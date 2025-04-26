@@ -72,13 +72,18 @@ export class OneBunModule implements Module {
       for (const provider of metadata.providers) {
         // Check if provider has @Service decorator
         if (typeof provider === 'function') {
+          console.log(`Checking if provider ${provider.name} has @Service decorator`);
           const serviceMetadata = getServiceMetadata(provider);
           if (serviceMetadata) {
             // This is a service with @Service decorator
+            console.log(`Provider ${provider.name} has @Service decorator, creating service layer`);
             const serviceLayer = createServiceLayer(provider as new () => unknown);
             serviceLayers.push(serviceLayer);
             layer = Layer.merge(layer, serviceLayer);
+            console.log(`Added service layer for ${provider.name}`);
             continue;
+          } else {
+            console.warn(`Provider ${provider.name} does not have @Service decorator`);
           }
         }
 
@@ -143,6 +148,14 @@ export class OneBunModule implements Module {
     return Effect.gen(function* (_) {
       // Get all services from the layer
       const services = yield* _(Effect.context());
+      console.log(`Got services context with ${Object.keys(services).length} entries`);
+
+      // Log all services for debugging
+      for (const [key, value] of Object.entries(services)) {
+        if (key && typeof key === 'object' && 'Identifier' in key) {
+          console.log(`Service in context: ${(key as any).Identifier}`);
+        }
+      }
 
       // Create controller instances
       for (const ControllerClass of self.controllers) {
@@ -179,6 +192,54 @@ export class OneBunModule implements Module {
             const tag = key as Context.Tag<unknown, unknown>;
             controller.setService(tag, value);
             self.serviceInstances.set(tag, value);
+          }
+        }
+
+        // Get module metadata to access providers
+        const moduleMetadata = getModuleMetadata(self.moduleClass);
+        if (moduleMetadata && moduleMetadata.providers) {
+          // Import getServiceTag function to avoid circular dependency
+          const { getServiceTag } = require('./service');
+
+          // For each provider that is a class constructor, register it with its tag
+          for (const provider of moduleMetadata.providers) {
+            if (typeof provider === 'function') {
+              try {
+                // Get the service tag for this provider
+                const tag = getServiceTag(provider);
+                console.log(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
+
+                // Find the service instance in the services context
+                let found = false;
+                for (const [key, value] of Object.entries(services)) {
+                  if (key && value && typeof key === 'object' && 'Identifier' in key) {
+                    console.log(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
+                    if (key === tag || (key as any).Identifier === (tag as any).Identifier) {
+                      // Register the service with its tag in the controller
+                      controller.setService(tag, value);
+                      self.serviceInstances.set(tag, value);
+                      console.log(`Registered service ${provider.name} in controller ${ControllerClass.name}`);
+                      found = true;
+                      break;
+                    }
+                  }
+                }
+
+                if (!found) {
+                  console.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
+
+                  // Create an instance of the service and register it
+                  console.log(`Creating instance of service ${provider.name}`);
+                  const serviceInstance = new (provider as new () => any)();
+                  controller.setService(tag, serviceInstance);
+                  self.serviceInstances.set(tag, serviceInstance);
+                  console.log(`Registered manually created service ${provider.name} in controller ${ControllerClass.name}`);
+                }
+              } catch (error) {
+                // If getServiceTag fails, the provider might not have @Service decorator
+                console.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
+              }
+            }
           }
         }
       }

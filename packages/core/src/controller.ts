@@ -35,11 +35,24 @@ export class Controller {
       tag = tagOrClass;
     }
 
-    const service = this.services.get(tag);
+    // Try to get the service by tag
+    let service = this.services.get(tag);
+
+    // If not found, try to find by Identifier
+    if (!service && 'Identifier' in tag) {
+      for (const [key, value] of this.services.entries()) {
+        if ('Identifier' in key && key.Identifier === tag.Identifier) {
+          service = value;
+          break;
+        }
+      }
+    }
+
     if (!service) {
       const id = 'Identifier' in tag ? tag.Identifier : (tagOrClass as any).name;
       throw new Error(`Service ${id} not found. Make sure it's registered in the module.`);
     }
+
     return service as T;
   }
 
