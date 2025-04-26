@@ -4,7 +4,7 @@ import { Effect, Context, Layer } from 'effect';
  * Base interface for all OneBun services
  */
 export interface Service {
-  readonly [key: string]: any;
+  readonly [key: string]: unknown;
 }
 
 /**
@@ -15,21 +15,21 @@ export interface ModuleProviders {
    * Services to provide
    */
   providers?: Service[];
-  
+
   /**
    * Controllers to include
    */
-  controllers?: any[];
-  
+  controllers?: Function[];
+
   /**
    * Modules to import
    */
   imports?: Module[];
-  
+
   /**
    * Services to export to parent modules
    */
-  exports?: any[];
+  exports?: Function[];
 }
 
 /**
@@ -39,17 +39,22 @@ export interface Module {
   /**
    * Setup the module
    */
-  setup(): Effect.Effect<void>;
-  
+  setup(): Effect.Effect<unknown, never, void>;
+
   /**
    * Get the Layer for this module
    */
-  getLayer(): Layer.Layer<any>;
-  
+  getLayer(): Layer.Layer<never, never, unknown>;
+
   /**
    * Get controllers
    */
-  getControllers(): any[];
+  getControllers(): Function[];
+
+  /**
+   * Get controller instance
+   */
+  getControllerInstance?(controllerClass: Function): any;
 }
 
 /**
@@ -61,13 +66,13 @@ export interface ApplicationOptions {
    * @default 3000
    */
   port?: number;
-  
+
   /**
    * Host to listen on
    * @default "0.0.0.0"
    */
   host?: string;
-  
+
   /**
    * Enable development mode
    * @default false
@@ -90,12 +95,37 @@ export enum HttpMethod {
 }
 
 /**
+ * Parameter type for route parameters
+ */
+export enum ParamType {
+  PATH = 'path',
+  QUERY = 'query',
+  BODY = 'body',
+  HEADER = 'header',
+  REQUEST = 'request',
+  RESPONSE = 'response'
+}
+
+/**
+ * Parameter metadata
+ */
+export interface ParamMetadata {
+  type: ParamType;
+  name: string;
+  index: number;
+  isRequired?: boolean;
+  validator?: (value: unknown) => boolean | Promise<boolean>;
+}
+
+/**
  * Route metadata
  */
 export interface RouteMetadata {
   path: string;
   method: HttpMethod;
   handler: string;
+  params?: ParamMetadata[];
+  middleware?: Function[];
 }
 
 /**
@@ -104,4 +134,4 @@ export interface RouteMetadata {
 export interface ControllerMetadata {
   path: string;
   routes: RouteMetadata[];
-} 
+}

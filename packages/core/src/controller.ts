@@ -1,9 +1,57 @@
-import { Context, Effect } from 'effect';
+import { Context, Effect, Layer } from 'effect';
+import { getServiceMetadata } from './service';
 
 /**
  * Base controller class that can be extended to add common functionality
  */
 export class Controller {
+  // Store service instances
+  private services: Map<Context.Tag<any, any>, any> = new Map();
+
+  /**
+   * Get a service instance by tag
+   * @param tag The service tag
+   * @returns The service instance
+   */
+  protected getService<T>(tag: Context.Tag<T, T>): T;
+  /**
+   * Get a service instance by class
+   * @param serviceClass The service class
+   * @returns The service instance
+   */
+  protected getService<T>(serviceClass: new (...args: any[]) => T): T;
+  /**
+   * Implementation of getService
+   */
+  protected getService<T>(tagOrClass: Context.Tag<T, T> | (new (...args: any[]) => T)): T {
+    let tag: Context.Tag<any, any>;
+
+    // If it's a class, get the tag from metadata
+    if (typeof tagOrClass === 'function') {
+      // Import here to avoid circular dependency
+      const { getServiceTag } = require('./service');
+      tag = getServiceTag(tagOrClass);
+    } else {
+      tag = tagOrClass;
+    }
+
+    const service = this.services.get(tag);
+    if (!service) {
+      const id = 'Identifier' in tag ? tag.Identifier : (tagOrClass as any).name;
+      throw new Error(`Service ${id} not found. Make sure it's registered in the module.`);
+    }
+    return service as T;
+  }
+
+  /**
+   * Set a service instance
+   * @param tag The service tag
+   * @param instance The service instance
+   */
+  setService<T>(tag: Context.Tag<T, T>, instance: T): void {
+    this.services.set(tag, instance);
+  }
+
   /**
    * Check if request has JSON content type
    */
@@ -14,20 +62,46 @@ export class Controller {
   /**
    * Parse JSON from request body
    */
-  protected async parseJson<T = any>(req: Request): Promise<T> {
+  protected async parseJson<T = unknown>(req: Request): Promise<T> {
     return await req.json() as T;
   }
 
   /**
-   * Create JSON response
+   * Create standardized success response
+   * @param result The result data
+   * @param status The HTTP status code
+   * @returns A Response object
    */
-  protected json<T = any>(data: T, status: number = 200): Response {
-    return new Response(JSON.stringify(data), {
+  protected success<T = unknown>(result: T, status: number = 200): Response {
+    return new Response(JSON.stringify({ success: true, result }), {
       status,
       headers: {
         'Content-Type': 'application/json'
       }
     });
+  }
+
+  /**
+   * Create standardized error response
+   * @param message The error message
+   * @param code The error code
+   * @param status The HTTP status code
+   * @returns A Response object
+   */
+  public error(message: string, code: number = 500, status: number = 500): Response {
+    return new Response(JSON.stringify({ success: false, code, message }), {
+      status,
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+  }
+
+  /**
+   * Create JSON response (legacy method, use success() instead)
+   */
+  protected json<T = unknown>(data: T, status: number = 200): Response {
+    return this.success(data, status);
   }
 
   /**
@@ -41,11 +115,4 @@ export class Controller {
       }
     });
   }
-
-  /**
-   * Create error response
-   */
-  protected error(message: string, status: number = 500): Response {
-    return this.json({ error: message }, status);
-  }
-} 
+}
