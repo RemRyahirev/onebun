@@ -3,7 +3,7 @@ import { getModuleMetadata, getControllerMetadata } from './decorators';
 import { Module, ModuleProviders } from './types';
 import { getServiceMetadata, createServiceLayer } from './service';
 import { Controller } from './controller';
-import { makeLogger } from '@onebun/logger';
+import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
 
 /**
  * OneBun Module implementation
@@ -13,57 +13,51 @@ export class OneBunModule implements Module {
   private controllers: Function[] = [];
   private controllerInstances: Map<Function, Controller> = new Map();
   private serviceInstances: Map<Context.Tag<any, any>, any> = new Map();
+  private logger: SyncLogger;
 
-  constructor(private moduleClass: Function) {
-    console.log(`Initializing OneBunModule for ${moduleClass.name}`);
+  constructor(private moduleClass: Function, private loggerLayer?: Layer.Layer<never, never, unknown>) {
+    // Initialize logger with module class name as context
+    const effectLogger = Effect.runSync(
+      Effect.provide(
+        Effect.map(
+          LoggerService,
+          (logger: Logger) => logger.child({ className: `OneBunModule:${moduleClass.name}` })
+        ),
+        this.loggerLayer || makeLogger()
+      ) as any
+    ) as Logger;
+    this.logger = createSyncLogger(effectLogger);
+
+    this.logger.debug(`Initializing OneBunModule for ${moduleClass.name}`);
     const { layer, controllers } = this.initModule();
     this.rootLayer = layer;
     this.controllers = controllers;
-    console.log(`OneBunModule initialized for ${moduleClass.name}, controllers: ${controllers.length}`);
-    for (const controller of controllers) {
-      console.log(`Module ${moduleClass.name} includes controller: ${controller.name}`);
-    }
+
+    this.logger.debug(`OneBunModule initialized for ${moduleClass.name}, controllers: ${controllers.length}`);
   }
 
   /**
    * Initialize module from metadata and create layer
    */
   private initModule(): { layer: Layer.Layer<never, never, unknown>, controllers: Function[] } {
-    console.log(`Initializing module metadata for ${this.moduleClass.name}`);
+    this.logger.debug(`Initializing module metadata for ${this.moduleClass.name}`);
     const metadata = getModuleMetadata(this.moduleClass);
     if (!metadata) {
-      console.error(`Module ${this.moduleClass.name} does not have @Module decorator`);
+      this.logger.error(`Module ${this.moduleClass.name} does not have @Module decorator`);
       throw new Error(`Module ${this.moduleClass.name} does not have @Module decorator`);
     }
-    console.log(`Found module metadata for ${this.moduleClass.name}`);
+    this.logger.debug(`Found module metadata for ${this.moduleClass.name}`);
 
-    // Start with logger layer based on NODE_ENV
-    let layer: Layer.Layer<never, never, unknown> = makeLogger();
+    // Use provided logger layer or create a default one
+    let layer: Layer.Layer<never, never, unknown> = this.loggerLayer || makeLogger();
     const controllers: Function[] = [];
     const serviceLayers: Layer.Layer<never, never, unknown>[] = [];
 
     // Add controllers
     if (metadata.controllers) {
-      console.log(`Adding ${metadata.controllers.length} controllers from module ${this.moduleClass.name}`);
       for (const controller of metadata.controllers) {
-        console.log(`Adding controller ${controller.name} from module ${this.moduleClass.name}`);
-
-        // Log controller details for debugging
-        console.log(`Controller constructor: ${controller.constructor?.name || 'undefined'}`);
-        console.log(`Controller prototype: ${Object.getPrototypeOf(controller)?.name || 'undefined'}`);
-
-        // Check if controller has metadata
-        const controllerMetadata = getControllerMetadata(controller);
-        if (controllerMetadata) {
-          console.log(`Found metadata for controller ${controller.name} in module, routes: ${controllerMetadata.routes.length}`);
-        } else {
-          console.warn(`No metadata found for controller ${controller.name} in module`);
-        }
-
         controllers.push(controller);
       }
-    } else {
-      console.log(`No controllers found in module ${this.moduleClass.name}`);
     }
 
     // Initialize provider layers
@@ -72,18 +66,18 @@ export class OneBunModule implements Module {
       for (const provider of metadata.providers) {
         // Check if provider has @Service decorator
         if (typeof provider === 'function') {
-          console.log(`Checking if provider ${provider.name} has @Service decorator`);
+          this.logger.debug(`Checking if provider ${provider.name} has @Service decorator`);
           const serviceMetadata = getServiceMetadata(provider);
           if (serviceMetadata) {
             // This is a service with @Service decorator
-            console.log(`Provider ${provider.name} has @Service decorator, creating service layer`);
-            const serviceLayer = createServiceLayer(provider as new () => unknown);
+            this.logger.debug(`Provider ${provider.name} has @Service decorator, creating service layer`);
+            const serviceLayer = createServiceLayer(provider as new (...args: any[]) => unknown, this.logger);
             serviceLayers.push(serviceLayer);
             layer = Layer.merge(layer, serviceLayer);
-            console.log(`Added service layer for ${provider.name}`);
+            this.logger.debug(`Added service layer for ${provider.name}`);
             continue;
           } else {
-            console.warn(`Provider ${provider.name} does not have @Service decorator`);
+            this.logger.warn(`Provider ${provider.name} does not have @Service decorator`);
           }
         }
 
@@ -120,7 +114,7 @@ export class OneBunModule implements Module {
               layer = Layer.merge(layer, serviceLayer);
             }
           } catch (error) {
-            console.warn(`Failed to auto-create instance of ${provider.name}`);
+            this.logger.warn(`Failed to auto-create instance of ${provider.name}`);
           }
         }
       }
@@ -129,7 +123,8 @@ export class OneBunModule implements Module {
     // Import child modules and merge their layers
     if (metadata.imports) {
       for (const importModule of metadata.imports) {
-        const childModule = new OneBunModule(importModule);
+        // Pass the logger layer to child modules
+        const childModule = new OneBunModule(importModule, this.loggerLayer);
         // Merge layers
         layer = Layer.merge(layer, childModule.getLayer());
         // Add controllers
@@ -148,42 +143,12 @@ export class OneBunModule implements Module {
     return Effect.gen(function* (_) {
       // Get all services from the layer
       const services = yield* _(Effect.context());
-      console.log(`Got services context with ${Object.keys(services).length} entries`);
-
-      // Log all services for debugging
-      for (const [key, value] of Object.entries(services)) {
-        if (key && typeof key === 'object' && 'Identifier' in key) {
-          console.log(`Service in context: ${(key as any).Identifier}`);
-        }
-      }
 
       // Create controller instances
       for (const ControllerClass of self.controllers) {
-        console.log(`Creating instance of controller ${ControllerClass.name}`);
-
-        // Log controller details for debugging
-        console.log(`Controller constructor: ${ControllerClass.constructor?.name || 'undefined'}`);
-        console.log(`Controller prototype: ${Object.getPrototypeOf(ControllerClass)?.name || 'undefined'}`);
-
-        // Check if controller has metadata before instantiation
-        const controllerMetadata = getControllerMetadata(ControllerClass);
-        if (controllerMetadata) {
-          console.log(`Found metadata for controller ${ControllerClass.name} before instantiation, routes: ${controllerMetadata.routes.length}`);
-        } else {
-          console.warn(`No metadata found for controller ${ControllerClass.name} before instantiation`);
-        }
-
-        const ControllerConstructor = ControllerClass as new () => Controller;
-        const controller = new ControllerConstructor();
+        const ControllerConstructor = ControllerClass as new (logger?: SyncLogger) => Controller;
+        const controller = new ControllerConstructor(self.logger);
         self.controllerInstances.set(ControllerClass, controller);
-
-        // Check if controller has metadata after instantiation
-        const controllerMetadataAfter = getControllerMetadata(ControllerClass);
-        if (controllerMetadataAfter) {
-          console.log(`Found metadata for controller ${ControllerClass.name} after instantiation, routes: ${controllerMetadataAfter.routes.length}`);
-        } else {
-          console.warn(`No metadata found for controller ${ControllerClass.name} after instantiation`);
-        }
 
         // Inject services into controller
         // Use Object.entries to iterate over the services context
@@ -207,18 +172,18 @@ export class OneBunModule implements Module {
               try {
                 // Get the service tag for this provider
                 const tag = getServiceTag(provider);
-                console.log(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
+                self.logger.debug(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
 
                 // Find the service instance in the services context
                 let found = false;
                 for (const [key, value] of Object.entries(services)) {
                   if (key && value && typeof key === 'object' && 'Identifier' in key) {
-                    console.log(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
+                    self.logger.debug(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
                     if (key === tag || (key as any).Identifier === (tag as any).Identifier) {
                       // Register the service with its tag in the controller
                       controller.setService(tag, value);
                       self.serviceInstances.set(tag, value);
-                      console.log(`Registered service ${provider.name} in controller ${ControllerClass.name}`);
+                      self.logger.debug(`Registered service ${provider.name} in controller ${ControllerClass.name}`);
                       found = true;
                       break;
                     }
@@ -226,18 +191,19 @@ export class OneBunModule implements Module {
                 }
 
                 if (!found) {
-                  console.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
+                  self.logger.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
 
                   // Create an instance of the service and register it
-                  console.log(`Creating instance of service ${provider.name}`);
-                  const serviceInstance = new (provider as new () => any)();
+                  self.logger.debug(`Creating instance of service ${provider.name}`);
+                  const ServiceConstructor = provider as new (logger?: SyncLogger) => any;
+                  const serviceInstance = new ServiceConstructor(self.logger);
                   controller.setService(tag, serviceInstance);
                   self.serviceInstances.set(tag, serviceInstance);
-                  console.log(`Registered manually created service ${provider.name} in controller ${ControllerClass.name}`);
+                  self.logger.debug(`Registered manually created service ${provider.name} in controller ${ControllerClass.name}`);
                 }
               } catch (error) {
                 // If getServiceTag fails, the provider might not have @Service decorator
-                console.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
+                self.logger.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
               }
             }
           }
@@ -266,28 +232,28 @@ export class OneBunModule implements Module {
    * Get controller instance
    */
   getControllerInstance(controllerClass: Function): Controller | undefined {
-    console.log(`Getting controller instance for ${controllerClass.name}`);
+    this.logger.debug(`Getting controller instance for ${controllerClass.name}`);
 
     // Log controller details for debugging
-    console.log(`Controller constructor: ${controllerClass.constructor?.name || 'undefined'}`);
-    console.log(`Controller prototype: ${Object.getPrototypeOf(controllerClass)?.name || 'undefined'}`);
+    this.logger.debug(`Controller constructor: ${controllerClass.constructor?.name || 'undefined'}`);
+    this.logger.debug(`Controller prototype: ${Object.getPrototypeOf(controllerClass)?.name || 'undefined'}`);
 
     // Check if controller has metadata
     const controllerMetadata = getControllerMetadata(controllerClass);
     if (controllerMetadata) {
-      console.log(`Found metadata for controller ${controllerClass.name} in getControllerInstance, routes: ${controllerMetadata.routes.length}`);
+      this.logger.debug(`Found metadata for controller ${controllerClass.name} in getControllerInstance, routes: ${controllerMetadata.routes.length}`);
     } else {
-      console.warn(`No metadata found for controller ${controllerClass.name} in getControllerInstance`);
+      this.logger.warn(`No metadata found for controller ${controllerClass.name} in getControllerInstance`);
     }
 
     // Log all keys in controllerInstances for debugging
-    console.log(`controllerInstances keys: ${Array.from(this.controllerInstances.keys()).map(k => k.name).join(', ')}`);
+    this.logger.debug(`controllerInstances keys: ${Array.from(this.controllerInstances.keys()).map(k => k.name).join(', ')}`);
 
     const instance = this.controllerInstances.get(controllerClass);
     if (instance) {
-      console.log(`Found instance for controller ${controllerClass.name}`);
+      this.logger.debug(`Found instance for controller ${controllerClass.name}`);
     } else {
-      console.warn(`No instance found for controller ${controllerClass.name}`);
+      this.logger.warn(`No instance found for controller ${controllerClass.name}`);
     }
 
     return instance;
@@ -316,9 +282,13 @@ export class OneBunModule implements Module {
 
   /**
    * Create a module from class
+   * @param moduleClass The module class
+   * @param loggerLayer Optional logger layer to use
    */
-  static create(moduleClass: Function): Module {
+  static create(moduleClass: Function, loggerLayer?: Layer.Layer<never, never, unknown>): Module {
+    // Using console.log here because we don't have access to the logger instance yet
+    // The instance will create its own logger in the constructor
     console.log(`Creating OneBunModule for ${moduleClass.name}`);
-    return new OneBunModule(moduleClass);
+    return new OneBunModule(moduleClass, loggerLayer);
   }
 }

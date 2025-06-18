@@ -13,8 +13,9 @@
     "test": "bun test"
   },
   "engines": {
-    "bun": "1.2.2"
+    "bun": "1.2.12",
+    "node": "24"
   },
   "author": "",
   "license": "MIT"
-} 
+}

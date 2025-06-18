@@ -17,6 +17,19 @@ export interface Logger {
 }
 
 /**
+ * Synchronous logger interface for convenience
+ */
+export interface SyncLogger {
+  trace(message: string, context?: Record<string, unknown>): void;
+  debug(message: string, context?: Record<string, unknown>): void;
+  info(message: string, context?: Record<string, unknown>): void;
+  warn(message: string, context?: Record<string, unknown>): void;
+  error(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void;
+  fatal(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void;
+  child(context: Record<string, unknown>): SyncLogger;
+}
+
+/**
  * Context tag for the Logger service
  */
 export const LoggerService = Context.GenericTag<Logger>("LoggerService");
@@ -118,6 +131,56 @@ export const makeProdLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logg
       ...config
     })
   );
+};
+
+/**
+ * Synchronous logger wrapper
+ */
+class SyncLoggerImpl implements SyncLogger {
+  constructor(private logger: Logger) {}
+
+  trace(message: string, context?: Record<string, unknown>): void {
+    Effect.runSync(this.logger.trace(message, context));
+  }
+
+  debug(message: string, context?: Record<string, unknown>): void {
+    Effect.runSync(this.logger.debug(message, context));
+  }
+
+  info(message: string, context?: Record<string, unknown>): void {
+    Effect.runSync(this.logger.info(message, context));
+  }
+
+  warn(message: string, context?: Record<string, unknown>): void {
+    Effect.runSync(this.logger.warn(message, context));
+  }
+
+  error(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void {
+    if (errorOrContext instanceof Error) {
+      Effect.runSync(this.logger.error(message, errorOrContext, context));
+    } else {
+      Effect.runSync(this.logger.error(message, undefined, errorOrContext));
+    }
+  }
+
+  fatal(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void {
+    if (errorOrContext instanceof Error) {
+      Effect.runSync(this.logger.fatal(message, errorOrContext, context));
+    } else {
+      Effect.runSync(this.logger.fatal(message, undefined, errorOrContext));
+    }
+  }
+
+  child(context: Record<string, unknown>): SyncLogger {
+    return new SyncLoggerImpl(this.logger.child(context));
+  }
+}
+
+/**
+ * Create a synchronous logger from async logger
+ */
+export const createSyncLogger = (logger: Logger): SyncLogger => {
+  return new SyncLoggerImpl(logger);
 };
 
 /**

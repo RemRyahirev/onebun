@@ -78,6 +78,12 @@ export interface ApplicationOptions {
    * @default false
    */
   development?: boolean;
+
+  /**
+   * Logger layer to use
+   * If not provided, a default logger will be created
+   */
+  loggerLayer?: Layer.Layer<never, never, unknown>;
 }
 
 /**

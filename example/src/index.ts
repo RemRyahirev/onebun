@@ -11,8 +11,10 @@ const app = new OneBunApplication(AppModule, {
 // Start the application
 app.start()
   .then(() => {
-    console.log('Application started successfully');
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.info('Application started successfully');
   })
   .catch((error: unknown) => {
-    console.error('Failed to start application:', error);
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error('Failed to start application:', error instanceof Error ? error : new Error(String(error)));
   });

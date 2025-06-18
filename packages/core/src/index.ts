@@ -3,6 +3,10 @@ export * from './application';
 export * from './module';
 export { Controller as BaseController } from './controller';
 export { Service, BaseService, getServiceTag } from './service';
+// Re-export logger from @onebun/logger
+export * from '@onebun/logger';
+// Re-export Effect and Layer from effect
+export { Effect, Layer } from 'effect';
 // Экспортируем декораторы явно, чтобы избежать конфликтов
 export {
   ControllerDecorator,

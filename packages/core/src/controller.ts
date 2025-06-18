@@ -1,5 +1,6 @@
 import { Context, Effect, Layer } from 'effect';
 import { getServiceMetadata } from './service';
+import { SyncLogger } from '@onebun/logger';
 
 /**
  * Base controller class that can be extended to add common functionality
@@ -7,6 +8,22 @@ import { getServiceMetadata } from './service';
 export class Controller {
   // Store service instances
   private services: Map<Context.Tag<any, any>, any> = new Map();
+
+  // Logger instance with controller class name as context
+  protected logger: SyncLogger;
+
+  constructor(logger?: SyncLogger) {
+    // Initialize logger with controller class name as context
+    const className = this.constructor.name;
+
+    if (logger) {
+      // Use provided logger and create a child with the controller class name
+      this.logger = logger.child({ className });
+          } else {
+        // This should never happen since OneBunApplication always provides a logger
+        throw new Error(`Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`);
+      }
+  }
 
   /**
    * Get a service instance by tag

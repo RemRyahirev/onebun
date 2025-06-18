@@ -1,4 +1,5 @@
 import { Context, Effect, Layer } from 'effect';
+import { SyncLogger } from '@onebun/logger';
 
 /**
  * Metadata storage for services
@@ -48,6 +49,22 @@ export function getServiceTag<T>(serviceClass: new (...args: any[]) => T): Conte
  * Base service class that provides utility methods for working with Effect
  */
 export class BaseService {
+  // Logger instance with service class name as context
+  protected logger: SyncLogger;
+
+  constructor(logger?: SyncLogger) {
+    // Initialize logger with service class name as context
+    const className = this.constructor.name;
+
+    if (logger) {
+      // Use provided logger and create a child with the service class name
+      this.logger = logger.child({ className });
+    } else {
+      // This should never happen since OneBunApplication always provides a logger
+      throw new Error(`Logger is required for service ${className}. Make sure OneBunApplication is configured correctly.`);
+    }
+  }
+
   /**
    * Run an effect with error handling
    * @param effect The effect to run
@@ -78,13 +95,19 @@ export class BaseService {
 /**
  * Create a layer for a service
  * @param serviceClass The service class
+ * @param logger The logger to inject into the service
  * @returns A layer for the service
  */
-export function createServiceLayer<T>(serviceClass: new () => T): Layer.Layer<never, never, any> {
+export function createServiceLayer<T>(serviceClass: new (...args: any[]) => T, logger?: SyncLogger): Layer.Layer<never, never, any> {
   const metadata = getServiceMetadata(serviceClass);
   if (!metadata) {
     throw new Error(`Service ${serviceClass.name} does not have @Service decorator`);
   }
 
-  return Layer.succeed(metadata.tag, new metadata.impl());
+  // Create a service instance with logger
+  const ServiceConstructor = metadata.impl as new (logger?: SyncLogger) => any;
+  const serviceInstance = new ServiceConstructor(logger);
+
+  // Return a layer that provides the service
+  return Layer.succeed(metadata.tag, serviceInstance);
 }

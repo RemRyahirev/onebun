@@ -3,6 +3,7 @@ import { getControllerMetadata } from './decorators';
 import { OneBunModule } from './module';
 import { ApplicationOptions, HttpMethod, Module, ParamType, ParamMetadata } from './types';
 import { Controller } from './controller';
+import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
 
 /**
  * OneBun Application
@@ -15,16 +16,33 @@ export class OneBunApplication {
     host: '0.0.0.0',
     development: process.env.NODE_ENV !== 'production'
   };
+  private logger: SyncLogger;
 
   /**
    * Create application instance
    */
   constructor(moduleClass: new (...args: unknown[]) => object, options?: Partial<ApplicationOptions>) {
-    this.rootModule = OneBunModule.create(moduleClass);
-
     if (options) {
       this.options = { ...this.options, ...options };
     }
+
+    // Use provided logger layer or create a default one
+    const loggerLayer = this.options.loggerLayer || makeLogger();
+
+    // Initialize logger with application class name as context
+    const effectLogger = Effect.runSync(
+      Effect.provide(
+        Effect.map(
+          LoggerService,
+          (logger: Logger) => logger.child({ className: 'OneBunApplication' })
+        ),
+        loggerLayer
+      ) as any
+    ) as Logger;
+    this.logger = createSyncLogger(effectLogger);
+
+    // Create the root module with the same logger layer
+    this.rootModule = OneBunModule.create(moduleClass, loggerLayer);
   }
 
   /**
@@ -52,7 +70,7 @@ export class OneBunApplication {
 
       // Get all controllers from the root module
       const controllers = this.rootModule.getControllers();
-      console.log(`Loaded ${controllers.length} controllers`);
+      this.logger.info(`Loaded ${controllers.length} controllers`);
 
       // Create a map of routes with metadata
       const routes = new Map<string, {
@@ -67,39 +85,22 @@ export class OneBunApplication {
 
       // Add routes from controllers
       for (const ControllerClass of controllers) {
-        console.log(`Processing controller: ${ControllerClass.name}`);
-
-        // Log controller details for debugging
-        console.log(`Controller constructor: ${ControllerClass.constructor?.name || 'undefined'}`);
-        console.log(`Controller prototype: ${Object.getPrototypeOf(ControllerClass)?.name || 'undefined'}`);
-
         const controllerMetadata = getControllerMetadata(ControllerClass);
         if (!controllerMetadata) {
-          console.warn(`No metadata found for controller: ${ControllerClass.name}`);
+          this.logger.warn(`No metadata found for controller: ${ControllerClass.name}`);
           continue;
         }
-        console.log(`Found metadata for controller: ${ControllerClass.name}, path: ${controllerMetadata.path}, routes: ${controllerMetadata.routes.length}`);
 
         // Get controller instance from module
         if (!this.rootModule.getControllerInstance) {
-          console.warn(`Module does not support getControllerInstance for ${ControllerClass.name}`);
+          this.logger.warn(`Module does not support getControllerInstance for ${ControllerClass.name}`);
           continue;
         }
 
-        console.log(`Getting controller instance for ${ControllerClass.name}`);
         const controller = this.rootModule.getControllerInstance(ControllerClass);
         if (!controller) {
-          console.warn(`Controller instance not found for ${ControllerClass.name}`);
+          this.logger.warn(`Controller instance not found for ${ControllerClass.name}`);
           continue;
-        }
-        console.log(`Got controller instance for ${ControllerClass.name}`);
-
-        // Check if controller has metadata after getting instance
-        const controllerMetadataAfterInstance = getControllerMetadata(ControllerClass);
-        if (controllerMetadataAfterInstance) {
-          console.log(`Found metadata for controller ${ControllerClass.name} after getting instance, routes: ${controllerMetadataAfterInstance.routes.length}`);
-        } else {
-          console.warn(`No metadata found for controller ${ControllerClass.name} after getting instance`);
         }
 
         const basePath = controllerMetadata.path;
@@ -126,7 +127,7 @@ export class OneBunApplication {
             pathPattern = new RegExp(`^${pattern}$`);
           }
 
-          console.log(`Registering route: ${method} ${fullPath}`);
+
           routes.set(fullPath, {
             method,
             handler,
@@ -147,7 +148,7 @@ export class OneBunApplication {
         for (const route of metadata.routes) {
           const fullPath = `${metadata.path}${route.path}`;
           const method = this.mapHttpMethod(route.method);
-          console.log(`Mapped {${method}} route: ${fullPath}`);
+          this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }
       }
 
@@ -160,7 +161,7 @@ export class OneBunApplication {
           const path = url.pathname;
           const method = req.method;
 
-          console.log(`Request: ${method} ${path}`);
+          // This log is handled by the logger middleware now
 
           // First try exact path match
           let route = routes.get(path);
@@ -241,9 +242,9 @@ export class OneBunApplication {
         }
       });
 
-      console.log(`OneBun application listening on http://${this.options.host}:${this.options.port}`);
+      this.logger.info(`OneBun application listening on http://${this.options.host}:${this.options.port}`);
     } catch (error) {
-      console.error('Failed to start application:', error);
+      this.logger.error('Failed to start application:', error instanceof Error ? error : new Error(String(error)));
       throw error;
     }
 
@@ -335,7 +336,18 @@ export class OneBunApplication {
     if (this.server) {
       this.server.stop();
       this.server = null;
-      console.log('OneBun application stopped');
+      this.logger.info('OneBun application stopped');
     }
+  }
+
+  /**
+   * Get the application logger
+   * @returns The logger instance
+   */
+  getLogger(context?: Record<string, unknown>): SyncLogger {
+    if (context) {
+      return this.logger.child(context);
+    }
+    return this.logger;
   }
 }

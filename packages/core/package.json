@@ -15,7 +15,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "effect": "^3.13.10"
+    "effect": "^3.13.10",
+    "@onebun/logger": "^0.1.0"
   },
   "devDependencies": {
     "bun-types": "1.2.2"
@@ -26,4 +27,4 @@
   "engines": {
     "bun": "1.2.2"
   }
-} 
+}
