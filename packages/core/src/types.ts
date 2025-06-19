@@ -84,6 +84,23 @@ export interface ApplicationOptions {
    * If not provided, a default logger will be created
    */
   loggerLayer?: Layer.Layer<never, never, unknown>;
+
+  /**
+   * Environment configuration schema
+   * If provided, the environment will be automatically initialized and made available
+   */
+  envSchema?: any;
+
+  /**
+   * Environment loading options
+   */
+  envOptions?: {
+    envFilePath?: string;
+    loadDotEnv?: boolean;
+    envOverridesDotEnv?: boolean;
+    strict?: boolean;
+    defaultArraySeparator?: string;
+  };
 }
 
 /**

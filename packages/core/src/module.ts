@@ -14,8 +14,9 @@ export class OneBunModule implements Module {
   private controllerInstances: Map<Function, Controller> = new Map();
   private serviceInstances: Map<Context.Tag<any, any>, any> = new Map();
   private logger: SyncLogger;
+  private config: any;
 
-  constructor(private moduleClass: Function, private loggerLayer?: Layer.Layer<never, never, unknown>) {
+  constructor(private moduleClass: Function, private loggerLayer?: Layer.Layer<never, never, unknown>, config?: any) {
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -27,6 +28,7 @@ export class OneBunModule implements Module {
       ) as any
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
+    this.config = config;
 
     this.logger.debug(`Initializing OneBunModule for ${moduleClass.name}`);
     const { layer, controllers } = this.initModule();
@@ -71,7 +73,7 @@ export class OneBunModule implements Module {
           if (serviceMetadata) {
             // This is a service with @Service decorator
             this.logger.debug(`Provider ${provider.name} has @Service decorator, creating service layer`);
-            const serviceLayer = createServiceLayer(provider as new (...args: any[]) => unknown, this.logger);
+            const serviceLayer = createServiceLayer(provider as new (...args: any[]) => unknown, this.logger, this.config);
             serviceLayers.push(serviceLayer);
             layer = Layer.merge(layer, serviceLayer);
             this.logger.debug(`Added service layer for ${provider.name}`);
@@ -123,8 +125,8 @@ export class OneBunModule implements Module {
     // Import child modules and merge their layers
     if (metadata.imports) {
       for (const importModule of metadata.imports) {
-        // Pass the logger layer to child modules
-        const childModule = new OneBunModule(importModule, this.loggerLayer);
+        // Pass the logger layer and config to child modules
+        const childModule = new OneBunModule(importModule, this.loggerLayer, this.config);
         // Merge layers
         layer = Layer.merge(layer, childModule.getLayer());
         // Add controllers
@@ -146,8 +148,8 @@ export class OneBunModule implements Module {
 
       // Create controller instances
       for (const ControllerClass of self.controllers) {
-        const ControllerConstructor = ControllerClass as new (logger?: SyncLogger) => Controller;
-        const controller = new ControllerConstructor(self.logger);
+        const ControllerConstructor = ControllerClass as new (logger?: SyncLogger, config?: any) => Controller;
+        const controller = new ControllerConstructor(self.logger, self.config);
         self.controllerInstances.set(ControllerClass, controller);
 
         // Inject services into controller
@@ -195,8 +197,8 @@ export class OneBunModule implements Module {
 
                   // Create an instance of the service and register it
                   self.logger.debug(`Creating instance of service ${provider.name}`);
-                  const ServiceConstructor = provider as new (logger?: SyncLogger) => any;
-                  const serviceInstance = new ServiceConstructor(self.logger);
+                  const ServiceConstructor = provider as new (logger?: SyncLogger, config?: any) => any;
+                  const serviceInstance = new ServiceConstructor(self.logger, self.config);
                   controller.setService(tag, serviceInstance);
                   self.serviceInstances.set(tag, serviceInstance);
                   self.logger.debug(`Registered manually created service ${provider.name} in controller ${ControllerClass.name}`);
@@ -284,11 +286,12 @@ export class OneBunModule implements Module {
    * Create a module from class
    * @param moduleClass The module class
    * @param loggerLayer Optional logger layer to use
+   * @param config Optional configuration to inject
    */
-  static create(moduleClass: Function, loggerLayer?: Layer.Layer<never, never, unknown>): Module {
+  static create(moduleClass: Function, loggerLayer?: Layer.Layer<never, never, unknown>, config?: any): Module {
     // Using console.log here because we don't have access to the logger instance yet
     // The instance will create its own logger in the constructor
     console.log(`Creating OneBunModule for ${moduleClass.name}`);
-    return new OneBunModule(moduleClass, loggerLayer);
+    return new OneBunModule(moduleClass, loggerLayer, config);
   }
 }

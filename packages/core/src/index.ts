@@ -1,15 +1,20 @@
-export * from './metadata';
 export * from './application';
+export * from './decorators';
 export * from './module';
 export { Controller as BaseController } from './controller';
 export { Service, BaseService, getServiceTag } from './service';
+export * from './metadata';
+export * from './types';
+export * from './config.service';
 // Re-export logger from @onebun/logger
 export * from '@onebun/logger';
+// Re-export envs from @onebun/envs
+export * from '@onebun/envs';
 // Re-export Effect and Layer from effect
 export { Effect, Layer } from 'effect';
 // Экспортируем декораторы явно, чтобы избежать конфликтов
 export {
-  ControllerDecorator,
+  Module,
   Controller,
   Get,
   Post,
@@ -19,16 +24,11 @@ export {
   Options,
   Head,
   All,
-  Module,
-  getControllerMetadata,
-  // Parameter decorators
   Param,
   Query,
   Body,
   Header,
   Req,
   Res,
-  // Middleware decorator
   UseMiddleware
 } from './decorators';
-export * from './types';

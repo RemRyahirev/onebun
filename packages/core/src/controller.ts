@@ -1,5 +1,4 @@
-import { Context, Effect, Layer } from 'effect';
-import { getServiceMetadata } from './service';
+import { Context } from 'effect';
 import { SyncLogger } from '@onebun/logger';
 
 /**
@@ -11,8 +10,10 @@ export class Controller {
 
   // Logger instance with controller class name as context
   protected logger: SyncLogger;
+  // Configuration instance for accessing environment variables
+  protected config: any;
 
-  constructor(logger?: SyncLogger) {
+  constructor(logger?: SyncLogger, config?: any) {
     // Initialize logger with controller class name as context
     const className = this.constructor.name;
 
@@ -23,6 +24,9 @@ export class Controller {
         // This should never happen since OneBunApplication always provides a logger
         throw new Error(`Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`);
       }
+
+    // Set configuration instance
+    this.config = config;
   }
 
   /**

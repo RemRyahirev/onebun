@@ -1,97 +1,68 @@
-import { ControllerDecorator, Get, Post, BaseController, UseMiddleware, Param, Query } from '@onebun/core';
-import { CounterService } from './counter.service';
+import { BaseController, Controller, Get, Post, Body, Param } from '@onebun/core';
 
-// Simple logger middleware
-function loggerMiddleware(req: Request, next: () => Promise<Response>): Promise<Response> {
-  // This will be handled by the controller's logger
-  return next();
+interface IncrementRequest {
+  value?: number;
 }
 
-// Simple timing middleware
-function timingMiddleware(req: Request, next: () => Promise<Response>): Promise<Response> {
-  const start = Date.now();
-  return next().then(response => {
-    const duration = Date.now() - start;
-    // This will be handled by the controller's logger in the actual controller methods
-    return response;
-  });
-}
-
-@ControllerDecorator('/api')
+@Controller('/api')
 export class CounterController extends BaseController {
-  @Get('/hello')
-  @UseMiddleware(loggerMiddleware)
-  hello() {
+  @Get('/')
+  async hello() {
     this.logger.info('Hello endpoint called');
     return this.success({ message: 'Hello OneBun!' });
   }
 
+  @Get('/info')
+  async getInfo() {
+    // Demonstrate configuration access in controller
+    const serverPort = this.config?.get('server.port') || 'N/A';
+    const serverHost = this.config?.get('server.host') || 'N/A';
+    
+    this.logger.info('Getting application info', { port: serverPort, host: serverHost });
+    
+    return this.success({
+      message: 'Counter Service Info',
+      server: {
+        port: serverPort,
+        host: serverHost
+      },
+      timestamp: new Date().toISOString(),
+      configAvailable: this.config !== null && this.config !== undefined
+    });
+  }
+
   @Get('/counter')
-  @UseMiddleware(timingMiddleware)
-  getCounter() {
-    const start = Date.now();
-
-    // Get the counter service using dependency injection
-    const counterService = this.getService(CounterService);
-
-    // Get the count directly from the service
-    const count = counterService.getCount();
-
-    const duration = Date.now() - start;
-    this.logger.info('Counter endpoint called', { count, duration });
-
-    // Return the count as a standardized success response
-    return this.success({ count });
+  async getCounter() {
+    this.logger.info('Getting current counter value');
+    
+    return this.success({
+      value: 42,
+      timestamp: new Date().toISOString()
+    });
   }
 
   @Post('/counter/increment')
-  @UseMiddleware(timingMiddleware)
-  incrementCounter() {
-    const start = Date.now();
-
-    // Get the counter service using dependency injection
-    const counterService = this.getService(CounterService);
-
-    // Increment the counter and get the new count
-    const count = counterService.increment();
-
-    const duration = Date.now() - start;
-    this.logger.info('Counter increment endpoint called', { count, duration });
-
-    // Return the count as a standardized success response
-    return this.success({ count });
+  async incrementCounter(@Body() body: IncrementRequest) {
+    const increment = body.value || 1;
+    const newValue = 42 + increment;
+    
+    this.logger.info('Incrementing counter', { increment, newValue });
+    
+    return this.success({
+      value: newValue,
+      increment,
+      timestamp: new Date().toISOString()
+    });
   }
 
-  @Get('/counter/:amount')
-  @UseMiddleware(timingMiddleware)
-  getCounterWithAmount(
-    @Param('amount', {
-      required: true,
-      validator: (value: unknown): boolean => !isNaN(Number(value))
-    }) amount: string,
-    @Query('multiply', {
-      validator: (value: unknown): boolean => !isNaN(Number(value))
-    }) multiply?: string
-  ) {
-    // Parse parameters
-    const amountValue = Number(amount);
-    const multiplyValue = multiply ? Number(multiply) : 1;
-
-    // Get the counter service using dependency injection
-    const counterService = this.getService(CounterService);
-
-    // Get the base count from the service
-    const baseCount = counterService.getCount();
-
-    // Calculate the result
-    const result = {
-      baseCount,
-      amount: amountValue,
-      multiply: multiplyValue,
-      result: baseCount + amountValue * multiplyValue
-    };
-
-    // Return the result as a standardized success response
-    return this.success(result);
+  @Get('/counter/:id')
+  async getCounterById(@Param('id') id: string) {
+    this.logger.info('Getting counter by ID', { id });
+    
+    return this.success({
+      id,
+      value: parseInt(id) * 10,
+      timestamp: new Date().toISOString()
+    });
   }
 }

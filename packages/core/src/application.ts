@@ -4,6 +4,8 @@ import { OneBunModule } from './module';
 import { ApplicationOptions, HttpMethod, Module, ParamType, ParamMetadata } from './types';
 import { Controller } from './controller';
 import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
+import { TypedEnv } from '@onebun/envs';
+import { ConfigServiceImpl } from './config.service';
 
 /**
  * OneBun Application
@@ -17,6 +19,8 @@ export class OneBunApplication {
     development: process.env.NODE_ENV !== 'production'
   };
   private logger: SyncLogger;
+  private config: any = null;
+  private configService: ConfigServiceImpl | null = null;
 
   /**
    * Create application instance
@@ -24,6 +28,11 @@ export class OneBunApplication {
   constructor(moduleClass: new (...args: unknown[]) => object, options?: Partial<ApplicationOptions>) {
     if (options) {
       this.options = { ...this.options, ...options };
+    }
+
+    // Initialize configuration if schema is provided
+    if (this.options.envSchema) {
+      this.config = TypedEnv.create(this.options.envSchema, this.options.envOptions);
     }
 
     // Use provided logger layer or create a default one
@@ -41,8 +50,30 @@ export class OneBunApplication {
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
 
-    // Create the root module with the same logger layer
-    this.rootModule = OneBunModule.create(moduleClass, loggerLayer);
+    // Create configuration service if config is available
+    if (this.config) {
+      this.configService = new ConfigServiceImpl(this.logger, this.config);
+    }
+
+    // Create the root module with logger layer and config
+    this.rootModule = OneBunModule.create(moduleClass, loggerLayer, this.config);
+  }
+
+  /**
+   * Get configuration service
+   */
+  getConfig(): ConfigServiceImpl {
+    if (!this.configService) {
+      throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
+    }
+    return this.configService;
+  }
+
+  /**
+   * Get configuration value by path (convenience method)
+   */
+  getConfigValue<T = any>(path: string): T {
+    return this.getConfig().get<T>(path);
   }
 
   /**
@@ -65,6 +96,12 @@ export class OneBunApplication {
    */
   async start(): Promise<void> {
     try {
+      // Initialize configuration if provided
+      if (this.config) {
+        await this.config.initialize();
+        this.logger.info('Application configuration initialized');
+      }
+
       // Setup the module and create controller instances
       await Effect.runPromise(this.rootModule.setup() as Effect.Effect<unknown, never, never>);
 

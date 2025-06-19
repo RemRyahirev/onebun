@@ -1,7 +1,7 @@
 {
-  "name": "@onebun/core",
+  "name": "@onebun/envs",
   "version": "0.1.0",
-  "description": "Core package for OneBun framework",
+  "description": "Environment variables management package for OneBun framework",
   "main": "src/index.ts",
   "module": "src/index.ts",
   "types": "src/index.ts",
@@ -15,9 +15,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "effect": "^3.13.10",
-    "@onebun/logger": "^0.1.0",
-    "@onebun/envs": "^0.1.0"
+    "effect": "^3.13.10"
   },
   "devDependencies": {
     "bun-types": "1.2.2"
@@ -28,4 +26,4 @@
   "engines": {
     "bun": "1.2.2"
   }
-}
+} 

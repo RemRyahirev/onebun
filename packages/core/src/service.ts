@@ -51,8 +51,10 @@ export function getServiceTag<T>(serviceClass: new (...args: any[]) => T): Conte
 export class BaseService {
   // Logger instance with service class name as context
   protected logger: SyncLogger;
+  // Configuration instance for accessing environment variables
+  protected config: any;
 
-  constructor(logger?: SyncLogger) {
+  constructor(logger?: SyncLogger, config?: any) {
     // Initialize logger with service class name as context
     const className = this.constructor.name;
 
@@ -63,6 +65,9 @@ export class BaseService {
       // This should never happen since OneBunApplication always provides a logger
       throw new Error(`Logger is required for service ${className}. Make sure OneBunApplication is configured correctly.`);
     }
+
+    // Set configuration instance
+    this.config = config;
   }
 
   /**
@@ -96,17 +101,18 @@ export class BaseService {
  * Create a layer for a service
  * @param serviceClass The service class
  * @param logger The logger to inject into the service
+ * @param config The configuration to inject into the service
  * @returns A layer for the service
  */
-export function createServiceLayer<T>(serviceClass: new (...args: any[]) => T, logger?: SyncLogger): Layer.Layer<never, never, any> {
+export function createServiceLayer<T>(serviceClass: new (...args: any[]) => T, logger?: SyncLogger, config?: any): Layer.Layer<never, never, any> {
   const metadata = getServiceMetadata(serviceClass);
   if (!metadata) {
     throw new Error(`Service ${serviceClass.name} does not have @Service decorator`);
   }
 
-  // Create a service instance with logger
-  const ServiceConstructor = metadata.impl as new (logger?: SyncLogger) => any;
-  const serviceInstance = new ServiceConstructor(logger);
+  // Create a service instance with logger and config
+  const ServiceConstructor = metadata.impl as new (logger?: SyncLogger, config?: any) => any;
+  const serviceInstance = new ServiceConstructor(logger, config);
 
   // Return a layer that provides the service
   return Layer.succeed(metadata.tag, serviceInstance);
