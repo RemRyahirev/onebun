@@ -7,12 +7,12 @@ import { LoggerConfig, LogLevel, TraceInfo } from './types';
  * Custom logger service interface
  */
 export interface Logger {
-  trace(message: string, context?: Record<string, unknown>): Effect.Effect<void>;
-  debug(message: string, context?: Record<string, unknown>): Effect.Effect<void>;
-  info(message: string, context?: Record<string, unknown>): Effect.Effect<void>;
-  warn(message: string, context?: Record<string, unknown>): Effect.Effect<void>;
-  error(message: string, error?: Error, context?: Record<string, unknown>): Effect.Effect<void>;
-  fatal(message: string, error?: Error, context?: Record<string, unknown>): Effect.Effect<void>;
+  trace(message: string, ...args: unknown[]): Effect.Effect<void>;
+  debug(message: string, ...args: unknown[]): Effect.Effect<void>;
+  info(message: string, ...args: unknown[]): Effect.Effect<void>;
+  warn(message: string, ...args: unknown[]): Effect.Effect<void>;
+  error(message: string, ...args: unknown[]): Effect.Effect<void>;
+  fatal(message: string, ...args: unknown[]): Effect.Effect<void>;
   child(context: Record<string, unknown>): Logger;
 }
 
@@ -20,12 +20,12 @@ export interface Logger {
  * Synchronous logger interface for convenience
  */
 export interface SyncLogger {
-  trace(message: string, context?: Record<string, unknown>): void;
-  debug(message: string, context?: Record<string, unknown>): void;
-  info(message: string, context?: Record<string, unknown>): void;
-  warn(message: string, context?: Record<string, unknown>): void;
-  error(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void;
-  fatal(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void;
+  trace(message: string, ...args: unknown[]): void;
+  debug(message: string, ...args: unknown[]): void;
+  info(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
+  fatal(message: string, ...args: unknown[]): void;
   child(context: Record<string, unknown>): SyncLogger;
 }
 
@@ -40,6 +40,46 @@ export const LoggerService = Context.GenericTag<Logger>("LoggerService");
 export const CurrentLoggerTraceContext = FiberRef.unsafeMake<TraceInfo | null>(null);
 
 /**
+ * Parse arguments to extract error, context and additional data
+ */
+function parseLogArgs(args: unknown[]): {
+  error?: Error;
+  context?: Record<string, unknown>;
+  additionalData?: unknown[];
+} {
+  if (args.length === 0) {
+    return {};
+  }
+
+  let error: Error | undefined;
+  let context: Record<string, unknown> | undefined;
+  const additionalData: unknown[] = [];
+
+  for (const arg of args) {
+    if (arg instanceof Error) {
+      // First error found becomes the main error
+      if (!error) {
+        error = arg;
+      } else {
+        additionalData.push(arg);
+      }
+    } else if (arg && typeof arg === 'object' && !Array.isArray(arg) && arg.constructor === Object) {
+      // Plain objects are merged into context
+      context = { ...context, ...arg as Record<string, unknown> };
+    } else {
+      // Everything else goes to additional data
+      additionalData.push(arg);
+    }
+  }
+
+  return {
+    error,
+    context: Object.keys(context || {}).length > 0 ? context : undefined,
+    additionalData: additionalData.length > 0 ? additionalData : undefined
+  };
+}
+
+/**
  * Simple logger implementation that uses our formatters and transports
  */
 class LoggerImpl implements Logger {
@@ -48,8 +88,7 @@ class LoggerImpl implements Logger {
   private log(
     level: LogLevel,
     message: string,
-    error?: Error,
-    context?: Record<string, unknown>
+    ...args: unknown[]
   ): Effect.Effect<void> {
     // Check minimum logging level
     if (level < this.config.minLevel) {
@@ -87,19 +126,27 @@ class LoggerImpl implements Logger {
           }
         }
 
+        // Parse additional arguments
+        const { error, context: argsContext, additionalData } = parseLogArgs(args);
+
         // Merge contexts
         const mergedContext = {
           ...this.config.defaultContext,
           ...this.context,
-          ...context
+          ...argsContext
         };
+
+        // Add additional data to context if present
+        if (additionalData && additionalData.length > 0) {
+          mergedContext.__additionalData = additionalData;
+        }
 
         // Create log entry
         const entry = {
           level,
           message,
           timestamp: new Date(),
-          context: mergedContext,
+          context: Object.keys(mergedContext).length > 0 ? mergedContext : undefined,
           error,
           trace: currentTraceInfo || undefined
         };
@@ -111,28 +158,28 @@ class LoggerImpl implements Logger {
     );
   }
 
-  trace(message: string, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Trace, message, undefined, context);
+  trace(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Trace, message, ...args);
   }
 
-  debug(message: string, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Debug, message, undefined, context);
+  debug(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Debug, message, ...args);
   }
 
-  info(message: string, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Info, message, undefined, context);
+  info(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Info, message, ...args);
   }
 
-  warn(message: string, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Warning, message, undefined, context);
+  warn(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Warning, message, ...args);
   }
 
-  error(message: string, error?: Error, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Error, message, error, context);
+  error(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Error, message, ...args);
   }
 
-  fatal(message: string, error?: Error, context?: Record<string, unknown>): Effect.Effect<void> {
-    return this.log(LogLevel.Fatal, message, error, context);
+  fatal(message: string, ...args: unknown[]): Effect.Effect<void> {
+    return this.log(LogLevel.Fatal, message, ...args);
   }
 
   child(context: Record<string, unknown>): Logger {
@@ -196,36 +243,28 @@ class SyncLoggerImpl implements SyncLogger {
     return Effect.runSync(traceEffect);
   }
 
-  trace(message: string, context?: Record<string, unknown>): void {
-    this.runWithTraceContext(this.logger.trace(message, context));
+  trace(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.trace(message, ...args));
   }
 
-  debug(message: string, context?: Record<string, unknown>): void {
-    this.runWithTraceContext(this.logger.debug(message, context));
+  debug(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.debug(message, ...args));
   }
 
-  info(message: string, context?: Record<string, unknown>): void {
-    this.runWithTraceContext(this.logger.info(message, context));
+  info(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.info(message, ...args));
   }
 
-  warn(message: string, context?: Record<string, unknown>): void {
-    this.runWithTraceContext(this.logger.warn(message, context));
+  warn(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.warn(message, ...args));
   }
 
-  error(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void {
-    if (errorOrContext instanceof Error) {
-      this.runWithTraceContext(this.logger.error(message, errorOrContext, context));
-    } else {
-      this.runWithTraceContext(this.logger.error(message, undefined, errorOrContext));
-    }
+  error(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.error(message, ...args));
   }
 
-  fatal(message: string, errorOrContext?: Error | Record<string, unknown>, context?: Record<string, unknown>): void {
-    if (errorOrContext instanceof Error) {
-      this.runWithTraceContext(this.logger.fatal(message, errorOrContext, context));
-    } else {
-      this.runWithTraceContext(this.logger.fatal(message, undefined, errorOrContext));
-    }
+  fatal(message: string, ...args: unknown[]): void {
+    this.runWithTraceContext(this.logger.fatal(message, ...args));
   }
 
   child(context: Record<string, unknown>): SyncLogger {

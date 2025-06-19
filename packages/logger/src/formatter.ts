@@ -11,7 +11,74 @@ const COLORS: Record<string, string> = {
   [LogLevel.Error]: '\x1b[31m', // Red
   [LogLevel.Fatal]: '\x1b[35m', // Magenta
   RESET: '\x1b[0m',
+  DIM: '\x1b[2m',
+  BRIGHT: '\x1b[1m',
 };
+
+/**
+ * Format a value for pretty output
+ */
+function formatValue(value: unknown, depth = 0): string {
+  if (value === null) return '\x1b[90mnull\x1b[0m';
+  if (value === undefined) return '\x1b[90mundefined\x1b[0m';
+  
+  if (typeof value === 'string') {
+    return `\x1b[32m"${value}"\x1b[0m`;
+  }
+  
+  if (typeof value === 'number') {
+    return `\x1b[33m${value}\x1b[0m`;
+  }
+  
+  if (typeof value === 'boolean') {
+    return `\x1b[35m${value}\x1b[0m`;
+  }
+  
+  if (value instanceof Date) {
+    return `\x1b[36m${value.toISOString()}\x1b[0m`;
+  }
+  
+  if (value instanceof Error) {
+    return `\x1b[31m${value.name}: ${value.message}\x1b[0m`;
+  }
+  
+  if (Array.isArray(value)) {
+    if (depth > 3) return '\x1b[90m[Array]\x1b[0m';
+    
+    const items = value.map(item => formatValue(item, depth + 1));
+    if (items.length === 0) return '\x1b[90m[]\x1b[0m';
+    
+    const indent = '  '.repeat(depth + 1);
+    const closeIndent = '  '.repeat(depth);
+    
+    return `\x1b[90m[\x1b[0m\n${indent}${items.join(`,\n${indent}`)}\n${closeIndent}\x1b[90m]\x1b[0m`;
+  }
+  
+  if (typeof value === 'object') {
+    if (depth > 3) return '\x1b[90m[Object]\x1b[0m';
+    
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return '\x1b[90m{}\x1b[0m';
+    
+    const indent = '  '.repeat(depth + 1);
+    const closeIndent = '  '.repeat(depth);
+    
+    const formattedEntries = entries.map(([key, val]) => {
+      const formattedKey = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key) 
+        ? `\x1b[34m${key}\x1b[0m` 
+        : `\x1b[32m"${key}"\x1b[0m`;
+      return `${formattedKey}: ${formatValue(val, depth + 1)}`;
+    });
+    
+    return `\x1b[90m{\x1b[0m\n${indent}${formattedEntries.join(`,\n${indent}`)}\n${closeIndent}\x1b[90m}\x1b[0m`;
+  }
+  
+  if (typeof value === 'function') {
+    return `\x1b[36m[Function: ${value.name || 'anonymous'}]\x1b[0m`;
+  }
+  
+  return String(value);
+}
 
 /**
  * Pretty console formatter with colors
@@ -28,19 +95,43 @@ export class PrettyFormatter implements LogFormatter {
       ? ` [trace:${entry.trace.traceId.slice(-8)} span:${entry.trace.spanId.slice(-8)}]`
       : '';
     
-    let message = `${color}${time} [${level}]${reset}${traceInfo} ${entry.message}`;
+    // Extract className from context for main log line
+    let className = '';
+    let contextWithoutClassName: Record<string, unknown> = {};
     
-    if (entry.context?.SHOW_CONTEXT && Object.keys(entry.context).length > 0) {
-      const contextWithoutServiceFields = { ...entry.context };
-      delete contextWithoutServiceFields.SHOW_CONTEXT;
+    if (entry.context) {
+      const { className: extractedClassName, ...restContext } = entry.context;
+      if (extractedClassName && typeof extractedClassName === 'string') {
+        className = ` [${extractedClassName}]`;
+      }
+      contextWithoutClassName = restContext;
+    }
+    
+    let message = `${color}${time} [${level}]${reset}${traceInfo}${className} ${entry.message}`;
+    
+    // Handle additional data first (this is the main new functionality)
+    if (contextWithoutClassName.__additionalData) {
+      const additionalData = contextWithoutClassName.__additionalData as unknown[];
+      if (additionalData.length > 0) {
+        const formattedData = additionalData.map(data => formatValue(data)).join(' ');
+        message += ` ${formattedData}`;
+      }
+      // Remove __additionalData from context since we've processed it
+      delete contextWithoutClassName.__additionalData;
+    }
+    
+    // Handle regular context (excluding special fields and className)
+    if (Object.keys(contextWithoutClassName).length > 0) {
+      const contextWithoutSpecialFields = { ...contextWithoutClassName };
+      delete contextWithoutSpecialFields.SHOW_CONTEXT;
       
-      if (Object.keys(contextWithoutServiceFields).length > 0) {
-        message += `\n${JSON.stringify(contextWithoutServiceFields, null, 2)}`;
+      if (Object.keys(contextWithoutSpecialFields).length > 0) {
+        message += `\n${COLORS.DIM}Context:${COLORS.RESET} ${formatValue(contextWithoutSpecialFields)}`;
       }
     }
     
     if (entry.error) {
-      message += `\n${entry.error.stack || entry.error.message}`;
+      message += `\n${COLORS[LogLevel.Error]}Error:${COLORS.RESET} ${entry.error.stack || entry.error.message}`;
     }
     
     return message;
@@ -64,26 +155,44 @@ export class PrettyFormatter implements LogFormatter {
  */
 export class JsonFormatter implements LogFormatter {
   format(entry: LogEntry): string {
-    return JSON.stringify({
+    const logData: any = {
       timestamp: entry.timestamp.toISOString(),
       level: this.getLevelName(entry.level),
       message: entry.message,
-      ...(entry.trace ? { 
-        trace: {
-          traceId: entry.trace.traceId,
-          spanId: entry.trace.spanId,
-          ...(entry.trace.parentSpanId ? { parentSpanId: entry.trace.parentSpanId } : {})
-        }
-      } : {}),
-      ...(entry.context ? { context: entry.context } : {}),
-      ...(entry.error ? { 
-        error: {
-          message: entry.error.message,
-          stack: entry.error.stack,
-          name: entry.error.name
-        } 
-      } : {})
-    });
+    };
+
+    if (entry.trace) {
+      logData.trace = {
+        traceId: entry.trace.traceId,
+        spanId: entry.trace.spanId,
+        ...(entry.trace.parentSpanId ? { parentSpanId: entry.trace.parentSpanId } : {})
+      };
+    }
+
+    if (entry.context) {
+      const contextData = { ...entry.context };
+      
+      // Extract additional data if present
+      if (contextData.__additionalData) {
+        logData.additionalData = contextData.__additionalData;
+        delete contextData.__additionalData;
+      }
+      
+      // Add remaining context
+      if (Object.keys(contextData).length > 0) {
+        logData.context = contextData;
+      }
+    }
+
+    if (entry.error) {
+      logData.error = {
+        message: entry.error.message,
+        stack: entry.error.stack,
+        name: entry.error.name
+      };
+    }
+
+    return JSON.stringify(logData);
   }
   
   private getLevelName(level: LogLevel): string {
