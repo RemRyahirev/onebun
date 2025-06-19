@@ -1,4 +1,5 @@
-import { Effect, Context, Layer } from 'effect';
+import { Effect, Layer } from 'effect';
+import { Logger } from '@onebun/logger';
 
 /**
  * Base interface for all OneBun services
@@ -58,6 +59,13 @@ export interface Module {
 }
 
 /**
+ * Typed environment schema interface
+ */
+export interface TypedEnvSchema {
+  [key: string]: any;
+}
+
+/**
  * Application options
  */
 export interface ApplicationOptions {
@@ -83,13 +91,13 @@ export interface ApplicationOptions {
    * Logger layer to use
    * If not provided, a default logger will be created
    */
-  loggerLayer?: Layer.Layer<never, never, unknown>;
+  loggerLayer?: Layer.Layer<Logger>;
 
   /**
    * Environment configuration schema
    * If provided, the environment will be automatically initialized and made available
    */
-  envSchema?: any;
+  envSchema?: TypedEnvSchema;
 
   /**
    * Environment loading options
@@ -100,6 +108,63 @@ export interface ApplicationOptions {
     envOverridesDotEnv?: boolean;
     strict?: boolean;
     defaultArraySeparator?: string;
+  };
+
+  /**
+   * Metrics configuration
+   */
+  metrics?: {
+    /**
+     * Enable/disable metrics collection
+     * @default true
+     */
+    enabled?: boolean;
+
+    /**
+     * HTTP path for exposing metrics endpoint
+     * @default '/metrics'
+     */
+    path?: string;
+
+    /**
+     * Default labels to add to all metrics
+     */
+    defaultLabels?: Record<string, string>;
+
+    /**
+     * Enable automatic HTTP metrics collection
+     * @default true
+     */
+    collectHttpMetrics?: boolean;
+
+    /**
+     * Enable automatic system metrics collection
+     * @default true
+     */
+    collectSystemMetrics?: boolean;
+
+    /**
+     * Enable GC metrics collection
+     * @default true
+     */
+    collectGcMetrics?: boolean;
+
+    /**
+     * Collection interval for system metrics in milliseconds
+     * @default 5000
+     */
+    systemMetricsInterval?: number;
+
+    /**
+     * Custom prefix for all metrics
+     * @default 'onebun_'
+     */
+    prefix?: string;
+
+    /**
+     * Buckets for HTTP request duration histogram
+     */
+    httpDurationBuckets?: number[];
   };
 }
 

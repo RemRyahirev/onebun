@@ -2,6 +2,7 @@
   "name": "onebun-example",
   "version": "0.1.0",
   "description": "Example application using OneBun framework",
+  "main": "src/index.ts",
   "private": true,
   "scripts": {
     "start": "bun run src/index.ts",
@@ -10,13 +11,16 @@
   },
   "dependencies": {
     "@onebun/core": "workspace:*",
+    "@onebun/envs": "workspace:*",
     "@onebun/logger": "workspace:*",
-    "effect": "^3.13.10"
+    "@onebun/metrics": "workspace:*",
+    "effect": "^3.10.15"
   },
   "devDependencies": {
-    "bun-types": "1.2.2"
+    "bun-types": "1.2.2",
+    "@types/node": "^22.9.0"
   },
   "engines": {
-    "bun": "1.2.2"
+    "bun": "1.2.12"
   }
 } 

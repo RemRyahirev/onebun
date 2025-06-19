@@ -1,22 +1,23 @@
 import { BaseController, Controller, Get, Post, Body, Param } from '@onebun/core';
-
-interface IncrementRequest {
-  value?: number;
-}
+import { CounterService } from './counter.service';
 
 @Controller('/api')
 export class CounterController extends BaseController {
+  constructor(private counterService: CounterService, logger?: any, config?: any) {
+    super(logger, config);
+  }
+
   @Get('/')
   async hello() {
     this.logger.info('Hello endpoint called');
-    return this.success({ message: 'Hello OneBun!' });
+    return this.success({ message: 'Hello OneBun with Metrics!' });
   }
 
   @Get('/info')
   async getInfo() {
     // Demonstrate configuration access in controller
-    const serverPort = this.config?.get('server.port') || 'N/A';
-    const serverHost = this.config?.get('server.host') || 'N/A';
+    const serverPort = this.config?.get('server.port') || 3001;
+    const serverHost = this.config?.get('server.host') || '0.0.0.0';
     
     this.logger.info('Getting application info', { port: serverPort, host: serverHost });
     
@@ -32,37 +33,67 @@ export class CounterController extends BaseController {
   }
 
   @Get('/counter')
-  async getCounter() {
-    this.logger.info('Getting current counter value');
-    
-    return this.success({
-      value: 42,
-      timestamp: new Date().toISOString()
-    });
+  async getValue() {
+    const value = this.counterService.getValue();
+    this.logger.info('Getting counter value', { value });
+    return this.success({ value });
   }
 
-  @Post('/counter/increment')
-  async incrementCounter(@Body() body: IncrementRequest) {
-    const increment = body.value || 1;
-    const newValue = 42 + increment;
-    
-    this.logger.info('Incrementing counter', { increment, newValue });
+  @Post('/increment')
+  async increment(@Body() body?: { amount?: number }) {
+    const amount = body?.amount || 1;
+    const newValue = this.counterService.increment(amount);
+    this.logger.info('Counter incremented', { amount, newValue });
     
     return this.success({
       value: newValue,
-      increment,
-      timestamp: new Date().toISOString()
+      message: `Counter incremented by ${amount}`
     });
   }
 
-  @Get('/counter/:id')
-  async getCounterById(@Param('id') id: string) {
-    this.logger.info('Getting counter by ID', { id });
+  @Post('/decrement')  
+  async decrement(@Body() body?: { amount?: number }) {
+    const amount = body?.amount || 1;
+    const newValue = this.counterService.decrement(amount);
+    this.logger.info('Counter decremented', { amount, newValue });
+    
+    return this.success({
+      value: newValue,
+      message: `Counter decremented by ${amount}`
+    });
+  }
+
+  @Post('/reset')
+  async reset() {
+    this.counterService.reset();
+    this.logger.info('Counter reset');
+    
+    return this.success({
+      value: 0,
+      message: 'Counter reset to 0'
+    });
+  }
+
+  @Get('/stats')
+  async getStats() {
+    const stats = {
+      value: this.counterService.getValue(),
+      totalOperations: this.counterService.getTotalOperations(),
+      memoryUsage: process.memoryUsage(),
+      uptime: process.uptime()
+    };
+    this.logger.info('Getting stats', { totalOperations: stats.totalOperations });
+    
+    return this.success(stats);
+  }
+
+  @Get('/:id')
+  async getById(@Param('id') id: string) {
+    this.logger.info('Getting counter by id', { id });
     
     return this.success({
       id,
-      value: parseInt(id) * 10,
-      timestamp: new Date().toISOString()
+      value: this.counterService.getValue()
     });
   }
 }

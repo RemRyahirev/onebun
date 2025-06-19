@@ -146,69 +146,86 @@ export class OneBunModule implements Module {
       // Get all services from the layer
       const services = yield* _(Effect.context());
 
-      // Create controller instances
-      for (const ControllerClass of self.controllers) {
-        const ControllerConstructor = ControllerClass as new (logger?: SyncLogger, config?: any) => Controller;
-        const controller = new ControllerConstructor(self.logger, self.config);
-        self.controllerInstances.set(ControllerClass, controller);
-
-        // Inject services into controller
-        // Use Object.entries to iterate over the services context
-        for (const [key, value] of Object.entries(services)) {
-          if (key && value && typeof key === 'object' && 'Identifier' in key) {
-            const tag = key as Context.Tag<unknown, unknown>;
-            controller.setService(tag, value);
-            self.serviceInstances.set(tag, value);
-          }
+      // First, process all services from context and register them
+      for (const [key, value] of Object.entries(services)) {
+        if (key && value && typeof key === 'object' && 'Identifier' in key) {
+          const tag = key as Context.Tag<unknown, unknown>;
+          self.serviceInstances.set(tag, value);
         }
+      }
 
-        // Get module metadata to access providers
-        const moduleMetadata = getModuleMetadata(self.moduleClass);
-        if (moduleMetadata && moduleMetadata.providers) {
-          // Import getServiceTag function to avoid circular dependency
-          const { getServiceTag } = require('./service');
+      // Get module metadata to access providers and register any missing services
+      const moduleMetadata = getModuleMetadata(self.moduleClass);
+      if (moduleMetadata && moduleMetadata.providers) {
+        // Import getServiceTag function to avoid circular dependency
+        const { getServiceTag } = require('./service');
 
-          // For each provider that is a class constructor, register it with its tag
-          for (const provider of moduleMetadata.providers) {
-            if (typeof provider === 'function') {
-              try {
-                // Get the service tag for this provider
-                const tag = getServiceTag(provider);
-                self.logger.debug(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
+        // For each provider that is a class constructor, register it with its tag
+        for (const provider of moduleMetadata.providers) {
+          if (typeof provider === 'function') {
+            try {
+              // Get the service tag for this provider
+              const tag = getServiceTag(provider);
+              self.logger.debug(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
 
-                // Find the service instance in the services context
-                let found = false;
-                for (const [key, value] of Object.entries(services)) {
-                  if (key && value && typeof key === 'object' && 'Identifier' in key) {
-                    self.logger.debug(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
-                    if (key === tag || (key as any).Identifier === (tag as any).Identifier) {
-                      // Register the service with its tag in the controller
-                      controller.setService(tag, value);
-                      self.serviceInstances.set(tag, value);
-                      self.logger.debug(`Registered service ${provider.name} in controller ${ControllerClass.name}`);
-                      found = true;
-                      break;
-                    }
+              // Find the service instance in the services context
+              let found = false;
+              for (const [key, value] of Object.entries(services)) {
+                if (key && value && typeof key === 'object' && 'Identifier' in key) {
+                  self.logger.debug(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
+                  if (key === tag || (key as any).Identifier === (tag as any).Identifier) {
+                    // Register the service with its tag
+                    self.serviceInstances.set(tag, value);
+                    self.logger.debug(`Registered service ${provider.name} from context`);
+                    found = true;
+                    break;
                   }
                 }
-
-                if (!found) {
-                  self.logger.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
-
-                  // Create an instance of the service and register it
-                  self.logger.debug(`Creating instance of service ${provider.name}`);
-                  const ServiceConstructor = provider as new (logger?: SyncLogger, config?: any) => any;
-                  const serviceInstance = new ServiceConstructor(self.logger, self.config);
-                  controller.setService(tag, serviceInstance);
-                  self.serviceInstances.set(tag, serviceInstance);
-                  self.logger.debug(`Registered manually created service ${provider.name} in controller ${ControllerClass.name}`);
-                }
-              } catch (error) {
-                // If getServiceTag fails, the provider might not have @Service decorator
-                self.logger.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
               }
+
+              if (!found) {
+                self.logger.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
+
+                // Create an instance of the service and register it
+                self.logger.debug(`Creating instance of service ${provider.name}`);
+                const ServiceConstructor = provider as new (logger?: SyncLogger, config?: any) => any;
+                const serviceInstance = new ServiceConstructor(self.logger, self.config);
+                self.serviceInstances.set(tag, serviceInstance);
+                self.logger.debug(`Registered manually created service ${provider.name}`);
+              }
+            } catch (error) {
+              // If getServiceTag fails, the provider might not have @Service decorator
+              self.logger.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
             }
           }
+        }
+      }
+
+      // Now create controller instances with the registered services
+      for (const ControllerClass of self.controllers) {
+        // Create controller instance
+        const ControllerConstructor = ControllerClass as any;
+        
+        // Find required services for this controller
+        let requiredService = undefined;
+        
+        // Look for the first service in our service instances
+        // For now, just take the first available service (CounterService)
+        for (const [tag, serviceInstance] of self.serviceInstances.entries()) {
+          if (serviceInstance) {
+            requiredService = serviceInstance;
+            break;
+          }
+        }
+        
+        // Create controller with the required service, logger and config
+        const controller = new ControllerConstructor(requiredService, self.logger, self.config);
+        
+        self.controllerInstances.set(ControllerClass, controller);
+
+        // Inject all services into controller
+        for (const [tag, serviceInstance] of self.serviceInstances.entries()) {
+          controller.setService(tag, serviceInstance);
         }
       }
     }).pipe(

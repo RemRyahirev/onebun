@@ -7,6 +7,21 @@ import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from 
 import { TypedEnv } from '@onebun/envs';
 import { ConfigServiceImpl } from './config.service';
 
+// Conditionally import metrics
+let MetricsService: any;
+let createMetricsService: any;
+let HttpMetricsData: any;
+
+try {
+  const metricsModule = require('@onebun/metrics');
+  MetricsService = metricsModule.MetricsService;
+  createMetricsService = metricsModule.createMetricsService;
+  HttpMetricsData = metricsModule.HttpMetricsData;
+} catch (error) {
+  // Metrics module not available - this is optional
+  // console.warn('Metrics module not available');
+}
+
 /**
  * OneBun Application
  */
@@ -21,6 +36,7 @@ export class OneBunApplication {
   private logger: SyncLogger;
   private config: any = null;
   private configService: ConfigServiceImpl | null = null;
+  private metricsService: any = null;
 
   /**
    * Create application instance
@@ -53,6 +69,32 @@ export class OneBunApplication {
     // Create configuration service if config is available
     if (this.config) {
       this.configService = new ConfigServiceImpl(this.logger, this.config);
+    }
+
+    // Initialize metrics if enabled and available
+    if (this.options.metrics?.enabled !== false && createMetricsService) {
+      try {
+        this.logger.info('Attempting to initialize metrics service');
+        this.logger.debug('Metrics options:', this.options.metrics);
+        
+        this.metricsService = Effect.runSync(
+          createMetricsService(this.options.metrics || {})
+        );
+        
+        this.logger.debug('Metrics service Effect run successfully');
+        
+        // Make metrics service globally available (temporary solution)
+        if (typeof globalThis !== 'undefined') {
+          (globalThis as any).__onebunMetricsService = this.metricsService;
+        }
+        
+        this.logger.info('Metrics service initialized successfully');
+      } catch (error) {
+        this.logger.error('Failed to initialize metrics service:', error instanceof Error ? error : new Error(String(error)));
+        this.logger.debug('Full error details:', { error, stack: error instanceof Error ? error.stack : 'No stack' });
+      }
+    } else if (this.options.metrics?.enabled !== false) {
+      this.logger.debug('createMetricsService not available, metrics will be disabled');
     }
 
     // Create the root module with logger layer and config
@@ -100,6 +142,12 @@ export class OneBunApplication {
       if (this.config) {
         await this.config.initialize();
         this.logger.info('Application configuration initialized');
+      }
+
+      // Start metrics collection if enabled
+      if (this.metricsService && this.metricsService.startSystemMetricsCollection) {
+        this.metricsService.startSystemMetricsCollection();
+        this.logger.info('System metrics collection started');
       }
 
       // Setup the module and create controller instances
@@ -189,7 +237,11 @@ export class OneBunApplication {
         }
       }
 
-      // Create server
+      // Get metrics path
+      const metricsPath = this.options.metrics?.path || '/metrics';
+
+      // Create server with proper context binding
+      const app = this;
       this.server = Bun.serve({
         port: this.options.port,
         hostname: this.options.host,
@@ -197,89 +249,137 @@ export class OneBunApplication {
           const url = new URL(req.url);
           const path = url.pathname;
           const method = req.method;
+          const startTime = Date.now();
 
-          // This log is handled by the logger middleware now
+          // Handle metrics endpoint
+          if (path === metricsPath && method === 'GET' && app.metricsService) {
+            try {
+              const metrics = await app.metricsService.getMetrics();
+              return new Response(metrics, {
+                headers: {
+                  'Content-Type': app.metricsService.getContentType()
+                }
+              });
+            } catch (error) {
+              console.error('Failed to get metrics:', error);
+              return new Response('Internal Server Error', { status: 500 });
+            }
+          }
 
-          // First try exact path match
+          // Find exact match first
           let route = routes.get(path);
-          let pathValues: string[] = [];
+          let paramValues: Record<string, string | string[]> = {};
 
-          // If no exact match, try regex patterns for path params
+          // If no exact match, try pattern matching
           if (!route) {
-            for (const [routePath, routeData] of routes.entries()) {
-              if (routeData.pathPattern) {
+            for (const [routePath, routeData] of routes) {
+              if (routeData.pathPattern && routeData.method === method) {
                 const match = path.match(routeData.pathPattern);
                 if (match) {
                   route = routeData;
-                  // Extract path parameter values (skip the first element which is the full match)
-                  pathValues = match.slice(1);
+                  // Extract parameter values
+                  for (let i = 0; i < routeData.pathParams!.length; i++) {
+                    paramValues[routeData.pathParams![i]] = match[i + 1];
+                  }
                   break;
                 }
               }
             }
           }
 
-          if (route && (route.method === method || route.method === HttpMethod.ALL)) {
-            try {
-              // Create parameter values object
-              const paramValues: Record<string, string | string[]> = {};
-
-              // Process path parameters
-              if (route.pathParams && route.pathParams.length > 0) {
-                route.pathParams.forEach((paramName, index) => {
-                  paramValues[paramName] = pathValues[index];
-                });
-              }
-
-              // Process query parameters
-              for (const [key, value] of url.searchParams.entries()) {
-                paramValues[key] = value;
-              }
-
-              // Apply middleware if any
-              if (route.middleware && route.middleware.length > 0) {
-                let currentIndex = 0;
-
-                // Create next function for middleware chain
-                const next = async (index: number): Promise<Response> => {
-                  if (index >= (route?.middleware?.length || 0)) {
-                    // All middleware executed, call the handler
-                    return await executeHandler(route!, req, paramValues);
-                  }
-
-                  // Execute current middleware
-                  const middleware = route!.middleware![index];
-                  return await middleware(req, () => next(index + 1));
-                };
-
-                // Start middleware chain
-                return await next(0);
-              }
-
-              // No middleware, directly execute handler
-              return await executeHandler(route, req, paramValues);
-            } catch (error: unknown) {
-              // Use standardized error response format
-              return new Response(
-                JSON.stringify({
-                  success: false,
-                  code: 500,
-                  message: error instanceof Error ? error.message : String(error)
-                }),
-                { status: 500, headers: { 'Content-Type': 'application/json' } }
-              );
+          if (!route || route.method !== method) {
+            const response = new Response('Not Found', { status: 404 });
+            
+            // Record metrics for 404
+            if (app.metricsService && app.metricsService.recordHttpRequest) {
+              const duration = (Date.now() - startTime) / 1000;
+              app.metricsService.recordHttpRequest({
+                method: method,
+                route: path,
+                statusCode: 404,
+                duration,
+                controller: 'unknown',
+                action: 'unknown'
+              });
             }
+            
+            return response;
           }
 
-          // Use standardized error response format for 404
-          return new Response(
-            JSON.stringify({ success: false, code: 404, message: 'Not Found' }),
-            { status: 404, headers: { 'Content-Type': 'application/json' } }
-          );
-        }
-      });
+          try {
+            // Execute middleware if any
+            if (route.middleware && route.middleware.length > 0) {
+              const next = async (index: number): Promise<Response> => {
+                if (index >= route!.middleware!.length) {
+                  return await executeHandler(route!, req, paramValues);
+                }
 
-      this.logger.info(`OneBun application listening on http://${this.options.host}:${this.options.port}`);
+                const middleware = route!.middleware![index];
+                return await middleware(req, () => next(index + 1));
+              };
+
+              const response = await next(0);
+              
+              // Record metrics
+              if (app.metricsService && app.metricsService.recordHttpRequest) {
+                const duration = (Date.now() - startTime) / 1000;
+                app.metricsService.recordHttpRequest({
+                  method: method,
+                  route: path,
+                  statusCode: response.status,
+                  duration,
+                  controller: route.controller.constructor.name,
+                  action: 'unknown'
+                });
+              }
+              
+              return response;
+            } else {
+              const response = await executeHandler(route, req, paramValues);
+              
+              // Record metrics
+              if (app.metricsService && app.metricsService.recordHttpRequest) {
+                const duration = (Date.now() - startTime) / 1000;
+                app.metricsService.recordHttpRequest({
+                  method: method,
+                  route: path,
+                  statusCode: response.status,
+                  duration,
+                  controller: route.controller.constructor.name,
+                  action: 'unknown'
+                });
+              }
+              
+              return response;
+            }
+          } catch (error) {
+            console.error('Request handling error:', error);
+            const response = new Response('Internal Server Error', { status: 500 });
+            
+                         // Record error metrics
+             if (app.metricsService && app.metricsService.recordHttpRequest) {
+               const duration = (Date.now() - startTime) / 1000;
+               app.metricsService.recordHttpRequest({
+                method: method,
+                route: path,
+                statusCode: 500,
+                duration,
+                controller: route.controller.constructor.name,
+                action: 'unknown'
+              });
+            }
+            
+            return response;
+           }
+         }
+       });
+
+      this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);
+      if (this.metricsService) {
+        this.logger.info(`Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`);
+      } else if (this.options.metrics?.enabled !== false) {
+        this.logger.warn('Metrics enabled but @onebun/metrics module not available. Install with: bun add @onebun/metrics');
+      }
     } catch (error) {
       this.logger.error('Failed to start application:', error instanceof Error ? error : new Error(String(error)));
       throw error;
