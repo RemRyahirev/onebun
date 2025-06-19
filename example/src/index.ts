@@ -15,6 +15,19 @@ const app = new OneBunApplication(AppModule, {
     collectSystemMetrics: true,
     collectGcMetrics: true,
     prefix: 'example_app_'
+  },
+  tracing: {
+    enabled: true,
+    serviceName: 'onebun-example',
+    serviceVersion: '0.1.0',
+    samplingRate: 1.0,
+    traceHttpRequests: true,
+    traceDatabaseQueries: true,
+    defaultAttributes: {
+      'service.name': 'onebun-example',
+      'service.version': '0.1.0',
+      'deployment.environment': 'development'
+    }
   }
 });
 

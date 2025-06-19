@@ -22,6 +22,20 @@ try {
   // console.warn('Metrics module not available');
 }
 
+// Import tracing modules directly
+import { TraceService, makeTraceService, TraceMiddleware, CurrentTraceContext } from '@onebun/trace';
+
+// Global trace context for current request
+let globalCurrentTraceContext: any = null;
+
+// Helper function to clear trace context
+function clearGlobalTraceContext() {
+  globalCurrentTraceContext = null;
+  if (typeof globalThis !== 'undefined') {
+    (globalThis as any).__onebunCurrentTraceContext = null;
+  }
+}
+
 /**
  * OneBun Application
  */
@@ -37,6 +51,7 @@ export class OneBunApplication {
   private config: any = null;
   private configService: ConfigServiceImpl | null = null;
   private metricsService: any = null;
+  private traceService: any = null;
 
   /**
    * Create application instance
@@ -95,6 +110,31 @@ export class OneBunApplication {
       }
     } else if (this.options.metrics?.enabled !== false) {
       this.logger.debug('createMetricsService not available, metrics will be disabled');
+    }
+
+    // Initialize tracing if enabled
+    if (this.options.tracing?.enabled !== false) {
+      try {
+        this.logger.info('Attempting to initialize trace service');
+        this.logger.debug('Tracing options:', this.options.tracing);
+        
+        const traceLayer = makeTraceService(this.options.tracing || {});
+        this.traceService = Effect.runSync(
+          Effect.provide(TraceService, traceLayer) as any
+        );
+        
+        this.logger.debug('Trace service Effect run successfully');
+        
+        // Make trace service globally available (temporary solution)
+        if (typeof globalThis !== 'undefined') {
+          (globalThis as any).__onebunTraceService = this.traceService;
+        }
+        
+        this.logger.info('Trace service initialized successfully');
+      } catch (error) {
+        this.logger.error('Failed to initialize trace service:', error instanceof Error ? error : new Error(String(error)));
+        this.logger.debug('Full error details:', { error, stack: error instanceof Error ? error.stack : 'No stack' });
+      }
     }
 
     // Create the root module with logger layer and config
@@ -251,6 +291,66 @@ export class OneBunApplication {
           const method = req.method;
           const startTime = Date.now();
 
+          // Setup tracing context if available and enabled
+          let traceSpan: any = null;
+          let traceContext: any = null;
+          
+          if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
+            try {
+              // Extract trace headers
+              const headers = Object.fromEntries(req.headers.entries());
+              const traceHeaders = {
+                'traceparent': headers['traceparent'],
+                'tracestate': headers['tracestate'], 
+                'x-trace-id': headers['x-trace-id'],
+                'x-span-id': headers['x-span-id'],
+              };
+
+              // Extract or generate trace context
+              const extractedContext = await Effect.runPromise(
+                app.traceService.extractFromHeaders(traceHeaders)
+              );
+
+              if (extractedContext) {
+                traceContext = extractedContext;
+                await Effect.runPromise(app.traceService.setContext(extractedContext));
+              } else {
+                // Generate new trace context
+                traceContext = await Effect.runPromise(app.traceService.generateTraceContext());
+                await Effect.runPromise(app.traceService.setContext(traceContext));
+              }
+
+              // Start HTTP trace span
+              const httpData = {
+                method: method,
+                url: req.url,
+                route: path,
+                userAgent: headers['user-agent'],
+                remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
+                requestSize: headers['content-length'] ? parseInt(headers['content-length'], 10) : undefined,
+              };
+
+              traceSpan = await Effect.runPromise(app.traceService.startHttpTrace(httpData));
+
+              // Set global trace context for this request
+              globalCurrentTraceContext = {
+                traceId: traceContext.traceId,
+                spanId: traceContext.spanId,
+                parentSpanId: traceContext.parentSpanId,
+              };
+
+              // Also set it globally for logger
+              if (typeof globalThis !== 'undefined') {
+                (globalThis as any).__onebunCurrentTraceContext = globalCurrentTraceContext;
+              }
+
+              // Propagate trace context to logger
+              // Note: FiberRef.set should be used within Effect context
+            } catch (error) {
+              console.error('Failed to setup tracing:', error);
+            }
+          }
+
           // Handle metrics endpoint
           if (path === metricsPath && method === 'GET' && app.metricsService) {
             try {
@@ -289,19 +389,37 @@ export class OneBunApplication {
 
           if (!route || route.method !== method) {
             const response = new Response('Not Found', { status: 404 });
+            const duration = Date.now() - startTime;
             
             // Record metrics for 404
             if (app.metricsService && app.metricsService.recordHttpRequest) {
-              const duration = (Date.now() - startTime) / 1000;
+              const durationSeconds = duration / 1000;
               app.metricsService.recordHttpRequest({
                 method: method,
                 route: path,
                 statusCode: 404,
-                duration,
+                duration: durationSeconds,
                 controller: 'unknown',
                 action: 'unknown'
               });
             }
+
+            // End trace for 404
+            if (traceSpan && app.traceService) {
+              try {
+                await Effect.runPromise(
+                  app.traceService.endHttpTrace(traceSpan, {
+                    statusCode: 404,
+                    duration,
+                  })
+                );
+              } catch (traceError) {
+                console.error('Failed to end trace for 404:', traceError);
+              }
+            }
+
+            // Clear trace context after 404
+            clearGlobalTraceContext();
             
             return response;
           }
@@ -319,55 +437,119 @@ export class OneBunApplication {
               };
 
               const response = await next(0);
+              const duration = Date.now() - startTime;
               
               // Record metrics
               if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const duration = (Date.now() - startTime) / 1000;
+                const durationSeconds = duration / 1000;
                 app.metricsService.recordHttpRequest({
                   method: method,
                   route: path,
-                  statusCode: response.status,
-                  duration,
+                  statusCode: response?.status || 200,
+                  duration: durationSeconds,
                   controller: route.controller.constructor.name,
                   action: 'unknown'
                 });
               }
+
+              // End trace
+              if (traceSpan && app.traceService) {
+                try {
+                  await Effect.runPromise(
+                    app.traceService.endHttpTrace(traceSpan, {
+                      statusCode: response?.status || 200,
+                      responseSize: response?.headers?.get('content-length') ? 
+                        parseInt(response.headers.get('content-length')!, 10) : undefined,
+                      duration,
+                    })
+                  );
+                } catch (traceError) {
+                  console.error('Failed to end trace:', traceError);
+                }
+              }
+
+              // Clear trace context after request
+              clearGlobalTraceContext();
               
               return response;
             } else {
               const response = await executeHandler(route, req, paramValues);
+              const duration = Date.now() - startTime;
               
               // Record metrics
               if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const duration = (Date.now() - startTime) / 1000;
+                const durationSeconds = duration / 1000;
                 app.metricsService.recordHttpRequest({
                   method: method,
                   route: path,
-                  statusCode: response.status,
-                  duration,
+                  statusCode: response?.status || 200,
+                  duration: durationSeconds,
                   controller: route.controller.constructor.name,
                   action: 'unknown'
                 });
               }
+
+              // End trace
+              if (traceSpan && app.traceService) {
+                try {
+                  await Effect.runPromise(
+                    app.traceService.endHttpTrace(traceSpan, {
+                      statusCode: response?.status || 200,
+                      responseSize: response?.headers?.get('content-length') ? 
+                        parseInt(response.headers.get('content-length')!, 10) : undefined,
+                      duration,
+                    })
+                  );
+                } catch (traceError) {
+                  console.error('Failed to end trace:', traceError);
+                }
+              }
+
+              // Clear trace context after request
+              clearGlobalTraceContext();
               
               return response;
             }
           } catch (error) {
             console.error('Request handling error:', error);
             const response = new Response('Internal Server Error', { status: 500 });
+            const duration = Date.now() - startTime;
             
-                         // Record error metrics
-             if (app.metricsService && app.metricsService.recordHttpRequest) {
-               const duration = (Date.now() - startTime) / 1000;
-               app.metricsService.recordHttpRequest({
+            // Record error metrics
+            if (app.metricsService && app.metricsService.recordHttpRequest) {
+              const durationSeconds = duration / 1000;
+              app.metricsService.recordHttpRequest({
                 method: method,
                 route: path,
                 statusCode: 500,
-                duration,
-                controller: route.controller.constructor.name,
+                duration: durationSeconds,
+                controller: route?.controller.constructor.name || 'unknown',
                 action: 'unknown'
               });
             }
+
+            // End trace with error
+            if (traceSpan && app.traceService) {
+              try {
+                await Effect.runPromise(
+                  app.traceService.addEvent('error', {
+                    'error.type': error instanceof Error ? error.constructor.name : 'UnknownError',
+                    'error.message': error instanceof Error ? error.message : String(error),
+                  })
+                );
+                await Effect.runPromise(
+                  app.traceService.endHttpTrace(traceSpan, {
+                    statusCode: 500,
+                    duration,
+                  })
+                );
+              } catch (traceError) {
+                console.error('Failed to end trace with error:', traceError);
+              }
+            }
+
+            // Clear trace context after error
+            clearGlobalTraceContext();
             
             return response;
            }

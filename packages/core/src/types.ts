@@ -166,6 +166,85 @@ export interface ApplicationOptions {
      */
     httpDurationBuckets?: number[];
   };
+
+  /**
+   * Tracing configuration
+   */
+  tracing?: {
+    /**
+     * Enable/disable tracing
+     * @default true
+     */
+    enabled?: boolean;
+
+    /**
+     * Service name for tracing
+     * @default 'onebun-service'
+     */
+    serviceName?: string;
+
+    /**
+     * Service version
+     * @default '1.0.0'
+     */
+    serviceVersion?: string;
+
+    /**
+     * Sampling rate (0.0 to 1.0)
+     * @default 1.0
+     */
+    samplingRate?: number;
+
+    /**
+     * Enable automatic HTTP request tracing
+     * @default true
+     */
+    traceHttpRequests?: boolean;
+
+    /**
+     * Enable automatic database query tracing
+     * @default true
+     */
+    traceDatabaseQueries?: boolean;
+
+    /**
+     * Custom attributes to add to all spans
+     */
+    defaultAttributes?: Record<string, string | number | boolean>;
+
+    /**
+     * Export traces to external system
+     */
+    exportOptions?: {
+      /**
+       * Export endpoint URL
+       */
+      endpoint?: string;
+
+      /**
+       * Export headers
+       */
+      headers?: Record<string, string>;
+
+      /**
+       * Export timeout in milliseconds
+       * @default 10000
+       */
+      timeout?: number;
+
+      /**
+       * Batch size for exporting
+       * @default 100
+       */
+      batchSize?: number;
+
+      /**
+       * Batch timeout in milliseconds
+       * @default 5000
+       */
+      batchTimeout?: number;
+    };
+  };
 }
 
 /**

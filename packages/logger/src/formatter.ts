@@ -23,7 +23,12 @@ export class PrettyFormatter implements LogFormatter {
     const color = COLORS[entry.level.toString()] || '';
     const reset = COLORS.RESET;
     
-    let message = `${color}${time} [${level}]${reset} ${entry.message}`;
+    // Add trace information if available
+    const traceInfo = entry.trace 
+      ? ` [trace:${entry.trace.traceId.slice(-8)} span:${entry.trace.spanId.slice(-8)}]`
+      : '';
+    
+    let message = `${color}${time} [${level}]${reset}${traceInfo} ${entry.message}`;
     
     if (entry.context?.SHOW_CONTEXT && Object.keys(entry.context).length > 0) {
       const contextWithoutServiceFields = { ...entry.context };
@@ -63,6 +68,13 @@ export class JsonFormatter implements LogFormatter {
       timestamp: entry.timestamp.toISOString(),
       level: this.getLevelName(entry.level),
       message: entry.message,
+      ...(entry.trace ? { 
+        trace: {
+          traceId: entry.trace.traceId,
+          spanId: entry.trace.spanId,
+          ...(entry.trace.parentSpanId ? { parentSpanId: entry.trace.parentSpanId } : {})
+        }
+      } : {}),
       ...(entry.context ? { context: entry.context } : {}),
       ...(entry.error ? { 
         error: {

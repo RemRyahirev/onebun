@@ -1,4 +1,5 @@
 import { Service, BaseService } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 // Service implementation with @Service decorator
 @Service()
@@ -7,6 +8,7 @@ export class CounterService extends BaseService {
   private totalOperations = 0;
 
   getValue(): number {
+    this.logger.info('Getting counter value from service');
     return this.value;
   }
 
@@ -26,6 +28,7 @@ export class CounterService extends BaseService {
     return this.value;
   }
 
+  @Span('counter-reset')
   reset(): void {
     this.value = 0;
     this.totalOperations++;

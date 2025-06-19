@@ -14,13 +14,11 @@
     "@onebun/envs": "workspace:*",
     "@onebun/logger": "workspace:*",
     "@onebun/metrics": "workspace:*",
+    "@onebun/trace": "workspace:*",
     "effect": "^3.10.15"
   },
   "devDependencies": {
     "bun-types": "1.2.2",
     "@types/node": "^22.9.0"
-  },
-  "engines": {
-    "bun": "1.2.12"
   }
 } 

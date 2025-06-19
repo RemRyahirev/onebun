@@ -14,6 +14,15 @@ export enum LogLevel {
 }
 
 /**
+ * Trace information for log entries
+ */
+export interface TraceInfo {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+}
+
+/**
  * Log entry structure
  */
 export interface LogEntry {
@@ -22,6 +31,7 @@ export interface LogEntry {
   timestamp: Date;
   context?: Record<string, unknown>;
   error?: Error;
+  trace?: TraceInfo;
 }
 
 /**
