@@ -8,6 +8,9 @@ const app = new OneBunApplication(AppModule, {
   host: '0.0.0.0',
   development: true,
   envSchema,
+  envOptions: {
+    envFilePath: '../../.env',
+  },
   metrics: {
     enabled: true,
     path: '/metrics',

@@ -89,7 +89,7 @@ export class OneBunApplication {
     // Initialize metrics if enabled and available
     if (this.options.metrics?.enabled !== false && createMetricsService) {
       try {
-        this.logger.info('Attempting to initialize metrics service');
+        this.logger.debug('Attempting to initialize metrics service');
         this.logger.debug('Metrics options:', this.options.metrics);
         
         this.metricsService = Effect.runSync(
@@ -115,7 +115,7 @@ export class OneBunApplication {
     // Initialize tracing if enabled
     if (this.options.tracing?.enabled !== false) {
       try {
-        this.logger.info('Attempting to initialize trace service');
+        this.logger.debug('Attempting to initialize trace service');
         this.logger.debug('Tracing options:', this.options.tracing);
         
         const traceLayer = makeTraceService(this.options.tracing || {});
@@ -195,7 +195,7 @@ export class OneBunApplication {
 
       // Get all controllers from the root module
       const controllers = this.rootModule.getControllers();
-      this.logger.info(`Loaded ${controllers.length} controllers`);
+      this.logger.debug(`Loaded ${controllers.length} controllers`);
 
       // Create a map of routes with metadata
       const routes = new Map<string, {
