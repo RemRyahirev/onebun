@@ -82,7 +82,7 @@ export class ExternalApiService extends BaseService {
    * Get user by ID with proper error handling
    */
   getUserById(id: number): Effect.Effect<User, RequestError> {
-    console.log(`🚀 Getting user ${id} with @onebun/requests`);
+    this.logger.info(`🚀 Getting user ${id} with @onebun/requests`);
     
     return pipe(
       this.client.get<User>(`/users/${id}`),

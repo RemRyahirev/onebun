@@ -28,12 +28,9 @@ export function Injectable() {
  * This function analyzes constructor parameters and matches them with available services
  */
 function autoDetectDependencies(target: Function, availableServices: Map<string, Function>): Function[] {
-  console.log(`Auto-detecting dependencies for ${target.name}`);
-  
   // First, try to get types from TypeScript's design:paramtypes
   const designTypes = getDesignParamTypes(target);
   if (designTypes && designTypes.length > 0) {
-    console.log(`Found design:paramtypes for ${target.name}:`, designTypes.map(t => t.name));
     return designTypes;
   }
   
@@ -42,13 +39,10 @@ function autoDetectDependencies(target: Function, availableServices: Map<string,
   const constructorMatch = constructorStr.match(/constructor\s*\(([^)]*)\)/);
   
   if (!constructorMatch || !constructorMatch[1]) {
-    console.log(`No constructor found for ${target.name}`);
     return [];
   }
 
   const paramsStr = constructorMatch[1];
-  console.log(`Analyzing constructor parameters for ${target.name}: ${paramsStr}`);
-  
   const params = paramsStr.split(',').map(p => p.trim());
   const dependencies: Function[] = [];
 
@@ -67,9 +61,6 @@ function autoDetectDependencies(target: Function, availableServices: Map<string,
       
       if (serviceType) {
         dependencies.push(serviceType);
-        console.log(`Auto-detected dependency: ${typeName} for ${target.name}`);
-      } else {
-        console.log(`Could not resolve service type: ${typeName} for ${target.name}`);
       }
     } else {
       // Try to guess from parameter name
@@ -86,7 +77,6 @@ function autoDetectDependencies(target: Function, availableServices: Map<string,
         const serviceType = availableServices.get(guessedTypeName);
         if (serviceType) {
           dependencies.push(serviceType);
-          console.log(`Auto-detected dependency by name convention: ${guessedTypeName} for ${target.name}`);
         }
       }
     }
@@ -99,14 +89,10 @@ function autoDetectDependencies(target: Function, availableServices: Map<string,
  * Register dependencies for a controller automatically
  */
 export function registerControllerDependencies(target: Function, availableServices: Map<string, Function>): void {
-  console.log(`Registering dependencies for ${target.name}`);
   const dependencies = autoDetectDependencies(target, availableServices);
   
   if (dependencies.length > 0) {
     META_CONSTRUCTOR_PARAMS.set(target, dependencies);
-    console.log(`Registered ${dependencies.length} dependencies for ${target.name}:`, dependencies.map(d => d.name));
-  } else {
-    console.log(`No dependencies detected for ${target.name}`);
   }
 }
 
@@ -124,7 +110,6 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
 function ForceMetadataEmission(target: any, propertyKey?: string, parameterIndex?: number) {
   // This decorator exists only to trigger TypeScript's emitDecoratorMetadata
   // When applied to constructor parameters, TypeScript will emit design:paramtypes
-  console.log(`ForceMetadataEmission applied to ${target.constructor?.name || target.name} constructor parameter ${parameterIndex}`);
 }
 
 /**
@@ -133,21 +118,6 @@ function ForceMetadataEmission(target: any, propertyKey?: string, parameterIndex
  */
 export function ControllerDecorator(basePath: string = '') {
   return function<T extends new (...args: any[]) => any>(target: T): T {
-    console.log(`\n🚀 Applying Controller decorator to ${target.name}`);
-    
-    // Great news! TypeScript is ALREADY emitting design:paramtypes for our controllers!
-    // We can see this in the logs. No need for complex wrapper - let's just use the metadata
-    
-    console.log(`📝 Checking if TypeScript emitted metadata for ${target.name}...`);
-    
-    // Check if we have design:paramtypes metadata (which we now do!)
-    const existingTypes = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
-    if (existingTypes) {
-      console.log(`✅ Found TypeScript metadata for ${target.name}:`, existingTypes.map((t: any) => t?.name || 'undefined'));
-    } else {
-      console.log(`❌ No TypeScript metadata found for ${target.name}`);
-    }
-
     const metadata: ControllerMetadata = {
       path: basePath.startsWith('/') ? basePath : `/${basePath}`,
       routes: []
@@ -165,7 +135,6 @@ export function ControllerDecorator(basePath: string = '') {
     // Mark controller as injectable automatically
     Injectable()(target);
 
-    console.log(`✅ Controller decorator applied to ${target.name}\n`);
     return target;
   };
 }
@@ -176,8 +145,6 @@ export function ControllerDecorator(basePath: string = '') {
  */
 export function Inject<T>(type: new (...args: any[]) => T) {
   return function(target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void {
-    console.log(`Explicit @Inject used for ${type.name} at index ${parameterIndex} in ${target.constructor?.name || target.name}`);
-    
     // Get existing dependencies or create new array
     const existingDeps = META_CONSTRUCTOR_PARAMS.get(target) || [];
     
@@ -197,7 +164,6 @@ export function Inject<T>(type: new (...args: any[]) => T) {
  */
 export function registerDependencies(target: Function, dependencies: Function[]): void {
   META_CONSTRUCTOR_PARAMS.set(target, dependencies);
-  console.log(`Manually registered dependencies for ${target.name}:`, dependencies.map(d => d.name));
 }
 
 // Алиас для обратной совместимости

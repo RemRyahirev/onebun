@@ -172,17 +172,14 @@ export class OneBunModule implements Module {
             try {
               // Get the service tag for this provider
               const tag = getServiceTag(provider);
-              self.logger.debug(`Got service tag for provider ${provider.name}: ${tag.Identifier}`);
 
               // Find the service instance in the services context
               let found = false;
               for (const [key, value] of Object.entries(services)) {
                 if (key && value && typeof key === 'object' && 'Identifier' in key) {
-                  self.logger.debug(`Checking service in context: ${(key as any).Identifier} against tag: ${tag.Identifier}`);
                   if (key === tag || (key as any).Identifier === (tag as any).Identifier) {
                     // Register the service with its tag
                     self.serviceInstances.set(tag, value);
-                    self.logger.debug(`Registered service ${provider.name} from context`);
                     found = true;
                     break;
                   }
@@ -190,14 +187,10 @@ export class OneBunModule implements Module {
               }
 
               if (!found) {
-                self.logger.warn(`Service ${provider.name} not found in context with tag ${tag.Identifier}`);
-
                 // Create an instance of the service and register it
-                self.logger.debug(`Creating instance of service ${provider.name}`);
                 const ServiceConstructor = provider as new (logger?: SyncLogger, config?: any) => any;
                 const serviceInstance = new ServiceConstructor(self.logger, self.config);
                 self.serviceInstances.set(tag, serviceInstance);
-                self.logger.debug(`Registered manually created service ${provider.name}`);
               }
             } catch (error) {
               // If getServiceTag fails, the provider might not have @Service decorator
@@ -206,10 +199,8 @@ export class OneBunModule implements Module {
           }
         }
 
-        // Now automatically analyze and register dependencies for all controllers
-        self.logger.debug(`Available services for dependency injection:`, Array.from(availableServices.keys()));
+        // Automatically analyze and register dependencies for all controllers
         for (const ControllerClass of self.controllers) {
-          self.logger.debug(`Auto-analyzing dependencies for controller ${ControllerClass.name}`);
           registerControllerDependencies(ControllerClass, availableServices);
         }
       }
@@ -226,23 +217,16 @@ export class OneBunModule implements Module {
    */
   private createControllersWithDI(): void {
     for (const ControllerClass of this.controllers) {
-      this.logger.debug(`Creating controller ${ControllerClass.name} with automatic DI`);
-      
-      // Get constructor parameter types automatically from @Inject decorators
+      // Get constructor parameter types automatically from DI system
       const paramTypes = getConstructorParamTypes(ControllerClass);
-      this.logger.debug(`Constructor parameter types for ${ControllerClass.name}:`, paramTypes);
-      
       const dependencies: any[] = [];
       
       if (paramTypes && paramTypes.length > 0) {
         // Resolve dependencies based on registered parameter types
         for (const paramType of paramTypes) {
-          this.logger.debug(`Resolving dependency type: ${paramType.name}`);
-          
           const dependency = this.resolveDependencyByType(paramType);
           if (dependency) {
             dependencies.push(dependency);
-            this.logger.debug(`Resolved dependency ${paramType.name} for ${ControllerClass.name}`);
           } else {
             this.logger.warn(`Could not resolve dependency ${paramType.name} for ${ControllerClass.name}`);
           }
@@ -250,11 +234,8 @@ export class OneBunModule implements Module {
       }
       
       // Add logger and config at the end (always needed)
-      // Pass the SyncLogger instance directly (it already has child method)
       dependencies.push(this.logger);
       dependencies.push(this.config);
-      
-      this.logger.debug(`Creating ${ControllerClass.name} with dependencies:`, dependencies.map(d => d?.constructor?.name || typeof d));
       
       // Create controller with resolved dependencies
       const ControllerConstructor = ControllerClass as any;
@@ -267,7 +248,9 @@ export class OneBunModule implements Module {
         controller.setService(tag, serviceInstance);
       }
       
-      this.logger.debug(`Successfully created controller ${ControllerClass.name} with ${dependencies.length - 2} dependencies`);
+      if (paramTypes && paramTypes.length > 0) {
+        this.logger.debug(`Controller ${ControllerClass.name} created with ${paramTypes.length} injected dependencies`);
+      }
     }
   }
 
@@ -283,26 +266,13 @@ export class OneBunModule implements Module {
    * Resolve dependency by type (constructor function)
    */
   private resolveDependencyByType(type: Function): any {
-    this.logger.debug(`Looking for service of type: ${type.name}`);
-    
     // Find service instance that matches the type
     const serviceInstance = Array.from(this.serviceInstances.values()).find(instance => {
       if (!instance) return false;
       
       // Check if instance is of the exact type or inherits from it
-      const matches = (instance.constructor === type || instance instanceof type);
-      
-      if (matches) {
-        this.logger.debug(`Found matching service instance: ${instance.constructor.name} for type: ${type.name}`);
-      }
-      
-      return matches;
+      return (instance.constructor === type || instance instanceof type);
     });
-    
-    if (!serviceInstance) {
-      this.logger.debug(`No service instance found for type: ${type.name}`);
-      this.logger.debug(`Available service instances: ${Array.from(this.serviceInstances.values()).map(s => s?.constructor?.name || 'unknown').join(', ')}`);
-    }
     
     return serviceInstance;
   }
@@ -325,27 +295,9 @@ export class OneBunModule implements Module {
    * Get controller instance
    */
   getControllerInstance(controllerClass: Function): Controller | undefined {
-    this.logger.debug(`Getting controller instance for ${controllerClass.name}`);
-
-    // Log controller details for debugging
-    this.logger.debug(`Controller constructor: ${controllerClass.constructor?.name || 'undefined'}`);
-    this.logger.debug(`Controller prototype: ${Object.getPrototypeOf(controllerClass)?.name || 'undefined'}`);
-
-    // Check if controller has metadata
-    const controllerMetadata = getControllerMetadata(controllerClass);
-    if (controllerMetadata) {
-      this.logger.debug(`Found metadata for controller ${controllerClass.name} in getControllerInstance, routes: ${controllerMetadata.routes.length}`);
-    } else {
-      this.logger.warn(`No metadata found for controller ${controllerClass.name} in getControllerInstance`);
-    }
-
-    // Log all keys in controllerInstances for debugging
-    this.logger.debug(`controllerInstances keys: ${Array.from(this.controllerInstances.keys()).map(k => k.name).join(', ')}`);
-
     const instance = this.controllerInstances.get(controllerClass);
-    if (instance) {
-      this.logger.debug(`Found instance for controller ${controllerClass.name}`);
-    } else {
+    
+    if (!instance) {
       this.logger.warn(`No instance found for controller ${controllerClass.name}`);
     }
 
@@ -382,7 +334,6 @@ export class OneBunModule implements Module {
   static create(moduleClass: Function, loggerLayer?: Layer.Layer<never, never, unknown>, config?: any): Module {
     // Using console.log here because we don't have access to the logger instance yet
     // The instance will create its own logger in the constructor
-    console.log(`Creating OneBunModule for ${moduleClass.name}`);
     return new OneBunModule(moduleClass, loggerLayer, config);
   }
 }

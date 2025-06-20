@@ -39,7 +39,7 @@ export class ApiController extends BaseController {
         this.api.getUserById(userId),
         Effect.map((user) => user),
         Effect.catchAll((error) => 
-          Effect.succeed({ error: `Failed to fetch user: ${error.message}` })
+          Effect.succeed({ error: `Failed to fetch user: ${error.message} | traceId: ${error.traceId}`, traceId: error.traceId })
         )
       )
     );

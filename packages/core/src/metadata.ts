@@ -150,8 +150,6 @@ if (typeof (globalThis as any).__decorate === 'undefined') {
  * Only adds what's needed for TypeScript's emitDecoratorMetadata
  */
 if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
-  console.log('Setting up Reflect polyfill for design:paramtypes support');
-  
   // Simple storage for metadata
   const globalMetadataStorage = new WeakMap<any, Map<string, any>>();
   
@@ -162,17 +160,12 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
           globalMetadataStorage.set(target, new Map());
         }
         globalMetadataStorage.get(target)!.set(key, value);
-        console.log(`Reflect.metadata: Set ${key} on ${target.name}:`, value);
       };
     },
     
     getMetadata: (key: string, target: any) => {
       const metadata = globalMetadataStorage.get(target);
-      const result = metadata ? metadata.get(key) : undefined;
-      if (result) {
-        console.log(`Reflect.getMetadata: Found ${key} on ${target.name}:`, result);
-      }
-      return result;
+      return metadata ? metadata.get(key) : undefined;
     },
     
     defineMetadata: (key: string, value: any, target: any) => {
@@ -180,7 +173,6 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
         globalMetadataStorage.set(target, new Map());
       }
       globalMetadataStorage.get(target)!.set(key, value);
-      console.log(`Reflect.defineMetadata: Set ${key} on ${target.name}:`, value);
     }
   };
   
@@ -195,43 +187,33 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
  * Enhanced getConstructorParamTypes with Reflect polyfill support
  */
 export function getConstructorParamTypes(target: Function): Function[] | undefined {
-  console.log(`\n=== Enhanced getConstructorParamTypes for ${target.name} ===`);
-  
   // First try the global Reflect (now with our polyfill)
   let types: Function[] | undefined;
   
   try {
     types = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
     if (types && Array.isArray(types) && types.length > 0) {
-      console.log(`✅ Found design:paramtypes via globalThis.Reflect for ${target.name}:`, types.map(t => t?.name || 'undefined'));
-      
       // Filter out basic types and focus on service types
       const serviceTypes = types.filter((type: any) => {
         if (!type || type === Object || type === String || type === Number || type === Boolean) {
-          console.log(`Skipping basic type:`, type?.name || 'undefined');
           return false;
         }
         const typeName = type.name;
         if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
-          console.log(`Skipping system type:`, typeName);
           return false;
         }
-        console.log(`Keeping service type:`, typeName);
         return true;
       });
       
-      console.log(`=== End enhanced check (SUCCESS) ===\n`);
       return serviceTypes.length > 0 ? serviceTypes : undefined;
     }
   } catch (e) {
-    console.log(`❌ Error getting metadata via globalThis.Reflect:`, e);
+    // Silent fallback to custom metadata
   }
   
   // Fallback to our custom metadata
   types = getMetadata('design:paramtypes', target);
   if (types && Array.isArray(types)) {
-    console.log(`✅ Found design:paramtypes via custom metadata for ${target.name}:`, types.map(t => t?.name || 'undefined'));
-    
     const serviceTypes = types.filter((type: any) => {
       if (!type || type === Object || type === String || type === Number || type === Boolean) {
         return false;
@@ -243,12 +225,9 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
       return true;
     });
     
-    console.log(`=== End enhanced check (FALLBACK SUCCESS) ===\n`);
     return serviceTypes.length > 0 ? serviceTypes : undefined;
   }
   
-  console.log(`❌ No design:paramtypes found for ${target.name}`);
-  console.log(`=== End enhanced check (FAILED) ===\n`);
   return undefined;
 }
 
