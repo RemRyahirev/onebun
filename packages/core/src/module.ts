@@ -1,5 +1,5 @@
 import { Context, Effect, Layer } from 'effect';
-import { getModuleMetadata, getControllerMetadata } from './decorators';
+import { getModuleMetadata, getControllerMetadata, getConstructorParamTypes, registerControllerDependencies } from './decorators';
 import { Module, ModuleProviders } from './types';
 import { getServiceMetadata, createServiceLayer } from './service';
 import { Controller } from './controller';
@@ -160,9 +160,15 @@ export class OneBunModule implements Module {
         // Import getServiceTag function to avoid circular dependency
         const { getServiceTag } = require('./service');
 
+        // Create map of available services for dependency resolution
+        const availableServices = new Map<string, Function>();
+
         // For each provider that is a class constructor, register it with its tag
         for (const provider of moduleMetadata.providers) {
           if (typeof provider === 'function') {
+            // Add to available services map
+            availableServices.set(provider.name, provider);
+
             try {
               // Get the service tag for this provider
               const tag = getServiceTag(provider);
@@ -199,38 +205,106 @@ export class OneBunModule implements Module {
             }
           }
         }
-      }
 
-      // Now create controller instances with the registered services
-      for (const ControllerClass of self.controllers) {
-        // Create controller instance
-        const ControllerConstructor = ControllerClass as any;
-        
-        // Find required services for this controller
-        let requiredService = undefined;
-        
-        // Look for the first service in our service instances
-        // For now, just take the first available service (CounterService)
-        for (const [tag, serviceInstance] of self.serviceInstances.entries()) {
-          if (serviceInstance) {
-            requiredService = serviceInstance;
-            break;
-          }
-        }
-        
-        // Create controller with the required service, logger and config
-        const controller = new ControllerConstructor(requiredService, self.logger, self.config);
-        
-        self.controllerInstances.set(ControllerClass, controller);
-
-        // Inject all services into controller
-        for (const [tag, serviceInstance] of self.serviceInstances.entries()) {
-          controller.setService(tag, serviceInstance);
+        // Now automatically analyze and register dependencies for all controllers
+        self.logger.debug(`Available services for dependency injection:`, Array.from(availableServices.keys()));
+        for (const ControllerClass of self.controllers) {
+          self.logger.debug(`Auto-analyzing dependencies for controller ${ControllerClass.name}`);
+          registerControllerDependencies(ControllerClass, availableServices);
         }
       }
+
+      // Now create controller instances with automatic dependency injection
+      self.createControllersWithDI();
     }).pipe(
       Effect.provide(this.rootLayer)
     );
+  }
+
+  /**
+   * Create controllers with automatic dependency injection
+   */
+  private createControllersWithDI(): void {
+    for (const ControllerClass of this.controllers) {
+      this.logger.debug(`Creating controller ${ControllerClass.name} with automatic DI`);
+      
+      // Get constructor parameter types automatically from @Inject decorators
+      const paramTypes = getConstructorParamTypes(ControllerClass);
+      this.logger.debug(`Constructor parameter types for ${ControllerClass.name}:`, paramTypes);
+      
+      const dependencies: any[] = [];
+      
+      if (paramTypes && paramTypes.length > 0) {
+        // Resolve dependencies based on registered parameter types
+        for (const paramType of paramTypes) {
+          this.logger.debug(`Resolving dependency type: ${paramType.name}`);
+          
+          const dependency = this.resolveDependencyByType(paramType);
+          if (dependency) {
+            dependencies.push(dependency);
+            this.logger.debug(`Resolved dependency ${paramType.name} for ${ControllerClass.name}`);
+          } else {
+            this.logger.warn(`Could not resolve dependency ${paramType.name} for ${ControllerClass.name}`);
+          }
+        }
+      }
+      
+      // Add logger and config at the end (always needed)
+      // Pass the SyncLogger instance directly (it already has child method)
+      dependencies.push(this.logger);
+      dependencies.push(this.config);
+      
+      this.logger.debug(`Creating ${ControllerClass.name} with dependencies:`, dependencies.map(d => d?.constructor?.name || typeof d));
+      
+      // Create controller with resolved dependencies
+      const ControllerConstructor = ControllerClass as any;
+      const controller = new ControllerConstructor(...dependencies);
+      
+      this.controllerInstances.set(ControllerClass, controller);
+
+      // Inject all services into controller (for legacy compatibility)
+      for (const [tag, serviceInstance] of this.serviceInstances.entries()) {
+        controller.setService(tag, serviceInstance);
+      }
+      
+      this.logger.debug(`Successfully created controller ${ControllerClass.name} with ${dependencies.length - 2} dependencies`);
+    }
+  }
+
+  /**
+   * Resolve dependency by name (string) - DEPRECATED
+   */
+  private resolveDependencyByName(typeName: string): any {
+    // This method is deprecated with the new automatic system
+    return null;
+  }
+
+  /**
+   * Resolve dependency by type (constructor function)
+   */
+  private resolveDependencyByType(type: Function): any {
+    this.logger.debug(`Looking for service of type: ${type.name}`);
+    
+    // Find service instance that matches the type
+    const serviceInstance = Array.from(this.serviceInstances.values()).find(instance => {
+      if (!instance) return false;
+      
+      // Check if instance is of the exact type or inherits from it
+      const matches = (instance.constructor === type || instance instanceof type);
+      
+      if (matches) {
+        this.logger.debug(`Found matching service instance: ${instance.constructor.name} for type: ${type.name}`);
+      }
+      
+      return matches;
+    });
+    
+    if (!serviceInstance) {
+      this.logger.debug(`No service instance found for type: ${type.name}`);
+      this.logger.debug(`Available service instances: ${Array.from(this.serviceInstances.values()).map(s => s?.constructor?.name || 'unknown').join(', ')}`);
+    }
+    
+    return serviceInstance;
   }
 
   /**
@@ -312,3 +386,4 @@ export class OneBunModule implements Module {
     return new OneBunModule(moduleClass, loggerLayer, config);
   }
 }
+

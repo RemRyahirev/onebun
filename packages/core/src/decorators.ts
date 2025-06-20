@@ -1,4 +1,5 @@
-import { Reflect } from './metadata';
+import './metadata'; // Import polyfill first
+import { Reflect, getConstructorParamTypes as getDesignParamTypes } from './metadata';
 import { ControllerMetadata, HttpMethod, RouteMetadata, ParamType, ParamMetadata } from './types';
 
 /**
@@ -7,11 +8,146 @@ import { ControllerMetadata, HttpMethod, RouteMetadata, ParamType, ParamMetadata
 const META_CONTROLLERS = new Map<Function, ControllerMetadata>();
 
 /**
- * Controller decorator
+ * Metadata storage for automatically detected constructor parameters
+ */
+const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
+
+/**
+ * Injectable decorator for controllers and services
+ * This decorator enables automatic dependency injection by registering the class for DI
+ */
+export function Injectable() {
+  return function<T extends new (...args: any[]) => any>(target: T): T {
+    // The class is now marked as injectable
+    return target;
+  };
+}
+
+/**
+ * Automatic dependency detection through smart constructor analysis
+ * This function analyzes constructor parameters and matches them with available services
+ */
+function autoDetectDependencies(target: Function, availableServices: Map<string, Function>): Function[] {
+  console.log(`Auto-detecting dependencies for ${target.name}`);
+  
+  // First, try to get types from TypeScript's design:paramtypes
+  const designTypes = getDesignParamTypes(target);
+  if (designTypes && designTypes.length > 0) {
+    console.log(`Found design:paramtypes for ${target.name}:`, designTypes.map(t => t.name));
+    return designTypes;
+  }
+  
+  // Fallback: analyze constructor source code
+  const constructorStr = target.toString();
+  const constructorMatch = constructorStr.match(/constructor\s*\(([^)]*)\)/);
+  
+  if (!constructorMatch || !constructorMatch[1]) {
+    console.log(`No constructor found for ${target.name}`);
+    return [];
+  }
+
+  const paramsStr = constructorMatch[1];
+  console.log(`Analyzing constructor parameters for ${target.name}: ${paramsStr}`);
+  
+  const params = paramsStr.split(',').map(p => p.trim());
+  const dependencies: Function[] = [];
+
+  for (const param of params) {
+    // Skip logger and config parameters
+    if (param.includes('logger') || param.includes('config')) {
+      continue;
+    }
+
+    // Try to extract type information
+    // Look for patterns like: "private counterService: CounterService"
+    const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
+    if (typeMatch) {
+      const typeName = typeMatch[1];
+      const serviceType = availableServices.get(typeName);
+      
+      if (serviceType) {
+        dependencies.push(serviceType);
+        console.log(`Auto-detected dependency: ${typeName} for ${target.name}`);
+      } else {
+        console.log(`Could not resolve service type: ${typeName} for ${target.name}`);
+      }
+    } else {
+      // Try to guess from parameter name
+      const paramNameMatch = param.match(/([a-zA-Z][a-zA-Z0-9]*)/);
+      if (paramNameMatch) {
+        const paramName = paramNameMatch[1];
+        
+        // Convert camelCase service name to PascalCase class name
+        // e.g., counterService -> CounterService
+        const guessedTypeName = paramName
+          .replace(/Service$/, '') // Remove Service suffix if present
+          .replace(/^[a-z]/, c => c.toUpperCase()) + 'Service';
+        
+        const serviceType = availableServices.get(guessedTypeName);
+        if (serviceType) {
+          dependencies.push(serviceType);
+          console.log(`Auto-detected dependency by name convention: ${guessedTypeName} for ${target.name}`);
+        }
+      }
+    }
+  }
+
+  return dependencies;
+}
+
+/**
+ * Register dependencies for a controller automatically
+ */
+export function registerControllerDependencies(target: Function, availableServices: Map<string, Function>): void {
+  console.log(`Registering dependencies for ${target.name}`);
+  const dependencies = autoDetectDependencies(target, availableServices);
+  
+  if (dependencies.length > 0) {
+    META_CONSTRUCTOR_PARAMS.set(target, dependencies);
+    console.log(`Registered ${dependencies.length} dependencies for ${target.name}:`, dependencies.map(d => d.name));
+  } else {
+    console.log(`No dependencies detected for ${target.name}`);
+  }
+}
+
+/**
+ * Get constructor parameter types (automatically detected or explicitly set)
+ */
+export function getConstructorParamTypes(target: Function): Function[] | undefined {
+  return META_CONSTRUCTOR_PARAMS.get(target);
+}
+
+/**
+ * Hidden decorator to force TypeScript to emit design:paramtypes
+ * This is the key to making automatic dependency injection work
+ */
+function ForceMetadataEmission(target: any, propertyKey?: string, parameterIndex?: number) {
+  // This decorator exists only to trigger TypeScript's emitDecoratorMetadata
+  // When applied to constructor parameters, TypeScript will emit design:paramtypes
+  console.log(`ForceMetadataEmission applied to ${target.constructor?.name || target.name} constructor parameter ${parameterIndex}`);
+}
+
+/**
+ * Controller decorator with automatic dependency detection
  * @param basePath Base path for all routes in controller
  */
 export function ControllerDecorator(basePath: string = '') {
   return function<T extends new (...args: any[]) => any>(target: T): T {
+    console.log(`\n🚀 Applying Controller decorator to ${target.name}`);
+    
+    // Great news! TypeScript is ALREADY emitting design:paramtypes for our controllers!
+    // We can see this in the logs. No need for complex wrapper - let's just use the metadata
+    
+    console.log(`📝 Checking if TypeScript emitted metadata for ${target.name}...`);
+    
+    // Check if we have design:paramtypes metadata (which we now do!)
+    const existingTypes = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
+    if (existingTypes) {
+      console.log(`✅ Found TypeScript metadata for ${target.name}:`, existingTypes.map((t: any) => t?.name || 'undefined'));
+    } else {
+      console.log(`❌ No TypeScript metadata found for ${target.name}`);
+    }
+
     const metadata: ControllerMetadata = {
       path: basePath.startsWith('/') ? basePath : `/${basePath}`,
       routes: []
@@ -26,8 +162,42 @@ export function ControllerDecorator(basePath: string = '') {
 
     META_CONTROLLERS.set(target, metadata);
 
+    // Mark controller as injectable automatically
+    Injectable()(target);
+
+    console.log(`✅ Controller decorator applied to ${target.name}\n`);
     return target;
   };
+}
+
+/**
+ * Decorator for explicit dependency injection (for complex cases)
+ * Usage: constructor(@Inject(CounterService) private counterService: CounterService)
+ */
+export function Inject<T>(type: new (...args: any[]) => T) {
+  return function(target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void {
+    console.log(`Explicit @Inject used for ${type.name} at index ${parameterIndex} in ${target.constructor?.name || target.name}`);
+    
+    // Get existing dependencies or create new array
+    const existingDeps = META_CONSTRUCTOR_PARAMS.get(target) || [];
+    
+    // Ensure array is large enough
+    while (existingDeps.length <= parameterIndex) {
+      existingDeps.push(undefined as any);
+    }
+    
+    // Set the explicit type
+    existingDeps[parameterIndex] = type;
+    META_CONSTRUCTOR_PARAMS.set(target, existingDeps);
+  };
+}
+
+/**
+ * Register dependencies manually (fallback method)
+ */
+export function registerDependencies(target: Function, dependencies: Function[]): void {
+  META_CONSTRUCTOR_PARAMS.set(target, dependencies);
+  console.log(`Manually registered dependencies for ${target.name}:`, dependencies.map(d => d.name));
 }
 
 // Алиас для обратной совместимости

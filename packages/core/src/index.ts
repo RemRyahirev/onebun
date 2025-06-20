@@ -16,6 +16,8 @@ export { Effect, Layer } from 'effect';
 export {
   Module,
   Controller,
+  Injectable,
+  Inject,
   Get,
   Post,
   Put,
@@ -30,5 +32,8 @@ export {
   Header,
   Req,
   Res,
-  UseMiddleware
+  UseMiddleware,
+  getConstructorParamTypes,
+  registerControllerDependencies,
+  registerDependencies
 } from './decorators';

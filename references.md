@@ -326,4 +326,149 @@ pipe(
     "noPropertyAccessFromIndexSignature": true
   }
 }
-``` 
+```
+
+# OneBun Framework - References
+
+Полезные ссылки на документации различных технологий, используемых в проекте OneBun.
+
+## Core Technologies
+
+### Effect.js
+- **Официальная документация**: https://effect.website/
+- **GitHub**: https://github.com/Effect-TS/effect
+- **Основные концепции**: 
+  - Effect.js - библиотека для функционального программирования с поддержкой типобезопасности
+  - Использует Effect.gen() для генераторного стиля (но мы используем Effect.pipe)
+  - Система зависимостей через Layer и Context
+  - Встроенная обработка ошибок и ресурсов
+
+### TypeScript
+- **Официальная документация**: https://www.typescriptlang.org/docs/
+- **Строгая типизация**: настроена strict mode для максимальной безопасности типов
+- **Декораторы**: включены экспериментальные декораторы для метаданных
+
+### Bun.js
+- **Официальная документация**: https://bun.sh/docs
+- **Runtime**: используется вместо Node.js для максимальной производительности
+- **Package manager**: встроенный менеджер пакетов
+- **Bundler**: встроенный бандлер и компилятор
+
+## OneBun Framework Packages
+
+### @onebun/core
+- **Назначение**: Основной пакет фреймворка с базовой функциональностью
+- **Возможности**:
+  - Декораторы для контроллеров и сервисов
+  - Система модулей и DI
+  - Базовые HTTP-роуты
+  - Интеграция с Effect.js
+
+### @onebun/logger
+- **Назначение**: Система логирования с поддержкой трейсинга
+- **Возможности**:
+  - Structured logging с JSON форматом
+  - Контекстные логи с trace ID
+  - Различные уровни логирования
+  - Интеграция с Effect.js
+
+### @onebun/envs
+- **Назначение**: Управление переменными окружения
+- **Возможности**:
+  - Типизированные environment variables
+  - Валидация и парсинг значений
+  - Загрузка из .env файлов
+  - Интеграция с Effect.js
+
+### @onebun/metrics
+- **Назначение**: Сбор метрик в формате Prometheus
+- **Возможности**:
+  - HTTP request метрики (count, duration)
+  - System метрики (memory, CPU, uptime)
+  - Custom метрики (counters, gauges, histograms)
+  - Автоматический сбор через декораторы
+
+### @onebun/trace
+- **Назначение**: Distributed tracing с OpenTelemetry совместимостью
+- **Возможности**:
+  - W3C Trace Context propagation
+  - Автоматический HTTP tracing
+  - Custom spans и события
+  - Интеграция с логированием
+
+### @onebun/requests
+- **Назначение**: Унифицированный HTTP клиент для внешних вызовов
+- **Возможности**:
+  - Множественные схемы авторизации
+  - Автоматические ретраи с backoff стратегиями
+  - Интеграция с трейсингом и метриками
+  - Типизированные ошибки с цепочкой контекста
+  - Единый формат ответов
+
+#### Схемы авторизации:
+- **Bearer Token**: `Authorization: Bearer <token>`
+- **API Key**: Header или query parameter
+- **Basic Auth**: `Authorization: Basic <base64(user:pass)>`
+- **OneBun Auth**: HMAC-подписи для межсервисного взаимодействия
+- **Custom Auth**: Пользовательские interceptor'ы
+
+#### Retry стратегии:
+- **Fixed**: фиксированная задержка между попытками
+- **Linear**: линейное увеличение задержки
+- **Exponential**: экспоненциальный backoff
+
+#### Пример использования:
+```typescript
+import { createHttpClient } from '@onebun/requests';
+
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  timeout: 5000,
+  auth: {
+    type: 'bearer',
+    token: 'your-token'
+  },
+  retries: {
+    max: 3,
+    delay: 1000,
+    backoff: 'exponential'
+  }
+});
+
+const response = await Effect.runPromise(client.get('/users'));
+```
+
+## Third-party Libraries
+
+### Prometheus Client
+- **GitHub**: https://github.com/siimon/prom-client
+- **Документация**: https://prometheus.io/docs/
+- **Использование**: сбор и экспорт метрик в формате Prometheus
+
+### OpenTelemetry
+- **Официальная документация**: https://opentelemetry.io/docs/
+- **JavaScript SDK**: https://opentelemetry.io/docs/languages/js/
+- **Использование**: distributed tracing и observability
+
+## Development Guidelines
+
+### Code Style
+- Используем строгий TypeScript без any
+- Предпочитаем Effect.pipe вместо Effect.gen
+- Все публичные API должны быть типизированы
+- Комментарии на английском языке
+
+### Error Handling
+- Все ошибки типизированы через Effect.Effect<T, E>
+- Используем chainable error context для трассировки
+- Логируем ошибки с trace context
+
+### Testing
+- Unit тесты для каждого модуля
+- Integration тесты для HTTP endpoints
+- Performance тесты для critical paths
+
+### Documentation
+- README.md для каждого пакета
+- Inline documentation с JSDoc
+- Примеры использования в documentation 

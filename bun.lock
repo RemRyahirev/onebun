@@ -12,6 +12,7 @@
         "@onebun/envs": "workspace:*",
         "@onebun/logger": "workspace:*",
         "@onebun/metrics": "workspace:*",
+        "@onebun/requests": "workspace:*",
         "@onebun/trace": "workspace:*",
         "effect": "^3.10.15",
       },
@@ -72,6 +73,16 @@
         "@types/node": "^22.9.0",
       },
     },
+    "packages/requests": {
+      "name": "@onebun/requests",
+      "version": "0.1.0",
+      "dependencies": {
+        "@onebun/logger": "workspace:*",
+        "@onebun/metrics": "workspace:*",
+        "@onebun/trace": "workspace:*",
+        "effect": "^3.0.0",
+      },
+    },
     "packages/trace": {
       "name": "@onebun/trace",
       "version": "0.1.0",
@@ -92,6 +103,8 @@
     "@onebun/logger": ["@onebun/logger@workspace:packages/logger"],
 
     "@onebun/metrics": ["@onebun/metrics@workspace:packages/metrics"],
+
+    "@onebun/requests": ["@onebun/requests@workspace:packages/requests"],
 
     "@onebun/trace": ["@onebun/trace@workspace:packages/trace"],
 

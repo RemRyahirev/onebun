@@ -14,6 +14,7 @@
     "@onebun/envs": "workspace:*",
     "@onebun/logger": "workspace:*",
     "@onebun/metrics": "workspace:*",
+    "@onebun/requests": "workspace:*",
     "@onebun/trace": "workspace:*",
     "effect": "^3.10.15"
   },

@@ -1,21 +1,21 @@
 {
   "name": "onebun",
   "version": "0.1.0",
+  "author": "",
   "description": "OneBun framework monorepo - A bun.js framework inspired by nest.js with effect.ts",
+  "engines": {
+    "bun": "1.2.12",
+    "node": "24"
+  },
+  "license": "MIT",
   "private": true,
-  "workspaces": [
-    "packages/*",
-    "example"
-  ],
   "scripts": {
     "dev": "bun run --watch example/src/index.ts",
     "dev:once": "bun run example/src/index.ts",
     "test": "bun test"
   },
-  "engines": {
-    "bun": "1.2.12",
-    "node": "24"
-  },
-  "author": "",
-  "license": "MIT"
+  "workspaces": [
+    "packages/*",
+    "example"
+  ]
 }
