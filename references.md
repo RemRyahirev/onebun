@@ -471,4 +471,92 @@ const response = await Effect.runPromise(client.get('/users'));
 ### Documentation
 - README.md для каждого пакета
 - Inline documentation с JSDoc
-- Примеры использования в documentation 
+- Примеры использования в documentation
+
+## Effect-TS
+- [Официальная документация](https://effect.website/docs/introduction)
+- [Getting Started Guide](https://effect.website/docs/getting-started)
+- [Effect vs Promise](https://effect.website/docs/effect-vs-promise)
+- [Error Handling](https://effect.website/docs/error-handling)
+
+## Bun.js
+- [Официальная документация](https://bun.sh/docs)
+- [TypeScript Support](https://bun.sh/docs/typescript)
+- [Web API](https://bun.sh/docs/api/web-api)
+
+## TypeScript
+- [Handbook](https://www.typescriptlang.org/docs/)
+- [Decorators](https://www.typescriptlang.org/docs/handbook/decorators.html)
+
+## OneBun Framework - Dual API Guidelines
+
+### Promise API (Default)
+Простой и знакомый подход для большинства случаев использования:
+
+```typescript
+// ✅ Простые CRUD операции
+const users = await client.get<User[]>('/users');
+
+// ✅ Стандартное обработка ошибок
+try {
+  const user = await client.post<User>('/users', userData);
+  return user;
+} catch (error) {
+  logger.error('Failed to create user', error);
+  throw error;
+}
+```
+
+### Effect API (Advanced)
+Для сложных композиций и функционального программирования:
+
+```typescript
+// ✅ Композиция операций
+const result = pipe(
+  client.getEffect<User[]>('/users'),
+  Effect.flatMap(users => processUsers(users)),
+  Effect.catchAll(error => handleError(error))
+);
+
+// ✅ Цепочки зависимых операций
+const workflow = pipe(
+  getUserEffect(id),
+  Effect.flatMap(user => updateUserEffect(user)),
+  Effect.flatMap(user => notifyUserEffect(user))
+);
+```
+
+### Когда использовать каждый API
+
+#### Promise API подходит для:
+- Простых CRUD операций
+- Команд, знакомых с async/await
+- Миграции существующих кодовых баз
+- Минимальной кривой обучения
+
+#### Effect API подходит для:
+- Сложных workflows с множественными зависимостями
+- Продвинутого error handling и recovery стратегий
+- Функционального программирования
+- Композируемого и тестируемого кода
+- Управления сложными async операциями
+
+### Принципы именования
+
+- **Promise методы**: стандартные имена (`get`, `post`, `put`, etc.)
+- **Effect методы**: стандартные имена + суффикс `Effect` (`getEffect`, `postEffect`, `putEffect`, etc.)
+
+Это обеспечивает:
+- Интуитивное понимание API
+- Обратную совместимость
+- Легкий переход между подходами
+- Автокомплит в IDE
+
+### Migration Guide
+
+При миграции с Effect-only API на dual API:
+
+1. **Сохраните существующие Effect методы** с суффиксом `Effect`
+2. **Добавьте Promise обёртки** как основные методы
+3. **Обновите документацию** с примерами обеих подходов
+4. **Обеспечьте** постепенную миграцию без breaking changes 

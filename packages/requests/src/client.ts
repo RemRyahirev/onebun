@@ -436,65 +436,189 @@ export class HttpClient {
   constructor(private clientOptions: RequestsOptions = {}) {}
 
   /**
-   * Execute a configured request
+   * Execute a request with Effect interface
    */
-  request<T = any>(config: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  requestEffect<T = any>(config: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    const mergedOptions = { ...DEFAULT_REQUESTS_OPTIONS, ...this.clientOptions };
     const fullConfig: RequestConfig = {
       method: HttpMethod.GET,
-      url: '/',
+      url: '',
       ...config
     };
-
-    return executeRequest<T>(fullConfig, this.clientOptions);
+    return executeRequest<T>(fullConfig, mergedOptions);
   }
 
   /**
-   * GET request
+   * Execute a request with Promise interface (default)
    */
-  get<T = any>(url: string, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.GET, url });
+  async request<T = any>(config: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.requestEffect<T>(config));
   }
 
   /**
-   * POST request
+   * GET request with Effect interface
    */
-  post<T = any>(url: string, data?: any, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.POST, url, data });
+  getEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    // Handle overloads: either query data as second param, or config as second param
+    let finalConfig: Partial<RequestConfig>;
+    
+    if (queryOrConfig && config) {
+      // queryOrConfig is query data, config is request config
+      finalConfig = { method: HttpMethod.GET, url, query: queryOrConfig as Q, ...config };
+    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
+      // Check if it's a RequestConfig (has method, url, etc.) or query data
+      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+      if (hasConfigFields) {
+        // It's config
+        finalConfig = { method: HttpMethod.GET, url, ...queryOrConfig as Partial<RequestConfig> };
+      } else {
+        // It's query data
+        finalConfig = { method: HttpMethod.GET, url, query: queryOrConfig as Q };
+      }
+    } else {
+      finalConfig = { method: HttpMethod.GET, url };
+    }
+    
+    return this.requestEffect<T>(finalConfig);
   }
 
   /**
-   * PUT request
+   * GET request with Promise interface (default)
    */
-  put<T = any>(url: string, data?: any, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.PUT, url, data });
+  async get<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.getEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
-   * PATCH request
+   * POST request with Effect interface
    */
-  patch<T = any>(url: string, data?: any, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.PATCH, url, data });
+  postEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    return this.requestEffect<T>({ method: HttpMethod.POST, url, data, ...config });
   }
 
   /**
-   * DELETE request
+   * POST request with Promise interface (default)
    */
-  delete<T = any>(url: string, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.DELETE, url });
+  async post<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.postEffect<T, D>(url, data, config));
   }
 
   /**
-   * HEAD request
+   * PUT request with Effect interface
    */
-  head(url: string, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<void>, RequestError> {
-    return this.request<void>({ ...config, method: HttpMethod.HEAD, url });
+  putEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    return this.requestEffect<T>({ method: HttpMethod.PUT, url, data, ...config });
   }
 
   /**
-   * OPTIONS request
+   * PUT request with Promise interface (default)
    */
-  options<T = any>(url: string, config: Partial<RequestConfig> = {}): Effect.Effect<RequestResponse<T>, RequestError> {
-    return this.request<T>({ ...config, method: HttpMethod.OPTIONS, url });
+  async put<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.putEffect<T, D>(url, data, config));
+  }
+
+  /**
+   * PATCH request with Effect interface
+   */
+  patchEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    return this.requestEffect<T>({ method: HttpMethod.PATCH, url, data, ...config });
+  }
+
+  /**
+   * PATCH request with Promise interface (default)
+   */
+  async patch<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.patchEffect<T, D>(url, data, config));
+  }
+
+  /**
+   * DELETE request with Effect interface
+   */
+  deleteEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    // Handle overloads similar to GET
+    let finalConfig: Partial<RequestConfig>;
+    
+    if (queryOrConfig && config) {
+      finalConfig = { method: HttpMethod.DELETE, url, query: queryOrConfig as Q, ...config };
+    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
+      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+      if (hasConfigFields) {
+        finalConfig = { method: HttpMethod.DELETE, url, ...queryOrConfig as Partial<RequestConfig> };
+      } else {
+        finalConfig = { method: HttpMethod.DELETE, url, query: queryOrConfig as Q };
+      }
+    } else {
+      finalConfig = { method: HttpMethod.DELETE, url };
+    }
+    
+    return this.requestEffect<T>(finalConfig);
+  }
+
+  /**
+   * DELETE request with Promise interface (default)
+   */
+  async delete<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.deleteEffect<T, Q>(url, queryOrConfig, config));
+  }
+
+  /**
+   * HEAD request with Effect interface
+   */
+  headEffect<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<void>, RequestError> {
+    // Handle overloads similar to GET
+    let finalConfig: Partial<RequestConfig>;
+    
+    if (queryOrConfig && config) {
+      finalConfig = { method: HttpMethod.HEAD, url, query: queryOrConfig as Q, ...config };
+    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
+      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+      if (hasConfigFields) {
+        finalConfig = { method: HttpMethod.HEAD, url, ...queryOrConfig as Partial<RequestConfig> };
+      } else {
+        finalConfig = { method: HttpMethod.HEAD, url, query: queryOrConfig as Q };
+      }
+    } else {
+      finalConfig = { method: HttpMethod.HEAD, url };
+    }
+    
+    return this.requestEffect<void>(finalConfig);
+  }
+
+  /**
+   * HEAD request with Promise interface (default)
+   */
+  async head<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<void>> {
+    return Effect.runPromise(this.headEffect<Q>(url, queryOrConfig, config));
+  }
+
+  /**
+   * OPTIONS request with Effect interface
+   */
+  optionsEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+    // Handle overloads similar to GET
+    let finalConfig: Partial<RequestConfig>;
+    
+    if (queryOrConfig && config) {
+      finalConfig = { method: HttpMethod.OPTIONS, url, query: queryOrConfig as Q, ...config };
+    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
+      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+      if (hasConfigFields) {
+        finalConfig = { method: HttpMethod.OPTIONS, url, ...queryOrConfig as Partial<RequestConfig> };
+      } else {
+        finalConfig = { method: HttpMethod.OPTIONS, url, query: queryOrConfig as Q };
+      }
+    } else {
+      finalConfig = { method: HttpMethod.OPTIONS, url };
+    }
+    
+    return this.requestEffect<T>(finalConfig);
+  }
+
+  /**
+   * OPTIONS request with Promise interface (default)
+   */
+  async options<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+    return Effect.runPromise(this.optionsEffect<T, Q>(url, queryOrConfig, config));
   }
 }
 

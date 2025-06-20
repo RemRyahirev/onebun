@@ -87,7 +87,7 @@ export class CounterController extends BaseController {
     return this.success(stats);
   }
 
-  @Get('/:id')
+  @Get('/counter/:id')
   async getById(@Param('id') id: string) {
     this.logger.info('Getting counter by id', { id });
     

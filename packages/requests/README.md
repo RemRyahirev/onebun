@@ -1,17 +1,20 @@
 # @onebun/requests
 
-Unified HTTP client module for OneBun framework with built-in tracing, metrics, error handling, and retries.
+Unified HTTP client service for OneBun framework with comprehensive error handling, retries, authentication, tracing, and metrics.
 
 ## Features
 
-- **Unified Request/Response Format**: Standardized request and response structures
-- **Built-in Error Handling**: Chainable error propagation with context
-- **Multiple Authentication Schemes**: API keys, Basic auth, Bearer tokens, custom headers
-- **Automatic Retries**: Configurable retry strategies with exponential backoff
-- **Distributed Tracing**: Automatic trace context propagation
-- **Metrics Collection**: Request count and latency metrics
-- **Type Safety**: Full TypeScript support with strict typing
-- **Effect.js Integration**: Built on Effect.js for functional programming patterns
+- **Dual API**: Promise-based interface by default with optional Effect-based interface
+- **Typed Generics**: Enhanced type safety for request/response data and query parameters
+- **Request/Response interceptors** with chainable configuration
+- **Comprehensive error handling** with typed error objects
+- **Automatic retries** with configurable backoff strategies
+- **Built-in authentication** support (Bearer, API Key, Basic, Custom)
+- **Request/response tracing** integration
+- **Metrics collection** for monitoring
+- **Timeout management** with request-level overrides
+- **Query parameter handling** with automatic encoding
+- **JSON request/response** handling with automatic parsing
 
 ## Installation
 
@@ -19,243 +22,401 @@ Unified HTTP client module for OneBun framework with built-in tracing, metrics, 
 bun add @onebun/requests
 ```
 
-## Basic Usage
+## Quick Start
 
-### Simple GET Request
-
-```typescript
-import { RequestsService, makeRequestsService } from '@onebun/requests';
-import { Effect, pipe } from 'effect';
-
-const program = pipe(
-  RequestsService,
-  Effect.flatMap((requestsService) =>
-    pipe(
-      requestsService.get('https://api.example.com/users'),
-      Effect.tap((response) => {
-        if (response.success) {
-          return Effect.sync(() => console.log('Users:', response.data));
-        } else {
-          return Effect.sync(() => console.error('Error:', response.error));
-        }
-      })
-    )
-  )
-);
-
-Effect.runPromise(program.pipe(
-  Effect.provide(makeRequestsService())
-));
-```
-
-### Creating Client Instance
+### Basic Usage with Promise API (Default)
 
 ```typescript
 import { createHttpClient } from '@onebun/requests';
 
-const apiClient = createHttpClient({
+// Create a client
+const client = createHttpClient({
   baseUrl: 'https://api.example.com',
-  timeout: 5000,
-  auth: {
-    type: 'bearer',
-    token: 'your-api-token'
-  },
-  retries: {
-    max: 3,
-    delay: 1000,
-    backoff: 'exponential'
-  }
+  timeout: 5000
 });
 
-const response = await Effect.runPromise(apiClient.get('/users'));
+// Simple GET request
+const users = await client.get<User[]>('/users');
+
+// POST request with data
+const newUser = await client.post<User, CreateUserData>('/users', {
+  name: 'John Doe',
+  email: 'john@example.com'
+});
+```
+
+## Enhanced Typed Generics
+
+### GET Requests with Query Parameters
+
+```typescript
+interface UserQuery {
+  name?: string;
+  email?: string;
+  active?: boolean;
+}
+
+// Method 1: Typed query parameters (recommended)
+const users = await client.get<User[], UserQuery>('/users', {
+  name: 'John',
+  active: true
+});
+
+// Method 2: Query + config separately  
+const users = await client.get<User[], UserQuery>('/users', queryParams, {
+  timeout: 10000
+});
+
+// Method 3: Traditional config-only approach (still supported)
+const users = await client.get<User[]>('/users', {
+  query: { name: 'John' },
+  timeout: 10000
+});
+```
+
+### POST/PUT/PATCH Requests with Typed Data
+
+```typescript
+interface CreatePostData {
+  title: string;
+  body: string;
+  userId: number;
+}
+
+interface UpdateUserData {
+  name?: string;
+  email?: string;
+}
+
+// POST with typed data
+const post = await client.post<Post, CreatePostData>('/posts', {
+  title: 'My Post',
+  body: 'Post content',
+  userId: 1
+});
+
+// PUT with typed data
+const user = await client.put<User, UpdateUserData>('/users/1', {
+  name: 'Updated Name'
+});
+
+// PATCH with typed data
+const user = await client.patch<User, Partial<UpdateUserData>>('/users/1', {
+  email: 'new@example.com'
+});
+```
+
+### DELETE Requests with Query Parameters
+
+```typescript
+interface DeleteQuery {
+  force?: boolean;
+  reason?: string;
+}
+
+// DELETE with typed query parameters
+await client.delete<void, DeleteQuery>('/posts/1', {
+  force: true,
+  reason: 'spam'
+});
+```
+
+## Dual API Support
+
+### Promise API (Default - Recommended)
+
+```typescript
+// Simple and familiar async/await syntax
+const client = createHttpClient({ baseUrl: 'https://api.example.com' });
+
+try {
+  const users = await client.get<User[]>('/users');
+  const newPost = await client.post<Post, CreatePostData>('/posts', postData);
+  console.log('Success:', users, newPost);
+} catch (error) {
+  console.error('Request failed:', error.message);
+}
+```
+
+### Effect API (For advanced functional programming)
+
+```typescript
+import { Effect, pipe } from 'effect';
+
+// Composable and functional approach
+const program = pipe(
+  client.getEffect<User[]>('/users'),
+  Effect.flatMap(response => 
+    response.success 
+      ? Effect.succeed(response.data!)
+      : Effect.fail(response.error!)
+  ),
+  Effect.tap(users => Effect.sync(() => console.log('Users:', users))),
+  Effect.catchAll(error => 
+    Effect.sync(() => console.error('Failed:', error.message))
+  )
+);
+
+await Effect.runPromise(program);
+```
+
+## Service Integration
+
+### Dependency Injection
+
+```typescript
+import { createRequestsService } from '@onebun/requests';
+
+@Service()
+export class UserService extends BaseService {
+  constructor(
+    private requests: RequestsService,
+    logger?: Logger
+  ) {
+    super(logger);
+  }
+
+  async getUser(id: number): Promise<User> {
+    // Using typed generics with service
+    return this.requests.get<User>(`/users/${id}`);
+  }
+
+  async searchUsers(query: UserQuery): Promise<User[]> {
+    // Using typed query parameters
+    return this.requests.get<User[], UserQuery>('/users', query);
+  }
+
+  async createUser(userData: CreateUserData): Promise<User> {
+    // Using typed data interface
+    return this.requests.post<User, CreateUserData>('/users', userData);
+  }
+}
+```
+
+### Utility Functions
+
+```typescript
+import { requests } from '@onebun/requests';
+
+// Direct utility usage with typed generics
+const users = await requests.get<User[], UserQuery>('/users', { active: true });
+const post = await requests.post<Post, CreatePostData>('/posts', postData);
+const updatedUser = await requests.put<User, UpdateUserData>('/users/1', updateData);
 ```
 
 ## Configuration
 
-### RequestsOptions
+### Client Configuration
 
 ```typescript
-interface RequestsOptions {
-  // Base URL for all requests
-  baseUrl?: string;
-  
-  // Request timeout in milliseconds (default: 10000)
-  timeout?: number;
-  
-  // Default headers
-  headers?: Record<string, string>;
-  
-  // Authentication configuration
-  auth?: AuthConfig;
-  
-  // Retry configuration
-  retries?: RetryConfig;
-  
-  // Enable/disable tracing (default: true)
-  tracing?: boolean;
-  
-  // Enable/disable metrics (default: true)
-  metrics?: boolean;
-}
-```
-
-### Authentication Options
-
-```typescript
-// Bearer token
-auth: {
-  type: 'bearer',
-  token: 'your-token'
-}
-
-// API Key in header
-auth: {
-  type: 'apikey',
-  key: 'x-api-key',
-  value: 'your-api-key'
-}
-
-// API Key in query
-auth: {
-  type: 'apikey',
-  key: 'api_key',
-  value: 'your-api-key',
-  location: 'query'
-}
-
-// Basic auth
-auth: {
-  type: 'basic',
-  username: 'user',
-  password: 'pass'
-}
-
-// Custom headers
-auth: {
-  type: 'custom',
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  timeout: 10000,
   headers: {
-    'Authorization': 'Custom token',
-    'X-API-Version': 'v1'
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  },
+  auth: {
+    type: 'bearer',
+    token: 'your-bearer-token'
+  },
+  retries: {
+    max: 3,
+    delay: 1000,
+    backoff: 'exponential',
+    retryOn: [408, 429, 500, 502, 503, 504]
   }
-}
+});
 ```
 
-### Retry Configuration
+### Authentication Types
 
 ```typescript
-retries: {
-  max: 3,                    // Maximum retry attempts
-  delay: 1000,              // Initial delay in ms
-  backoff: 'exponential',   // 'linear' | 'exponential' | 'fixed'
-  factor: 2,                // Backoff factor for exponential
-  retryOn: [408, 429, 500, 502, 503, 504] // HTTP status codes to retry on
-}
+// Bearer Token
+const bearerClient = createHttpClient({
+  auth: {
+    type: 'bearer',
+    token: 'your-token'
+  }
+});
+
+// API Key
+const apiKeyClient = createHttpClient({
+  auth: {
+    type: 'apikey',
+    key: 'X-API-Key',
+    value: 'your-api-key'
+  }
+});
+
+// Basic Auth
+const basicClient = createHttpClient({
+  auth: {
+    type: 'basic',
+    username: 'user',
+    password: 'pass'
+  }
+});
 ```
 
-## Response Format
+## Advanced Usage Patterns
 
-All requests return a standardized response format:
+### Complex Query Parameters
 
 ```typescript
-interface RequestResponse<T = any> {
-  success: boolean;
-  data?: T;
-  error?: RequestError;
-  statusCode: number;
-  headers: Record<string, string>;
-  duration: number;
-  traceId?: string;
+interface SearchQuery {
+  q?: string;
+  filters?: {
+    category?: string;
+    tags?: string[];
+    dateRange?: {
+      from: string;
+      to: string;
+    };
+  };
+  pagination?: {
+    page: number;
+    limit: number;
+  };
 }
+
+const results = await client.get<SearchResult[], SearchQuery>('/search', {
+  q: 'test',
+  filters: {
+    category: 'tech',
+    tags: ['javascript', 'typescript'],
+    dateRange: {
+      from: '2024-01-01',
+      to: '2024-12-31'
+    }
+  },
+  pagination: {
+    page: 1,
+    limit: 20
+  }
+});
+```
+
+### Request Configuration Override
+
+```typescript
+// Override config when using typed parameters
+const users = await client.get<User[], UserQuery>(
+  '/users',
+  { active: true },     // typed query
+  {                     // config override
+    timeout: 30000,
+    headers: { 'X-Custom': 'value' },
+    query: { additional: 'param' }  // merged with typed query
+  }
+);
 ```
 
 ## Error Handling
 
-Errors are wrapped in a structured format with chainable context:
+### Promise API Error Handling
 
 ```typescript
-interface RequestError {
-  code: string;
-  message: string;
-  details?: any;
-  cause?: RequestError;  // Chained errors
-  statusCode?: number;
-  traceId?: string;
+try {
+  const user = await client.get<User>('/users/1');
+  console.log('User:', user);
+} catch (error: RequestError) {
+  console.error('Request failed:', {
+    code: error.code,
+    message: error.message,
+    statusCode: error.statusCode,
+    traceId: error.traceId
+  });
 }
 ```
 
-## Integration with OneBun Framework
-
-The requests module automatically integrates with other OneBun modules:
-
-- **Logging**: All requests are logged with trace context
-- **Metrics**: Request count and latency metrics
-- **Tracing**: Automatic trace propagation
-- **Configuration**: Environment-based configuration
-
-## Advanced Usage
-
-### Custom Request Configuration
-
-```typescript
-const response = pipe(
-  RequestsService,
-  Effect.flatMap((requestsService) =>
-    requestsService.request({
-      method: 'POST',
-      url: '/users',
-      data: { name: 'John', email: 'john@example.com' },
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 15000,
-      retries: { max: 1 }
-    })
-  )
-);
-```
-
-### Error Chain Handling
+### Effect API Error Handling
 
 ```typescript
 const program = pipe(
-  RequestsService,
-  Effect.flatMap((requestsService) =>
-    pipe(
-      requestsService.get('/api/data'),
-      Effect.tap((response) => {
-        if (!response.success && response.error) {
-          return Effect.sync(() => {
-            // Walk through error chain
-            let currentError = response.error;
-            while (currentError) {
-              console.log(`Error: ${currentError.message}`);
-              currentError = currentError.cause;
-            }
-          });
-        }
-        return Effect.succeed(undefined);
-      })
-    )
-  )
+  client.getEffect<User>('/users/1'),
+  Effect.flatMap(response => 
+    response.success 
+      ? Effect.succeed(response.data!)
+      : Effect.fail(response.error!)
+  ),
+  Effect.catchAll(error => {
+    console.error('Request failed:', error);
+    return Effect.succeed(null);
+  })
 );
 ```
 
-### Custom Authentication
+## Migration Guide
+
+### From Basic to Typed Generics
 
 ```typescript
-const client = createHttpClient({
-  auth: {
-    type: 'custom',
-    interceptor: (request) => {
-      // Custom auth logic
-      const signature = generateSignature(request);
-      return {
-        ...request,
-        headers: {
-          ...request.headers,
-          'X-Signature': signature,
-          'X-Timestamp': Date.now().toString()
-        }
-      };
-    }
-  }
-});
-``` 
+// Before: Basic usage
+const users = await client.get('/users');
+const newPost = await client.post('/posts', postData);
+
+// After: With typed generics
+const users = await client.get<User[]>('/users');
+const newPost = await client.post<Post, CreatePostData>('/posts', postData);
+
+// After: With typed query parameters
+const users = await client.get<User[], UserQuery>('/users', { active: true });
+```
+
+### Benefits of Typed Generics
+
+1. **Type Safety**: Compile-time validation of request/response data
+2. **IntelliSense**: Better IDE support with autocompletion
+3. **Documentation**: Self-documenting API interfaces
+4. **Refactoring**: Safer code changes with type checking
+5. **Error Prevention**: Catch data structure mismatches early
+
+## Best Practices
+
+1. **Define clear interfaces** for your request/response data
+2. **Use typed generics** for better development experience
+3. **Handle errors appropriately** with try-catch or Effect error handling
+4. **Configure retries** for resilient applications
+5. **Use authentication** for secure API access
+6. **Enable tracing and metrics** for monitoring
+
+## API Reference
+
+### HttpClient Methods
+
+All methods support both Promise and Effect APIs:
+
+#### GET Requests
+- `get<T, Q>(url, query?, config?)` - Promise API
+- `getEffect<T, Q>(url, query?, config?)` - Effect API
+
+#### POST Requests  
+- `post<T, D>(url, data?, config?)` - Promise API
+- `postEffect<T, D>(url, data?, config?)` - Effect API
+
+#### PUT Requests
+- `put<T, D>(url, data?, config?)` - Promise API  
+- `putEffect<T, D>(url, data?, config?)` - Effect API
+
+#### PATCH Requests
+- `patch<T, D>(url, data?, config?)` - Promise API
+- `patchEffect<T, D>(url, data?, config?)` - Effect API
+
+#### DELETE Requests
+- `delete<T, Q>(url, query?, config?)` - Promise API
+- `deleteEffect<T, Q>(url, query?, config?)` - Effect API
+
+### Type Parameters
+
+- `T` - Response data type
+- `D` - Request data type (for POST/PUT/PATCH)
+- `Q` - Query parameters type (for GET/DELETE/HEAD/OPTIONS)
+
+Where:
+- `Q extends Record<string, any>` - Query parameters must be an object
+- `D` - Data can be any type (object, string, number, etc.)
+
+## License
+
+MIT License - see LICENSE file for details. 

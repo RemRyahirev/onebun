@@ -1,67 +1,169 @@
-# OneBun Example Application
+# OneBun Framework Example
 
-This example demonstrates the use of the OneBun framework with Effect.js for dependency injection.
+This example demonstrates the OneBun framework with integrated packages:
 
-## Features Demonstrated
+- `@onebun/core` - Application framework with decorators and dependency injection
+- `@onebun/envs` - Environment variables management
+- `@onebun/logger` - Structured logging with context
+- `@onebun/metrics` - Prometheus-compatible metrics
+- `@onebun/trace` - Distributed tracing
+- `@onebun/requests` - HTTP client with dual API support
 
-### Lightweight Implementation
-- No external dependencies like reflect-metadata
-- Custom metadata system for decorators and dependency injection
-- Simplified setup with fewer dependencies
+## Dual API Support
 
-### Route Decorators
-- `@Controller('/api')` - Base path for all routes in the controller
-- `@Get('/hello')` - HTTP GET endpoint
-- `@Post('/counter/increment')` - HTTP POST endpoint
-- `@Get('/counter/:amount')` - Endpoint with path parameter
+OneBun provides both **Promise** and **Effect** APIs to accommodate different development preferences:
 
-### Parameter Decorators
-- `@Param('amount')` - Extract path parameters
-- `@Query('multiply')` - Extract query parameters
+### Promise API (Default - Recommended for most use cases)
 
-### Middleware
-- `@UseMiddleware(loggerMiddleware)` - Apply middleware to specific routes
-- Logger middleware - Logs request method and path
-- Timing middleware - Measures request duration
+```typescript
+// Simple and familiar async/await syntax
+@Service()
+export class UserService extends BaseService {
+  private client = createHttpClient({ baseUrl: 'https://api.example.com' });
 
-### Module System
-- `@ModuleDecorator` - Define a module with controllers and providers
-- Organize controllers and services in modules
-- Automatic service registration and dependency injection
+  async getUsers(): Promise<User[]> {
+    try {
+      const response = await this.client.get<User[]>('/users');
+      return response.success ? response.data : [];
+    } catch (error) {
+      this.logger.error('Failed to fetch users', error);
+      return [];
+    }
+  }
 
-### Service System
-- `@Service()` - Define a service with automatic Context tag creation
-- `BaseService` - Base class for services with utility methods
-- Dependency injection in controllers with `getService()`
+  async createUser(userData: CreateUserRequest): Promise<User> {
+    const response = await this.client.post<User>('/users', userData);
+    if (response.success) {
+      return response.data;
+    }
+    throw new Error(`Failed to create user: ${response.error}`);
+  }
+}
+```
 
-### Standardized Responses
-- `success()` - Return standardized success response: `{ success: true, result: data }`
-- `error()` - Return standardized error response: `{ success: false, code: number, message: string }`
-- Automatic error handling for thrown exceptions
+### Effect API (Advanced - For functional programming and complex workflows)
 
-### Application
-- `OneBunApplication` - Create and start an application with a module
-- Automatic logger creation based on NODE_ENV
-- Simplified application startup without Effect.js calls
+```typescript
+import { Effect, pipe } from 'effect';
 
-## Project Structure
+@Service()
+export class UserService extends BaseService {
+  private client = createHttpClient({ baseUrl: 'https://api.example.com' });
 
-- `counter.service.ts` - Defines the counter service and its interface
-- `counter.controller.ts` - Defines the controller with route handlers
-- `app.module.ts` - Defines the application module
-- `index.ts` - Creates and starts the application
+  getUsersEffect(): Effect.Effect<User[]> {
+    return pipe(
+      this.client.getEffect<User[]>('/users'),
+      Effect.map(response => response.success ? response.data : []),
+      Effect.catchAll(error => {
+        return pipe(
+          Effect.sync(() => this.logger.error('Failed to fetch users', error)),
+          Effect.map(() => [])
+        );
+      })
+    );
+  }
 
-## Endpoints
+  createUserEffect(userData: CreateUserRequest): Effect.Effect<User, RequestError> {
+    return pipe(
+      this.client.postEffect<User>('/users', userData),
+      Effect.flatMap(response => 
+        response.success 
+          ? Effect.succeed(response.data)
+          : Effect.fail(new RequestError(`Failed to create user: ${response.error}`))
+      )
+    );
+  }
+}
+```
 
-- `GET /api/hello` - Returns a simple greeting
-- `GET /api/counter` - Returns the current counter value
-- `POST /api/counter/increment` - Increments the counter and returns the new value
-- `GET /api/counter/:amount?multiply=<value>` - Calculates a result based on the counter value, amount, and multiply factor
+### Mixed Usage
+
+You can mix both APIs in the same application:
+
+```typescript
+@Controller('users')
+export class UserController extends BaseController {
+  constructor(private userService: UserService) {
+    super();
+  }
+
+  // Using Promise API for simple operations
+  @Get()
+  async getUsers(): Promise<Response> {
+    try {
+      const users = await this.userService.getUsers();
+      return this.success(users);
+    } catch (error) {
+      return this.error(error.message, 500);
+    }
+  }
+
+  // Using Effect API for complex operations with composition
+  @Post()
+  async createUser(@Body() userData: CreateUserRequest): Promise<Response> {
+    const result = await Effect.runPromise(
+      pipe(
+        this.userService.createUserEffect(userData),
+        Effect.tap(user => 
+          Effect.sync(() => this.logger.info(`Created user: ${user.id}`))
+        ),
+        Effect.catchAll(error => {
+          this.logger.error('User creation failed', error);
+          return Effect.succeed(null);
+        })
+      )
+    );
+
+    return result 
+      ? this.success(result, 201)
+      : this.error('Failed to create user', 400);
+  }
+}
+```
+
+## When to Use Each API
+
+### Use Promise API when:
+- ✅ Building simple CRUD operations
+- ✅ Working with teams familiar with async/await
+- ✅ Migrating existing codebases
+- ✅ You want minimal learning curve
+- ✅ Error handling can be managed with try/catch
+
+### Use Effect API when:
+- ✅ Building complex workflows with multiple dependencies
+- ✅ You need advanced error handling and recovery strategies
+- ✅ Working with functional programming patterns
+- ✅ You want composable and testable code
+- ✅ Managing complex async operations with retries, timeouts, etc.
 
 ## Running the Example
 
 ```bash
-bun run index.ts
+# Install dependencies
+bun install
+
+# Start the application
+bun run dev
+
+# Test endpoints
+curl http://localhost:3000/api/users
+curl http://localhost:3000/api/effect/users  # Effect API version
 ```
 
-Then visit http://localhost:3000/api/hello in your browser or use a tool like curl or Postman to make requests to the endpoints.
+## Available Endpoints
+
+### Promise API Endpoints
+- `GET /api/users` - Get all users
+- `GET /api/users/:id` - Get user by ID
+- `GET /api/users/:id/posts` - Get user posts
+- `POST /api/posts` - Create a new post
+- `GET /api/demo/error-handling` - Error handling demo
+- `GET /api/demo/authentication` - Auth methods demo
+- `GET /api/demo/retries` - Retry functionality demo
+
+### Effect API Endpoints
+- `GET /api/effect/users` - Get all users (Effect API)
+- `GET /api/effect/demo/error-handling` - Error handling demo (Effect API)
+
+Both endpoints return the same data but demonstrate different programming paradigms and error handling approaches.

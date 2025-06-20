@@ -252,8 +252,9 @@ export class OneBunApplication {
             pathPattern = new RegExp(`^${pattern}$`);
           }
 
-
-          routes.set(fullPath, {
+          // Use method and path as key to avoid conflicts between different HTTP methods
+          const routeKey = `${method}:${fullPath}`;
+          routes.set(routeKey, {
             method,
             handler,
             controller,
@@ -366,13 +367,15 @@ export class OneBunApplication {
             }
           }
 
-          // Find exact match first
-          let route = routes.get(path);
+          // Find exact match first using method and path
+          const exactRouteKey = `${method}:${path}`;
+          let route = routes.get(exactRouteKey);
           let paramValues: Record<string, string | string[]> = {};
 
           // If no exact match, try pattern matching
           if (!route) {
-            for (const [routePath, routeData] of routes) {
+            for (const [routeKey, routeData] of routes) {
+              // Check if this route matches the method and has a pattern
               if (routeData.pathPattern && routeData.method === method) {
                 const match = path.match(routeData.pathPattern);
                 if (match) {
@@ -387,7 +390,7 @@ export class OneBunApplication {
             }
           }
 
-          if (!route || route.method !== method) {
+          if (!route) {
             const response = new Response('Not Found', { status: 404 });
             const duration = Date.now() - startTime;
             
