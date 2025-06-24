@@ -1,6 +1,6 @@
 import { BaseController, Controller, Get, Post, Put, Body, Param, Query } from '@onebun/core';
 import { ExternalApiService } from './external-api.service';
-import type { UserQuery, CreatePostData, UpdateUserData } from './types';
+import type { UserQuery, CreatePostData, UpdateUserData, User } from './types';
 
 @Controller('api')
 export class ApiController extends BaseController {
@@ -22,6 +22,20 @@ export class ApiController extends BaseController {
     } catch (error: any) {
       return this.error(`Failed to fetch users: ${error.message}`, 500);
     }
+  }
+
+  /**
+   * Get all users using @onebun/requests package (Promise API)
+   */
+  @Get('users')
+  async getUsers_NEW(@Query() query: UserQuery = {}): Promise<User[]> {
+    this.logger.info('Getting users');
+
+    const users = await this.api.getAllUsers_NEW(query);
+
+    this.logger.info(`Fetched ${users.length} users using @onebun/requests (Promise API)`);
+
+    return users;
   }
 
   /**

@@ -1,37 +1,21 @@
 import { Effect, pipe } from 'effect';
 import {
   RequestConfig,
-  RequestResponse,
-  RequestError,
   RequestsOptions,
   RetryConfig,
   HttpMethod,
   DEFAULT_REQUESTS_OPTIONS,
-  RequestMetricsData
+  RequestMetricsData,
+  ErrorResponse,
+  createErrorResponse,
+  ApiResponse,
+  isErrorResponse,
+  OneBunBaseError,
+  wrapToErrorResponse,
+  createSuccessResponse,
+  SuccessResponse,
 } from './types.js';
 import { applyAuth } from './auth.js';
-
-/**
- * Create a request error with chainable context
- */
-export const createRequestError = (
-  code: string,
-  message: string,
-  options: {
-    details?: any;
-    cause?: RequestError;
-    statusCode?: number;
-    traceId?: string;
-  } = {}
-): RequestError => ({
-  code,
-  message,
-  details: options.details,
-  cause: options.cause,
-  statusCode: options.statusCode,
-  traceId: options.traceId,
-  timestamp: Date.now()
-});
 
 /**
  * Build full URL from base URL and request URL
@@ -76,12 +60,12 @@ const calculateRetryDelay = (attempt: number, config: RetryConfig): number => {
 /**
  * Check if error should trigger a retry
  */
-const shouldRetry = (error: RequestError, config: RetryConfig): boolean => {
+const shouldRetry = (error: ErrorResponse, config: RetryConfig): boolean => {
   if (!config.retryOn || config.retryOn.length === 0) {
     return false;
   }
   
-  return error.statusCode !== undefined && config.retryOn.includes(error.statusCode);
+  return error.code !== undefined && config.retryOn.includes(error.code);
 };
 
 /**
@@ -134,15 +118,17 @@ const applyAuthIfNeeded = (
   config: RequestConfig, 
   mergedOptions: RequestsOptions, 
   traceId?: string
-): Effect.Effect<RequestConfig, RequestError> => {
+): Effect.Effect<RequestConfig, ErrorResponse> => {
   if (config.auth || mergedOptions.auth) {
     const authConfig = config.auth || mergedOptions.auth!;
     return pipe(
       applyAuth(authConfig, config),
-      Effect.catchAll((error) => Effect.fail(createRequestError(
+      Effect.catchAll((error) => Effect.fail(createErrorResponse(
         'AUTH_ERROR',
+        401,
         `Authentication failed: ${error}`,
-        { details: error, traceId }
+        traceId,
+        { details: error },
       )))
     );
   }
@@ -176,38 +162,64 @@ const buildHeaders = (
 /**
  * Parse response data based on content type
  */
-const parseResponseData = (response: Response, traceId?: string): Effect.Effect<any, RequestError> => {
+const parseResponseData = <T>(response: Response, traceId?: string): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
   
   if (contentType.includes('application/json')) {
     return pipe(
       Effect.tryPromise({
         try: () => response.text(),
-        catch: (error) => createRequestError(
+        catch: (error) => createErrorResponse(
           'RESPONSE_PARSE_ERROR',
+          response.status,
           `Failed to read response text: ${error}`,
-          { statusCode: response.status, traceId }
+          traceId,
+          { details: error },
         )
       }),
       Effect.flatMap((text) => {
         if (!text) {
-          return Effect.succeed(undefined);
+          return Effect.fail(createErrorResponse(
+            'RESPONSE_PARSE_ERROR',
+            response.status,
+            'Response text is empty',
+            traceId,
+            { details: 'Response text is empty' },
+          ));
         }
         
+        let parsedData: T;
         try {
-          return Effect.succeed(JSON.parse(text));
+          parsedData = JSON.parse(text);
         } catch {
-          return Effect.succeed(text); // Return text if JSON parsing fails
+          return Effect.fail(createErrorResponse(
+            'RESPONSE_PARSE_ERROR',
+            response.status,
+            'Response text is not valid JSON',
+            traceId,
+            { details: text },
+          ));
         }
+
+        // Check if response is a standardized error format
+        if (isErrorResponse(parsedData)) {
+          // Create OneBunApiError to throw
+          const apiError = OneBunBaseError.fromErrorResponse(parsedData);
+          return Effect.fail(wrapToErrorResponse(apiError));
+        }
+        
+        return Effect.succeed(parsedData);
       })
     );
   } else {
     return Effect.tryPromise({
-      try: () => response.text(),
-      catch: (error) => createRequestError(
+      try: () => response.text() as Promise<T>,
+      catch: (error) => createErrorResponse(
         'RESPONSE_READ_ERROR',
+        response.status,
         `Failed to read response: ${error}`,
-        { statusCode: response.status, traceId }
+        traceId,
+        { details: error },
       )
     });
   }
@@ -216,13 +228,13 @@ const parseResponseData = (response: Response, traceId?: string): Effect.Effect<
 /**
  * Execute single HTTP request attempt
  */
-const executeSingleRequest = <T>(
+const executeSingleRequest = <T, E extends string, R extends string>(
   config: RequestConfig,
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
   traceId?: string
-): Effect.Effect<RequestResponse<T>, RequestError> => {
+): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => {
   const requestStartTime = Date.now();
   
   // Create fetch request
@@ -244,10 +256,12 @@ const executeSingleRequest = <T>(
   return pipe(
     Effect.tryPromise({
       try: () => fetch(fullUrl, requestInit),
-      catch: (error) => createRequestError(
+      catch: (error) => createErrorResponse(
         'FETCH_ERROR',
+        500,
         `Request failed: ${error}`,
-        { details: error, traceId }
+        traceId,
+        { details: error },
       )
     }),
     Effect.flatMap((response) => {
@@ -257,57 +271,64 @@ const executeSingleRequest = <T>(
       });
 
       return pipe(
-        parseResponseData(response, traceId),
+        parseResponseData<T>(response, traceId),
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
           const success = response.status >= 200 && response.status < 300;
 
-          const result: RequestResponse<T> = {
-            success,
-            data: success ? responseData : undefined,
-            error: !success ? createRequestError(
-              'HTTP_ERROR',
-              `HTTP ${response.status}: ${response.statusText}`,
-              { statusCode: response.status, details: responseData, traceId }
-            ) : undefined,
-            statusCode: response.status,
-            headers: responseHeaders,
-            duration,
-            traceId,
-            url: fullUrl,
-            method: config.method,
-            retryCount: 0
-          };
+          if (success) {
+            return createSuccessResponse(
+              responseData,
+              traceId,
+            );
+          }
 
-          return result;
-        })
+          return createErrorResponse(
+            'HTTP_ERROR',
+            response.status,
+            `HTTP ${response.status}: ${response.statusText}`,
+            traceId,
+            { 
+              headers: responseHeaders,
+              details: responseData,
+              duration,
+              url: fullUrl,
+              method: config.method,
+            },
+          );
+        }),
       );
-    })
+    }),
+    Effect.catchAll((error) => {
+      return Effect.succeed(error);
+    }),
   );
 };
 
 /**
  * Execute request with retry logic
  */
-const executeWithRetry = <T>(
+const executeWithRetry = <T, E extends string, R extends string>(
   config: RequestConfig,
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
   traceId?: string,
   attemptNumber: number = 1
-): Effect.Effect<RequestResponse<T>, RequestError> => {
+): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
+  const requestStartTime = Date.now();
   return pipe(
-    executeSingleRequest<T>(config, mergedOptions, headers, fullUrl, traceId),
+    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, traceId),
     Effect.map((result) => ({ ...result, retryCount: attemptNumber - 1 })),
     Effect.flatMap((result) => {
+      const duration = Date.now() - requestStartTime;
       // Record metrics if enabled
       const recordMetrics = config.metrics !== false && mergedOptions.metrics
         ? recordRequestMetrics({
             method: config.method,
             url: fullUrl,
-            statusCode: result.statusCode,
-            duration: result.duration,
+            statusCode: result.success ? 200 : result.code,
+            duration,
             success: result.success,
             retryCount: result.retryCount || 0,
             baseUrl: mergedOptions.baseUrl
@@ -317,35 +338,8 @@ const executeWithRetry = <T>(
       return pipe(
         recordMetrics,
         Effect.flatMap(() => {
-                     // Check if we should retry
-           if (!result.success && result.error) {
-             const retryConfig: RetryConfig = { 
-               max: 3, 
-               delay: 1000, 
-               backoff: 'exponential',
-               factor: 2,
-               retryOn: [500, 502, 503, 504],
-               ...mergedOptions.retries, 
-               ...config.retries 
-             };
-             
-             if (attemptNumber <= retryConfig.max && shouldRetry(result.error, retryConfig)) {
-              // Call retry callback if provided
-              const callRetryCallback = retryConfig.onRetry
-                ? Effect.tryPromise({
-                    try: () => Promise.resolve(retryConfig.onRetry!(result.error!, attemptNumber)),
-                    catch: () => createRequestError('RETRY_CALLBACK_ERROR', 'Retry callback failed')
-                  })
-                : Effect.succeed(undefined);
-
-              const delay = calculateRetryDelay(attemptNumber, retryConfig);
-              
-              return pipe(
-                callRetryCallback,
-                Effect.flatMap(() => Effect.sleep(`${delay} millis`)),
-                Effect.flatMap(() => executeWithRetry<T>(config, mergedOptions, headers, fullUrl, traceId, attemptNumber + 1))
-              );
-            }
+          if (isErrorResponse(result)) {
+            return Effect.fail(result);
           }
 
           return Effect.succeed(result);
@@ -353,55 +347,41 @@ const executeWithRetry = <T>(
       );
     }),
     Effect.catchAll((error) => {
-      const duration = Date.now() - Date.now(); // This should be calculated properly
-      
-      // Record error metrics
-      const recordErrorMetrics = config.metrics !== false && mergedOptions.metrics
-        ? recordRequestMetrics({
-            method: config.method,
-            url: fullUrl,
-            statusCode: 0,
-            duration,
-            success: false,
-            retryCount: attemptNumber - 1,
-            baseUrl: mergedOptions.baseUrl
-          })
-        : Effect.succeed(undefined);
+      // Check if we should retry on this error
+      const retryConfig: RetryConfig = { 
+        max: 3, 
+        delay: 1000, 
+        backoff: 'exponential',
+        factor: 2,
+        retryOn: [500, 502, 503, 504],
+        ...mergedOptions.retries, 
+        ...config.retries 
+      };
+        
+      if (attemptNumber <= retryConfig.max) {
+        const callRetryCallback = retryConfig.onRetry
+          ? Effect.tryPromise({
+              try: () => Promise.resolve(retryConfig.onRetry!(error, attemptNumber)),
+              catch: () => createErrorResponse(
+                'RETRY_CALLBACK_ERROR',
+                500,
+                'Retry callback failed',
+                traceId,
+                { details: error },
+              )
+            })
+          : Effect.succeed(undefined);
 
-      return pipe(
-        recordErrorMetrics,
-        Effect.flatMap(() => {
-                     // Check if we should retry on this error
-           const retryConfig: RetryConfig = { 
-             max: 3, 
-             delay: 1000, 
-             backoff: 'exponential',
-             factor: 2,
-             retryOn: [500, 502, 503, 504],
-             ...mergedOptions.retries, 
-             ...config.retries 
-           };
-           
-           if (attemptNumber <= retryConfig.max) {
-            const callRetryCallback = retryConfig.onRetry
-              ? Effect.tryPromise({
-                  try: () => Promise.resolve(retryConfig.onRetry!(error, attemptNumber)),
-                  catch: () => createRequestError('RETRY_CALLBACK_ERROR', 'Retry callback failed')
-                })
-              : Effect.succeed(undefined);
+        const delay = calculateRetryDelay(attemptNumber, retryConfig);
+        
+        return pipe(
+          callRetryCallback,
+          Effect.flatMap(() => Effect.sleep(`${delay} millis`)),
+          Effect.flatMap(() => executeWithRetry<T, E, R>(config, mergedOptions, headers, fullUrl, traceId, attemptNumber + 1))
+        );
+      }
 
-            const delay = calculateRetryDelay(attemptNumber, retryConfig);
-            
-            return pipe(
-              callRetryCallback,
-              Effect.flatMap(() => Effect.sleep(`${delay} millis`)),
-              Effect.flatMap(() => executeWithRetry<T>(config, mergedOptions, headers, fullUrl, traceId, attemptNumber + 1))
-            );
-          }
-
-          return Effect.fail(error);
-        })
-      );
+      return Effect.fail(error);
     })
   );
 };
@@ -409,10 +389,10 @@ const executeWithRetry = <T>(
 /**
  * Execute HTTP request with full configuration
  */
-export const executeRequest = <T = any>(
+export const executeRequest = <T = any, E extends string = string, R extends string = string>(
   config: RequestConfig,
   requestOptions: RequestsOptions = {}
-): Effect.Effect<RequestResponse<T>, RequestError> => {
+): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const mergedOptions = { ...DEFAULT_REQUESTS_OPTIONS, ...requestOptions };
   const fullUrl = buildUrl(mergedOptions.baseUrl, config.url, config.query);
   const traceId = getTraceId(config, mergedOptions);
@@ -424,7 +404,7 @@ export const executeRequest = <T = any>(
       return { finalConfig, headers };
     }),
     Effect.flatMap(({ finalConfig, headers }) => 
-      executeWithRetry<T>(finalConfig, mergedOptions, headers, fullUrl, traceId)
+      executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, traceId)
     )
   );
 };
@@ -438,7 +418,7 @@ export class HttpClient {
   /**
    * Execute a request with Effect interface
    */
-  requestEffect<T = any>(config: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  requestEffect<T = any>(config: Partial<RequestConfig>): Effect.Effect<SuccessResponse<T>, ErrorResponse> {
     const mergedOptions = { ...DEFAULT_REQUESTS_OPTIONS, ...this.clientOptions };
     const fullConfig: RequestConfig = {
       method: HttpMethod.GET,
@@ -451,14 +431,14 @@ export class HttpClient {
   /**
    * Execute a request with Promise interface (default)
    */
-  async request<T = any>(config: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async request<T = any>(config: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.requestEffect<T>(config));
   }
 
   /**
    * GET request with Effect interface
    */
-  getEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  getEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     // Handle overloads: either query data as second param, or config as second param
     let finalConfig: Partial<RequestConfig>;
     
@@ -485,56 +465,56 @@ export class HttpClient {
   /**
    * GET request with Promise interface (default)
    */
-  async get<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async get<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.getEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
    * POST request with Effect interface
    */
-  postEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  postEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({ method: HttpMethod.POST, url, data, ...config });
   }
 
   /**
    * POST request with Promise interface (default)
    */
-  async post<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async post<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.postEffect<T, D>(url, data, config));
   }
 
   /**
    * PUT request with Effect interface
    */
-  putEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  putEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({ method: HttpMethod.PUT, url, data, ...config });
   }
 
   /**
    * PUT request with Promise interface (default)
    */
-  async put<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async put<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.putEffect<T, D>(url, data, config));
   }
 
   /**
    * PATCH request with Effect interface
    */
-  patchEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  patchEffect<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({ method: HttpMethod.PATCH, url, data, ...config });
   }
 
   /**
    * PATCH request with Promise interface (default)
    */
-  async patch<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async patch<T = any, D = any>(url: string, data?: D, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.patchEffect<T, D>(url, data, config));
   }
 
   /**
    * DELETE request with Effect interface
    */
-  deleteEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  deleteEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     // Handle overloads similar to GET
     let finalConfig: Partial<RequestConfig>;
     
@@ -557,14 +537,14 @@ export class HttpClient {
   /**
    * DELETE request with Promise interface (default)
    */
-  async delete<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async delete<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.deleteEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
    * HEAD request with Effect interface
    */
-  headEffect<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<void>, RequestError> {
+  headEffect<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<void>, ErrorResponse> {
     // Handle overloads similar to GET
     let finalConfig: Partial<RequestConfig>;
     
@@ -587,14 +567,14 @@ export class HttpClient {
   /**
    * HEAD request with Promise interface (default)
    */
-  async head<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<void>> {
+  async head<Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<ApiResponse<void>> {
     return Effect.runPromise(this.headEffect<Q>(url, queryOrConfig, config));
   }
 
   /**
    * OPTIONS request with Effect interface
    */
-  optionsEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<RequestResponse<T>, RequestError> {
+  optionsEffect<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     // Handle overloads similar to GET
     let finalConfig: Partial<RequestConfig>;
     
@@ -617,7 +597,7 @@ export class HttpClient {
   /**
    * OPTIONS request with Promise interface (default)
    */
-  async options<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<RequestResponse<T>> {
+  async options<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.optionsEffect<T, Q>(url, queryOrConfig, config));
   }
 }

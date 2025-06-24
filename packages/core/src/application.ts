@@ -6,6 +6,12 @@ import { Controller } from './controller';
 import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
 import { TypedEnv } from '@onebun/envs';
 import { ConfigServiceImpl } from './config.service';
+import { 
+  createSuccessResponse, 
+  createErrorResponse, 
+  OneBunBaseError, 
+  ApiResponse,
+} from '@onebun/requests';
 
 // Conditionally import metrics
 let MetricsService: any;
@@ -640,13 +646,58 @@ export class OneBunApplication {
 
       try {
         // Call handler with injected parameters
-        return await route.handler(...args);
+        const result = await route.handler(...args);
+        
+        // If the result is already a Response object, return it as-is
+        if (result instanceof Response) {
+          return result;
+        }
+        
+        // If the result is already in standardized format, return it as JSON
+        if (typeof result === 'object' && result !== null && 'success' in result) {
+          return new Response(JSON.stringify(result), {
+            status: 200,
+            headers: {
+              'Content-Type': 'application/json'
+            }
+          });
+        }
+        
+        // Otherwise, wrap in standardized success response
+        const successResponse = createSuccessResponse(result);
+        return new Response(JSON.stringify(successResponse), {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
       } catch (error) {
         // Convert any thrown errors to standardized error response
-        const message = error instanceof Error ? error.message : String(error);
-        const code = error instanceof Error && 'code' in error ? Number((error as any).code) : 500;
+        let errorResponse: ApiResponse<never>;
+        
+        if (error instanceof OneBunBaseError) {
+          errorResponse = error.toErrorResponse();
+        } else {
+          const message = error instanceof Error ? error.message : String(error);
+          const code = error instanceof Error && 'code' in error ? Number((error as any).code) : 500;
+          errorResponse = createErrorResponse(
+            message,
+            code,
+            message,
+            undefined,
+            {
+              originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+              stack: error instanceof Error ? error.stack : undefined,
+            }
+          );
+        }
 
-        return route.controller.error(message, code, code);
+        return new Response(JSON.stringify(errorResponse), {
+          status: 200, // Always return 200 for consistency with API response format
+          headers: {
+            'Content-Type': 'application/json'
+          }
+        });
       }
     }
   }

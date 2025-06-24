@@ -1,5 +1,5 @@
 import { Service, BaseService } from '@onebun/core';
-import { createHttpClient, RequestError } from '@onebun/requests';
+import { createHttpClient, ErrorResponse, InternalServerError, isErrorResponse, NotFoundError, OneBunBaseError } from '@onebun/requests';
 import { Effect, pipe } from 'effect';
 import type { User, Post, UserQuery, PostQuery, CreatePostData, UpdateUserData } from './types';
 
@@ -13,10 +13,14 @@ export class ExternalApiService extends BaseService {
       max: 2, 
       delay: 1000, 
       backoff: 'exponential',
+      // TODO: make as default
       retryOn: [408, 429, 500, 502, 503, 504]
     },
+    // TODO: make as default
     tracing: true,
+    // TODO: make as default
     metrics: true,
+    // TODO: make as default
     headers: {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
@@ -32,19 +36,45 @@ export class ExternalApiService extends BaseService {
     try {
       const response = await this.client.get<User[], UserQuery>('/users', query);
       
-      if (response.success && response.data) {
-        console.log(`✅ Fetched ${response.data.length} users in ${response.duration}ms`);
-        return response.data;
+      if (isErrorResponse(response)) {
+        throw response;
       }
-      return [];
+
+      console.log(`✅ Fetched ${response.result.length} users`);
+      return response.result;
     } catch (error: any) {
-      console.error(`❌ Failed to fetch users: ${error.message}`, {
-        code: error.code,
-        statusCode: error.statusCode,
-        traceId: error.traceId
-      });
-      return [];
+      this.logger.error('Failed to fetch users', { error });
+
+      if (isErrorResponse(error)) {
+        throw OneBunBaseError.fromErrorResponse(error).withContext('Failed to fetch users');
+      }
+
+      throw new InternalServerError('Failed to fetch users', { error });
     }
+  }
+
+  /**
+   * Get all users using Promise API (default)
+   */
+  async getAllUsers_NEW(query: UserQuery = {}): Promise<User[]> {
+    console.log('🚀 Fetching users with @onebun/requests (Promise API)');
+    
+    // TODO: req (SuccessReponse and throw ErrorResponse), reqRaw (ApiResponse), reqEffect (Effect.Effect<SuccessResponse<T>, ErrorResponse<E, R>>)
+    const result = await this.client.req<User[], UserQuery>(
+      'GET',
+      '/users',
+      query,
+      {
+        errors: {
+          // default code is 500
+          wrong: { error: 'USERS_UNAVAILABLE', message: 'Failed to fetch users', details: { query } },
+        },
+      }
+    );
+    
+    console.log(`✅ Fetched ${result.length} users`);
+
+    return result;
   }
 
   /**
@@ -56,20 +86,24 @@ export class ExternalApiService extends BaseService {
     try {
       const response = await this.client.get<User>(`/users/${id}`);
       
-      if (response.success && response.data) {
-        console.log(`✅ Fetched user: ${response.data.name} in ${response.duration}ms`);
-        return response.data;
+      if (isErrorResponse(response)) {
+        throw response;
+      }
+
+      if (response.result) {
+        console.log(`✅ Fetched user: ${response.result.name}`);
+        return response.result;
       }
       
-      throw {
-        code: 'USER_NOT_FOUND',
-        message: `User with ID ${id} not found`,
-        statusCode: response.statusCode,
-        traceId: response.traceId,
-        timestamp: Date.now()
-      } as RequestError;
-    } catch (error) {
-      throw error;
+      throw new NotFoundError('User not found', { id });
+    } catch (error: any) {
+      this.logger.error('Failed to fetch user', { error, id });
+
+      if (isErrorResponse(error)) {
+        throw OneBunBaseError.fromErrorResponse(error).withContext('Failed to fetch user', { id });
+      }
+
+      throw new InternalServerError('Failed to fetch user', { error, id });
     }
   }
 
@@ -83,20 +117,25 @@ export class ExternalApiService extends BaseService {
       // Using typed query interface
       const query: PostQuery = { userId: userId.toString() };
       const response = await this.client.get<Post[], PostQuery>('/posts', query);
-      
-      if (response.success && response.data) {
-        console.log(`✅ Fetched ${response.data.length} posts in ${response.duration}ms`);
-        return response.data;
+
+      if (isErrorResponse(response)) {  
+        throw response;
       }
+
+      if (response.result) {
+        console.log(`✅ Fetched ${response.result.length} posts`);
+        return response.result;
+      }
+      
       return [];
     } catch (error: any) {
-      console.error(`❌ Failed to fetch posts for user ${userId}:`, {
-        message: error.message,
-        code: error.code,
-        statusCode: error.statusCode,
-        traceId: error.traceId
-      });
-      return [];
+      this.logger.error('Failed to fetch posts', { error, userId });
+
+      if (isErrorResponse(error)) {
+        throw OneBunBaseError.fromErrorResponse(error).withContext('Failed to fetch posts', { userId });
+      }
+
+      throw new InternalServerError('Failed to fetch posts', { error, userId });
     }
   }
 
@@ -110,21 +149,24 @@ export class ExternalApiService extends BaseService {
       // Using typed data interface  
       const response = await this.client.post<Post, CreatePostData>('/posts', postData);
       
-      if (response.success && response.data) {
-        console.log(`✅ Created post ${response.data.id}: ${response.data.title} in ${response.duration}ms`);
-        return response.data;
+      if (isErrorResponse(response)) {
+        throw response;
+      }
+
+      if (response.result) {
+        console.log(`✅ Created post ${response.result.id}: ${response.result.title}`);
+        return response.result;
       }
       
-      throw {
-        code: 'POST_CREATION_FAILED',
-        message: 'Failed to create post',
-        statusCode: response.statusCode,
-        details: response.error,
-        traceId: response.traceId,
-        timestamp: Date.now()
-      } as RequestError;
-    } catch (error) {
-      throw error;
+      throw new InternalServerError('Empty response from create post', { postData });
+    } catch (error: any) {
+      this.logger.error('Failed to create post', { error, postData });
+
+      if (isErrorResponse(error)) {
+        throw OneBunBaseError.fromErrorResponse(error).withContext('Failed to create post', { postData });
+      }
+
+      throw new InternalServerError('Failed to create post', { error, postData });
     }
   }
 
@@ -136,21 +178,25 @@ export class ExternalApiService extends BaseService {
     
     try {
       const response = await this.client.put<User, UpdateUserData>(`/users/${id}`, userData);
-      
-      if (response.success && response.data) {
-        console.log(`✅ Updated user ${response.data.id}: ${response.data.name} in ${response.duration}ms`);
-        return response.data;
+
+      if (isErrorResponse(response)) {
+        throw response;
+      }
+
+      if (response.result) {
+        console.log(`✅ Updated user ${response.result.id}: ${response.result.name}`);
+        return response.result;
       }
       
-      throw {
-        code: 'USER_UPDATE_FAILED',
-        message: 'Failed to update user',
-        statusCode: response.statusCode,
-        traceId: response.traceId,
-        timestamp: Date.now()
-      } as RequestError;
-    } catch (error) {
-      throw error;
+      throw new InternalServerError('Empty response from update user', { id });
+    } catch (error: any) {
+      this.logger.error('Failed to update user', { error, id });
+
+      if (isErrorResponse(error)) {
+        throw OneBunBaseError.fromErrorResponse(error).withContext('Failed to update user', { id });
+      }
+
+      throw new InternalServerError('Failed to update user', { error, id });
     }
   }
 
@@ -186,16 +232,16 @@ export class ExternalApiService extends BaseService {
     
     return pipe(
       this.client.getEffect('/nonexistent-endpoint'),
-      Effect.catchAll((error: RequestError) => {
+      Effect.catchAll((error: ErrorResponse) => {
         console.log('💥 @onebun/requests error handling demonstration:');
         console.log(`- Error code: ${error.code}`);
         console.log(`- Message: ${error.message}`);
-        console.log(`- Status: ${error.statusCode || 'N/A'}`);
+        console.log(`- Status: ${error.code || 'N/A'}`);
         console.log(`- Trace ID: ${error.traceId || 'N/A'}`);
-        console.log(`- Timestamp: ${new Date(error.timestamp).toISOString()}`);
+        console.log(`- Timestamp: ${new Date().toISOString()}`);
         
-        if (error.cause) {
-          console.log(`- Caused by: ${error.cause.message}`);
+        if (error.originalError) {
+          console.log(`- Caused by: ${error.originalError.message}`);
         }
         
         console.log('✅ Error handling demonstration completed');
@@ -294,7 +340,7 @@ export class ExternalApiService extends BaseService {
     return pipe(
       Effect.sync(() => console.log('📡 Attempting request to endpoint that returns 500 (will retry)...')),
       Effect.flatMap(() => retryClient.getEffect('/500')),
-      Effect.catchAll((error: RequestError) => {
+      Effect.catchAll((error: ErrorResponse) => {
         console.log(`💥 Request failed after retries: ${error.message}`);
         console.log('✅ Retry functionality demonstrated');
         return Effect.succeed(undefined);

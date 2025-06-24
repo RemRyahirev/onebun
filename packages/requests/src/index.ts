@@ -13,26 +13,25 @@ export * from './auth.js';
 
 // HTTP client
 export { 
-  HttpClient, 
-  createRequestError, 
-  executeRequest, 
-  createHttpClient 
+  HttpClient,
+  executeRequest
 } from './client.js';
 
 // Service for dependency injection
 export {
   RequestsService,
   makeRequestsService,
-  makeRequestsServiceFromEnv,
-  createHttpClient as createClient,
-  requests
 } from './service.js';
+
+// Export the createHttpClient function specifically to avoid conflicts
+export { createHttpClient } from './client.js';
 
 // Re-export common types for convenience
 export type {
+  ErrorResponse,
+  SuccessResponse,
+  ApiResponse,
   RequestConfig,
-  RequestResponse,
-  RequestError,
   RequestsOptions,
   AuthConfig,
   RetryConfig,
