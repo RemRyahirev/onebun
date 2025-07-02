@@ -1,4 +1,7 @@
-export * from './logger';
-export * from './transport';
-export * from './formatter';
-export * from './types'; 
+export {
+  Logger,
+  SyncLogger,
+  LoggerService,
+  makeLogger,
+  createSyncLogger,
+} from './logger';

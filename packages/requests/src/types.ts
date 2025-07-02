@@ -352,6 +352,25 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
 };
 
 /**
+ * Error configuration for req method
+ */
+export interface RequestErrorConfig {
+  [errorKey: string]: {
+    error: string;
+    message: string;
+    details?: Record<string, unknown>;
+    code?: number;
+  };
+}
+
+/**
+ * Configuration for req method
+ */
+export interface ReqConfig {
+  errors?: RequestErrorConfig;
+}
+
+/**
  * Default requests options
  */
 export const DEFAULT_REQUESTS_OPTIONS: Required<Omit<RequestsOptions, 'baseUrl' | 'auth'>> = {

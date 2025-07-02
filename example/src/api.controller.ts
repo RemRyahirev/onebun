@@ -1,6 +1,6 @@
 import { BaseController, Controller, Get, Post, Put, Body, Param, Query } from '@onebun/core';
 import { ExternalApiService } from './external-api.service';
-import type { UserQuery, CreatePostData, UpdateUserData, User } from './types';
+import type { UserQuery, CreatePostData, UpdateUserData, User, Post as PostEntity } from './types';
 
 @Controller('api')
 export class ApiController extends BaseController {
@@ -9,15 +9,15 @@ export class ApiController extends BaseController {
   }
 
   /**
-   * Get all users using @onebun/requests package (Promise API)
+   * Get all users using @onebun/requests package (Traditional API)
    */
-  @Get('users')
-  async getUsers(@Query() query: UserQuery = {}): Promise<Response> {
-    this.logger.info('Getting users');
+  @Get('users/traditional')
+  async getUsersTraditional(@Query() query: UserQuery = {}): Promise<Response> {
+    this.logger.info('Getting users with traditional API');
 
     try {
       const users = await this.api.getAllUsers(query);
-      this.logger.info(`Fetched ${users.length} users using @onebun/requests (Promise API)`);
+      this.logger.info(`Fetched ${users.length} users using @onebun/requests (Traditional API)`);
       return this.success(users);
     } catch (error: any) {
       return this.error(`Failed to fetch users: ${error.message}`, 500);
@@ -25,28 +25,46 @@ export class ApiController extends BaseController {
   }
 
   /**
-   * Get all users using @onebun/requests package (Promise API)
+   * Get all users using new req API (simplified pattern)
    */
   @Get('users')
-  async getUsers_NEW(@Query() query: UserQuery = {}): Promise<User[]> {
-    this.logger.info('Getting users');
-
+  async getUsers(@Query() query: UserQuery = {}): Promise<User[]> {
+    this.logger.info('Getting users with new req API');
     const users = await this.api.getAllUsers_NEW(query);
-
-    this.logger.info(`Fetched ${users.length} users using @onebun/requests (Promise API)`);
-
+    this.logger.info(`Fetched ${users.length} users using new req API`);
     return users;
   }
 
   /**
-   * Get user by ID using @onebun/requests package with error handling (Promise API)
+   * Get all users using reqRaw API (demonstrates raw response handling)
+   */
+  @Get('users/raw')
+  async getUsersRaw(@Query() query: UserQuery = {}): Promise<User[]> {
+    this.logger.info('Getting users with reqRaw API');
+    const users = await this.api.getAllUsersRaw(query);
+    this.logger.info(`Fetched ${users.length} users using reqRaw API`);
+    return users;
+  }
+
+  /**
+   * Get user by ID using new req API (simplified pattern)
    */
   @Get('users/:id')
-  async getUserById(@Param('id') id: string): Promise<Response> {
+  async getUserById(@Param('id') id: string): Promise<User> {
     const userId = parseInt(id, 10);
-    
+    const user = await this.api.getUserById(userId);
+    return user;
+  }
+
+  /**
+   * Get user by ID using traditional API (for comparison)
+   */
+  @Get('users/:id/traditional')
+  async getUserByIdTraditional(@Param('id') id: string): Promise<Response> {
+    const userId = parseInt(id, 10);
+
     try {
-      const user = await this.api.getUserById(userId);
+      const user = await this.api.getUserByIdOld(userId);
       return this.success(user);
     } catch (error: any) {
       return this.error(`Failed to fetch user: ${error.message} | traceId: ${error.traceId}`, 404);
@@ -54,47 +72,33 @@ export class ApiController extends BaseController {
   }
 
   /**
-   * Update user with typed data interface
+   * Update user using new req API (simplified pattern)
    */
   @Put('users/:id')
-  async updateUser(@Param('id') id: string, @Body() userData: UpdateUserData): Promise<Response> {
+  async updateUser(@Param('id') id: string, @Body() userData: UpdateUserData): Promise<User> {
     const userId = parseInt(id, 10);
-    
-    try {
-      const user = await this.api.updateUser(userId, userData);
-      return this.success(user);
-    } catch (error: any) {
-      return this.error(`Failed to update user: ${error.message}`, 400);
-    }
+    const user = await this.api.updateUser(userId, userData);
+    return user;
   }
 
   /**
-   * Get posts by user ID using @onebun/requests (Promise API)
+   * Get posts by user ID using new req API (simplified pattern)
    */
   @Get('users/:id/posts')
-  async getUserPosts(@Param('id') id: string): Promise<Response> {
+  async getUserPosts(@Param('id') id: string): Promise<PostEntity[]> {
     const userId = parseInt(id, 10);
-    
-    try {
-      const posts = await this.api.getPostsByUserId(userId);
-      this.logger.info(`Fetched ${posts.length} posts for user ${userId} using @onebun/requests (Promise API)`);
-      return this.success(posts);
-    } catch (error: any) {
-      return this.error(`Failed to fetch posts: ${error.message}`, 500);
-    }
+    const posts = await this.api.getPostsByUserId(userId);
+    this.logger.info(`Fetched ${posts.length} posts for user ${userId} using new req API`);
+    return posts;
   }
 
   /**
-   * Create a new post using typed data interface (Promise API)
+   * Create a new post using new req API (simplified pattern)
    */
   @Post('posts')
-  async createPost(@Body() postData: CreatePostData): Promise<Response> {
-    try {
-      const newPost = await this.api.createPost(postData);
-      return this.success(newPost, 201);
-    } catch (error: any) {
-      return this.error(`Failed to create post: ${error.message}`, 400);
-    }
+  async createPost(@Body() postData: CreatePostData): Promise<PostEntity> {
+    const newPost = await this.api.createPost(postData);
+    return newPost;
   }
 
   /**
@@ -161,7 +165,7 @@ export class ApiController extends BaseController {
   @Get('effect/demo/error-handling')
   async demonstrateErrorHandlingEffect(): Promise<Response> {
     const { Effect } = await import('effect');
-    
+
     try {
       await Effect.runPromise(this.api.demonstrateErrorHandlingEffect());
       return this.success({ message: 'Error handling demonstration (Effect API) completed - check console logs' });
@@ -169,4 +173,4 @@ export class ApiController extends BaseController {
       return this.error(`Error handling demo failed: ${error.message}`, 500);
     }
   }
-} 
+}

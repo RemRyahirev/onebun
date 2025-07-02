@@ -37,5 +37,7 @@ export type {
   RetryConfig,
   HttpMethod,
   RequestMetricsData,
-  RequestTraceData
+  RequestTraceData,
+  ReqConfig,
+  RequestErrorConfig
 } from './types.js'; 

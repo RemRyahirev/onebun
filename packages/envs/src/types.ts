@@ -80,5 +80,3 @@ export interface EnvLoadOptions {
   /** Default separator for arrays (default: ',') */
   defaultArraySeparator?: string;
 }
-
-// Legacy interface - kept for compatibility but not used in new TypedEnv API 

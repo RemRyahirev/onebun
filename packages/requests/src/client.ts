@@ -14,6 +14,9 @@ import {
   wrapToErrorResponse,
   createSuccessResponse,
   SuccessResponse,
+  ReqConfig,
+  RequestErrorConfig,
+  InternalServerError,
 } from './types.js';
 import { applyAuth } from './auth.js';
 
@@ -599,6 +602,101 @@ export class HttpClient {
    */
   async options<T = any, Q extends Record<string, any> = Record<string, any>>(url: string, queryOrConfig?: Q | Partial<RequestConfig>, config?: Partial<RequestConfig>): Promise<ApiResponse<T>> {
     return Effect.runPromise(this.optionsEffect<T, Q>(url, queryOrConfig, config));
+  }
+
+  /**
+   * Generic request method - throws on error, returns data directly
+   */
+  async req<T = any, Q extends Record<string, any> = Record<string, any>>(
+    method: HttpMethod | string,
+    url: string,
+    queryOrData?: Q,
+    config?: ReqConfig & Partial<RequestConfig>
+  ): Promise<T> {
+    try {
+      const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+      const response = await this.request<T>({
+        method: methodEnum,
+        url,
+        ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+        ...config
+      });
+      
+      if (isErrorResponse(response)) {
+        // Check if we have custom error configuration
+        if (config?.errors) {
+          const errorKey = Object.keys(config.errors)[0]; // Use first error config as default
+          const errorConfig = config.errors[errorKey];
+          const customError = new InternalServerError(
+            errorConfig.error,
+            { ...errorConfig.details, originalResponse: response },
+            response
+          );
+          if (errorConfig.message) {
+            customError.message = errorConfig.message;
+          }
+          throw customError;
+        }
+        
+        throw OneBunBaseError.fromErrorResponse(response);
+      }
+      
+      return response.result;
+    } catch (error: any) {
+      // If it's already an OneBun error, rethrow
+      if (error instanceof OneBunBaseError) {
+        throw error;
+      }
+      
+      // Check if we have custom error configuration for unexpected errors
+      if (config?.errors) {
+        const errorKey = Object.keys(config.errors)[0];
+        const errorConfig = config.errors[errorKey];
+        throw new InternalServerError(
+          errorConfig.error,
+          { ...errorConfig.details, originalError: error },
+        );
+      }
+      
+      // Wrap unexpected errors
+      throw new InternalServerError('REQUEST_FAILED', { originalError: error });
+    }
+  }
+
+  /**
+   * Generic request method - returns full API response
+   */
+  async reqRaw<T = any, Q extends Record<string, any> = Record<string, any>>(
+    method: HttpMethod | string,
+    url: string,
+    queryOrData?: Q,
+    config?: Partial<RequestConfig>
+  ): Promise<ApiResponse<T>> {
+    const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+    return this.request<T>({
+      method: methodEnum,
+      url,
+      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+      ...config
+    });
+  }
+
+  /**
+   * Generic request method - returns Effect
+   */
+  reqEffect<T = any, Q extends Record<string, any> = Record<string, any>>(
+    method: HttpMethod | string,
+    url: string,
+    queryOrData?: Q,
+    config?: Partial<RequestConfig>
+  ): Effect.Effect<SuccessResponse<T>, ErrorResponse> {
+    const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+    return this.requestEffect<T>({
+      method: methodEnum,
+      url,
+      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+      ...config
+    });
   }
 }
 

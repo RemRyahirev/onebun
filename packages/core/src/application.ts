@@ -1,4 +1,4 @@
-import { Effect, Layer, pipe } from 'effect';
+import { Effect, Layer } from 'effect';
 import { getControllerMetadata } from './decorators';
 import { OneBunModule } from './module';
 import { ApplicationOptions, HttpMethod, Module, ParamType, ParamMetadata } from './types';
@@ -6,10 +6,10 @@ import { Controller } from './controller';
 import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
 import { TypedEnv } from '@onebun/envs';
 import { ConfigServiceImpl } from './config.service';
-import { 
-  createSuccessResponse, 
-  createErrorResponse, 
-  OneBunBaseError, 
+import {
+  createSuccessResponse,
+  createErrorResponse,
+  OneBunBaseError,
   ApiResponse,
 } from '@onebun/requests';
 
@@ -97,18 +97,18 @@ export class OneBunApplication {
       try {
         this.logger.debug('Attempting to initialize metrics service');
         this.logger.debug('Metrics options:', this.options.metrics);
-        
+
         this.metricsService = Effect.runSync(
           createMetricsService(this.options.metrics || {})
         );
-        
+
         this.logger.debug('Metrics service Effect run successfully');
-        
+
         // Make metrics service globally available (temporary solution)
         if (typeof globalThis !== 'undefined') {
           (globalThis as any).__onebunMetricsService = this.metricsService;
         }
-        
+
         this.logger.info('Metrics service initialized successfully');
       } catch (error) {
         this.logger.error('Failed to initialize metrics service:', error instanceof Error ? error : new Error(String(error)));
@@ -123,19 +123,19 @@ export class OneBunApplication {
       try {
         this.logger.debug('Attempting to initialize trace service');
         this.logger.debug('Tracing options:', this.options.tracing);
-        
+
         const traceLayer = makeTraceService(this.options.tracing || {});
         this.traceService = Effect.runSync(
           Effect.provide(TraceService, traceLayer) as any
         );
-        
+
         this.logger.debug('Trace service Effect run successfully');
-        
+
         // Make trace service globally available (temporary solution)
         if (typeof globalThis !== 'undefined') {
           (globalThis as any).__onebunTraceService = this.traceService;
         }
-        
+
         this.logger.info('Trace service initialized successfully');
       } catch (error) {
         this.logger.error('Failed to initialize trace service:', error instanceof Error ? error : new Error(String(error)));
@@ -301,14 +301,14 @@ export class OneBunApplication {
           // Setup tracing context if available and enabled
           let traceSpan: any = null;
           let traceContext: any = null;
-          
+
           if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
             try {
               // Extract trace headers
               const headers = Object.fromEntries(req.headers.entries());
               const traceHeaders = {
                 'traceparent': headers['traceparent'],
-                'tracestate': headers['tracestate'], 
+                'tracestate': headers['tracestate'],
                 'x-trace-id': headers['x-trace-id'],
                 'x-span-id': headers['x-span-id'],
               };
@@ -399,7 +399,7 @@ export class OneBunApplication {
           if (!route) {
             const response = new Response('Not Found', { status: 404 });
             const duration = Date.now() - startTime;
-            
+
             // Record metrics for 404
             if (app.metricsService && app.metricsService.recordHttpRequest) {
               const durationSeconds = duration / 1000;
@@ -429,7 +429,7 @@ export class OneBunApplication {
 
             // Clear trace context after 404
             clearGlobalTraceContext();
-            
+
             return response;
           }
 
@@ -447,7 +447,7 @@ export class OneBunApplication {
 
               const response = await next(0);
               const duration = Date.now() - startTime;
-              
+
               // Record metrics
               if (app.metricsService && app.metricsService.recordHttpRequest) {
                 const durationSeconds = duration / 1000;
@@ -467,7 +467,7 @@ export class OneBunApplication {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
                       statusCode: response?.status || 200,
-                      responseSize: response?.headers?.get('content-length') ? 
+                      responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
                     })
@@ -479,12 +479,12 @@ export class OneBunApplication {
 
               // Clear trace context after request
               clearGlobalTraceContext();
-              
+
               return response;
             } else {
               const response = await executeHandler(route, req, paramValues);
               const duration = Date.now() - startTime;
-              
+
               // Record metrics
               if (app.metricsService && app.metricsService.recordHttpRequest) {
                 const durationSeconds = duration / 1000;
@@ -504,7 +504,7 @@ export class OneBunApplication {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
                       statusCode: response?.status || 200,
-                      responseSize: response?.headers?.get('content-length') ? 
+                      responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
                     })
@@ -516,14 +516,14 @@ export class OneBunApplication {
 
               // Clear trace context after request
               clearGlobalTraceContext();
-              
+
               return response;
             }
           } catch (error) {
             console.error('Request handling error:', error);
             const response = new Response('Internal Server Error', { status: 500 });
             const duration = Date.now() - startTime;
-            
+
             // Record error metrics
             if (app.metricsService && app.metricsService.recordHttpRequest) {
               const durationSeconds = duration / 1000;
@@ -559,7 +559,7 @@ export class OneBunApplication {
 
             // Clear trace context after error
             clearGlobalTraceContext();
-            
+
             return response;
            }
          }
@@ -647,12 +647,12 @@ export class OneBunApplication {
       try {
         // Call handler with injected parameters
         const result = await route.handler(...args);
-        
+
         // If the result is already a Response object, return it as-is
         if (result instanceof Response) {
           return result;
         }
-        
+
         // If the result is already in standardized format, return it as JSON
         if (typeof result === 'object' && result !== null && 'success' in result) {
           return new Response(JSON.stringify(result), {
@@ -662,7 +662,7 @@ export class OneBunApplication {
             }
           });
         }
-        
+
         // Otherwise, wrap in standardized success response
         const successResponse = createSuccessResponse(result);
         return new Response(JSON.stringify(successResponse), {
@@ -674,7 +674,7 @@ export class OneBunApplication {
       } catch (error) {
         // Convert any thrown errors to standardized error response
         let errorResponse: ApiResponse<never>;
-        
+
         if (error instanceof OneBunBaseError) {
           errorResponse = error.toErrorResponse();
         } else {
