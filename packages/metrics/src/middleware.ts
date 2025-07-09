@@ -1,6 +1,8 @@
 import { Effect } from 'effect';
-import { MetricsService } from './metrics.service';
+
 import type { HttpMetricsData } from './types';
+
+import { MetricsService } from './metrics.service';
 
 /**
  * Metrics middleware for automatic HTTP metrics collection
@@ -18,7 +20,7 @@ export class MetricsMiddleware {
         controller?: string;
         action?: string;
         route?: string;
-      } = {}
+      } = {},
     ): Promise<(response: Response, startTime: number) => void> => {
       const startTime = Date.now();
 
@@ -32,7 +34,7 @@ export class MetricsMiddleware {
           statusCode: response.status,
           duration,
           controller: context.controller,
-          action: context.action
+          action: context.action,
         };
 
         this.metricsService.recordHttpRequest(metricsData);
@@ -47,7 +49,7 @@ export class MetricsMiddleware {
     originalMethod: T,
     controllerName: string,
     methodName: string,
-    route: string
+    route: string,
   ): T {
     return (async (...args: any[]) => {
       const startTime = Date.now();
@@ -76,7 +78,7 @@ export class MetricsMiddleware {
           statusCode,
           duration,
           controller: controllerName,
-          action: methodName
+          action: methodName,
         });
       }
     }) as T;
@@ -90,7 +92,7 @@ export function WithMetrics(route?: string) {
   return function (
     target: any,
     propertyKey: string,
-    descriptor: PropertyDescriptor
+    descriptor: PropertyDescriptor,
   ) {
     const originalMethod = descriptor.value;
     const controllerName = target.constructor.name;
@@ -107,6 +109,7 @@ export function WithMetrics(route?: string) {
           return result
             .then((res) => {
               recordMetrics(controllerName, propertyKey, routePath, startTime, 200);
+
               return res;
             })
             .catch((err) => {
@@ -115,6 +118,7 @@ export function WithMetrics(route?: string) {
             });
         } else {
           recordMetrics(controllerName, propertyKey, routePath, startTime, 200);
+
           return result;
         }
       } catch (err) {
@@ -135,7 +139,7 @@ function recordMetrics(
   action: string,
   route: string,
   startTime: number,
-  statusCode: number
+  statusCode: number,
 ): void {
   const duration = (Date.now() - startTime) / 1000;
   
@@ -149,7 +153,7 @@ function recordMetrics(
       statusCode,
       duration,
       controller,
-      action
+      action,
     });
   }
 }
@@ -158,11 +162,9 @@ function recordMetrics(
  * Effect-based metrics collection
  */
 export const recordHttpMetrics = (
-  data: HttpMetricsData
+  data: HttpMetricsData,
 ): Effect.Effect<void, never, MetricsService> =>
   Effect.gen(function* () {
     const metricsService = yield* MetricsService;
     metricsService.recordHttpRequest(data);
   });
-
- 

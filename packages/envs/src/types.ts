@@ -34,8 +34,8 @@ export type EnvSchema<T> = {
   [K in keyof T]: T[K] extends string | number | boolean | string[] | number[] | boolean[]
     ? EnvVariableConfig<T[K]>
     : T[K] extends Record<string, any>
-    ? EnvSchema<T[K]>
-    : EnvVariableConfig<T[K]>;
+      ? EnvSchema<T[K]>
+      : EnvVariableConfig<T[K]>;
 };
 
 /**
@@ -45,7 +45,7 @@ export class EnvValidationError extends Error {
   constructor(
     public readonly variable: string,
     public readonly value: any,
-    public readonly reason: string
+    public readonly reason: string,
   ) {
     super(`Environment variable validation failed for "${variable}": ${reason}. Got: ${value}`);
     this.name = 'EnvValidationError';
@@ -58,7 +58,7 @@ export class EnvValidationError extends Error {
 export class EnvLoadError extends Error {
   constructor(
     public readonly variable: string,
-    public readonly reason: string
+    public readonly reason: string,
   ) {
     super(`Failed to load environment variable "${variable}": ${reason}`);
     this.name = 'EnvLoadError';

@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+
 import { MetricsService } from './metrics.service';
 import { CustomMetricConfig } from './types';
 
@@ -9,7 +10,7 @@ export function MeasureTime(metricName?: string, labels?: string[]) {
   return function (
     target: any,
     propertyKey: string,
-    descriptor: PropertyDescriptor
+    descriptor: PropertyDescriptor,
   ) {
     const originalMethod = descriptor.value;
     const methodName = metricName || `${target.constructor.name}_${propertyKey}_duration`;
@@ -24,6 +25,7 @@ export function MeasureTime(metricName?: string, labels?: string[]) {
           return result
             .then((res) => {
               recordDuration(methodName, startTime, labels);
+
               return res;
             })
             .catch((err) => {
@@ -32,6 +34,7 @@ export function MeasureTime(metricName?: string, labels?: string[]) {
             });
         } else {
           recordDuration(methodName, startTime, labels);
+
           return result;
         }
       } catch (err) {
@@ -51,13 +54,14 @@ export function CountCalls(metricName?: string, labels?: string[]) {
   return function (
     target: any,
     propertyKey: string,
-    descriptor: PropertyDescriptor
+    descriptor: PropertyDescriptor,
   ) {
     const originalMethod = descriptor.value;
     const counterName = metricName || `${target.constructor.name}_${propertyKey}_calls_total`;
 
     descriptor.value = function (...args: any[]) {
       incrementCounter(counterName, labels);
+
       return originalMethod.apply(this, args);
     };
 
@@ -72,7 +76,7 @@ export function MeasureGauge(metricName: string, getValue: () => number, labels?
   return function (
     target: any,
     propertyKey: string,
-    descriptor: PropertyDescriptor
+    descriptor: PropertyDescriptor,
   ) {
     const originalMethod = descriptor.value;
 
@@ -92,10 +96,12 @@ export function MeasureGauge(metricName: string, getValue: () => number, labels?
       if (result instanceof Promise) {
         return result.then((res) => {
           updateGauge();
+
           return res;
         });
       } else {
         updateGauge();
+
         return result;
       }
     };
@@ -134,7 +140,9 @@ export function WithMetrics(options: { prefix?: string } = {}) {
  */
 function recordDuration(metricName: string, startTime: number, labels?: string[]): void {
   const metricsService = getMetricsService();
-  if (!metricsService) return;
+  if (!metricsService) {
+    return;
+  }
 
   const duration = (Date.now() - startTime) / 1000;
   const histogram = metricsService.getMetric(metricName);
@@ -146,7 +154,9 @@ function recordDuration(metricName: string, startTime: number, labels?: string[]
 
 function incrementCounter(metricName: string, labels?: string[]): void {
   const metricsService = getMetricsService();
-  if (!metricsService) return;
+  if (!metricsService) {
+    return;
+  }
 
   const counter = metricsService.getMetric(metricName);
   
@@ -157,7 +167,9 @@ function incrementCounter(metricName: string, labels?: string[]): void {
 
 function setGaugeValue(metricName: string, value: number, labels?: string[]): void {
   const metricsService = getMetricsService();
-  if (!metricsService) return;
+  if (!metricsService) {
+    return;
+  }
 
   const gauge = metricsService.getMetric(metricName);
   
@@ -174,6 +186,7 @@ function getMetricsService(): any {
   if (typeof globalThis !== 'undefined') {
     return (globalThis as any).__onebunMetricsService;
   }
+
   return undefined;
 }
 
@@ -182,7 +195,7 @@ function getMetricsService(): any {
  */
 export const measureExecutionTime = <A, E, R>(
   metricName: string,
-  effect: Effect.Effect<A, E, R>
+  effect: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E, R | MetricsService> =>
   Effect.gen(function* () {
     const metricsService = yield* MetricsService;

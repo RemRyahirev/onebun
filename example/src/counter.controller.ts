@@ -1,4 +1,12 @@
-import { BaseController, Controller, Get, Post, Body, Param } from '@onebun/core';
+import {
+  BaseController,
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+} from '@onebun/core';
+
 import { CounterService } from './counter.service';
 
 @Controller('/api')
@@ -10,6 +18,7 @@ export class CounterController extends BaseController {
   @Get('/')
   async hello() {
     this.logger.info('Hello endpoint called');
+
     return this.success({ message: 'Hello OneBun with Metrics!' });
   }
 
@@ -25,10 +34,10 @@ export class CounterController extends BaseController {
       message: 'Counter Service Info',
       server: {
         port: serverPort,
-        host: serverHost
+        host: serverHost,
       },
       timestamp: new Date().toISOString(),
-      configAvailable: this.config !== null && this.config !== undefined
+      configAvailable: this.config !== null && this.config !== undefined,
     });
   }
 
@@ -36,6 +45,7 @@ export class CounterController extends BaseController {
   async getValue() {
     const value = this.counterService.getValue();
     this.logger.info('Getting counter value', { value });
+
     return this.success({ value });
   }
 
@@ -47,7 +57,7 @@ export class CounterController extends BaseController {
     
     return this.success({
       value: newValue,
-      message: `Counter incremented by ${amount}`
+      message: `Counter incremented by ${amount}`,
     });
   }
 
@@ -59,7 +69,7 @@ export class CounterController extends BaseController {
     
     return this.success({
       value: newValue,
-      message: `Counter decremented by ${amount}`
+      message: `Counter decremented by ${amount}`,
     });
   }
 
@@ -70,7 +80,7 @@ export class CounterController extends BaseController {
     
     return this.success({
       value: 0,
-      message: 'Counter reset to 0'
+      message: 'Counter reset to 0',
     });
   }
 
@@ -80,7 +90,7 @@ export class CounterController extends BaseController {
       value: this.counterService.getValue(),
       totalOperations: this.counterService.getTotalOperations(),
       memoryUsage: process.memoryUsage(),
-      uptime: process.uptime()
+      uptime: process.uptime(),
     };
     this.logger.info('Getting stats', { totalOperations: stats.totalOperations });
     
@@ -93,7 +103,7 @@ export class CounterController extends BaseController {
     
     return this.success({
       id,
-      value: this.counterService.getValue()
+      value: this.counterService.getValue(),
     });
   }
 }

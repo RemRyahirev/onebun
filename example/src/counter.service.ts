@@ -14,8 +14,9 @@ export class CounterService extends BaseService {
       new Date(),
       ['array', 'of', 'strings'],
       true,
-      null
+      null,
     );
+
     return this.value;
   }
 
@@ -29,7 +30,7 @@ export class CounterService extends BaseService {
     
     this.logger.debug('Counter incremented', 
       { previousValue: this.value - amount, newValue: this.value, amount },
-      `Operation #${this.totalOperations}`
+      `Operation #${this.totalOperations}`,
     );
     
     return this.value;
@@ -42,7 +43,7 @@ export class CounterService extends BaseService {
     this.logger.warn('Counter decremented', 
       amount, 
       { negativeValue: this.value < 0 },
-      this.value < 0 ? new Error('Counter went negative!') : null
+      this.value < 0 ? new Error('Counter went negative!') : null,
     );
     
     return this.value;
@@ -63,10 +64,10 @@ export class CounterService extends BaseService {
         operation: 'reset',
         nested: {
           deep: {
-            value: 'test'
-          }
-        }
-      }
+            value: 'test',
+          },
+        },
+      },
     });
   }
 }

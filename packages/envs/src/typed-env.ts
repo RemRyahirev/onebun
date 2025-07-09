@@ -1,7 +1,13 @@
 import { Effect } from 'effect';
-import { EnvSchema, EnvValidationError, EnvLoadError, EnvVariableConfig } from './types';
+
 import { EnvLoader } from './loader';
 import { EnvParser } from './parser';
+import {
+  EnvSchema,
+  EnvValidationError,
+  EnvLoadError,
+  EnvVariableConfig,
+} from './types';
 
 /**
  * Utility types for automatic type inference
@@ -9,21 +15,21 @@ import { EnvParser } from './parser';
 type DeepValue<T, Path extends string> = Path extends keyof T
   ? T[Path]
   : Path extends `${infer K}.${infer Rest}`
-  ? K extends keyof T
-    ? T[K] extends object
-      ? DeepValue<T[K], Rest>
+    ? K extends keyof T
+      ? T[K] extends object
+        ? DeepValue<T[K], Rest>
+        : never
       : never
-    : never
-  : any; // Fallback to any for complex paths
+    : any; // Fallback to any for complex paths
 
 type DeepPaths<T> = T extends object
   ? {
-      [K in keyof T]: K extends string
-        ? T[K] extends object
-          ? K | `${K}.${DeepPaths<T[K]>}`
-          : K
-        : never;
-    }[keyof T]
+    [K in keyof T]: K extends string
+      ? T[K] extends object
+        ? K | `${K}.${DeepPaths<T[K]>}`
+        : K
+      : never;
+  }[keyof T]
   : never;
 
 /**
@@ -49,8 +55,13 @@ class SensitiveValue<T> {
   }
 
   [Symbol.toPrimitive](hint: string): string | number | T {
-    if (hint === 'string') return '***';
-    if (hint === 'number' && typeof this._value === 'number') return this._value;
+    if (hint === 'string') {
+      return '***';
+    }
+    if (hint === 'number' && typeof this._value === 'number') {
+      return this._value;
+    }
+
     return this._value;
   }
 }
@@ -65,7 +76,7 @@ class ConfigProxy<T> {
 
   constructor(
     private readonly _schema: EnvSchema<T>,
-    private readonly _options: any = {}
+    private readonly _options: any = {},
   ) {
     this.extractSensitiveFields(this._schema, '');
   }
@@ -89,7 +100,9 @@ class ConfigProxy<T> {
   }
 
   private async ensureInitialized(): Promise<void> {
-    if (this._isInitialized) return;
+    if (this._isInitialized) {
+      return;
+    }
 
     const rawVariables = await Effect.runPromise(EnvLoader.load(this._options));
     this._values = this.parseNestedSchema(this._schema, rawVariables, '') as T;
@@ -109,7 +122,7 @@ class ConfigProxy<T> {
         
         try {
           const parsed = Effect.runSync(
-            EnvParser.parse(envVar, rawValue, envConfig, this._options)
+            EnvParser.parse(envVar, rawValue, envConfig, this._options),
           );
           result[key] = parsed;
         } catch (error) {
@@ -173,6 +186,7 @@ class ConfigProxy<T> {
     if (!this._isInitialized || !this._values) {
       throw new Error('Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.');
     }
+
     return this._values;
   }
 
@@ -202,11 +216,13 @@ class ConfigProxy<T> {
   }
 
   private applySensitiveMask(obj: any, prefix = ''): any {
-    if (obj === null || obj === undefined) return obj;
+    if (obj === null || obj === undefined) {
+      return obj;
+    }
     
     if (Array.isArray(obj)) {
       return obj.map(item => 
-        typeof item === 'object' ? this.applySensitiveMask(item, prefix) : item
+        typeof item === 'object' ? this.applySensitiveMask(item, prefix) : item,
       );
     }
     
@@ -244,7 +260,7 @@ export class TypedEnv {
   static create<T>(
     schema: EnvSchema<T>,
     options: any = {},
-    key = 'default'
+    key = 'default',
   ): ConfigProxy<T> {
     if (!TypedEnv.instances.has(key)) {
       const proxy = new ConfigProxy(schema, options);
@@ -263,10 +279,11 @@ export class TypedEnv {
   static async createAsync<T>(
     schema: EnvSchema<T>,
     options: any = {},
-    key = 'default'
+    key = 'default',
   ): Promise<ConfigProxy<T>> {
     const proxy = TypedEnv.create(schema, options, key);
     await proxy.initialize();
+
     return proxy;
   }
 

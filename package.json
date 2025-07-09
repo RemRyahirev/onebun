@@ -13,7 +13,7 @@
     "dev": "bun run --watch example/src/index.ts",
     "dev:once": "bun run example/src/index.ts",
     "test": "bun test",
-    "lint": "eslint"
+    "lint": "eslint --fix"
   },
   "workspaces": [
     "packages/*",

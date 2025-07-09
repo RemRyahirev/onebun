@@ -1,7 +1,23 @@
-import { Service, BaseService } from '@onebun/core';
-import { createHttpClient, ErrorResponse, InternalServerError, isErrorResponse, NotFoundError, OneBunBaseError, SuccessResponse } from '@onebun/requests';
 import { Effect, pipe } from 'effect';
-import type { User, Post, UserQuery, PostQuery, CreatePostData, UpdateUserData } from './types';
+import { Service, BaseService } from '@onebun/core';
+import {
+  createHttpClient,
+  ErrorResponse,
+  InternalServerError,
+  isErrorResponse,
+  NotFoundError,
+  OneBunBaseError,
+  SuccessResponse,
+} from '@onebun/requests';
+
+import type {
+  User,
+  Post,
+  UserQuery,
+  PostQuery,
+  CreatePostData,
+  UpdateUserData,
+} from './types';
 
 @Service()
 export class ExternalApiService extends BaseService {
@@ -13,7 +29,7 @@ export class ExternalApiService extends BaseService {
       delay: 1000,
       backoff: 'exponential',
       // TODO: make as default
-      retryOn: [408, 429, 500, 502, 503, 504]
+      retryOn: [408, 429, 500, 502, 503, 504],
     },
     // TODO: make as default
     tracing: true,
@@ -22,8 +38,8 @@ export class ExternalApiService extends BaseService {
     // TODO: make as default
     headers: {
       'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    }
+      'Content-Type': 'application/json',
+    },
   });
 
   /**
@@ -40,6 +56,7 @@ export class ExternalApiService extends BaseService {
       }
 
       console.log(`✅ Fetched ${response.result.length} users`);
+
       return response.result;
     } catch (error: any) {
       this.logger.error('Failed to fetch users', { error });
@@ -68,13 +85,14 @@ export class ExternalApiService extends BaseService {
             error: 'USERS_UNAVAILABLE',
             message: 'Failed to fetch users from external API',
             details: { query },
-            code: 503
+            code: 503,
           },
         },
-      }
+      },
     );
 
     console.log(`✅ Fetched ${result.length} users`);
+
     return result;
   }
 
@@ -87,7 +105,7 @@ export class ExternalApiService extends BaseService {
     const response = await this.client.reqRaw<User[], UserQuery>(
       'GET',
       '/users',
-      query
+      query,
     );
 
     if (isErrorResponse(response)) {
@@ -95,6 +113,7 @@ export class ExternalApiService extends BaseService {
     }
 
     console.log(`✅ Fetched ${response.result.length} users`);
+
     return response.result;
   }
 
@@ -108,12 +127,13 @@ export class ExternalApiService extends BaseService {
       this.client.reqEffect<User[], UserQuery>(
         'GET',
         '/users',
-        query
+        query,
       ),
       Effect.map((response: SuccessResponse<User[]>) => {
         console.log(`✅ Fetched ${response.result.length} users`);
+
         return response.result;
-      })
+      }),
     );
   }
 
@@ -133,13 +153,14 @@ export class ExternalApiService extends BaseService {
             error: 'USER_NOT_FOUND',
             message: `User with ID ${id} does not exist`,
             details: { userId: id },
-            code: 404
-          }
-        }
-      }
+            code: 404,
+          },
+        },
+      },
     );
 
     console.log(`✅ Fetched user: ${user.name}`);
+
     return user;
   }
 
@@ -158,6 +179,7 @@ export class ExternalApiService extends BaseService {
 
       if (response.result) {
         console.log(`✅ Fetched user: ${response.result.name}`);
+
         return response.result;
       }
 
@@ -190,13 +212,14 @@ export class ExternalApiService extends BaseService {
             error: 'POSTS_UNAVAILABLE',
             message: `Failed to fetch posts for user ${userId}`,
             details: { userId, query },
-            code: 503
-          }
-        }
-      }
+            code: 503,
+          },
+        },
+      },
     );
 
     console.log(`✅ Fetched ${posts.length} posts`);
+
     return posts;
   }
 
@@ -216,13 +239,14 @@ export class ExternalApiService extends BaseService {
             error: 'POST_CREATION_FAILED',
             message: 'Failed to create new post',
             details: { postData },
-            code: 500
-          }
-        }
-      }
+            code: 500,
+          },
+        },
+      },
     );
 
     console.log(`✅ Created post ${post.id}: ${post.title}`);
+
     return post;
   }
 
@@ -242,13 +266,14 @@ export class ExternalApiService extends BaseService {
             error: 'USER_UPDATE_FAILED',
             message: `Failed to update user ${id}`,
             details: { userId: id, userData },
-            code: 500
-          }
-        }
-      }
+            code: 500,
+          },
+        },
+      },
     );
 
     console.log(`✅ Updated user ${user.id}: ${user.name}`);
+
     return user;
   }
 
@@ -297,9 +322,10 @@ export class ExternalApiService extends BaseService {
         }
 
         console.log('✅ Error handling demonstration completed');
+
         return Effect.succeed(undefined);
       }),
-      Effect.map(() => undefined)
+      Effect.map(() => undefined),
     );
   }
 
@@ -314,8 +340,8 @@ export class ExternalApiService extends BaseService {
       baseUrl: 'https://api.example.com',
       auth: {
         type: 'bearer',
-        token: 'your-bearer-token'
-      }
+        token: 'your-bearer-token',
+      },
     });
 
     // API Key Example
@@ -324,8 +350,8 @@ export class ExternalApiService extends BaseService {
       auth: {
         type: 'apikey',
         key: 'X-API-Key',
-        value: 'your-api-key'
-      }
+        value: 'your-api-key',
+      },
     });
 
     // Basic Auth Example
@@ -334,8 +360,8 @@ export class ExternalApiService extends BaseService {
       auth: {
         type: 'basic',
         username: 'user',
-        password: 'pass'
-      }
+        password: 'pass',
+      },
     });
 
     console.log('✅ Authentication clients created - ready for use');
@@ -358,8 +384,8 @@ export class ExternalApiService extends BaseService {
         delay: 1000,
         backoff: 'exponential',
         factor: 2,
-        retryOn: [500, 502, 503, 504]
-      }
+        retryOn: [500, 502, 503, 504],
+      },
     });
 
     try {
@@ -385,8 +411,8 @@ export class ExternalApiService extends BaseService {
         delay: 1000,
         backoff: 'exponential',
         factor: 2,
-        retryOn: [500, 502, 503, 504]
-      }
+        retryOn: [500, 502, 503, 504],
+      },
     });
 
     return pipe(
@@ -395,9 +421,10 @@ export class ExternalApiService extends BaseService {
       Effect.catchAll((error: ErrorResponse) => {
         console.log(`💥 Request failed after retries: ${error.message}`);
         console.log('✅ Retry functionality demonstrated');
+
         return Effect.succeed(undefined);
       }),
-      Effect.map(() => undefined)
+      Effect.map(() => undefined),
     );
   }
 }

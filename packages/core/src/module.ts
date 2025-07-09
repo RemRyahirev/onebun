@@ -1,9 +1,25 @@
-import { Context, Effect, Layer } from 'effect';
-import { getModuleMetadata, getControllerMetadata, getConstructorParamTypes, registerControllerDependencies } from './decorators';
-import { Module, ModuleProviders } from './types';
-import { getServiceMetadata, createServiceLayer } from './service';
+import {
+  Context,
+  Effect,
+  Layer,
+} from 'effect';
+import {
+  Logger,
+  SyncLogger,
+  LoggerService,
+  makeLogger,
+  createSyncLogger,
+} from '@onebun/logger';
+
 import { Controller } from './controller';
-import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
+import {
+  getModuleMetadata,
+  getControllerMetadata,
+  getConstructorParamTypes,
+  registerControllerDependencies,
+} from './decorators';
+import { getServiceMetadata, createServiceLayer } from './service';
+import { Module, ModuleProviders } from './types';
 
 /**
  * OneBun Module implementation
@@ -22,10 +38,10 @@ export class OneBunModule implements Module {
       Effect.provide(
         Effect.map(
           LoggerService,
-          (logger: Logger) => logger.child({ className: `OneBunModule:${moduleClass.name}` })
+          (logger: Logger) => logger.child({ className: `OneBunModule:${moduleClass.name}` }),
         ),
-        this.loggerLayer || makeLogger()
-      ) as any
+        this.loggerLayer || makeLogger(),
+      ) as any,
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
     this.config = config;
@@ -41,7 +57,7 @@ export class OneBunModule implements Module {
   /**
    * Initialize module from metadata and create layer
    */
-  private initModule(): { layer: Layer.Layer<never, never, unknown>, controllers: Function[] } {
+  private initModule(): { layer: Layer.Layer<never, never, unknown>; controllers: Function[] } {
     this.logger.debug(`Initializing module metadata for ${this.moduleClass.name}`);
     const metadata = getModuleMetadata(this.moduleClass);
     if (!metadata) {
@@ -87,10 +103,10 @@ export class OneBunModule implements Module {
         if (typeof provider === 'object' && provider !== null && 'prototype' in provider && 'tag' in provider) {
           // This is a Context Tag, we need to get implementation
           // Find matching implementation in providers array
-          const tagProvider = provider as { isTag?: boolean, Service?: Function };
+          const tagProvider = provider as { isTag?: boolean; Service?: Function };
           const impl = metadata.providers.find((p: unknown) =>
             tagProvider.isTag && typeof p === 'function' && typeof tagProvider.Service === 'function' &&
-            'prototype' in p && p.prototype instanceof tagProvider.Service
+            'prototype' in p && p.prototype instanceof tagProvider.Service,
           );
 
           if (impl && typeof impl === 'function') {
@@ -107,7 +123,7 @@ export class OneBunModule implements Module {
             const instance = new providerConstructor();
             // Find matching tag in providers
             const tag = metadata.providers.find((p: unknown) =>
-              typeof p === 'object' && p !== null && 'isTag' in p && 'Service' in p && instance instanceof (p as { Service: Function }).Service
+              typeof p === 'object' && p !== null && 'isTag' in p && 'Service' in p && instance instanceof (p as { Service: Function }).Service,
             );
 
             if (tag) {
@@ -142,6 +158,7 @@ export class OneBunModule implements Module {
    */
   createControllerInstances(): Effect.Effect<unknown, never, void> {
     const self = this;
+
     return Effect.gen(function* (_) {
       // Get all services from the layer
       const services = yield* _(Effect.context());
@@ -208,7 +225,7 @@ export class OneBunModule implements Module {
       // Now create controller instances with automatic dependency injection
       self.createControllersWithDI();
     }).pipe(
-      Effect.provide(this.rootLayer)
+      Effect.provide(this.rootLayer),
     );
   }
 
@@ -268,7 +285,9 @@ export class OneBunModule implements Module {
   private resolveDependencyByType(type: Function): any {
     // Find service instance that matches the type
     const serviceInstance = Array.from(this.serviceInstances.values()).find(instance => {
-      if (!instance) return false;
+      if (!instance) {
+        return false;
+      }
       
       // Check if instance is of the exact type or inherits from it
       return (instance.constructor === type || instance instanceof type);
@@ -337,4 +356,3 @@ export class OneBunModule implements Module {
     return new OneBunModule(moduleClass, loggerLayer, config);
   }
 }
-

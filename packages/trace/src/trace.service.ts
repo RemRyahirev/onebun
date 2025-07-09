@@ -1,5 +1,16 @@
-import { Effect, Layer, Context, FiberRef } from 'effect';
-import { trace, context, SpanKind, SpanStatusCode as OtelSpanStatusCode } from '@opentelemetry/api';
+import {
+  trace,
+  context,
+  SpanKind,
+  SpanStatusCode as OtelSpanStatusCode,
+} from '@opentelemetry/api';
+import {
+  Effect,
+  Layer,
+  Context,
+  FiberRef,
+} from 'effect';
+
 import { 
   TraceContext, 
   TraceSpan, 
@@ -7,7 +18,7 @@ import {
   TraceHeaders, 
   SpanStatus,
   SpanStatusCode,
-  HttpTraceData
+  HttpTraceData,
 } from './types.js';
 
 /**
@@ -127,11 +138,12 @@ export class TraceServiceImpl implements TraceService {
             events: [],
             status: { code: SpanStatusCode.OK },
           };
+
           return Effect.flatMap(
             FiberRef.set(CurrentSpan, mockSpan),
-            () => Effect.succeed(mockSpan)
+            () => Effect.succeed(mockSpan),
           );
-        }
+        },
       );
     }
 
@@ -162,8 +174,8 @@ export class TraceServiceImpl implements TraceService {
       FiberRef.set(CurrentSpan, traceSpan),
       () => Effect.flatMap(
         this.setContext(traceContext),
-        () => Effect.succeed(traceSpan)
-      )
+        () => Effect.succeed(traceSpan),
+      ),
     );
   }
 
@@ -212,8 +224,9 @@ export class TraceServiceImpl implements TraceService {
             activeSpan.addEvent(name, attributes);
           }
         }
+
         return Effect.void;
-      }
+      },
     );
   }
 
@@ -233,8 +246,9 @@ export class TraceServiceImpl implements TraceService {
             activeSpan.setAttributes(attributes);
           }
         }
+
         return Effect.void;
-      }
+      },
     );
   }
 
@@ -307,9 +321,9 @@ export class TraceServiceImpl implements TraceService {
 
         return Effect.flatMap(
           this.setAttributes(attributes),
-          () => Effect.succeed(span)
+          () => Effect.succeed(span),
         );
-      }
+      },
     );
   }
 
@@ -335,7 +349,7 @@ export class TraceServiceImpl implements TraceService {
 
     return Effect.flatMap(
       this.setAttributes(attributes),
-      () => this.endSpan(span, status)
+      () => this.endSpan(span, status),
     );
   }
 
@@ -345,6 +359,7 @@ export class TraceServiceImpl implements TraceService {
     for (let i = 0; i < length; i++) {
       result += chars[Math.floor(Math.random() * chars.length)];
     }
+
     return result;
   }
 }

@@ -1,10 +1,14 @@
-import { Context, Effect, Layer } from 'effect';
+import {
+  Context,
+  Effect,
+  Layer,
+} from 'effect';
 import { SyncLogger } from '@onebun/logger';
 
 /**
  * Metadata storage for services
  */
-const META_SERVICES = new Map<Function, { tag: Context.Tag<any, any>, impl: new () => any }>();
+const META_SERVICES = new Map<Function, { tag: Context.Tag<any, any>; impl: new () => any }>();
 
 /**
  * Service decorator
@@ -18,7 +22,7 @@ export function Service<T>(tag?: Context.Tag<T, T>) {
     // Store metadata
     META_SERVICES.set(target, {
       tag: serviceTag,
-      impl: target
+      impl: target,
     });
 
     return target;
@@ -28,7 +32,7 @@ export function Service<T>(tag?: Context.Tag<T, T>) {
 /**
  * Get service metadata
  */
-export function getServiceMetadata(target: Function): { tag: Context.Tag<any, any>, impl: new () => any } | undefined {
+export function getServiceMetadata(target: Function): { tag: Context.Tag<any, any>; impl: new () => any } | undefined {
   return META_SERVICES.get(target);
 }
 
@@ -42,6 +46,7 @@ export function getServiceTag<T>(serviceClass: new (...args: any[]) => T): Conte
   if (!metadata) {
     throw new Error(`Service ${serviceClass.name} does not have @Service decorator`);
   }
+
   return metadata.tag as Context.Tag<T, T>;
 }
 
@@ -93,6 +98,7 @@ export class BaseService {
     if (error instanceof Error) {
       return error;
     }
+
     return new Error(String(error));
   }
 }

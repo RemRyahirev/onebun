@@ -1,7 +1,17 @@
-import { Context, Effect, Layer, FiberRef } from 'effect';
-import { ConsoleTransport } from './transport';
+import {
+  Context,
+  Effect,
+  Layer,
+  FiberRef,
+} from 'effect';
+
 import { JsonFormatter, PrettyFormatter } from './formatter';
-import { LoggerConfig, LogLevel, TraceInfo } from './types';
+import { ConsoleTransport } from './transport';
+import {
+  LoggerConfig,
+  LogLevel,
+  TraceInfo,
+} from './types';
 
 /**
  * Custom logger service interface
@@ -32,7 +42,7 @@ export interface SyncLogger {
 /**
  * Context tag for the Logger service
  */
-export const LoggerService = Context.GenericTag<Logger>("LoggerService");
+export const LoggerService = Context.GenericTag<Logger>('LoggerService');
 
 /**
  * Current trace context stored in fiber for automatic trace inclusion in logs
@@ -75,7 +85,7 @@ function parseLogArgs(args: unknown[]): {
   return {
     error,
     context: Object.keys(context || {}).length > 0 ? context : undefined,
-    additionalData: additionalData.length > 0 ? additionalData : undefined
+    additionalData: additionalData.length > 0 ? additionalData : undefined,
   };
 }
 
@@ -133,7 +143,7 @@ class LoggerImpl implements Logger {
         const mergedContext = {
           ...this.config.defaultContext,
           ...this.context,
-          ...argsContext
+          ...argsContext,
         };
 
         // Add additional data to context if present
@@ -148,13 +158,14 @@ class LoggerImpl implements Logger {
           timestamp: new Date(),
           context: Object.keys(mergedContext).length > 0 ? mergedContext : undefined,
           error,
-          trace: currentTraceInfo || undefined
+          trace: currentTraceInfo || undefined,
         };
 
         // Format and send through transport
         const formattedEntry = this.config.formatter.format(entry);
+
         return this.config.transport.log(formattedEntry, entry);
-      }
+      },
     );
   }
 
@@ -198,8 +209,8 @@ export const makeDevLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logge
       formatter: new PrettyFormatter(),
       transport: new ConsoleTransport(),
       defaultContext: {},
-      ...config
-    })
+      ...config,
+    }),
   );
 };
 
@@ -214,8 +225,8 @@ export const makeProdLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logg
       formatter: new JsonFormatter(),
       transport: new ConsoleTransport(),
       defaultContext: {},
-      ...config
-    })
+      ...config,
+    }),
   );
 };
 
@@ -234,12 +245,13 @@ class SyncLoggerImpl implements SyncLogger {
         traceEffect = Effect.provide(
           Effect.flatMap(
             FiberRef.set(CurrentLoggerTraceContext, globalTraceContext),
-            () => effect
+            () => effect,
           ),
-          Layer.empty
+          Layer.empty,
         );
       }
     }
+
     return Effect.runSync(traceEffect);
   }
 
@@ -284,5 +296,6 @@ export const createSyncLogger = (logger: Logger): SyncLogger => {
  */
 export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> => {
   const isDev = process.env.NODE_ENV !== 'production';
+
   return isDev ? makeDevLogger(config) : makeProdLogger(config);
 }; 

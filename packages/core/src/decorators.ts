@@ -1,6 +1,12 @@
 import './metadata'; // Import polyfill first
 import { Reflect, getConstructorParamTypes as getDesignParamTypes } from './metadata';
-import { ControllerMetadata, HttpMethod, RouteMetadata, ParamType, ParamMetadata } from './types';
+import {
+  ControllerMetadata,
+  HttpMethod,
+  RouteMetadata,
+  ParamType,
+  ParamMetadata,
+} from './types';
 
 /**
  * Metadata storage for controllers
@@ -120,7 +126,7 @@ export function ControllerDecorator(basePath: string = '') {
   return function<T extends new (...args: any[]) => any>(target: T): T {
     const metadata: ControllerMetadata = {
       path: basePath.startsWith('/') ? basePath : `/${basePath}`,
-      routes: []
+      routes: [],
     };
 
     // Check if there's already metadata for this controller
@@ -174,6 +180,7 @@ export const Controller = ControllerDecorator;
  */
 export function getControllerMetadata(target: Function): ControllerMetadata | undefined {
   const metadata = META_CONTROLLERS.get(target);
+
   return metadata;
 }
 
@@ -202,7 +209,7 @@ function createRouteDecorator(method: HttpMethod) {
       if (!metadata) {
         metadata = {
           path: '/',
-          routes: []
+          routes: [],
         };
       }
 
@@ -219,10 +226,11 @@ function createRouteDecorator(method: HttpMethod) {
         method,
         handler: propertyKey,
         params,
-        middleware
+        middleware,
       });
 
       META_CONTROLLERS.set(controllerClass, metadata);
+
       return descriptor;
     };
   };
@@ -232,7 +240,7 @@ function createRouteDecorator(method: HttpMethod) {
  * Create parameter decorator factory
  */
 function createParamDecorator(type: ParamType) {
-  return function(name?: string, options: { required?: boolean, validator?: (value: unknown) => boolean | Promise<boolean> } = {}) {
+  return function(name?: string, options: { required?: boolean; validator?: (value: unknown) => boolean | Promise<boolean> } = {}) {
     return function(target: object, propertyKey: string, parameterIndex: number) {
       const params: ParamMetadata[] = Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
 
@@ -241,7 +249,7 @@ function createParamDecorator(type: ParamType) {
         name: name || '',
         index: parameterIndex,
         isRequired: options.required,
-        validator: options.validator
+        validator: options.validator,
       });
 
       Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey);
@@ -293,6 +301,7 @@ export function UseMiddleware(...middleware: Function[]) {
   return function(target: object, propertyKey: string, descriptor: PropertyDescriptor) {
     const existingMiddleware: Function[] = Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
     Reflect.defineMetadata(MIDDLEWARE_METADATA, [...existingMiddleware, ...middleware], target, propertyKey);
+
     return descriptor;
   };
 }
@@ -340,19 +349,20 @@ export const All = createRouteDecorator(HttpMethod.ALL);
 /**
  * Module decorator metadata
  */
-const META_MODULES = new Map<Function, { imports?: Function[], controllers?: Function[], providers?: unknown[], exports?: unknown[] }>();
+const META_MODULES = new Map<Function, { imports?: Function[]; controllers?: Function[]; providers?: unknown[]; exports?: unknown[] }>();
 
 /**
  * Module decorator
  */
 export function Module(options: {
-  imports?: Function[],
-  controllers?: Function[],
-  providers?: unknown[],
-  exports?: unknown[]
+  imports?: Function[];
+  controllers?: Function[];
+  providers?: unknown[];
+  exports?: unknown[];
 }) {
   return function<T extends new (...args: any[]) => any>(target: T): T {
     META_MODULES.set(target, options);
+
     return target;
   };
 }
@@ -360,7 +370,8 @@ export function Module(options: {
 /**
  * Get module metadata
  */
-export function getModuleMetadata(target: Function): { imports?: Function[], controllers?: Function[], providers?: unknown[], exports?: unknown[] } | undefined {
+export function getModuleMetadata(target: Function): { imports?: Function[]; controllers?: Function[]; providers?: unknown[]; exports?: unknown[] } | undefined {
   const metadata = META_MODULES.get(target);
+
   return metadata;
 }

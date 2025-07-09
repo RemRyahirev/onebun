@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+
 import { EnvLoadError, EnvLoadOptions } from './types';
 
 /**
@@ -30,7 +31,7 @@ export class EnvLoader {
           // .env file has priority
           return { ...processEnvVars, ...dotEnvVars };
         }
-      })
+      }),
     );
   }
 
@@ -39,7 +40,7 @@ export class EnvLoader {
    */
   private static loadDotEnvFile(filePath: string): Effect.Effect<Record<string, string>, EnvLoadError> {
     return Effect.tryPromise({
-      try: async () => {
+      async try() {
         const file = Bun.file(filePath);
         const exists = await file.exists();
         
@@ -48,10 +49,11 @@ export class EnvLoader {
         }
 
         const content = await file.text();
+
         return EnvLoader.parseDotEnvContent(content);
       },
       catch: (error) => 
-        new EnvLoadError(filePath, `Failed to read .env file: ${error instanceof Error ? error.message : String(error)}`)
+        new EnvLoadError(filePath, `Failed to read .env file: ${error instanceof Error ? error.message : String(error)}`),
     });
   }
 

@@ -1,44 +1,46 @@
-module.exports = {
-  parser: '@typescript-eslint/parser',
-  parserOptions: {
-    project: 'tsconfig.json',
-    tsconfigRootDir: __dirname,
-    sourceType: 'module',
-  },
-  plugins: [
-    'jest',
-    '@typescript-eslint',
-    '@typescript-eslint/eslint-plugin',
-    'eslint-plugin-tsdoc',
-    'import',
-    'import-newlines',
-    '@stylistic',
-  ],
-  extends: [
-    'airbnb-base',
-    'eslint:recommended',
-    'plugin:@typescript-eslint/recommended',
-    'plugin:@typescript-eslint/recommended-requiring-type-checking',
-    'plugin:@typescript-eslint/eslint-recommended',
-    'plugin:import/recommended',
-    'plugin:import/typescript',
-  ],
-  root: true,
-  env: {
-    node: true,
-    jest: true,
-  },
-  settings: {
-    'import/parsers': {
-      '@typescript-eslint/parser': ['.ts', '.tsx'],
-    },
-    'import/resolver': {
-      typescript: {
-        alwaysTryTypes: true,
+const typescriptParser = require('@typescript-eslint/parser');
+const typescriptPlugin = require('@typescript-eslint/eslint-plugin');
+const jestPlugin = require('eslint-plugin-jest');
+const tsdocPlugin = require('eslint-plugin-tsdoc');
+const importPlugin = require('eslint-plugin-import');
+const importNewlinesPlugin = require('eslint-plugin-import-newlines');
+
+module.exports = (async () => {
+  const stylisticPlugin = await import('@stylistic/eslint-plugin');
+
+  return [
+  {
+    files: ['**/*.ts', '**/*.tsx'],
+    languageOptions: {
+      parser: typescriptParser,
+      parserOptions: {
+        project: true,
+        tsconfigRootDir: __dirname,
+        sourceType: 'module',
+      },
+      globals: {
+        node: true,
+        jest: true,
       },
     },
-  },
-  ignorePatterns: ['.eslintrc.js'],
+    plugins: {
+      jest: jestPlugin,
+      '@typescript-eslint': typescriptPlugin,
+      'tsdoc': tsdocPlugin,
+      'import': importPlugin,
+      'import-newlines': importNewlinesPlugin,
+      '@stylistic': stylisticPlugin.default,
+    },
+    settings: {
+      'import/parsers': {
+        '@typescript-eslint/parser': ['.ts', '.tsx'],
+      },
+      'import/resolver': {
+        typescript: {
+          alwaysTryTypes: true,
+        },
+      },
+    },
   rules: {
     // disabled rules
     'no-await-in-loop': 'off',
@@ -279,15 +281,17 @@ module.exports = {
       detectObjects: true,
     }],
   },
-  overrides: [
-    {
-      files: ['**/*.spec.ts'],
-      plugins: ['jest'],
-      rules: {
-        '@typescript-eslint/unbound-method': 'off',
-        'jest/unbound-method': 'error',
-        'no-magic-numbers': 'off',
-      },
+},
+  {
+    files: ['**/*.spec.ts'],
+    plugins: {
+      jest: jestPlugin,
     },
-  ],
-};
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+      'jest/unbound-method': 'error',
+      'no-magic-numbers': 'off',
+    },
+  },
+];
+})();

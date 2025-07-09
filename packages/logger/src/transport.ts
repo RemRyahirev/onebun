@@ -1,5 +1,10 @@
 import { Effect } from 'effect';
-import { LogEntry, LogTransport, LogLevel } from './types';
+
+import {
+  LogEntry,
+  LogTransport,
+  LogLevel,
+} from './types';
 
 /**
  * Console transport for logging

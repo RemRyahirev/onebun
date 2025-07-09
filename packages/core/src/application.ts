@@ -1,17 +1,37 @@
 import { Effect, Layer } from 'effect';
-import { getControllerMetadata } from './decorators';
-import { OneBunModule } from './module';
-import { ApplicationOptions, HttpMethod, Module, ParamType, ParamMetadata } from './types';
-import { Controller } from './controller';
-import { Logger, SyncLogger, LoggerService, makeLogger, createSyncLogger } from '@onebun/logger';
 import { TypedEnv } from '@onebun/envs';
-import { ConfigServiceImpl } from './config.service';
+import {
+  Logger,
+  SyncLogger,
+  LoggerService,
+  makeLogger,
+  createSyncLogger,
+} from '@onebun/logger';
 import {
   createSuccessResponse,
   createErrorResponse,
   OneBunBaseError,
   ApiResponse,
 } from '@onebun/requests';
+import {
+  TraceService,
+  makeTraceService,
+  TraceMiddleware,
+  CurrentTraceContext,
+} from '@onebun/trace';
+
+import { ConfigServiceImpl } from './config.service';
+import { Controller } from './controller';
+import { getControllerMetadata } from './decorators';
+import { OneBunModule } from './module';
+import {
+  ApplicationOptions,
+  HttpMethod,
+  Module,
+  ParamType,
+  ParamMetadata,
+} from './types';
+
 
 // Conditionally import metrics
 let MetricsService: any;
@@ -29,7 +49,6 @@ try {
 }
 
 // Import tracing modules directly
-import { TraceService, makeTraceService, TraceMiddleware, CurrentTraceContext } from '@onebun/trace';
 
 // Global trace context for current request
 let globalCurrentTraceContext: any = null;
@@ -51,7 +70,7 @@ export class OneBunApplication {
   private options: ApplicationOptions = {
     port: 3000,
     host: '0.0.0.0',
-    development: process.env.NODE_ENV !== 'production'
+    development: process.env.NODE_ENV !== 'production',
   };
   private logger: SyncLogger;
   private config: any = null;
@@ -80,10 +99,10 @@ export class OneBunApplication {
       Effect.provide(
         Effect.map(
           LoggerService,
-          (logger: Logger) => logger.child({ className: 'OneBunApplication' })
+          (logger: Logger) => logger.child({ className: 'OneBunApplication' }),
         ),
-        loggerLayer
-      ) as any
+        loggerLayer,
+      ) as any,
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
 
@@ -99,7 +118,7 @@ export class OneBunApplication {
         this.logger.debug('Metrics options:', this.options.metrics);
 
         this.metricsService = Effect.runSync(
-          createMetricsService(this.options.metrics || {})
+          createMetricsService(this.options.metrics || {}),
         );
 
         this.logger.debug('Metrics service Effect run successfully');
@@ -126,7 +145,7 @@ export class OneBunApplication {
 
         const traceLayer = makeTraceService(this.options.tracing || {});
         this.traceService = Effect.runSync(
-          Effect.provide(TraceService, traceLayer) as any
+          Effect.provide(TraceService, traceLayer) as any,
         );
 
         this.logger.debug('Trace service Effect run successfully');
@@ -154,6 +173,7 @@ export class OneBunApplication {
     if (!this.configService) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
+
     return this.configService;
   }
 
@@ -205,13 +225,13 @@ export class OneBunApplication {
 
       // Create a map of routes with metadata
       const routes = new Map<string, {
-        method: string,
-        handler: Function,
-        controller: Controller,
-        params?: ParamMetadata[],
-        middleware?: Function[],
-        pathPattern?: RegExp,
-        pathParams?: string[]
+        method: string;
+        handler: Function;
+        controller: Controller;
+        params?: ParamMetadata[];
+        middleware?: Function[];
+        pathPattern?: RegExp;
+        pathParams?: string[];
       }>();
 
       // Add routes from controllers
@@ -252,8 +272,9 @@ export class OneBunApplication {
               /:([^/]+)/g,
               (_, paramName) => {
                 pathParams.push(paramName);
+
                 return '([^/]+)';
-              }
+              },
             );
             pathPattern = new RegExp(`^${pattern}$`);
           }
@@ -267,7 +288,7 @@ export class OneBunApplication {
             params: route.params,
             middleware: route.middleware,
             pathPattern,
-            pathParams
+            pathParams,
           });
         }
       }
@@ -275,7 +296,9 @@ export class OneBunApplication {
       // Log all routes
       for (const ControllerClass of controllers) {
         const metadata = getControllerMetadata(ControllerClass);
-        if (!metadata) continue;
+        if (!metadata) {
+          continue;
+        }
 
         for (const route of metadata.routes) {
           const fullPath = `${metadata.path}${route.path}`;
@@ -315,7 +338,7 @@ export class OneBunApplication {
 
               // Extract or generate trace context
               const extractedContext = await Effect.runPromise(
-                app.traceService.extractFromHeaders(traceHeaders)
+                app.traceService.extractFromHeaders(traceHeaders),
               );
 
               if (extractedContext) {
@@ -329,7 +352,7 @@ export class OneBunApplication {
 
               // Start HTTP trace span
               const httpData = {
-                method: method,
+                method,
                 url: req.url,
                 route: path,
                 userAgent: headers['user-agent'],
@@ -362,13 +385,15 @@ export class OneBunApplication {
           if (path === metricsPath && method === 'GET' && app.metricsService) {
             try {
               const metrics = await app.metricsService.getMetrics();
+
               return new Response(metrics, {
                 headers: {
-                  'Content-Type': app.metricsService.getContentType()
-                }
+                  'Content-Type': app.metricsService.getContentType(),
+                },
               });
             } catch (error) {
               console.error('Failed to get metrics:', error);
+
               return new Response('Internal Server Error', { status: 500 });
             }
           }
@@ -404,12 +429,12 @@ export class OneBunApplication {
             if (app.metricsService && app.metricsService.recordHttpRequest) {
               const durationSeconds = duration / 1000;
               app.metricsService.recordHttpRequest({
-                method: method,
+                method,
                 route: path,
                 statusCode: 404,
                 duration: durationSeconds,
                 controller: 'unknown',
-                action: 'unknown'
+                action: 'unknown',
               });
             }
 
@@ -420,7 +445,7 @@ export class OneBunApplication {
                   app.traceService.endHttpTrace(traceSpan, {
                     statusCode: 404,
                     duration,
-                  })
+                  }),
                 );
               } catch (traceError) {
                 console.error('Failed to end trace for 404:', traceError);
@@ -442,6 +467,7 @@ export class OneBunApplication {
                 }
 
                 const middleware = route!.middleware![index];
+
                 return await middleware(req, () => next(index + 1));
               };
 
@@ -452,12 +478,12 @@ export class OneBunApplication {
               if (app.metricsService && app.metricsService.recordHttpRequest) {
                 const durationSeconds = duration / 1000;
                 app.metricsService.recordHttpRequest({
-                  method: method,
+                  method,
                   route: path,
                   statusCode: response?.status || 200,
                   duration: durationSeconds,
                   controller: route.controller.constructor.name,
-                  action: 'unknown'
+                  action: 'unknown',
                 });
               }
 
@@ -470,7 +496,7 @@ export class OneBunApplication {
                       responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
-                    })
+                    }),
                   );
                 } catch (traceError) {
                   console.error('Failed to end trace:', traceError);
@@ -489,12 +515,12 @@ export class OneBunApplication {
               if (app.metricsService && app.metricsService.recordHttpRequest) {
                 const durationSeconds = duration / 1000;
                 app.metricsService.recordHttpRequest({
-                  method: method,
+                  method,
                   route: path,
                   statusCode: response?.status || 200,
                   duration: durationSeconds,
                   controller: route.controller.constructor.name,
-                  action: 'unknown'
+                  action: 'unknown',
                 });
               }
 
@@ -507,7 +533,7 @@ export class OneBunApplication {
                       responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
-                    })
+                    }),
                   );
                 } catch (traceError) {
                   console.error('Failed to end trace:', traceError);
@@ -528,12 +554,12 @@ export class OneBunApplication {
             if (app.metricsService && app.metricsService.recordHttpRequest) {
               const durationSeconds = duration / 1000;
               app.metricsService.recordHttpRequest({
-                method: method,
+                method,
                 route: path,
                 statusCode: 500,
                 duration: durationSeconds,
                 controller: route?.controller.constructor.name || 'unknown',
-                action: 'unknown'
+                action: 'unknown',
               });
             }
 
@@ -544,13 +570,13 @@ export class OneBunApplication {
                   app.traceService.addEvent('error', {
                     'error.type': error instanceof Error ? error.constructor.name : 'UnknownError',
                     'error.message': error instanceof Error ? error.message : String(error),
-                  })
+                  }),
                 );
                 await Effect.runPromise(
                   app.traceService.endHttpTrace(traceSpan, {
                     statusCode: 500,
                     duration,
-                  })
+                  }),
                 );
               } catch (traceError) {
                 console.error('Failed to end trace with error:', traceError);
@@ -561,9 +587,9 @@ export class OneBunApplication {
             clearGlobalTraceContext();
 
             return response;
-           }
-         }
-       });
+          }
+        },
+      });
 
       this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);
       if (this.metricsService) {
@@ -580,9 +606,9 @@ export class OneBunApplication {
      * Execute route handler with parameter injection
      */
     async function executeHandler(
-      route: { handler: Function, controller: Controller, params?: ParamMetadata[] },
+      route: { handler: Function; controller: Controller; params?: ParamMetadata[] },
       req: Request,
-      paramValues: Record<string, string | string[]>
+      paramValues: Record<string, string | string[]>,
     ): Promise<Response> {
       // If no parameter metadata, just call the handler with the request
       if (!route.params || route.params.length === 0) {
@@ -658,18 +684,19 @@ export class OneBunApplication {
           return new Response(JSON.stringify(result), {
             status: 200,
             headers: {
-              'Content-Type': 'application/json'
-            }
+              'Content-Type': 'application/json',
+            },
           });
         }
 
         // Otherwise, wrap in standardized success response
         const successResponse = createSuccessResponse(result);
+
         return new Response(JSON.stringify(successResponse), {
           status: 200,
           headers: {
-            'Content-Type': 'application/json'
-          }
+            'Content-Type': 'application/json',
+          },
         });
       } catch (error) {
         // Convert any thrown errors to standardized error response
@@ -688,15 +715,15 @@ export class OneBunApplication {
             {
               originalErrorName: error instanceof Error ? error.name : 'UnknownError',
               stack: error instanceof Error ? error.stack : undefined,
-            }
+            },
           );
         }
 
         return new Response(JSON.stringify(errorResponse), {
           status: 200, // Always return 200 for consistency with API response format
           headers: {
-            'Content-Type': 'application/json'
-          }
+            'Content-Type': 'application/json',
+          },
         });
       }
     }
@@ -721,6 +748,7 @@ export class OneBunApplication {
     if (context) {
       return this.logger.child(context);
     }
+
     return this.logger;
   }
 }

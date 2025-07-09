@@ -1,6 +1,23 @@
-import { BaseController, Controller, Get, Post, Put, Body, Param, Query } from '@onebun/core';
+import {
+  BaseController,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Body,
+  Param,
+  Query,
+} from '@onebun/core';
+
+import type {
+  UserQuery,
+  CreatePostData,
+  UpdateUserData,
+  User,
+  Post as PostEntity,
+} from './types';
+
 import { ExternalApiService } from './external-api.service';
-import type { UserQuery, CreatePostData, UpdateUserData, User, Post as PostEntity } from './types';
 
 @Controller('api')
 export class ApiController extends BaseController {
@@ -18,6 +35,7 @@ export class ApiController extends BaseController {
     try {
       const users = await this.api.getAllUsers(query);
       this.logger.info(`Fetched ${users.length} users using @onebun/requests (Traditional API)`);
+
       return this.success(users);
     } catch (error: any) {
       return this.error(`Failed to fetch users: ${error.message}`, 500);
@@ -32,6 +50,7 @@ export class ApiController extends BaseController {
     this.logger.info('Getting users with new req API');
     const users = await this.api.getAllUsers_NEW(query);
     this.logger.info(`Fetched ${users.length} users using new req API`);
+
     return users;
   }
 
@@ -43,6 +62,7 @@ export class ApiController extends BaseController {
     this.logger.info('Getting users with reqRaw API');
     const users = await this.api.getAllUsersRaw(query);
     this.logger.info(`Fetched ${users.length} users using reqRaw API`);
+
     return users;
   }
 
@@ -53,6 +73,7 @@ export class ApiController extends BaseController {
   async getUserById(@Param('id') id: string): Promise<User> {
     const userId = parseInt(id, 10);
     const user = await this.api.getUserById(userId);
+
     return user;
   }
 
@@ -65,6 +86,7 @@ export class ApiController extends BaseController {
 
     try {
       const user = await this.api.getUserByIdOld(userId);
+
       return this.success(user);
     } catch (error: any) {
       return this.error(`Failed to fetch user: ${error.message} | traceId: ${error.traceId}`, 404);
@@ -78,6 +100,7 @@ export class ApiController extends BaseController {
   async updateUser(@Param('id') id: string, @Body() userData: UpdateUserData): Promise<User> {
     const userId = parseInt(id, 10);
     const user = await this.api.updateUser(userId, userData);
+
     return user;
   }
 
@@ -89,6 +112,7 @@ export class ApiController extends BaseController {
     const userId = parseInt(id, 10);
     const posts = await this.api.getPostsByUserId(userId);
     this.logger.info(`Fetched ${posts.length} posts for user ${userId} using new req API`);
+
     return posts;
   }
 
@@ -98,6 +122,7 @@ export class ApiController extends BaseController {
   @Post('posts')
   async createPost(@Body() postData: CreatePostData): Promise<PostEntity> {
     const newPost = await this.api.createPost(postData);
+
     return newPost;
   }
 
@@ -108,6 +133,7 @@ export class ApiController extends BaseController {
   async demonstrateErrorHandling(): Promise<Response> {
     try {
       await this.api.demonstrateErrorHandling();
+
       return this.success({ message: 'Error handling demonstration completed - check console logs' });
     } catch (error: any) {
       return this.error(`Error handling demo failed: ${error.message}`, 500);
@@ -121,6 +147,7 @@ export class ApiController extends BaseController {
   async demonstrateAuthentication(): Promise<Response> {
     try {
       await this.api.demonstrateAuthentication();
+
       return this.success({ message: 'Authentication methods demonstration completed - check console logs' });
     } catch (error: any) {
       return this.error(`Authentication demo failed: ${error.message}`, 500);
@@ -134,6 +161,7 @@ export class ApiController extends BaseController {
   async demonstrateRetries(): Promise<Response> {
     try {
       await this.api.demonstrateRetries();
+
       return this.success({ message: 'Retry functionality demonstration completed - check console logs' });
     } catch (error: any) {
       return this.error(`Retry demo failed: ${error.message}`, 500);
@@ -152,9 +180,9 @@ export class ApiController extends BaseController {
         'Dual API support (Promise + Effect)',
         'Typed generics for data and query parameters',
         'Comprehensive error handling',
-        'Automatic retries and authentication'
+        'Automatic retries and authentication',
       ],
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
   }
 
@@ -168,6 +196,7 @@ export class ApiController extends BaseController {
 
     try {
       await Effect.runPromise(this.api.demonstrateErrorHandlingEffect());
+
       return this.success({ message: 'Error handling demonstration (Effect API) completed - check console logs' });
     } catch (error: any) {
       return this.error(`Error handling demo failed: ${error.message}`, 500);

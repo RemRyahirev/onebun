@@ -1,5 +1,11 @@
 import { Effect } from 'effect';
-import { EnvValidationError, EnvValueType, EnvVariableConfig, EnvLoadOptions } from './types';
+
+import {
+  EnvValidationError,
+  EnvValueType,
+  EnvVariableConfig,
+  EnvLoadOptions,
+} from './types';
 
 /**
  * Environment variable parser
@@ -12,7 +18,7 @@ export class EnvParser {
     variable: string,
     value: string | undefined,
     config: EnvVariableConfig<T>,
-    options: EnvLoadOptions = {}
+    options: EnvLoadOptions = {},
   ): Effect.Effect<T, EnvValidationError> {
     const resolveValue = Effect.sync(() => {
       // If value is not set
@@ -23,16 +29,20 @@ export class EnvParser {
         if (config.required) {
           throw new EnvValidationError(variable, value, 'Required variable is not set');
         }
+
         return EnvParser.getDefaultForTypeSync(config.type);
       }
+
       return value;
     });
 
     const parseValue = (resolvedValue: any) => {
       if (typeof resolvedValue === 'string') {
         const separator = config.separator || options.defaultArraySeparator || ',';
+
         return EnvParser.parseByType(variable, resolvedValue, config.type, separator);
       }
+
       return Effect.succeed(resolvedValue);
     };
 
@@ -40,7 +50,7 @@ export class EnvParser {
 
     return resolveValue.pipe(
       Effect.flatMap(parseValue),
-      Effect.flatMap(validateParsed)
+      Effect.flatMap(validateParsed),
     );
   }
 
@@ -51,10 +61,10 @@ export class EnvParser {
     variable: string,
     value: string,
     type: EnvValueType,
-    separator = ','
+    separator = ',',
   ): Effect.Effect<any, EnvValidationError> {
     return Effect.try({
-      try: () => {
+      try() {
         switch (type) {
           case 'string':
             return value;
@@ -64,18 +74,26 @@ export class EnvParser {
             if (isNaN(num)) {
               throw new Error(`"${value}" is not a valid number`);
             }
+
             return num;
           }
           
           case 'boolean': {
             const lower = value.toLowerCase();
-            if (['true', '1', 'yes', 'on'].includes(lower)) return true;
-            if (['false', '0', 'no', 'off'].includes(lower)) return false;
+            if (['true', '1', 'yes', 'on'].includes(lower)) {
+              return true;
+            }
+            if (['false', '0', 'no', 'off'].includes(lower)) {
+              return false;
+            }
             throw new Error(`"${value}" is not a valid boolean`);
           }
           
           case 'array': {
-            if (value.trim() === '') return [];
+            if (value.trim() === '') {
+              return [];
+            }
+
             return value.split(separator).map(item => item.trim());
           }
           
@@ -84,7 +102,7 @@ export class EnvParser {
         }
       },
       catch: (error) =>
-        new EnvValidationError(variable, value, error instanceof Error ? error.message : String(error))
+        new EnvValidationError(variable, value, error instanceof Error ? error.message : String(error)),
     });
   }
 
@@ -94,11 +112,12 @@ export class EnvParser {
   private static validateValue<T>(
     variable: string,
     value: T,
-    config: EnvVariableConfig<T>
+    config: EnvVariableConfig<T>,
   ): Effect.Effect<T, EnvValidationError> {
     if (config.validate) {
       return config.validate(value);
     }
+
     return Effect.succeed(value);
   }
 

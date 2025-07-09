@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+
 import { EnvVariableConfig, EnvValidationError } from './types';
 
 /**
@@ -20,7 +21,7 @@ export const Env = {
     return {
       type: 'string',
       separator: ',',
-      ...options
+      ...options,
     };
   },
 
@@ -41,182 +42,190 @@ export const Env = {
 
     // Add range validation if specified
     if (options.min !== undefined || options.max !== undefined) {
-             const rangeValidator = (value: number) => {
-         if (options.min !== undefined && value < options.min) {
-           return Effect.fail(new EnvValidationError('', value, `Value must be >= ${options.min}`));
-         }
-         if (options.max !== undefined && value > options.max) {
-           return Effect.fail(new EnvValidationError('', value, `Value must be <= ${options.max}`));
-         }
-         return Effect.succeed(value);
-       };
+      const rangeValidator = (value: number) => {
+        if (options.min !== undefined && value < options.min) {
+          return Effect.fail(new EnvValidationError('', value, `Value must be >= ${options.min}`));
+        }
+        if (options.max !== undefined && value > options.max) {
+          return Effect.fail(new EnvValidationError('', value, `Value must be <= ${options.max}`));
+        }
 
-       if (validator) {
-         const originalValidator = validator;
-         validator = (value: number) => 
-           rangeValidator(value).pipe(
-             Effect.flatMap(originalValidator)
-           );
-       } else {
-         validator = rangeValidator;
-       }
+        return Effect.succeed(value);
+      };
+
+      if (validator) {
+        const originalValidator = validator;
+        validator = (value: number) => 
+          rangeValidator(value).pipe(
+            Effect.flatMap(originalValidator),
+          );
+      } else {
+        validator = rangeValidator;
+      }
     }
 
-         return {
-       type: 'number',
-       description: options.description,
-       default: options.default,
-       required: options.required,
-       sensitive: options.sensitive,
-       env: options.env,
-       validate: validator
-     };
-   },
+    return {
+      type: 'number',
+      description: options.description,
+      default: options.default,
+      required: options.required,
+      sensitive: options.sensitive,
+      env: options.env,
+      validate: validator,
+    };
+  },
 
-   /**
+  /**
     * Create configuration for boolean variable
     */
-   boolean(options: {
-     env?: string;
-     description?: string;
-     default?: boolean;
-     required?: boolean;
-     sensitive?: boolean;
-     validate?: (value: boolean) => Effect.Effect<boolean, EnvValidationError>;
-   } = {}): EnvVariableConfig<boolean> {
-     return {
-       type: 'boolean',
-       ...options
-     };
-   },
+  boolean(options: {
+    env?: string;
+    description?: string;
+    default?: boolean;
+    required?: boolean;
+    sensitive?: boolean;
+    validate?: (value: boolean) => Effect.Effect<boolean, EnvValidationError>;
+  } = {}): EnvVariableConfig<boolean> {
+    return {
+      type: 'boolean',
+      ...options,
+    };
+  },
 
-     /**
+  /**
     * Create configuration for string array variable
     */
-   array(options: {
-     env?: string;
-     description?: string;
-     default?: string[];
-     required?: boolean;
-     sensitive?: boolean;
-     separator?: string;
-     minLength?: number;
-     maxLength?: number;
-     validate?: (value: string[]) => Effect.Effect<string[], EnvValidationError>;
-   } = {}): EnvVariableConfig<string[]> {
-     let validator = options.validate;
+  array(options: {
+    env?: string;
+    description?: string;
+    default?: string[];
+    required?: boolean;
+    sensitive?: boolean;
+    separator?: string;
+    minLength?: number;
+    maxLength?: number;
+    validate?: (value: string[]) => Effect.Effect<string[], EnvValidationError>;
+  } = {}): EnvVariableConfig<string[]> {
+    let validator = options.validate;
 
-     // Add length validation if specified
-     if (options.minLength !== undefined || options.maxLength !== undefined) {
-       const lengthValidator = (value: string[]) => {
-         if (options.minLength !== undefined && value.length < options.minLength) {
-           return Effect.fail(new EnvValidationError('', value, `Array must have at least ${options.minLength} items`));
-         }
-         if (options.maxLength !== undefined && value.length > options.maxLength) {
-           return Effect.fail(new EnvValidationError('', value, `Array must have at most ${options.maxLength} items`));
-         }
-         return Effect.succeed(value);
-       };
+    // Add length validation if specified
+    if (options.minLength !== undefined || options.maxLength !== undefined) {
+      const lengthValidator = (value: string[]) => {
+        if (options.minLength !== undefined && value.length < options.minLength) {
+          return Effect.fail(new EnvValidationError('', value, `Array must have at least ${options.minLength} items`));
+        }
+        if (options.maxLength !== undefined && value.length > options.maxLength) {
+          return Effect.fail(new EnvValidationError('', value, `Array must have at most ${options.maxLength} items`));
+        }
 
-       if (validator) {
-         const originalValidator = validator;
-         validator = (value: string[]) => 
-           lengthValidator(value).pipe(
-             Effect.flatMap(originalValidator)
-           );
-       } else {
-         validator = lengthValidator;
-       }
-     }
+        return Effect.succeed(value);
+      };
 
-     return {
-       type: 'array',
-       description: options.description,
-       default: options.default,
-       required: options.required,
-       sensitive: options.sensitive,
-       env: options.env,
-       separator: options.separator || ',',
-       validate: validator
-     };
-   },
+      if (validator) {
+        const originalValidator = validator;
+        validator = (value: string[]) => 
+          lengthValidator(value).pipe(
+            Effect.flatMap(originalValidator),
+          );
+      } else {
+        validator = lengthValidator;
+      }
+    }
 
-     /**
+    return {
+      type: 'array',
+      description: options.description,
+      default: options.default,
+      required: options.required,
+      sensitive: options.sensitive,
+      env: options.env,
+      separator: options.separator || ',',
+      validate: validator,
+    };
+  },
+
+  /**
     * Create validator for string with regular expression
     */
-   regex(pattern: RegExp, errorMessage?: string) {
-     return (value: string) => {
-       if (!pattern.test(value)) {
-         return Effect.fail(new EnvValidationError('', value, errorMessage || `Value must match pattern ${pattern}`));
-       }
-       return Effect.succeed(value);
-     };
-   },
+  regex(pattern: RegExp, errorMessage?: string) {
+    return (value: string) => {
+      if (!pattern.test(value)) {
+        return Effect.fail(new EnvValidationError('', value, errorMessage || `Value must match pattern ${pattern}`));
+      }
 
-   /**
+      return Effect.succeed(value);
+    };
+  },
+
+  /**
     * Create validator for string from allowed values list
     */
-   oneOf<T extends string>(allowedValues: readonly T[], errorMessage?: string) {
-     return (value: string) => {
-       if (!allowedValues.includes(value as T)) {
-         return Effect.fail(new EnvValidationError(
-           '', 
-           value, 
-           errorMessage || `Value must be one of: ${allowedValues.join(', ')}`
-         ));
-       }
-       return Effect.succeed(value as T);
-     };
-   },
+  oneOf<T extends string>(allowedValues: readonly T[], errorMessage?: string) {
+    return (value: string) => {
+      if (!allowedValues.includes(value as T)) {
+        return Effect.fail(new EnvValidationError(
+          '', 
+          value, 
+          errorMessage || `Value must be one of: ${allowedValues.join(', ')}`,
+        ));
+      }
 
-   /**
+      return Effect.succeed(value as T);
+    };
+  },
+
+  /**
     * Create validator for URL
     */
-   url(errorMessage?: string) {
-     return (value: string) => {
-       try {
-         new URL(value);
-         return Effect.succeed(value);
-       } catch {
-         return Effect.fail(new EnvValidationError(
-           '', 
-           value, 
-           errorMessage || 'Value must be a valid URL'
-         ));
-       }
-     };
-   },
+  url(errorMessage?: string) {
+    return (value: string) => {
+      try {
+        new URL(value);
 
-   /**
+        return Effect.succeed(value);
+      } catch {
+        return Effect.fail(new EnvValidationError(
+          '', 
+          value, 
+          errorMessage || 'Value must be a valid URL',
+        ));
+      }
+    };
+  },
+
+  /**
     * Create validator for email
     */
-   email(errorMessage?: string) {
-     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-     return (value: string) => {
-       if (!emailRegex.test(value)) {
-         return Effect.fail(new EnvValidationError(
-           '', 
-           value, 
-           errorMessage || 'Value must be a valid email address'
-         ));
-       }
-       return Effect.succeed(value);
-     };
-   },
+  email(errorMessage?: string) {
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-   /**
+    return (value: string) => {
+      if (!emailRegex.test(value)) {
+        return Effect.fail(new EnvValidationError(
+          '', 
+          value, 
+          errorMessage || 'Value must be a valid email address',
+        ));
+      }
+
+      return Effect.succeed(value);
+    };
+  },
+
+  /**
     * Create validator for port number
     */
-   port(errorMessage?: string) {
-     return (value: number) => {
-       if (!Number.isInteger(value) || value < 1 || value > 65535) {
-         return Effect.fail(new EnvValidationError(
-           '', 
-           value, 
-           errorMessage || 'Port must be an integer between 1 and 65535'
-         ));
-       }
-       return Effect.succeed(value);
-     };
-   }
+  port(errorMessage?: string) {
+    return (value: number) => {
+      if (!Number.isInteger(value) || value < 1 || value > 65535) {
+        return Effect.fail(new EnvValidationError(
+          '', 
+          value, 
+          errorMessage || 'Port must be an integer between 1 and 65535',
+        ));
+      }
+
+      return Effect.succeed(value);
+    };
+  },
 }; 

@@ -20,10 +20,10 @@ export class Controller {
     if (logger) {
       // Use provided logger and create a child with the controller class name
       this.logger = logger.child({ className });
-          } else {
-        // This should never happen since OneBunApplication always provides a logger
-        throw new Error(`Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`);
-      }
+    } else {
+      // This should never happen since OneBunApplication always provides a logger
+      throw new Error(`Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`);
+    }
 
     // Set configuration instance
     this.config = config;
@@ -110,8 +110,8 @@ export class Controller {
     return new Response(JSON.stringify({ success: true, result }), {
       status,
       headers: {
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+      },
     });
   }
 
@@ -126,8 +126,8 @@ export class Controller {
     return new Response(JSON.stringify({ success: false, code, message }), {
       status,
       headers: {
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+      },
     });
   }
 
@@ -145,8 +145,8 @@ export class Controller {
     return new Response(data, {
       status,
       headers: {
-        'Content-Type': 'text/plain'
-      }
+        'Content-Type': 'text/plain',
+      },
     });
   }
 }

@@ -1,4 +1,5 @@
 import { Context } from 'effect';
+
 import { BaseService, Service } from './service';
 
 /**
@@ -35,6 +36,7 @@ export class ConfigServiceImpl extends BaseService {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
+
     return this.configInstance.get(path);
   }
 
@@ -45,6 +47,7 @@ export class ConfigServiceImpl extends BaseService {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
+
     return this.configInstance.values;
   }
 
@@ -55,6 +58,7 @@ export class ConfigServiceImpl extends BaseService {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
+
     return this.configInstance.getSafeConfig();
   }
 

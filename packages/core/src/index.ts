@@ -35,5 +35,5 @@ export {
   UseMiddleware,
   getConstructorParamTypes,
   registerControllerDependencies,
-  registerDependencies
+  registerDependencies,
 } from './decorators';

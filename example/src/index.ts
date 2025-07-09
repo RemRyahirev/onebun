@@ -1,4 +1,5 @@
 import { OneBunApplication } from '@onebun/core';
+
 import { AppModule } from './app.module';
 import { envSchema } from './config';
 

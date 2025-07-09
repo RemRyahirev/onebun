@@ -1,4 +1,8 @@
-import { LogEntry, LogFormatter, LogLevel } from './types';
+import {
+  LogEntry,
+  LogFormatter,
+  LogLevel,
+} from './types';
 
 /**
  * Colors for console output
@@ -19,8 +23,12 @@ const COLORS: Record<string, string> = {
  * Format a value for pretty output
  */
 function formatValue(value: unknown, depth = 0): string {
-  if (value === null) return '\x1b[90mnull\x1b[0m';
-  if (value === undefined) return '\x1b[90mundefined\x1b[0m';
+  if (value === null) {
+    return '\x1b[90mnull\x1b[0m';
+  }
+  if (value === undefined) {
+    return '\x1b[90mundefined\x1b[0m';
+  }
   
   if (typeof value === 'string') {
     return `\x1b[32m"${value}"\x1b[0m`;
@@ -43,10 +51,14 @@ function formatValue(value: unknown, depth = 0): string {
   }
   
   if (Array.isArray(value)) {
-    if (depth > 3) return '\x1b[90m[Array]\x1b[0m';
+    if (depth > 3) {
+      return '\x1b[90m[Array]\x1b[0m';
+    }
     
     const items = value.map(item => formatValue(item, depth + 1));
-    if (items.length === 0) return '\x1b[90m[]\x1b[0m';
+    if (items.length === 0) {
+      return '\x1b[90m[]\x1b[0m';
+    }
     
     const indent = '  '.repeat(depth + 1);
     const closeIndent = '  '.repeat(depth);
@@ -55,10 +67,14 @@ function formatValue(value: unknown, depth = 0): string {
   }
   
   if (typeof value === 'object') {
-    if (depth > 3) return '\x1b[90m[Object]\x1b[0m';
+    if (depth > 3) {
+      return '\x1b[90m[Object]\x1b[0m';
+    }
     
     const entries = Object.entries(value as Record<string, unknown>);
-    if (entries.length === 0) return '\x1b[90m{}\x1b[0m';
+    if (entries.length === 0) {
+      return '\x1b[90m{}\x1b[0m';
+    }
     
     const indent = '  '.repeat(depth + 1);
     const closeIndent = '  '.repeat(depth);
@@ -67,6 +83,7 @@ function formatValue(value: unknown, depth = 0): string {
       const formattedKey = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key) 
         ? `\x1b[34m${key}\x1b[0m` 
         : `\x1b[32m"${key}"\x1b[0m`;
+
       return `${formattedKey}: ${formatValue(val, depth + 1)}`;
     });
     
@@ -165,7 +182,7 @@ export class JsonFormatter implements LogFormatter {
       logData.trace = {
         traceId: entry.trace.traceId,
         spanId: entry.trace.spanId,
-        ...(entry.trace.parentSpanId ? { parentSpanId: entry.trace.parentSpanId } : {})
+        ...(entry.trace.parentSpanId ? { parentSpanId: entry.trace.parentSpanId } : {}),
       };
     }
 
@@ -188,7 +205,7 @@ export class JsonFormatter implements LogFormatter {
       logData.error = {
         message: entry.error.message,
         stack: entry.error.stack,
-        name: entry.error.name
+        name: entry.error.name,
       };
     }
 

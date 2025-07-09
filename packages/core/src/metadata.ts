@@ -16,7 +16,7 @@ export function defineMetadata(
   metadataKey: string,
   metadataValue: any,
   target: object,
-  propertyKey?: string | symbol
+  propertyKey?: string | symbol,
 ): void {
   // Get or create metadata map for target
   let targetMetadata = metadataStorage.get(target);
@@ -46,7 +46,7 @@ export function defineMetadata(
 export function getMetadata(
   metadataKey: string,
   target: object,
-  propertyKey?: string | symbol
+  propertyKey?: string | symbol,
 ): any {
   // Get metadata map for target
   const targetMetadata = metadataStorage.get(target);
@@ -86,6 +86,7 @@ function getLegacyConstructorParamTypes(target: Function): Function[] | undefine
     // Skip undefined, Object, and basic types
     if (!type || type === Object || type === String || type === Number || type === Boolean) {
       console.log(`Skipping basic type at index ${index}:`, type?.name || 'undefined');
+
       return false;
     }
     
@@ -93,10 +94,12 @@ function getLegacyConstructorParamTypes(target: Function): Function[] | undefine
     const typeName = type.name;
     if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
       console.log(`Skipping system type at index ${index}:`, typeName);
+
       return false;
     }
     
     console.log(`Keeping service type at index ${index}:`, typeName);
+
     return true;
   });
   
@@ -141,6 +144,7 @@ if (typeof (globalThis as any).__decorate === 'undefined') {
         }
       }
     }
+
     return result;
   };
 }
@@ -154,7 +158,7 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
   const globalMetadataStorage = new WeakMap<any, Map<string, any>>();
   
   const reflectPolyfill = {
-    metadata: (key: string, value: any) => {
+    metadata(key: string, value: any) {
       return function(target: any) {
         if (!globalMetadataStorage.has(target)) {
           globalMetadataStorage.set(target, new Map());
@@ -163,17 +167,18 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
       };
     },
     
-    getMetadata: (key: string, target: any) => {
+    getMetadata(key: string, target: any) {
       const metadata = globalMetadataStorage.get(target);
+
       return metadata ? metadata.get(key) : undefined;
     },
     
-    defineMetadata: (key: string, value: any, target: any) => {
+    defineMetadata(key: string, value: any, target: any) {
       if (!globalMetadataStorage.has(target)) {
         globalMetadataStorage.set(target, new Map());
       }
       globalMetadataStorage.get(target)!.set(key, value);
-    }
+    },
   };
   
   if (!(globalThis as any).Reflect) {
@@ -202,6 +207,7 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
         if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
           return false;
         }
+
         return true;
       });
       
@@ -222,6 +228,7 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
       if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
         return false;
       }
+
       return true;
     });
     
@@ -238,5 +245,5 @@ export const Reflect = {
   defineMetadata,
   getMetadata,
   getConstructorParamTypes,
-  setConstructorParamTypes
+  setConstructorParamTypes,
 };

@@ -44,7 +44,7 @@ export abstract class OneBunBaseError<E extends string = string, R extends strin
   constructor(
     public readonly error: E,
     public readonly details: Record<string, unknown> = {},
-    public readonly originalError?: OneBunError<R>
+    public readonly originalError?: OneBunError<R>,
   ) {
     super(String(error));
     this.name = this.constructor.name;
@@ -56,7 +56,7 @@ export abstract class OneBunBaseError<E extends string = string, R extends strin
       error: this.error,
       code: this.code,
       details: this.details,
-      originalError: this.originalError
+      originalError: this.originalError,
     };
   }
 
@@ -97,7 +97,7 @@ export abstract class OneBunBaseError<E extends string = string, R extends strin
     return new InternalServerError<U, E>(
       contextMessage,
       contextDetails,
-      this.toErrorResponse()
+      this.toErrorResponse(),
     );
   }
 }
@@ -171,7 +171,7 @@ export function createErrorResponse<E extends string, R extends string>(
   message?: string,
   traceId?: string,
   details: Record<string, unknown> = {},
-  originalError?: OneBunError<E, R>
+  originalError?: OneBunError<E, R>,
 ): ErrorResponse {
   return {
     success: false,
@@ -180,7 +180,7 @@ export function createErrorResponse<E extends string, R extends string>(
     traceId,
     code,
     details,
-    originalError
+    originalError,
   };
 }
 
@@ -348,7 +348,7 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
   delay: 300,
   backoff: 'exponential',
   factor: 2,
-  retryOn: [408, 429, 500, 502, 503, 504]
+  retryOn: [408, 429, 500, 502, 503, 504],
 };
 
 /**
@@ -379,5 +379,5 @@ export const DEFAULT_REQUESTS_OPTIONS: Required<Omit<RequestsOptions, 'baseUrl' 
   retries: DEFAULT_RETRY_CONFIG,
   tracing: true,
   metrics: true,
-  userAgent: 'OneBun-Requests/1.0'
+  userAgent: 'OneBun-Requests/1.0',
 }; 

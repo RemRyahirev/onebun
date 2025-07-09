@@ -1,5 +1,10 @@
 import { Effect, pipe } from 'effect';
-import type { AuthConfig, RequestConfig, OneBunAuthConfig } from './types.js';
+
+import type {
+  AuthConfig,
+  RequestConfig,
+  OneBunAuthConfig,
+} from './types.js';
 
 /**
  * Apply authentication to request configuration
@@ -11,8 +16,8 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         ...config,
         headers: {
           ...config.headers,
-          'Authorization': `Bearer ${auth.token}`
-        }
+          'Authorization': `Bearer ${auth.token}`,
+        },
       });
 
     case 'apikey':
@@ -21,27 +26,28 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
           ...config,
           query: {
             ...config.query,
-            [auth.key]: auth.value
-          }
+            [auth.key]: auth.value,
+          },
         });
       } else {
         return Effect.succeed({
           ...config,
           headers: {
             ...config.headers,
-            [auth.key]: auth.value
-          }
+            [auth.key]: auth.value,
+          },
         });
       }
 
     case 'basic':
       const credentials = btoa(`${auth.username}:${auth.password}`);
+
       return Effect.succeed({
         ...config,
         headers: {
           ...config.headers,
-          'Authorization': `Basic ${credentials}`
-        }
+          'Authorization': `Basic ${credentials}`,
+        },
       });
 
     case 'custom':
@@ -52,7 +58,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
           if (auth.headers) {
             updatedConfig.headers = {
               ...updatedConfig.headers,
-              ...auth.headers
+              ...auth.headers,
             };
           }
 
@@ -60,7 +66,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
           if (auth.query) {
             updatedConfig.query = {
               ...updatedConfig.query,
-              ...auth.query
+              ...auth.query,
             };
           }
 
@@ -71,11 +77,12 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
           if (auth.interceptor) {
             return Effect.tryPromise({
               try: () => Promise.resolve(auth.interceptor!(updatedConfig)),
-              catch: (error) => new Error(`Auth interceptor failed: ${error}`)
+              catch: (error) => new Error(`Auth interceptor failed: ${error}`),
             });
           }
+
           return Effect.succeed(updatedConfig);
-        })
+        }),
       );
 
     case 'onebun':
@@ -100,7 +107,7 @@ const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.
     config.url,
     timestamp,
     nonce,
-    auth.serviceId
+    auth.serviceId,
   ].join('\n');
 
   return pipe(
@@ -113,9 +120,9 @@ const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.
         'X-OneBun-Timestamp': timestamp,
         'X-OneBun-Nonce': nonce,
         'X-OneBun-Algorithm': algorithm,
-        'X-OneBun-Signature': signature
-      }
-    }))
+        'X-OneBun-Signature': signature,
+      },
+    })),
   );
 };
 
@@ -125,10 +132,10 @@ const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.
 const generateSignature = (
   payload: string, 
   secretKey: string, 
-  algorithm: 'hmac-sha256' | 'hmac-sha512'
+  algorithm: 'hmac-sha256' | 'hmac-sha512',
 ): Effect.Effect<string, Error> => {
   return Effect.tryPromise({
-    try: async () => {
+    async try() {
       const encoder = new TextEncoder();
       const keyData = encoder.encode(secretKey);
       const payloadData = encoder.encode(payload);
@@ -140,15 +147,16 @@ const generateSignature = (
         keyData,
         { name: 'HMAC', hash: algorithmName },
         false,
-        ['sign']
+        ['sign'],
       );
 
       const signature = await crypto.subtle.sign('HMAC', cryptoKey, payloadData);
+
       return Array.from(new Uint8Array(signature))
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
     },
-    catch: (error) => new Error(`Failed to generate signature: ${error}`)
+    catch: (error) => new Error(`Failed to generate signature: ${error}`),
   });
 };
 
@@ -158,6 +166,7 @@ const generateSignature = (
 const generateNonce = (): string => {
   const array = new Uint8Array(16);
   crypto.getRandomValues(array);
+
   return Array.from(array)
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
@@ -169,7 +178,7 @@ const generateNonce = (): string => {
 export const validateOneBunAuth = (
   headers: Record<string, string>,
   secretKey: string,
-  maxAge: number = 300000 // 5 minutes
+  maxAge: number = 300000, // 5 minutes
 ): Effect.Effect<{ serviceId: string; valid: boolean }, Error> => {
   const serviceId = headers['x-onebun-service-id'];
   const timestamp = headers['x-onebun-timestamp'];
@@ -199,7 +208,7 @@ export const validateOneBunAuth = (
     generateSignature(payload, secretKey, algorithm),
     Effect.map((expectedSignature) => ({
       serviceId,
-      valid: signature === expectedSignature
-    }))
+      valid: signature === expectedSignature,
+    })),
   );
 }; 

@@ -14,7 +14,7 @@ export * from './auth.js';
 // HTTP client
 export { 
   HttpClient,
-  executeRequest
+  executeRequest,
 } from './client.js';
 
 // Service for dependency injection
@@ -39,5 +39,5 @@ export type {
   RequestMetricsData,
   RequestTraceData,
   ReqConfig,
-  RequestErrorConfig
+  RequestErrorConfig,
 } from './types.js'; 

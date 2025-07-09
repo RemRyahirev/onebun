@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+
 import { TraceService } from './trace.service.js';
 import { TraceHeaders, HttpTraceData } from './types.js';
 
@@ -20,9 +21,9 @@ export class TraceMiddleware {
               extractedContext 
                 ? traceService.setContext(extractedContext)
                 : Effect.flatMap(
-                    traceService.generateTraceContext(),
-                    (newContext) => traceService.setContext(newContext)
-                  ),
+                  traceService.generateTraceContext(),
+                  (newContext) => traceService.setContext(newContext),
+                ),
               () => {
                 const httpData: Partial<HttpTraceData> = {
                   method: request.method,
@@ -63,16 +64,16 @@ export class TraceMiddleware {
                           'error.type': error.constructor.name,
                           'error.message': error.message,
                         }),
-                        () => traceService.endHttpTrace(span, errorData)
+                        () => traceService.endHttpTrace(span, errorData),
                       );
-                    })
-                  )
+                    }),
+                  ),
                 );
-              }
-            )
-          )
+              },
+            ),
+          ),
         );
-      })
+      }),
     );
   }
 
@@ -81,6 +82,7 @@ export class TraceMiddleware {
    */
   private static extractHeaders(request: any): TraceHeaders {
     const headers = request.headers || {};
+
     return {
       'traceparent': headers['traceparent'],
       'tracestate': headers['tracestate'],
@@ -104,6 +106,7 @@ export class TraceMiddleware {
    */
   private static getRequestSize(request: any): number | undefined {
     const contentLength = request.headers?.['content-length'];
+
     return contentLength ? parseInt(contentLength, 10) : undefined;
   }
 
@@ -111,7 +114,9 @@ export class TraceMiddleware {
    * Get response content length
    */
   private static getResponseSize(response: any): number | undefined {
-    if (!response) return undefined;
+    if (!response) {
+      return undefined;
+    }
     
     const contentLength = response.headers?.['content-length'];
     if (contentLength) {
@@ -164,16 +169,18 @@ export function Trace(operationName?: string) {
             }).pipe(
               Effect.tap(() => {
                 const duration = Date.now() - startTime;
+
                 return Effect.flatMap(
                   traceService.setAttributes({
                     'method.name': propertyKey,
                     'method.duration': duration,
                   }),
-                  () => traceService.endSpan(span)
+                  () => traceService.endSpan(span),
                 );
               }),
               Effect.tapError((error) => {
                 const duration = Date.now() - startTime;
+
                 return Effect.flatMap(
                   traceService.setAttributes({
                     'method.name': propertyKey,
@@ -184,12 +191,12 @@ export function Trace(operationName?: string) {
                   () => traceService.endSpan(span, {
                     code: 2, // ERROR
                     message: error.message,
-                  })
+                  }),
                 );
-              })
+              }),
             );
-          }
-        )
+          },
+        ),
       );
     };
 
@@ -214,10 +221,10 @@ export function Span(name?: string) {
             Effect.try(() => originalMethod.apply(this, args)),
             (result) => Effect.flatMap(
               traceService.endSpan(span),
-              () => Effect.succeed(result)
-            )
-          )
-        )
+              () => Effect.succeed(result),
+            ),
+          ),
+        ),
       );
     };
 

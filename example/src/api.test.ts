@@ -1,4 +1,10 @@
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+} from 'bun:test';
 import { createHttpClient } from '@onebun/requests';
 
 describe('New req API Pattern', () => {
@@ -7,7 +13,7 @@ describe('New req API Pattern', () => {
   beforeAll(() => {
     client = createHttpClient({
       baseUrl: 'https://jsonplaceholder.typicode.com',
-      timeout: 5000
+      timeout: 5000,
     });
   });
 
@@ -51,9 +57,9 @@ describe('New req API Pattern', () => {
             error: 'CUSTOM_ERROR',
             message: 'Custom error message',
             details: { custom: true },
-            code: 404
-          }
-        }
+            code: 404,
+          },
+        },
       });
       expect(true).toBe(false); // Should not reach here
     } catch (error: any) {
@@ -69,7 +75,7 @@ describe('New req API Pattern', () => {
     const postData = {
       title: 'Test Post',
       body: 'This is a test post',
-      userId: 1
+      userId: 1,
     };
 
     const newPost = await client.req('POST', '/posts', postData);

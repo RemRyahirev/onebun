@@ -9,7 +9,7 @@
 export {
   MetricsService,
   makeMetricsService,
-  createMetricsService
+  createMetricsService,
 } from './metrics.service';
 
 // Types
@@ -18,7 +18,7 @@ export type {
   HttpMetricsData,
   SystemMetricsData,
   MetricsRegistry,
-  CustomMetricConfig
+  CustomMetricConfig,
 } from './types';
 
 export { MetricType } from './types';
@@ -27,7 +27,7 @@ export { MetricType } from './types';
 export {
   MetricsMiddleware,
   WithMetrics as WithMetricsMiddleware,
-  recordHttpMetrics
+  recordHttpMetrics,
 } from './middleware';
 
 // Decorators
@@ -37,7 +37,7 @@ export {
   MeasureGauge,
   InjectMetric,
   WithMetrics,
-  measureExecutionTime
+  measureExecutionTime,
 } from './decorators';
 
 // Re-export commonly used prom-client types
@@ -45,7 +45,7 @@ export type {
   Counter,
   Gauge,
   Histogram,
-  Summary
+  Summary,
 } from 'prom-client';
 
 /**
@@ -60,7 +60,7 @@ export const DEFAULT_METRICS_OPTIONS = {
   collectGcMetrics: true,
   systemMetricsInterval: 5000,
   prefix: 'onebun_',
-  httpDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+  httpDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
 } as const;
 
 /**
@@ -68,9 +68,10 @@ export const DEFAULT_METRICS_OPTIONS = {
  */
 export const createDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}) => {
   const { createMetricsService } = require('./metrics.service');
+
   return createMetricsService({
     ...DEFAULT_METRICS_OPTIONS,
-    ...overrides
+    ...overrides,
   });
 };
 
@@ -79,8 +80,9 @@ export const createDefaultMetricsService = (overrides: Partial<import('./types')
  */
 export const makeDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}) => {
   const { makeMetricsService } = require('./metrics.service');
+
   return makeMetricsService({
     ...DEFAULT_METRICS_OPTIONS,
-    ...overrides
+    ...overrides,
   });
 }; 

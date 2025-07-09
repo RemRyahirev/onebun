@@ -1,4 +1,8 @@
-import { Effect, Layer, Context } from 'effect';
+import {
+  Effect,
+  Layer,
+  Context,
+} from 'effect';
 import {
   register,
   collectDefaultMetrics,
@@ -7,6 +11,7 @@ import {
   Histogram,
   Summary,
 } from 'prom-client';
+
 import type {
   MetricsOptions,
   HttpMetricsData,
@@ -107,7 +112,7 @@ class MetricsServiceImpl implements MetricsService {
       systemMetricsInterval: 5000,
       prefix: 'onebun_',
       httpDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
-      ...options
+      ...options,
     };
 
     this.cpuUsageBaseline = process.cpuUsage();
@@ -128,7 +133,7 @@ class MetricsServiceImpl implements MetricsService {
       collectDefaultMetrics({
         register,
         prefix: this.options.prefix,
-        gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5]
+        gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5],
       });
     }
 
@@ -148,7 +153,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}http_requests_total`,
       help: 'Total number of HTTP requests',
       labelNames: ['method', 'route', 'status_code', 'controller', 'action'],
-      registers: [register]
+      registers: [register],
     });
 
     this.httpRequestDuration = new Histogram({
@@ -156,7 +161,7 @@ class MetricsServiceImpl implements MetricsService {
       help: 'HTTP request duration in seconds',
       labelNames: ['method', 'route', 'status_code', 'controller', 'action'],
       buckets: this.options.httpDurationBuckets!,
-      registers: [register]
+      registers: [register],
     });
   }
 
@@ -165,19 +170,19 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}memory_usage_bytes`,
       help: 'Memory usage in bytes',
       labelNames: ['type'],
-      registers: [register]
+      registers: [register],
     });
 
     this.systemCpuUsage = new Gauge({
       name: `${this.options.prefix}cpu_usage_ratio`,
       help: 'CPU usage ratio',
-      registers: [register]
+      registers: [register],
     });
 
     this.systemUptime = new Gauge({
       name: `${this.options.prefix}uptime_seconds`,
       help: 'Process uptime in seconds',
-      registers: [register]
+      registers: [register],
     });
   }
 
@@ -185,7 +190,8 @@ class MetricsServiceImpl implements MetricsService {
     if (!this.options.enabled) {
       return '';
     }
-    return register.metrics();
+
+    return await register.metrics();
   }
 
   getContentType(): string {
@@ -202,7 +208,7 @@ class MetricsServiceImpl implements MetricsService {
       route: data.route,
       status_code: data.statusCode.toString(),
       controller: data.controller || 'unknown',
-      action: data.action || 'unknown'
+      action: data.action || 'unknown',
     };
 
     this.httpRequestsTotal.inc(labels);
@@ -214,7 +220,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      registers: [register]
+      registers: [register],
     });
   }
 
@@ -223,7 +229,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      registers: [register]
+      registers: [register],
     });
   }
 
@@ -233,7 +239,7 @@ class MetricsServiceImpl implements MetricsService {
       help: config.help,
       labelNames: config.labelNames || [],
       buckets: config.buckets || [0.001, 0.01, 0.1, 1, 10],
-      registers: [register]
+      registers: [register],
     });
   }
 
@@ -245,12 +251,13 @@ class MetricsServiceImpl implements MetricsService {
       percentiles: config.percentiles || [0.01, 0.05, 0.5, 0.9, 0.95, 0.99, 0.999],
       maxAgeSeconds: config.maxAgeSeconds || 600,
       ageBuckets: config.ageBuckets || 5,
-      registers: [register]
+      registers: [register],
     });
   }
 
   getMetric<T = any>(name: string): T | undefined {
     const fullName = name.startsWith(this.options.prefix!) ? name : `${this.options.prefix}${name}`;
+
     return register.getSingleMetric(fullName) as T;
   }
 
@@ -263,7 +270,7 @@ class MetricsServiceImpl implements MetricsService {
       getMetrics: () => this.getMetrics(),
       getContentType: () => this.getContentType(),
       clear: () => this.clear(),
-      register
+      register,
     };
   }
 
