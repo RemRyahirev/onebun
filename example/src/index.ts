@@ -17,7 +17,7 @@ const app = new OneBunApplication(AppModule, {
     collectHttpMetrics: true,
     collectSystemMetrics: true,
     collectGcMetrics: true,
-    prefix: 'example_app_'
+    prefix: 'example_app_',
   },
   tracing: {
     enabled: true,
@@ -29,9 +29,9 @@ const app = new OneBunApplication(AppModule, {
     defaultAttributes: {
       'service.name': 'onebun-example',
       'service.version': '0.1.0',
-      'deployment.environment': 'development'
-    }
-  }
+      'deployment.environment': 'development',
+    },
+  },
 });
 
 // Start the application
@@ -39,11 +39,11 @@ app.start()
   .then(() => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.info('Application started successfully');
-    
+
     // Demonstrate config access from application level
     try {
       const config = app.getConfig();
-      
+
       // Safe config logging
       const safeConfig = config.getSafeConfig();
       logger.info('Application configuration loaded:', { config: safeConfig });
