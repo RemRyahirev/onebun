@@ -8,7 +8,7 @@ export type EnvValueType = 'string' | 'number' | 'boolean' | 'array';
 /**
  * Configuration for environment variable
  */
-export interface EnvVariableConfig<T = any> {
+export interface EnvVariableConfig<T = unknown> {
   /** Environment variable name (if different from schema key) */
   env?: string;
   /** Variable description */
@@ -33,7 +33,7 @@ export interface EnvVariableConfig<T = any> {
 export type EnvSchema<T> = {
   [K in keyof T]: T[K] extends string | number | boolean | string[] | number[] | boolean[]
     ? EnvVariableConfig<T[K]>
-    : T[K] extends Record<string, any>
+    : T[K] extends Record<string, unknown>
       ? EnvSchema<T[K]>
       : EnvVariableConfig<T[K]>;
 };
@@ -44,6 +44,7 @@ export type EnvSchema<T> = {
 export class EnvValidationError extends Error {
   constructor(
     public readonly variable: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
     public readonly value: any,
     public readonly reason: string,
   ) {

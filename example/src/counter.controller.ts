@@ -6,27 +6,31 @@ import {
   Body,
   Param,
 } from '@onebun/core';
+import type { SyncLogger } from '@onebun/logger';
 
 import { CounterService } from './counter.service';
 
 @Controller('/api')
 export class CounterController extends BaseController {
-  constructor(private counterService: CounterService, logger?: any, config?: any) {
+  constructor(private counterService: CounterService, logger?: SyncLogger, config?: unknown) {
     super(logger, config);
   }
 
   @Get('/')
-  async hello() {
+  async hello(): Promise<Response> {
     this.logger.info('Hello endpoint called');
 
     return this.success({ message: 'Hello OneBun with Metrics!' });
   }
 
   @Get('/info')
-  async getInfo() {
+  async getInfo(): Promise<Response> {
     // Demonstrate configuration access in controller
-    const serverPort = this.config?.get('server.port') || 3001;
-    const serverHost = this.config?.get('server.host') || '0.0.0.0';
+    const DEFAULT_PORT = 3001;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const serverPort = (this.config as any)?.get('server.port') || DEFAULT_PORT;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const serverHost = (this.config as any)?.get('server.host') || '0.0.0.0';
     
     this.logger.info('Getting application info', { port: serverPort, host: serverHost });
     
@@ -42,7 +46,7 @@ export class CounterController extends BaseController {
   }
 
   @Get('/counter')
-  async getValue() {
+  async getValue(): Promise<Response> {
     const value = this.counterService.getValue();
     this.logger.info('Getting counter value', { value });
 
@@ -50,7 +54,7 @@ export class CounterController extends BaseController {
   }
 
   @Post('/increment')
-  async increment(@Body() body?: { amount?: number }) {
+  async increment(@Body() body?: { amount?: number }): Promise<Response> {
     const amount = body?.amount || 1;
     const newValue = this.counterService.increment(amount);
     this.logger.info('Counter incremented', { amount, newValue });
@@ -62,7 +66,7 @@ export class CounterController extends BaseController {
   }
 
   @Post('/decrement')  
-  async decrement(@Body() body?: { amount?: number }) {
+  async decrement(@Body() body?: { amount?: number }): Promise<Response> {
     const amount = body?.amount || 1;
     const newValue = this.counterService.decrement(amount);
     this.logger.info('Counter decremented', { amount, newValue });
@@ -74,7 +78,7 @@ export class CounterController extends BaseController {
   }
 
   @Post('/reset')
-  async reset() {
+  async reset(): Promise<Response> {
     this.counterService.reset();
     this.logger.info('Counter reset');
     
@@ -85,7 +89,7 @@ export class CounterController extends BaseController {
   }
 
   @Get('/stats')
-  async getStats() {
+  async getStats(): Promise<Response> {
     const stats = {
       value: this.counterService.getValue(),
       totalOperations: this.counterService.getTotalOperations(),
@@ -98,7 +102,7 @@ export class CounterController extends BaseController {
   }
 
   @Get('/counter/:id')
-  async getById(@Param('id') id: string) {
+  async getById(@Param('id') id: string): Promise<Response> {
     this.logger.info('Getting counter by id', { id });
     
     return this.success({

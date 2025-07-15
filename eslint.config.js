@@ -283,7 +283,7 @@ module.exports = (async () => {
   },
 },
   {
-    files: ['**/*.spec.ts'],
+    files: ['**/*.spec.ts', '**/*.test.ts'],
     plugins: {
       jest: jestPlugin,
     },

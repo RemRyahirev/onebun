@@ -1,4 +1,34 @@
-# OneBun Framework - Project Guidelines & Architecture
+# OneBun Framework - Development Commands & Guidelines
+
+## Type Checking & Linting Commands
+
+### TypeScript Type Checking
+```bash
+bunx tsc --noEmit
+```
+- Проверяет типы TypeScript без генерации файлов
+- Должен выполняться без ошибок перед коммитом
+
+### Linting
+```bash
+bun lint
+```
+- Запускает ESLint для проверки стиля кода
+- Многие "Resolve error" связаны с конфигурацией и не критичны
+
+## Code Style Guidelines
+
+### Type Safety
+- Использовать `any` только при необходимости с комментарием `// eslint-disable-next-line @typescript-eslint/no-explicit-any`
+- Предпочитать типизированные интерфейсы вместо `unknown` где возможно
+- Всегда исправлять ошибки TypeScript перед коммитом
+
+### Decorator Types
+- Декораторы контроллеров используют `(...args: any[]) => any` для совместимости
+- Это обоснованное использование `any` для поддержки различных конструкторов
+
+### Configuration Access
+- В контроллерах config имеет тип `unknown`, используем `(this.config as any)?.get()` с eslint-disable
 
 ## General Guidelines
 

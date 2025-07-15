@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "effect": "^3.10.15",
-    "@opentelemetry/api": "^1.8.0"
+    "@opentelemetry/api": "^1.8.0",
+    "@onebun/requests": "^0.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0"
@@ -17,4 +18,4 @@
   "engines": {
     "bun": "1.2.12"
   }
-} 
+}

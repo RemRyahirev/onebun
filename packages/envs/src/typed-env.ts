@@ -3,9 +3,9 @@ import { Effect } from 'effect';
 import { EnvLoader } from './loader';
 import { EnvParser } from './parser';
 import {
+  EnvLoadOptions,
   EnvSchema,
   EnvValidationError,
-  EnvLoadError,
   EnvVariableConfig,
 } from './types';
 
@@ -20,6 +20,7 @@ type DeepValue<T, Path extends string> = Path extends keyof T
         ? DeepValue<T[K], Rest>
         : never
       : never
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     : any; // Fallback to any for complex paths
 
 type DeepPaths<T> = T extends object
@@ -76,15 +77,17 @@ class ConfigProxy<T> {
 
   constructor(
     private readonly _schema: EnvSchema<T>,
-    private readonly _options: any = {},
+    private readonly _options: EnvLoadOptions = {},
   ) {
     this.extractSensitiveFields(this._schema, '');
   }
 
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private extractSensitiveFields(schema: any, prefix = ''): void {
     for (const [key, config] of Object.entries(schema)) {
       const fullPath = prefix ? `${prefix}.${key}` : key;
-      
+
       if (this.isEnvVariableConfig(config)) {
         if ((config as EnvVariableConfig).sensitive) {
           this._sensitiveFields.add(fullPath);
@@ -95,8 +98,8 @@ class ConfigProxy<T> {
     }
   }
 
-  private isEnvVariableConfig(config: any): boolean {
-    return config && typeof config === 'object' && 'type' in config;
+  private isEnvVariableConfig(config: unknown): boolean {
+    return Boolean(config) && typeof config === 'object' && 'type' in config!;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -109,20 +112,28 @@ class ConfigProxy<T> {
     this._isInitialized = true;
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private parseNestedSchema(schema: any, rawVariables: Record<string, string>, prefix: string): any {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result: any = {};
 
     for (const [key, config] of Object.entries(schema)) {
       const fullPath = prefix ? `${prefix}.${key}` : key;
-      
+
       if (this.isEnvVariableConfig(config)) {
         const envConfig = config as EnvVariableConfig;
         const envVar = envConfig.env || this.pathToEnvVar(fullPath);
         const rawValue = rawVariables[envVar];
-        
+
         try {
           const parsed = Effect.runSync(
-            EnvParser.parse(envVar, rawValue, envConfig, this._options),
+            EnvParser.parse(
+              envVar,
+              rawValue,
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              envConfig as any,
+              this._options,
+            ),
           );
           result[key] = parsed;
         } catch (error) {
@@ -143,18 +154,18 @@ class ConfigProxy<T> {
     return path.toUpperCase().replace(/\./g, '_');
   }
 
-  private getValueByPath(obj: any, path: string): any {
+  private getValueByPath(obj: Record<string, unknown>, path: string): unknown {
     const keys = path.split('.');
-    let current = obj;
-    
+    let current: Record<string, unknown> | unknown = obj;
+
     for (const key of keys) {
       if (current && typeof current === 'object' && key in current) {
-        current = current[key];
+        current = current[key as keyof typeof current];
       } else {
         return undefined;
       }
     }
-    
+
     return current;
   }
 
@@ -163,19 +174,21 @@ class ConfigProxy<T> {
    */
   get<P extends DeepPaths<T>>(path: P): DeepValue<T, P>;
   get<P extends keyof T>(path: P): T[P];
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   get(path: string): any;
-  get(path: string): any {
+  get(path: string): unknown {
     if (!this._isInitialized || !this._values) {
       throw new Error('Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.');
     }
 
     const value = this.getValueByPath(this._values, path);
-    
+
     // Wrap sensitive values
     if (this._sensitiveFields.has(path)) {
       return new SensitiveValue(value);
     }
-    
+
     return value;
   }
 
@@ -211,39 +224,40 @@ class ConfigProxy<T> {
     if (!this._isInitialized || !this._values) {
       throw new Error('Configuration not initialized.');
     }
-    
+
     return this.applySensitiveMask(this._values, '') as T;
   }
 
-  private applySensitiveMask(obj: any, prefix = ''): any {
+  private applySensitiveMask<U = unknown>(obj: U, prefix = ''): U {
     if (obj === null || obj === undefined) {
       return obj;
     }
-    
+
     if (Array.isArray(obj)) {
-      return obj.map(item => 
-        typeof item === 'object' ? this.applySensitiveMask(item, prefix) : item,
-      );
+      return obj.map(item =>
+        typeof item === 'object' ? this.applySensitiveMask<U>(item, prefix) : item,
+      ) as U;
     }
-    
+
     if (typeof obj === 'object') {
-      const result: any = {};
-      
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result: Record<string, unknown> = {};
+
       for (const [key, value] of Object.entries(obj)) {
         const fullPath = prefix ? `${prefix}.${key}` : key;
-        
+
         if (this._sensitiveFields.has(fullPath)) {
           result[key] = '***';
         } else if (value && typeof value === 'object') {
-          result[key] = this.applySensitiveMask(value, fullPath);
+          result[key] = this.applySensitiveMask<U>(value, fullPath);
         } else {
           result[key] = value;
         }
       }
-      
-      return result;
+
+      return result as U;
     }
-    
+
     return obj;
   }
 }
@@ -252,24 +266,24 @@ class ConfigProxy<T> {
  * Static factory for creating typed environment configurations
  */
 export class TypedEnv {
-  private static instances = new Map<string, ConfigProxy<any>>();
+  private static instances = new Map<string, ConfigProxy<unknown>>();
 
   /**
    * Create or get existing typed environment configuration
    */
   static create<T>(
     schema: EnvSchema<T>,
-    options: any = {},
+    options: EnvLoadOptions = {},
     key = 'default',
   ): ConfigProxy<T> {
     if (!TypedEnv.instances.has(key)) {
       const proxy = new ConfigProxy(schema, options);
       TypedEnv.instances.set(key, proxy);
-      
+
       // Auto-initialize
       proxy.initialize();
     }
-    
+
     return TypedEnv.instances.get(key) as ConfigProxy<T>;
   }
 
@@ -278,6 +292,7 @@ export class TypedEnv {
    */
   static async createAsync<T>(
     schema: EnvSchema<T>,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     options: any = {},
     key = 'default',
   ): Promise<ConfigProxy<T>> {
@@ -297,4 +312,4 @@ export class TypedEnv {
 
 // Export type helpers for external use
 export type { DeepPaths, DeepValue, SensitiveValue };
-export { ConfigProxy }; 
+export { ConfigProxy };

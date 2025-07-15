@@ -125,21 +125,23 @@ export interface TraceHeaders {
   /**
    * Trace parent header (W3C)
    */
-  'traceparent'?: string;
+  traceparent?: string;
 
   /**
    * Trace state header (W3C)
    */
-  'tracestate'?: string;
+  tracestate?: string;
 
   /**
    * X-Trace-Id header (custom)
    */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   'x-trace-id'?: string;
 
   /**
    * X-Span-Id header (custom)
    */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   'x-span-id'?: string;
 }
 
@@ -149,7 +151,7 @@ export interface TraceHeaders {
 export interface TraceOptions {
   /**
    * Enable/disable tracing
-   * @default true
+   * @defaultValue true
    */
   enabled?: boolean;
 
@@ -165,19 +167,19 @@ export interface TraceOptions {
 
   /**
    * Sampling rate (0.0 to 1.0)
-   * @default 1.0
+   * @defaultValue 1.0
    */
   samplingRate?: number;
 
   /**
    * Enable automatic HTTP request tracing
-   * @default true
+   * @defaultValue true
    */
   traceHttpRequests?: boolean;
 
   /**
    * Enable automatic database query tracing
-   * @default true
+   * @defaultValue true
    */
   traceDatabaseQueries?: boolean;
 
@@ -208,19 +210,19 @@ export interface TraceExportOptions {
 
   /**
    * Export timeout in milliseconds
-   * @default 10000
+   * @defaultValue 10000
    */
   timeout?: number;
 
   /**
    * Batch size for exporting
-   * @default 100
+   * @defaultValue 100
    */
   batchSize?: number;
 
   /**
    * Batch timeout in milliseconds
-   * @default 5000
+   * @defaultValue 5000
    */
   batchTimeout?: number;
 }

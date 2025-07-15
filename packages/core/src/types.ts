@@ -55,14 +55,14 @@ export interface Module {
   /**
    * Get controller instance
    */
-  getControllerInstance?(controllerClass: Function): any;
+  getControllerInstance?(controllerClass: Function): unknown;
 }
 
 /**
  * Typed environment schema interface
  */
 export interface TypedEnvSchema {
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 /**
@@ -70,20 +70,25 @@ export interface TypedEnvSchema {
  */
 export interface ApplicationOptions {
   /**
+   * Application name (used for metrics and tracing labels)
+   */
+  name?: string;
+
+  /**
    * Port to listen on
-   * @default 3000
+   * @defaultValue 3000
    */
   port?: number;
 
   /**
    * Host to listen on
-   * @default "0.0.0.0"
+   * @defaultValue "0.0.0.0"
    */
   host?: string;
 
   /**
    * Enable development mode
-   * @default false
+   * @defaultValue false
    */
   development?: boolean;
 
@@ -116,13 +121,13 @@ export interface ApplicationOptions {
   metrics?: {
     /**
      * Enable/disable metrics collection
-     * @default true
+     * @defaultValue true
      */
     enabled?: boolean;
 
     /**
      * HTTP path for exposing metrics endpoint
-     * @default '/metrics'
+     * @defaultValue '/metrics'
      */
     path?: string;
 
@@ -133,31 +138,31 @@ export interface ApplicationOptions {
 
     /**
      * Enable automatic HTTP metrics collection
-     * @default true
+     * @defaultValue true
      */
     collectHttpMetrics?: boolean;
 
     /**
      * Enable automatic system metrics collection
-     * @default true
+     * @defaultValue true
      */
     collectSystemMetrics?: boolean;
 
     /**
      * Enable GC metrics collection
-     * @default true
+     * @defaultValue true
      */
     collectGcMetrics?: boolean;
 
     /**
      * Collection interval for system metrics in milliseconds
-     * @default 5000
+     * @defaultValue 5000
      */
     systemMetricsInterval?: number;
 
     /**
      * Custom prefix for all metrics
-     * @default 'onebun_'
+     * @defaultValue 'onebun_'
      */
     prefix?: string;
 
@@ -173,37 +178,37 @@ export interface ApplicationOptions {
   tracing?: {
     /**
      * Enable/disable tracing
-     * @default true
+     * @defaultValue true
      */
     enabled?: boolean;
 
     /**
      * Service name for tracing
-     * @default 'onebun-service'
+     * @defaultValue 'onebun-service'
      */
     serviceName?: string;
 
     /**
      * Service version
-     * @default '1.0.0'
+     * @defaultValue '1.0.0'
      */
     serviceVersion?: string;
 
     /**
      * Sampling rate (0.0 to 1.0)
-     * @default 1.0
+     * @defaultValue 1.0
      */
     samplingRate?: number;
 
     /**
      * Enable automatic HTTP request tracing
-     * @default true
+     * @defaultValue true
      */
     traceHttpRequests?: boolean;
 
     /**
      * Enable automatic database query tracing
-     * @default true
+     * @defaultValue true
      */
     traceDatabaseQueries?: boolean;
 
@@ -228,19 +233,19 @@ export interface ApplicationOptions {
 
       /**
        * Export timeout in milliseconds
-       * @default 10000
+       * @defaultValue 10000
        */
       timeout?: number;
 
       /**
        * Batch size for exporting
-       * @default 100
+       * @defaultValue 100
        */
       batchSize?: number;
 
       /**
        * Batch timeout in milliseconds
-       * @default 5000
+       * @defaultValue 5000
        */
       batchTimeout?: number;
     };

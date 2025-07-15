@@ -5,6 +5,7 @@ import { BaseService, Service } from './service';
 /**
  * Configuration service tag
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const ConfigServiceTag = Context.GenericTag<ConfigServiceImpl>('ConfigService');
 
 /**
@@ -12,9 +13,14 @@ export const ConfigServiceTag = Context.GenericTag<ConfigServiceImpl>('ConfigSer
  */
 @Service(ConfigServiceTag)
 export class ConfigServiceImpl extends BaseService {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private configInstance: any = null;
 
-  constructor(logger?: any, config?: any) {
+  constructor(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
+    logger?: any,
+    config?: unknown,
+  ) {
     super(logger);
     this.configInstance = config;
   }
@@ -32,7 +38,7 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Get configuration value by path
    */
-  get<T = any>(path: string): T {
+  get<T = unknown>(path: string): T {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -43,7 +49,7 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Get all configuration values
    */
-  get values(): any {
+  get values(): unknown {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -54,7 +60,7 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Get safe configuration for logging (sensitive data masked)
    */
-  getSafeConfig(): any {
+  getSafeConfig(): unknown {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -72,10 +78,11 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Get the underlying TypedEnv instance
    */
-  get instance(): any {
+  get instance(): unknown {
     return this.configInstance;
   }
 }
 
 // Export both tag and implementation
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const ConfigService = ConfigServiceTag; 

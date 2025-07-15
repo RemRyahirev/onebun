@@ -17,7 +17,10 @@
   "dependencies": {
     "effect": "^3.13.10",
     "@onebun/logger": "^0.1.0",
-    "@onebun/envs": "^0.1.0"
+    "@onebun/envs": "^0.1.0",
+    "@onebun/metrics": "^0.1.0",
+    "@onebun/requests": "^0.1.0",
+    "@onebun/trace": "^0.1.0"
   },
   "devDependencies": {
     "bun-types": "1.2.2"

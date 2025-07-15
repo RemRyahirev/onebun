@@ -16,7 +16,7 @@ export { Effect, Layer } from 'effect';
 export {
   Module,
   Controller,
-  Injectable,
+  injectable as Injectable,
   Inject,
   Get,
   Post,

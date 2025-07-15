@@ -10,16 +10,24 @@ import {
   Context,
   FiberRef,
 } from 'effect';
+import { HttpStatusCode } from '@onebun/requests';
 
-import { 
-  TraceContext, 
-  TraceSpan, 
-  TraceOptions, 
-  TraceHeaders, 
+import {
+  TraceContext,
+  TraceSpan,
+  TraceOptions,
+  TraceHeaders,
   SpanStatus,
   SpanStatusCode,
   HttpTraceData,
 } from './types.js';
+
+
+/**
+ * Index of trace flags in W3C traceparent header regex match array
+ */
+const TRACE_FLAGS_MATCH_INDEX = 3;
+
 
 /**
  * Trace service interface
@@ -84,17 +92,18 @@ export interface TraceService {
 /**
  * Trace service tag for Effect dependency injection
  */
-export const TraceService = Context.GenericTag<TraceService>('@onebun/trace/TraceService');
+export const traceService = Context.GenericTag<TraceService>('@onebun/trace/TraceService');
 
 /**
  * Current trace context stored in fiber
  */
-export const CurrentTraceContext = FiberRef.unsafeMake<TraceContext | null>(null);
+export const currentTraceContext = FiberRef.unsafeMake<TraceContext | null>(null);
 
 /**
  * Current span stored in fiber
  */
-export const CurrentSpan = FiberRef.unsafeMake<TraceSpan | null>(null);
+
+export const currentSpan = FiberRef.unsafeMake<TraceSpan | null>(null);
 
 /**
  * Implementation of TraceService
@@ -118,17 +127,18 @@ export class TraceServiceImpl implements TraceService {
   }
 
   getCurrentContext(): Effect.Effect<TraceContext | null> {
-    return FiberRef.get(CurrentTraceContext);
+    return FiberRef.get(currentTraceContext);
   }
 
   setContext(traceContext: TraceContext): Effect.Effect<void> {
-    return FiberRef.set(CurrentTraceContext, traceContext);
+    return FiberRef.set(currentTraceContext, traceContext);
   }
 
   startSpan(name: string, parentContext?: TraceContext): Effect.Effect<TraceSpan> {
     if (!this.options.enabled) {
       return Effect.flatMap(
         this.generateTraceContext(),
+        // eslint-disable-next-line @typescript-eslint/no-shadow
         (context) => {
           const mockSpan: TraceSpan = {
             context,
@@ -140,7 +150,7 @@ export class TraceServiceImpl implements TraceService {
           };
 
           return Effect.flatMap(
-            FiberRef.set(CurrentSpan, mockSpan),
+            FiberRef.set(currentSpan, mockSpan),
             () => Effect.succeed(mockSpan),
           );
         },
@@ -171,7 +181,7 @@ export class TraceServiceImpl implements TraceService {
     };
 
     return Effect.flatMap(
-      FiberRef.set(CurrentSpan, traceSpan),
+      FiberRef.set(currentSpan, traceSpan),
       () => Effect.flatMap(
         this.setContext(traceContext),
         () => Effect.succeed(traceSpan),
@@ -201,7 +211,7 @@ export class TraceServiceImpl implements TraceService {
       activeSpan.end();
     }
 
-    return FiberRef.set(CurrentSpan, null);
+    return FiberRef.set(currentSpan, null);
   }
 
   addEvent(name: string, attributes?: Record<string, string | number | boolean>): Effect.Effect<void> {
@@ -210,7 +220,7 @@ export class TraceServiceImpl implements TraceService {
     }
 
     return Effect.flatMap(
-      FiberRef.get(CurrentSpan),
+      FiberRef.get(currentSpan),
       (span) => {
         if (span) {
           span.events.push({
@@ -236,7 +246,7 @@ export class TraceServiceImpl implements TraceService {
     }
 
     return Effect.flatMap(
-      FiberRef.get(CurrentSpan),
+      FiberRef.get(currentSpan),
       (span) => {
         if (span) {
           Object.assign(span.attributes, attributes);
@@ -258,14 +268,19 @@ export class TraceServiceImpl implements TraceService {
     }
 
     // Try W3C traceparent header first
+    const TRACE_ID_LENGTH = 32;
+    const SPAN_ID_LENGTH = 16;
+    const FLAGS_LENGTH = 2;
+    const HEX_BASE = 16;
     const traceparent = headers['traceparent'];
     if (traceparent) {
-      const match = traceparent.match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/);
+      const match = traceparent.match(new RegExp(`^00-([0-9a-f]{${TRACE_ID_LENGTH}})-([0-9a-f]{${SPAN_ID_LENGTH}})-([0-9a-f]{${FLAGS_LENGTH}})$`));
       if (match) {
+
         return Effect.succeed({
           traceId: match[1],
           spanId: match[2],
-          traceFlags: parseInt(match[3], 16),
+          traceFlags: parseInt(match[TRACE_FLAGS_MATCH_INDEX], HEX_BASE),
         });
       }
     }
@@ -273,7 +288,7 @@ export class TraceServiceImpl implements TraceService {
     // Fallback to custom headers
     const traceId = headers['x-trace-id'];
     const spanId = headers['x-span-id'];
-    
+
     if (traceId && spanId) {
       return Effect.succeed({
         traceId,
@@ -286,32 +301,45 @@ export class TraceServiceImpl implements TraceService {
   }
 
   injectIntoHeaders(traceContext: TraceContext): Effect.Effect<TraceHeaders> {
+    const HEX_BASE = 16;
+    const PAD_LENGTH = 2;
+
     return Effect.succeed({
-      'traceparent': `00-${traceContext.traceId}-${traceContext.spanId}-${traceContext.traceFlags.toString(16).padStart(2, '0')}`,
+      traceparent: `00-${traceContext.traceId}-${traceContext.spanId}-${traceContext.traceFlags.toString(HEX_BASE).padStart(PAD_LENGTH, '0')}`,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       'x-trace-id': traceContext.traceId,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       'x-span-id': traceContext.spanId,
     });
   }
 
   generateTraceContext(): Effect.Effect<TraceContext> {
+    const TRACE_ID_LENGTH = 32;
+    const SPAN_ID_LENGTH = 16;
+
     return Effect.succeed({
-      traceId: this.generateId(32),
-      spanId: this.generateId(16),
+      traceId: this.generateId(TRACE_ID_LENGTH),
+      spanId: this.generateId(SPAN_ID_LENGTH),
       traceFlags: Math.random() < this.options.samplingRate ? 1 : 0,
     });
   }
 
   startHttpTrace(data: Partial<HttpTraceData>): Effect.Effect<TraceSpan> {
     const spanName = `HTTP ${data.method || 'REQUEST'} ${data.route || data.url || '/'}`;
-    
+
     return Effect.flatMap(
       this.startSpan(spanName),
       (span) => {
         const attributes: Record<string, string | number | boolean> = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'http.method': data.method || 'UNKNOWN',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'http.url': data.url || '',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'http.route': data.route || '',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'http.user_agent': data.userAgent || '',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'http.remote_addr': data.remoteAddr || '',
         };
 
@@ -342,9 +370,10 @@ export class TraceServiceImpl implements TraceService {
       attributes['http.duration'] = data.duration;
     }
 
+    const HTTP_ERROR_THRESHOLD = HttpStatusCode.BAD_REQUEST;
     const status: SpanStatus = {
-      code: (data.statusCode && data.statusCode >= 400) ? SpanStatusCode.ERROR : SpanStatusCode.OK,
-      message: data.statusCode && data.statusCode >= 400 ? `HTTP ${data.statusCode}` : undefined,
+      code: (data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD) ? SpanStatusCode.ERROR : SpanStatusCode.OK,
+      message: data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD ? `HTTP ${data.statusCode}` : undefined,
     };
 
     return Effect.flatMap(
@@ -368,9 +397,15 @@ export class TraceServiceImpl implements TraceService {
  * Create TraceService layer
  */
 export const makeTraceService = (options?: TraceOptions): Layer.Layer<TraceService> =>
-  Layer.succeed(TraceService, new TraceServiceImpl(options));
+  Layer.succeed(traceService, new TraceServiceImpl(options));
 
 /**
  * Default trace service layer
  */
-export const TraceServiceLive = makeTraceService(); 
+export const traceServiceLive = makeTraceService();
+
+// Backward compatibility aliases
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const TraceService = traceService;
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const TraceServiceLive = traceServiceLive;

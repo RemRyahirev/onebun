@@ -15,19 +15,23 @@ export class ConsoleTransport implements LogTransport {
       switch (entry.level) {
         case LogLevel.Error:
         case LogLevel.Fatal:
+          // eslint-disable-next-line no-console
           console.error(formattedEntry);
           break;
         case LogLevel.Warning:
+          // eslint-disable-next-line no-console
           console.warn(formattedEntry);
           break;
         case LogLevel.Info:
+          // eslint-disable-next-line no-console
           console.info(formattedEntry);
           break;
         case LogLevel.Debug:
         case LogLevel.Trace:
         default:
+          // eslint-disable-next-line no-console
           console.log(formattedEntry);
       }
     });
   }
-} 
+}

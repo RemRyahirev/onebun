@@ -16,6 +16,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         ...config,
         headers: {
           ...config.headers,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'Authorization': `Bearer ${auth.token}`,
         },
       });
@@ -46,6 +47,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         ...config,
         headers: {
           ...config.headers,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
           'Authorization': `Basic ${credentials}`,
         },
       });
@@ -116,10 +118,15 @@ const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.
       ...config,
       headers: {
         ...config.headers,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'X-OneBun-Service-Id': auth.serviceId,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'X-OneBun-Timestamp': timestamp,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'X-OneBun-Nonce': nonce,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'X-OneBun-Algorithm': algorithm,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'X-OneBun-Signature': signature,
       },
     })),

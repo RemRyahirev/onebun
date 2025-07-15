@@ -42,11 +42,13 @@ export interface SyncLogger {
 /**
  * Context tag for the Logger service
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const LoggerService = Context.GenericTag<Logger>('LoggerService');
 
 /**
  * Current trace context stored in fiber for automatic trace inclusion in logs
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const CurrentLoggerTraceContext = FiberRef.unsafeMake<TraceInfo | null>(null);
 
 /**
@@ -112,15 +114,18 @@ class LoggerImpl implements Logger {
         let currentTraceInfo = traceInfo;
         if (!currentTraceInfo && typeof globalThis !== 'undefined') {
           // Try global trace context first
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
           if (globalTraceContext && globalTraceContext.traceId) {
             currentTraceInfo = globalTraceContext;
           } else {
             // Fallback to trace service
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             const globalTraceService = (globalThis as any).__onebunTraceService;
             if (globalTraceService && globalTraceService.getCurrentTraceContext) {
               try {
                 // Extract current trace context from global trace service
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 const currentContext = Effect.runSync(globalTraceService.getCurrentTraceContext()) as any;
                 if (currentContext && currentContext.traceId) {
                   currentTraceInfo = {
@@ -129,7 +134,7 @@ class LoggerImpl implements Logger {
                     parentSpanId: currentContext.parentSpanId,
                   };
                 }
-              } catch (error) {
+              } catch {
                 // Ignore errors getting trace context
               }
             }
@@ -240,6 +245,7 @@ class SyncLoggerImpl implements SyncLogger {
     // Try to get trace context from global context
     let traceEffect = effect;
     if (typeof globalThis !== 'undefined') {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
       if (globalTraceContext && globalTraceContext.traceId) {
         traceEffect = Effect.provide(

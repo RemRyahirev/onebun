@@ -5,6 +5,7 @@ import { EnvVariableConfig, EnvValidationError } from './types';
 /**
  * Helpers for creating environment variable configurations
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Env = {
   /**
    * Create configuration for string variable
@@ -147,7 +148,7 @@ export const Env = {
   /**
     * Create validator for string with regular expression
     */
-  regex(pattern: RegExp, errorMessage?: string) {
+  regex(pattern: RegExp, errorMessage?: string): (value: string) => Effect.Effect<string, EnvValidationError> {
     return (value: string) => {
       if (!pattern.test(value)) {
         return Effect.fail(new EnvValidationError('', value, errorMessage || `Value must match pattern ${pattern}`));
@@ -160,7 +161,10 @@ export const Env = {
   /**
     * Create validator for string from allowed values list
     */
-  oneOf<T extends string>(allowedValues: readonly T[], errorMessage?: string) {
+  oneOf<T extends string>(
+    allowedValues: readonly T[], 
+    errorMessage?: string,
+  ): (value: string) => Effect.Effect<T, EnvValidationError> {
     return (value: string) => {
       if (!allowedValues.includes(value as T)) {
         return Effect.fail(new EnvValidationError(
@@ -177,7 +181,7 @@ export const Env = {
   /**
     * Create validator for URL
     */
-  url(errorMessage?: string) {
+  url(errorMessage?: string): (value: string) => Effect.Effect<string, EnvValidationError> {
     return (value: string) => {
       try {
         new URL(value);
@@ -196,7 +200,7 @@ export const Env = {
   /**
     * Create validator for email
     */
-  email(errorMessage?: string) {
+  email(errorMessage?: string): (value: string) => Effect.Effect<string, EnvValidationError> {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     return (value: string) => {
@@ -215,8 +219,9 @@ export const Env = {
   /**
     * Create validator for port number
     */
-  port(errorMessage?: string) {
+  port(errorMessage?: string): (value: number) => Effect.Effect<number, EnvValidationError> {
     return (value: number) => {
+      // eslint-disable-next-line no-magic-numbers
       if (!Number.isInteger(value) || value < 1 || value > 65535) {
         return Effect.fail(new EnvValidationError(
           '', 

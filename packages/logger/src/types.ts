@@ -3,6 +3,7 @@ import { Effect } from 'effect';
 /**
  * Определяем уровни логирования
  */
+/* eslint-disable no-magic-numbers -- Standard log levels based on syslog defined in one place */
 export enum LogLevel {
   Fatal = 60,
   Error = 50,
@@ -12,6 +13,8 @@ export enum LogLevel {
   Trace = 10,
   None = 0
 }
+/* eslint-enable no-magic-numbers */
+ 
 
 /**
  * Trace information for log entries

@@ -1,9 +1,11 @@
 /**
- * @onebun/metrics
+ * \@onebun/metrics
  * 
  * Prometheus-compatible metrics module for OneBun framework
  * Provides automatic HTTP request metrics, system metrics, and custom metrics API
  */
+
+import { DEFAULT_SYSTEM_METRICS_INTERVAL, DEFAULT_HTTP_DURATION_BUCKETS } from './types';
 
 // Core service
 export {
@@ -58,15 +60,15 @@ export const DEFAULT_METRICS_OPTIONS = {
   collectHttpMetrics: true,
   collectSystemMetrics: true,
   collectGcMetrics: true,
-  systemMetricsInterval: 5000,
+  systemMetricsInterval: DEFAULT_SYSTEM_METRICS_INTERVAL,
   prefix: 'onebun_',
-  httpDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+  httpDurationBuckets: DEFAULT_HTTP_DURATION_BUCKETS,
 } as const;
 
 /**
  * Convenience function to create metrics service with default options
  */
-export const createDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}) => {
+export const createDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}): ReturnType<typeof import('./metrics.service').createMetricsService> => {
   const { createMetricsService } = require('./metrics.service');
 
   return createMetricsService({
@@ -78,7 +80,7 @@ export const createDefaultMetricsService = (overrides: Partial<import('./types')
 /**
  * Convenience function to create metrics layer with default options
  */
-export const makeDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}) => {
+export const makeDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}): ReturnType<typeof import('./metrics.service').makeMetricsService> => {
   const { makeMetricsService } = require('./metrics.service');
 
   return makeMetricsService({

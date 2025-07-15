@@ -3,7 +3,6 @@ import { Reflect, getConstructorParamTypes as getDesignParamTypes } from './meta
 import {
   ControllerMetadata,
   HttpMethod,
-  RouteMetadata,
   ParamType,
   ParamMetadata,
 } from './types';
@@ -22,7 +21,8 @@ const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
  * Injectable decorator for controllers and services
  * This decorator enables automatic dependency injection by registering the class for DI
  */
-export function Injectable() {
+export function injectable() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function<T extends new (...args: any[]) => any>(target: T): T {
     // The class is now marked as injectable
     return target;
@@ -33,7 +33,10 @@ export function Injectable() {
  * Automatic dependency detection through smart constructor analysis
  * This function analyzes constructor parameters and matches them with available services
  */
-function autoDetectDependencies(target: Function, availableServices: Map<string, Function>): Function[] {
+function autoDetectDependencies(
+  target: Function, 
+  availableServices: Map<string, Function>,
+): Function[] {
   // First, try to get types from TypeScript's design:paramtypes
   const designTypes = getDesignParamTypes(target);
   if (designTypes && designTypes.length > 0) {
@@ -113,16 +116,18 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
  * Hidden decorator to force TypeScript to emit design:paramtypes
  * This is the key to making automatic dependency injection work
  */
-function ForceMetadataEmission(target: any, propertyKey?: string, parameterIndex?: number) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function forceMetadataEmission(_target: unknown, _propertyKey?: string, _parameterIndex?: number): void {
   // This decorator exists only to trigger TypeScript's emitDecoratorMetadata
   // When applied to constructor parameters, TypeScript will emit design:paramtypes
 }
 
 /**
  * Controller decorator with automatic dependency detection
- * @param basePath Base path for all routes in controller
+ * @param basePath - Base path for all routes in controller
  */
-export function ControllerDecorator(basePath: string = '') {
+export function controllerDecorator(basePath: string = '') {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function<T extends new (...args: any[]) => any>(target: T): T {
     const metadata: ControllerMetadata = {
       path: basePath.startsWith('/') ? basePath : `/${basePath}`,
@@ -139,7 +144,7 @@ export function ControllerDecorator(basePath: string = '') {
     META_CONTROLLERS.set(target, metadata);
 
     // Mark controller as injectable automatically
-    Injectable()(target);
+    injectable()(target);
 
     return target;
   };
@@ -147,15 +152,18 @@ export function ControllerDecorator(basePath: string = '') {
 
 /**
  * Decorator for explicit dependency injection (for complex cases)
- * Usage: constructor(@Inject(CounterService) private counterService: CounterService)
+ * Usage: constructor(\@Inject(CounterService) private counterService: CounterService)
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
 export function Inject<T>(type: new (...args: any[]) => T) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
   return function(target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void {
     // Get existing dependencies or create new array
     const existingDeps = META_CONSTRUCTOR_PARAMS.get(target) || [];
     
     // Ensure array is large enough
     while (existingDeps.length <= parameterIndex) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       existingDeps.push(undefined as any);
     }
     
@@ -173,7 +181,8 @@ export function registerDependencies(target: Function, dependencies: Function[])
 }
 
 // Алиас для обратной совместимости
-export const Controller = ControllerDecorator;
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const Controller = controllerDecorator;
 
 /**
  * Get controller metadata
@@ -240,7 +249,10 @@ function createRouteDecorator(method: HttpMethod) {
  * Create parameter decorator factory
  */
 function createParamDecorator(type: ParamType) {
-  return function(name?: string, options: { required?: boolean; validator?: (value: unknown) => boolean | Promise<boolean> } = {}) {
+  return function(
+    name?: string, 
+    options: { required?: boolean; validator?: (value: unknown) => boolean | Promise<boolean> } = {},
+  ) {
     return function(target: object, propertyKey: string, parameterIndex: number) {
       const params: ParamMetadata[] = Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
 
@@ -259,48 +271,62 @@ function createParamDecorator(type: ParamType) {
 
 /**
  * Path parameter decorator
- * @example @Param('id')
+ * @example \@Param('id')
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Param = createParamDecorator(ParamType.PATH);
 
 /**
  * Query parameter decorator
- * @example @Query('filter')
+ * @example \@Query('filter')
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Query = createParamDecorator(ParamType.QUERY);
 
 /**
  * Body parameter decorator
- * @example @Body()
+ * @example \@Body()
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Body = createParamDecorator(ParamType.BODY);
 
 /**
  * Header parameter decorator
- * @example @Header('Authorization')
+ * @example \@Header('Authorization')
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Header = createParamDecorator(ParamType.HEADER);
 
 /**
  * Request object decorator
- * @example @Req()
+ * @example \@Req()
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Req = createParamDecorator(ParamType.REQUEST);
 
 /**
  * Response object decorator
- * @example @Res()
+ * @example \@Res()
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Res = createParamDecorator(ParamType.RESPONSE);
 
 /**
  * Middleware decorator
- * @example @UseMiddleware(authMiddleware)
+ * @example \@UseMiddleware(authMiddleware)
  */
-export function UseMiddleware(...middleware: Function[]) {
-  return function(target: object, propertyKey: string, descriptor: PropertyDescriptor) {
+ 
+export function UseMiddleware(
+  ...middleware: Function[]
+): MethodDecorator {
+  return function(target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) {
     const existingMiddleware: Function[] = Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
-    Reflect.defineMetadata(MIDDLEWARE_METADATA, [...existingMiddleware, ...middleware], target, propertyKey);
+    Reflect.defineMetadata(
+      MIDDLEWARE_METADATA, 
+      [...existingMiddleware, ...middleware], 
+      target, 
+      propertyKey,
+    );
 
     return descriptor;
   };
@@ -309,47 +335,60 @@ export function UseMiddleware(...middleware: Function[]) {
 /**
  * HTTP GET decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Get = createRouteDecorator(HttpMethod.GET);
 
 /**
  * HTTP POST decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Post = createRouteDecorator(HttpMethod.POST);
 
 /**
  * HTTP PUT decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Put = createRouteDecorator(HttpMethod.PUT);
 
 /**
  * HTTP DELETE decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Delete = createRouteDecorator(HttpMethod.DELETE);
 
 /**
  * HTTP PATCH decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Patch = createRouteDecorator(HttpMethod.PATCH);
 
 /**
  * HTTP OPTIONS decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Options = createRouteDecorator(HttpMethod.OPTIONS);
 
 /**
  * HTTP HEAD decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const Head = createRouteDecorator(HttpMethod.HEAD);
 
 /**
  * All HTTP methods decorator
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const All = createRouteDecorator(HttpMethod.ALL);
 
 /**
  * Module decorator metadata
  */
-const META_MODULES = new Map<Function, { imports?: Function[]; controllers?: Function[]; providers?: unknown[]; exports?: unknown[] }>();
+const META_MODULES = new Map<Function, { 
+  imports?: Function[]; 
+  controllers?: Function[]; 
+  providers?: unknown[]; 
+  exports?: unknown[]; 
+}>();
 
 /**
  * Module decorator
@@ -360,6 +399,7 @@ export function Module(options: {
   providers?: unknown[];
   exports?: unknown[];
 }) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function<T extends new (...args: any[]) => any>(target: T): T {
     META_MODULES.set(target, options);
 
@@ -370,7 +410,14 @@ export function Module(options: {
 /**
  * Get module metadata
  */
-export function getModuleMetadata(target: Function): { imports?: Function[]; controllers?: Function[]; providers?: unknown[]; exports?: unknown[] } | undefined {
+export function getModuleMetadata(
+  target: Function,
+): { 
+  imports?: Function[]; 
+  controllers?: Function[]; 
+  providers?: unknown[]; 
+  exports?: unknown[]; 
+} | undefined {
   const metadata = META_MODULES.get(target);
 
   return metadata;

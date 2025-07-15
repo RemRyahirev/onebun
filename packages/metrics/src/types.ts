@@ -1,18 +1,38 @@
 import { register } from 'prom-client';
 
 /**
+ * Default system metrics collection interval (5 seconds)
+ */
+export const DEFAULT_SYSTEM_METRICS_INTERVAL = 5000;
+
+/**
+ * Default HTTP duration buckets for histogram metrics (in seconds)
+ */
+/* eslint-disable no-magic-numbers -- Standard Prometheus histogram buckets defined in one place */
+export const DEFAULT_HTTP_DURATION_BUCKETS = [
+  0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
+];
+/* eslint-enable no-magic-numbers */
+ 
+
+/**
+ * Default metrics max age in seconds (10 minutes)
+ */
+export const DEFAULT_METRICS_MAX_AGE_SECONDS = 600;
+
+/**
  * Metrics module configuration options
  */
 export interface MetricsOptions {
   /**
    * Enable/disable metrics collection
-   * @default true
+   * @defaultValue true
    */
   enabled?: boolean;
 
   /**
    * HTTP path for exposing metrics endpoint
-   * @default '/metrics'
+   * @defaultValue '/metrics'
    */
   path?: string;
 
@@ -23,37 +43,37 @@ export interface MetricsOptions {
 
   /**
    * Enable automatic HTTP metrics collection
-   * @default true
+   * @defaultValue true
    */
   collectHttpMetrics?: boolean;
 
   /**
    * Enable automatic system metrics collection
-   * @default true
+   * @defaultValue true
    */
   collectSystemMetrics?: boolean;
 
   /**
    * Enable GC metrics collection
-   * @default true
+   * @defaultValue true
    */
   collectGcMetrics?: boolean;
 
   /**
    * Collection interval for system metrics in milliseconds
-   * @default 5000
+   * @defaultValue 5000
    */
   systemMetricsInterval?: number;
 
   /**
    * Custom prefix for all metrics
-   * @default 'onebun_'
+   * @defaultValue 'onebun_'
    */
   prefix?: string;
 
   /**
    * Buckets for HTTP request duration histogram
-   * @default [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+   * @defaultValue [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
    */
   httpDurationBuckets?: number[];
 }

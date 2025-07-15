@@ -12,13 +12,9 @@ import {
   createErrorResponse,
   OneBunBaseError,
   ApiResponse,
+  HttpStatusCode,
 } from '@onebun/requests';
-import {
-  TraceService,
-  makeTraceService,
-  TraceMiddleware,
-  CurrentTraceContext,
-} from '@onebun/trace';
+import { TraceService, makeTraceService } from '@onebun/trace';
 
 import { ConfigServiceImpl } from './config.service';
 import { Controller } from './controller';
@@ -34,30 +30,26 @@ import {
 
 
 // Conditionally import metrics
-let MetricsService: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 let createMetricsService: any;
-let HttpMetricsData: any;
 
 try {
   const metricsModule = require('@onebun/metrics');
-  MetricsService = metricsModule.MetricsService;
   createMetricsService = metricsModule.createMetricsService;
-  HttpMetricsData = metricsModule.HttpMetricsData;
-} catch (error) {
+} catch {
   // Metrics module not available - this is optional
-  // console.warn('Metrics module not available');
 }
 
 // Import tracing modules directly
 
 // Global trace context for current request
-let globalCurrentTraceContext: any = null;
+let globalCurrentTraceContext: unknown = null;
 
 // Helper function to clear trace context
-function clearGlobalTraceContext() {
+function clearGlobalTraceContext(): void {
   globalCurrentTraceContext = null;
   if (typeof globalThis !== 'undefined') {
-    (globalThis as any).__onebunCurrentTraceContext = null;
+    (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = null;
   }
 }
 
@@ -73,9 +65,12 @@ export class OneBunApplication {
     development: process.env.NODE_ENV !== 'production',
   };
   private logger: SyncLogger;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private config: any = null;
   private configService: ConfigServiceImpl | null = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
 
   /**
@@ -88,7 +83,8 @@ export class OneBunApplication {
 
     // Initialize configuration if schema is provided
     if (this.options.envSchema) {
-      this.config = TypedEnv.create(this.options.envSchema, this.options.envOptions);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      this.config = TypedEnv.create(this.options.envSchema as any, this.options.envOptions);
     }
 
     // Use provided logger layer or create a default one
@@ -102,7 +98,7 @@ export class OneBunApplication {
           (logger: Logger) => logger.child({ className: 'OneBunApplication' }),
         ),
         loggerLayer,
-      ) as any,
+      ),
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
 
@@ -125,7 +121,7 @@ export class OneBunApplication {
 
         // Make metrics service globally available (temporary solution)
         if (typeof globalThis !== 'undefined') {
-          (globalThis as any).__onebunMetricsService = this.metricsService;
+          (globalThis as Record<string, unknown>).__onebunMetricsService = this.metricsService;
         }
 
         this.logger.info('Metrics service initialized successfully');
@@ -145,14 +141,14 @@ export class OneBunApplication {
 
         const traceLayer = makeTraceService(this.options.tracing || {});
         this.traceService = Effect.runSync(
-          Effect.provide(TraceService, traceLayer) as any,
+          Effect.provide(TraceService, traceLayer),
         );
 
         this.logger.debug('Trace service Effect run successfully');
 
         // Make trace service globally available (temporary solution)
         if (typeof globalThis !== 'undefined') {
-          (globalThis as any).__onebunTraceService = this.traceService;
+          (globalThis as Record<string, unknown>).__onebunTraceService = this.traceService;
         }
 
         this.logger.info('Trace service initialized successfully');
@@ -180,7 +176,7 @@ export class OneBunApplication {
   /**
    * Get configuration value by path (convenience method)
    */
-  getConfigValue<T = any>(path: string): T {
+  getConfigValue<T = unknown>(path: string): T {
     return this.getConfig().get<T>(path);
   }
 
@@ -235,22 +231,22 @@ export class OneBunApplication {
       }>();
 
       // Add routes from controllers
-      for (const ControllerClass of controllers) {
-        const controllerMetadata = getControllerMetadata(ControllerClass);
+      for (const controllerClass of controllers) {
+        const controllerMetadata = getControllerMetadata(controllerClass);
         if (!controllerMetadata) {
-          this.logger.warn(`No metadata found for controller: ${ControllerClass.name}`);
+          this.logger.warn(`No metadata found for controller: ${controllerClass.name}`);
           continue;
         }
 
         // Get controller instance from module
         if (!this.rootModule.getControllerInstance) {
-          this.logger.warn(`Module does not support getControllerInstance for ${ControllerClass.name}`);
+          this.logger.warn(`Module does not support getControllerInstance for ${controllerClass.name}`);
           continue;
         }
 
-        const controller = this.rootModule.getControllerInstance(ControllerClass);
+        const controller = this.rootModule.getControllerInstance(controllerClass) as Controller;
         if (!controller) {
-          this.logger.warn(`Controller instance not found for ${ControllerClass.name}`);
+          this.logger.warn(`Controller instance not found for ${controllerClass.name}`);
           continue;
         }
 
@@ -259,7 +255,7 @@ export class OneBunApplication {
         for (const route of controllerMetadata.routes) {
           const fullPath = `${basePath}${route.path}`;
           const method = this.mapHttpMethod(route.method);
-          const handler = (controller as any)[route.handler].bind(controller);
+          const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(controller);
 
           // Process path parameters
           const pathParams: string[] = [];
@@ -280,8 +276,8 @@ export class OneBunApplication {
           }
 
           // Use method and path as key to avoid conflicts between different HTTP methods
-          const routeKey = `${method}:${fullPath}`;
-          routes.set(routeKey, {
+          const _routeKey = `${method}:${fullPath}`;
+          routes.set(_routeKey, {
             method,
             handler,
             controller,
@@ -294,8 +290,8 @@ export class OneBunApplication {
       }
 
       // Log all routes
-      for (const ControllerClass of controllers) {
-        const metadata = getControllerMetadata(ControllerClass);
+      for (const controllerClass of controllers) {
+        const metadata = getControllerMetadata(controllerClass);
         if (!metadata) {
           continue;
         }
@@ -322,7 +318,9 @@ export class OneBunApplication {
           const startTime = Date.now();
 
           // Setup tracing context if available and enabled
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let traceSpan: any = null;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let traceContext: any = null;
 
           if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
@@ -330,9 +328,11 @@ export class OneBunApplication {
               // Extract trace headers
               const headers = Object.fromEntries(req.headers.entries());
               const traceHeaders = {
-                'traceparent': headers['traceparent'],
-                'tracestate': headers['tracestate'],
+                traceparent: headers.traceparent,
+                tracestate: headers.tracestate,
+                // eslint-disable-next-line @typescript-eslint/naming-convention
                 'x-trace-id': headers['x-trace-id'],
+                // eslint-disable-next-line @typescript-eslint/naming-convention
                 'x-span-id': headers['x-span-id'],
               };
 
@@ -371,13 +371,13 @@ export class OneBunApplication {
 
               // Also set it globally for logger
               if (typeof globalThis !== 'undefined') {
-                (globalThis as any).__onebunCurrentTraceContext = globalCurrentTraceContext;
+                (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = globalCurrentTraceContext;
               }
 
               // Propagate trace context to logger
               // Note: FiberRef.set should be used within Effect context
             } catch (error) {
-              console.error('Failed to setup tracing:', error);
+              app.logger.error('Failed to setup tracing:', error instanceof Error ? error : new Error(String(error)));
             }
           }
 
@@ -388,13 +388,14 @@ export class OneBunApplication {
 
               return new Response(metrics, {
                 headers: {
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
                   'Content-Type': app.metricsService.getContentType(),
                 },
               });
             } catch (error) {
-              console.error('Failed to get metrics:', error);
+              app.logger.error('Failed to get metrics:', error instanceof Error ? error : new Error(String(error)));
 
-              return new Response('Internal Server Error', { status: 500 });
+              return new Response('Internal Server Error', { status: HttpStatusCode.INTERNAL_SERVER_ERROR });
             }
           }
 
@@ -405,7 +406,7 @@ export class OneBunApplication {
 
           // If no exact match, try pattern matching
           if (!route) {
-            for (const [routeKey, routeData] of routes) {
+            for (const [_routeKey, routeData] of routes) {
               // Check if this route matches the method and has a pattern
               if (routeData.pathPattern && routeData.method === method) {
                 const match = path.match(routeData.pathPattern);
@@ -422,7 +423,7 @@ export class OneBunApplication {
           }
 
           if (!route) {
-            const response = new Response('Not Found', { status: 404 });
+            const response = new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
             const duration = Date.now() - startTime;
 
             // Record metrics for 404
@@ -431,7 +432,7 @@ export class OneBunApplication {
               app.metricsService.recordHttpRequest({
                 method,
                 route: path,
-                statusCode: 404,
+                statusCode: HttpStatusCode.NOT_FOUND,
                 duration: durationSeconds,
                 controller: 'unknown',
                 action: 'unknown',
@@ -443,12 +444,12 @@ export class OneBunApplication {
               try {
                 await Effect.runPromise(
                   app.traceService.endHttpTrace(traceSpan, {
-                    statusCode: 404,
+                    statusCode: HttpStatusCode.NOT_FOUND,
                     duration,
                   }),
                 );
               } catch (traceError) {
-                console.error('Failed to end trace for 404:', traceError);
+                app.logger.error('Failed to end trace for 404:', traceError instanceof Error ? traceError : new Error(String(traceError)));
               }
             }
 
@@ -480,7 +481,7 @@ export class OneBunApplication {
                 app.metricsService.recordHttpRequest({
                   method,
                   route: path,
-                  statusCode: response?.status || 200,
+                  statusCode: response?.status || HttpStatusCode.OK,
                   duration: durationSeconds,
                   controller: route.controller.constructor.name,
                   action: 'unknown',
@@ -492,14 +493,14 @@ export class OneBunApplication {
                 try {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: response?.status || 200,
+                      statusCode: response?.status || HttpStatusCode.OK,
                       responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
                     }),
                   );
                 } catch (traceError) {
-                  console.error('Failed to end trace:', traceError);
+                  app.logger.error('Failed to end trace:', traceError instanceof Error ? traceError : new Error(String(traceError)));
                 }
               }
 
@@ -517,7 +518,7 @@ export class OneBunApplication {
                 app.metricsService.recordHttpRequest({
                   method,
                   route: path,
-                  statusCode: response?.status || 200,
+                  statusCode: response?.status || HttpStatusCode.OK,
                   duration: durationSeconds,
                   controller: route.controller.constructor.name,
                   action: 'unknown',
@@ -529,14 +530,14 @@ export class OneBunApplication {
                 try {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: response?.status || 200,
+                      statusCode: response?.status || HttpStatusCode.OK,
                       responseSize: response?.headers?.get('content-length') ?
                         parseInt(response.headers.get('content-length')!, 10) : undefined,
                       duration,
                     }),
                   );
                 } catch (traceError) {
-                  console.error('Failed to end trace:', traceError);
+                  app.logger.error('Failed to end trace:', traceError instanceof Error ? traceError : new Error(String(traceError)));
                 }
               }
 
@@ -546,8 +547,8 @@ export class OneBunApplication {
               return response;
             }
           } catch (error) {
-            console.error('Request handling error:', error);
-            const response = new Response('Internal Server Error', { status: 500 });
+            app.logger.error('Request handling error:', error instanceof Error ? error : new Error(String(error)));
+            const response = new Response('Internal Server Error', { status: HttpStatusCode.INTERNAL_SERVER_ERROR });
             const duration = Date.now() - startTime;
 
             // Record error metrics
@@ -556,7 +557,7 @@ export class OneBunApplication {
               app.metricsService.recordHttpRequest({
                 method,
                 route: path,
-                statusCode: 500,
+                statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
                 duration: durationSeconds,
                 controller: route?.controller.constructor.name || 'unknown',
                 action: 'unknown',
@@ -568,18 +569,18 @@ export class OneBunApplication {
               try {
                 await Effect.runPromise(
                   app.traceService.addEvent('error', {
-                    'error.type': error instanceof Error ? error.constructor.name : 'UnknownError',
-                    'error.message': error instanceof Error ? error.message : String(error),
+                    errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
+                    errorMessage: error instanceof Error ? error.message : String(error),
                   }),
                 );
                 await Effect.runPromise(
                   app.traceService.endHttpTrace(traceSpan, {
-                    statusCode: 500,
+                    statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
                     duration,
                   }),
                 );
               } catch (traceError) {
-                console.error('Failed to end trace with error:', traceError);
+                app.logger.error('Failed to end trace with error:', traceError instanceof Error ? traceError : new Error(String(traceError)));
               }
             }
 
@@ -634,7 +635,7 @@ export class OneBunApplication {
           case ParamType.BODY:
             try {
               args[param.index] = await req.json();
-            } catch (e: unknown) {
+            } catch {
               args[param.index] = undefined;
             }
             break;
@@ -682,8 +683,9 @@ export class OneBunApplication {
         // If the result is already in standardized format, return it as JSON
         if (typeof result === 'object' && result !== null && 'success' in result) {
           return new Response(JSON.stringify(result), {
-            status: 200,
+            status: HttpStatusCode.OK,
             headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
               'Content-Type': 'application/json',
             },
           });
@@ -693,8 +695,9 @@ export class OneBunApplication {
         const successResponse = createSuccessResponse(result);
 
         return new Response(JSON.stringify(successResponse), {
-          status: 200,
+          status: HttpStatusCode.OK,
           headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
           },
         });
@@ -706,7 +709,7 @@ export class OneBunApplication {
           errorResponse = error.toErrorResponse();
         } else {
           const message = error instanceof Error ? error.message : String(error);
-          const code = error instanceof Error && 'code' in error ? Number((error as any).code) : 500;
+          const code = error instanceof Error && 'code' in error ? Number((error as { code: unknown }).code) : HttpStatusCode.INTERNAL_SERVER_ERROR;
           errorResponse = createErrorResponse(
             message,
             code,
@@ -719,9 +722,11 @@ export class OneBunApplication {
           );
         }
 
+        // Always return 200 for consistency with API response format
         return new Response(JSON.stringify(errorResponse), {
-          status: 200, // Always return 200 for consistency with API response format
+          status: HttpStatusCode.OK,
           headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
           },
         });
@@ -750,5 +755,13 @@ export class OneBunApplication {
     }
 
     return this.logger;
+  }
+
+  /**
+   * Get the HTTP URL where the application is listening
+   * @returns The HTTP URL
+   */
+  getHttpUrl(): string {
+    return `http://${this.options.host}:${this.options.port}`;
   }
 }

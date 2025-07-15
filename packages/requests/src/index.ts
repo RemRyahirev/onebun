@@ -1,5 +1,5 @@
 /**
- * @onebun/requests
+ * \@onebun/requests
  * 
  * Unified HTTP client module for OneBun framework
  * Provides built-in tracing, metrics, error handling, and retries

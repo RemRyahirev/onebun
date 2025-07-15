@@ -3,9 +3,17 @@ import { OneBunApplication } from '@onebun/core';
 import { AppModule } from './app.module';
 import { envSchema } from './config';
 
+ 
+/**
+ * Default development server port
+ */
+const DEFAULT_DEV_PORT = 3001;
+ 
+
 // Create application with integrated configuration
 const app = new OneBunApplication(AppModule, {
-  port: 3001,
+   
+  port: DEFAULT_DEV_PORT,
   host: '0.0.0.0',
   development: true,
   envSchema,
@@ -28,8 +36,11 @@ const app = new OneBunApplication(AppModule, {
     traceHttpRequests: true,
     traceDatabaseQueries: true,
     defaultAttributes: {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       'service.name': 'onebun-example',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       'service.version': '0.1.0',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       'deployment.environment': 'development',
     },
   },

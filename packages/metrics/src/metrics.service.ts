@@ -19,6 +19,39 @@ import type {
   CustomMetricConfig,
 } from './types';
 
+import {
+  DEFAULT_SYSTEM_METRICS_INTERVAL,
+  DEFAULT_HTTP_DURATION_BUCKETS,
+  DEFAULT_METRICS_MAX_AGE_SECONDS,
+} from './types';
+
+/* eslint-disable no-magic-numbers -- Metrics constants defined in one place */
+/**
+ * Default histogram buckets for GC metrics
+ */
+const GC_DURATION_BUCKETS = [0.001, 0.01, 0.1, 1, 2, 5];
+
+/**
+ * Default histogram buckets for custom metrics
+ */
+const DEFAULT_CUSTOM_HISTOGRAM_BUCKETS = [0.001, 0.01, 0.1, 1, 10];
+
+/**
+ * Default percentiles for summary metrics
+ */
+const DEFAULT_SUMMARY_PERCENTILES = [0.01, 0.05, 0.5, 0.9, 0.95, 0.99, 0.999];
+
+/**
+ * Default number of age buckets for summary metrics
+ */
+const DEFAULT_SUMMARY_AGE_BUCKETS = 5;
+
+/**
+ * Microseconds to seconds conversion factor
+ */
+const MICROSECONDS_TO_SECONDS = 1000000;
+/* eslint-enable no-magic-numbers */
+
 /**
  * Metrics service interface
  */
@@ -61,6 +94,7 @@ export interface MetricsService {
   /**
    * Get a metric by name
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getMetric<T = any>(name: string): T | undefined;
 
   /**
@@ -87,6 +121,7 @@ export interface MetricsService {
 /**
  * Metrics service tag for dependency injection
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const MetricsService = Context.GenericTag<MetricsService>('@onebun/metrics/MetricsService');
 
 /**
@@ -109,9 +144,9 @@ class MetricsServiceImpl implements MetricsService {
       collectHttpMetrics: true,
       collectSystemMetrics: true,
       collectGcMetrics: true,
-      systemMetricsInterval: 5000,
+      systemMetricsInterval: DEFAULT_SYSTEM_METRICS_INTERVAL,
       prefix: 'onebun_',
-      httpDurationBuckets: [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],
+      httpDurationBuckets: DEFAULT_HTTP_DURATION_BUCKETS,
       ...options,
     };
 
@@ -133,7 +168,7 @@ class MetricsServiceImpl implements MetricsService {
       collectDefaultMetrics({
         register,
         prefix: this.options.prefix,
-        gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5],
+        gcDurationBuckets: GC_DURATION_BUCKETS,
       });
     }
 
@@ -238,7 +273,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      buckets: config.buckets || [0.001, 0.01, 0.1, 1, 10],
+      buckets: config.buckets || DEFAULT_CUSTOM_HISTOGRAM_BUCKETS,
       registers: [register],
     });
   }
@@ -248,13 +283,14 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      percentiles: config.percentiles || [0.01, 0.05, 0.5, 0.9, 0.95, 0.99, 0.999],
-      maxAgeSeconds: config.maxAgeSeconds || 600,
-      ageBuckets: config.ageBuckets || 5,
+      percentiles: config.percentiles || DEFAULT_SUMMARY_PERCENTILES,
+      maxAgeSeconds: config.maxAgeSeconds || DEFAULT_METRICS_MAX_AGE_SECONDS,
+      ageBuckets: config.ageBuckets || DEFAULT_SUMMARY_AGE_BUCKETS,
       registers: [register],
     });
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getMetric<T = any>(name: string): T | undefined {
     const fullName = name.startsWith(this.options.prefix!) ? name : `${this.options.prefix}${name}`;
 
@@ -305,7 +341,7 @@ class MetricsServiceImpl implements MetricsService {
 
       // CPU metrics
       const cpuUsage = process.cpuUsage(this.cpuUsageBaseline);
-      const cpuPercent = (cpuUsage.user + cpuUsage.system) / 1000000; // Convert microseconds to seconds
+      const cpuPercent = (cpuUsage.user + cpuUsage.system) / MICROSECONDS_TO_SECONDS; // Convert microseconds to seconds
       this.systemCpuUsage.set(cpuPercent);
       this.cpuUsageBaseline = process.cpuUsage();
 
@@ -313,6 +349,7 @@ class MetricsServiceImpl implements MetricsService {
       this.systemUptime.set(process.uptime());
     } catch (error) {
       // Silently ignore metrics collection errors
+      // eslint-disable-next-line no-console
       console.warn('Failed to collect system metrics:', error);
     }
   }
@@ -328,4 +365,4 @@ export const makeMetricsService = (options?: MetricsOptions): Layer.Layer<Metric
  * Create metrics service with configuration
  */
 export const createMetricsService = (options?: MetricsOptions): Effect.Effect<MetricsService, never, never> =>
-  Effect.succeed(new MetricsServiceImpl(options)); 
+  Effect.succeed(new MetricsServiceImpl(options));

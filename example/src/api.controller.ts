@@ -8,6 +8,8 @@ import {
   Param,
   Query,
 } from '@onebun/core';
+import type { SyncLogger } from '@onebun/logger';
+import { HttpStatusCode } from '@onebun/requests';
 
 import type {
   UserQuery,
@@ -21,12 +23,12 @@ import { ExternalApiService } from './external-api.service';
 
 @Controller('api')
 export class ApiController extends BaseController {
-  constructor(private api: ExternalApiService, logger?: any, config?: any) {
+  constructor(private api: ExternalApiService, logger?: SyncLogger, config?: unknown) {
     super(logger, config);
   }
 
   /**
-   * Get all users using @onebun/requests package (Traditional API)
+   * Get all users using \@onebun/requests package (Traditional API)
    */
   @Get('users/traditional')
   async getUsersTraditional(@Query() query: UserQuery = {}): Promise<Response> {
@@ -37,8 +39,10 @@ export class ApiController extends BaseController {
       this.logger.info(`Fetched ${users.length} users using @onebun/requests (Traditional API)`);
 
       return this.success(users);
-    } catch (error: any) {
-      return this.error(`Failed to fetch users: ${error.message}`, 500);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      return this.error(`Failed to fetch users: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
     }
   }
 
@@ -48,7 +52,7 @@ export class ApiController extends BaseController {
   @Get('users')
   async getUsers(@Query() query: UserQuery = {}): Promise<User[]> {
     this.logger.info('Getting users with new req API');
-    const users = await this.api.getAllUsers_NEW(query);
+    const users = await this.api.getAllUsersNew(query);
     this.logger.info(`Fetched ${users.length} users using new req API`);
 
     return users;
@@ -88,8 +92,11 @@ export class ApiController extends BaseController {
       const user = await this.api.getUserByIdOld(userId);
 
       return this.success(user);
-    } catch (error: any) {
-      return this.error(`Failed to fetch user: ${error.message} | traceId: ${error.traceId}`, 404);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      const traceId = error && typeof error === 'object' && 'traceId' in error ? error.traceId : 'N/A';
+
+      return this.error(`Failed to fetch user: ${errorMessage} | traceId: ${traceId}`, HttpStatusCode.NOT_FOUND);
     }
   }
 
@@ -127,7 +134,7 @@ export class ApiController extends BaseController {
   }
 
   /**
-   * Demonstrate comprehensive error handling with @onebun/requests (Promise API)
+   * Demonstrate comprehensive error handling with \@onebun/requests (Promise API)
    */
   @Get('demo/error-handling')
   async demonstrateErrorHandling(): Promise<Response> {
@@ -135,13 +142,15 @@ export class ApiController extends BaseController {
       await this.api.demonstrateErrorHandling();
 
       return this.success({ message: 'Error handling demonstration completed - check console logs' });
-    } catch (error: any) {
-      return this.error(`Error handling demo failed: ${error.message}`, 500);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      return this.error(`Error handling demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
     }
   }
 
   /**
-   * Demonstrate authentication methods available in @onebun/requests (Promise API)
+   * Demonstrate authentication methods available in \@onebun/requests (Promise API)
    */
   @Get('demo/authentication')
   async demonstrateAuthentication(): Promise<Response> {
@@ -149,13 +158,15 @@ export class ApiController extends BaseController {
       await this.api.demonstrateAuthentication();
 
       return this.success({ message: 'Authentication methods demonstration completed - check console logs' });
-    } catch (error: any) {
-      return this.error(`Authentication demo failed: ${error.message}`, 500);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      return this.error(`Authentication demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
     }
   }
 
   /**
-   * Demonstrate retry functionality in @onebun/requests (Promise API)
+   * Demonstrate retry functionality in \@onebun/requests (Promise API)
    */
   @Get('demo/retries')
   async demonstrateRetries(): Promise<Response> {
@@ -163,13 +174,15 @@ export class ApiController extends BaseController {
       await this.api.demonstrateRetries();
 
       return this.success({ message: 'Retry functionality demonstration completed - check console logs' });
-    } catch (error: any) {
-      return this.error(`Retry demo failed: ${error.message}`, 500);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      return this.error(`Retry demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
     }
   }
 
   /**
-   * Health check endpoint that shows @onebun/requests integration
+   * Health check endpoint that shows \@onebun/requests integration
    */
   @Get('health')
   async healthCheck(): Promise<Response> {
@@ -192,14 +205,16 @@ export class ApiController extends BaseController {
    */
   @Get('effect/demo/error-handling')
   async demonstrateErrorHandlingEffect(): Promise<Response> {
-    const { Effect } = await import('effect');
+    const { Effect: effectLib } = await import('effect');
 
     try {
-      await Effect.runPromise(this.api.demonstrateErrorHandlingEffect());
+      await effectLib.runPromise(this.api.demonstrateErrorHandlingEffect());
 
       return this.success({ message: 'Error handling demonstration (Effect API) completed - check console logs' });
-    } catch (error: any) {
-      return this.error(`Error handling demo failed: ${error.message}`, 500);
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+      return this.error(`Error handling demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
     }
   }
 }

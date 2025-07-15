@@ -4,6 +4,23 @@ import {
   LogLevel,
 } from './types';
 
+
+/**
+ * Maximum recursion depth for object formatting
+ */
+const MAX_OBJECT_DEPTH = 3;
+
+/**
+ * Standard width for level names alignment in console output
+ */
+const LEVEL_NAME_WIDTH = 7;
+
+/**
+ * Number of characters to display from trace/span IDs for brevity
+ */
+const TRACE_ID_DISPLAY_LENGTH = 8;
+
+
 /**
  * Colors for console output
  */
@@ -29,71 +46,71 @@ function formatValue(value: unknown, depth = 0): string {
   if (value === undefined) {
     return '\x1b[90mundefined\x1b[0m';
   }
-  
+
   if (typeof value === 'string') {
     return `\x1b[32m"${value}"\x1b[0m`;
   }
-  
+
   if (typeof value === 'number') {
     return `\x1b[33m${value}\x1b[0m`;
   }
-  
+
   if (typeof value === 'boolean') {
     return `\x1b[35m${value}\x1b[0m`;
   }
-  
+
   if (value instanceof Date) {
     return `\x1b[36m${value.toISOString()}\x1b[0m`;
   }
-  
+
   if (value instanceof Error) {
     return `\x1b[31m${value.name}: ${value.message}\x1b[0m`;
   }
-  
+
   if (Array.isArray(value)) {
-    if (depth > 3) {
+    if (depth > MAX_OBJECT_DEPTH) {
       return '\x1b[90m[Array]\x1b[0m';
     }
-    
+
     const items = value.map(item => formatValue(item, depth + 1));
     if (items.length === 0) {
       return '\x1b[90m[]\x1b[0m';
     }
-    
+
     const indent = '  '.repeat(depth + 1);
     const closeIndent = '  '.repeat(depth);
-    
+
     return `\x1b[90m[\x1b[0m\n${indent}${items.join(`,\n${indent}`)}\n${closeIndent}\x1b[90m]\x1b[0m`;
   }
-  
+
   if (typeof value === 'object') {
-    if (depth > 3) {
+    if (depth > MAX_OBJECT_DEPTH) {
       return '\x1b[90m[Object]\x1b[0m';
     }
-    
+
     const entries = Object.entries(value as Record<string, unknown>);
     if (entries.length === 0) {
       return '\x1b[90m{}\x1b[0m';
     }
-    
+
     const indent = '  '.repeat(depth + 1);
     const closeIndent = '  '.repeat(depth);
-    
+
     const formattedEntries = entries.map(([key, val]) => {
-      const formattedKey = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key) 
-        ? `\x1b[34m${key}\x1b[0m` 
+      const formattedKey = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key)
+        ? `\x1b[34m${key}\x1b[0m`
         : `\x1b[32m"${key}"\x1b[0m`;
 
       return `${formattedKey}: ${formatValue(val, depth + 1)}`;
     });
-    
+
     return `\x1b[90m{\x1b[0m\n${indent}${formattedEntries.join(`,\n${indent}`)}\n${closeIndent}\x1b[90m}\x1b[0m`;
   }
-  
+
   if (typeof value === 'function') {
     return `\x1b[36m[Function: ${value.name || 'anonymous'}]\x1b[0m`;
   }
-  
+
   return String(value);
 }
 
@@ -103,19 +120,20 @@ function formatValue(value: unknown, depth = 0): string {
 export class PrettyFormatter implements LogFormatter {
   format(entry: LogEntry): string {
     const time = entry.timestamp.toISOString();
-    const level = this.getLevelName(entry.level).padEnd(7);
+
+    const level = this.getLevelName(entry.level).padEnd(LEVEL_NAME_WIDTH);
     const color = COLORS[entry.level.toString()] || '';
     const reset = COLORS.RESET;
-    
+
     // Add trace information if available
-    const traceInfo = entry.trace 
-      ? ` [trace:${entry.trace.traceId.slice(-8)} span:${entry.trace.spanId.slice(-8)}]`
+    const traceInfo = entry.trace
+      ? ` [trace:${entry.trace.traceId.slice(-TRACE_ID_DISPLAY_LENGTH)} span:${entry.trace.spanId.slice(-TRACE_ID_DISPLAY_LENGTH)}]`
       : '';
-    
+
     // Extract className from context for main log line
     let className = '';
     let contextWithoutClassName: Record<string, unknown> = {};
-    
+
     if (entry.context) {
       const { className: extractedClassName, ...restContext } = entry.context;
       if (extractedClassName && typeof extractedClassName === 'string') {
@@ -123,9 +141,9 @@ export class PrettyFormatter implements LogFormatter {
       }
       contextWithoutClassName = restContext;
     }
-    
+
     let message = `${color}${time} [${level}]${reset}${traceInfo}${className} ${entry.message}`;
-    
+
     // Handle additional data first (this is the main new functionality)
     if (contextWithoutClassName.__additionalData) {
       const additionalData = contextWithoutClassName.__additionalData as unknown[];
@@ -136,24 +154,24 @@ export class PrettyFormatter implements LogFormatter {
       // Remove __additionalData from context since we've processed it
       delete contextWithoutClassName.__additionalData;
     }
-    
+
     // Handle regular context (excluding special fields and className)
     if (Object.keys(contextWithoutClassName).length > 0) {
       const contextWithoutSpecialFields = { ...contextWithoutClassName };
       delete contextWithoutSpecialFields.SHOW_CONTEXT;
-      
+
       if (Object.keys(contextWithoutSpecialFields).length > 0) {
         message += `\n${COLORS.DIM}Context:${COLORS.RESET} ${formatValue(contextWithoutSpecialFields)}`;
       }
     }
-    
+
     if (entry.error) {
       message += `\n${COLORS[LogLevel.Error]}Error:${COLORS.RESET} ${entry.error.stack || entry.error.message}`;
     }
-    
+
     return message;
   }
-  
+
   private getLevelName(level: LogLevel): string {
     switch (level) {
       case LogLevel.Trace: return 'TRACE';
@@ -172,7 +190,7 @@ export class PrettyFormatter implements LogFormatter {
  */
 export class JsonFormatter implements LogFormatter {
   format(entry: LogEntry): string {
-    const logData: any = {
+    const logData: any = { // eslint-disable-line @typescript-eslint/no-explicit-any
       timestamp: entry.timestamp.toISOString(),
       level: this.getLevelName(entry.level),
       message: entry.message,
@@ -188,13 +206,13 @@ export class JsonFormatter implements LogFormatter {
 
     if (entry.context) {
       const contextData = { ...entry.context };
-      
+
       // Extract additional data if present
       if (contextData.__additionalData) {
         logData.additionalData = contextData.__additionalData;
         delete contextData.__additionalData;
       }
-      
+
       // Add remaining context
       if (Object.keys(contextData).length > 0) {
         logData.context = contextData;
@@ -211,7 +229,7 @@ export class JsonFormatter implements LogFormatter {
 
     return JSON.stringify(logData);
   }
-  
+
   private getLevelName(level: LogLevel): string {
     switch (level) {
       case LogLevel.Trace: return 'trace';
@@ -223,4 +241,4 @@ export class JsonFormatter implements LogFormatter {
       default: return 'unknown';
     }
   }
-} 
+}

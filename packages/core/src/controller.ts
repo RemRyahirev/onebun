@@ -1,19 +1,21 @@
 import { Context } from 'effect';
 import { SyncLogger } from '@onebun/logger';
+import { HttpStatusCode } from '@onebun/requests';
 
 /**
  * Base controller class that can be extended to add common functionality
  */
 export class Controller {
   // Store service instances
-  private services: Map<Context.Tag<any, any>, any> = new Map();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private services: Map<Context.Tag<any, any>, unknown> = new Map();
 
   // Logger instance with controller class name as context
   protected logger: SyncLogger;
   // Configuration instance for accessing environment variables
-  protected config: any;
+  protected config: unknown;
 
-  constructor(logger?: SyncLogger, config?: any) {
+  constructor(logger?: SyncLogger, config?: unknown) {
     // Initialize logger with controller class name as context
     const className = this.constructor.name;
 
@@ -31,20 +33,21 @@ export class Controller {
 
   /**
    * Get a service instance by tag
-   * @param tag The service tag
+   * @param tag - The service tag
    * @returns The service instance
    */
   protected getService<T>(tag: Context.Tag<T, T>): T;
   /**
    * Get a service instance by class
-   * @param serviceClass The service class
+   * @param serviceClass - The service class
    * @returns The service instance
    */
-  protected getService<T>(serviceClass: new (...args: any[]) => T): T;
+  protected getService<T>(serviceClass: new (...args: unknown[]) => T): T;
   /**
    * Implementation of getService
    */
-  protected getService<T>(tagOrClass: Context.Tag<T, T> | (new (...args: any[]) => T)): T {
+  protected getService<T>(tagOrClass: Context.Tag<T, T> | (new (...args: unknown[]) => T)): T {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let tag: Context.Tag<any, any>;
 
     // If it's a class, get the tag from metadata
@@ -70,7 +73,7 @@ export class Controller {
     }
 
     if (!service) {
-      const id = 'Identifier' in tag ? tag.Identifier : (tagOrClass as any).name;
+      const id = 'Identifier' in tag ? tag.Identifier : (tagOrClass as Function).name;
       throw new Error(`Service ${id} not found. Make sure it's registered in the module.`);
     }
 
@@ -79,8 +82,8 @@ export class Controller {
 
   /**
    * Set a service instance
-   * @param tag The service tag
-   * @param instance The service instance
+   * @param tag - The service tag
+   * @param instance - The service instance
    */
   setService<T>(tag: Context.Tag<T, T>, instance: T): void {
     this.services.set(tag, instance);
@@ -90,7 +93,7 @@ export class Controller {
    * Check if request has JSON content type
    */
   protected isJson(req: Request): boolean {
-    return req.headers.get('Content-Type')?.includes('application/json') ?? false;
+    return req.headers.get('content-type')?.includes('application/json') ?? false;
   }
 
   /**
@@ -102,14 +105,15 @@ export class Controller {
 
   /**
    * Create standardized success response
-   * @param result The result data
-   * @param status The HTTP status code
+   * @param result - The result data
+   * @param status - The HTTP status code
    * @returns A Response object
    */
-  protected success<T = unknown>(result: T, status: number = 200): Response {
+  protected success<T = unknown>(result: T, status: number = HttpStatusCode.OK): Response {
     return new Response(JSON.stringify({ success: true, result }), {
       status,
       headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'Content-Type': 'application/json',
       },
     });
@@ -117,15 +121,20 @@ export class Controller {
 
   /**
    * Create standardized error response
-   * @param message The error message
-   * @param code The error code
-   * @param status The HTTP status code
+   * @param message - The error message
+   * @param code - The error code
+   * @param status - The HTTP status code
    * @returns A Response object
    */
-  public error(message: string, code: number = 500, status: number = 500): Response {
+  public error(
+    message: string,
+    code: number = HttpStatusCode.INTERNAL_SERVER_ERROR,
+    status: number = HttpStatusCode.INTERNAL_SERVER_ERROR,
+  ): Response {
     return new Response(JSON.stringify({ success: false, code, message }), {
       status,
       headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'Content-Type': 'application/json',
       },
     });
@@ -133,18 +142,25 @@ export class Controller {
 
   /**
    * Create JSON response (legacy method, use success() instead)
+   * @param data - The data to return
+   * @param status - The HTTP status code
+   * @returns A Response object
    */
-  protected json<T = unknown>(data: T, status: number = 200): Response {
+  protected json<T = unknown>(data: T, status: number = HttpStatusCode.OK): Response {
     return this.success(data, status);
   }
 
   /**
    * Create text response
+   * @param data - The text data to return
+   * @param status - The HTTP status code
+   * @returns A Response object
    */
-  protected text(data: string, status: number = 200): Response {
+  protected text(data: string, status: number = HttpStatusCode.OK): Response {
     return new Response(data, {
       status,
       headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         'Content-Type': 'text/plain',
       },
     });

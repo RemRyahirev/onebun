@@ -36,7 +36,7 @@ export class EnvParser {
       return value;
     });
 
-    const parseValue = (resolvedValue: any) => {
+    const parseValue = (resolvedValue: unknown) => {
       if (typeof resolvedValue === 'string') {
         const separator = config.separator || options.defaultArraySeparator || ',';
 
@@ -46,7 +46,7 @@ export class EnvParser {
       return Effect.succeed(resolvedValue);
     };
 
-    const validateParsed = (parsed: any) => EnvParser.validateValue(variable, parsed as T, config);
+    const validateParsed = (parsed: unknown) => EnvParser.validateValue(variable, parsed as T, config);
 
     return resolveValue.pipe(
       Effect.flatMap(parseValue),
@@ -62,7 +62,7 @@ export class EnvParser {
     value: string,
     type: EnvValueType,
     separator = ',',
-  ): Effect.Effect<any, EnvValidationError> {
+  ): Effect.Effect<unknown, EnvValidationError> {
     return Effect.try({
       try() {
         switch (type) {
@@ -124,6 +124,7 @@ export class EnvParser {
   /**
    * Get default value for type (sync)
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private static getDefaultForTypeSync(type: EnvValueType): any {
     switch (type) {
       case 'string':
@@ -142,6 +143,7 @@ export class EnvParser {
   /**
    * Get default value for type
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private static getDefaultForType(type: EnvValueType): Effect.Effect<any, EnvValidationError> {
     switch (type) {
       case 'string':
