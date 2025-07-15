@@ -240,7 +240,7 @@ class ConfigProxy<T> {
     }
 
     if (typeof obj === 'object') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+       
       const result: Record<string, unknown> = {};
 
       for (const [key, value] of Object.entries(obj)) {

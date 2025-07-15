@@ -184,7 +184,13 @@ export const Env = {
   url(errorMessage?: string): (value: string) => Effect.Effect<string, EnvValidationError> {
     return (value: string) => {
       try {
-        new URL(value);
+        const url = new URL(value);
+        
+        // Reject potentially dangerous schemes
+        const dangerousSchemes = ['javascript', 'data', 'vbscript'];
+        if (dangerousSchemes.includes(url.protocol.slice(0, -1))) {
+          throw new Error('Dangerous URL scheme');
+        }
 
         return Effect.succeed(value);
       } catch {

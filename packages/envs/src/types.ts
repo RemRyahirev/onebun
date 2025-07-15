@@ -39,6 +39,31 @@ export type EnvSchema<T> = {
 };
 
 /**
+ * Format value for error messages
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function formatValue(value: any): string {
+  if (value === undefined) {
+    return 'undefined';
+  }
+  if (value === null) {
+    return 'null';
+  }
+  if (typeof value === 'string') {
+    return `"${value}"`;
+  }
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return '[object Object]';
+    }
+  }
+
+  return String(value);
+}
+
+/**
  * Environment variable validation error
  */
 export class EnvValidationError extends Error {
@@ -48,7 +73,7 @@ export class EnvValidationError extends Error {
     public readonly value: any,
     public readonly reason: string,
   ) {
-    super(`Environment variable validation failed for "${variable}": ${reason}. Got: ${value}`);
+    super(`Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`);
     this.name = 'EnvValidationError';
   }
 }

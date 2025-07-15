@@ -70,6 +70,11 @@ export class EnvParser {
             return value;
           
           case 'number': {
+            // Empty string should be rejected for numbers
+            if (value.trim() === '') {
+              throw new Error(`"${value}" is not a valid number`);
+            }
+            
             const num = Number(value);
             if (isNaN(num)) {
               throw new Error(`"${value}" is not a valid number`);
@@ -140,22 +145,5 @@ export class EnvParser {
     }
   }
 
-  /**
-   * Get default value for type
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private static getDefaultForType(type: EnvValueType): Effect.Effect<any, EnvValidationError> {
-    switch (type) {
-      case 'string':
-        return Effect.succeed('');
-      case 'number':
-        return Effect.succeed(0);
-      case 'boolean':
-        return Effect.succeed(false);
-      case 'array':
-        return Effect.succeed([]);
-      default:
-        return Effect.fail(new EnvValidationError('unknown', undefined, `Unknown type: ${type}`));
-    }
-  }
+
 } 

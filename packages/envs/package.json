@@ -12,7 +12,9 @@
     }
   },
   "scripts": {
-    "test": "bun test"
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "lint": "eslint --fix --config ../../eslint.config.js ./"
   },
   "dependencies": {
     "effect": "^3.13.10"
