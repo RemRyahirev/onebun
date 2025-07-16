@@ -1,15 +1,4 @@
 import { Effect, pipe } from 'effect';
-import { Service, BaseService } from '@onebun/core';
-import {
-  createHttpClient,
-  ErrorResponse,
-  HttpStatusCode,
-  InternalServerError,
-  isErrorResponse,
-  NotFoundError,
-  OneBunBaseError,
-  SuccessResponse,
-} from '@onebun/requests';
 
 import type {
   User,
@@ -19,6 +8,19 @@ import type {
   CreatePostData,
   UpdateUserData,
 } from './types';
+
+import { 
+  Service,
+  BaseService,
+  createHttpClient,
+  ErrorResponse,
+  HttpStatusCode,
+  InternalServerError,
+  isErrorResponse,
+  NotFoundError,
+  OneBunBaseError,
+  SuccessResponse,
+} from '@onebun/core';
 
 @Service()
 export class ExternalApiService extends BaseService {

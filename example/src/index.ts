@@ -3,16 +3,13 @@ import { OneBunApplication } from '@onebun/core';
 import { AppModule } from './app.module';
 import { envSchema } from './config';
 
- 
 /**
  * Default development server port
  */
 const DEFAULT_DEV_PORT = 3001;
- 
 
 // Create application with integrated configuration
 const app = new OneBunApplication(AppModule, {
-   
   port: DEFAULT_DEV_PORT,
   host: '0.0.0.0',
   development: true,

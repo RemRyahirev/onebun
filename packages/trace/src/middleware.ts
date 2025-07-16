@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+
 import { HttpStatusCode } from '@onebun/requests';
 
 import { traceService } from './trace.service.js';

@@ -1,11 +1,12 @@
 import { Effect, Layer } from 'effect';
+
 import { TypedEnv } from '@onebun/envs';
 import {
   Logger,
-  SyncLogger,
   LoggerService,
-  makeLogger,
+  SyncLogger,
   createSyncLogger,
+  makeLogger,
 } from '@onebun/logger';
 import {
   createSuccessResponse,

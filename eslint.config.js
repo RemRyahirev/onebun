@@ -94,8 +94,8 @@ module.exports = (async () => {
           // OneBun core imports
           {
             pattern: '@onebun/**',
-            group: 'external',
-            position: 'after',
+            group: 'internal',
+            position: 'before',
           },
           // Internal paths for OneBun project structure
           {

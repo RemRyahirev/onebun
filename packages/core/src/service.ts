@@ -3,7 +3,8 @@ import {
   Effect,
   Layer,
 } from 'effect';
-import { SyncLogger } from '@onebun/logger';
+
+import type { SyncLogger } from '@onebun/logger';
 
 /**
  * Metadata storage for services
@@ -31,18 +32,16 @@ export function Service<T>(tag?: Context.Tag<T, T>) {
 }
 
 /**
- * Get service metadata
+ * Get service metadata by class
  */
 export function getServiceMetadata(
-  target: Function,
+  serviceClass: Function,
 ): { tag: Context.Tag<unknown, unknown>; impl: new () => unknown } | undefined {
-  return META_SERVICES.get(target);
+  return META_SERVICES.get(serviceClass);
 }
 
 /**
- * Get service tag
- * @param serviceClass - The service class
- * @returns The service tag
+ * Get the service tag for a service class
  */
 export function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): Context.Tag<T, T> {
   const metadata = getServiceMetadata(serviceClass);
@@ -62,7 +61,24 @@ export class BaseService {
   // Configuration instance for accessing environment variables
   protected config: unknown;
 
-  constructor(logger?: SyncLogger, config?: unknown) {
+  constructor(...args: unknown[]) {
+    // Extract logger and config from arguments
+    // Module passes: [service1, service2, ..., logger, config] - same as controller
+    let logger: SyncLogger | undefined;
+    let config: unknown;
+    
+    if (args.length >= 2) {
+      // Last argument is config, second to last is logger
+      config = args[args.length - 1];
+      const potentialLogger = args[args.length - 2];
+      if (potentialLogger && typeof potentialLogger === 'object' && 'info' in potentialLogger) {
+        logger = potentialLogger as SyncLogger;
+      }
+    } else if (args.length === 1) {
+      // Only config provided
+      config = args[0];
+    }
+
     // Initialize logger with service class name as context
     const className = this.constructor.name;
 
@@ -76,6 +92,8 @@ export class BaseService {
 
     // Set configuration instance
     this.config = config;
+
+    this.logger.debug(`Service ${className} initialized`);
   }
 
   /**
@@ -124,7 +142,7 @@ export function createServiceLayer<T>(
   }
 
   // Create a service instance with logger and config
-  const serviceConstructor = metadata.impl as new (logger?: SyncLogger, config?: unknown) => unknown;
+  const serviceConstructor = metadata.impl as new (...args: unknown[]) => unknown;
   const serviceInstance = new serviceConstructor(logger, config);
 
   // Return a layer that provides the service

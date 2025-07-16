@@ -1,6 +1,6 @@
 export {
-  Logger,
-  SyncLogger,
+  type Logger,
+  type SyncLogger,
   LoggerService,
   makeLogger,
   createSyncLogger,

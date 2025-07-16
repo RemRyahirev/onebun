@@ -1,5 +1,6 @@
 import { Context } from 'effect';
-import { SyncLogger } from '@onebun/logger';
+
+import type { SyncLogger } from '@onebun/logger';
 import { HttpStatusCode } from '@onebun/requests';
 
 /**
@@ -15,7 +16,21 @@ export class Controller {
   // Configuration instance for accessing environment variables
   protected config: unknown;
 
-  constructor(logger?: SyncLogger, config?: unknown) {
+  constructor(...args: unknown[]) {
+    // Extract logger and config from arguments
+    // Module passes: [service1, service2, ..., logger, config]
+    let logger: SyncLogger | undefined;
+    let config: unknown;
+    
+    if (args.length >= 2) {
+      // Last argument is config, second to last is logger
+      config = args[args.length - 1];
+      const potentialLogger = args[args.length - 2];
+      if (potentialLogger && typeof potentialLogger === 'object' && 'info' in potentialLogger) {
+        logger = potentialLogger as SyncLogger;
+      }
+    }
+
     // Initialize logger with controller class name as context
     const className = this.constructor.name;
 
@@ -29,6 +44,8 @@ export class Controller {
 
     // Set configuration instance
     this.config = config;
+
+    this.logger.debug(`Controller ${className} initialized`);
   }
 
   /**

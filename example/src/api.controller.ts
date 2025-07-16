@@ -1,3 +1,11 @@
+import type {
+  UserQuery,
+  CreatePostData,
+  UpdateUserData,
+  User,
+  Post as PostEntity,
+} from './types';
+
 import {
   BaseController,
   Controller,
@@ -7,24 +15,15 @@ import {
   Body,
   Param,
   Query,
+  HttpStatusCode,
 } from '@onebun/core';
-import type { SyncLogger } from '@onebun/logger';
-import { HttpStatusCode } from '@onebun/requests';
-
-import type {
-  UserQuery,
-  CreatePostData,
-  UpdateUserData,
-  User,
-  Post as PostEntity,
-} from './types';
 
 import { ExternalApiService } from './external-api.service';
 
 @Controller('api')
 export class ApiController extends BaseController {
-  constructor(private api: ExternalApiService, logger?: SyncLogger, config?: unknown) {
-    super(logger, config);
+  constructor(private api: ExternalApiService) {
+    super();
   }
 
   /**

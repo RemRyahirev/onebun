@@ -1,5 +1,7 @@
 import { Context } from 'effect';
 
+import type { SyncLogger } from '@onebun/logger';
+
 import { BaseService, Service } from './service';
 
 /**
@@ -17,11 +19,10 @@ export class ConfigServiceImpl extends BaseService {
   private configInstance: any = null;
 
   constructor(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
-    logger?: any,
+    logger?: SyncLogger,
     config?: unknown,
   ) {
-    super(logger);
+    super(logger, config);
     this.configInstance = config;
   }
 

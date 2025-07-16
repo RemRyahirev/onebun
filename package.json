@@ -19,7 +19,11 @@
     "packages/*",
     "example"
   ],
+  "dependencies": {
+    "effect": "^3.13.10"
+  },
   "devDependencies": {
+    "bun-types": "1.2.2",
     "@stylistic/eslint-plugin": "^5.1.0",
     "@typescript-eslint/eslint-plugin": "^8.35.1",
     "@typescript-eslint/parser": "^8.35.1",

@@ -6,14 +6,13 @@ import {
   Body,
   Param,
 } from '@onebun/core';
-import type { SyncLogger } from '@onebun/logger';
 
 import { CounterService } from './counter.service';
 
 @Controller('/api')
 export class CounterController extends BaseController {
-  constructor(private counterService: CounterService, logger?: SyncLogger, config?: unknown) {
-    super(logger, config);
+  constructor(private counterService: CounterService) {
+    super();
   }
 
   @Get('/')

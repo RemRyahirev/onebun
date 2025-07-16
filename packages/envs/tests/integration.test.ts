@@ -15,11 +15,10 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { EnvSchema, EnvValidationError } from 'types';
-
 import { Env } from '../src/helpers';
 import { EnvLoader } from '../src/loader';
 import { TypedEnv } from '../src/typed-env';
+import { EnvSchema, EnvValidationError } from '../src/types';
 
 const TEST_DIR = path.join(__dirname, '.test-integration');
 

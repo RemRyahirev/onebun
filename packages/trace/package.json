@@ -3,17 +3,18 @@
   "version": "0.1.0",
   "description": "OpenTelemetry-compatible tracing module for OneBun framework",
   "main": "src/index.ts",
+  "module": "src/index.ts",
   "types": "src/index.ts",
   "scripts": {
     "dev": "bun run --watch src/index.ts"
   },
   "dependencies": {
-    "effect": "^3.10.15",
+    "effect": "^3.13.10",
     "@opentelemetry/api": "^1.8.0",
     "@onebun/requests": "^0.1.0"
   },
   "devDependencies": {
-    "@types/node": "^22.9.0"
+    "bun-types": "1.2.2"
   },
   "engines": {
     "bun": "1.2.12"

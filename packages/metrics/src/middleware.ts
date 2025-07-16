@@ -1,7 +1,8 @@
 import { Effect } from 'effect';
-import { HttpStatusCode } from '@onebun/requests';
 
 import type { HttpMetricsData } from './types';
+
+import { HttpStatusCode } from '@onebun/requests';
 
 import { MetricsService } from './metrics.service';
 

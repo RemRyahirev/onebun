@@ -25,9 +25,21 @@
     "strictBindCallApply": true,
     "forceConsistentCasingInFileNames": true,
     "noFallthroughCasesInSwitch": true,
+
+    "verbatimModuleSyntax": true,
+    "noErrorTruncation": true,
+    // "pretty": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    // "traceResolution": true,
+    // "extendedDiagnostics": true,
+    // "explainFiles": true,
+
     "resolveJsonModule": true,
     "allowJs": true,
     "checkJs": false,
+
     "types": ["bun-types"],
     "lib": ["ESNext"],
     "paths": {

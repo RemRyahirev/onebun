@@ -16,7 +16,7 @@ import {
 /**
  * Custom logger service interface
  */
-export interface Logger {
+export type Logger = {
   trace(message: string, ...args: unknown[]): Effect.Effect<void>;
   debug(message: string, ...args: unknown[]): Effect.Effect<void>;
   info(message: string, ...args: unknown[]): Effect.Effect<void>;
@@ -24,12 +24,12 @@ export interface Logger {
   error(message: string, ...args: unknown[]): Effect.Effect<void>;
   fatal(message: string, ...args: unknown[]): Effect.Effect<void>;
   child(context: Record<string, unknown>): Logger;
-}
+};
 
 /**
  * Synchronous logger interface for convenience
  */
-export interface SyncLogger {
+export type SyncLogger = {
   trace(message: string, ...args: unknown[]): void;
   debug(message: string, ...args: unknown[]): void;
   info(message: string, ...args: unknown[]): void;
@@ -37,7 +37,7 @@ export interface SyncLogger {
   error(message: string, ...args: unknown[]): void;
   fatal(message: string, ...args: unknown[]): void;
   child(context: Record<string, unknown>): SyncLogger;
-}
+};
 
 /**
  * Context tag for the Logger service

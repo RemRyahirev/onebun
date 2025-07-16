@@ -1,4 +1,4 @@
-import { Env, EnvSchema } from '@onebun/envs';
+import { Env, EnvSchema } from '@onebun/core';
 
 // Define configuration interface
 interface AppConfig {

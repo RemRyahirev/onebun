@@ -3,12 +3,13 @@ import {
   Effect,
   Layer,
 } from 'effect';
+
 import {
+  createSyncLogger,
   Logger,
-  SyncLogger,
   LoggerService,
   makeLogger,
-  createSyncLogger,
+  SyncLogger,
 } from '@onebun/logger';
 
 import { Controller } from './controller';
@@ -206,7 +207,8 @@ export class OneBunModule implements Module {
 
               if (!found) {
                 // Create an instance of the service and register it
-                const serviceConstructor = provider as new (logger?: SyncLogger, config?: unknown) => unknown;
+                // Pass logger and config at the end, same as controllers
+                const serviceConstructor = provider as new (...args: unknown[]) => unknown;
                 const serviceInstance = new serviceConstructor(self.logger, self.config);
                 self.serviceInstances.set(tag, serviceInstance);
               }
@@ -251,7 +253,7 @@ export class OneBunModule implements Module {
         }
       }
       
-      // Add logger and config at the end (always needed)
+      // Add logger and config at the end (required by BaseController)
       dependencies.push(this.logger);
       dependencies.push(this.config);
       
