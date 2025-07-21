@@ -3,10 +3,10 @@ import { Effect } from 'effect';
 import { EnvLoader } from './loader';
 import { EnvParser } from './parser';
 import {
-  EnvLoadOptions,
-  EnvSchema,
+  type EnvLoadOptions,
+  type EnvSchema,
   EnvValidationError,
-  EnvVariableConfig,
+  type EnvVariableConfig,
 } from './types';
 
 /**

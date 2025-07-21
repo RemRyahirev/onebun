@@ -1,6 +1,6 @@
 import { Effect } from 'effect';
 
-import { EnvVariableConfig, EnvValidationError } from './types';
+import { type EnvVariableConfig, EnvValidationError } from './types';
 
 /**
  * Helpers for creating environment variable configurations

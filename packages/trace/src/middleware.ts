@@ -3,7 +3,7 @@ import { Effect } from 'effect';
 import { HttpStatusCode } from '@onebun/requests';
 
 import { traceService } from './trace.service.js';
-import { TraceHeaders, HttpTraceData } from './types.js';
+import { type TraceHeaders, type HttpTraceData } from './types.js';
 
 /**
  * HTTP trace middleware for OneBun applications

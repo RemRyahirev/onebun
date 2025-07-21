@@ -326,7 +326,7 @@ class MetricsServiceImpl implements MetricsService {
   stopSystemMetricsCollection(): void {
     if (this.systemMetricsInterval) {
       clearInterval(this.systemMetricsInterval);
-      this.systemMetricsInterval = undefined;
+      delete this.systemMetricsInterval;
     }
   }
 

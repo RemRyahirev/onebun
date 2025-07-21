@@ -1,10 +1,10 @@
 import './metadata'; // Import polyfill first
 import { Reflect, getConstructorParamTypes as getDesignParamTypes } from './metadata';
 import {
-  ControllerMetadata,
+  type ControllerMetadata,
   HttpMethod,
   ParamType,
-  ParamMetadata,
+  type ParamMetadata,
 } from './types';
 
 /**

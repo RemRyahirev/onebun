@@ -17,7 +17,7 @@ import { Effect } from 'effect';
 
 import { Env } from '../src/helpers';
 import { TypedEnv } from '../src/typed-env';
-import { EnvSchema, EnvValidationError } from '../src/types';
+import { type EnvSchema, EnvValidationError } from '../src/types';
 
 const TEST_DIR = path.join(__dirname, '.test-typed-env');
 

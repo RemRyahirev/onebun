@@ -6,10 +6,10 @@ import {
 
 import {
   createSyncLogger,
-  Logger,
+  type Logger,
   LoggerService,
   makeLogger,
-  SyncLogger,
+  type SyncLogger,
 } from '@onebun/logger';
 
 import { Controller } from './controller';
@@ -19,7 +19,7 @@ import {
   registerControllerDependencies,
 } from './decorators';
 import { getServiceMetadata, createServiceLayer } from './service';
-import { Module } from './types';
+import { type Module } from './types';
 
 /**
  * OneBun Module implementation

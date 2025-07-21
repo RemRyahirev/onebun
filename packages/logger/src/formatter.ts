@@ -1,6 +1,6 @@
 import {
-  LogEntry,
-  LogFormatter,
+  type LogEntry,
+  type LogFormatter,
   LogLevel,
 } from './types';
 

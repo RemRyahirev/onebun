@@ -8,9 +8,9 @@ import {
 import { JsonFormatter, PrettyFormatter } from './formatter';
 import { ConsoleTransport } from './transport';
 import {
-  LoggerConfig,
+  type LoggerConfig,
   LogLevel,
-  TraceInfo,
+  type TraceInfo,
 } from './types';
 
 /**

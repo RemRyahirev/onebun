@@ -1,7 +1,7 @@
 import { Effect } from 'effect';
 
 import { MetricsService } from './metrics.service';
-import { CustomMetricConfig } from './types';
+import { type CustomMetricConfig } from './types';
 
 /**
  * Decorator for measuring method execution time

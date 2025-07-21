@@ -13,13 +13,13 @@ import {
   Service,
   BaseService,
   createHttpClient,
-  ErrorResponse,
+  type ErrorResponse,
   HttpStatusCode,
   InternalServerError,
   isErrorResponse,
   NotFoundError,
   OneBunBaseError,
-  SuccessResponse,
+  type SuccessResponse,
 } from '@onebun/core';
 
 @Service()

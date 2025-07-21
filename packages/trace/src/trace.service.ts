@@ -14,13 +14,13 @@ import {
 import { HttpStatusCode } from '@onebun/requests';
 
 import {
-  TraceContext,
-  TraceSpan,
-  TraceOptions,
-  TraceHeaders,
-  SpanStatus,
+  type TraceContext,
+  type TraceSpan,
+  type TraceOptions,
+  type TraceHeaders,
+  type SpanStatus,
   SpanStatusCode,
-  HttpTraceData,
+  type HttpTraceData,
 } from './types.js';
 
 

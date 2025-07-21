@@ -1,6 +1,6 @@
 import { Effect, Layer } from 'effect';
 
-import { Logger } from '@onebun/logger';
+import { type Logger } from '@onebun/logger';
 
 /**
  * Base interface for all OneBun services

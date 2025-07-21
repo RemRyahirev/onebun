@@ -1,6 +1,6 @@
 import { Effect } from 'effect';
 
-import { EnvLoadError, EnvLoadOptions } from './types';
+import { EnvLoadError, type EnvLoadOptions } from './types';
 
 /**
  * Environment variables loader

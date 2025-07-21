@@ -2,9 +2,9 @@ import { Effect } from 'effect';
 
 import {
   EnvValidationError,
-  EnvValueType,
-  EnvVariableConfig,
-  EnvLoadOptions,
+  type EnvValueType,
+  type EnvVariableConfig,
+  type EnvLoadOptions,
 } from './types';
 
 /**

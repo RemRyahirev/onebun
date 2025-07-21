@@ -7,14 +7,14 @@ import {
 
 import { HttpClient, executeRequest } from './client.js';
 import {
-  RequestsOptions,
-  RequestConfig,
+  type RequestsOptions,
+  type RequestConfig,
   HttpMethod,
   DEFAULT_REQUESTS_OPTIONS,
-  ApiResponse,
+  type ApiResponse,
   OneBunBaseError,
-  SuccessResponse,
-  ErrorResponse,
+  type SuccessResponse,
+  type ErrorResponse,
   InternalServerError,
   isErrorResponse,
   isSuccessResponse,
