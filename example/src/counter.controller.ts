@@ -1,10 +1,10 @@
 import {
   BaseController,
+  Body,
   Controller,
   Get,
-  Post,
-  Body,
   Param,
+  Post,
 } from '@onebun/core';
 
 import { CounterService } from './counter.service';
@@ -30,9 +30,9 @@ export class CounterController extends BaseController {
     const serverPort = (this.config as any)?.get('server.port') || DEFAULT_PORT;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const serverHost = (this.config as any)?.get('server.host') || '0.0.0.0';
-    
+
     this.logger.info('Getting application info', { port: serverPort, host: serverHost });
-    
+
     return this.success({
       message: 'Counter Service Info',
       server: {
@@ -57,19 +57,19 @@ export class CounterController extends BaseController {
     const amount = body?.amount || 1;
     const newValue = this.counterService.increment(amount);
     this.logger.info('Counter incremented', { amount, newValue });
-    
+
     return this.success({
       value: newValue,
       message: `Counter incremented by ${amount}`,
     });
   }
 
-  @Post('/decrement')  
+  @Post('/decrement')
   async decrement(@Body() body?: { amount?: number }): Promise<Response> {
     const amount = body?.amount || 1;
     const newValue = this.counterService.decrement(amount);
     this.logger.info('Counter decremented', { amount, newValue });
-    
+
     return this.success({
       value: newValue,
       message: `Counter decremented by ${amount}`,
@@ -80,7 +80,7 @@ export class CounterController extends BaseController {
   async reset(): Promise<Response> {
     this.counterService.reset();
     this.logger.info('Counter reset');
-    
+
     return this.success({
       value: 0,
       message: 'Counter reset to 0',
@@ -96,14 +96,14 @@ export class CounterController extends BaseController {
       uptime: process.uptime(),
     };
     this.logger.info('Getting stats', { totalOperations: stats.totalOperations });
-    
+
     return this.success(stats);
   }
 
   @Get('/counter/:id')
   async getById(@Param('id') id: string): Promise<Response> {
     this.logger.info('Getting counter by id', { id });
-    
+
     return this.success({
       id,
       value: this.counterService.getValue(),

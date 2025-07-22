@@ -62,23 +62,25 @@ export interface SuccessResponse<T = unknown> {
 /**
  * Error API response
  */
-export interface ErrorResponse<E extends string = string, R extends string = string> extends OneBunError<E, R> {
+export interface ErrorResponse<E extends string = string, R extends string = string>
+  extends OneBunError<E, R> {
   success: false;
 }
 
 /**
  * Standardized API response type - either success or error
  */
-export type ApiResponse<
-  T = unknown,
-  E extends string = string,
-  R extends string = string
-> = SuccessResponse<T> | ErrorResponse<E, R>;
+export type ApiResponse<T = unknown, E extends string = string, R extends string = string> =
+  | SuccessResponse<T>
+  | ErrorResponse<E, R>;
 
 /**
  * Base OneBun error class
  */
-export abstract class OneBunBaseError<E extends string = string, R extends string = string> extends Error {
+export abstract class OneBunBaseError<
+  E extends string = string,
+  R extends string = string,
+> extends Error {
   public abstract readonly code: number;
 
   constructor(
@@ -100,100 +102,179 @@ export abstract class OneBunBaseError<E extends string = string, R extends strin
     };
   }
 
-  static fromErrorResponse<U extends string, V extends string>(errorResponse: ErrorResponse<U, V>): OneBunBaseError<U, V> {
+  static fromErrorResponse<U extends string, V extends string>(
+    errorResponse: ErrorResponse<U, V>,
+  ): OneBunBaseError<U, V> {
     switch (errorResponse.code) {
       case HttpStatusCode.BAD_REQUEST:
-        return new BadRequestError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new BadRequestError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.UNAUTHORIZED:
-        return new UnauthorizedError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new UnauthorizedError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.FORBIDDEN:
-        return new ForbiddenError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new ForbiddenError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.NOT_FOUND:
-        return new NotFoundError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new NotFoundError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.CONFLICT:
-        return new ConflictError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new ConflictError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.UNPROCESSABLE_ENTITY:
-        return new ValidationError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new ValidationError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.TOO_MANY_REQUESTS:
-        return new TooManyRequestsError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new TooManyRequestsError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.INTERNAL_SERVER_ERROR:
-        return new InternalServerError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new InternalServerError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.BAD_GATEWAY:
-        return new BadGatewayError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new BadGatewayError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.SERVICE_UNAVAILABLE:
-        return new ServiceUnavailableError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new ServiceUnavailableError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       case HttpStatusCode.GATEWAY_TIMEOUT:
-        return new GatewayTimeoutError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new GatewayTimeoutError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       default:
-        return new InternalServerError<U, V>(errorResponse.error, errorResponse.details, errorResponse.originalError);
+        return new InternalServerError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
     }
   }
 
   /**
    * Add context to error and create error chain
    */
-  withContext<U extends string>(contextMessage: U, contextDetails: Record<string, unknown> = {}): OneBunBaseError<U, E> {
-    return new InternalServerError<U, E>(
-      contextMessage,
-      contextDetails,
-      this.toErrorResponse(),
-    );
+  withContext<U extends string>(
+    contextMessage: U,
+    contextDetails: Record<string, unknown> = {},
+  ): OneBunBaseError<U, E> {
+    return new InternalServerError<U, E>(contextMessage, contextDetails, this.toErrorResponse());
   }
 }
 
 // 4xx Client Errors
-export class BadRequestError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class BadRequestError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.BAD_REQUEST;
 }
 
-export class UnauthorizedError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class UnauthorizedError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.UNAUTHORIZED;
 }
 
-export class ForbiddenError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class ForbiddenError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.FORBIDDEN;
 }
 
-export class NotFoundError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class NotFoundError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.NOT_FOUND;
 }
 
-export class ConflictError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class ConflictError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.CONFLICT;
 }
 
-export class ValidationError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class ValidationError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.UNPROCESSABLE_ENTITY;
 }
 
-export class TooManyRequestsError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class TooManyRequestsError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.TOO_MANY_REQUESTS;
 }
 
 // 5xx Server Errors
-export class InternalServerError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class InternalServerError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.INTERNAL_SERVER_ERROR;
 }
 
-export class BadGatewayError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class BadGatewayError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.BAD_GATEWAY;
 }
 
-export class ServiceUnavailableError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class ServiceUnavailableError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.SERVICE_UNAVAILABLE;
 }
 
-export class GatewayTimeoutError<E extends string = string, R extends string = string> extends OneBunBaseError<E, R> {
+export class GatewayTimeoutError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.GATEWAY_TIMEOUT;
 }
 
 /**
  * Helper function to create success response
  */
-export function createSuccessResponse<T>(
-  result: T,
-  traceId?: string,
-): SuccessResponse<T> {
+export function createSuccessResponse<T>(result: T, traceId?: string): SuccessResponse<T> {
   return {
     success: true,
     result,
@@ -223,7 +304,9 @@ export function createErrorResponse<E extends string, R extends string>(
   };
 }
 
-export function wrapToErrorResponse<E extends string, R extends string>(error: OneBunError<E, R>): ErrorResponse<E, R> {
+export function wrapToErrorResponse<E extends string, R extends string>(
+  error: OneBunError<E, R>,
+): ErrorResponse<E, R> {
   return {
     ...error,
     success: false,
@@ -268,7 +351,7 @@ export enum HttpMethod {
   DELETE = 'DELETE',
   PATCH = 'PATCH',
   HEAD = 'HEAD',
-  OPTIONS = 'OPTIONS'
+  OPTIONS = 'OPTIONS',
 }
 
 /**

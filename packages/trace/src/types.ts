@@ -240,4 +240,4 @@ export interface HttpTraceData {
   requestSize?: number;
   responseSize?: number;
   duration?: number;
-} 
+}

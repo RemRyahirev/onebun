@@ -1,16 +1,15 @@
 import { Effect, pipe } from 'effect';
 
 import type {
-  User,
-  Post,
-  UserQuery,
-  PostQuery,
   CreatePostData,
+  Post,
+  PostQuery,
   UpdateUserData,
+  User,
+  UserQuery,
 } from './types';
 
-import { 
-  Service,
+import {
   BaseService,
   createHttpClient,
   type ErrorResponse,
@@ -19,6 +18,7 @@ import {
   isErrorResponse,
   NotFoundError,
   OneBunBaseError,
+  Service,
   type SuccessResponse,
 } from '@onebun/core';
 
@@ -88,21 +88,16 @@ export class ExternalApiService extends BaseService {
   async getAllUsersNew(query: UserQuery = {}): Promise<User[]> {
     this.logger.info('Fetching users with @onebun/requests (req API)');
 
-    const result = await this.client.req<User[], UserQuery>(
-      'GET',
-      '/users',
-      query,
-      {
-        errors: {
-          wrong: {
-            error: 'USERS_UNAVAILABLE',
-            message: 'Failed to fetch users from external API',
-            details: { query },
-            code: HttpStatusCode.SERVICE_UNAVAILABLE,
-          },
+    const result = await this.client.req<User[], UserQuery>('GET', '/users', query, {
+      errors: {
+        wrong: {
+          error: 'USERS_UNAVAILABLE',
+          message: 'Failed to fetch users from external API',
+          details: { query },
+          code: HttpStatusCode.SERVICE_UNAVAILABLE,
         },
       },
-    );
+    });
 
     this.logger.info(`Fetched ${result.length} users`);
 
@@ -115,14 +110,12 @@ export class ExternalApiService extends BaseService {
   async getAllUsersRaw(query: UserQuery = {}): Promise<User[]> {
     this.logger.info('Fetching users with @onebun/requests (reqRaw API)');
 
-    const response = await this.client.reqRaw<User[], UserQuery>(
-      'GET',
-      '/users',
-      query,
-    );
+    const response = await this.client.reqRaw<User[], UserQuery>('GET', '/users', query);
 
     if (isErrorResponse(response)) {
-      throw OneBunBaseError.fromErrorResponse(response).withContext('Failed to fetch users', { query });
+      throw OneBunBaseError.fromErrorResponse(response).withContext('Failed to fetch users', {
+        query,
+      });
     }
 
     this.logger.info(`Fetched ${response.result.length} users`);
@@ -137,11 +130,7 @@ export class ExternalApiService extends BaseService {
     this.logger.info('Fetching users with @onebun/requests (reqEffect API)');
 
     return pipe(
-      this.client.reqEffect<User[], UserQuery>(
-        'GET',
-        '/users',
-        query,
-      ),
+      this.client.reqEffect<User[], UserQuery>('GET', '/users', query),
       Effect.map((response: SuccessResponse<User[]>) => {
         this.logger.info(`Fetched ${response.result.length} users`);
 
@@ -156,21 +145,16 @@ export class ExternalApiService extends BaseService {
   async getUserById(id: number): Promise<User> {
     this.logger.info(`Getting user ${id} with @onebun/requests (req API)`);
 
-    const user = await this.client.req<User>(
-      'GET',
-      `/users/${id}`,
-      undefined,
-      {
-        errors: {
-          wrong: {
-            error: 'USER_NOT_FOUND',
-            message: `User with ID ${id} does not exist`,
-            details: { userId: id },
-            code: HttpStatusCode.NOT_FOUND,
-          },
+    const user = await this.client.req<User>('GET', `/users/${id}`, undefined, {
+      errors: {
+        wrong: {
+          error: 'USER_NOT_FOUND',
+          message: `User with ID ${id} does not exist`,
+          details: { userId: id },
+          code: HttpStatusCode.NOT_FOUND,
         },
       },
-    );
+    });
 
     this.logger.info(`Fetched user: ${user.name}`);
 
@@ -215,21 +199,16 @@ export class ExternalApiService extends BaseService {
     this.logger.info(`Getting posts for user ${userId} with req API`);
 
     const query: PostQuery = { userId: userId.toString() };
-    const posts = await this.client.req<Post[], PostQuery>(
-      'GET',
-      '/posts',
-      query,
-      {
-        errors: {
-          wrong: {
-            error: 'POSTS_UNAVAILABLE',
-            message: `Failed to fetch posts for user ${userId}`,
-            details: { userId, query },
-            code: HttpStatusCode.SERVICE_UNAVAILABLE,
-          },
+    const posts = await this.client.req<Post[], PostQuery>('GET', '/posts', query, {
+      errors: {
+        wrong: {
+          error: 'POSTS_UNAVAILABLE',
+          message: `Failed to fetch posts for user ${userId}`,
+          details: { userId, query },
+          code: HttpStatusCode.SERVICE_UNAVAILABLE,
         },
       },
-    );
+    });
 
     this.logger.info(`Fetched ${posts.length} posts`);
 
@@ -242,21 +221,16 @@ export class ExternalApiService extends BaseService {
   async createPost(postData: CreatePostData): Promise<Post> {
     this.logger.info('Creating post with req API');
 
-    const post = await this.client.req<Post, CreatePostData>(
-      'POST',
-      '/posts',
-      postData,
-      {
-        errors: {
-          wrong: {
-            error: 'POST_CREATION_FAILED',
-            message: 'Failed to create new post',
-            details: { postData },
-            code: HttpStatusCode.INTERNAL_SERVER_ERROR,
-          },
+    const post = await this.client.req<Post, CreatePostData>('POST', '/posts', postData, {
+      errors: {
+        wrong: {
+          error: 'POST_CREATION_FAILED',
+          message: 'Failed to create new post',
+          details: { postData },
+          code: HttpStatusCode.INTERNAL_SERVER_ERROR,
         },
       },
-    );
+    });
 
     this.logger.info(`Created post ${post.id}: ${post.title}`);
 
@@ -269,21 +243,16 @@ export class ExternalApiService extends BaseService {
   async updateUser(id: number, userData: UpdateUserData): Promise<User> {
     this.logger.info(`Updating user ${id} with req API`);
 
-    const user = await this.client.req<User, UpdateUserData>(
-      'PUT',
-      `/users/${id}`,
-      userData,
-      {
-        errors: {
-          wrong: {
-            error: 'USER_UPDATE_FAILED',
-            message: `Failed to update user ${id}`,
-            details: { userId: id, userData },
-            code: HttpStatusCode.INTERNAL_SERVER_ERROR,
-          },
+    const user = await this.client.req<User, UpdateUserData>('PUT', `/users/${id}`, userData, {
+      errors: {
+        wrong: {
+          error: 'USER_UPDATE_FAILED',
+          message: `Failed to update user ${id}`,
+          details: { userId: id, userData },
+          code: HttpStatusCode.INTERNAL_SERVER_ERROR,
         },
       },
-    );
+    });
 
     this.logger.info(`Updated user ${user.id}: ${user.name}`);
 
@@ -317,7 +286,12 @@ export class ExternalApiService extends BaseService {
         if ('timestamp' in error && error.timestamp) {
           this.logger.info(`- Timestamp: ${new Date(error.timestamp as number).toISOString()}`);
         }
-        if ('cause' in error && error.cause && typeof error.cause === 'object' && 'message' in error.cause) {
+        if (
+          'cause' in error &&
+          error.cause &&
+          typeof error.cause === 'object' &&
+          'message' in error.cause
+        ) {
           this.logger.info(`- Caused by: ${error.cause.message}`);
         }
       }
@@ -464,7 +438,9 @@ export class ExternalApiService extends BaseService {
     });
 
     return pipe(
-      Effect.sync(() => this.logger.info('Attempting request to endpoint that returns 500 (will retry)...')),
+      Effect.sync(() =>
+        this.logger.info('Attempting request to endpoint that returns 500 (will retry)...'),
+      ),
       Effect.flatMap(() => retryClient.getEffect('/500')),
       Effect.catchAll((error: ErrorResponse) => {
         this.logger.info(`Request failed after retries: ${error.message}`);

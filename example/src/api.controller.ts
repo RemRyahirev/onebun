@@ -1,21 +1,21 @@
 import type {
-  UserQuery,
   CreatePostData,
+  Post as PostEntity,
   UpdateUserData,
   User,
-  Post as PostEntity,
+  UserQuery,
 } from './types';
 
 import {
   BaseController,
+  Body,
   Controller,
   Get,
+  HttpStatusCode,
+  Param,
   Post,
   Put,
-  Body,
-  Param,
   Query,
-  HttpStatusCode,
 } from '@onebun/core';
 
 import { ExternalApiService } from './external-api.service';
@@ -41,7 +41,10 @@ export class ApiController extends BaseController {
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      return this.error(`Failed to fetch users: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
+      return this.error(
+        `Failed to fetch users: ${errorMessage}`,
+        HttpStatusCode.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -93,9 +96,13 @@ export class ApiController extends BaseController {
       return this.success(user);
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      const traceId = error && typeof error === 'object' && 'traceId' in error ? error.traceId : 'N/A';
+      const traceId =
+        error && typeof error === 'object' && 'traceId' in error ? error.traceId : 'N/A';
 
-      return this.error(`Failed to fetch user: ${errorMessage} | traceId: ${traceId}`, HttpStatusCode.NOT_FOUND);
+      return this.error(
+        `Failed to fetch user: ${errorMessage} | traceId: ${traceId}`,
+        HttpStatusCode.NOT_FOUND,
+      );
     }
   }
 
@@ -140,11 +147,16 @@ export class ApiController extends BaseController {
     try {
       await this.api.demonstrateErrorHandling();
 
-      return this.success({ message: 'Error handling demonstration completed - check console logs' });
+      return this.success({
+        message: 'Error handling demonstration completed - check console logs',
+      });
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      return this.error(`Error handling demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
+      return this.error(
+        `Error handling demo failed: ${errorMessage}`,
+        HttpStatusCode.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -156,11 +168,16 @@ export class ApiController extends BaseController {
     try {
       await this.api.demonstrateAuthentication();
 
-      return this.success({ message: 'Authentication methods demonstration completed - check console logs' });
+      return this.success({
+        message: 'Authentication methods demonstration completed - check console logs',
+      });
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      return this.error(`Authentication demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
+      return this.error(
+        `Authentication demo failed: ${errorMessage}`,
+        HttpStatusCode.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 
@@ -172,7 +189,9 @@ export class ApiController extends BaseController {
     try {
       await this.api.demonstrateRetries();
 
-      return this.success({ message: 'Retry functionality demonstration completed - check console logs' });
+      return this.success({
+        message: 'Retry functionality demonstration completed - check console logs',
+      });
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
@@ -198,7 +217,6 @@ export class ApiController extends BaseController {
     });
   }
 
-
   /**
    * Demonstrate error handling with Effect API
    */
@@ -209,11 +227,16 @@ export class ApiController extends BaseController {
     try {
       await effectLib.runPromise(this.api.demonstrateErrorHandlingEffect());
 
-      return this.success({ message: 'Error handling demonstration (Effect API) completed - check console logs' });
+      return this.success({
+        message: 'Error handling demonstration (Effect API) completed - check console logs',
+      });
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
-      return this.error(`Error handling demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
+      return this.error(
+        `Error handling demo failed: ${errorMessage}`,
+        HttpStatusCode.INTERNAL_SERVER_ERROR,
+      );
     }
   }
 }

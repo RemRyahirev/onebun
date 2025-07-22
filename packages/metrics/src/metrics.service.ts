@@ -1,28 +1,28 @@
 import {
+  Context,
   Effect,
   Layer,
-  Context,
 } from 'effect';
 import {
-  register,
-  collectDefaultMetrics,
   Counter,
+  collectDefaultMetrics,
   Gauge,
   Histogram,
+  register,
   Summary,
 } from 'prom-client';
 
 import type {
-  MetricsOptions,
-  HttpMetricsData,
-  MetricsRegistry,
   CustomMetricConfig,
+  HttpMetricsData,
+  MetricsOptions,
+  MetricsRegistry,
 } from './types';
 
 import {
-  DEFAULT_SYSTEM_METRICS_INTERVAL,
   DEFAULT_HTTP_DURATION_BUCKETS,
   DEFAULT_METRICS_MAX_AGE_SECONDS,
+  DEFAULT_SYSTEM_METRICS_INTERVAL,
 } from './types';
 
 /* eslint-disable no-magic-numbers -- Metrics constants defined in one place */
@@ -358,11 +358,14 @@ class MetricsServiceImpl implements MetricsService {
 /**
  * Create metrics service layer
  */
-export const makeMetricsService = (options?: MetricsOptions): Layer.Layer<MetricsService, never, never> =>
+export const makeMetricsService = (
+  options?: MetricsOptions,
+): Layer.Layer<MetricsService, never, never> =>
   Layer.succeed(MetricsService, new MetricsServiceImpl(options));
 
 /**
  * Create metrics service with configuration
  */
-export const createMetricsService = (options?: MetricsOptions): Effect.Effect<MetricsService, never, never> =>
-  Effect.succeed(new MetricsServiceImpl(options));
+export const createMetricsService = (
+  options?: MetricsOptions,
+): Effect.Effect<MetricsService, never, never> => Effect.succeed(new MetricsServiceImpl(options));

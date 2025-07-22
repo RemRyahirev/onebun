@@ -34,7 +34,8 @@ const app = new OneBunApplication(AppModule, {
     prefix: 'example_app_', // `onebun_` by default
     httpDurationBuckets: [0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600], // this is default (duration in seconds)
     systemMetricsInterval: 5000, // this is default
-    defaultLabels: { // optional custom static labels
+    defaultLabels: {
+      // optional custom static labels
       app: 'example', // this is default if `name` specified and it's `example`
     },
   },
@@ -67,7 +68,8 @@ const app = new OneBunApplication(AppModule, {
 // TODO: swagger, validation, cors
 
 const logger = app.getLogger({ className: 'AppBootstrap' });
-app.start()
+app
+  .start()
   .then(() => {
     logger.info('Application started successfully and listen to', app.getHttpUrl());
   })

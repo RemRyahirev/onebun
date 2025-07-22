@@ -1,34 +1,34 @@
-import { Effect, Layer } from 'effect';
+import { Effect, type Layer } from 'effect';
+
+import type { Controller } from './controller';
 
 import { TypedEnv } from '@onebun/envs';
 import {
+  createSyncLogger,
   type Logger,
   LoggerService,
-  type SyncLogger,
-  createSyncLogger,
   makeLogger,
+  type SyncLogger,
 } from '@onebun/logger';
 import {
-  createSuccessResponse,
-  createErrorResponse,
-  OneBunBaseError,
   type ApiResponse,
+  createErrorResponse,
+  createSuccessResponse,
   HttpStatusCode,
+  OneBunBaseError,
 } from '@onebun/requests';
-import { TraceService, makeTraceService } from '@onebun/trace';
+import { makeTraceService, TraceService } from '@onebun/trace';
 
 import { ConfigServiceImpl } from './config.service';
-import { Controller } from './controller';
 import { getControllerMetadata } from './decorators';
 import { OneBunModule } from './module';
 import {
   type ApplicationOptions,
-  HttpMethod,
+  type HttpMethod,
   type Module,
-  ParamType,
   type ParamMetadata,
+  ParamType,
 } from './types';
-
 
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -77,7 +77,10 @@ export class OneBunApplication {
   /**
    * Create application instance
    */
-  constructor(moduleClass: new (...args: unknown[]) => object, options?: Partial<ApplicationOptions>) {
+  constructor(
+    moduleClass: new (...args: unknown[]) => object,
+    options?: Partial<ApplicationOptions>,
+  ) {
     if (options) {
       this.options = { ...this.options, ...options };
     }
@@ -94,9 +97,8 @@ export class OneBunApplication {
     // Initialize logger with application class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
-        Effect.map(
-          LoggerService,
-          (logger: Logger) => logger.child({ className: 'OneBunApplication' }),
+        Effect.map(LoggerService, (logger: Logger) =>
+          logger.child({ className: 'OneBunApplication' }),
         ),
         loggerLayer,
       ),
@@ -114,9 +116,7 @@ export class OneBunApplication {
         this.logger.debug('Attempting to initialize metrics service');
         this.logger.debug('Metrics options:', this.options.metrics);
 
-        this.metricsService = Effect.runSync(
-          createMetricsService(this.options.metrics || {}),
-        );
+        this.metricsService = Effect.runSync(createMetricsService(this.options.metrics || {}));
 
         this.logger.debug('Metrics service Effect run successfully');
 
@@ -127,8 +127,14 @@ export class OneBunApplication {
 
         this.logger.info('Metrics service initialized successfully');
       } catch (error) {
-        this.logger.error('Failed to initialize metrics service:', error instanceof Error ? error : new Error(String(error)));
-        this.logger.debug('Full error details:', { error, stack: error instanceof Error ? error.stack : 'No stack' });
+        this.logger.error(
+          'Failed to initialize metrics service:',
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        this.logger.debug('Full error details:', {
+          error,
+          stack: error instanceof Error ? error.stack : 'No stack',
+        });
       }
     } else if (this.options.metrics?.enabled !== false) {
       this.logger.debug('createMetricsService not available, metrics will be disabled');
@@ -141,9 +147,7 @@ export class OneBunApplication {
         this.logger.debug('Tracing options:', this.options.tracing);
 
         const traceLayer = makeTraceService(this.options.tracing || {});
-        this.traceService = Effect.runSync(
-          Effect.provide(TraceService, traceLayer),
-        );
+        this.traceService = Effect.runSync(Effect.provide(TraceService, traceLayer));
 
         this.logger.debug('Trace service Effect run successfully');
 
@@ -154,8 +158,14 @@ export class OneBunApplication {
 
         this.logger.info('Trace service initialized successfully');
       } catch (error) {
-        this.logger.error('Failed to initialize trace service:', error instanceof Error ? error : new Error(String(error)));
-        this.logger.debug('Full error details:', { error, stack: error instanceof Error ? error.stack : 'No stack' });
+        this.logger.error(
+          'Failed to initialize trace service:',
+          error instanceof Error ? error : new Error(String(error)),
+        );
+        this.logger.debug('Full error details:', {
+          error,
+          stack: error instanceof Error ? error.stack : 'No stack',
+        });
       }
     }
 
@@ -221,15 +231,18 @@ export class OneBunApplication {
       this.logger.debug(`Loaded ${controllers.length} controllers`);
 
       // Create a map of routes with metadata
-      const routes = new Map<string, {
-        method: string;
-        handler: Function;
-        controller: Controller;
-        params?: ParamMetadata[];
-        middleware?: Function[];
-        pathPattern?: RegExp;
-        pathParams?: string[];
-      }>();
+      const routes = new Map<
+        string,
+        {
+          method: string;
+          handler: Function;
+          controller: Controller;
+          params?: ParamMetadata[];
+          middleware?: Function[];
+          pathPattern?: RegExp;
+          pathParams?: string[];
+        }
+      >();
 
       // Add routes from controllers
       for (const controllerClass of controllers) {
@@ -241,7 +254,9 @@ export class OneBunApplication {
 
         // Get controller instance from module
         if (!this.rootModule.getControllerInstance) {
-          this.logger.warn(`Module does not support getControllerInstance for ${controllerClass.name}`);
+          this.logger.warn(
+            `Module does not support getControllerInstance for ${controllerClass.name}`,
+          );
           continue;
         }
 
@@ -256,23 +271,22 @@ export class OneBunApplication {
         for (const route of controllerMetadata.routes) {
           const fullPath = `${basePath}${route.path}`;
           const method = this.mapHttpMethod(route.method);
-          const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(controller);
+          const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
+            controller,
+          );
 
           // Process path parameters
           const pathParams: string[] = [];
-          let pathPattern: RegExp | undefined = undefined;
+          let pathPattern: RegExp | undefined;
 
           // Check if path contains parameters like :id
           if (fullPath.includes(':')) {
             // Convert path to regex pattern
-            const pattern = fullPath.replace(
-              /:([^/]+)/g,
-              (_, paramName) => {
-                pathParams.push(paramName);
+            const pattern = fullPath.replace(/:([^/]+)/g, (_, paramName) => {
+              pathParams.push(paramName);
 
-                return '([^/]+)';
-              },
-            );
+              return '([^/]+)';
+            });
             pathPattern = new RegExp(`^${pattern}$`);
           }
 
@@ -358,7 +372,9 @@ export class OneBunApplication {
                 route: path,
                 userAgent: headers['user-agent'],
                 remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
-                requestSize: headers['content-length'] ? parseInt(headers['content-length'], 10) : undefined,
+                requestSize: headers['content-length']
+                  ? parseInt(headers['content-length'], 10)
+                  : undefined,
               };
 
               traceSpan = await Effect.runPromise(app.traceService.startHttpTrace(httpData));
@@ -372,13 +388,17 @@ export class OneBunApplication {
 
               // Also set it globally for logger
               if (typeof globalThis !== 'undefined') {
-                (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = globalCurrentTraceContext;
+                (globalThis as Record<string, unknown>).__onebunCurrentTraceContext =
+                  globalCurrentTraceContext;
               }
 
               // Propagate trace context to logger
               // Note: FiberRef.set should be used within Effect context
             } catch (error) {
-              app.logger.error('Failed to setup tracing:', error instanceof Error ? error : new Error(String(error)));
+              app.logger.error(
+                'Failed to setup tracing:',
+                error instanceof Error ? error : new Error(String(error)),
+              );
             }
           }
 
@@ -394,16 +414,21 @@ export class OneBunApplication {
                 },
               });
             } catch (error) {
-              app.logger.error('Failed to get metrics:', error instanceof Error ? error : new Error(String(error)));
+              app.logger.error(
+                'Failed to get metrics:',
+                error instanceof Error ? error : new Error(String(error)),
+              );
 
-              return new Response('Internal Server Error', { status: HttpStatusCode.INTERNAL_SERVER_ERROR });
+              return new Response('Internal Server Error', {
+                status: HttpStatusCode.INTERNAL_SERVER_ERROR,
+              });
             }
           }
 
           // Find exact match first using method and path
           const exactRouteKey = `${method}:${path}`;
           let route = routes.get(exactRouteKey);
-          let paramValues: Record<string, string | string[]> = {};
+          const paramValues: Record<string, string | string[]> = {};
 
           // If no exact match, try pattern matching
           if (!route) {
@@ -424,7 +449,9 @@ export class OneBunApplication {
           }
 
           if (!route) {
-            const response = new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+            const response = new Response('Not Found', {
+              status: HttpStatusCode.NOT_FOUND,
+            });
             const duration = Date.now() - startTime;
 
             // Record metrics for 404
@@ -450,7 +477,10 @@ export class OneBunApplication {
                   }),
                 );
               } catch (traceError) {
-                app.logger.error('Failed to end trace for 404:', traceError instanceof Error ? traceError : new Error(String(traceError)));
+                app.logger.error(
+                  'Failed to end trace for 404:',
+                  traceError instanceof Error ? traceError : new Error(String(traceError)),
+                );
               }
             }
 
@@ -495,13 +525,17 @@ export class OneBunApplication {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
                       statusCode: response?.status || HttpStatusCode.OK,
-                      responseSize: response?.headers?.get('content-length') ?
-                        parseInt(response.headers.get('content-length')!, 10) : undefined,
+                      responseSize: response?.headers?.get('content-length')
+                        ? parseInt(response.headers.get('content-length')!, 10)
+                        : undefined,
                       duration,
                     }),
                   );
                 } catch (traceError) {
-                  app.logger.error('Failed to end trace:', traceError instanceof Error ? traceError : new Error(String(traceError)));
+                  app.logger.error(
+                    'Failed to end trace:',
+                    traceError instanceof Error ? traceError : new Error(String(traceError)),
+                  );
                 }
               }
 
@@ -532,13 +566,17 @@ export class OneBunApplication {
                   await Effect.runPromise(
                     app.traceService.endHttpTrace(traceSpan, {
                       statusCode: response?.status || HttpStatusCode.OK,
-                      responseSize: response?.headers?.get('content-length') ?
-                        parseInt(response.headers.get('content-length')!, 10) : undefined,
+                      responseSize: response?.headers?.get('content-length')
+                        ? parseInt(response.headers.get('content-length')!, 10)
+                        : undefined,
                       duration,
                     }),
                   );
                 } catch (traceError) {
-                  app.logger.error('Failed to end trace:', traceError instanceof Error ? traceError : new Error(String(traceError)));
+                  app.logger.error(
+                    'Failed to end trace:',
+                    traceError instanceof Error ? traceError : new Error(String(traceError)),
+                  );
                 }
               }
 
@@ -548,8 +586,13 @@ export class OneBunApplication {
               return response;
             }
           } catch (error) {
-            app.logger.error('Request handling error:', error instanceof Error ? error : new Error(String(error)));
-            const response = new Response('Internal Server Error', { status: HttpStatusCode.INTERNAL_SERVER_ERROR });
+            app.logger.error(
+              'Request handling error:',
+              error instanceof Error ? error : new Error(String(error)),
+            );
+            const response = new Response('Internal Server Error', {
+              status: HttpStatusCode.INTERNAL_SERVER_ERROR,
+            });
             const duration = Date.now() - startTime;
 
             // Record error metrics
@@ -581,7 +624,10 @@ export class OneBunApplication {
                   }),
                 );
               } catch (traceError) {
-                app.logger.error('Failed to end trace with error:', traceError instanceof Error ? traceError : new Error(String(traceError)));
+                app.logger.error(
+                  'Failed to end trace with error:',
+                  traceError instanceof Error ? traceError : new Error(String(traceError)),
+                );
               }
             }
 
@@ -595,12 +641,19 @@ export class OneBunApplication {
 
       this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);
       if (this.metricsService) {
-        this.logger.info(`Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`);
+        this.logger.info(
+          `Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`,
+        );
       } else if (this.options.metrics?.enabled !== false) {
-        this.logger.warn('Metrics enabled but @onebun/metrics module not available. Install with: bun add @onebun/metrics');
+        this.logger.warn(
+          'Metrics enabled but @onebun/metrics module not available. Install with: bun add @onebun/metrics',
+        );
       }
     } catch (error) {
-      this.logger.error('Failed to start application:', error instanceof Error ? error : new Error(String(error)));
+      this.logger.error(
+        'Failed to start application:',
+        error instanceof Error ? error : new Error(String(error)),
+      );
       throw error;
     }
 
@@ -608,7 +661,11 @@ export class OneBunApplication {
      * Execute route handler with parameter injection
      */
     async function executeHandler(
-      route: { handler: Function; controller: Controller; params?: ParamMetadata[] },
+      route: {
+        handler: Function;
+        controller: Controller;
+        params?: ParamMetadata[];
+      },
       req: Request,
       paramValues: Record<string, string | string[]>,
     ): Promise<Response> {
@@ -710,17 +767,14 @@ export class OneBunApplication {
           errorResponse = error.toErrorResponse();
         } else {
           const message = error instanceof Error ? error.message : String(error);
-          const code = error instanceof Error && 'code' in error ? Number((error as { code: unknown }).code) : HttpStatusCode.INTERNAL_SERVER_ERROR;
-          errorResponse = createErrorResponse(
-            message,
-            code,
-            message,
-            undefined,
-            {
-              originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-              stack: error instanceof Error ? error.stack : undefined,
-            },
-          );
+          const code =
+            error instanceof Error && 'code' in error
+              ? Number((error as { code: unknown }).code)
+              : HttpStatusCode.INTERNAL_SERVER_ERROR;
+          errorResponse = createErrorResponse(message, code, message, undefined, {
+            originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+            stack: error instanceof Error ? error.stack : undefined,
+          });
         }
 
         // Always return 200 for consistency with API response format

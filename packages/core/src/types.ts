@@ -1,6 +1,6 @@
-import { Effect, Layer } from 'effect';
+import type { Effect, Layer } from 'effect';
 
-import { type Logger } from '@onebun/logger';
+import type { Logger } from '@onebun/logger';
 
 /**
  * Base interface for all OneBun services
@@ -264,7 +264,7 @@ export enum HttpMethod {
   PATCH = 'PATCH',
   OPTIONS = 'OPTIONS',
   HEAD = 'HEAD',
-  ALL = 'ALL'
+  ALL = 'ALL',
 }
 
 /**
@@ -276,7 +276,7 @@ export enum ParamType {
   BODY = 'body',
   HEADER = 'header',
   REQUEST = 'request',
-  RESPONSE = 'response'
+  RESPONSE = 'response',
 }
 
 /**

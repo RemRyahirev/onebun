@@ -2,14 +2,17 @@ import { Effect, pipe } from 'effect';
 
 import type {
   AuthConfig,
-  RequestConfig,
   OneBunAuthConfig,
+  RequestConfig,
 } from './types.js';
 
 /**
  * Apply authentication to request configuration
  */
-export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effect<RequestConfig, Error> => {
+export const applyAuth = (
+  auth: AuthConfig,
+  config: RequestConfig,
+): Effect.Effect<RequestConfig, Error> => {
   switch (auth.type) {
     case 'bearer':
       return Effect.succeed({
@@ -17,7 +20,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         headers: {
           ...config.headers,
           // eslint-disable-next-line @typescript-eslint/naming-convention
-          'Authorization': `Bearer ${auth.token}`,
+          Authorization: `Bearer ${auth.token}`,
         },
       });
 
@@ -40,7 +43,7 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         });
       }
 
-    case 'basic':
+    case 'basic': {
       const credentials = btoa(`${auth.username}:${auth.password}`);
 
       return Effect.succeed({
@@ -48,9 +51,10 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
         headers: {
           ...config.headers,
           // eslint-disable-next-line @typescript-eslint/naming-convention
-          'Authorization': `Basic ${credentials}`,
+          Authorization: `Basic ${credentials}`,
         },
       });
+    }
 
     case 'custom':
       return pipe(
@@ -98,19 +102,16 @@ export const applyAuth = (auth: AuthConfig, config: RequestConfig): Effect.Effec
 /**
  * Apply OneBun framework internal authentication
  */
-const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.Effect<RequestConfig, Error> => {
+const applyOneBunAuth = (
+  auth: OneBunAuthConfig,
+  config: RequestConfig,
+): Effect.Effect<RequestConfig, Error> => {
   const timestamp = Date.now().toString();
   const nonce = generateNonce();
   const algorithm = auth.algorithm || 'hmac-sha256';
 
   // Create signature payload
-  const payload = [
-    config.method,
-    config.url,
-    timestamp,
-    nonce,
-    auth.serviceId,
-  ].join('\n');
+  const payload = [config.method, config.url, timestamp, nonce, auth.serviceId].join('\n');
 
   return pipe(
     generateSignature(payload, auth.secretKey, algorithm),
@@ -137,8 +138,8 @@ const applyOneBunAuth = (auth: OneBunAuthConfig, config: RequestConfig): Effect.
  * Generate cryptographic signature for OneBun auth
  */
 const generateSignature = (
-  payload: string, 
-  secretKey: string, 
+  payload: string,
+  secretKey: string,
   algorithm: 'hmac-sha256' | 'hmac-sha512',
 ): Effect.Effect<string, Error> => {
   return Effect.tryPromise({
@@ -160,7 +161,7 @@ const generateSignature = (
       const signature = await crypto.subtle.sign('HMAC', cryptoKey, payloadData);
 
       return Array.from(new Uint8Array(signature))
-        .map(b => b.toString(16).padStart(2, '0'))
+        .map((b) => b.toString(16).padStart(2, '0'))
         .join('');
     },
     catch: (error) => new Error(`Failed to generate signature: ${error}`),
@@ -175,7 +176,7 @@ const generateNonce = (): string => {
   crypto.getRandomValues(array);
 
   return Array.from(array)
-    .map(b => b.toString(16).padStart(2, '0'))
+    .map((b) => b.toString(16).padStart(2, '0'))
     .join('');
 };
 
@@ -207,7 +208,7 @@ export const validateOneBunAuth = (
   // Reconstruct payload (method and URL should be provided separately)
   const method = headers['x-onebun-method'] || 'GET';
   const url = headers['x-onebun-url'] || '/';
-  
+
   const payload = [method, url, timestamp, nonce, serviceId].join('\n');
 
   // Verify signature
@@ -218,4 +219,4 @@ export const validateOneBunAuth = (
       valid: signature === expectedSignature,
     })),
   );
-}; 
+};

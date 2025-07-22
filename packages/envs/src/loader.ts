@@ -10,13 +10,9 @@ export class EnvLoader {
    * Load environment variables from various sources
    */
   static load(options: EnvLoadOptions = {}): Effect.Effect<Record<string, string>, EnvLoadError> {
-    const {
-      envFilePath = '.env',
-      loadDotEnv = true,
-      envOverridesDotEnv = true,
-    } = options;
+    const { envFilePath = '.env', loadDotEnv = true, envOverridesDotEnv = true } = options;
 
-    const loadDotEnvVars = loadDotEnv 
+    const loadDotEnvVars = loadDotEnv
       ? EnvLoader.loadDotEnvFile(envFilePath)
       : Effect.succeed({} as Record<string, string>);
 
@@ -38,12 +34,14 @@ export class EnvLoader {
   /**
    * Load variables from .env file
    */
-  private static loadDotEnvFile(filePath: string): Effect.Effect<Record<string, string>, EnvLoadError> {
+  private static loadDotEnvFile(
+    filePath: string,
+  ): Effect.Effect<Record<string, string>, EnvLoadError> {
     return Effect.tryPromise({
       async try() {
         const file = Bun.file(filePath);
         const exists = await file.exists();
-        
+
         if (!exists) {
           return {}; // File not found - not an error, just return empty object
         }
@@ -52,8 +50,11 @@ export class EnvLoader {
 
         return EnvLoader.parseDotEnvContent(content);
       },
-      catch: (error) => 
-        new EnvLoadError(filePath, `Failed to read .env file: ${error instanceof Error ? error.message : String(error)}`),
+      catch: (error) =>
+        new EnvLoadError(
+          filePath,
+          `Failed to read .env file: ${error instanceof Error ? error.message : String(error)}`,
+        ),
     });
   }
 
@@ -66,7 +67,7 @@ export class EnvLoader {
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i].trim();
-      
+
       // Skip empty lines and comments
       if (!line || line.startsWith('#')) {
         continue;
@@ -82,8 +83,10 @@ export class EnvLoader {
       let value = line.slice(equalIndex + 1).trim();
 
       // Remove quotes if present
-      if ((value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))) {
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
         value = value.slice(1, -1);
       }
 
@@ -107,7 +110,7 @@ export class EnvLoader {
    */
   private static loadProcessEnv(): Record<string, string> {
     const variables: Record<string, string> = {};
-    
+
     for (const [key, value] of Object.entries(process.env)) {
       if (value !== undefined) {
         variables[key] = value;
@@ -123,4 +126,4 @@ export class EnvLoader {
   static checkDotEnvExists(filePath: string = '.env'): Effect.Effect<boolean, never> {
     return Effect.promise(() => Bun.file(filePath).exists());
   }
-} 
+}

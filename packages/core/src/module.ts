@@ -1,8 +1,11 @@
 import {
-  Context,
+  type Context,
   Effect,
   Layer,
 } from 'effect';
+
+import type { Controller } from './controller';
+import type { Module } from './types';
 
 import {
   createSyncLogger,
@@ -12,14 +15,13 @@ import {
   type SyncLogger,
 } from '@onebun/logger';
 
-import { Controller } from './controller';
+
 import {
-  getModuleMetadata,
   getConstructorParamTypes,
+  getModuleMetadata,
   registerControllerDependencies,
 } from './decorators';
-import { getServiceMetadata, createServiceLayer } from './service';
-import { type Module } from './types';
+import { createServiceLayer, getServiceMetadata } from './service';
 
 /**
  * OneBun Module implementation
@@ -32,13 +34,16 @@ export class OneBunModule implements Module {
   private logger: SyncLogger;
   private config: unknown;
 
-  constructor(private moduleClass: Function, private loggerLayer?: Layer.Layer<never, never, unknown>, config?: unknown) {
+  constructor(
+    private moduleClass: Function,
+    private loggerLayer?: Layer.Layer<never, never, unknown>,
+    config?: unknown,
+  ) {
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
-        Effect.map(
-          LoggerService,
-          (logger: Logger) => logger.child({ className: `OneBunModule:${moduleClass.name}` }),
+        Effect.map(LoggerService, (logger: Logger) =>
+          logger.child({ className: `OneBunModule:${moduleClass.name}` }),
         ),
         this.loggerLayer || makeLogger(),
       ) as Effect.Effect<Logger, never, never>,
@@ -51,13 +56,18 @@ export class OneBunModule implements Module {
     this.rootLayer = layer;
     this.controllers = controllers;
 
-    this.logger.debug(`OneBunModule initialized for ${moduleClass.name}, controllers: ${controllers.length}`);
+    this.logger.debug(
+      `OneBunModule initialized for ${moduleClass.name}, controllers: ${controllers.length}`,
+    );
   }
 
   /**
    * Initialize module from metadata and create layer
    */
-  private initModule(): { layer: Layer.Layer<never, never, unknown>; controllers: Function[] } {
+  private initModule(): {
+    layer: Layer.Layer<never, never, unknown>;
+    controllers: Function[];
+  } {
     this.logger.debug(`Initializing module metadata for ${this.moduleClass.name}`);
     const metadata = getModuleMetadata(this.moduleClass);
     if (!metadata) {
@@ -88,8 +98,16 @@ export class OneBunModule implements Module {
           const serviceMetadata = getServiceMetadata(provider);
           if (serviceMetadata) {
             // This is a service with @Service decorator
-            this.logger.debug(`Provider ${provider.name} has @Service decorator, creating service layer`);
-            const serviceLayer = createServiceLayer(provider as new (...args: unknown[]) => unknown, this.logger, this.config);
+            this.logger.debug(
+              `Provider ${provider.name} has @Service decorator, creating service layer`,
+            );
+            const serviceLayer = createServiceLayer(
+              provider as new (
+                ...args: unknown[]
+              ) => unknown,
+              this.logger,
+              this.config,
+            );
             serviceLayers.push(serviceLayer);
             layer = Layer.merge(layer, serviceLayer);
             this.logger.debug(`Added service layer for ${provider.name}`);
@@ -100,19 +118,34 @@ export class OneBunModule implements Module {
         }
 
         // Legacy provider handling
-        if (typeof provider === 'object' && provider !== null && 'prototype' in provider && 'tag' in provider) {
+        if (
+          typeof provider === 'object' &&
+          provider !== null &&
+          'prototype' in provider &&
+          'tag' in provider
+        ) {
           // This is a Context Tag, we need to get implementation
           // Find matching implementation in providers array
-          const tagProvider = provider as { isTag?: boolean; service?: Function };
-          const impl = metadata.providers.find((p: unknown) =>
-            tagProvider.isTag && typeof p === 'function' && typeof tagProvider.service === 'function' &&
-            'prototype' in p && p.prototype instanceof tagProvider.service,
+          const tagProvider = provider as {
+            isTag?: boolean;
+            service?: Function;
+          };
+          const impl = metadata.providers.find(
+            (p: unknown) =>
+              tagProvider.isTag &&
+              typeof p === 'function' &&
+              typeof tagProvider.service === 'function' &&
+              'prototype' in p &&
+              p.prototype instanceof tagProvider.service,
           );
 
           if (impl && typeof impl === 'function') {
             // Create layer for this service
             const implConstructor = impl as new () => unknown;
-            const serviceLayer = Layer.succeed(provider as unknown as Context.Tag<unknown, unknown>, new implConstructor());
+            const serviceLayer = Layer.succeed(
+              provider as unknown as Context.Tag<unknown, unknown>,
+              new implConstructor(),
+            );
             serviceLayers.push(serviceLayer);
             layer = Layer.merge(layer, serviceLayer);
           }
@@ -122,8 +155,13 @@ export class OneBunModule implements Module {
             const providerConstructor = provider as new () => unknown;
             const instance = new providerConstructor();
             // Find matching tag in providers
-            const tag = metadata.providers.find((p: unknown) =>
-              typeof p === 'object' && p !== null && 'isTag' in p && 'service' in p && instance instanceof (p as { service: Function }).service,
+            const tag = metadata.providers.find(
+              (p: unknown) =>
+                typeof p === 'object' &&
+                p !== null &&
+                'isTag' in p &&
+                'service' in p &&
+                instance instanceof (p as { service: Function }).service,
             );
 
             if (tag) {
@@ -194,9 +232,11 @@ export class OneBunModule implements Module {
               let found = false;
               for (const [key, value] of Object.entries(services)) {
                 if (key && value && typeof key === 'object' && 'Identifier' in key) {
-                  if (key === tag || 
-                      (key as Context.Tag<unknown, unknown>).Identifier === 
-                      (tag as Context.Tag<unknown, unknown>).Identifier) {
+                  if (
+                    key === tag ||
+                    (key as Context.Tag<unknown, unknown>).Identifier ===
+                      (tag as Context.Tag<unknown, unknown>).Identifier
+                  ) {
                     // Register the service with its tag
                     self.serviceInstances.set(tag, value);
                     found = true;
@@ -227,9 +267,7 @@ export class OneBunModule implements Module {
 
       // Now create controller instances with automatic dependency injection
       self.createControllersWithDI();
-    }).pipe(
-      Effect.provide(this.rootLayer),
-    );
+    }).pipe(Effect.provide(this.rootLayer));
   }
 
   /**
@@ -240,7 +278,7 @@ export class OneBunModule implements Module {
       // Get constructor parameter types automatically from DI system
       const paramTypes = getConstructorParamTypes(controllerClass);
       const dependencies: unknown[] = [];
-      
+
       if (paramTypes && paramTypes.length > 0) {
         // Resolve dependencies based on registered parameter types
         for (const paramType of paramTypes) {
@@ -248,28 +286,34 @@ export class OneBunModule implements Module {
           if (dependency) {
             dependencies.push(dependency);
           } else {
-            this.logger.warn(`Could not resolve dependency ${paramType.name} for ${controllerClass.name}`);
+            this.logger.warn(
+              `Could not resolve dependency ${paramType.name} for ${controllerClass.name}`,
+            );
           }
         }
       }
-      
-      // Add logger and config at the end (required by BaseController)
-      dependencies.push(this.logger);
-      dependencies.push(this.config);
-      
+
+      // Logger and config are now injected separately via initializeController
+      // No need to add them to constructor dependencies
+
       // Create controller with resolved dependencies
       const controllerConstructor = controllerClass as new (...args: unknown[]) => Controller;
       const controller = new controllerConstructor(...dependencies);
-      
+
+      // Initialize controller with logger and config
+      controller.initializeController(this.logger, this.config);
+
       this.controllerInstances.set(controllerClass, controller);
 
       // Inject all services into controller (for legacy compatibility)
       for (const [tag, serviceInstance] of this.serviceInstances.entries()) {
         controller.setService(tag, serviceInstance);
       }
-      
+
       if (paramTypes && paramTypes.length > 0) {
-        this.logger.debug(`Controller ${controllerClass.name} created with ${paramTypes.length} injected dependencies`);
+        this.logger.debug(
+          `Controller ${controllerClass.name} created with ${paramTypes.length} injected dependencies`,
+        );
       }
     }
   }
@@ -287,15 +331,15 @@ export class OneBunModule implements Module {
    */
   private resolveDependencyByType(type: Function): unknown {
     // Find service instance that matches the type
-    const serviceInstance = Array.from(this.serviceInstances.values()).find(instance => {
+    const serviceInstance = Array.from(this.serviceInstances.values()).find((instance) => {
       if (!instance) {
         return false;
       }
-      
+
       // Check if instance is of the exact type or inherits from it
-      return (instance.constructor === type || instance instanceof type);
+      return instance.constructor === type || instance instanceof type;
     });
-    
+
     return serviceInstance;
   }
 
@@ -318,7 +362,7 @@ export class OneBunModule implements Module {
    */
   getControllerInstance(controllerClass: Function): Controller | undefined {
     const instance = this.controllerInstances.get(controllerClass);
-    
+
     if (!instance) {
       this.logger.warn(`No instance found for controller ${controllerClass.name}`);
     }
@@ -354,8 +398,8 @@ export class OneBunModule implements Module {
    * @param config - Optional configuration to inject
    */
   static create(
-    moduleClass: Function, 
-    loggerLayer?: Layer.Layer<never, never, unknown>, 
+    moduleClass: Function,
+    loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: unknown,
   ): Module {
     // Using console.log here because we don't have access to the logger instance yet

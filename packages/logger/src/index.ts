@@ -1,7 +1,7 @@
 export {
+  createSyncLogger,
   type Logger,
-  type SyncLogger,
   LoggerService,
   makeLogger,
-  createSyncLogger,
+  type SyncLogger,
 } from './logger';

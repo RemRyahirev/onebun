@@ -20,8 +20,8 @@ type DeepValue<T, Path extends string> = Path extends keyof T
         ? DeepValue<T[K], Rest>
         : never
       : never
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    : any; // Fallback to any for complex paths
+    : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    any; // Fallback to any for complex paths
 
 type DeepPaths<T> = T extends object
   ? {
@@ -82,7 +82,6 @@ class ConfigProxy<T> {
     this.extractSensitiveFields(this._schema, '');
   }
 
-
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private extractSensitiveFields(schema: any, prefix = ''): void {
     for (const [key, config] of Object.entries(schema)) {
@@ -112,8 +111,14 @@ class ConfigProxy<T> {
     this._isInitialized = true;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private parseNestedSchema(schema: any, rawVariables: Record<string, string>, prefix: string): any {
+   
+  private parseNestedSchema(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    schema: any,
+    rawVariables: Record<string, string>,
+    prefix: string,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): any {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const result: any = {};
 
@@ -179,7 +184,9 @@ class ConfigProxy<T> {
   get(path: string): any;
   get(path: string): unknown {
     if (!this._isInitialized || !this._values) {
-      throw new Error('Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.');
+      throw new Error(
+        'Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.',
+      );
     }
 
     const value = this.getValueByPath(this._values, path);
@@ -197,7 +204,9 @@ class ConfigProxy<T> {
    */
   get values(): T {
     if (!this._isInitialized || !this._values) {
-      throw new Error('Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.');
+      throw new Error(
+        'Configuration not initialized. Call TypedEnv.create() or ensure initialization is complete.',
+      );
     }
 
     return this._values;
@@ -234,13 +243,12 @@ class ConfigProxy<T> {
     }
 
     if (Array.isArray(obj)) {
-      return obj.map(item =>
+      return obj.map((item) =>
         typeof item === 'object' ? this.applySensitiveMask<U>(item, prefix) : item,
       ) as U;
     }
 
     if (typeof obj === 'object') {
-       
       const result: Record<string, unknown> = {};
 
       for (const [key, value] of Object.entries(obj)) {

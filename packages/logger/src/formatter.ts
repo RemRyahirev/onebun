@@ -4,7 +4,6 @@ import {
   LogLevel,
 } from './types';
 
-
 /**
  * Maximum recursion depth for object formatting
  */
@@ -20,15 +19,14 @@ const LEVEL_NAME_WIDTH = 7;
  */
 const TRACE_ID_DISPLAY_LENGTH = 8;
 
-
 /**
  * Colors for console output
  */
 const COLORS: Record<string, string> = {
   [LogLevel.Trace]: '\x1b[90m', // Gray
   [LogLevel.Debug]: '\x1b[36m', // Cyan
-  [LogLevel.Info]: '\x1b[32m',  // Green
-  [LogLevel.Warning]: '\x1b[33m',  // Yellow
+  [LogLevel.Info]: '\x1b[32m', // Green
+  [LogLevel.Warning]: '\x1b[33m', // Yellow
   [LogLevel.Error]: '\x1b[31m', // Red
   [LogLevel.Fatal]: '\x1b[35m', // Magenta
   RESET: '\x1b[0m',
@@ -72,7 +70,7 @@ function formatValue(value: unknown, depth = 0): string {
       return '\x1b[90m[Array]\x1b[0m';
     }
 
-    const items = value.map(item => formatValue(item, depth + 1));
+    const items = value.map((item) => formatValue(item, depth + 1));
     if (items.length === 0) {
       return '\x1b[90m[]\x1b[0m';
     }
@@ -148,7 +146,7 @@ export class PrettyFormatter implements LogFormatter {
     if (contextWithoutClassName.__additionalData) {
       const additionalData = contextWithoutClassName.__additionalData as unknown[];
       if (additionalData.length > 0) {
-        const formattedData = additionalData.map(data => formatValue(data)).join(' ');
+        const formattedData = additionalData.map((data) => formatValue(data)).join(' ');
         message += ` ${formattedData}`;
       }
       // Remove __additionalData from context since we've processed it
@@ -174,13 +172,20 @@ export class PrettyFormatter implements LogFormatter {
 
   private getLevelName(level: LogLevel): string {
     switch (level) {
-      case LogLevel.Trace: return 'TRACE';
-      case LogLevel.Debug: return 'DEBUG';
-      case LogLevel.Info: return 'INFO';
-      case LogLevel.Warning: return 'WARN';
-      case LogLevel.Error: return 'ERROR';
-      case LogLevel.Fatal: return 'FATAL';
-      default: return 'UNKNOWN';
+      case LogLevel.Trace:
+        return 'TRACE';
+      case LogLevel.Debug:
+        return 'DEBUG';
+      case LogLevel.Info:
+        return 'INFO';
+      case LogLevel.Warning:
+        return 'WARN';
+      case LogLevel.Error:
+        return 'ERROR';
+      case LogLevel.Fatal:
+        return 'FATAL';
+      default:
+        return 'UNKNOWN';
     }
   }
 }
@@ -190,7 +195,8 @@ export class PrettyFormatter implements LogFormatter {
  */
 export class JsonFormatter implements LogFormatter {
   format(entry: LogEntry): string {
-    const logData: any = { // eslint-disable-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const logData: any = {
       timestamp: entry.timestamp.toISOString(),
       level: this.getLevelName(entry.level),
       message: entry.message,
@@ -232,13 +238,20 @@ export class JsonFormatter implements LogFormatter {
 
   private getLevelName(level: LogLevel): string {
     switch (level) {
-      case LogLevel.Trace: return 'trace';
-      case LogLevel.Debug: return 'debug';
-      case LogLevel.Info: return 'info';
-      case LogLevel.Warning: return 'warn';
-      case LogLevel.Error: return 'error';
-      case LogLevel.Fatal: return 'fatal';
-      default: return 'unknown';
+      case LogLevel.Trace:
+        return 'trace';
+      case LogLevel.Debug:
+        return 'debug';
+      case LogLevel.Info:
+        return 'info';
+      case LogLevel.Warning:
+        return 'warn';
+      case LogLevel.Error:
+        return 'error';
+      case LogLevel.Fatal:
+        return 'fatal';
+      default:
+        return 'unknown';
     }
   }
 }

@@ -2,8 +2,8 @@ import { Effect } from 'effect';
 
 import {
   type LogEntry,
-  type LogTransport,
   LogLevel,
+  type LogTransport,
 } from './types';
 
 /**

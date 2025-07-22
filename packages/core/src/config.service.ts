@@ -18,10 +18,7 @@ export class ConfigServiceImpl extends BaseService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private configInstance: any = null;
 
-  constructor(
-    logger?: SyncLogger,
-    config?: unknown,
-  ) {
+  constructor(logger?: SyncLogger, config?: unknown) {
     super(logger, config);
     this.configInstance = config;
   }
@@ -86,4 +83,4 @@ export class ConfigServiceImpl extends BaseService {
 
 // Export both tag and implementation
 // eslint-disable-next-line @typescript-eslint/naming-convention
-export const ConfigService = ConfigServiceTag; 
+export const ConfigService = ConfigServiceTag;

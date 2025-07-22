@@ -1,4 +1,4 @@
-import { Context } from 'effect';
+import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
 import { HttpStatusCode } from '@onebun/requests';
@@ -12,34 +12,24 @@ export class Controller {
   private services: Map<Context.Tag<any, any>, unknown> = new Map();
 
   // Logger instance with controller class name as context
-  protected logger: SyncLogger;
+  protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
-  protected config: unknown;
+  protected config!: unknown;
 
-  constructor(...args: unknown[]) {
-    // Extract logger and config from arguments
-    // Module passes: [service1, service2, ..., logger, config]
-    let logger: SyncLogger | undefined;
-    let config: unknown;
-    
-    if (args.length >= 2) {
-      // Last argument is config, second to last is logger
-      config = args[args.length - 1];
-      const potentialLogger = args[args.length - 2];
-      if (potentialLogger && typeof potentialLogger === 'object' && 'info' in potentialLogger) {
-        logger = potentialLogger as SyncLogger;
-      }
-    }
-
-    // Initialize logger with controller class name as context
+  /**
+   * Initialize controller with logger and config (called by the framework)
+   * @internal
+   */
+  initializeController(logger: SyncLogger, config: unknown): void {
     const className = this.constructor.name;
 
     if (logger) {
       // Use provided logger and create a child with the controller class name
       this.logger = logger.child({ className });
     } else {
-      // This should never happen since OneBunApplication always provides a logger
-      throw new Error(`Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`);
+      throw new Error(
+        `Logger is required for controller ${className}. Make sure OneBunApplication is configured correctly.`,
+      );
     }
 
     // Set configuration instance
@@ -117,7 +107,7 @@ export class Controller {
    * Parse JSON from request body
    */
   protected async parseJson<T = unknown>(req: Request): Promise<T> {
-    return await req.json() as T;
+    return (await req.json()) as T;
   }
 
   /**

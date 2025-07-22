@@ -1,7 +1,7 @@
 import {
   describe,
-  it,
   expect,
+  it,
 } from 'bun:test';
 import { Effect } from 'effect';
 
@@ -48,9 +48,8 @@ describe('Env helpers', () => {
 
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate('hi')))
-          .rejects.toThrow('too short');
-        
+        expect(Effect.runPromise(config.validate('hi'))).rejects.toThrow('too short');
+
         const result = await Effect.runPromise(config.validate('hello'));
         expect(result).toBe('hello');
       }
@@ -84,12 +83,11 @@ describe('Env helpers', () => {
 
     it('should apply min validation', async () => {
       const config = Env.number({ min: 10 });
-      
+
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(5)))
-          .rejects.toThrow('Value must be >= 10');
-        
+        expect(Effect.runPromise(config.validate(5))).rejects.toThrow('Value must be >= 10');
+
         const result = await Effect.runPromise(config.validate(15));
         expect(result).toBe(15);
       }
@@ -97,12 +95,11 @@ describe('Env helpers', () => {
 
     it('should apply max validation', async () => {
       const config = Env.number({ max: 100 });
-      
+
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(150)))
-          .rejects.toThrow('Value must be <= 100');
-        
+        expect(Effect.runPromise(config.validate(150))).rejects.toThrow('Value must be <= 100');
+
         const result = await Effect.runPromise(config.validate(50));
         expect(result).toBe(50);
       }
@@ -110,15 +107,13 @@ describe('Env helpers', () => {
 
     it('should apply min and max validation', async () => {
       const config = Env.number({ min: 10, max: 100 });
-      
+
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(5)))
-          .rejects.toThrow('Value must be >= 10');
-        
-        expect(Effect.runPromise(config.validate(150)))
-          .rejects.toThrow('Value must be <= 100');
-        
+        expect(Effect.runPromise(config.validate(5))).rejects.toThrow('Value must be >= 10');
+
+        expect(Effect.runPromise(config.validate(150))).rejects.toThrow('Value must be <= 100');
+
         const result = await Effect.runPromise(config.validate(50));
         expect(result).toBe(50);
       }
@@ -139,12 +134,10 @@ describe('Env helpers', () => {
 
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(5)))
-          .rejects.toThrow('Value must be >= 10');
-        
-        expect(Effect.runPromise(config.validate(15)))
-          .rejects.toThrow('must be even');
-        
+        expect(Effect.runPromise(config.validate(5))).rejects.toThrow('Value must be >= 10');
+
+        expect(Effect.runPromise(config.validate(15))).rejects.toThrow('must be even');
+
         const result = await Effect.runPromise(config.validate(20));
         expect(result).toBe(20);
       }
@@ -187,9 +180,8 @@ describe('Env helpers', () => {
 
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(false)))
-          .rejects.toThrow('must be true');
-        
+        expect(Effect.runPromise(config.validate(false))).rejects.toThrow('must be true');
+
         const result = await Effect.runPromise(config.validate(true));
         expect(result).toBe(true);
       }
@@ -226,12 +218,13 @@ describe('Env helpers', () => {
 
     it('should apply minLength validation', async () => {
       const config = Env.array({ minLength: 2 });
-      
+
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(['single'])))
-          .rejects.toThrow('Array must have at least 2 items');
-        
+        expect(Effect.runPromise(config.validate(['single']))).rejects.toThrow(
+          'Array must have at least 2 items',
+        );
+
         const result = await Effect.runPromise(config.validate(['one', 'two']));
         expect(result).toEqual(['one', 'two']);
       }
@@ -239,12 +232,13 @@ describe('Env helpers', () => {
 
     it('should apply maxLength validation', async () => {
       const config = Env.array({ maxLength: 2 });
-      
+
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate(['one', 'two', 'three'])))
-          .rejects.toThrow('Array must have at most 2 items');
-        
+        expect(Effect.runPromise(config.validate(['one', 'two', 'three']))).rejects.toThrow(
+          'Array must have at most 2 items',
+        );
+
         const result = await Effect.runPromise(config.validate(['one', 'two']));
         expect(result).toEqual(['one', 'two']);
       }
@@ -255,8 +249,10 @@ describe('Env helpers', () => {
         minLength: 1,
         maxLength: 3,
         validate(value: string[]) {
-          if (value.some(item => item.length < 2)) {
-            return Effect.fail(new EnvValidationError('', value, 'all items must be at least 2 chars'));
+          if (value.some((item) => item.length < 2)) {
+            return Effect.fail(
+              new EnvValidationError('', value, 'all items must be at least 2 chars'),
+            );
           }
 
           return Effect.succeed(value);
@@ -265,12 +261,14 @@ describe('Env helpers', () => {
 
       expect(config.validate).toBeDefined();
       if (config.validate) {
-        expect(Effect.runPromise(config.validate([])))
-          .rejects.toThrow('Array must have at least 1 items');
-        
-        expect(Effect.runPromise(config.validate(['a', 'bb'])))
-          .rejects.toThrow('all items must be at least 2 chars');
-        
+        expect(Effect.runPromise(config.validate([]))).rejects.toThrow(
+          'Array must have at least 1 items',
+        );
+
+        expect(Effect.runPromise(config.validate(['a', 'bb']))).rejects.toThrow(
+          'all items must be at least 2 chars',
+        );
+
         const result = await Effect.runPromise(config.validate(['aa', 'bb']));
         expect(result).toEqual(['aa', 'bb']);
       }
@@ -280,38 +278,38 @@ describe('Env helpers', () => {
   describe('Env.regex', () => {
     it('should create regex validator', async () => {
       const validator = Env.regex(/^[a-z]+$/);
-      
-      expect(Effect.runPromise(validator('hello')))
-        .resolves.toBe('hello');
-      
-      expect(Effect.runPromise(validator('Hello')))
-        .rejects.toThrow('Value must match pattern /^[a-z]+$/');
+
+      expect(Effect.runPromise(validator('hello'))).resolves.toBe('hello');
+
+      expect(Effect.runPromise(validator('Hello'))).rejects.toThrow(
+        'Value must match pattern /^[a-z]+$/',
+      );
     });
 
     it('should use custom error message', async () => {
       const validator = Env.regex(/^[a-z]+$/, 'Only lowercase letters allowed');
-      
-      expect(Effect.runPromise(validator('Hello')))
-        .rejects.toThrow('Only lowercase letters allowed');
+
+      expect(Effect.runPromise(validator('Hello'))).rejects.toThrow(
+        'Only lowercase letters allowed',
+      );
     });
   });
 
   describe('Env.oneOf', () => {
     it('should create oneOf validator', async () => {
       const validator = Env.oneOf(['dev', 'prod', 'test'] as const);
-      
-      expect(Effect.runPromise(validator('dev')))
-        .resolves.toBe('dev');
-      
-      expect(Effect.runPromise(validator('invalid')))
-        .rejects.toThrow('Value must be one of: dev, prod, test');
+
+      expect(Effect.runPromise(validator('dev'))).resolves.toBe('dev');
+
+      expect(Effect.runPromise(validator('invalid'))).rejects.toThrow(
+        'Value must be one of: dev, prod, test',
+      );
     });
 
     it('should use custom error message', async () => {
       const validator = Env.oneOf(['a', 'b'], 'Custom error message');
-      
-      expect(Effect.runPromise(validator('c')))
-        .rejects.toThrow('Custom error message');
+
+      expect(Effect.runPromise(validator('c'))).rejects.toThrow('Custom error message');
     });
 
     it('should maintain type safety', async () => {
@@ -325,7 +323,7 @@ describe('Env helpers', () => {
   describe('Env.url', () => {
     it('should validate valid URLs', async () => {
       const validator = Env.url();
-      
+
       const validUrls = [
         'https://example.com',
         'http://localhost:3000',
@@ -334,38 +332,31 @@ describe('Env helpers', () => {
       ];
 
       for (const url of validUrls) {
-        expect(Effect.runPromise(validator(url)))
-          .resolves.toBe(url);
+        expect(Effect.runPromise(validator(url))).resolves.toBe(url);
       }
     });
 
     it('should reject invalid URLs', async () => {
       const validator = Env.url();
-      
-      const invalidUrls = [
-        'not-a-url',
-        '://missing-protocol',
-        "javascript:alert('xss')",
-      ];
+
+      const invalidUrls = ['not-a-url', '://missing-protocol', "javascript:alert('xss')"];
 
       for (const url of invalidUrls) {
-        expect(Effect.runPromise(validator(url)))
-          .rejects.toThrow('Value must be a valid URL');
+        expect(Effect.runPromise(validator(url))).rejects.toThrow('Value must be a valid URL');
       }
     });
 
     it('should use custom error message', async () => {
       const validator = Env.url('Invalid URL provided');
-      
-      expect(Effect.runPromise(validator('invalid')))
-        .rejects.toThrow('Invalid URL provided');
+
+      expect(Effect.runPromise(validator('invalid'))).rejects.toThrow('Invalid URL provided');
     });
   });
 
   describe('Env.email', () => {
     it('should validate valid emails', async () => {
       const validator = Env.email();
-      
+
       const validEmails = [
         'user@example.com',
         'test.email+tag@domain.co.uk',
@@ -374,14 +365,13 @@ describe('Env helpers', () => {
       ];
 
       for (const email of validEmails) {
-        expect(Effect.runPromise(validator(email)))
-          .resolves.toBe(email);
+        expect(Effect.runPromise(validator(email))).resolves.toBe(email);
       }
     });
 
     it('should reject invalid emails', async () => {
       const validator = Env.email();
-      
+
       const invalidEmails = [
         'not-an-email',
         '@domain.com',
@@ -393,47 +383,48 @@ describe('Env helpers', () => {
       ];
 
       for (const email of invalidEmails) {
-        expect(Effect.runPromise(validator(email)))
-          .rejects.toThrow('Value must be a valid email address');
+        expect(Effect.runPromise(validator(email))).rejects.toThrow(
+          'Value must be a valid email address',
+        );
       }
     });
 
     it('should use custom error message', async () => {
       const validator = Env.email('Please provide a valid email');
-      
-      expect(Effect.runPromise(validator('invalid')))
-        .rejects.toThrow('Please provide a valid email');
+
+      expect(Effect.runPromise(validator('invalid'))).rejects.toThrow(
+        'Please provide a valid email',
+      );
     });
   });
 
   describe('Env.port', () => {
     it('should validate valid ports', async () => {
       const validator = Env.port();
-      
+
       const validPorts = [1, 80, 443, 3000, 8080, 65535];
 
       for (const port of validPorts) {
-        expect(Effect.runPromise(validator(port)))
-          .resolves.toBe(port);
+        expect(Effect.runPromise(validator(port))).resolves.toBe(port);
       }
     });
 
     it('should reject invalid ports', async () => {
       const validator = Env.port();
-      
+
       const invalidPorts = [0, -1, 65536, 100000, 3.14, NaN, Infinity];
 
       for (const port of invalidPorts) {
-        expect(Effect.runPromise(validator(port)))
-          .rejects.toThrow('Port must be an integer between 1 and 65535');
+        expect(Effect.runPromise(validator(port))).rejects.toThrow(
+          'Port must be an integer between 1 and 65535',
+        );
       }
     });
 
     it('should use custom error message', async () => {
       const validator = Env.port('Invalid port number');
-      
-      expect(Effect.runPromise(validator(0)))
-        .rejects.toThrow('Invalid port number');
+
+      expect(Effect.runPromise(validator(0))).rejects.toThrow('Invalid port number');
     });
   });
-}); 
+});

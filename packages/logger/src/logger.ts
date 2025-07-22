@@ -1,8 +1,8 @@
 import {
   Context,
   Effect,
-  Layer,
   FiberRef,
+  Layer,
 } from 'effect';
 
 import { JsonFormatter, PrettyFormatter } from './formatter';
@@ -75,9 +75,14 @@ function parseLogArgs(args: unknown[]): {
       } else {
         additionalData.push(arg);
       }
-    } else if (arg && typeof arg === 'object' && !Array.isArray(arg) && arg.constructor === Object) {
+    } else if (
+      arg &&
+      typeof arg === 'object' &&
+      !Array.isArray(arg) &&
+      arg.constructor === Object
+    ) {
       // Plain objects are merged into context
-      context = { ...context, ...arg as Record<string, unknown> };
+      context = { ...context, ...(arg as Record<string, unknown>) };
     } else {
       // Everything else goes to additional data
       additionalData.push(arg);
@@ -95,83 +100,82 @@ function parseLogArgs(args: unknown[]): {
  * Simple logger implementation that uses our formatters and transports
  */
 class LoggerImpl implements Logger {
-  constructor(private config: LoggerConfig, private context: Record<string, unknown> = {}) {}
+  constructor(
+    private config: LoggerConfig,
+    private context: Record<string, unknown> = {},
+  ) {}
 
-  private log(
-    level: LogLevel,
-    message: string,
-    ...args: unknown[]
-  ): Effect.Effect<void> {
+  private log(level: LogLevel, message: string, ...args: unknown[]): Effect.Effect<void> {
     // Check minimum logging level
     if (level < this.config.minLevel) {
       return Effect.succeed(undefined);
     }
 
-    return Effect.flatMap(
-      FiberRef.get(CurrentLoggerTraceContext),
-      (traceInfo) => {
-        // Try to get trace context from global context or trace service
-        let currentTraceInfo = traceInfo;
-        if (!currentTraceInfo && typeof globalThis !== 'undefined') {
-          // Try global trace context first
+    return Effect.flatMap(FiberRef.get(CurrentLoggerTraceContext), (traceInfo) => {
+      // Try to get trace context from global context or trace service
+      let currentTraceInfo = traceInfo;
+      if (!currentTraceInfo && typeof globalThis !== 'undefined') {
+        // Try global trace context first
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
+        if (globalTraceContext && globalTraceContext.traceId) {
+          currentTraceInfo = globalTraceContext;
+        } else {
+          // Fallback to trace service
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
-          if (globalTraceContext && globalTraceContext.traceId) {
-            currentTraceInfo = globalTraceContext;
-          } else {
-            // Fallback to trace service
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            const globalTraceService = (globalThis as any).__onebunTraceService;
-            if (globalTraceService && globalTraceService.getCurrentTraceContext) {
-              try {
-                // Extract current trace context from global trace service
+          const globalTraceService = (globalThis as any).__onebunTraceService;
+          if (globalTraceService && globalTraceService.getCurrentTraceContext) {
+            try {
+              // Extract current trace context from global trace service
+               
+              const currentContext = Effect.runSync(
+                globalTraceService.getCurrentTraceContext(),
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const currentContext = Effect.runSync(globalTraceService.getCurrentTraceContext()) as any;
-                if (currentContext && currentContext.traceId) {
-                  currentTraceInfo = {
-                    traceId: currentContext.traceId,
-                    spanId: currentContext.spanId,
-                    parentSpanId: currentContext.parentSpanId,
-                  };
-                }
-              } catch {
-                // Ignore errors getting trace context
+              ) as any;
+              if (currentContext && currentContext.traceId) {
+                currentTraceInfo = {
+                  traceId: currentContext.traceId,
+                  spanId: currentContext.spanId,
+                  parentSpanId: currentContext.parentSpanId,
+                };
               }
+            } catch {
+              // Ignore errors getting trace context
             }
           }
         }
+      }
 
-        // Parse additional arguments
-        const { error, context: argsContext, additionalData } = parseLogArgs(args);
+      // Parse additional arguments
+      const { error, context: argsContext, additionalData } = parseLogArgs(args);
 
-        // Merge contexts
-        const mergedContext = {
-          ...this.config.defaultContext,
-          ...this.context,
-          ...argsContext,
-        };
+      // Merge contexts
+      const mergedContext = {
+        ...this.config.defaultContext,
+        ...this.context,
+        ...argsContext,
+      };
 
-        // Add additional data to context if present
-        if (additionalData && additionalData.length > 0) {
-          mergedContext.__additionalData = additionalData;
-        }
+      // Add additional data to context if present
+      if (additionalData && additionalData.length > 0) {
+        mergedContext.__additionalData = additionalData;
+      }
 
-        // Create log entry
-        const entry = {
-          level,
-          message,
-          timestamp: new Date(),
-          context: Object.keys(mergedContext).length > 0 ? mergedContext : undefined,
-          error,
-          trace: currentTraceInfo || undefined,
-        };
+      // Create log entry
+      const entry = {
+        level,
+        message,
+        timestamp: new Date(),
+        context: Object.keys(mergedContext).length > 0 ? mergedContext : undefined,
+        error,
+        trace: currentTraceInfo || undefined,
+      };
 
-        // Format and send through transport
-        const formattedEntry = this.config.formatter.format(entry);
+      // Format and send through transport
+      const formattedEntry = this.config.formatter.format(entry);
 
-        return this.config.transport.log(formattedEntry, entry);
-      },
-    );
+      return this.config.transport.log(formattedEntry, entry);
+    });
   }
 
   trace(message: string, ...args: unknown[]): Effect.Effect<void> {
@@ -249,10 +253,7 @@ class SyncLoggerImpl implements SyncLogger {
       const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
       if (globalTraceContext && globalTraceContext.traceId) {
         traceEffect = Effect.provide(
-          Effect.flatMap(
-            FiberRef.set(CurrentLoggerTraceContext, globalTraceContext),
-            () => effect,
-          ),
+          Effect.flatMap(FiberRef.set(CurrentLoggerTraceContext, globalTraceContext), () => effect),
           Layer.empty,
         );
       }
@@ -304,4 +305,4 @@ export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> 
   const isDev = process.env.NODE_ENV !== 'production';
 
   return isDev ? makeDevLogger(config) : makeProdLogger(config);
-}; 
+};

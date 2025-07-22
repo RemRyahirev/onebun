@@ -1,19 +1,20 @@
 import { Effect } from 'effect';
 
+import type { CustomMetricConfig } from './types';
+
 import { MetricsService } from './metrics.service';
-import { type CustomMetricConfig } from './types';
 
 /**
  * Decorator for measuring method execution time
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function MeasureTime(metricName?: string, labels?: string[]): MethodDecorator {
-  return function (
+  return (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
-  ): PropertyDescriptor {
+  ): PropertyDescriptor => {
     const originalMethod = descriptor.value;
     const methodName = metricName || `${target.constructor.name}_${String(propertyKey)}_duration`;
 
@@ -55,14 +56,15 @@ export function MeasureTime(metricName?: string, labels?: string[]): MethodDecor
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function CountCalls(metricName?: string, labels?: string[]): MethodDecorator {
-  return function (
+  return (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
-  ): PropertyDescriptor {
+  ): PropertyDescriptor => {
     const originalMethod = descriptor.value;
-    const counterName = metricName || `${target.constructor.name}_${String(propertyKey)}_calls_total`;
+    const counterName =
+      metricName || `${target.constructor.name}_${String(propertyKey)}_calls_total`;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     descriptor.value = function (...args: any[]): any {
@@ -79,13 +81,17 @@ export function CountCalls(metricName?: string, labels?: string[]): MethodDecora
  * Decorator for measuring gauge values
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
-export function MeasureGauge(metricName: string, getValue: () => number, labels?: string[]): MethodDecorator {
-  return function (
+export function MeasureGauge(
+  metricName: string,
+  getValue: () => number,
+  labels?: string[],
+): MethodDecorator {
+  return (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
-  ): PropertyDescriptor {
+  ): PropertyDescriptor => {
     const originalMethod = descriptor.value;
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -125,14 +131,16 @@ export function MeasureGauge(metricName: string, getValue: () => number, labels?
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function InjectMetric(config: CustomMetricConfig): PropertyDecorator {
-  return function (
+  return (
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
-  ): void {
+  ): void => {
     // For now, just log the configuration
     // eslint-disable-next-line no-console
-    console.log(`Metric ${config.name} will be injected into ${target.constructor.name}.${String(propertyKey)}`);
+    console.log(
+      `Metric ${config.name} will be injected into ${target.constructor.name}.${String(propertyKey)}`,
+    );
   };
 }
 
@@ -145,17 +153,18 @@ export function WithMetrics(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): <T extends new (...args: any[]) => any>(constructor: T) => T {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return function <T extends new (...args: any[]) => any>(constructor: T): T {
-    return class extends constructor {
+  return <T extends new (...args: any[]) => any>(constructor: T): T =>
+    class extends constructor {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       constructor(...args: any[]) {
         super(...args);
         // For now, just log initialization
         // eslint-disable-next-line no-console
-        console.log(`WithMetrics applied to ${constructor.name} with prefix: ${options.prefix || 'none'}`);
+        console.log(
+          `WithMetrics applied to ${constructor.name} with prefix: ${options.prefix || 'none'}`,
+        );
       }
     };
-  };
 }
 
 /**

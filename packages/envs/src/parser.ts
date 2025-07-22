@@ -1,10 +1,10 @@
 import { Effect } from 'effect';
 
 import {
+  type EnvLoadOptions,
   EnvValidationError,
   type EnvValueType,
   type EnvVariableConfig,
-  type EnvLoadOptions,
 } from './types';
 
 /**
@@ -46,12 +46,10 @@ export class EnvParser {
       return Effect.succeed(resolvedValue);
     };
 
-    const validateParsed = (parsed: unknown) => EnvParser.validateValue(variable, parsed as T, config);
+    const validateParsed = (parsed: unknown) =>
+      EnvParser.validateValue(variable, parsed as T, config);
 
-    return resolveValue.pipe(
-      Effect.flatMap(parseValue),
-      Effect.flatMap(validateParsed),
-    );
+    return resolveValue.pipe(Effect.flatMap(parseValue), Effect.flatMap(validateParsed));
   }
 
   /**
@@ -68,13 +66,13 @@ export class EnvParser {
         switch (type) {
           case 'string':
             return value;
-          
+
           case 'number': {
             // Empty string should be rejected for numbers
             if (value.trim() === '') {
               throw new Error(`"${value}" is not a valid number`);
             }
-            
+
             const num = Number(value);
             if (isNaN(num)) {
               throw new Error(`"${value}" is not a valid number`);
@@ -82,7 +80,7 @@ export class EnvParser {
 
             return num;
           }
-          
+
           case 'boolean': {
             const lower = value.toLowerCase();
             if (['true', '1', 'yes', 'on'].includes(lower)) {
@@ -93,21 +91,25 @@ export class EnvParser {
             }
             throw new Error(`"${value}" is not a valid boolean`);
           }
-          
+
           case 'array': {
             if (value.trim() === '') {
               return [];
             }
 
-            return value.split(separator).map(item => item.trim());
+            return value.split(separator).map((item) => item.trim());
           }
-          
+
           default:
             throw new Error(`Unknown type: ${type}`);
         }
       },
       catch: (error) =>
-        new EnvValidationError(variable, value, error instanceof Error ? error.message : String(error)),
+        new EnvValidationError(
+          variable,
+          value,
+          error instanceof Error ? error.message : String(error),
+        ),
     });
   }
 
@@ -144,6 +146,4 @@ export class EnvParser {
         throw new EnvValidationError('unknown', undefined, `Unknown type: ${type}`);
     }
   }
-
-
-} 
+}

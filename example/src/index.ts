@@ -44,7 +44,8 @@ const app = new OneBunApplication(AppModule, {
 });
 
 // Start the application
-app.start()
+app
+  .start()
   .then(() => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.info('Application started successfully');
@@ -57,10 +58,15 @@ app.start()
       const safeConfig = config.getSafeConfig();
       logger.info('Application configuration loaded:', { config: safeConfig });
     } catch (error) {
-      logger.warn('Configuration not available:', { error: error instanceof Error ? error.message : String(error) });
+      logger.warn('Configuration not available:', {
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   })
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
-    logger.error('Failed to start application:', error instanceof Error ? error : new Error(String(error)));
+    logger.error(
+      'Failed to start application:',
+      error instanceof Error ? error : new Error(String(error)),
+    );
   });

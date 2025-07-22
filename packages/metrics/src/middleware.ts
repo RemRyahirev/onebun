@@ -45,30 +45,32 @@ export class MetricsMiddleware {
   /**
    * Wrap controller method with metrics collection
    */
-  wrapControllerMethod<T extends (...args: any[]) => any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  wrapControllerMethod<T extends (...args: any[]) => any>(
     originalMethod: T,
     controllerName: string,
     methodName: string,
     route: string,
   ): T {
-    return (async (...args: any[]) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (async (...args: any[]) => {
       const startTime = Date.now();
       let statusCode = HttpStatusCode.OK;
       try {
         const result = await originalMethod.apply(this, args);
-        
+
         // If result is a Response, extract status code
         if (result instanceof Response) {
           statusCode = result.status;
         }
-        
+
         return result;
       } catch (err) {
         statusCode = HttpStatusCode.INTERNAL_SERVER_ERROR; // Default error status
         throw err;
       } finally {
         const duration = (Date.now() - startTime) / 1000;
-        
+
         this.metricsService.recordHttpRequest({
           method: 'UNKNOWN', // Will be overridden by actual request
           route,
@@ -85,23 +87,25 @@ export class MetricsMiddleware {
 /**
  * Decorator for automatic metrics collection on controller methods
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
-export function WithMetrics(route?: string): any { // eslint-disable-line @typescript-eslint/no-explicit-any
-  return function (
-    target: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+// eslint-disable-next-line @typescript-eslint/naming-convention,@typescript-eslint/no-explicit-any
+export function WithMetrics(route?: string): any {
+  return (
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    target: any, 
     propertyKey: string,
     descriptor: PropertyDescriptor,
-  ) {
+  ) => {
     const originalMethod = descriptor.value;
     const controllerName = target.constructor.name;
     const routePath = route || `/${propertyKey}`;
 
-    descriptor.value = function (...args: any[]) { // eslint-disable-line @typescript-eslint/no-explicit-any
-      const startTime = Date.now();
-      
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    descriptor.value = function (...args: any[]) {
+      const startTime = Date.now(); 
+
       try {
         const result = originalMethod.apply(this, args);
-        
+
         // Handle both sync and async methods
         if (result instanceof Promise) {
           return result
@@ -111,7 +115,13 @@ export function WithMetrics(route?: string): any { // eslint-disable-line @types
               return res;
             })
             .catch((err) => {
-              recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.INTERNAL_SERVER_ERROR);
+              recordMetrics(
+                controllerName,
+                propertyKey,
+                routePath,
+                startTime,
+                HttpStatusCode.INTERNAL_SERVER_ERROR,
+              );
               throw err;
             });
         } else {
@@ -120,7 +130,13 @@ export function WithMetrics(route?: string): any { // eslint-disable-line @types
           return result;
         }
       } catch (err) {
-        recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.INTERNAL_SERVER_ERROR);
+        recordMetrics(
+          controllerName,
+          propertyKey,
+          routePath,
+          startTime,
+          HttpStatusCode.INTERNAL_SERVER_ERROR,
+        );
         throw err;
       }
     };
@@ -140,11 +156,13 @@ function recordMetrics(
   statusCode: number,
 ): void {
   const duration = (Date.now() - startTime) / 1000;
-  
+
   // This would ideally get the metrics service from the current context
   // For now, we'll store this information and let the application handle it
-  if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunMetricsService) { // eslint-disable-line @typescript-eslint/no-explicit-any
-    const metricsService = (globalThis as any).__onebunMetricsService; // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunMetricsService) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const metricsService = (globalThis as any).__onebunMetricsService; 
     metricsService.recordHttpRequest({
       method: 'UNKNOWN',
       route,

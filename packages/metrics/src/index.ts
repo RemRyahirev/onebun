@@ -1,46 +1,11 @@
 /**
  * \@onebun/metrics
- * 
+ *
  * Prometheus-compatible metrics module for OneBun framework
  * Provides automatic HTTP request metrics, system metrics, and custom metrics API
  */
 
-import { DEFAULT_SYSTEM_METRICS_INTERVAL, DEFAULT_HTTP_DURATION_BUCKETS } from './types';
-
-// Core service
-export {
-  MetricsService,
-  makeMetricsService,
-  createMetricsService,
-} from './metrics.service';
-
-// Types
-export type {
-  MetricsOptions,
-  HttpMetricsData,
-  SystemMetricsData,
-  MetricsRegistry,
-  CustomMetricConfig,
-} from './types';
-
-export { MetricType } from './types';
-
-// Middleware
-export {
-  MetricsMiddleware,
-  WithMetrics as WithMetricsMiddleware,
-  recordHttpMetrics,
-} from './middleware';
-
-// Decorators
-export {
-  MeasureTime,
-  CountCalls,
-  MeasureGauge,
-  InjectMetric,
-  WithMetrics,
-  measureExecutionTime,
-} from './decorators';
+import { DEFAULT_HTTP_DURATION_BUCKETS, DEFAULT_SYSTEM_METRICS_INTERVAL } from './types';
 
 // Re-export commonly used prom-client types
 export type {
@@ -49,6 +14,37 @@ export type {
   Histogram,
   Summary,
 } from 'prom-client';
+// Decorators
+export {
+  CountCalls,
+  InjectMetric,
+  MeasureGauge,
+  MeasureTime,
+  measureExecutionTime,
+  WithMetrics,
+} from './decorators';
+// Core service
+export {
+  createMetricsService,
+  MetricsService,
+  makeMetricsService,
+} from './metrics.service';
+
+// Middleware
+export {
+  MetricsMiddleware,
+  recordHttpMetrics,
+  WithMetrics as WithMetricsMiddleware,
+} from './middleware';
+// Types
+export type {
+  CustomMetricConfig,
+  HttpMetricsData,
+  MetricsOptions,
+  MetricsRegistry,
+  SystemMetricsData,
+} from './types';
+export { MetricType } from './types';
 
 /**
  * Default metrics configuration
@@ -68,7 +64,9 @@ export const DEFAULT_METRICS_OPTIONS = {
 /**
  * Convenience function to create metrics service with default options
  */
-export const createDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}): ReturnType<typeof import('./metrics.service').createMetricsService> => {
+export const createDefaultMetricsService = (
+  overrides: Partial<import('./types').MetricsOptions> = {},
+): ReturnType<typeof import('./metrics.service').createMetricsService> => {
   const { createMetricsService } = require('./metrics.service');
 
   return createMetricsService({
@@ -80,11 +78,13 @@ export const createDefaultMetricsService = (overrides: Partial<import('./types')
 /**
  * Convenience function to create metrics layer with default options
  */
-export const makeDefaultMetricsService = (overrides: Partial<import('./types').MetricsOptions> = {}): ReturnType<typeof import('./metrics.service').makeMetricsService> => {
+export const makeDefaultMetricsService = (
+  overrides: Partial<import('./types').MetricsOptions> = {},
+): ReturnType<typeof import('./metrics.service').makeMetricsService> => {
   const { makeMetricsService } = require('./metrics.service');
 
   return makeMetricsService({
     ...DEFAULT_METRICS_OPTIONS,
     ...overrides,
   });
-}; 
+};

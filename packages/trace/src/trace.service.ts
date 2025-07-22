@@ -1,34 +1,32 @@
 import {
-  trace,
   context,
-  SpanKind,
   SpanStatusCode as OtelSpanStatusCode,
+  SpanKind,
+  trace,
 } from '@opentelemetry/api';
 import {
-  Effect,
-  Layer,
   Context,
+  Effect,
   FiberRef,
+  Layer,
 } from 'effect';
 
 import { HttpStatusCode } from '@onebun/requests';
 
 import {
-  type TraceContext,
-  type TraceSpan,
-  type TraceOptions,
-  type TraceHeaders,
+  type HttpTraceData,
   type SpanStatus,
   SpanStatusCode,
-  type HttpTraceData,
+  type TraceContext,
+  type TraceHeaders,
+  type TraceOptions,
+  type TraceSpan,
 } from './types.js';
-
 
 /**
  * Index of trace flags in W3C traceparent header regex match array
  */
 const TRACE_FLAGS_MATCH_INDEX = 3;
-
 
 /**
  * Trace service interface
@@ -57,7 +55,10 @@ export interface TraceService {
   /**
    * Add event to current span
    */
-  addEvent(name: string, attributes?: Record<string, string | number | boolean>): Effect.Effect<void>;
+  addEvent(
+    name: string,
+    attributes?: Record<string, string | number | boolean>,
+  ): Effect.Effect<void>;
 
   /**
    * Set span attributes
@@ -150,19 +151,22 @@ export class TraceServiceImpl implements TraceService {
             status: { code: SpanStatusCode.OK },
           };
 
-          return Effect.flatMap(
-            FiberRef.set(currentSpan, mockSpan),
-            () => Effect.succeed(mockSpan),
+          return Effect.flatMap(FiberRef.set(currentSpan, mockSpan), () =>
+            Effect.succeed(mockSpan),
           );
         },
       );
     }
 
     const currentContext = context.active();
-    const span = this.tracer.startSpan(name, {
-      kind: SpanKind.INTERNAL,
-      attributes: this.options.defaultAttributes,
-    }, currentContext);
+    const span = this.tracer.startSpan(
+      name,
+      {
+        kind: SpanKind.INTERNAL,
+        attributes: this.options.defaultAttributes,
+      },
+      currentContext,
+    );
 
     const spanContext = span.spanContext();
     const traceContext: TraceContext = {
@@ -181,12 +185,8 @@ export class TraceServiceImpl implements TraceService {
       status: { code: SpanStatusCode.OK },
     };
 
-    return Effect.flatMap(
-      FiberRef.set(currentSpan, traceSpan),
-      () => Effect.flatMap(
-        this.setContext(traceContext),
-        () => Effect.succeed(traceSpan),
-      ),
+    return Effect.flatMap(FiberRef.set(currentSpan, traceSpan), () =>
+      Effect.flatMap(this.setContext(traceContext), () => Effect.succeed(traceSpan)),
     );
   }
 
@@ -215,30 +215,30 @@ export class TraceServiceImpl implements TraceService {
     return FiberRef.set(currentSpan, null);
   }
 
-  addEvent(name: string, attributes?: Record<string, string | number | boolean>): Effect.Effect<void> {
+  addEvent(
+    name: string,
+    attributes?: Record<string, string | number | boolean>,
+  ): Effect.Effect<void> {
     if (!this.options.enabled) {
       return Effect.void;
     }
 
-    return Effect.flatMap(
-      FiberRef.get(currentSpan),
-      (span) => {
-        if (span) {
-          span.events.push({
-            name,
-            timestamp: Date.now(),
-            attributes,
-          });
+    return Effect.flatMap(FiberRef.get(currentSpan), (span) => {
+      if (span) {
+        span.events.push({
+          name,
+          timestamp: Date.now(),
+          attributes,
+        });
 
-          const activeSpan = trace.getActiveSpan();
-          if (activeSpan) {
-            activeSpan.addEvent(name, attributes);
-          }
+        const activeSpan = trace.getActiveSpan();
+        if (activeSpan) {
+          activeSpan.addEvent(name, attributes);
         }
+      }
 
-        return Effect.void;
-      },
-    );
+      return Effect.void;
+    });
   }
 
   setAttributes(attributes: Record<string, string | number | boolean>): Effect.Effect<void> {
@@ -246,21 +246,18 @@ export class TraceServiceImpl implements TraceService {
       return Effect.void;
     }
 
-    return Effect.flatMap(
-      FiberRef.get(currentSpan),
-      (span) => {
-        if (span) {
-          Object.assign(span.attributes, attributes);
+    return Effect.flatMap(FiberRef.get(currentSpan), (span) => {
+      if (span) {
+        Object.assign(span.attributes, attributes);
 
-          const activeSpan = trace.getActiveSpan();
-          if (activeSpan) {
-            activeSpan.setAttributes(attributes);
-          }
+        const activeSpan = trace.getActiveSpan();
+        if (activeSpan) {
+          activeSpan.setAttributes(attributes);
         }
+      }
 
-        return Effect.void;
-      },
-    );
+      return Effect.void;
+    });
   }
 
   extractFromHeaders(headers: TraceHeaders): Effect.Effect<TraceContext | null> {
@@ -275,9 +272,12 @@ export class TraceServiceImpl implements TraceService {
     const HEX_BASE = 16;
     const traceparent = headers['traceparent'];
     if (traceparent) {
-      const match = traceparent.match(new RegExp(`^00-([0-9a-f]{${TRACE_ID_LENGTH}})-([0-9a-f]{${SPAN_ID_LENGTH}})-([0-9a-f]{${FLAGS_LENGTH}})$`));
+      const match = traceparent.match(
+        new RegExp(
+          `^00-([0-9a-f]{${TRACE_ID_LENGTH}})-([0-9a-f]{${SPAN_ID_LENGTH}})-([0-9a-f]{${FLAGS_LENGTH}})$`,
+        ),
+      );
       if (match) {
-
         return Effect.succeed({
           traceId: match[1],
           spanId: match[2],
@@ -328,32 +328,26 @@ export class TraceServiceImpl implements TraceService {
   startHttpTrace(data: Partial<HttpTraceData>): Effect.Effect<TraceSpan> {
     const spanName = `HTTP ${data.method || 'REQUEST'} ${data.route || data.url || '/'}`;
 
-    return Effect.flatMap(
-      this.startSpan(spanName),
-      (span) => {
-        const attributes: Record<string, string | number | boolean> = {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'http.method': data.method || 'UNKNOWN',
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'http.url': data.url || '',
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'http.route': data.route || '',
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'http.user_agent': data.userAgent || '',
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'http.remote_addr': data.remoteAddr || '',
-        };
+    return Effect.flatMap(this.startSpan(spanName), (span) => {
+      const attributes: Record<string, string | number | boolean> = {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.method': data.method || 'UNKNOWN',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.url': data.url || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.route': data.route || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.user_agent': data.userAgent || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.remote_addr': data.remoteAddr || '',
+      };
 
-        if (data.requestSize !== undefined) {
-          attributes['http.request_content_length'] = data.requestSize;
-        }
+      if (data.requestSize !== undefined) {
+        attributes['http.request_content_length'] = data.requestSize;
+      }
 
-        return Effect.flatMap(
-          this.setAttributes(attributes),
-          () => Effect.succeed(span),
-        );
-      },
-    );
+      return Effect.flatMap(this.setAttributes(attributes), () => Effect.succeed(span));
+    });
   }
 
   endHttpTrace(span: TraceSpan, data: Partial<HttpTraceData>): Effect.Effect<void> {
@@ -373,14 +367,17 @@ export class TraceServiceImpl implements TraceService {
 
     const HTTP_ERROR_THRESHOLD = HttpStatusCode.BAD_REQUEST;
     const status: SpanStatus = {
-      code: (data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD) ? SpanStatusCode.ERROR : SpanStatusCode.OK,
-      message: data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD ? `HTTP ${data.statusCode}` : undefined,
+      code:
+        data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD
+          ? SpanStatusCode.ERROR
+          : SpanStatusCode.OK,
+      message:
+        data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD
+          ? `HTTP ${data.statusCode}`
+          : undefined,
     };
 
-    return Effect.flatMap(
-      this.setAttributes(attributes),
-      () => this.endSpan(span, status),
-    );
+    return Effect.flatMap(this.setAttributes(attributes), () => this.endSpan(span, status));
   }
 
   private generateId(length: number): string {

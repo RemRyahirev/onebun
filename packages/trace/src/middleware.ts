@@ -1,9 +1,10 @@
 import { Effect } from 'effect';
 
+import type { HttpTraceData, TraceHeaders } from './types.js';
+
 import { HttpStatusCode } from '@onebun/requests';
 
 import { traceService } from './trace.service.js';
-import { type TraceHeaders, type HttpTraceData } from './types.js';
 
 /**
  * HTTP trace middleware for OneBun applications
@@ -14,69 +15,72 @@ export class TraceMiddleware {
    */
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   static create() {
-    return Effect.flatMap(
-      traceService,
-      (traceServiceInstance) => Effect.succeed((request: Request, next: () => Promise<Response>) => {
+    return Effect.flatMap(traceService, (traceServiceInstance) =>
+      Effect.succeed((request: Request, next: () => Promise<Response>) => {
         return Effect.runPromise(
           Effect.flatMap(
-            traceServiceInstance.extractFromHeaders(this.extractHeaders(request)),
-            (extractedContext) => Effect.flatMap(
-              extractedContext
-                ? traceServiceInstance.setContext(extractedContext)
-                : Effect.flatMap(
-                  traceServiceInstance.generateTraceContext(),
-                  (newContext) => traceServiceInstance.setContext(newContext),
-                ),
-              () => {
-                const httpData: Partial<HttpTraceData> = {
-                  method: request.method,
-                  url: request.url,
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  route: (request as any).route?.path,
-                  userAgent: request.headers.get('user-agent') || undefined,
-                  remoteAddr: this.getRemoteAddress(request),
-                  requestSize: this.getRequestSize(request),
-                };
-
-                const startTime = Date.now();
-
-                return Effect.flatMap(
-                  traceServiceInstance.startHttpTrace(httpData),
-                  (_httpSpan) => Effect.tryPromise({
-                    try: () => next(),
-                    catch: (error) => error as Error,
-                  }).pipe(
-                    Effect.tap((response) => {
-                      const endTime = Date.now();
-                      const finalData: Partial<HttpTraceData> = {
-                        statusCode: (response && typeof response === 'object' && 'status' in response ? response.status as number : undefined) || HttpStatusCode.OK,
-                        responseSize: this.getResponseSize(response),
-                        duration: endTime - startTime,
-                      };
-
-                      return traceServiceInstance.endHttpTrace(_httpSpan, finalData);
-                    }),
-                    Effect.tapError((error) => {
-                      const endTime = Date.now();
-                      const errorData: Partial<HttpTraceData> = {
-                        statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                        duration: endTime - startTime,
-                      };
-
-                      return Effect.flatMap(
-                        traceServiceInstance.addEvent('error', {
-                          // eslint-disable-next-line @typescript-eslint/naming-convention
-                          'error.type': error.constructor.name,
-                          // eslint-disable-next-line @typescript-eslint/naming-convention
-                          'error.message': error.message,
-                        }),
-                        () => traceServiceInstance.endHttpTrace(_httpSpan, errorData),
-                      );
-                    }),
+            traceServiceInstance.extractFromHeaders(TraceMiddleware.extractHeaders(request)),
+            (extractedContext) =>
+              Effect.flatMap(
+                extractedContext
+                  ? traceServiceInstance.setContext(extractedContext)
+                  : Effect.flatMap(traceServiceInstance.generateTraceContext(), (newContext) =>
+                    traceServiceInstance.setContext(newContext),
                   ),
-                );
-              },
-            ),
+                () => {
+                  const httpData: Partial<HttpTraceData> = {
+                    method: request.method,
+                    url: request.url,
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    route: (request as any).route?.path,
+                    userAgent: request.headers.get('user-agent') || undefined,
+                    remoteAddr: TraceMiddleware.getRemoteAddress(request),
+                    requestSize: TraceMiddleware.getRequestSize(request),
+                  };
+
+                  const startTime = Date.now();
+
+                  return Effect.flatMap(
+                    traceServiceInstance.startHttpTrace(httpData),
+                    (_httpSpan) =>
+                      Effect.tryPromise({
+                        try: () => next(),
+                        catch: (error) => error as Error,
+                      }).pipe(
+                        Effect.tap((response) => {
+                          const endTime = Date.now();
+                          const finalData: Partial<HttpTraceData> = {
+                            statusCode:
+                              (response && typeof response === 'object' && 'status' in response
+                                ? (response.status as number)
+                                : undefined) || HttpStatusCode.OK,
+                            responseSize: TraceMiddleware.getResponseSize(response),
+                            duration: endTime - startTime,
+                          };
+
+                          return traceServiceInstance.endHttpTrace(_httpSpan, finalData);
+                        }),
+                        Effect.tapError((error) => {
+                          const endTime = Date.now();
+                          const errorData: Partial<HttpTraceData> = {
+                            statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
+                            duration: endTime - startTime,
+                          };
+
+                          return Effect.flatMap(
+                            traceServiceInstance.addEvent('error', {
+                              // eslint-disable-next-line @typescript-eslint/naming-convention
+                              'error.type': error.constructor.name,
+                              // eslint-disable-next-line @typescript-eslint/naming-convention
+                              'error.message': error.message,
+                            }),
+                            () => traceServiceInstance.endHttpTrace(_httpSpan, errorData),
+                          );
+                        }),
+                      ),
+                  );
+                },
+              ),
           ),
         );
       }),
@@ -105,14 +109,17 @@ export class TraceMiddleware {
       return undefined;
     }
 
-    const headers = 'headers' in request ? request.headers as Record<string, string> : {};
-    const socket = 'socket' in request ? request.socket as { remoteAddress?: string } : {};
-    const connection = 'connection' in request ? request.connection as { remoteAddress?: string } : {};
+    const headers = 'headers' in request ? (request.headers as Record<string, string>) : {};
+    const socket = 'socket' in request ? (request.socket as { remoteAddress?: string }) : {};
+    const connection =
+      'connection' in request ? (request.connection as { remoteAddress?: string }) : {};
 
-    return headers['x-forwarded-for'] ||
-           headers['x-real-ip'] ||
-           socket.remoteAddress ||
-           connection.remoteAddress;
+    return (
+      headers['x-forwarded-for'] ||
+      headers['x-real-ip'] ||
+      socket.remoteAddress ||
+      connection.remoteAddress
+    );
   }
 
   /**
@@ -179,59 +186,59 @@ export const createTraceMiddleware = (): TraceMiddleware => {
  * Trace decorator for controller methods
  */
 export function trace(operationName?: string): MethodDecorator {
-  return function (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) {
+  return (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
     const originalMethod = descriptor.value;
-    const targetConstructor = target && typeof target === 'object' && target.constructor ? target.constructor : { name: 'Unknown' };
+    const targetConstructor =
+      target && typeof target === 'object' && target.constructor
+        ? target.constructor
+        : { name: 'Unknown' };
     const spanName = operationName || `${targetConstructor.name}.${String(propertyKey)}`;
 
     descriptor.value = function (...args: unknown[]) {
-      return Effect.flatMap(
-        traceService,
-        (traceServiceInstance) => Effect.flatMap(
-          traceServiceInstance.startSpan(spanName),
-          (_traceSpan) => {
-            const startTime = Date.now();
+      return Effect.flatMap(traceService, (traceServiceInstance) =>
+        Effect.flatMap(traceServiceInstance.startSpan(spanName), (_traceSpan) => {
+          const startTime = Date.now();
 
-            return Effect.tryPromise({
-              try: () => originalMethod.apply(this, args),
-              catch: (error) => error as Error,
-            }).pipe(
-              Effect.tap(() => {
-                const duration = Date.now() - startTime;
+          return Effect.tryPromise({
+            try: () => originalMethod.apply(this, args),
+            catch: (error) => error as Error,
+          }).pipe(
+            Effect.tap(() => {
+              const duration = Date.now() - startTime;
 
-                return Effect.flatMap(
-                  traceServiceInstance.setAttributes({
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'method.name': String(propertyKey),
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'method.duration': duration,
-                  }),
-                  () => traceServiceInstance.endSpan(_traceSpan),
-                );
-              }),
-              Effect.tapError((error) => {
-                const duration = Date.now() - startTime;
+              return Effect.flatMap(
+                traceServiceInstance.setAttributes({
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'method.name': String(propertyKey),
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'method.duration': duration,
+                }),
+                () => traceServiceInstance.endSpan(_traceSpan),
+              );
+            }),
+            Effect.tapError((error) => {
+              const duration = Date.now() - startTime;
 
-                return Effect.flatMap(
-                  traceServiceInstance.setAttributes({
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'method.name': String(propertyKey),
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'method.duration': duration,
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'error.type': error.constructor.name,
-                    // eslint-disable-next-line @typescript-eslint/naming-convention
-                    'error.message': error.message,
-                  }),
-                  () => traceServiceInstance.endSpan(_traceSpan, {
+              return Effect.flatMap(
+                traceServiceInstance.setAttributes({
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'method.name': String(propertyKey),
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'method.duration': duration,
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'error.type': error.constructor.name,
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'error.message': error.message,
+                }),
+                () =>
+                  traceServiceInstance.endSpan(_traceSpan, {
                     code: 2, // ERROR
                     message: error.message,
                   }),
-                );
-              }),
-            );
-          },
-        ),
+              );
+            }),
+          );
+        }),
       );
     };
 
@@ -243,22 +250,23 @@ export function trace(operationName?: string): MethodDecorator {
  * Span decorator for creating custom spans
  */
 export function span(name?: string): MethodDecorator {
-  return function (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) {
+  return (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
     const originalMethod = descriptor.value;
-    const targetConstructor = target && typeof target === 'object' && target.constructor ? target.constructor : { name: 'Unknown' };
+    const targetConstructor =
+      target && typeof target === 'object' && target.constructor
+        ? target.constructor
+        : { name: 'Unknown' };
     const spanName = name || `${targetConstructor.name}.${String(propertyKey)}`;
 
     descriptor.value = function (...args: unknown[]) {
-      return Effect.flatMap(
-        traceService,
-        (traceServiceInstance) => Effect.flatMap(
-          traceServiceInstance.startSpan(spanName),
-          (spanInstance) => Effect.flatMap(
+      return Effect.flatMap(traceService, (traceServiceInstance) =>
+        Effect.flatMap(traceServiceInstance.startSpan(spanName), (spanInstance) =>
+          Effect.flatMap(
             Effect.try(() => originalMethod.apply(this, args)),
-            (result) => Effect.flatMap(
-              traceServiceInstance.endSpan(spanInstance),
-              () => Effect.succeed(result),
-            ),
+            (result) =>
+              Effect.flatMap(traceServiceInstance.endSpan(spanInstance), () =>
+                Effect.succeed(result),
+              ),
           ),
         ),
       );

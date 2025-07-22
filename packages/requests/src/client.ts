@@ -2,25 +2,25 @@ import { Effect, pipe } from 'effect';
 
 import { applyAuth } from './auth.js';
 import {
-  type RequestConfig,
-  type RequestsOptions,
-  type RetryConfig,
-  HttpMethod,
+  type ApiResponse,
+  createErrorResponse,
+  createSuccessResponse,
+  DEFAULT_MAX_RETRIES,
   DEFAULT_REQUESTS_OPTIONS,
   DEFAULT_TIMEOUT_MS,
-  DEFAULT_MAX_RETRIES,
-  type RequestMetricsData,
   type ErrorResponse,
-  createErrorResponse,
-  type ApiResponse,
+  HttpMethod,
+  HttpStatusCode,
+  InternalServerError,
   isErrorResponse,
   OneBunBaseError,
-  wrapToErrorResponse,
-  createSuccessResponse,
-  type SuccessResponse,
   type ReqConfig,
-  InternalServerError,
-  HttpStatusCode,
+  type RequestConfig,
+  type RequestMetricsData,
+  type RequestsOptions,
+  type RetryConfig,
+  type SuccessResponse,
+  wrapToErrorResponse,
 } from './types.js';
 
 /**
@@ -61,7 +61,7 @@ const calculateRetryDelay = (attempt: number, config: RetryConfig): number => {
     case 'linear':
       return delay * attempt;
     case 'exponential':
-      return delay * Math.pow(factor, attempt - 1);
+      return delay * factor ** (attempt - 1);
     case 'fixed':
     default:
       return delay;
@@ -104,8 +104,10 @@ const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, nev
 const getTraceId = (config: RequestConfig, mergedOptions: RequestsOptions): string | undefined => {
   if (config.tracing !== false && mergedOptions.tracing) {
     try {
-      if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunCurrentTraceContext) { // eslint-disable-line @typescript-eslint/no-explicit-any
-        return (globalThis as any).__onebunCurrentTraceContext.traceId; // eslint-disable-line @typescript-eslint/no-explicit-any
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunCurrentTraceContext) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (globalThis as any).__onebunCurrentTraceContext.traceId; 
       }
     } catch {
       // Tracing not available, continue without it
@@ -128,13 +130,17 @@ const applyAuthIfNeeded = (
 
     return pipe(
       applyAuth(authConfig, config),
-      Effect.catchAll((error) => Effect.fail(createErrorResponse(
-        'AUTH_ERROR',
-        HttpStatusCode.UNAUTHORIZED,
-        `Authentication failed: ${error}`,
-        traceId,
-        { details: error },
-      ))),
+      Effect.catchAll((error) =>
+        Effect.fail(
+          createErrorResponse(
+            'AUTH_ERROR',
+            HttpStatusCode.UNAUTHORIZED,
+            `Authentication failed: ${error}`,
+            traceId,
+            { details: error },
+          ),
+        ),
+      ),
     );
   }
 
@@ -153,7 +159,7 @@ const buildHeaders = (
     // eslint-disable-next-line @typescript-eslint/naming-convention
     'User-Agent': mergedOptions.userAgent || 'OneBun-Requests/1.0',
     // eslint-disable-next-line @typescript-eslint/naming-convention
-    'Accept': 'application/json',
+    Accept: 'application/json',
     // eslint-disable-next-line @typescript-eslint/naming-convention
     'Content-Type': 'application/json',
     ...mergedOptions.headers,
@@ -171,43 +177,51 @@ const buildHeaders = (
 /**
  * Parse response data based on content type
  */
-const parseResponseData = <T>(response: Response, traceId?: string): Effect.Effect<T, ErrorResponse> => {
+const parseResponseData = <T>(
+  response: Response,
+  traceId?: string,
+): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     return pipe(
       Effect.tryPromise({
         try: () => response.text(),
-        catch: (error) => createErrorResponse(
-          'RESPONSE_PARSE_ERROR',
-          response.status,
-          `Failed to read response text: ${error}`,
-          traceId,
-          { details: error },
-        ),
+        catch: (error) =>
+          createErrorResponse(
+            'RESPONSE_PARSE_ERROR',
+            response.status,
+            `Failed to read response text: ${error}`,
+            traceId,
+            { details: error },
+          ),
       }),
       Effect.flatMap((text) => {
         if (!text) {
-          return Effect.fail(createErrorResponse(
-            'RESPONSE_PARSE_ERROR',
-            response.status,
-            'Response text is empty',
-            traceId,
-            { details: 'Response text is empty' },
-          ));
+          return Effect.fail(
+            createErrorResponse(
+              'RESPONSE_PARSE_ERROR',
+              response.status,
+              'Response text is empty',
+              traceId,
+              { details: 'Response text is empty' },
+            ),
+          );
         }
 
         let parsedData: T;
         try {
           parsedData = JSON.parse(text);
         } catch {
-          return Effect.fail(createErrorResponse(
-            'RESPONSE_PARSE_ERROR',
-            response.status,
-            'Response text is not valid JSON',
-            traceId,
-            { details: text },
-          ));
+          return Effect.fail(
+            createErrorResponse(
+              'RESPONSE_PARSE_ERROR',
+              response.status,
+              'Response text is not valid JSON',
+              traceId,
+              { details: text },
+            ),
+          );
         }
 
         // Check if response is a standardized error format
@@ -224,13 +238,14 @@ const parseResponseData = <T>(response: Response, traceId?: string): Effect.Effe
   } else {
     return Effect.tryPromise({
       try: () => response.text() as Promise<T>,
-      catch: (error) => createErrorResponse(
-        'RESPONSE_READ_ERROR',
-        response.status,
-        `Failed to read response: ${error}`,
-        traceId,
-        { details: error },
-      ),
+      catch: (error) =>
+        createErrorResponse(
+          'RESPONSE_READ_ERROR',
+          response.status,
+          `Failed to read response: ${error}`,
+          traceId,
+          { details: error },
+        ),
     });
   }
 };
@@ -266,13 +281,14 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   return pipe(
     Effect.tryPromise({
       try: () => fetch(fullUrl, requestInit),
-      catch: (error) => createErrorResponse(
-        'FETCH_ERROR',
-        HttpStatusCode.INTERNAL_SERVER_ERROR,
-        `Request failed: ${error}`,
-        traceId,
-        { details: error },
-      ),
+      catch: (error) =>
+        createErrorResponse(
+          'FETCH_ERROR',
+          HttpStatusCode.INTERNAL_SERVER_ERROR,
+          `Request failed: ${error}`,
+          traceId,
+          { details: error },
+        ),
     }),
     Effect.flatMap((response) => {
       const responseHeaders: Record<string, string> = {};
@@ -284,13 +300,12 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         parseResponseData<T>(response, traceId),
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
-          const success = response.status >= HttpStatusCode.OK && response.status < HttpStatusCode.MOVED_PERMANENTLY;
+          const success =
+            response.status >= HttpStatusCode.OK &&
+            response.status < HttpStatusCode.MOVED_PERMANENTLY;
 
           if (success) {
-            return createSuccessResponse(
-              responseData,
-              traceId,
-            );
+            return createSuccessResponse(responseData, traceId);
           }
 
           return createErrorResponse(
@@ -334,17 +349,18 @@ const executeWithRetry = <T, E extends string, R extends string>(
     Effect.flatMap((result) => {
       const duration = Date.now() - requestStartTime;
       // Record metrics if enabled
-      const recordMetrics = config.metrics !== false && mergedOptions.metrics
-        ? recordRequestMetrics({
-          method: config.method,
-          url: fullUrl,
-          statusCode: result.success ? HttpStatusCode.OK : result.code,
-          duration,
-          success: result.success,
-          retryCount: result.retryCount || 0,
-          baseUrl: mergedOptions.baseUrl,
-        })
-        : Effect.succeed(undefined);
+      const recordMetrics =
+        config.metrics !== false && mergedOptions.metrics
+          ? recordRequestMetrics({
+            method: config.method,
+            url: fullUrl,
+            statusCode: result.success ? HttpStatusCode.OK : result.code,
+            duration,
+            success: result.success,
+            retryCount: result.retryCount || 0,
+            baseUrl: mergedOptions.baseUrl,
+          })
+          : Effect.succeed(undefined);
 
       return pipe(
         recordMetrics,
@@ -378,13 +394,14 @@ const executeWithRetry = <T, E extends string, R extends string>(
         const callRetryCallback = retryConfig.onRetry
           ? Effect.tryPromise({
             try: () => Promise.resolve(retryConfig.onRetry!(error, attemptNumber)),
-            catch: () => createErrorResponse(
-              'RETRY_CALLBACK_ERROR',
-              HttpStatusCode.INTERNAL_SERVER_ERROR,
-              'Retry callback failed',
-              traceId,
-              { details: error },
-            ),
+            catch: () =>
+              createErrorResponse(
+                'RETRY_CALLBACK_ERROR',
+                HttpStatusCode.INTERNAL_SERVER_ERROR,
+                'Retry callback failed',
+                traceId,
+                { details: error },
+              ),
           })
           : Effect.succeed(undefined);
 
@@ -393,7 +410,16 @@ const executeWithRetry = <T, E extends string, R extends string>(
         return pipe(
           callRetryCallback,
           Effect.flatMap(() => Effect.sleep(`${delay} millis`)),
-          Effect.flatMap(() => executeWithRetry<T, E, R>(config, mergedOptions, headers, fullUrl, traceId, attemptNumber + 1)),
+          Effect.flatMap(() =>
+            executeWithRetry<T, E, R>(
+              config,
+              mergedOptions,
+              headers,
+              fullUrl,
+              traceId,
+              attemptNumber + 1,
+            ),
+          ),
         );
       }
 
@@ -408,7 +434,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
 export const executeRequest = <
   T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
   E extends string = string,
-  R extends string = string
+  R extends string = string,
 >(
   config: RequestConfig,
   requestOptions: RequestsOptions = {},
@@ -439,10 +465,14 @@ export class HttpClient {
   /**
    * Execute a request with Effect interface
    */
-  requestEffect<T = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  requestEffect<T = any>(
     config: Partial<RequestConfig>,
   ): Effect.Effect<SuccessResponse<T>, ErrorResponse> {
-    const mergedOptions = { ...DEFAULT_REQUESTS_OPTIONS, ...this.clientOptions };
+    const mergedOptions = {
+      ...DEFAULT_REQUESTS_OPTIONS,
+      ...this.clientOptions,
+    };
     const fullConfig: RequestConfig = {
       method: HttpMethod.GET,
       url: '',
@@ -455,7 +485,8 @@ export class HttpClient {
   /**
    * Execute a request with Promise interface (default)
    */
-  async request<T = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async request<T = any>(
     config: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
     return await Effect.runPromise(this.requestEffect<T>(config));
@@ -466,7 +497,7 @@ export class HttpClient {
    */
   getEffect<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -478,17 +509,36 @@ export class HttpClient {
     if (queryOrConfig && config) {
       // queryOrConfig is query data, config is request config
       finalConfig = {
-        method: HttpMethod.GET, url, query: queryOrConfig as Q, ...config,
+        method: HttpMethod.GET,
+        url,
+        query: queryOrConfig as Q,
+        ...config,
       };
-    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
+    } else if (
+      queryOrConfig &&
+      typeof queryOrConfig === 'object' &&
+      !Array.isArray(queryOrConfig)
+    ) {
       // Check if it's a RequestConfig (has method, url, etc.) or query data
-      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+      const hasConfigFields =
+        'method' in queryOrConfig ||
+        'headers' in queryOrConfig ||
+        'timeout' in queryOrConfig ||
+        'auth' in queryOrConfig;
       if (hasConfigFields) {
         // It's config
-        finalConfig = { method: HttpMethod.GET, url, ...queryOrConfig as Partial<RequestConfig> };
+        finalConfig = {
+          method: HttpMethod.GET,
+          url,
+          ...(queryOrConfig as Partial<RequestConfig>),
+        };
       } else {
         // It's query data
-        finalConfig = { method: HttpMethod.GET, url, query: queryOrConfig as Q };
+        finalConfig = {
+          method: HttpMethod.GET,
+          url,
+          query: queryOrConfig as Q,
+        };
       }
     } else {
       finalConfig = { method: HttpMethod.GET, url };
@@ -502,7 +552,7 @@ export class HttpClient {
    */
   async get<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -514,20 +564,25 @@ export class HttpClient {
   /**
    * POST request with Effect interface
    */
-  postEffect<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  postEffect<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({
-      method: HttpMethod.POST, url, data, ...config,
+      method: HttpMethod.POST,
+      url,
+      data,
+      ...config,
     });
   }
 
   /**
    * POST request with Promise interface (default)
    */
-  async post<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async post<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
@@ -538,20 +593,25 @@ export class HttpClient {
   /**
    * PUT request with Effect interface
    */
-  putEffect<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  putEffect<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({
-      method: HttpMethod.PUT, url, data, ...config,
+      method: HttpMethod.PUT,
+      url,
+      data,
+      ...config,
     });
   }
 
   /**
    * PUT request with Promise interface (default)
    */
-  async put<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async put<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
@@ -562,20 +622,25 @@ export class HttpClient {
   /**
    * PATCH request with Effect interface
    */
-  patchEffect<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  patchEffect<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
     return this.requestEffect<T>({
-      method: HttpMethod.PATCH, url, data, ...config,
+      method: HttpMethod.PATCH,
+      url,
+      data,
+      ...config,
     });
   }
 
   /**
    * PATCH request with Promise interface (default)
    */
-  async patch<T = any, D = any>( // eslint-disable-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async patch<T = any, D = any>(
     url: string,
     data?: D,
     config?: Partial<RequestConfig>,
@@ -588,7 +653,7 @@ export class HttpClient {
    */
   deleteEffect<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -599,14 +664,33 @@ export class HttpClient {
 
     if (queryOrConfig && config) {
       finalConfig = {
-        method: HttpMethod.DELETE, url, query: queryOrConfig as Q, ...config,
+        method: HttpMethod.DELETE,
+        url,
+        query: queryOrConfig as Q,
+        ...config,
       };
-    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
-      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+    } else if (
+      queryOrConfig &&
+      typeof queryOrConfig === 'object' &&
+      !Array.isArray(queryOrConfig)
+    ) {
+      const hasConfigFields =
+        'method' in queryOrConfig ||
+        'headers' in queryOrConfig ||
+        'timeout' in queryOrConfig ||
+        'auth' in queryOrConfig;
       if (hasConfigFields) {
-        finalConfig = { method: HttpMethod.DELETE, url, ...queryOrConfig as Partial<RequestConfig> };
+        finalConfig = {
+          method: HttpMethod.DELETE,
+          url,
+          ...(queryOrConfig as Partial<RequestConfig>),
+        };
       } else {
-        finalConfig = { method: HttpMethod.DELETE, url, query: queryOrConfig as Q };
+        finalConfig = {
+          method: HttpMethod.DELETE,
+          url,
+          query: queryOrConfig as Q,
+        };
       }
     } else {
       finalConfig = { method: HttpMethod.DELETE, url };
@@ -620,7 +704,7 @@ export class HttpClient {
    */
   async delete<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -633,7 +717,7 @@ export class HttpClient {
    * HEAD request with Effect interface
    */
   headEffect<
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -644,14 +728,33 @@ export class HttpClient {
 
     if (queryOrConfig && config) {
       finalConfig = {
-        method: HttpMethod.HEAD, url, query: queryOrConfig as Q, ...config,
+        method: HttpMethod.HEAD,
+        url,
+        query: queryOrConfig as Q,
+        ...config,
       };
-    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
-      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+    } else if (
+      queryOrConfig &&
+      typeof queryOrConfig === 'object' &&
+      !Array.isArray(queryOrConfig)
+    ) {
+      const hasConfigFields =
+        'method' in queryOrConfig ||
+        'headers' in queryOrConfig ||
+        'timeout' in queryOrConfig ||
+        'auth' in queryOrConfig;
       if (hasConfigFields) {
-        finalConfig = { method: HttpMethod.HEAD, url, ...queryOrConfig as Partial<RequestConfig> };
+        finalConfig = {
+          method: HttpMethod.HEAD,
+          url,
+          ...(queryOrConfig as Partial<RequestConfig>),
+        };
       } else {
-        finalConfig = { method: HttpMethod.HEAD, url, query: queryOrConfig as Q };
+        finalConfig = {
+          method: HttpMethod.HEAD,
+          url,
+          query: queryOrConfig as Q,
+        };
       }
     } else {
       finalConfig = { method: HttpMethod.HEAD, url };
@@ -664,7 +767,7 @@ export class HttpClient {
    * HEAD request with Promise interface (default)
    */
   async head<
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -678,7 +781,7 @@ export class HttpClient {
    */
   optionsEffect<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -689,14 +792,33 @@ export class HttpClient {
 
     if (queryOrConfig && config) {
       finalConfig = {
-        method: HttpMethod.OPTIONS, url, query: queryOrConfig as Q, ...config,
+        method: HttpMethod.OPTIONS,
+        url,
+        query: queryOrConfig as Q,
+        ...config,
       };
-    } else if (queryOrConfig && typeof queryOrConfig === 'object' && !Array.isArray(queryOrConfig)) {
-      const hasConfigFields = 'method' in queryOrConfig || 'headers' in queryOrConfig || 'timeout' in queryOrConfig || 'auth' in queryOrConfig;
+    } else if (
+      queryOrConfig &&
+      typeof queryOrConfig === 'object' &&
+      !Array.isArray(queryOrConfig)
+    ) {
+      const hasConfigFields =
+        'method' in queryOrConfig ||
+        'headers' in queryOrConfig ||
+        'timeout' in queryOrConfig ||
+        'auth' in queryOrConfig;
       if (hasConfigFields) {
-        finalConfig = { method: HttpMethod.OPTIONS, url, ...queryOrConfig as Partial<RequestConfig> };
+        finalConfig = {
+          method: HttpMethod.OPTIONS,
+          url,
+          ...(queryOrConfig as Partial<RequestConfig>),
+        };
       } else {
-        finalConfig = { method: HttpMethod.OPTIONS, url, query: queryOrConfig as Q };
+        finalConfig = {
+          method: HttpMethod.OPTIONS,
+          url,
+          query: queryOrConfig as Q,
+        };
       }
     } else {
       finalConfig = { method: HttpMethod.OPTIONS, url };
@@ -710,7 +832,7 @@ export class HttpClient {
    */
   async options<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     url: string,
     queryOrConfig?: Q | Partial<RequestConfig>,
@@ -724,7 +846,7 @@ export class HttpClient {
    */
   async req<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     method: HttpMethod | string,
     url: string,
@@ -732,11 +854,13 @@ export class HttpClient {
     config?: ReqConfig & Partial<RequestConfig>,
   ): Promise<T> {
     try {
-      const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+      const methodEnum = typeof method === 'string' ? (method as HttpMethod) : method;
       const response = await this.request<T>({
         method: methodEnum,
         url,
-        ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+        ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE
+          ? { query: queryOrData }
+          : { data: queryOrData }),
         ...config,
       });
 
@@ -760,7 +884,7 @@ export class HttpClient {
       }
 
       return response.result;
-    } catch (error: any) { // eslint-disable-line @typescript-eslint/no-explicit-any
+    } catch (error: unknown) {
       // If it's already an OneBun error, rethrow
       if (error instanceof OneBunBaseError) {
         throw error;
@@ -770,10 +894,10 @@ export class HttpClient {
       if (config?.errors) {
         const errorKey = Object.keys(config.errors)[0];
         const errorConfig = config.errors[errorKey];
-        throw new InternalServerError(
-          errorConfig.error,
-          { ...errorConfig.details, originalError: error },
-        );
+        throw new InternalServerError(errorConfig.error, {
+          ...errorConfig.details,
+          originalError: error,
+        });
       }
 
       // Wrap unexpected errors
@@ -786,19 +910,21 @@ export class HttpClient {
    */
   async reqRaw<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     method: HttpMethod | string,
     url: string,
     queryOrData?: Q,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+    const methodEnum = typeof method === 'string' ? (method as HttpMethod) : method;
 
     return await this.request<T>({
       method: methodEnum,
       url,
-      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE
+        ? { query: queryOrData }
+        : { data: queryOrData }),
       ...config,
     });
   }
@@ -808,19 +934,21 @@ export class HttpClient {
    */
   reqEffect<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    Q extends Record<string, any> = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+    Q extends Record<string, any> = Record<string, any>, // eslint-disable-line @typescript-eslint/no-explicit-any
   >(
     method: HttpMethod | string,
     url: string,
     queryOrData?: Q,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<SuccessResponse<T>, ErrorResponse> {
-    const methodEnum = typeof method === 'string' ? method as HttpMethod : method;
+    const methodEnum = typeof method === 'string' ? (method as HttpMethod) : method;
 
     return this.requestEffect<T>({
       method: methodEnum,
       url,
-      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE ? { query: queryOrData } : { data: queryOrData }),
+      ...(methodEnum === HttpMethod.GET || methodEnum === HttpMethod.DELETE
+        ? { query: queryOrData }
+        : { data: queryOrData }),
       ...config,
     });
   }

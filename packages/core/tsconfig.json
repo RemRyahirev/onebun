@@ -6,4 +6,4 @@
     "types": ["bun-types"]
   },
   "include": ["src/**/*"]
-} 
+}

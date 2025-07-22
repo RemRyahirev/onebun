@@ -1,7 +1,7 @@
 import {
   describe,
-  it,
   expect,
+  it,
 } from 'bun:test';
 import { Effect } from 'effect';
 
@@ -30,8 +30,9 @@ describe('EnvParser', () => {
 
     it('should throw for required string when undefined', async () => {
       const config = { type: 'string' as const, required: true };
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', undefined, config)))
-        .rejects.toThrow('Required variable is not set');
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', undefined, config))).rejects.toThrow(
+        'Required variable is not set',
+      );
     });
 
     it('should apply custom validation', async () => {
@@ -45,10 +46,11 @@ describe('EnvParser', () => {
           return Effect.succeed(value);
         },
       };
-      
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'hi', config)))
-        .rejects.toThrow('too short');
-      
+
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'hi', config))).rejects.toThrow(
+        'too short',
+      );
+
       const result = await Effect.runPromise(EnvParser.parse('TEST_VAR', 'hello', config));
       expect(result).toBe('hello');
     });
@@ -57,7 +59,7 @@ describe('EnvParser', () => {
   describe('number parsing', () => {
     it('should parse valid numbers', async () => {
       const config = { type: 'number' as const };
-      
+
       expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '42', config))).resolves.toBe(42);
       expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '3.14', config))).resolves.toBe(3.14);
       expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '-100', config))).resolves.toBe(-100);
@@ -78,26 +80,30 @@ describe('EnvParser', () => {
 
     it('should throw for invalid number strings', async () => {
       const config = { type: 'number' as const };
-      
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'not_a_number', config)))
-        .rejects.toThrow('is not a valid number');
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '12.34.56', config)))
-        .rejects.toThrow('is not a valid number');
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '', config)))
-        .rejects.toThrow('is not a valid number');
+
+      expect(
+        Effect.runPromise(EnvParser.parse('TEST_VAR', 'not_a_number', config)),
+      ).rejects.toThrow('is not a valid number');
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '12.34.56', config))).rejects.toThrow(
+        'is not a valid number',
+      );
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '', config))).rejects.toThrow(
+        'is not a valid number',
+      );
     });
 
     it('should throw for required number when undefined', async () => {
       const config = { type: 'number' as const, required: true };
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', undefined, config)))
-        .rejects.toThrow('Required variable is not set');
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', undefined, config))).rejects.toThrow(
+        'Required variable is not set',
+      );
     });
   });
 
   describe('boolean parsing', () => {
     it('should parse truthy values', async () => {
       const config = { type: 'boolean' as const };
-      
+
       for (const value of ['true', 'TRUE', 'True', '1', 'yes', 'YES', 'on', 'ON']) {
         const result = await Effect.runPromise(EnvParser.parse('TEST_VAR', value, config));
         expect(result).toBe(true);
@@ -106,7 +112,7 @@ describe('EnvParser', () => {
 
     it('should parse falsy values', async () => {
       const config = { type: 'boolean' as const };
-      
+
       for (const value of ['false', 'FALSE', 'False', '0', 'no', 'NO', 'off', 'OFF']) {
         const result = await Effect.runPromise(EnvParser.parse('TEST_VAR', value, config));
         expect(result).toBe(false);
@@ -127,11 +133,13 @@ describe('EnvParser', () => {
 
     it('should throw for invalid boolean strings', async () => {
       const config = { type: 'boolean' as const };
-      
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'maybe', config)))
-        .rejects.toThrow('is not a valid boolean');
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '2', config)))
-        .rejects.toThrow('is not a valid boolean');
+
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'maybe', config))).rejects.toThrow(
+        'is not a valid boolean',
+      );
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '2', config))).rejects.toThrow(
+        'is not a valid boolean',
+      );
     });
   });
 
@@ -190,8 +198,9 @@ describe('EnvParser', () => {
     it('should throw for unknown type', async () => {
       const config = { type: 'unknown' };
       // @ts-expect-error - Test for unknown type
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'value', config)))
-        .rejects.toThrow('Unknown type: unknown');
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', 'value', config))).rejects.toThrow(
+        'Unknown type: unknown',
+      );
     });
   });
 
@@ -202,4 +211,4 @@ describe('EnvParser', () => {
       expect(result).toBe(42);
     });
   });
-}); 
+});

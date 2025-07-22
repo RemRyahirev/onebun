@@ -1,17 +1,17 @@
 import {
-  writeFileSync,
-  rmSync,
   existsSync,
   mkdirSync,
+  rmSync,
+  writeFileSync,
 } from 'fs';
 import path from 'path';
 
 import {
-  describe,
-  it,
-  expect,
-  beforeEach,
   afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
 } from 'bun:test';
 import { Effect } from 'effect';
 
@@ -27,9 +27,9 @@ describe('Integration Tests', () => {
     if (!existsSync(TEST_DIR)) {
       mkdirSync(TEST_DIR, { recursive: true });
     }
-    
+
     TypedEnv.clear();
-    
+
     // Clear test env vars
     delete process.env.NODE_ENV;
     delete process.env.NODEENV;
@@ -68,14 +68,16 @@ describe('Integration Tests', () => {
     if (existsSync(TEST_DIR)) {
       rmSync(TEST_DIR, { recursive: true, force: true });
     }
-    
+
     TypedEnv.clear();
   });
 
   describe('Real-world application configuration', () => {
     it('should handle complete application config from .env file', async () => {
       const envFile = path.join(TEST_DIR, 'app.env');
-      writeFileSync(envFile, `
+      writeFileSync(
+        envFile,
+        `
 # Application Configuration
 APP_ENV=production
 APP_PORT=8080
@@ -105,7 +107,8 @@ FEATURES_NEWUI=true
 FEATURES_BETAAPI=false
 FEATURES_MAXUPLOADSIZE=50
 FEATURES_RATELIMITREQUESTS=100
-`);
+`,
+      );
 
       const schema: EnvSchema<{
         app: {
@@ -140,11 +143,11 @@ FEATURES_RATELIMITREQUESTS=100
         };
       }> = {
         app: {
-          env: Env.string({ 
+          env: Env.string({
             default: 'development',
             validate: Env.oneOf(['development', 'production', 'test'] as const),
           }),
-          port: Env.number({ 
+          port: Env.number({
             default: 3000,
             min: 1,
             max: 65535,
@@ -153,51 +156,53 @@ FEATURES_RATELIMITREQUESTS=100
           host: Env.string({ default: 'localhost' }),
         },
         database: {
-          url: Env.string({ 
+          url: Env.string({
             required: true,
             validate: Env.url(),
           }),
-          poolSize: Env.number({ 
+          poolSize: Env.number({
             default: 10,
             min: 1,
             max: 100,
           }),
         },
         security: {
-          jwtSecret: Env.string({ 
+          jwtSecret: Env.string({
             sensitive: true,
             required: true,
             validate(secret: string) {
               if (secret.length < 20) {
-                return Effect.fail(new EnvValidationError('', secret, 'JWT secret must be at least 20 characters'));
+                return Effect.fail(
+                  new EnvValidationError('', secret, 'JWT secret must be at least 20 characters'),
+                );
               }
 
               return Effect.succeed(secret);
             },
           }),
-          allowedOrigins: Env.array({ 
+          allowedOrigins: Env.array({
             default: [],
           }),
           corsEnabled: Env.boolean({ default: false }),
         },
         redis: {
           host: Env.string({ default: 'localhost' }),
-          port: Env.number({ 
+          port: Env.number({
             default: 6379,
             validate: Env.port(),
           }),
-          password: Env.string({ 
+          password: Env.string({
             sensitive: true,
             default: '',
           }),
         },
         logging: {
           debug: Env.boolean({ default: false }),
-          level: Env.string({ 
+          level: Env.string({
             default: 'info',
             validate: Env.oneOf(['debug', 'info', 'warn', 'error'] as const),
           }),
-          format: Env.string({ 
+          format: Env.string({
             default: 'text',
             validate: Env.oneOf(['text', 'json'] as const),
           }),
@@ -205,12 +210,12 @@ FEATURES_RATELIMITREQUESTS=100
         features: {
           newUi: Env.boolean({ default: false }),
           betaApi: Env.boolean({ default: false }),
-          maxUploadSize: Env.number({ 
+          maxUploadSize: Env.number({
             default: 10,
             min: 1,
             max: 1000,
           }),
-          rateLimitRequests: Env.number({ 
+          rateLimitRequests: Env.number({
             default: 60,
             min: 1,
           }),
@@ -261,11 +266,14 @@ FEATURES_RATELIMITREQUESTS=100
 
     it('should handle environment override of .env file', async () => {
       const envFile = path.join(TEST_DIR, 'override.env');
-      writeFileSync(envFile, `
+      writeFileSync(
+        envFile,
+        `
 PORT=3000
 NODEENV=development
 DEBUG=false
-`);
+`,
+      );
 
       // Устанавливаем переменные окружения для переопределения
       process.env.PORT = '8080';
@@ -292,10 +300,13 @@ DEBUG=false
 
     it('should prioritize .env file over environment when configured', async () => {
       const envFile = path.join(TEST_DIR, 'priority.env');
-      writeFileSync(envFile, `
+      writeFileSync(
+        envFile,
+        `
 PORT=3000
 DEBUG=false
-`);
+`,
+      );
 
       process.env.PORT = '8080';
       process.env.DEBUG = 'true';
@@ -322,40 +333,45 @@ DEBUG=false
       delete process.env.PORT;
       delete process.env.EMAIL;
       delete process.env.URL;
-      
+
       const envFile = path.join(TEST_DIR, 'invalid.env');
-      writeFileSync(envFile, `
+      writeFileSync(
+        envFile,
+        `
 PORT=invalid_port
 EMAIL=invalid_email
 URL=not_a_url
-`);
+`,
+      );
 
       const schema = {
-        port: Env.number({ 
+        port: Env.number({
           required: true,
           validate: Env.port(),
         }),
-        email: Env.string({ 
+        email: Env.string({
           required: true,
           validate: Env.email(),
         }),
-        url: Env.string({ 
+        url: Env.string({
           required: true,
           validate: Env.url(),
         }),
       };
 
       // Должна быть ошибка валидации порта
-      expect(() => TypedEnv.createAsync(schema, {
-        envFilePath: envFile,
-      })).toThrow(/is not a valid number/);
+      expect(() =>
+        TypedEnv.createAsync(schema, {
+          envFilePath: envFile,
+        }),
+      ).toThrow(/is not a valid number/);
     });
 
     it('should handle missing required variables', () => {
       // Очищаем переменные окружения
       delete process.env.REQUIREDVAR;
       delete process.env.OPTIONALVAR;
-      
+
       const schema = {
         requiredVar: Env.string({ required: true }),
         optionalVar: Env.string({ default: 'default_value' }),
@@ -368,19 +384,24 @@ URL=not_a_url
   describe('Direct loader usage', () => {
     it('should work with EnvLoader directly', async () => {
       const envFile = path.join(TEST_DIR, 'direct.env');
-      writeFileSync(envFile, `
+      writeFileSync(
+        envFile,
+        `
 KEY1=value1
 KEY2=value2
 QUOTED="quoted value"
-`);
+`,
+      );
 
       process.env.KEY3 = 'value3';
 
-      const variables = await Effect.runPromise(EnvLoader.load({
-        envFilePath: envFile,
-        loadDotEnv: true,
-        envOverridesDotEnv: true,
-      }));
+      const variables = await Effect.runPromise(
+        EnvLoader.load({
+          envFilePath: envFile,
+          loadDotEnv: true,
+          envOverridesDotEnv: true,
+        }),
+      );
 
       expect(variables.KEY1).toBe('value1');
       expect(variables.KEY2).toBe('value2');
@@ -392,9 +413,7 @@ QUOTED="quoted value"
       const existingFile = path.join(TEST_DIR, 'exists.env');
       writeFileSync(existingFile, 'KEY=value');
 
-      const existsResult = await Effect.runPromise(
-        EnvLoader.checkDotEnvExists(existingFile),
-      );
+      const existsResult = await Effect.runPromise(EnvLoader.checkDotEnvExists(existingFile));
       expect(existsResult).toBe(true);
 
       const notExistsResult = await Effect.runPromise(
@@ -413,7 +432,7 @@ QUOTED="quoted value"
       delete process.env.MIN_VALUE;
       delete process.env.MAX_VALUE;
       delete process.env.CURRENT_VALUE;
-      
+
       process.env.MINVALUE = '10';
       process.env.MAXVALUE = '100';
       process.env.CURRENTVALUE = '50';
@@ -421,7 +440,7 @@ QUOTED="quoted value"
       const schema = {
         minValue: Env.number({ required: true }),
         maxValue: Env.number({ required: true }),
-        currentValue: Env.number({ 
+        currentValue: Env.number({
           required: true,
           validate(value: number) {
             // Простая валидация без доступа к другим значениям
@@ -435,7 +454,7 @@ QUOTED="quoted value"
       };
 
       const config = await TypedEnv.createAsync(schema);
-      
+
       expect(config.get('minValue')).toBe(10);
       expect(config.get('maxValue')).toBe(100);
       expect(config.get('currentValue')).toBe(50);
@@ -444,7 +463,7 @@ QUOTED="quoted value"
       const min = config.get('minValue');
       const max = config.get('maxValue');
       const current = config.get('currentValue');
-      
+
       expect(current).toBeGreaterThanOrEqual(min);
       expect(current).toBeLessThanOrEqual(max);
     });
@@ -460,7 +479,7 @@ QUOTED="quoted value"
         largeSchema[`string_${i}`] = Env.string({ default: `default_${i}` });
         largeSchema[`number_${i}`] = Env.number({ default: i });
         largeSchema[`boolean_${i}`] = Env.boolean({ default: i % 2 === 0 });
-        
+
         expectedValues[`string_${i}`] = `default_${i}`;
         expectedValues[`number_${i}`] = i;
         expectedValues[`boolean_${i}`] = i % 2 === 0;
@@ -479,4 +498,4 @@ QUOTED="quoted value"
       expect(config.get('boolean_99')).toBe(false);
     });
   });
-}); 
+});

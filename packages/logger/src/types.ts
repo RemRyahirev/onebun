@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import type { Effect } from 'effect';
 
 /**
  * Определяем уровни логирования
@@ -11,10 +11,9 @@ export enum LogLevel {
   Info = 30,
   Debug = 20,
   Trace = 10,
-  None = 0
+  None = 0,
 }
 /* eslint-enable no-magic-numbers */
- 
 
 /**
  * Trace information for log entries
@@ -59,4 +58,4 @@ export interface LoggerConfig {
   formatter: LogFormatter;
   transport: LogTransport;
   defaultContext?: Record<string, unknown>;
-} 
+}

@@ -1,4 +1,4 @@
-import { Effect } from 'effect';
+import type { Effect } from 'effect';
 
 /**
  * Environment variable value types
@@ -73,7 +73,9 @@ export class EnvValidationError extends Error {
     public readonly value: any,
     public readonly reason: string,
   ) {
-    super(`Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`);
+    super(
+      `Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`,
+    );
     this.name = 'EnvValidationError';
   }
 }

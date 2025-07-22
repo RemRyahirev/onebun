@@ -9,7 +9,10 @@ import type { SyncLogger } from '@onebun/logger';
 /**
  * Metadata storage for services
  */
-const META_SERVICES = new Map<Function, { tag: Context.Tag<unknown, unknown>; impl: new () => unknown }>();
+const META_SERVICES = new Map<
+  Function,
+  { tag: Context.Tag<unknown, unknown>; impl: new () => unknown }
+>();
 
 /**
  * Service decorator
@@ -17,7 +20,7 @@ const META_SERVICES = new Map<Function, { tag: Context.Tag<unknown, unknown>; im
  */
 export function Service<T>(tag?: Context.Tag<T, T>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return function<C extends new (...args: any[]) => any>(target: C): C {
+  return <C extends new (...args: any[]) => any>(target: C): C => {
     // If no tag is provided, create one using the class name
     const serviceTag = tag || Context.GenericTag<InstanceType<C>>(target.name);
 
@@ -66,7 +69,7 @@ export class BaseService {
     // Module passes: [service1, service2, ..., logger, config] - same as controller
     let logger: SyncLogger | undefined;
     let config: unknown;
-    
+
     if (args.length >= 2) {
       // Last argument is config, second to last is logger
       config = args[args.length - 1];
@@ -87,7 +90,9 @@ export class BaseService {
       this.logger = logger.child({ className });
     } else {
       // This should never happen since OneBunApplication always provides a logger
-      throw new Error(`Logger is required for service ${className}. Make sure OneBunApplication is configured correctly.`);
+      throw new Error(
+        `Logger is required for service ${className}. Make sure OneBunApplication is configured correctly.`,
+      );
     }
 
     // Set configuration instance

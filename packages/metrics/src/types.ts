@@ -1,4 +1,4 @@
-import { register } from 'prom-client';
+import type { register } from 'prom-client';
 
 /**
  * Default system metrics collection interval (5 seconds)
@@ -13,7 +13,6 @@ export const DEFAULT_HTTP_DURATION_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 ];
 /* eslint-enable no-magic-numbers */
- 
 
 /**
  * Default metrics max age in seconds (10 minutes)
@@ -116,7 +115,7 @@ export enum MetricType {
   COUNTER = 'counter',
   GAUGE = 'gauge',
   HISTOGRAM = 'histogram',
-  SUMMARY = 'summary'
+  SUMMARY = 'summary',
 }
 
 /**
@@ -131,4 +130,4 @@ export interface CustomMetricConfig {
   percentiles?: number[]; // for summary
   maxAgeSeconds?: number; // for summary
   ageBuckets?: number; // for summary
-} 
+}

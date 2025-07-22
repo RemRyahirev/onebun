@@ -9,43 +9,40 @@
  * - Custom span creation and management
  */
 
-// Types
-export type {
-  TraceContext,
-  TraceSpan,
-  TraceEvent,
-  SpanStatus,
-  TraceHeaders,
-  TraceOptions,
-  TraceExportOptions,
-  HttpTraceData,
-} from './types.js';
-
-export { SpanStatusCode } from './types.js';
-
-// Core service
-export {
-  traceService,
-  TraceServiceImpl,
-  makeTraceService,
-  traceServiceLive,
-  currentTraceContext,
-  currentSpan,
-  // Backward compatibility aliases
-  TraceService,
-  TraceServiceLive,
-} from './trace.service.js';
-
+// Re-export some OpenTelemetry types for convenience
+export type { Context } from '@opentelemetry/api';
 // Middleware and decorators
 export {
-  TraceMiddleware,
   createTraceMiddleware,
-  trace,
+  Span,
   span,
   // Backward compatibility aliases
   Trace,
-  Span,
+  TraceMiddleware,
+  trace,
 } from './middleware.js';
 
-// Re-export some OpenTelemetry types for convenience
-export type { Context } from '@opentelemetry/api';
+// Core service
+export {
+  currentSpan,
+  currentTraceContext,
+  makeTraceService,
+  // Backward compatibility aliases
+  TraceService,
+  TraceServiceImpl,
+  TraceServiceLive,
+  traceService,
+  traceServiceLive,
+} from './trace.service.js';
+// Types
+export type {
+  HttpTraceData,
+  SpanStatus,
+  TraceContext,
+  TraceEvent,
+  TraceExportOptions,
+  TraceHeaders,
+  TraceOptions,
+  TraceSpan,
+} from './types.js';
+export { SpanStatusCode } from './types.js';

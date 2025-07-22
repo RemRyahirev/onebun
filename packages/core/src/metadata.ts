@@ -51,7 +51,7 @@ export function getMetadata(
   metadataKey: string,
   target: object,
   propertyKey?: string | symbol,
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): any {
   // Get metadata map for target
   const targetMetadata = metadataStorage.get(target);
@@ -72,7 +72,7 @@ export function getMetadata(
 /**
  * Get constructor parameter types using TypeScript's emitDecoratorMetadata
  * This works with our custom metadata system and doesn't require reflect-metadata
- * 
+ *
  * @deprecated Use getConstructorParamTypes instead
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -80,14 +80,17 @@ function _getLegacyConstructorParamTypes(target: Function): Function[] | undefin
   // Try to get design:paramtypes metadata that TypeScript emits
   // This should work because we have emitDecoratorMetadata: true in tsconfig
   const types = getMetadata('design:paramtypes', target);
-  
+
   if (!types || !Array.isArray(types)) {
     return undefined;
   }
-  
+
   // eslint-disable-next-line no-console
-  console.log(`Raw design:paramtypes for ${target.name}:`, types.map(t => t?.name || 'undefined'));
-  
+  console.log(
+    `Raw design:paramtypes for ${target.name}:`,
+    types.map((t) => t?.name || 'undefined'),
+  );
+
   // Filter out basic types and focus on service types
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const serviceTypes = types.filter((type: any, _index: number) => {
@@ -98,22 +101,25 @@ function _getLegacyConstructorParamTypes(target: Function): Function[] | undefin
 
       return false;
     }
-    
+
     // Skip logger and config types (they have specific patterns)
     const typeName = type.name;
-    if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
+    if (
+      typeName &&
+      (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
+    ) {
       // Debug: Skipping system type
       // console.log(`Skipping system type at index ${index}:`, typeName);
 
       return false;
     }
-    
+
     // Debug: Keeping service type
     // console.log(`Keeping service type at index ${index}:`, typeName);
 
     return true;
   });
-  
+
   return serviceTypes.length > 0 ? serviceTypes : undefined;
 }
 
@@ -130,13 +136,14 @@ export function setConstructorParamTypes(target: Function, types: Function[]): v
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 if (typeof (globalThis as any).__decorate === 'undefined') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).__decorate = function(decorators: any[], target: any, propertyKey?: any, descriptor?: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any  
+  (globalThis as any).__decorate = (decorators: any[], target: any, propertyKey?: any, descriptor?: any) => {
     // Debug: __decorate called
     // console.log('__decorate', decorators, target, propertyKey, descriptor);
     // This is where TypeScript would normally call Reflect.decorate
     // We can intercept and store metadata here
-    if (arguments.length === 2 && typeof target === 'function') {
+    const argsLength = propertyKey === undefined && descriptor === undefined ? 2 : 4;
+    if (argsLength === 2 && typeof target === 'function') {
       // This is a class decorator, capture constructor parameter types
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const paramTypes = (globalThis as any).__param || [];
@@ -144,14 +151,14 @@ if (typeof (globalThis as any).__decorate === 'undefined') {
         defineMetadata('design:paramtypes', paramTypes, target);
       }
     }
-    
+
     // Apply decorators normally
     let result = target;
     for (let i = decorators.length - 1; i >= 0; i--) {
       const decorator = decorators[i];
       if (decorator) {
         if (typeof decorator === 'function') {
-          if (arguments.length === 2) {
+          if (argsLength === 2) {
             result = decorator(result) || result;
           } else {
             result = decorator(target, propertyKey, descriptor) || descriptor;
@@ -173,26 +180,26 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
   // Simple storage for metadata
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const globalMetadataStorage = new WeakMap<any, Map<string, any>>();
-  
+
   const reflectPolyfill = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     metadata(key: string, value: any) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return function(target: any) {
+      return (target: any) => {
         if (!globalMetadataStorage.has(target)) {
           globalMetadataStorage.set(target, new Map());
         }
         globalMetadataStorage.get(target)!.set(key, value);
       };
     },
-    
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     getMetadata(key: string, target: any) {
       const metadata = globalMetadataStorage.get(target);
 
       return metadata ? metadata.get(key) : undefined;
     },
-    
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     defineMetadata(key: string, value: any, target: any) {
       if (!globalMetadataStorage.has(target)) {
@@ -201,7 +208,7 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
       globalMetadataStorage.get(target)!.set(key, value);
     },
   };
-  
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   if (!(globalThis as any).Reflect) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -218,7 +225,7 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
 export function getConstructorParamTypes(target: Function): Function[] | undefined {
   // First try the global Reflect (now with our polyfill)
   let types: Function[] | undefined;
-  
+
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     types = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
@@ -230,19 +237,22 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
           return false;
         }
         const typeName = type.name;
-        if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
+        if (
+          typeName &&
+          (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
+        ) {
           return false;
         }
 
         return true;
       });
-      
+
       return serviceTypes.length > 0 ? serviceTypes : undefined;
     }
   } catch {
     // Silent fallback to custom metadata
   }
-  
+
   // Fallback to our custom metadata
   types = getMetadata('design:paramtypes', target);
   if (types && Array.isArray(types)) {
@@ -252,16 +262,19 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
         return false;
       }
       const typeName = type.name;
-      if (typeName && (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))) {
+      if (
+        typeName &&
+        (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
+      ) {
         return false;
       }
 
       return true;
     });
-    
+
     return serviceTypes.length > 0 ? serviceTypes : undefined;
   }
-  
+
   return undefined;
 }
 
