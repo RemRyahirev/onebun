@@ -13,7 +13,9 @@
     "dev": "bun run --watch example/src/index.ts",
     "dev:once": "bun run example/src/index.ts",
     "test": "bun test",
-    "lint": "eslint --fix"
+    "lint": "eslint --fix",
+    "compose:up": "docker-compose -p onebun-example",
+    "redis:cli": "docker-compose exec redis redis-cli -a $REDIS_PASSWORD"
   },
   "workspaces": [
     "packages/*",
