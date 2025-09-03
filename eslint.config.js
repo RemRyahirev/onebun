@@ -9,6 +9,7 @@ module.exports = (async () => {
   const stylisticPlugin = await import('@stylistic/eslint-plugin');
 
   return [
+    { ignores: ['future-example/**'] },
     {
       files: ['**/*.ts', '**/*.tsx'],
       languageOptions: {
