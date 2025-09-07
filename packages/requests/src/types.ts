@@ -183,12 +183,19 @@ export abstract class OneBunBaseError<
 
   /**
    * Add context to error and create error chain
+   * The returned error preserves the original error as the main one
+   * and nests the provided context as the originalError (error chain).
    */
   withContext<U extends string>(
     contextMessage: U,
     contextDetails: Record<string, unknown> = {},
-  ): OneBunBaseError<U, E> {
-    return new InternalServerError<U, E>(contextMessage, contextDetails, this.toErrorResponse());
+  ): OneBunBaseError<E, U> {
+    const contextErr = new InternalServerError<U, E>(
+      contextMessage,
+      contextDetails,
+    ).toErrorResponse();
+
+    return new InternalServerError<E, U>(this.error as E, this.details, contextErr);
   }
 }
 

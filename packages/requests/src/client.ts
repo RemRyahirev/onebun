@@ -29,8 +29,7 @@ import {
 const buildUrl = (
   baseUrl: string | undefined,
   url: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  query?: Record<string, any>,
+  query?: Record<string, unknown>,
 ): string => {
   let fullUrl = baseUrl ? `${baseUrl.replace(/\/$/, '')}/${url.replace(/^\//, '')}` : url;
 
@@ -75,10 +74,20 @@ const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, nev
   return Effect.sync(() => {
     try {
       // Try to record metrics if metrics service is available
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunMetricsService) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const metricsService = (globalThis as any).__onebunMetricsService;
+      interface OneBunMetricsService {
+        recordHttpRequest(input: {
+          method: string;
+          route: string;
+          statusCode: number;
+          duration: number;
+          controller: string;
+          action: string;
+        }): void;
+      }
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const g = globalThis as unknown as { __onebunMetricsService?: OneBunMetricsService };
+      if (typeof globalThis !== 'undefined' && g.__onebunMetricsService) {
+        const metricsService = g.__onebunMetricsService;
         if (metricsService && metricsService.recordHttpRequest) {
           metricsService.recordHttpRequest({
             method: data.method,
@@ -104,10 +113,10 @@ const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, nev
 const getTraceId = (config: RequestConfig, mergedOptions: RequestsOptions): string | undefined => {
   if (config.tracing !== false && mergedOptions.tracing) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunCurrentTraceContext) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (globalThis as any).__onebunCurrentTraceContext.traceId; 
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const g = globalThis as unknown as { __onebunCurrentTraceContext?: { traceId: string } };
+      if (typeof globalThis !== 'undefined' && g.__onebunCurrentTraceContext) {
+        return g.__onebunCurrentTraceContext.traceId;
       }
     } catch {
       // Tracing not available, continue without it
@@ -432,7 +441,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
  * Execute HTTP request with full configuration
  */
 export const executeRequest = <
-  T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  T = unknown,
   E extends string = string,
   R extends string = string,
 >(
