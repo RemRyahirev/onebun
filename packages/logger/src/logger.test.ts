@@ -155,6 +155,34 @@ describe('ConsoleTransport', () => {
     Effect.runSync(transport.log('x', { ...base, level: LogLevel.Debug, message: 'm' }));
     expect(logSpy).toHaveBeenCalled();
   });
+
+  it('routes trace to console.log', () => {
+    Effect.runSync(transport.log('trace message', { ...base, level: LogLevel.Trace, message: 'trace' }));
+    expect(logSpy).toHaveBeenCalledWith('trace message');
+  });
+
+  it('should create ConsoleTransport instance', () => {
+    const newTransport = new ConsoleTransport();
+    expect(newTransport).toBeInstanceOf(ConsoleTransport);
+    expect(typeof newTransport.log).toBe('function');
+  });
+
+  it('should create ConsoleTransport with implicit constructor', () => {
+    // Test explicit constructor call to improve coverage
+    const transport1 = new ConsoleTransport();
+    const transport2 = new ConsoleTransport();
+    
+    expect(transport1).toBeInstanceOf(ConsoleTransport);
+    expect(transport2).toBeInstanceOf(ConsoleTransport);
+    expect(transport1).not.toBe(transport2); // Different instances
+  });
+
+  it('should handle unknown log level', () => {
+    // Test the default case in switch statement
+    const unknownLevel = 999 as LogLevel;
+    Effect.runSync(transport.log('unknown level', { ...base, level: unknownLevel, message: 'test' }));
+    expect(logSpy).toHaveBeenCalledWith('unknown level');
+  });
 });
 
 describe('Logger + SyncLogger basic flow', () => {
@@ -453,5 +481,108 @@ describe('formatValue rare branches via PrettyFormatter additionalData', () => {
     // символы и бигинты проходят в String(value)
     expect(out).toContain('Symbol(s)');
     expect(out).toContain('42');
+  });
+});
+
+describe('Formatter edge cases and additional coverage', () => {
+  it('PrettyFormatter should handle Set and Map objects', () => {
+    const formatter = new PrettyFormatter();
+    const set = new Set([1, 2, 3]);
+    const map = new Map([['key', 'value']]);
+
+    const out = formatter.format({
+      level: LogLevel.Info,
+      message: 'collections',
+      timestamp: new Date('2025-01-01T00:00:00.000Z'),
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      context: { __additionalData: [set, map] },
+    });
+
+    // Sets and Maps are formatted as empty objects {} in the formatter
+    expect(out).toContain('{}');
+    expect(out).toContain('collections');
+  });
+
+  it('PrettyFormatter should handle Date objects', () => {
+    const formatter = new PrettyFormatter();
+    const date = new Date('2025-01-01T12:00:00.000Z');
+
+    const out = formatter.format({
+      level: LogLevel.Info,
+      message: 'dates',
+      timestamp: new Date('2025-01-01T00:00:00.000Z'),
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      context: { __additionalData: [date] },
+    });
+
+    expect(out).toContain('2025');
+  });
+
+  it('PrettyFormatter should handle class instances', () => {
+    const formatter = new PrettyFormatter();
+    
+    class TestClass {
+      prop = 'value';
+    }
+    
+    const instance = new TestClass();
+
+    const out = formatter.format({
+      level: LogLevel.Info,
+      message: 'instance',
+      timestamp: new Date('2025-01-01T00:00:00.000Z'),
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      context: { __additionalData: [instance] },
+    });
+
+    // Class instances show their properties, not class name
+    expect(out).toContain('prop');
+    expect(out).toContain('value');
+  });
+
+  it('JsonFormatter should handle all log levels correctly', () => {
+    const formatter = new JsonFormatter();
+    const timestamp = new Date('2025-01-01T00:00:00.000Z');
+
+    // Test all log levels
+    const levels = [LogLevel.Trace, LogLevel.Debug, LogLevel.Info, LogLevel.Warning, LogLevel.Error, LogLevel.Fatal];
+    
+    levels.forEach(level => {
+      const out = formatter.format({
+        level,
+        message: 'test',
+        timestamp,
+      });
+      
+      const parsed = JSON.parse(out);
+      expect(parsed.level).toBeDefined();
+      expect(parsed.message).toBe('test');
+    });
+  });
+
+  it('PrettyFormatter should handle complex nested structures with formatting', () => {
+    const formatter = new PrettyFormatter();
+    
+    const complexData = {
+      level1: {
+        level2: {
+          level3: {
+            deep: 'value',
+            array: [1, 2, { nested: true }],
+          },
+        },
+      },
+    };
+
+    const out = formatter.format({
+      level: LogLevel.Info,
+      message: 'complex',
+      timestamp: new Date('2025-01-01T00:00:00.000Z'),
+      context: complexData,
+    });
+
+    expect(out).toContain('level1');
+    expect(out).toContain('level2');
+    expect(out).toContain('level3');
   });
 });

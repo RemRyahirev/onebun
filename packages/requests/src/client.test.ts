@@ -5,6 +5,7 @@ import {
   expect,
   beforeEach,
   afterEach,
+  mock,
 } from 'bun:test';
 import { Effect } from 'effect';
 
@@ -424,5 +425,121 @@ describe('client.executeRequest edge cases', () => {
     const res = await Effect.runPromise(executeRequest<string>({ method: HttpMethod.GET, url: '/txt' }));
     expect(res.success).toBe(true);
     expect(res.result).toBe('hello');
+  });
+
+  it('should handle response.text() failure in JSON parsing', async () => {
+    globalThis.fetch = (() => {
+      return Promise.resolve({
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'application/json' }),
+        text: () => Promise.reject(new Error('Text read error')),
+      });
+    }) as any;
+
+    await expect(Effect.runPromise(executeRequest({ method: HttpMethod.GET, url: '/error' }))).rejects.toThrow(/RESPONSE_PARSE_ERROR/);
+  });
+
+  it('should handle response.text() failure in non-JSON parsing', async () => {
+    globalThis.fetch = (() => {
+      return Promise.resolve({
+        status: 200,
+        headers: new Headers({ 'Content-Type': 'text/plain' }),
+        text: () => Promise.reject(new Error('Text read error')),
+      });
+    }) as any;
+
+    await expect(Effect.runPromise(executeRequest<string>({ method: HttpMethod.GET, url: '/error' }))).rejects.toThrow(/RESPONSE_READ_ERROR/);
+  });
+});
+
+describe('HttpClient additional methods', () => {
+  const mockFetch = mock();
+  
+  beforeEach(() => {
+    globalThis.fetch = mockFetch;
+  });
+
+  afterEach(() => {
+    mockFetch.mockClear();
+  });
+
+  it('should have all Effect-based methods', () => {
+    const client = new HttpClient({
+      baseUrl: 'https://api.test.com',
+    });
+
+    expect(typeof client.getEffect).toBe('function');
+    expect(typeof client.postEffect).toBe('function');
+    expect(typeof client.putEffect).toBe('function');
+    expect(typeof client.patchEffect).toBe('function');
+    expect(typeof client.deleteEffect).toBe('function');
+    expect(typeof client.headEffect).toBe('function');
+    expect(typeof client.optionsEffect).toBe('function');
+  });
+
+  it('should handle generic req method success', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, data: 'test' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const client = new HttpClient({
+      baseUrl: 'https://api.test.com',
+    });
+
+    const result = await client.req('GET', '/test');
+    expect(result).toEqual({ success: true, data: 'test' });
+  });
+
+  it('should handle req method with error', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ 
+        success: false, 
+        error: { code: 'TEST_ERROR', message: 'Test error' }, 
+      }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const client = new HttpClient({
+      baseUrl: 'https://api.test.com',
+    });
+
+    await expect(client.req('GET', '/test')).rejects.toThrow();
+  });
+
+  it('should handle req method with query data', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, data: 'response' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const client = new HttpClient({
+      baseUrl: 'https://api.test.com',
+    });
+
+    const result = await client.req('GET', '/test', { param: 'value' });
+    expect(result).toEqual({ success: true, data: 'response' });
+  });
+
+  it('should handle req method with config object', async () => {
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, data: 'response' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const client = new HttpClient({
+      baseUrl: 'https://api.test.com',
+    });
+
+    const result = await client.req('GET', '/test', undefined, { });
+    expect(result).toEqual({ success: true, data: 'response' });
   });
 });

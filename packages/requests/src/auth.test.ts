@@ -60,6 +60,32 @@ describe('auth.applyAuth', () => {
     expect(res.query).toEqual({ z: 9, q: 'x' });
   });
 
+  it('applies custom auth with interceptor only', async () => {
+    const eff = applyAuth(
+      {
+        type: 'custom',
+        interceptor: async (cfg) => ({ ...cfg, headers: { ...cfg.headers, 'X-Custom': 'interceptor-value' } }),
+      },
+      baseConfig,
+    );
+    const res = await Effect.runPromise(eff);
+    expect(res.headers).toEqual({ 'X-Custom': 'interceptor-value' });
+  });
+
+  it('applies custom auth without interceptor', async () => {
+    const eff = applyAuth(
+      {
+        type: 'custom',
+        headers: { 'X-Custom': 'header-value' },
+        query: { customParam: 'query-value' },
+      },
+      baseConfig,
+    );
+    const res = await Effect.runPromise(eff);
+    expect(res.headers).toEqual({ 'X-Custom': 'header-value' });
+    expect(res.query).toEqual({ customParam: 'query-value' });
+  });
+
   it('fails when custom interceptor throws', async () => {
     const eff = applyAuth(
       {
