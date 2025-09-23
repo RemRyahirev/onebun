@@ -399,7 +399,11 @@ const executeWithRetry = <T, E extends string, R extends string>(
         ...config.retries,
       };
 
-      if (attemptNumber <= retryConfig.max) {
+      const shouldRetry = isErrorResponse(error) && Array.isArray(retryConfig.retryOn)
+        ? retryConfig.retryOn.includes(error.code)
+        : false;
+
+      if (shouldRetry && attemptNumber <= retryConfig.max) {
         const callRetryCallback = retryConfig.onRetry
           ? Effect.tryPromise({
             try: () => Promise.resolve(retryConfig.onRetry!(error, attemptNumber)),
