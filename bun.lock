@@ -32,6 +32,17 @@
         "bun-types": "1.2.2",
       },
     },
+    "packages/cache": {
+      "name": "@onebun/cache",
+      "version": "0.1.0",
+      "dependencies": {
+        "effect": "^3.13.10",
+      },
+      "devDependencies": {
+        "@onebun/core": "workspace:*",
+        "bun-types": "1.2.2",
+      },
+    },
     "packages/core": {
       "name": "@onebun/core",
       "version": "0.1.0",
@@ -146,6 +157,8 @@
     "@nodelib/fs.stat": ["@nodelib/fs.stat@2.0.5", "", {}, "sha512-RkhPPp2zrqDAQA/2jNhnztcPAlv64XdhIp7a7454A5ovI7Bukxgt7MX7udwAu3zg1DcpPU0rz3VV1SeaqvY4+A=="],
 
     "@nodelib/fs.walk": ["@nodelib/fs.walk@1.2.8", "", { "dependencies": { "@nodelib/fs.scandir": "2.1.5", "fastq": "^1.6.0" } }, "sha512-oGB+UxlgWcgQkgwo8GcEGwemoTFt3FIO9ababBmaGwXIoBKZ+GTy0pP185beGg7Llih/NSHSV2XAs1lnznocSg=="],
+
+    "@onebun/cache": ["@onebun/cache@workspace:packages/cache"],
 
     "@onebun/core": ["@onebun/core@workspace:packages/core"],
 

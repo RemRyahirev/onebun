@@ -22,3 +22,4 @@ export { Controller as BaseController } from './controller';
 export * from './decorators';
 export { OneBunModule } from './module';
 export { BaseService, getServiceTag, Service } from './service';
+export { FakeTimers, fakeTimers, useFakeTimers } from './test-utils';

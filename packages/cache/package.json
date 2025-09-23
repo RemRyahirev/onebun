@@ -1,0 +1,21 @@
+{
+  "name": "@onebun/cache",
+  "version": "0.1.0",
+  "description": "Caching module for OneBun framework with in-memory and Redis support",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts"
+  },
+  "dependencies": {
+    "effect": "^3.13.10"
+  },
+  "devDependencies": {
+    "@onebun/core": "workspace:*",
+    "bun-types": "1.2.2"
+  },
+  "engines": {
+    "bun": "1.2.12"
+  }
+}
