@@ -515,4 +515,66 @@ describe('Controller', () => {
       await expect(controller.testMalformedJson()).rejects.toThrow();
     });
   });
+
+  describe('Text response method', () => {
+    test('should create text response with default status', async () => {
+      class TestController extends Controller {
+        testTextResponse() {
+          // Access protected method using type casting
+          return (this as any).text('Hello, World!');
+        }
+      }
+
+      const controller = new TestController();
+      controller.initializeController(mockLogger, mockConfig);
+      
+      const result = controller.testTextResponse();
+      
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(200);
+      expect(result.headers.get('Content-Type')).toBe('text/plain');
+      
+      const text = await result.text();
+      expect(text).toBe('Hello, World!');
+    });
+
+    test('should create text response with custom status', async () => {
+      class TestController extends Controller {
+        testTextResponseWithStatus() {
+          return (this as any).text('Not Found', 404);
+        }
+      }
+
+      const controller = new TestController();
+      controller.initializeController(mockLogger, mockConfig);
+      
+      const result = controller.testTextResponseWithStatus();
+      
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(404);
+      expect(result.headers.get('Content-Type')).toBe('text/plain');
+      
+      const text = await result.text();
+      expect(text).toBe('Not Found');
+    });
+
+    test('should handle empty text response', async () => {
+      class TestController extends Controller {
+        testEmptyTextResponse() {
+          return (this as any).text('');
+        }
+      }
+
+      const controller = new TestController();
+      controller.initializeController(mockLogger, mockConfig);
+      
+      const result = controller.testEmptyTextResponse();
+      
+      expect(result).toBeInstanceOf(Response);
+      expect(result.status).toBe(200);
+      
+      const text = await result.text();
+      expect(text).toBe('');
+    });
+  });
 });

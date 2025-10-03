@@ -7,7 +7,7 @@ import {
   test,
 } from 'bun:test';
 
-import { FakeTimers, useFakeTimers } from './test-utils';
+import { FakeTimers, useFakeTimers, createMockSyncLogger } from './test-utils';
 
 describe('FakeTimers', () => {
   let advanceTime: (ms: number) => void;
@@ -361,5 +361,62 @@ describe('FakeTimers', () => {
     advanceTime(50);
     expect(callCount).toBe(3);
     expect(getTimerCount()).toBe(0);
+  });
+});
+
+describe('createMockSyncLogger', () => {
+  test('should create mock sync logger with all methods', () => {
+    const mockLogger = createMockSyncLogger();
+    
+    expect(mockLogger).toBeDefined();
+    expect(typeof mockLogger.trace).toBe('function');
+    expect(typeof mockLogger.debug).toBe('function');
+    expect(typeof mockLogger.info).toBe('function');
+    expect(typeof mockLogger.warn).toBe('function');
+    expect(typeof mockLogger.error).toBe('function');
+    expect(typeof mockLogger.fatal).toBe('function');
+    expect(typeof mockLogger.child).toBe('function');
+  });
+
+  test('should have no-op methods that do not throw', () => {
+    const mockLogger = createMockSyncLogger();
+    
+    expect(() => mockLogger.trace('test')).not.toThrow();
+    expect(() => mockLogger.debug('test')).not.toThrow();
+    expect(() => mockLogger.info('test')).not.toThrow();
+    expect(() => mockLogger.warn('test')).not.toThrow();
+    expect(() => mockLogger.error('test')).not.toThrow();
+    expect(() => mockLogger.fatal('test')).not.toThrow();
+  });
+
+  test('should return itself from child method', () => {
+    const mockLogger = createMockSyncLogger();
+    
+    const childLogger = mockLogger.child({ context: 'test' });
+    
+    expect(childLogger).toBe(mockLogger);
+    expect(childLogger.child).toBeDefined();
+  });
+
+  test('should handle multiple child calls', () => {
+    const mockLogger = createMockSyncLogger();
+    
+    const child1 = mockLogger.child({ context: 'child1' });
+    const child2 = child1.child({ context: 'child2' });
+    const child3 = child2.child({ context: 'child3' });
+    
+    expect(child1).toBe(mockLogger);
+    expect(child2).toBe(mockLogger);
+    expect(child3).toBe(mockLogger);
+  });
+
+  test('should handle method calls with various parameters', () => {
+    const mockLogger = createMockSyncLogger();
+    
+    // Test with different parameter types
+    expect(() => mockLogger.info('string message')).not.toThrow();
+    expect(() => mockLogger.warn({ obj: 'message' })).not.toThrow();
+    expect(() => mockLogger.error('message', { context: 'data' })).not.toThrow();
+    expect(() => mockLogger.debug()).not.toThrow();
   });
 });

@@ -618,8 +618,28 @@ describe('OneBunApplication', () => {
   });
 
   describe('Configuration handling', () => {
+    let originalServe: typeof Bun.serve;
+    let mockServer: any;
+
     beforeEach(() => {
       register.clear();
+      
+      mockServer = {
+        stop: mock(),
+        hostname: 'localhost',
+        port: 3000,
+      };
+
+      originalServe = Bun.serve;
+      (Bun as any).serve = mock((options: any) => {
+        (mockServer as any).fetchHandler = options.fetch;
+
+        return mockServer;
+      });
+    });
+
+    afterEach(() => {
+      (Bun as any).serve = originalServe;
     });
 
     test('should handle application with metrics service', async () => {
