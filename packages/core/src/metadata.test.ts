@@ -558,7 +558,9 @@ describe('Metadata System', () => {
       delete require.cache[require.resolve('./metadata')];
       const metadataModule = require('./metadata');
       
-      const mockDescriptor = { value: () => {}, configurable: true, enumerable: false, writable: true };
+      const mockDescriptor = {
+        value() {}, configurable: true, enumerable: false, writable: true, 
+      };
       const mockDecorator = mock((target, key, descriptor) => descriptor);
       class TestClass {
         testMethod() {}

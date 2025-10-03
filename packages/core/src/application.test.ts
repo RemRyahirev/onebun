@@ -8,9 +8,31 @@ import {
 } from 'bun:test';
 import { register } from 'prom-client';
 
+import type { ApplicationOptions } from './types';
+
 import { OneBunApplication } from './application';
 import { Controller as BaseController } from './controller';
-import { Module, Controller, Get, Post, Param, Query, Body } from './decorators';
+import {
+  Module,
+  Controller,
+  Get,
+  Post,
+  Param,
+  Query,
+  Body,
+} from './decorators';
+import { makeMockLoggerLayer } from './test-utils';
+
+// Helper function to create app with mock logger to suppress logs in tests
+function createTestApp(
+  moduleClass: new (...args: unknown[]) => object,
+  options?: Partial<ApplicationOptions>,
+): OneBunApplication {
+  return new OneBunApplication(moduleClass, {
+    ...options,
+    loggerLayer: makeMockLoggerLayer(),
+  });
+}
 
 describe('OneBunApplication', () => {
   beforeEach(() => {
@@ -26,7 +48,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -40,7 +62,7 @@ describe('OneBunApplication', () => {
         development: false,
       };
 
-      const app = new OneBunApplication(TestModule, options);
+      const app = createTestApp(TestModule, options);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -52,7 +74,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -64,7 +86,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -77,7 +99,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
   });
@@ -87,7 +109,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       expect(() => app.getConfig()).toThrow('Configuration not initialized');
     });
@@ -96,7 +118,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       expect(() => app.getConfigValue('test.path')).toThrow('Configuration not initialized');
     });
@@ -113,7 +135,7 @@ describe('OneBunApplication', () => {
         },
       };
 
-      const app = new OneBunApplication(TestModule, { envSchema });
+      const app = createTestApp(TestModule, { envSchema });
       
       const config = app.getConfig();
       expect(config).toBeDefined();
@@ -131,7 +153,7 @@ describe('OneBunApplication', () => {
         },
       };
 
-      const app = new OneBunApplication(TestModule, { envSchema });
+      const app = createTestApp(TestModule, { envSchema });
       
       // Just check that config service was created
       const config = app.getConfig();
@@ -147,7 +169,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       const layer = app.getLayer();
       expect(layer).toBeDefined();
@@ -163,7 +185,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       const layer = app.getLayer();
       expect(layer).toBeDefined();
@@ -176,7 +198,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       expect(() => {
-        new OneBunApplication(TestModule);
+        createTestApp(TestModule);
       }).not.toThrow();
     });
 
@@ -196,7 +218,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       expect(() => {
-        new OneBunApplication(TestModule);
+        createTestApp(TestModule);
       }).not.toThrow();
     });
 
@@ -204,7 +226,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, { 
+      const app = createTestApp(TestModule, { 
         development: true, 
       });
       
@@ -215,7 +237,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, { 
+      const app = createTestApp(TestModule, { 
         development: false, 
       });
       
@@ -229,7 +251,7 @@ describe('OneBunApplication', () => {
       class EmptyModule {}
 
       expect(() => {
-        new OneBunApplication(EmptyModule);
+        createTestApp(EmptyModule);
       }).not.toThrow();
     });
 
@@ -243,7 +265,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       expect(() => {
-        new OneBunApplication(TestModule);
+        createTestApp(TestModule);
       }).not.toThrow();
     });
 
@@ -256,7 +278,7 @@ describe('OneBunApplication', () => {
         host: 'localhost',
       };
 
-      const app = new OneBunApplication(TestModule, options);
+      const app = createTestApp(TestModule, options);
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -264,13 +286,13 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app1 = new OneBunApplication(TestModule, { port: 5000 });
+      const app1 = createTestApp(TestModule, { port: 5000 });
       expect(app1).toBeInstanceOf(OneBunApplication);
 
-      const app2 = new OneBunApplication(TestModule, { host: '0.0.0.0' });
+      const app2 = createTestApp(TestModule, { host: '0.0.0.0' });
       expect(app2).toBeInstanceOf(OneBunApplication);
 
-      const app3 = new OneBunApplication(TestModule, { development: true });
+      const app3 = createTestApp(TestModule, { development: true });
       expect(app3).toBeInstanceOf(OneBunApplication);
     });
   });
@@ -281,7 +303,7 @@ describe('OneBunApplication', () => {
 
       // This should throw error without @Module decorator
       expect(() => {
-        new OneBunApplication(PlainModule as any);
+        createTestApp(PlainModule as any);
       }).toThrow('Module PlainModule does not have @Module decorator');
     });
 
@@ -294,7 +316,7 @@ describe('OneBunApplication', () => {
       }
 
       expect(() => {
-        new OneBunApplication(ModuleWithConstructor);
+        createTestApp(ModuleWithConstructor);
       }).not.toThrow();
     });
   });
@@ -305,10 +327,10 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       // Test with explicit development option
-      const devApp = new OneBunApplication(TestModule, { development: true });
+      const devApp = createTestApp(TestModule, { development: true });
       expect(devApp).toBeInstanceOf(OneBunApplication);
 
-      const prodApp = new OneBunApplication(TestModule, { development: false });
+      const prodApp = createTestApp(TestModule, { development: false });
       expect(prodApp).toBeInstanceOf(OneBunApplication);
     });
 
@@ -347,7 +369,7 @@ describe('OneBunApplication', () => {
       };
 
       expect(() => {
-        new OneBunApplication(TestModule, { envSchema });
+        createTestApp(TestModule, { envSchema });
       }).not.toThrow();
     });
   });
@@ -357,7 +379,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       const logger = app.getLogger();
       
       expect(logger).toBeDefined();
@@ -369,7 +391,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       const context = { requestId: '123' };
       const logger = app.getLogger(context);
       
@@ -381,7 +403,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, { 
+      const app = createTestApp(TestModule, { 
         port: 3001, 
         host: '127.0.0.1', 
       });
@@ -394,7 +416,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       expect(() => {
         app.stop();
@@ -405,7 +427,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, {
+      const app = createTestApp(TestModule, {
         port: 8080,
         host: '0.0.0.0',
       });
@@ -439,7 +461,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       await expect(app.start()).resolves.toBeUndefined();
       expect(Bun.serve).toHaveBeenCalled();
@@ -454,7 +476,7 @@ describe('OneBunApplication', () => {
         isInitialized: true,
       };
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       // Set config manually for testing
       (app as any).config = mockConfig;
       
@@ -467,7 +489,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       await expect(app.start()).resolves.toBeUndefined();
     });
@@ -480,7 +502,7 @@ describe('OneBunApplication', () => {
         stop: mock(),
       };
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       (app as any).server = mockServer;
       
       app.stop();
@@ -493,7 +515,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       expect(() => app.stop()).not.toThrow();
     });
@@ -508,7 +530,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       // Access private method for testing
       const mapHttpMethod = (app as any).mapHttpMethod.bind(app);
@@ -523,7 +545,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, {
+      const app = createTestApp(TestModule, {
         port: 4000,
         host: '127.0.0.1',
         development: false,
@@ -548,7 +570,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
       
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       // The function should be called during app lifecycle
       expect(app).toBeDefined();
@@ -570,7 +592,7 @@ describe('OneBunApplication', () => {
         }),
       };
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       (app as any).config = mockConfig;
       
       await expect(app.start()).rejects.toThrow('Config initialization failed');
@@ -584,7 +606,7 @@ describe('OneBunApplication', () => {
       const originalNodeEnv = process.env.NODE_ENV;
       delete process.env.NODE_ENV;
       
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       
       expect(app).toBeDefined();
       
@@ -609,7 +631,7 @@ describe('OneBunApplication', () => {
         stopSystemMetricsCollection: mock(),
       };
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       (app as any).metricsService = mockMetricsService;
       
       await app.start();
@@ -628,7 +650,7 @@ describe('OneBunApplication', () => {
         },
       };
 
-      const app = new OneBunApplication(TestModule, { envSchema });
+      const app = createTestApp(TestModule, { envSchema });
       
       expect((app as any).config).toBeDefined();
       expect((app as any).configService).toBeDefined();
@@ -652,6 +674,7 @@ describe('OneBunApplication', () => {
       (Bun as any).serve = mock((options: any) => {
         // Store the fetch handler for testing
         (mockServer as any).fetchHandler = options.fetch;
+
         return mockServer;
       });
     });
@@ -674,7 +697,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       // Simulate request
@@ -708,7 +731,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const requestData = { name: 'John', email: 'john@example.com' };
@@ -739,7 +762,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/api/users/123', {
@@ -771,7 +794,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/api/search?q=test&limit=5', {
@@ -789,7 +812,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, {
+      const app = createTestApp(TestModule, {
         metrics: { path: '/metrics' },
       });
 
@@ -817,7 +840,7 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/unknown', {
@@ -843,7 +866,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/api/test', {
@@ -870,7 +893,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/api/error', {
@@ -900,7 +923,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
       await app.start();
 
       const request = new Request('http://localhost:3000/api/users/42/posts/123', {
@@ -935,6 +958,7 @@ describe('OneBunApplication', () => {
       originalServe = Bun.serve;
       (Bun as any).serve = mock((options: any) => {
         (mockServer as any).fetchHandler = options.fetch;
+
         return mockServer;
       });
     });
@@ -958,7 +982,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       // Don't enable tracing to avoid setup issues in tests
-      const app = new OneBunApplication(TestModule);
+      const app = createTestApp(TestModule);
 
       await app.start();
 
@@ -991,7 +1015,7 @@ describe('OneBunApplication', () => {
       })
       class TestModule {}
 
-      const app = new OneBunApplication(TestModule, {
+      const app = createTestApp(TestModule, {
         tracing: { traceHttpRequests: false },
       });
 

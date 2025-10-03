@@ -168,10 +168,18 @@ describe('FakeTimers', () => {
     const fakeTimers = new FakeTimers();
     fakeTimers.enable();
 
-    // Create many timeouts to trigger the max iterations check
-    for (let i = 0; i < 1100; i++) {
+    // Create just enough timeouts to trigger the max iterations check
+    // (runAllTimers has max 1000 iterations)
+    // We create 1001 to exceed the limit, but we can test with fewer
+    for (let i = 0; i < 150; i++) {
       setTimeout(() => {}, i);
     }
+    // Add one more that creates new timers to cause infinite loop
+    setTimeout(() => {
+      for (let i = 0; i < 1000; i++) {
+        setTimeout(() => {}, 1);
+      }
+    }, 100);
 
     expect(() => fakeTimers.runAllTimers()).toThrow('runAllTimers: Maximum iterations reached. Possible infinite loop detected.');
 
@@ -326,7 +334,9 @@ describe('FakeTimers', () => {
   test('should cover additional FakeTimers functionality', () => {
     // Test coverage for various FakeTimers methods to improve percentage
     let callCount = 0;
-    const callback = () => { callCount++; };
+    const callback = () => {
+      callCount++; 
+    };
     
     // Test setTimeout with minimal delay
     setTimeout(callback, 1);

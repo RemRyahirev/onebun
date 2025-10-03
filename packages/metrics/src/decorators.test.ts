@@ -9,6 +9,8 @@ import {
 import { Effect } from 'effect';
 import { register } from 'prom-client';
 
+import { useFakeTimers } from '@onebun/core';
+
 import {
   MeasureTime,
   CountCalls,
@@ -81,6 +83,8 @@ describe('Metrics Decorators', () => {
     });
 
     test('should measure execution time for asynchronous method', async () => {
+      const timers = useFakeTimers();
+      
       class TestService {
         @MeasureTime()
         async asyncMethod(value: number): Promise<number> {
@@ -91,10 +95,17 @@ describe('Metrics Decorators', () => {
       }
 
       const service = new TestService();
-      const result = await service.asyncMethod(5);
+      const resultPromise = service.asyncMethod(5);
+      
+      // Advance timers to resolve the setTimeout
+      timers.advanceTime(10);
+      
+      const result = await resultPromise;
 
       expect(result).toBe(10);
       expect(mockMetricsService.getMetric).toHaveBeenCalled();
+      
+      timers.restore();
     });
 
     test('should measure execution time even when method throws', () => {
@@ -290,6 +301,8 @@ describe('Metrics Decorators', () => {
     });
 
     test('should update gauge after asynchronous method execution', async () => {
+      const timers = useFakeTimers();
+      
       let gaugeValue = 100;
       const getValue = () => gaugeValue;
 
@@ -302,9 +315,16 @@ describe('Metrics Decorators', () => {
       }
 
       const service = new TestService();
-      await service.updateGaugeMethodAsync();
+      const resultPromise = service.updateGaugeMethodAsync();
+      
+      // Advance timers to resolve the setTimeout
+      timers.advanceTime(10);
+      
+      await resultPromise;
 
       expect(mockMetricsService.getMetric).toHaveBeenCalledWith('test_gauge');
+      
+      timers.restore();
     });
 
     test('should handle getValue function throwing error', () => {

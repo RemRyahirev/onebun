@@ -8,11 +8,12 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { BaseService } from './service';
-import { makeDevLogger, createSyncLogger } from '../../logger/src/logger';
 import { PrettyFormatter } from '../../logger/src/formatter';
+import { makeDevLogger, createSyncLogger } from '../../logger/src/logger';
 import { ConsoleTransport } from '../../logger/src/transport';
 import { LogLevel } from '../../logger/src/types';
+
+import { BaseService } from './service';
 
 describe('BaseService', () => {
   let mockLogger: any;
@@ -29,8 +30,13 @@ describe('BaseService', () => {
     
     mockConfig = {
       get: mock((path: string) => {
-        if (path === 'database.host') return 'localhost';
-        if (path === 'app.name') return 'test-app';
+        if (path === 'database.host') {
+          return 'localhost';
+        }
+        if (path === 'app.name') {
+          return 'test-app';
+        }
+
         return undefined;
       }),
       getSafeConfig: mock(() => ({ app: { name: 'test-app' } })),
@@ -93,7 +99,7 @@ describe('BaseService', () => {
       }
 
       async testRunEffect<A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> {
-        return this.runEffect(effect as any);
+        return await this.runEffect(effect as any);
       }
 
       testFormatError(error: unknown): Error {
@@ -165,7 +171,7 @@ describe('BaseService', () => {
         async testComplexEffect() {
           const effect = Effect.succeed(84); // Simplify to avoid generator complexity
           
-          return this.runEffect(effect as any);
+          return await this.runEffect(effect as any);
         }
       }
 

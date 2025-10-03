@@ -3,6 +3,15 @@
  * Provides fake timers and other testing helpers
  */
 
+import {
+  Context,
+  Effect,
+  Layer,
+} from 'effect';
+
+import type { Logger, SyncLogger } from '@onebun/logger';
+import { LoggerService } from '@onebun/logger';
+
 export interface TimerHandle {
   id: number;
   callback: () => void;
@@ -282,4 +291,52 @@ export function useFakeTimers(): {
      */
     restore: () => fakeTimers.disable(),
   };
+}
+
+/**
+ * Create a silent mock logger that doesn't output anything
+ * Useful for tests to avoid cluttering the output
+ */
+export function createMockLogger(): Logger {
+  const noOp = Effect.succeed(undefined);
+  
+  const mockLogger: Logger = {
+    trace: () => noOp,
+    debug: () => noOp,
+    info: () => noOp,
+    warn: () => noOp,
+    error: () => noOp,
+    fatal: () => noOp,
+    child: () => mockLogger,
+  };
+  
+  return mockLogger;
+}
+
+/**
+ * Create a silent mock sync logger that doesn't output anything
+ * Useful for tests to avoid cluttering the output
+ */
+export function createMockSyncLogger(): SyncLogger {
+  const noOp = () => {};
+  
+  const mockSyncLogger: SyncLogger = {
+    trace: noOp,
+    debug: noOp,
+    info: noOp,
+    warn: noOp,
+    error: noOp,
+    fatal: noOp,
+    child: () => mockSyncLogger,
+  };
+  
+  return mockSyncLogger;
+}
+
+/**
+ * Create a mock logger layer for testing
+ * Returns an Effect Layer that provides a silent logger
+ */
+export function makeMockLoggerLayer(): Layer.Layer<Logger, never, never> {
+  return Layer.succeed(LoggerService, createMockLogger());
 }

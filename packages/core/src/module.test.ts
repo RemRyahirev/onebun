@@ -7,9 +7,10 @@ import {
 } from 'bun:test';
 import { Context, Layer } from 'effect';
 
-import { OneBunModule } from './module';
 import { makeDevLogger } from '../../logger/src/logger';
+
 import { Module } from './decorators';
+import { OneBunModule } from './module';
 import { Service } from './service';
 
 describe('OneBunModule', () => {
