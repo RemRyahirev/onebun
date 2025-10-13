@@ -4,6 +4,7 @@ import {
   Layer,
 } from 'effect';
 
+import type { RedisCache } from './redis-cache';
 import type { CacheService as ICacheService } from './types';
 import type { CacheOptions } from './types';
 
@@ -67,10 +68,10 @@ export interface CacheService extends ICacheService {
 }
 
 /**
- * Cache service implementation that wraps InMemoryCache
+ * Cache service implementation that wraps InMemoryCache or RedisCache
  */
 class CacheServiceImpl implements ICacheService {
-  constructor(private readonly cache: InMemoryCache) {}
+  constructor(private readonly cache: InMemoryCache | RedisCache) {}
 
   // Promise-based methods (delegate to underlying cache)
   async get<T = unknown>(key: string): Promise<T | undefined> {
@@ -168,11 +169,11 @@ export const cacheServiceTag = Context.GenericTag<CacheService>(
 
 /**
  * Create CacheService Layer from cache instance
- * @param cache - Cache instance implementing CacheService interface
+ * @param cache - Cache instance implementing CacheService interface (InMemoryCache or RedisCache)
  * @returns Layer providing CacheService
  */
 export const makeCacheService = (
-  cache: InMemoryCache,
+  cache: InMemoryCache | RedisCache,
 ): Layer.Layer<CacheService> => {
   return Layer.succeed(cacheServiceTag, new CacheServiceImpl(cache));
 };

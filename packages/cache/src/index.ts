@@ -28,6 +28,19 @@ export {
   InMemoryCache,
 } from './memory-cache';
 
+// Redis cache implementation
+export {
+  createRedisCache,
+  RedisCache,
+} from './redis-cache';
+
+// Redis type definitions (until official types are available)
+export type {
+  RedisClient,
+  RedisClientOptions,
+} from './bun-redis-types';
+export { hasRedisClient } from './bun-redis-types';
+
 // Effect integration
 export type {
   CacheService as CacheServiceInterface,
@@ -39,5 +52,10 @@ export {
   makeCacheServiceFromOptions,
 } from './cache.service';
 
-// Redis cache implementation (planned)
-// export { createRedisCache, RedisCache } from './redis-cache';
+// Cache module for simplified setup
+export {
+  createCacheModule,
+  createCacheModuleAsync,
+  CacheType,
+  type CacheModuleOptions,
+} from './cache.module';

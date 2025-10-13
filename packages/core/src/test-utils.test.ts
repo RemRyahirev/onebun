@@ -7,7 +7,11 @@ import {
   test,
 } from 'bun:test';
 
-import { FakeTimers, useFakeTimers, createMockSyncLogger } from './test-utils';
+import {
+  FakeTimers,
+  useFakeTimers,
+  createMockSyncLogger,
+} from './test-utils';
 
 describe('FakeTimers', () => {
   let advanceTime: (ms: number) => void;
@@ -415,8 +419,10 @@ describe('createMockSyncLogger', () => {
     
     // Test with different parameter types
     expect(() => mockLogger.info('string message')).not.toThrow();
+    // @ts-ignore
     expect(() => mockLogger.warn({ obj: 'message' })).not.toThrow();
     expect(() => mockLogger.error('message', { context: 'data' })).not.toThrow();
+    // @ts-ignore
     expect(() => mockLogger.debug()).not.toThrow();
   });
 });

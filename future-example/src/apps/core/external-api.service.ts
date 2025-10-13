@@ -1,6 +1,6 @@
-import { Injectable } from '@onebun/core';
+import { Service } from '@onebun/core';
 
-@Injectable()
+@Service()
 export class ExternalApiService {
   // Placeholder for future implementation
 }
