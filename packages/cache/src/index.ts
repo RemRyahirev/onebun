@@ -7,12 +7,15 @@
 // Types and interfaces
 export type {
   CacheEntry,
+  CacheModuleOptions,
   CacheOptions,
-  CacheService,
+  CacheService as ICacheService,
   CacheSetOptions,
   CacheStats,
   RedisCacheOptions,
 } from './types';
+
+export { CacheType } from './types';
 
 // Constants
 export {
@@ -41,21 +44,25 @@ export type {
 } from './bun-redis-types';
 export { hasRedisClient } from './bun-redis-types';
 
-// Effect integration
+// NestJS-like module and service for use with @Module decorator (recommended for new applications)
+export { CacheModule } from './cache.module';
+export { CacheService } from './cache.service';
+
+// Effect.js integration (suffix only for module and service to avoid name conflicts)
 export type {
-  CacheService as CacheServiceInterface,
-} from './cache.service';
+  CacheService as CacheServiceEffect,
+} from './cache-effect.service';
 
 export {
-  cacheServiceTag as CacheServiceTag,
+  cacheServiceTag,
   makeCacheService,
   makeCacheServiceFromOptions,
-} from './cache.service';
+} from './cache-effect.service';
 
-// Cache module for simplified setup
+// Effect.js-based cache module
 export {
+  CacheModuleEffect,
   createCacheModule,
   createCacheModuleAsync,
-  CacheType,
-  type CacheModuleOptions,
-} from './cache.module';
+  CacheType as CacheTypeEffect,
+} from './cache-effect.module';

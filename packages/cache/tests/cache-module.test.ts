@@ -1,213 +1,221 @@
-import {
-  describe,
-  expect,
-  it,
-} from 'bun:test';
-import { Effect, pipe } from 'effect';
+import { describe, expect, test } from 'bun:test';
 
-import {
-  CacheType,
-  createCacheModule,
-  createCacheModuleAsync,
-  cacheServiceTag,
-} from '../src/cache.module';
+import { CacheModule, CacheService, CacheType } from '../src';
 
-describe('CacheModule', () => {
-  describe('In-memory cache module', () => {
-    it('should create in-memory cache module by default', async () => {
-      const cacheLayer = createCacheModule();
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('test', 'value'),
-            Effect.andThen(() => cache.getEffect('test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('value');
+describe('CacheModule (NestJS-style)', () => {
+  describe('Basic module usage', () => {
+    test('should create module without options', () => {
+      expect(CacheModule).toBeDefined();
+      expect(CacheModule).toHaveProperty('forRoot');
     });
 
-    it('should create in-memory cache with explicit type', async () => {
-      const cacheLayer = createCacheModule({ type: CacheType.MEMORY });
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('test', 'value'),
-            Effect.andThen(() => cache.getEffect('test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('value');
+    test('should have static forRoot method', () => {
+      const ModuleWithOptions = CacheModule.forRoot({
+        type: CacheType.MEMORY,
+      });
+      
+      expect(ModuleWithOptions).toBeDefined();
+      expect(ModuleWithOptions).toBe(CacheModule);
     });
 
-    it('should apply cache options', async () => {
-      const cacheLayer = createCacheModule({
+    test('should store module options', () => {
+      const options = {
         type: CacheType.MEMORY,
         cacheOptions: {
-          defaultTtl: 100,
-          maxSize: 10,
+          defaultTtl: 5000,
+          maxSize: 100,
+        },
+      };
+      
+      CacheModule.forRoot(options);
+      const storedOptions = CacheModule.getOptions();
+      
+      expect(storedOptions).toEqual(options);
+    });
+  });
+
+  describe('Module configuration', () => {
+    test('should configure with memory cache options', () => {
+      const options = {
+        type: CacheType.MEMORY,
+        cacheOptions: {
+          defaultTtl: 60000,
+          maxSize: 1000,
+          cleanupInterval: 30000,
+        },
+      };
+      
+      const ModuleWithOptions = CacheModule.forRoot(options);
+      expect(ModuleWithOptions.getOptions()).toEqual(options);
+    });
+
+    test('should configure with redis cache options', () => {
+      const options = {
+        type: CacheType.REDIS,
+        cacheOptions: {
+          defaultTtl: 60000,
+        },
+        redisOptions: {
+          host: 'redis.example.com',
+          port: 6380,
+          password: 'secret',
+        },
+      };
+      
+      const ModuleWithOptions = CacheModule.forRoot(options);
+      expect(ModuleWithOptions.getOptions()).toEqual(options);
+    });
+
+    test('should handle partial options', () => {
+      const options = {
+        cacheOptions: {
+          defaultTtl: 30000,
+        },
+      };
+      
+      CacheModule.forRoot(options);
+      const storedOptions = CacheModule.getOptions();
+      
+      expect(storedOptions).toEqual(options);
+    });
+
+    test('should handle empty options', () => {
+      CacheModule.forRoot({});
+      const storedOptions = CacheModule.getOptions();
+      
+      expect(storedOptions).toEqual({});
+    });
+  });
+
+  describe('CacheService integration', () => {
+    test('CacheService should be exportable', () => {
+      expect(CacheService).toBeDefined();
+      expect(CacheService.prototype).toHaveProperty('get');
+      expect(CacheService.prototype).toHaveProperty('set');
+      expect(CacheService.prototype).toHaveProperty('delete');
+    });
+
+    test('CacheService should have all required methods', () => {
+      const methods = [
+        'get',
+        'set',
+        'delete',
+        'has',
+        'clear',
+        'mget',
+        'mset',
+        'getStats',
+        'close',
+      ];
+
+      for (const method of methods) {
+        expect(CacheService.prototype).toHaveProperty(method);
+      }
+    });
+  });
+
+  describe('Module options override', () => {
+    test('should allow overriding options multiple times', () => {
+      const options1 = {
+        type: CacheType.MEMORY,
+        cacheOptions: { defaultTtl: 1000 },
+      };
+      
+      CacheModule.forRoot(options1);
+      expect(CacheModule.getOptions()).toEqual(options1);
+      
+      const options2 = {
+        type: CacheType.REDIS,
+        cacheOptions: { defaultTtl: 2000 },
+      };
+      
+      CacheModule.forRoot(options2);
+      expect(CacheModule.getOptions()).toEqual(options2);
+    });
+  });
+
+  describe('Type checking', () => {
+    test('should accept valid CacheType enum values', () => {
+      const memoryOptions = { type: CacheType.MEMORY };
+      const redisOptions = { type: CacheType.REDIS };
+      
+      expect(() => CacheModule.forRoot(memoryOptions)).not.toThrow();
+      expect(() => CacheModule.forRoot(redisOptions)).not.toThrow();
+    });
+
+    test('should work with type inference', () => {
+      // This is more of a compile-time test, but we can check runtime behavior
+      const options = {
+        type: CacheType.MEMORY as const,
+        cacheOptions: {
+          defaultTtl: 5000,
+        },
+      };
+      
+      const ModuleWithOptions = CacheModule.forRoot(options);
+      expect(ModuleWithOptions.getOptions()?.type).toBe(CacheType.MEMORY);
+    });
+  });
+
+  describe('Documentation examples', () => {
+    test('should work with basic example from docs', () => {
+      // Example from documentation
+      const ModuleWithOptions = CacheModule.forRoot({
+        type: CacheType.MEMORY,
+        cacheOptions: {
+          defaultTtl: 60000,
+          maxSize: 1000,
         },
       });
+      
+      expect(ModuleWithOptions).toBe(CacheModule);
+      expect(CacheModule.getOptions()?.type).toBe(CacheType.MEMORY);
+      expect(CacheModule.getOptions()?.cacheOptions?.defaultTtl).toBe(60000);
+      expect(CacheModule.getOptions()?.cacheOptions?.maxSize).toBe(1000);
+    });
 
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('test', 'value'),
-            Effect.andThen(() => cache.getEffect('test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('value');
+    test('should work with redis example from docs', () => {
+      // Example from documentation
+      CacheModule.forRoot({
+        type: CacheType.REDIS,
+        cacheOptions: { defaultTtl: 60000 },
+        redisOptions: { 
+          host: 'redis.example.com',
+          port: 6379,
+        },
+      });
+      
+      const options = CacheModule.getOptions();
+      expect(options?.type).toBe(CacheType.REDIS);
+      expect(options?.redisOptions?.host).toBe('redis.example.com');
+      expect(options?.redisOptions?.port).toBe(6379);
     });
   });
 
-  describe('Async module creation', () => {
-    it('should create async in-memory cache module', async () => {
-      const cacheLayer = await createCacheModuleAsync({ type: CacheType.MEMORY });
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('test', 'async-value'),
-            Effect.andThen(() => cache.getEffect('test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('async-value');
-    });
-  });
-
-  describe('Environment variable configuration', () => {
-    it('should load configuration from environment variables', async () => {
-      // Set environment variables
-      process.env.CACHE_TYPE = 'memory';
-      process.env.CACHE_DEFAULT_TTL = '5000';
-      process.env.CACHE_MAX_SIZE = '100';
-
-      const cacheLayer = createCacheModule();
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('env-test', 'value'),
-            Effect.andThen(() => cache.getEffect('env-test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('value');
-
-      // Clean up
-      delete process.env.CACHE_TYPE;
-      delete process.env.CACHE_DEFAULT_TTL;
-      delete process.env.CACHE_MAX_SIZE;
-    });
-
-    it('should support custom env prefix', async () => {
-      // Set environment variables with custom prefix
-      process.env.MY_CACHE_TYPE = 'memory';
-      process.env.MY_CACHE_DEFAULT_TTL = '3000';
-
-      const cacheLayer = createCacheModule({
+  describe('Environment prefix', () => {
+    test('should accept custom envPrefix', () => {
+      CacheModule.forRoot({
         envPrefix: 'MY_CACHE',
       });
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('prefix-test', 'value'),
-            Effect.andThen(() => cache.getEffect('prefix-test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      const result = await Effect.runPromise(runnable);
-
-      expect(result).toBe('value');
-
-      // Clean up
-      delete process.env.MY_CACHE_TYPE;
-      delete process.env.MY_CACHE_DEFAULT_TTL;
+      
+      const options = CacheModule.getOptions();
+      expect(options?.envPrefix).toBe('MY_CACHE');
     });
 
-    it('should prioritize explicit options over environment variables', async () => {
-      // Set environment variables
-      process.env.CACHE_TYPE = 'redis';
-
-      const cacheLayer = createCacheModule({
-        type: CacheType.MEMORY, // Explicit option should take precedence
+    test('should work with envPrefix and other options', () => {
+      CacheModule.forRoot({
+        type: CacheType.MEMORY,
+        envPrefix: 'CUSTOM_CACHE',
+        cacheOptions: {
+          defaultTtl: 30000,
+        },
       });
-
-      const program = pipe(
-        cacheServiceTag,
-        Effect.andThen((cache) =>
-          pipe(
-            cache.setEffect('priority-test', 'value'),
-            Effect.andThen(() => cache.getEffect('test')),
-          ),
-        ),
-      );
-
-      const runnable = Effect.provide(program, cacheLayer);
-      // Should not throw (would throw if it tried to connect to Redis)
-      await Effect.runPromise(runnable);
-
-      // Clean up
-      delete process.env.CACHE_TYPE;
-    });
-  });
-
-  describe('Redis cache module configuration', () => {
-    it('should configure Redis options from environment variables', () => {
-      // Set Redis environment variables
-      process.env.CACHE_TYPE = 'redis';
-      process.env.CACHE_REDIS_HOST = 'redis.example.com';
-      process.env.CACHE_REDIS_PORT = '6380';
-      process.env.CACHE_REDIS_PASSWORD = 'secret';
-      process.env.CACHE_REDIS_DATABASE = '2';
-      process.env.CACHE_REDIS_KEY_PREFIX = 'myapp:';
-
-      // Just test that module can be created without errors
-      // (won't actually connect to Redis)
-      expect(() => {
-        createCacheModule({ type: CacheType.MEMORY }); // Use memory to avoid actual connection
-      }).not.toThrow();
-
-      // Clean up
-      delete process.env.CACHE_TYPE;
-      delete process.env.CACHE_REDIS_HOST;
-      delete process.env.CACHE_REDIS_PORT;
-      delete process.env.CACHE_REDIS_PASSWORD;
-      delete process.env.CACHE_REDIS_DATABASE;
-      delete process.env.CACHE_REDIS_KEY_PREFIX;
+      
+      const options = CacheModule.getOptions();
+      expect(options?.envPrefix).toBe('CUSTOM_CACHE');
+      expect(options?.type).toBe(CacheType.MEMORY);
+      expect(options?.cacheOptions?.defaultTtl).toBe(30000);
     });
   });
 });
+

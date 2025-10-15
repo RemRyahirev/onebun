@@ -27,9 +27,114 @@ bun add @onebun/cache
 
 ## Quick Start
 
-### Using Cache Module (Recommended)
+### Using with @Module Decorator (Recommended for Applications)
 
-The easiest way to use cache is with the `createCacheModule` function:
+The easiest way to use cache in your OneBun application is by importing `CacheModule`:
+
+#### Basic usage with environment variables:
+
+```typescript
+import { Module } from '@onebun/core';
+import { CacheModule, CacheService } from '@onebun/cache';
+import { MyController } from './my.controller';
+
+@Module({
+  imports: [CacheModule],
+  controllers: [MyController],
+})
+export class AppModule {}
+```
+
+#### With module options (overrides environment variables):
+
+```typescript
+import { Module } from '@onebun/core';
+import { CacheModule, CacheType } from '@onebun/cache';
+import { MyController } from './my.controller';
+
+@Module({
+  imports: [
+    CacheModule.forRoot({
+      type: CacheType.MEMORY,
+      cacheOptions: {
+        defaultTtl: 60000,
+        maxSize: 1000,
+      },
+    }),
+  ],
+  controllers: [MyController],
+})
+export class AppModule {}
+```
+
+#### For Redis cache:
+
+```typescript
+@Module({
+  imports: [
+    CacheModule.forRoot({
+      type: CacheType.REDIS,
+      cacheOptions: { defaultTtl: 60000 },
+      redisOptions: {
+        host: 'redis.example.com',
+        port: 6379,
+        password: 'secret',
+      },
+    }),
+  ],
+  controllers: [MyController],
+})
+export class AppModule {}
+```
+
+#### With custom environment prefix:
+
+```typescript
+@Module({
+  imports: [
+    CacheModule.forRoot({
+      envPrefix: 'MY_CACHE',  // Will use MY_CACHE_TYPE, MY_CACHE_REDIS_HOST, etc.
+    }),
+  ],
+  controllers: [MyController],
+})
+export class AppModule {}
+```
+
+Then inject `CacheService` into your controllers or services:
+
+```typescript
+import { Controller, Get } from '@onebun/core';
+import { CacheService } from '@onebun/cache';
+
+@Controller('/api')
+export class MyController {
+  constructor(private readonly cache: CacheService) {}
+
+  @Get('/users/:id')
+  async getUser(id: string) {
+    // Try to get from cache first
+    const cached = await this.cache.get(`user:${id}`);
+    if (cached) {
+      return cached;
+    }
+
+    // Fetch from database
+    const user = await database.getUser(id);
+    
+    // Cache for 5 minutes
+    await this.cache.set(`user:${id}`, user, { ttl: 300000 });
+    
+    return user;
+  }
+}
+```
+
+**Configuration priority:** Module options > Environment variables > Defaults
+
+### Using Cache Module with Effect.js
+
+For Effect.js-based applications, use the `createCacheModule` function:
 
 ```typescript
 import { createCacheModule, CacheType } from '@onebun/cache';
@@ -50,6 +155,12 @@ const cacheLayer = createCacheModule({
 // Set CACHE_TYPE=redis, CACHE_REDIS_HOST=localhost, etc.
 const cacheLayer = createCacheModule(); // Will use env vars
 ```
+
+**Note:** For Effect.js-based exports, suffix `Effect` is only used for module and service to avoid conflicts:
+- `CacheModuleEffect` - namespace with Effect.js module functions
+- `CacheServiceEffect` - type for Effect.js service
+- `createCacheModule`, `createCacheModuleAsync` - functions are clear from context
+- `cacheServiceTag`, `makeCacheService` - tags and layers are clearly Effect.js
 
 ### Environment Variables
 
@@ -208,9 +319,9 @@ const program = pipe(
 const user = await Effect.runPromise(Effect.provide(program, cacheLayer));
 ```
 
-### Async Module Creation
+### Async Module Creation (Effect.js)
 
-For Redis, you can ensure connection is established before use:
+For Redis with Effect.js, you can ensure connection is established before use:
 
 ```typescript
 import { createCacheModuleAsync, CacheType } from '@onebun/cache';

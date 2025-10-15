@@ -10,6 +10,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@onebun/cache": "workspace:*",
     "@onebun/core": "workspace:*",
     "@onebun/envs": "workspace:*",
     "@onebun/logger": "workspace:*",

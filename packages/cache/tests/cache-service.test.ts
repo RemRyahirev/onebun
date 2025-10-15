@@ -9,13 +9,13 @@ import {
   pipe,
 } from 'effect';
 
-import type { CacheService } from '../src/cache.service';
+import type { CacheService } from '../src/cache-effect.service';
 
 import {
   cacheServiceTag,
   makeCacheService,
   makeCacheServiceFromOptions,
-} from '../src/cache.service';
+} from '../src/cache-effect.service';
 import { createInMemoryCache } from '../src/memory-cache';
 
 describe('cacheServiceTag', () => {

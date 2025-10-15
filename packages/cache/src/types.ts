@@ -228,3 +228,44 @@ export const DEFAULT_REDIS_CACHE_OPTIONS = {
   connectTimeout: DEFAULT_REDIS_CONNECT_TIMEOUT,
   keyPrefix: 'onebun:cache:' as const,
 };
+
+/**
+ * Cache type enum
+ */
+export enum CacheType {
+  MEMORY = 'memory',
+  REDIS = 'redis',
+}
+
+/**
+ * Cache module configuration
+ * Used by both NestJS-style CacheModule.forRoot() and Effect.js createCacheModule()
+ */
+export interface CacheModuleOptions {
+  /**
+   * Type of cache to use
+   * @defaultValue CacheType.MEMORY
+   */
+  type?: CacheType;
+
+  /**
+   * Cache options (for both in-memory and Redis)
+   */
+  cacheOptions?: CacheOptions;
+
+  /**
+   * Redis-specific options (only used when type is REDIS)
+   */
+  redisOptions?: Omit<RedisCacheOptions, keyof CacheOptions>;
+
+  /**
+   * Environment variable prefix for cache configuration
+   * Used when loading config from environment variables
+   * For example, with prefix 'MY_CACHE':
+   * - MY_CACHE_TYPE
+   * - MY_CACHE_REDIS_HOST
+   * - MY_CACHE_DEFAULT_TTL
+   * @defaultValue 'CACHE'
+   */
+  envPrefix?: string;
+}

@@ -6,9 +6,9 @@ import {
 } from 'bun:test';
 import { Effect, pipe } from 'effect';
 
-import type { CacheService } from '../src/cache.service';
+import type { CacheService } from '../src/cache-effect.service';
 
-import { cacheServiceTag, makeCacheService } from '../src/cache.service';
+import { cacheServiceTag, makeCacheService } from '../src/cache-effect.service';
 import { createInMemoryCache } from '../src/memory-cache';
 
 describe('Cache Integration Tests', () => {

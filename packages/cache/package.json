@@ -9,11 +9,11 @@
     "dev": "bun run --watch src/index.ts"
   },
   "dependencies": {
+    "@onebun/core": "workspace:*",
     "@onebun/envs": "workspace:*",
     "effect": "^3.13.10"
   },
   "devDependencies": {
-    "@onebun/core": "workspace:*",
     "bun-types": "^1.2.20",
     "testcontainers": "^11.7.1"
   },
