@@ -1,9 +1,5 @@
-import { BaseService, Service } from '@onebun/core';
-import { Env, EnvLoader, EnvParser } from '@onebun/envs';
 import { Effect } from 'effect';
 
-import { createInMemoryCache, InMemoryCache } from './memory-cache';
-import { createRedisCache, RedisCache } from './redis-cache';
 import type {
   CacheModuleOptions,
   CacheOptions,
@@ -12,7 +8,21 @@ import type {
   CacheStats,
   RedisCacheOptions,
 } from './types';
-import { CacheType, DEFAULT_CACHE_OPTIONS, DEFAULT_REDIS_CACHE_OPTIONS } from './types';
+
+import { BaseService, Service } from '@onebun/core';
+import {
+  Env,
+  EnvLoader,
+  EnvParser,
+} from '@onebun/envs';
+
+import { createInMemoryCache, InMemoryCache } from './memory-cache';
+import { createRedisCache, RedisCache } from './redis-cache';
+import {
+  CacheType,
+  DEFAULT_CACHE_OPTIONS,
+  DEFAULT_REDIS_CACHE_OPTIONS,
+} from './types';
 
 /**
  * Default environment variable prefix
@@ -101,20 +111,20 @@ function createCacheEnvSchema(prefix: string = DEFAULT_ENV_PREFIX) {
 async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEnvSchema> {
   const schema = createCacheEnvSchema(prefix);
   const rawEnv = await Effect.runPromise(EnvLoader.load());
-  
+
   // Parse each field using EnvParser
   const type = await Effect.runPromise(
     EnvParser.parse(`${prefix}_TYPE`, rawEnv[`${prefix}_TYPE`], schema.type),
   );
-  
+
   const defaultTtl = await Effect.runPromise(
     EnvParser.parse(`${prefix}_DEFAULT_TTL`, rawEnv[`${prefix}_DEFAULT_TTL`], schema.defaultTtl),
   );
-  
+
   const maxSize = await Effect.runPromise(
     EnvParser.parse(`${prefix}_MAX_SIZE`, rawEnv[`${prefix}_MAX_SIZE`], schema.maxSize),
   );
-  
+
   const cleanupInterval = await Effect.runPromise(
     EnvParser.parse(
       `${prefix}_CLEANUP_INTERVAL`,
@@ -122,15 +132,15 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
       schema.cleanupInterval,
     ),
   );
-  
+
   const redisHost = await Effect.runPromise(
     EnvParser.parse(`${prefix}_REDIS_HOST`, rawEnv[`${prefix}_REDIS_HOST`], schema.redis.host),
   );
-  
+
   const redisPort = await Effect.runPromise(
     EnvParser.parse(`${prefix}_REDIS_PORT`, rawEnv[`${prefix}_REDIS_PORT`], schema.redis.port),
   );
-  
+
   const redisPassword = await Effect.runPromise(
     EnvParser.parse(
       `${prefix}_REDIS_PASSWORD`,
@@ -138,7 +148,7 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
       schema.redis.password,
     ),
   );
-  
+
   const redisDatabase = await Effect.runPromise(
     EnvParser.parse(
       `${prefix}_REDIS_DATABASE`,
@@ -146,7 +156,7 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
       schema.redis.database,
     ),
   );
-  
+
   const redisConnectTimeout = await Effect.runPromise(
     EnvParser.parse(
       `${prefix}_REDIS_CONNECT_TIMEOUT`,
@@ -154,7 +164,7 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
       schema.redis.connectTimeout,
     ),
   );
-  
+
   const redisKeyPrefix = await Effect.runPromise(
     EnvParser.parse(
       `${prefix}_REDIS_KEY_PREFIX`,
@@ -162,7 +172,7 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
       schema.redis.keyPrefix,
     ),
   );
-  
+
   return {
     type,
     defaultTtl,
@@ -191,11 +201,11 @@ export class CacheService extends BaseService implements ICacheService {
 
   constructor(...args: unknown[]) {
     super(...args);
-    
+
     // Create in-memory cache by default
     // Will be initialized properly in the initialize() method
     this.cache = createInMemoryCache();
-    
+
     // Auto-initialize from environment variables
     this.initPromise = this.autoInitialize();
   }
@@ -209,28 +219,28 @@ export class CacheService extends BaseService implements ICacheService {
     try {
       // Try to get options from CacheModule.forRoot()
       const moduleOptions = this.getModuleOptions();
-      
+
       // Use envPrefix from module options or default
       const envPrefix = moduleOptions?.envPrefix ?? DEFAULT_ENV_PREFIX;
-      
+
       // Load environment configuration with custom prefix
       const envConfig = await loadFromEnv(envPrefix);
-      
+
       // Merge configuration: module options > env config > defaults
       const type = (moduleOptions?.type ?? envConfig.type) as CacheType;
-      
+
       this.logger.debug(`Auto-initializing cache service with type: ${type}`, {
         fromModuleOptions: !!moduleOptions,
         envPrefix,
       });
-      
+
       if (type === 'redis') {
         const cacheOptions: CacheOptions = {
           defaultTtl: moduleOptions?.cacheOptions?.defaultTtl ?? envConfig.defaultTtl,
           maxSize: moduleOptions?.cacheOptions?.maxSize ?? envConfig.maxSize,
           cleanupInterval: moduleOptions?.cacheOptions?.cleanupInterval ?? envConfig.cleanupInterval,
         };
-        
+
         const redisOptions: RedisCacheOptions = {
           ...cacheOptions,
           host: moduleOptions?.redisOptions?.host ?? envConfig.redis.host,
@@ -240,7 +250,7 @@ export class CacheService extends BaseService implements ICacheService {
           connectTimeout: moduleOptions?.redisOptions?.connectTimeout ?? envConfig.redis.connectTimeout,
           keyPrefix: moduleOptions?.redisOptions?.keyPrefix ?? envConfig.redis.keyPrefix,
         };
-        
+
         this.cache = createRedisCache(redisOptions);
         await this.cache.connect();
         this.logger.info('Redis cache initialized and connected', {
@@ -252,13 +262,13 @@ export class CacheService extends BaseService implements ICacheService {
           maxSize: moduleOptions?.cacheOptions?.maxSize ?? envConfig.maxSize,
           cleanupInterval: moduleOptions?.cacheOptions?.cleanupInterval ?? envConfig.cleanupInterval,
         };
-        
+
         this.cache = createInMemoryCache(cacheOptions);
         this.logger.info('In-memory cache initialized', {
           source: moduleOptions ? 'module options + env' : 'env only',
         });
       }
-      
+
       this.initialized = true;
     } catch (error) {
       this.logger.error('Failed to auto-initialize cache from environment', error);
@@ -267,7 +277,7 @@ export class CacheService extends BaseService implements ICacheService {
       this.initialized = true;
     }
   }
-  
+
   /**
    * Get module options from CacheModule if available
    * @private
@@ -275,14 +285,14 @@ export class CacheService extends BaseService implements ICacheService {
   private getModuleOptions(): CacheModuleOptions | undefined {
     try {
       // Dynamically import CacheModule to avoid circular dependency
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { CacheModule } = require('./cache.module');
+
       return CacheModule.getOptions();
     } catch {
       return undefined;
     }
   }
-  
+
   /**
    * Wait for initialization to complete
    * This method should be called before using the service

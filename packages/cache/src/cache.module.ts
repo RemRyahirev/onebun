@@ -1,6 +1,7 @@
+import type { CacheModuleOptions } from './types';
+
 import { Module } from '@onebun/core';
 
-import type { CacheModuleOptions } from './types';
 
 import { CacheService } from './cache.service';
 
@@ -100,6 +101,7 @@ export class CacheModule {
   static forRoot(options: CacheModuleOptions): typeof CacheModule {
     // Store options in a static property that CacheService can access
     (CacheModule as any)[CACHE_MODULE_OPTIONS] = options;
+
     return CacheModule;
   }
 

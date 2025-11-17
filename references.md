@@ -440,6 +440,33 @@ const response = await Effect.runPromise(client.get('/users'));
 
 ## Third-party Libraries
 
+### Drizzle ORM
+- **Официальная документация**: https://orm.drizzle.team/
+- **GitHub**: https://github.com/drizzle-team/drizzle-orm
+- **Использование**: TypeScript ORM для работы с базами данных
+- **Особенности**:
+  - Schema-first подход: схемы (`pgTable`/`sqliteTable`) как единая точка истины
+  - Автоматический вывод типов через `$inferSelect` и `$inferInsert`
+  - Миграции через drizzle-kit
+  - Поддержка PostgreSQL, MySQL, SQLite
+
+### Drizzle Kit
+- **Документация**: https://orm.drizzle.team/kit-docs/overview
+- **Использование**: Генерация и применение миграций
+- **Особенности**:
+  - Автоматическое отслеживание примененных миграций
+  - Защита от двойного применения через таблицу `__drizzle_migrations`
+  - Генерация миграций из схем
+
+### Drizzle ArkType
+- **GitHub**: https://github.com/drizzle-team/drizzle-orm/tree/main/drizzle-arktype
+- **Использование**: Генерация схем валидации из Drizzle схем
+- **API**:
+  - `createSelectSchema(table)` - схема для валидации данных из БД
+  - `createInsertSchema(table)` - схема для валидации данных при вставке
+  - `createUpdateSchema(table)` - схема для валидации данных при обновлении
+- **Совместимость**: Полностью совместим с Drizzle схемами, используемыми в @onebun/drizzle
+
 ### Prometheus Client
 - **GitHub**: https://github.com/siimon/prom-client
 - **Документация**: https://prometheus.io/docs/

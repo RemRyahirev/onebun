@@ -1,6 +1,14 @@
-import { describe, expect, test } from 'bun:test';
+import {
+  describe,
+  expect,
+  test,
+} from 'bun:test';
 
-import { CacheModule, CacheService, CacheType } from '../src';
+import {
+  CacheModule,
+  CacheService,
+  CacheType,
+} from '../src';
 
 describe('CacheModule (NestJS-style)', () => {
   describe('Basic module usage', () => {
@@ -218,4 +226,3 @@ describe('CacheModule (NestJS-style)', () => {
     });
   });
 });
-

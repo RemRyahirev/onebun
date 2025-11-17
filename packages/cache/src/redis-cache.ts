@@ -60,7 +60,20 @@ export class RedisCache implements CacheService {
       // Create Bun's native RedisClient
       // Type assertion needed until official types are available in bun-types
       // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/naming-convention
-      const { RedisClient: BunRedisClient } = (await import('bun')) as any;
+      const BunGlobal = (globalThis as any).Bun;
+      
+      // Try alternative access methods if BunGlobal doesn't have RedisClient
+      // Bun is available at runtime but may not be in TypeScript types
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const BunDirect = typeof Bun !== 'undefined' ? (Bun as any) : null;
+      const BunRedisClient = BunGlobal?.RedisClient 
+        || BunDirect?.RedisClient 
+        || BunGlobal?.Redis;
+      
+      if (!BunRedisClient) {
+        throw new Error('RedisClient is not available. Make sure you are using Bun runtime.');
+      }
+      
       this.client = new BunRedisClient(url, {
         connectionTimeout: this.options.connectTimeout,
         enableAutoPipelining: true,

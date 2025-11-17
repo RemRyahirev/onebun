@@ -1,0 +1,27 @@
+{
+  "name": "@onebun/drizzle",
+  "version": "0.1.0",
+  "description": "Drizzle ORM module for OneBun framework with SQLite and PostgreSQL support",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts"
+  },
+  "dependencies": {
+    "@onebun/core": "workspace:*",
+    "@onebun/envs": "workspace:*",
+    "@onebun/logger": "workspace:*",
+    "drizzle-orm": "^0.44.7",
+    "drizzle-kit": "^0.31.6",
+    "effect": "^3.13.10"
+  },
+  "devDependencies": {
+    "bun-types": "^1.2.20",
+    "testcontainers": "^11.7.1"
+  },
+  "engines": {
+    "bun": ">=1.2.9"
+  }
+}
+

@@ -1,10 +1,5 @@
 import { Effect, Layer } from 'effect';
 
-import { Env } from '@onebun/envs';
-
-import { cacheServiceTag, makeCacheService } from './cache-effect.service';
-import { createInMemoryCache } from './memory-cache';
-import { createRedisCache } from './redis-cache';
 import type { CacheService } from './cache-effect.service';
 import type {
   CacheModuleOptions,
@@ -12,6 +7,12 @@ import type {
   CacheType,
   RedisCacheOptions,
 } from './types';
+
+import { Env } from '@onebun/envs';
+
+import { cacheServiceTag, makeCacheService } from './cache-effect.service';
+import { createInMemoryCache } from './memory-cache';
+import { createRedisCache } from './redis-cache';
 import { DEFAULT_CACHE_OPTIONS, DEFAULT_REDIS_CACHE_OPTIONS } from './types';
 
 /**
