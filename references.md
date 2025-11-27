@@ -458,14 +458,37 @@ const response = await Effect.runPromise(client.get('/users'));
   - Защита от двойного применения через таблицу `__drizzle_migrations`
   - Генерация миграций из схем
 
+### ArkType
+- **GitHub**: https://github.com/arktypeio/arktype
+- **Документация**: https://arktype.io/
+- **Использование**: Runtime валидация и типизация в @onebun/core
+- **Особенности**:
+  - TypeScript-first валидация с выводом типов
+  - Генерация JSON Schema для OpenAPI документации
+  - Интеграция с Drizzle через drizzle-arktype
+  - Валидация запросов и ответов на эндпоинтах
+
 ### Drizzle ArkType
 - **GitHub**: https://github.com/drizzle-team/drizzle-orm/tree/main/drizzle-arktype
-- **Использование**: Генерация схем валидации из Drizzle схем
-- **API**:
+- **Использование**: Генерация схем валидации из Drizzle схем в @onebun/drizzle
+- **API** (экспортируется из @onebun/drizzle):
   - `createSelectSchema(table)` - схема для валидации данных из БД
   - `createInsertSchema(table)` - схема для валидации данных при вставке
   - `createUpdateSchema(table)` - схема для валидации данных при обновлении
 - **Совместимость**: Полностью совместим с Drizzle схемами, используемыми в @onebun/drizzle
+- **Пример использования**:
+  ```typescript
+  import { createInsertSchema, createSelectSchema } from '@onebun/drizzle';
+  import { users } from './schema/users';
+  
+  const insertUserSchema = createInsertSchema(users);
+  const selectUserSchema = createSelectSchema(users);
+  
+  @Post('/users')
+  async createUser(@Body(insertUserSchema) userData: typeof insertUserSchema.infer) {
+    // userData валидирован и типизирован
+  }
+  ```
 
 ### Prometheus Client
 - **GitHub**: https://github.com/siimon/prom-client
@@ -477,6 +500,23 @@ const response = await Effect.runPromise(client.get('/users'));
 - **JavaScript SDK**: https://opentelemetry.io/docs/languages/js/
 - **Использование**: distributed tracing и observability
 
+## OneBun Framework Packages
+
+### @onebun/core
+- **Валидация**: Интеграция с arktype для валидации запросов и ответов
+- **Декораторы**: @Body, @Query, @Param поддерживают arktype схемы
+- **Валидация ответов**: Декоратор @ApiResponse для валидации и документации ответов
+
+### @onebun/drizzle
+- **Валидация**: Экспорт функций createSelectSchema, createInsertSchema, createUpdateSchema
+- **Интеграция**: Автоматическая генерация arktype схем из Drizzle таблиц
+
+### @onebun/docs
+- **OpenAPI**: Генерация OpenAPI 3.1 спецификации из метаданных контроллеров
+- **Swagger UI**: Endpoint для отображения Swagger UI
+- **Декораторы**: @ApiOperation, @ApiTags для метаданных API
+- **Будущее**: Поддержка AsyncAPI и Pretty docs (redoc и т.д.)
+
 ## Development Guidelines
 
 ### Code Style
@@ -484,6 +524,11 @@ const response = await Effect.runPromise(client.get('/users'));
 - Предпочитаем Effect.pipe вместо Effect.gen
 - Все публичные API должны быть типизированы
 - Комментарии на английском языке
+
+### Validation
+- Используем arktype для валидации запросов и ответов
+- Схемы Drizzle → arktype → TypeScript типы → JSON Schema для документации
+- Единый источник истины: одна схема для БД, валидации и документации
 
 ### Error Handling
 - Все ошибки типизированы через Effect.Effect<T, E>

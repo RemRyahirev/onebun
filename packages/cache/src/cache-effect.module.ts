@@ -280,6 +280,7 @@ export { CacheType } from './types';
  * CacheModuleEffect - namespace for Effect.js cache module functions
  * This is not a class/module but a namespace for grouping related functions
  */
+// eslint-disable-next-line @typescript-eslint/naming-convention
 export const CacheModuleEffect = {
   create: createCacheModule,
   createAsync: createCacheModuleAsync,

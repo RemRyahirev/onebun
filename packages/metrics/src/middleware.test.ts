@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   jest/unbound-method */
 import {
   describe,
   test,
@@ -7,7 +12,6 @@ import {
 } from 'bun:test';
 
 import type { MetricsService } from './metrics.service';
-import type { HttpMetricsData } from './types';
 
 import { MetricsMiddleware } from './middleware';
 

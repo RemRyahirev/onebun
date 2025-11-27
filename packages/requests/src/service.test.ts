@@ -1,3 +1,7 @@
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   @typescript-eslint/no-shadow */
 import {
   describe,
   test,
@@ -17,7 +21,7 @@ import {
   requestsService,
   requests,
 } from './service';
-import { HttpMethod, OneBunBaseError } from './types';
+import { HttpMethod } from './types';
 
 // Mock the client module
 const mockExecuteRequest = mock();

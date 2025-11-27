@@ -1,3 +1,9 @@
+/* eslint-disable 
+    @typescript-eslint/no-explicit-any,
+    @typescript-eslint/no-unused-vars */
+// Drizzle ORM uses complex conditional types that require `any` for table type parameters
+// Unused type parameters in conditional types are used for type inference only
+
 /**
  * Schema utilities for Drizzle ORM
  * Provides helper functions to extract types and metadata from Drizzle table schemas
@@ -99,6 +105,7 @@ export function getPrimaryKeyColumn<TTable extends PgTable<any> | SQLiteTable<an
       if (column.primary === true) {
         // Get column name - it's stored in column.name
         const columnName = column.name || key;
+
         return columnName;
       }
     }

@@ -280,11 +280,11 @@ export class CacheService extends BaseService implements ICacheService {
 
   /**
    * Get module options from CacheModule if available
-   * @private
    */
   private getModuleOptions(): CacheModuleOptions | undefined {
     try {
       // Dynamically import CacheModule to avoid circular dependency
+      // eslint-disable-next-line @typescript-eslint/naming-convention
       const { CacheModule } = require('./cache.module');
 
       return CacheModule.getOptions();

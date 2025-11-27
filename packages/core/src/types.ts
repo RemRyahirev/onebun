@@ -1,3 +1,4 @@
+import type { Type } from 'arktype';
 import type { Effect, Layer } from 'effect';
 
 import type { Logger } from '@onebun/logger';
@@ -287,7 +288,19 @@ export interface ParamMetadata {
   name: string;
   index: number;
   isRequired?: boolean;
-  validator?: (value: unknown) => boolean | Promise<boolean>;
+  /**
+   * ArkType schema for validation
+   */
+  schema?: Type<unknown>;
+}
+
+/**
+ * Response schema metadata for validation
+ */
+export interface ResponseSchemaMetadata {
+  statusCode: number;
+  schema?: Type<unknown>;
+  description?: string;
 }
 
 /**
@@ -299,6 +312,11 @@ export interface RouteMetadata {
   handler: string;
   params?: ParamMetadata[];
   middleware?: Function[];
+  /**
+   * Response schemas for validation
+   * Key is HTTP status code (e.g., 200, 201, 404)
+   */
+  responseSchemas?: ResponseSchemaMetadata[];
 }
 
 /**

@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Drizzle ORM uses complex conditional types that require `any` for table type parameters
+
 import type { BunSQLDatabase } from 'drizzle-orm/bun-sql';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import type { PgTable } from 'drizzle-orm/pg-core';

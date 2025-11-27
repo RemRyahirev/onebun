@@ -1,3 +1,10 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   @typescript-eslint/no-unused-vars,
+   @typescript-eslint/no-useless-constructor */
+import { type } from 'arktype';
 import {
   describe,
   test,
@@ -8,7 +15,6 @@ import {
 import {
   injectable,
   Controller,
-  controllerDecorator,
   registerControllerDependencies,
   getConstructorParamTypes,
   Inject,
@@ -31,12 +37,9 @@ import {
   UseMiddleware,
   Module,
   getModuleMetadata,
+  ApiResponse,
 } from './decorators';
-import {
-  HttpMethod,
-  ParamType,
-  type ControllerMetadata,
-} from './types';
+import { HttpMethod, ParamType } from './types';
 
 describe('decorators', () => {
   beforeEach(() => {
@@ -482,8 +485,7 @@ describe('decorators', () => {
       class TestController {
         @Get()
         test(
-          @Query('filter', { required: true, validator: (v) => typeof v === 'string' })
-          filter: string,
+          @Query('filter', type('string')) filter: string,
         ) {}
       }
 
@@ -491,7 +493,7 @@ describe('decorators', () => {
       const route = metadata?.routes[0];
       const param = route?.params?.[0];
       expect(param?.isRequired).toBe(true);
-      expect(param?.validator).toBeDefined();
+      expect(param?.schema).toBeDefined();
     });
 
     test('should handle multiple parameters', () => {
@@ -684,6 +686,66 @@ describe('decorators', () => {
       expect(deps).toBeDefined();
       expect(deps?.length).toBe(1);
       expect(deps?.[0]).toBe(TestService);
+    });
+  });
+
+  describe('ApiResponse decorator', () => {
+    test('should register response schema metadata', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        @ApiResponse(200, { schema: type('string') })
+        test(): string {
+          return 'test';
+        }
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      expect(route?.responseSchemas).toBeDefined();
+      expect(route?.responseSchemas?.length).toBe(1);
+      expect(route?.responseSchemas?.[0].statusCode).toBe(200);
+      expect(route?.responseSchemas?.[0].schema).toBeDefined();
+    });
+
+    test('should register multiple response schemas', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        @ApiResponse(200, { schema: type('string') })
+        @ApiResponse(404, { schema: type('object'), description: 'Not found' })
+        test(): string {
+          return 'test';
+        }
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      expect(route?.responseSchemas?.length).toBe(2);
+      // Order might vary, so check both
+      const statusCodes = route?.responseSchemas?.map(rs => rs.statusCode) || [];
+      expect(statusCodes).toContain(200);
+      expect(statusCodes).toContain(404);
+      const notFoundSchema = route?.responseSchemas?.find(rs => rs.statusCode === 404);
+      expect(notFoundSchema?.description).toBe('Not found');
+    });
+
+    test('should work without schema', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        @ApiResponse(200, { description: 'Success' })
+        test(): string {
+          return 'test';
+        }
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      expect(route?.responseSchemas?.length).toBe(1);
+      expect(route?.responseSchemas?.[0].statusCode).toBe(200);
+      expect(route?.responseSchemas?.[0].schema).toBeUndefined();
+      expect(route?.responseSchemas?.[0].description).toBe('Success');
     });
   });
 });

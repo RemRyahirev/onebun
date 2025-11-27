@@ -1,6 +1,6 @@
 /**
  * Integration tests for Drizzle ORM with schema-first approach
- * Demonstrates full cycle: Schema -> Migration -> Repository -> CRUD -> Transactions
+ * Demonstrates full cycle: Schema \> Migration \> Repository \> CRUD \> Transactions
  */
 import {
   afterAll,
@@ -23,7 +23,7 @@ import { UserService } from './integration/services/user.service';
 
 /**
  * Integration test demonstrating full cycle:
- * Schema -> Migration -> Repository -> CRUD -> Transactions
+ * Schema \> Migration \> Repository \> CRUD \> Transactions
  */
 describe('Drizzle Integration Tests - Schema-First Approach', () => {
   let drizzleService: DrizzleService<DatabaseType.SQLITE>;

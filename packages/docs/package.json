@@ -1,0 +1,21 @@
+{
+  "name": "@onebun/docs",
+  "version": "0.1.0",
+  "description": "Documentation generation package for OneBun framework (OpenAPI, AsyncAPI, Pretty docs)",
+  "main": "src/index.ts",
+  "module": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@onebun/core": "workspace:*",
+    "swagger-ui-dist": "^5.17.14"
+  },
+  "devDependencies": {
+    "bun-types": "1.2.2"
+  },
+  "engines": {
+    "bun": "1.2.2"
+  }
+}

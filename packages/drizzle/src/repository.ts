@@ -1,13 +1,14 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Drizzle ORM uses complex conditional types that require `any` for table type parameters
+// This is a known limitation when working with Drizzle's type system
+
 import { eq, type SQL } from 'drizzle-orm';
 
 import type { IRepository } from './types';
-import type { BunSQLDatabase } from 'drizzle-orm/bun-sql';
-import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
+import type { DatabaseTypeLiteral, DatabaseInstanceForType } from './types';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
-import { DatabaseType } from './types';
-import type { DatabaseTypeLiteral, DatabaseInstanceForType } from './types';
 
 import { DrizzleService } from './drizzle.service';
 import {
@@ -15,34 +16,28 @@ import {
   type SelectType,
   type InsertType,
 } from './schema-utils';
+import { DatabaseType } from './types';
 
 /**
  * Query builder interface for type-safe database operations
  * Uses any for table types due to Drizzle's union type constraints
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface QueryBuilder {
   select(): {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     from(table: SQLiteTable<any> | PgTable<any>): Promise<unknown[]>;
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   insert(table: SQLiteTable<any> | PgTable<any>): {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     values(data: any | any[]): {
       returning(): Promise<unknown[]>;
     };
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   update(table: SQLiteTable<any> | PgTable<any>): {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     set(data: any): {
       where(condition: SQL<unknown>): {
         returning(): Promise<unknown[]>;
       };
     };
   };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   delete(table: SQLiteTable<any> | PgTable<any>): {
     where(condition: SQL<unknown>): {
       returning(): Promise<unknown[]>;
@@ -54,40 +49,40 @@ export interface QueryBuilder {
  * Base repository class for Drizzle ORM
  * Provides complete CRUD operations using Drizzle table schemas
  * Users can extend this class and add business logic methods
- * 
+ *
  * The repository works with a single table schema that matches the database type
  * configured in DrizzleService. Users should use pgTable() for PostgreSQL or
  * sqliteTable() for SQLite, matching their database configuration.
- * 
+ *
  * @example
  * ```typescript
  * // For PostgreSQL
  * import { pgTable, serial, text } from 'drizzle-orm/pg-core';
  * import { BaseRepository } from '@onebun/drizzle';
- * 
+ *
  * const users = pgTable('users', {
  *   id: serial('id').primaryKey(),
  *   name: text('name').notNull(),
  * });
- * 
+ *
  * export class UserRepository extends BaseRepository<typeof users> {
  *   constructor(drizzleService: DrizzleService) {
  *     super(drizzleService, users);
  *   }
  * }
  * ```
- * 
+ *
  * @example
  * ```typescript
  * // For SQLite
  * import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';
  * import { BaseRepository } from '@onebun/drizzle';
- * 
+ *
  * const users = sqliteTable('users', {
  *   id: integer('id').primaryKey({ autoIncrement: true }),
  *   name: text('name').notNull(),
  * });
- * 
+ *
  * export class UserRepository extends BaseRepository<typeof users> {
  *   constructor(drizzleService: DrizzleService) {
  *     super(drizzleService, users);
@@ -107,26 +102,26 @@ type InferDbTypeFromTable<TTable> =
 
 /**
  * Base repository class for Drizzle ORM
- * 
+ *
  * Simplified version with single generic parameter - database type is automatically inferred from table schema
- * 
+ *
  * @example
  * ```typescript
  * import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';
  * import { BaseRepository } from '@onebun/drizzle';
- * 
+ *
  * const users = sqliteTable('users', {
  *   id: integer('id').primaryKey({ autoIncrement: true }),
  *   name: text('name').notNull(),
  * });
- * 
+ *
  * export class UserRepository extends BaseRepository<typeof users> {
  *   constructor(drizzleService: DrizzleService) {
  *     super(drizzleService, users);
  *   }
  * }
  * ```
- * 
+ *
  * Advanced version with explicit database type (for edge cases):
  * ```typescript
  * export class UserRepository extends BaseRepository<DatabaseType.SQLITE, typeof users> {
@@ -144,17 +139,17 @@ export class BaseRepository<
    * Database instance with proper typing based on TDbType
    */
   protected readonly db: DatabaseInstanceForType<TDbType>;
-  
+
   /**
    * Table schema instance
    */
   protected readonly table: TTable;
-  
+
   /**
    * DrizzleService instance (type inferred from table)
    */
   protected readonly drizzleService: DrizzleService<TDbType>;
-  
+
   constructor(
     drizzleService: DrizzleService<DatabaseTypeLiteral>,
     table: TTable,
@@ -162,7 +157,6 @@ export class BaseRepository<
     this.table = table;
     // Store drizzleService - type is inferred from table schema
     // Type assertion is safe because TDbType is inferred from TTable
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     this.drizzleService = drizzleService as DrizzleService<TDbType>;
     // getDatabase() returns correctly typed instance based on TDbType
     // TDbType is automatically inferred from TTable
@@ -184,10 +178,10 @@ export class BaseRepository<
   /**
    * Helper method to get properly typed select query builder
    */
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   protected selectQuery() {
     // Type assertion needed because TypeScript cannot infer methods from conditional types
     // Runtime type is correct - this is a TypeScript limitation
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (this.db as any).select().from(this.table);
   }
 
@@ -206,7 +200,6 @@ export class BaseRepository<
   async findById(id: unknown): Promise<SelectType<TTable> | null> {
     const primaryKeyColumn = this.getPrimaryKeyColumn();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const results = await (this.db as any)
       .select()
       .from(this.table)
@@ -221,7 +214,6 @@ export class BaseRepository<
    */
   async create(data: Partial<InsertType<TTable>>): Promise<SelectType<TTable>> {
     // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const results = await (this.db as any).insert(this.table).values(data as any).returning();
     if (!results || results.length === 0) {
       throw new Error('Failed to create record');
@@ -237,7 +229,6 @@ export class BaseRepository<
   async update(id: unknown, data: Partial<InsertType<TTable>>): Promise<SelectType<TTable> | null> {
     const primaryKeyColumn = this.getPrimaryKeyColumn();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const results = await (this.db as any)
       .update(this.table)
       .set(data as any)
@@ -258,7 +249,6 @@ export class BaseRepository<
   async delete(id: unknown): Promise<boolean> {
     const primaryKeyColumn = this.getPrimaryKeyColumn();
     // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const results = await (this.db as any)
       .delete(this.table)
       .where(eq((this.table as any)[primaryKeyColumn], id))
@@ -281,28 +271,22 @@ export class BaseRepository<
    */
   getQueryBuilder(): QueryBuilder {
     // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const db = this.db as any;
-    
+
     return {
       select: () => ({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async from(t: SQLiteTable<any> | PgTable<any>) {
           return await db.select().from(t);
         },
       }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       insert: (t: SQLiteTable<any> | PgTable<any>) => ({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         values: (data: any | any[]) => ({
           async returning() {
             return await db.insert(t).values(data).returning();
           },
         }),
       }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       update: (t: SQLiteTable<any> | PgTable<any>) => ({
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         set: (data: any) => ({
           where: (condition: SQL<unknown>) => ({
             async returning() {
@@ -311,7 +295,6 @@ export class BaseRepository<
           }),
         }),
       }),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       delete: (t: SQLiteTable<any> | PgTable<any>) => ({
         where: (condition: SQL<unknown>) => ({
           async returning() {

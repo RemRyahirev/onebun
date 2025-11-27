@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-unused-vars,
+   @typescript-eslint/no-useless-constructor */
 import {
   describe,
   test,
@@ -13,9 +18,6 @@ import {
   getConstructorParamTypes,
   setConstructorParamTypes,
 } from './metadata';
-
-// Import internal functions for testing
-const metadata = require('./metadata');
 
 describe('Metadata System', () => {
   describe('defineMetadata and getMetadata', () => {

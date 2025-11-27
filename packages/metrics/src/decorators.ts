@@ -1,3 +1,9 @@
+/* eslint-disable
+    @typescript-eslint/no-explicit-any,
+    @typescript-eslint/naming-convention */
+// Decorators work with any class/method types - this is standard for TypeScript decorators
+// PascalCase naming is standard for decorator functions (e.g., @Component, @Injectable)
+
 import { Effect } from 'effect';
 
 import type { CustomMetricConfig } from './types';
@@ -7,10 +13,8 @@ import { MetricsService } from './metrics.service';
 /**
  * Decorator for measuring method execution time
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export function MeasureTime(metricName?: string, labels?: string[]): MethodDecorator {
   return (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
@@ -18,7 +22,6 @@ export function MeasureTime(metricName?: string, labels?: string[]): MethodDecor
     const originalMethod = descriptor.value;
     const methodName = metricName || `${target.constructor.name}_${String(propertyKey)}_duration`;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     descriptor.value = function (...args: any[]): any {
       const startTime = Date.now();
 
@@ -54,10 +57,8 @@ export function MeasureTime(metricName?: string, labels?: string[]): MethodDecor
 /**
  * Decorator for counting method calls
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export function CountCalls(metricName?: string, labels?: string[]): MethodDecorator {
   return (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
@@ -66,7 +67,6 @@ export function CountCalls(metricName?: string, labels?: string[]): MethodDecora
     const counterName =
       metricName || `${target.constructor.name}_${String(propertyKey)}_calls_total`;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     descriptor.value = function (...args: any[]): any {
       incrementCounter(counterName, labels);
 
@@ -80,21 +80,18 @@ export function CountCalls(metricName?: string, labels?: string[]): MethodDecora
 /**
  * Decorator for measuring gauge values
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export function MeasureGauge(
   metricName: string,
   getValue: () => number,
   labels?: string[],
 ): MethodDecorator {
   return (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
   ): PropertyDescriptor => {
     const originalMethod = descriptor.value;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     descriptor.value = function (...args: any[]): any {
       const result = originalMethod.apply(this, args);
 
@@ -129,10 +126,8 @@ export function MeasureGauge(
 /**
  * Decorator for automatic metric creation and injection
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export function InjectMetric(config: CustomMetricConfig): PropertyDecorator {
   return (
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     target: any,
     propertyKey: string | symbol,
   ): void => {
@@ -147,15 +142,11 @@ export function InjectMetric(config: CustomMetricConfig): PropertyDecorator {
 /**
  * Class decorator for automatic metric initialization
  */
-// eslint-disable-next-line @typescript-eslint/naming-convention
 export function WithMetrics(
   options: { prefix?: string } = {},
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): <T extends new (...args: any[]) => any>(constructor: T) => T {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return <T extends new (...args: any[]) => any>(constructor: T): T =>
     class extends constructor {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       constructor(...args: any[]) {
         super(...args);
         // For now, just log initialization
@@ -214,10 +205,8 @@ function setGaugeValue(metricName: string, value: number, labels?: string[]): vo
  * Get metrics service from global context
  * This is a temporary solution until proper DI is implemented
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getMetricsService(): any {
   if (typeof globalThis !== 'undefined') {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (globalThis as any).__onebunMetricsService;
   }
 

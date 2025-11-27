@@ -3,11 +3,7 @@
  * Provides fake timers and other testing helpers
  */
 
-import {
-  Context,
-  Effect,
-  Layer,
-} from 'effect';
+import { Effect, Layer } from 'effect';
 
 import type { Logger, SyncLogger } from '@onebun/logger';
 import { LoggerService } from '@onebun/logger';
@@ -318,6 +314,7 @@ export function createMockLogger(): Logger {
  * Useful for tests to avoid cluttering the output
  */
 export function createMockSyncLogger(): SyncLogger {
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
   const noOp = () => {};
   
   const mockSyncLogger: SyncLogger = {

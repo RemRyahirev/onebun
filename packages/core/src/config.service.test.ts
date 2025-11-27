@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   jest/unbound-method */
 import {
   describe,
   test,
@@ -16,6 +21,7 @@ import {
 
 describe('ConfigService', () => {
   let mockLogger: SyncLogger;
+   
   let mockConfig: any;
 
   beforeEach(() => {

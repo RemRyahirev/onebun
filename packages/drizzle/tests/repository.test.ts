@@ -1,3 +1,4 @@
+/* eslint-disable jest/unbound-method */
 import {
   describe,
   expect,

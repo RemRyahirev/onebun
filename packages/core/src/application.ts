@@ -28,7 +28,9 @@ import {
   type Module,
   type ParamMetadata,
   ParamType,
+  type RouteMetadata,
 } from './types';
+import { validateOrThrow } from './validation';
 
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -241,6 +243,7 @@ export class OneBunApplication {
           middleware?: Function[];
           pathPattern?: RegExp;
           pathParams?: string[];
+          responseSchemas?: RouteMetadata['responseSchemas'];
         }
       >();
 
@@ -300,6 +303,7 @@ export class OneBunApplication {
             middleware: route.middleware,
             pathPattern,
             pathParams,
+            responseSchemas: route.responseSchemas,
           });
         }
       }
@@ -658,13 +662,14 @@ export class OneBunApplication {
     }
 
     /**
-     * Execute route handler with parameter injection
+     * Execute route handler with parameter injection and validation
      */
     async function executeHandler(
       route: {
         handler: Function;
         controller: Controller;
         params?: ParamMetadata[];
+        responseSchemas?: RouteMetadata['responseSchemas'];
       },
       req: Request,
       paramValues: Record<string, string | string[]>,
@@ -720,11 +725,16 @@ export class OneBunApplication {
           throw new Error(`Required parameter ${param.name || param.index} is missing`);
         }
 
-        // Apply validator if provided
-        if (param.validator && args[param.index] !== undefined) {
-          const isValid = await param.validator(args[param.index]);
-          if (!isValid) {
-            throw new Error(`Parameter ${param.name || param.index} failed validation`);
+        // Apply arktype schema validation if provided
+        if (param.schema && args[param.index] !== undefined) {
+          try {
+            args[param.index] = validateOrThrow(param.schema, args[param.index]);
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            throw new Error(
+              `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
+            );
           }
         }
       }
@@ -733,15 +743,93 @@ export class OneBunApplication {
         // Call handler with injected parameters
         const result = await route.handler(...args);
 
-        // If the result is already a Response object, return it as-is
+        // Initialize variables for response validation
+        let validatedResult = result;
+        let responseStatusCode = HttpStatusCode.OK;
+
+        // If the result is already a Response object, extract body and validate it
         if (result instanceof Response) {
-          return result;
+          responseStatusCode = result.status;
+          const responseHeaders = Object.fromEntries(result.headers.entries());
+
+          // Extract and parse response body for validation
+          const contentType = result.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            try {
+              // Clone response to avoid consuming the body
+              const clonedResponse = result.clone();
+              const bodyText = await clonedResponse.text();
+              const bodyData = bodyText ? JSON.parse(bodyText) : null;
+
+              // Validate response body if schema is provided
+              if (route.responseSchemas && route.responseSchemas.length > 0) {
+                const responseSchema = route.responseSchemas.find(
+                  (rs) => rs.statusCode === responseStatusCode,
+                ) || route.responseSchemas.find(
+                  (rs) => rs.statusCode === HttpStatusCode.OK,
+                ) || route.responseSchemas[0];
+
+                if (responseSchema?.schema) {
+                  try {
+                    validatedResult = validateOrThrow(responseSchema.schema, bodyData);
+                  } catch (error) {
+                    const errorMessage =
+                      error instanceof Error ? error.message : String(error);
+                    throw new Error(`Response validation failed: ${errorMessage}`);
+                  }
+                } else {
+                  validatedResult = bodyData;
+                }
+              } else {
+                validatedResult = bodyData;
+              }
+
+              // Create new Response with validated data
+              return new Response(JSON.stringify(validatedResult), {
+                status: responseStatusCode,
+                headers: {
+                  ...responseHeaders,
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'Content-Type': 'application/json',
+                },
+              });
+            } catch {
+              // If parsing fails, return original response
+              return result;
+            }
+          } else {
+            // For non-JSON responses, return as-is (can't validate)
+            return result;
+          }
+        }
+
+        // Validate response against schema if provided
+        if (route.responseSchemas && route.responseSchemas.length > 0) {
+          // Find matching response schema (default to 200 if not found)
+          const responseSchema = route.responseSchemas.find(
+            (rs) => rs.statusCode === HttpStatusCode.OK,
+          ) || route.responseSchemas[0];
+
+          if (responseSchema?.schema) {
+            try {
+              validatedResult = validateOrThrow(responseSchema.schema, validatedResult);
+              responseStatusCode = responseSchema.statusCode;
+            } catch (error) {
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              throw new Error(`Response validation failed: ${errorMessage}`);
+            }
+          }
         }
 
         // If the result is already in standardized format, return it as JSON
-        if (typeof result === 'object' && result !== null && 'success' in result) {
-          return new Response(JSON.stringify(result), {
-            status: HttpStatusCode.OK,
+        if (
+          typeof validatedResult === 'object' &&
+          validatedResult !== null &&
+          'success' in validatedResult
+        ) {
+          return new Response(JSON.stringify(validatedResult), {
+            status: responseStatusCode,
             headers: {
               // eslint-disable-next-line @typescript-eslint/naming-convention
               'Content-Type': 'application/json',
@@ -750,10 +838,10 @@ export class OneBunApplication {
         }
 
         // Otherwise, wrap in standardized success response
-        const successResponse = createSuccessResponse(result);
+        const successResponse = createSuccessResponse(validatedResult);
 
         return new Response(JSON.stringify(successResponse), {
-          status: HttpStatusCode.OK,
+          status: responseStatusCode,
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',

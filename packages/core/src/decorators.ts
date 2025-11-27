@@ -1,4 +1,6 @@
 import './metadata'; // Import polyfill first
+import type { Type } from 'arktype';
+
 import { getConstructorParamTypes as getDesignParamTypes, Reflect } from './metadata';
 import {
   type ControllerMetadata,
@@ -232,6 +234,11 @@ const PARAMS_METADATA = 'onebun:params';
 const MIDDLEWARE_METADATA = 'onebun:middleware';
 
 /**
+ * Metadata key for response schemas
+ */
+const RESPONSE_SCHEMAS_METADATA = 'onebun:responseSchemas';
+
+/**
  * Base route decorator factory
  */
 function createRouteDecorator(method: HttpMethod) {
@@ -260,12 +267,24 @@ function createRouteDecorator(method: HttpMethod) {
       const middleware: Function[] =
         Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
 
+      // Get response schemas metadata if exists
+      const responseSchemas: Array<{
+        statusCode: number;
+        schema?: Type<unknown>;
+        description?: string;
+      }> = Reflect.getMetadata(RESPONSE_SCHEMAS_METADATA, target, propertyKey) || [];
+
       metadata.routes.push({
         path: routePath,
         method,
         handler: propertyKey,
         params,
         middleware,
+        responseSchemas: responseSchemas.map((rs) => ({
+          statusCode: rs.statusCode,
+          schema: rs.schema,
+          description: rs.description,
+        })),
       });
 
       META_CONTROLLERS.set(controllerClass, metadata);
@@ -276,26 +295,62 @@ function createRouteDecorator(method: HttpMethod) {
 
 /**
  * Create parameter decorator factory
+ * Supports \@Body(schema), \@Query(schema), \@Param('id', schema) or \@Param('id') for simple cases
  */
-function createParamDecorator(type: ParamType) {
+function createParamDecorator(paramType: ParamType) {
   return (
-    name?: string,
-    options: {
-      required?: boolean;
-      validator?: (value: unknown) => boolean | Promise<boolean>;
-    } = {},
+    nameOrSchema?: string | Type<unknown>,
+    schema?: Type<unknown>,
   ) =>
     (target: object, propertyKey: string, parameterIndex: number) => {
       const params: ParamMetadata[] =
         Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
 
-      params.push({
-        type,
-        name: name || '',
-        index: parameterIndex,
-        isRequired: options.required,
-        validator: options.validator,
-      });
+      let metadata: ParamMetadata;
+
+      // Helper function to check if value is an arktype schema
+      const isArkTypeSchema = (value: unknown): value is Type<unknown> => {
+        if (!value) {
+          return false;
+        }
+
+        // ArkType schemas are functions with 'kind' property
+        return (
+          typeof value === 'function' &&
+          ('kind' in value || 'impl' in value || typeof (value as Type<unknown>)({}) !== 'undefined')
+        );
+      };
+
+      // @Body(schema) or @Query(schema) - first argument is a schema
+      if (isArkTypeSchema(nameOrSchema)) {
+        const schemaValue = nameOrSchema as Type<unknown>;
+        metadata = {
+          type: paramType,
+          name: '',
+          index: parameterIndex,
+          schema: schemaValue,
+          isRequired: true,
+        };
+      } else if (typeof nameOrSchema === 'string' && isArkTypeSchema(schema)) {
+        // @Param('id', schema) or @Query('filter', schema)
+        metadata = {
+          type: paramType,
+          name: nameOrSchema,
+          index: parameterIndex,
+          schema: schema as Type<unknown>,
+          isRequired: true,
+        };
+      } else {
+        // Simple case: @Param('id') or @Query('filter') - no schema, no validation
+        const name = typeof nameOrSchema === 'string' ? nameOrSchema : '';
+        metadata = {
+          type: paramType,
+          name,
+          index: parameterIndex,
+        };
+      }
+
+      params.push(metadata);
 
       Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey);
     };
@@ -455,4 +510,42 @@ export function getModuleMetadata(target: Function):
   const metadata = META_MODULES.get(target);
 
   return metadata;
+}
+
+/**
+ * Response schema decorator for API documentation and validation
+ * @param statusCode - HTTP status code (e.g., 200, 201, 404)
+ * @param options - Response schema options
+ * @example
+ * ```typescript
+ * @Get('/users')
+ * @ApiResponse(200, { schema: userSchema.array() })
+ * async getUsers(): Promise<User[]> {
+ *   return users;
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function ApiResponse(
+  statusCode: number,
+  options?: {
+    schema?: Type<unknown>;
+    description?: string;
+  },
+): MethodDecorator {
+  return (target: object, propertyKey: string | symbol) => {
+    const existingSchemas: Array<{
+      statusCode: number;
+      schema?: Type<unknown>;
+      description?: string;
+    }> = Reflect.getMetadata(RESPONSE_SCHEMAS_METADATA, target, propertyKey) || [];
+
+    existingSchemas.push({
+      statusCode,
+      schema: options?.schema,
+      description: options?.description,
+    });
+
+    Reflect.defineMetadata(RESPONSE_SCHEMAS_METADATA, existingSchemas, target, propertyKey);
+  };
 }

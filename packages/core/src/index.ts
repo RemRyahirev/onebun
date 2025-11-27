@@ -20,6 +20,7 @@ export { Effect, Layer } from 'effect';
 export { OneBunApplication } from './application';
 export { Controller as BaseController } from './controller';
 export * from './decorators';
+export { defineMetadata, getMetadata } from './metadata';
 export { OneBunModule } from './module';
 export { BaseService, getServiceTag, Service } from './service';
 export {
@@ -28,3 +29,12 @@ export {
   useFakeTimers,
   makeMockLoggerLayer,
 } from './test-utils';
+export {
+  HttpMethod,
+  type RouteMetadata,
+  type ControllerMetadata,
+  type ParamMetadata,
+  type ResponseSchemaMetadata,
+  ParamType, 
+} from './types';
+export * from './validation';

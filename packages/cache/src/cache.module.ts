@@ -100,6 +100,7 @@ export class CacheModule {
    */
   static forRoot(options: CacheModuleOptions): typeof CacheModule {
     // Store options in a static property that CacheService can access
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (CacheModule as any)[CACHE_MODULE_OPTIONS] = options;
 
     return CacheModule;
@@ -110,6 +111,7 @@ export class CacheModule {
    * @internal
    */
   static getOptions(): CacheModuleOptions | undefined {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (CacheModule as any)[CACHE_MODULE_OPTIONS];
   }
 }

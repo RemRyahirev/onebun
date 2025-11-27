@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-unused-vars,
+   no-console */
 import {
   describe,
   test,
@@ -9,6 +14,7 @@ import {
 import { Effect } from 'effect';
 import { register } from 'prom-client';
 
+// eslint-disable-next-line import/no-extraneous-dependencies
 import { useFakeTimers } from '@onebun/core';
 
 import {

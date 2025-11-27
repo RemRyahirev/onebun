@@ -431,6 +431,7 @@ describe('client.executeRequest edge cases', () => {
     globalThis.fetch = (() => {
       return Promise.resolve({
         status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: new Headers({ 'Content-Type': 'application/json' }),
         text: () => Promise.reject(new Error('Text read error')),
       });
@@ -443,6 +444,7 @@ describe('client.executeRequest edge cases', () => {
     globalThis.fetch = (() => {
       return Promise.resolve({
         status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: new Headers({ 'Content-Type': 'text/plain' }),
         text: () => Promise.reject(new Error('Text read error')),
       });
@@ -481,6 +483,7 @@ describe('HttpClient additional methods', () => {
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ success: true, data: 'test' }), {
         status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: { 'Content-Type': 'application/json' },
       }),
     );
@@ -500,6 +503,7 @@ describe('HttpClient additional methods', () => {
         error: { code: 'TEST_ERROR', message: 'Test error' }, 
       }), {
         status: 400,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: { 'Content-Type': 'application/json' },
       }),
     );
@@ -515,6 +519,7 @@ describe('HttpClient additional methods', () => {
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ success: true, data: 'response' }), {
         status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: { 'Content-Type': 'application/json' },
       }),
     );
@@ -531,6 +536,7 @@ describe('HttpClient additional methods', () => {
     mockFetch.mockResolvedValueOnce(
       new Response(JSON.stringify({ success: true, data: 'response' }), {
         status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
         headers: { 'Content-Type': 'application/json' },
       }),
     );

@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-empty-function,
+   no-console,
+   jest/unbound-method */
 import {
   afterEach,
   beforeEach,

@@ -1,3 +1,7 @@
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   @typescript-eslint/no-unused-vars */
 import {
   describe,
   test,
@@ -5,7 +9,7 @@ import {
   beforeEach,
   mock,
 } from 'bun:test';
-import { Context, Layer } from 'effect';
+import { Context } from 'effect';
 
 import { makeDevLogger } from '../../logger/src/logger';
 

@@ -6,6 +6,7 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
+// eslint-disable-next-line import/no-extraneous-dependencies
 import { register } from 'prom-client';
 
 import type { ApplicationOptions } from './types';
@@ -68,7 +69,7 @@ describe('OneBunApplication', () => {
 
     test('should handle module with controllers', () => {
       class TestController {}
-      
+
       @Module({
         controllers: [TestController],
       })
@@ -80,7 +81,7 @@ describe('OneBunApplication', () => {
 
     test('should handle module with providers', () => {
       class TestService {}
-      
+
       @Module({
         providers: [TestService],
       })
@@ -93,7 +94,7 @@ describe('OneBunApplication', () => {
     test('should handle module with imports', () => {
       @Module({})
       class ImportedModule {}
-      
+
       @Module({
         imports: [ImportedModule],
       })
@@ -110,7 +111,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       expect(() => app.getConfig()).toThrow('Configuration not initialized');
     });
 
@@ -119,7 +120,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       expect(() => app.getConfigValue('test.path')).toThrow('Configuration not initialized');
     });
 
@@ -136,7 +137,7 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule, { envSchema });
-      
+
       const config = app.getConfig();
       expect(config).toBeDefined();
     });
@@ -154,11 +155,11 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule, { envSchema });
-      
+
       // Just check that config service was created
       const config = app.getConfig();
       expect(config).toBeDefined();
-      
+
       // The actual value access might need the config to be fully initialized
       // which happens during runtime, not during construction
     });
@@ -170,7 +171,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       const layer = app.getLayer();
       expect(layer).toBeDefined();
     });
@@ -178,7 +179,7 @@ describe('OneBunApplication', () => {
     test('should return layer for complex module structure', () => {
       class TestController {}
       class TestService {}
-      
+
       @Module({
         controllers: [TestController],
         providers: [TestService],
@@ -186,7 +187,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       const layer = app.getLayer();
       expect(layer).toBeDefined();
     });
@@ -205,10 +206,10 @@ describe('OneBunApplication', () => {
     test('should handle complex module with all features', () => {
       class TestController {}
       class TestService {}
-      
+
       @Module({})
       class ImportedModule {}
-      
+
       @Module({
         controllers: [TestController],
         providers: [TestService],
@@ -226,10 +227,10 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = createTestApp(TestModule, { 
-        development: true, 
+      const app = createTestApp(TestModule, {
+        development: true,
       });
-      
+
       expect(app).toBeInstanceOf(OneBunApplication);
     });
 
@@ -237,10 +238,10 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = createTestApp(TestModule, { 
-        development: false, 
+      const app = createTestApp(TestModule, {
+        development: false,
       });
-      
+
       expect(app).toBeInstanceOf(OneBunApplication);
     });
   });
@@ -303,6 +304,7 @@ describe('OneBunApplication', () => {
 
       // This should throw error without @Module decorator
       expect(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         createTestApp(PlainModule as any);
       }).toThrow('Module PlainModule does not have @Module decorator');
     });
@@ -310,7 +312,8 @@ describe('OneBunApplication', () => {
     test('should handle class with constructor parameters', () => {
       @Module({})
       class ModuleWithConstructor {
-        constructor(...args: unknown[]) {
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(..._args: unknown[]) {
           // Constructor with optional parameter - changed to match expected signature
         }
       }
@@ -381,7 +384,7 @@ describe('OneBunApplication', () => {
 
       const app = createTestApp(TestModule);
       const logger = app.getLogger();
-      
+
       expect(logger).toBeDefined();
       expect(typeof logger.info).toBe('function');
       expect(typeof logger.error).toBe('function');
@@ -394,7 +397,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(TestModule);
       const context = { requestId: '123' };
       const logger = app.getLogger(context);
-      
+
       expect(logger).toBeDefined();
       expect(typeof logger.info).toBe('function');
     });
@@ -403,11 +406,11 @@ describe('OneBunApplication', () => {
       @Module({})
       class TestModule {}
 
-      const app = createTestApp(TestModule, { 
-        port: 3001, 
-        host: '127.0.0.1', 
+      const app = createTestApp(TestModule, {
+        port: 3001,
+        host: '127.0.0.1',
       });
-      
+
       const url = app.getHttpUrl();
       expect(url).toBe('http://127.0.0.1:3001');
     });
@@ -417,7 +420,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       expect(() => {
         app.stop();
       }).not.toThrow();
@@ -442,9 +445,10 @@ describe('OneBunApplication', () => {
     beforeEach(() => {
       // Clear prometheus registry between tests
       register.clear();
-      
+
       // Mock Bun.serve
       originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = mock((options: any) => ({
         stop: mock(),
         hostname: options.hostname || 'localhost',
@@ -454,6 +458,7 @@ describe('OneBunApplication', () => {
 
     afterEach(() => {
       // Restore original Bun.serve
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = originalServe;
     });
 
@@ -462,7 +467,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       await expect(app.start()).resolves.toBeUndefined();
       expect(Bun.serve).toHaveBeenCalled();
     });
@@ -472,16 +477,18 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const mockConfig = {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
         initialize: mock(async () => {}),
         isInitialized: true,
       };
 
       const app = createTestApp(TestModule);
       // Set config manually for testing
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).config = mockConfig;
-      
+
       await app.start();
-      
+
       expect(mockConfig.initialize).toHaveBeenCalled();
     });
 
@@ -490,7 +497,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       await expect(app.start()).resolves.toBeUndefined();
     });
 
@@ -503,11 +510,13 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).server = mockServer;
-      
+
       app.stop();
-      
+
       expect(mockServer.stop).toHaveBeenCalled();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((app as any).server).toBeNull();
     });
 
@@ -516,7 +525,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       expect(() => app.stop()).not.toThrow();
     });
   });
@@ -531,10 +540,11 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
-      
+
       // Access private method for testing
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const mapHttpMethod = (app as any).mapHttpMethod.bind(app);
-      
+
       expect(mapHttpMethod('GET')).toBe('GET');
       expect(mapHttpMethod('POST')).toBe('POST');
       expect(mapHttpMethod('PUT')).toBe('PUT');
@@ -558,20 +568,22 @@ describe('OneBunApplication', () => {
   describe('Global trace context', () => {
     test('should clear global trace context', () => {
       // Access the clearGlobalTraceContext function
-      const appModule = require('./application');
-      
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _appModule = require('./application');
+
       // Set initial values
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (globalThis as any).__onebunCurrentTraceContext = 'test-context';
-      
+
       // This is testing an internal function, but it's important for trace cleanup
       // We can access it through module internals or test its effects
-      
+
       // Since the function is not exported, we'll test its effects by creating an app
       @Module({})
       class TestModule {}
-      
+
       const app = createTestApp(TestModule);
-      
+
       // The function should be called during app lifecycle
       expect(app).toBeDefined();
     });
@@ -593,8 +605,9 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).config = mockConfig;
-      
+
       await expect(app.start()).rejects.toThrow('Config initialization failed');
     });
 
@@ -605,11 +618,11 @@ describe('OneBunApplication', () => {
       // Temporarily remove NODE_ENV
       const originalNodeEnv = process.env.NODE_ENV;
       delete process.env.NODE_ENV;
-      
+
       const app = createTestApp(TestModule);
-      
+
       expect(app).toBeDefined();
-      
+
       // Restore NODE_ENV
       if (originalNodeEnv !== undefined) {
         process.env.NODE_ENV = originalNodeEnv;
@@ -619,11 +632,12 @@ describe('OneBunApplication', () => {
 
   describe('Configuration handling', () => {
     let originalServe: typeof Bun.serve;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let mockServer: any;
 
     beforeEach(() => {
       register.clear();
-      
+
       mockServer = {
         stop: mock(),
         hostname: 'localhost',
@@ -631,7 +645,9 @@ describe('OneBunApplication', () => {
       };
 
       originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = mock((options: any) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (mockServer as any).fetchHandler = options.fetch;
 
         return mockServer;
@@ -639,6 +655,7 @@ describe('OneBunApplication', () => {
     });
 
     afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = originalServe;
     });
 
@@ -652,10 +669,11 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).metricsService = mockMetricsService;
-      
+
       await app.start();
-      
+
       expect(mockMetricsService.startSystemMetricsCollection).toHaveBeenCalled();
     });
 
@@ -671,19 +689,22 @@ describe('OneBunApplication', () => {
       };
 
       const app = createTestApp(TestModule, { envSchema });
-      
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((app as any).config).toBeDefined();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((app as any).configService).toBeDefined();
     });
   });
 
   describe('HTTP Server and Routing', () => {
     let originalServe: typeof Bun.serve;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let mockServer: any;
 
     beforeEach(() => {
       register.clear();
-      
+
       mockServer = {
         stop: mock(),
         hostname: 'localhost',
@@ -691,8 +712,10 @@ describe('OneBunApplication', () => {
       };
 
       originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = mock((options: any) => {
         // Store the fetch handler for testing
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (mockServer as any).fetchHandler = options.fetch;
 
         return mockServer;
@@ -700,6 +723,7 @@ describe('OneBunApplication', () => {
     });
 
     afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = originalServe;
     });
 
@@ -725,14 +749,15 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
-      
+
       expect(response).toBeDefined();
       // Log actual response for debugging
-      console.log('Response type:', typeof response);
-      console.log('Response status:', response?.status);
-      console.log('Response keys:', Object.keys(response || {}));
-      
+      // console.log('Response type:', typeof response);
+      // console.log('Response status:', response?.status);
+      // console.log('Response keys:', Object.keys(response || {}));
+
       // Accept any successful response for now
       expect(response).toBeTruthy();
     });
@@ -741,6 +766,7 @@ describe('OneBunApplication', () => {
       @Controller('/api')
       class ApiController extends BaseController {
         @Post('/users')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async createUser(@Body() userData: any) {
           return { id: 1, ...userData };
         }
@@ -757,10 +783,14 @@ describe('OneBunApplication', () => {
       const requestData = { name: 'John', email: 'john@example.com' };
       const request = new Request('http://localhost:3000/api/users', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify(requestData),
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
       const body = await response.json();
 
@@ -789,6 +819,7 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
       const body = await response.json();
 
@@ -801,8 +832,8 @@ describe('OneBunApplication', () => {
       class ApiController extends BaseController {
         @Get('/search')
         async search(@Query('q') query: string, @Query('limit') limit?: string) {
-          return { 
-            query, 
+          return {
+            query,
             limit: limit ? parseInt(limit) : 10,
             results: ['item1', 'item2'],
           };
@@ -821,8 +852,9 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
-      
+
       expect(response).toBeDefined();
       // Accept any successful response for now
       expect(response).toBeTruthy();
@@ -837,11 +869,13 @@ describe('OneBunApplication', () => {
       });
 
       // Mock metrics service
-      const mockMetricsService = {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mockMetricsService: any = {
         getMetrics: mock(() => Promise.resolve('# metrics data')),
         getContentType: mock(() => 'text/plain'),
         startSystemMetricsCollection: mock(),
       };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).metricsService = mockMetricsService;
 
       await app.start();
@@ -850,6 +884,7 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
       expect(response.status).toBe(200);
@@ -867,6 +902,7 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
       expect(response.status).toBe(404);
@@ -893,6 +929,7 @@ describe('OneBunApplication', () => {
         method: 'POST',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
       // Current implementation returns 404 for method not allowed, not 405
@@ -920,6 +957,7 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
       expect(response.status).toBe(500);
@@ -930,8 +968,8 @@ describe('OneBunApplication', () => {
       class ApiController extends BaseController {
         @Get('/users/:userId/posts/:postId')
         async getUserPost(@Param('userId') userId: string, @Param('postId') postId: string) {
-          return { 
-            userId: parseInt(userId), 
+          return {
+            userId: parseInt(userId),
             postId: parseInt(postId),
             title: `Post ${postId} by User ${userId}`,
           };
@@ -950,12 +988,13 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
       const body = await response.json();
 
       expect(response.status).toBe(200);
-      expect(body.result).toEqual({ 
-        userId: 42, 
+      expect(body.result).toEqual({
+        userId: 42,
         postId: 123,
         title: 'Post 123 by User 42',
       });
@@ -964,11 +1003,12 @@ describe('OneBunApplication', () => {
 
   describe('Tracing integration', () => {
     let originalServe: typeof Bun.serve;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let mockServer: any;
 
     beforeEach(() => {
       register.clear();
-      
+
       mockServer = {
         stop: mock(),
         hostname: 'localhost',
@@ -976,7 +1016,9 @@ describe('OneBunApplication', () => {
       };
 
       originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = mock((options: any) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (mockServer as any).fetchHandler = options.fetch;
 
         return mockServer;
@@ -984,6 +1026,7 @@ describe('OneBunApplication', () => {
     });
 
     afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (Bun as any).serve = originalServe;
     });
 
@@ -1014,6 +1057,7 @@ describe('OneBunApplication', () => {
         },
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
       // Simply verify that request with trace headers is handled successfully
@@ -1043,6 +1087,7 @@ describe('OneBunApplication', () => {
         extractFromHeaders: mock(),
         setContext: mock(),
       };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).traceService = mockTraceService;
 
       await app.start();
@@ -1051,6 +1096,7 @@ describe('OneBunApplication', () => {
         method: 'GET',
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (mockServer as any).fetchHandler(request);
 
       expect(mockTraceService.extractFromHeaders).not.toHaveBeenCalled();

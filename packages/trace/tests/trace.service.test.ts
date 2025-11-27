@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/naming-convention, @typescript-eslint/no-shadow */
 import {
   describe,
   test,

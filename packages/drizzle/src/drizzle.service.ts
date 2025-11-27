@@ -33,6 +33,7 @@ import {
  * Default environment variable prefix
  */
 const DEFAULT_ENV_PREFIX = 'DB';
+const DEFAULT_PG_PORT = 5432;
 
 /**
  * Parse PostgreSQL connection URL into separate fields
@@ -44,7 +45,7 @@ function parsePostgreSQLUrl(url: string): PostgreSQLConnectionOptions {
 
     return {
       host: parsedUrl.hostname,
-      port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : (5432 as const),
+      port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : DEFAULT_PG_PORT,
       user: parsedUrl.username,
       password: parsedUrl.password,
       database: parsedUrl.pathname.slice(1), // Remove leading '/'

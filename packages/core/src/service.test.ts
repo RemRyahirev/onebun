@@ -1,3 +1,7 @@
+/* eslint-disable
+   @typescript-eslint/no-unused-vars,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/no-useless-constructor */
 import {
   describe,
   test,
@@ -7,11 +11,6 @@ import {
   mock,
 } from 'bun:test';
 import { Effect } from 'effect';
-
-import { PrettyFormatter } from '../../logger/src/formatter';
-import { makeDevLogger, createSyncLogger } from '../../logger/src/logger';
-import { ConsoleTransport } from '../../logger/src/transport';
-import { LogLevel } from '../../logger/src/types';
 
 import { BaseService } from './service';
 

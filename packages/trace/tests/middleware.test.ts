@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   @typescript-eslint/no-unused-vars,
+   jest/unbound-method */
 import {
   describe,
   test,

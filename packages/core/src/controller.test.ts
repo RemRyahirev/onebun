@@ -1,3 +1,8 @@
+/* eslint-disable
+   @typescript-eslint/no-empty-function,
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   jest/unbound-method */
 import {
   describe,
   test,
@@ -10,7 +15,6 @@ import { Context } from 'effect';
 import type { SyncLogger } from '@onebun/logger';
 
 import { Controller } from './controller';
-import { Module } from './decorators';
 
 describe('Controller', () => {
   let mockLogger: SyncLogger;
