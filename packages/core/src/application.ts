@@ -208,6 +208,34 @@ export class OneBunApplication {
   }
 
   /**
+   * Build path prefix from routePrefix and basePath options.
+   * The resulting prefix will be prepended to all controller routes.
+   *
+   * @returns Path prefix string (e.g., '/users/api/v1')
+   */
+  private buildPathPrefix(): string {
+    let prefix = '';
+
+    // Add routePrefix first (typically service name)
+    if (this.options.routePrefix) {
+      const routePrefix = this.options.routePrefix.startsWith('/')
+        ? this.options.routePrefix
+        : `/${this.options.routePrefix}`;
+      prefix += routePrefix;
+    }
+
+    // Add basePath after routePrefix
+    if (this.options.basePath) {
+      const basePath = this.options.basePath.startsWith('/')
+        ? this.options.basePath
+        : `/${this.options.basePath}`;
+      prefix += basePath;
+    }
+
+    return prefix;
+  }
+
+  /**
    * Start the application
    * This method now handles all the Effect.js calls internally
    */
@@ -247,6 +275,9 @@ export class OneBunApplication {
         }
       >();
 
+      // Build application-level path prefix from options
+      const appPrefix = this.buildPathPrefix();
+
       // Add routes from controllers
       for (const controllerClass of controllers) {
         const controllerMetadata = getControllerMetadata(controllerClass);
@@ -269,10 +300,11 @@ export class OneBunApplication {
           continue;
         }
 
-        const basePath = controllerMetadata.path;
+        const controllerPath = controllerMetadata.path;
 
         for (const route of controllerMetadata.routes) {
-          const fullPath = `${basePath}${route.path}`;
+          // Combine: appPrefix + controllerPath + routePath
+          const fullPath = `${appPrefix}${controllerPath}${route.path}`;
           const method = this.mapHttpMethod(route.method);
           const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
             controller,
@@ -316,7 +348,7 @@ export class OneBunApplication {
         }
 
         for (const route of metadata.routes) {
-          const fullPath = `${metadata.path}${route.path}`;
+          const fullPath = `${appPrefix}${metadata.path}${route.path}`;
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }

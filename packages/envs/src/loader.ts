@@ -7,10 +7,20 @@ import { EnvLoadError, type EnvLoadOptions } from './types';
  */
 export class EnvLoader {
   /**
-   * Load environment variables from various sources
+   * Load environment variables from various sources.
+   * Priority (highest to lowest):
+   * 1. valueOverrides (if provided)
+   * 2. process.env (if envOverridesDotEnv = true)
+   * 3. .env file
+   * 4. process.env (if envOverridesDotEnv = false)
    */
   static load(options: EnvLoadOptions = {}): Effect.Effect<Record<string, string>, EnvLoadError> {
-    const { envFilePath = '.env', loadDotEnv = true, envOverridesDotEnv = true } = options;
+    const {
+      envFilePath = '.env',
+      loadDotEnv = true,
+      envOverridesDotEnv = true,
+      valueOverrides,
+    } = options;
 
     const loadDotEnvVars = loadDotEnv
       ? EnvLoader.loadDotEnvFile(envFilePath)
@@ -20,13 +30,24 @@ export class EnvLoader {
 
     return loadDotEnvVars.pipe(
       Effect.map((dotEnvVars) => {
+        let result: Record<string, string>;
+
         if (envOverridesDotEnv) {
-          // Process environment variables have priority
-          return { ...dotEnvVars, ...processEnvVars };
+          // Process environment variables have priority over .env
+          result = { ...dotEnvVars, ...processEnvVars };
         } else {
-          // .env file has priority
-          return { ...processEnvVars, ...dotEnvVars };
+          // .env file has priority over process.env
+          result = { ...processEnvVars, ...dotEnvVars };
         }
+
+        // Apply valueOverrides with highest priority
+        if (valueOverrides) {
+          for (const [key, value] of Object.entries(valueOverrides)) {
+            result[key] = String(value);
+          }
+        }
+
+        return result;
       }),
     );
   }

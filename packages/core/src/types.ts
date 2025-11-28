@@ -89,6 +89,18 @@ export interface ApplicationOptions {
   host?: string;
 
   /**
+   * Base path prefix for all routes
+   * @example '/api/v1'
+   */
+  basePath?: string;
+
+  /**
+   * Route prefix to prepend to all routes (typically the service name)
+   * @example 'users' will prefix all routes with '/users'
+   */
+  routePrefix?: string;
+
+  /**
    * Enable development mode
    * @defaultValue false
    */
@@ -115,6 +127,8 @@ export interface ApplicationOptions {
     envOverridesDotEnv?: boolean;
     strict?: boolean;
     defaultArraySeparator?: string;
+    /** Override values that take precedence over both process.env and .env file */
+    valueOverrides?: Record<string, string | number | boolean>;
   };
 
   /**

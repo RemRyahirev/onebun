@@ -190,6 +190,7 @@ export class BaseRepository<
    */
   async findAll(): Promise<SelectType<TTable>[]> {
     const results = await this.selectQuery();
+
     // Drizzle returns properly typed results at runtime
     return results as SelectType<TTable>[];
   }

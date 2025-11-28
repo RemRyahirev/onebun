@@ -107,4 +107,9 @@ export interface EnvLoadOptions {
   strict?: boolean;
   /** Default separator for arrays (default: ',') */
   defaultArraySeparator?: string;
+  /**
+   * Override values that take precedence over both process.env and .env file.
+   * Useful for multi-service setups where each service needs different values.
+   */
+  valueOverrides?: Record<string, string | number | boolean>;
 }

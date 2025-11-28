@@ -38,3 +38,28 @@ export {
   ParamType, 
 } from './types';
 export * from './validation';
+
+// Multi-service application
+export { MultiServiceApplication } from './multi-service-application';
+export type {
+  MultiServiceApplicationOptions,
+  ServiceConfig,
+  ServicesMap,
+  BaseServiceOptions,
+  EnvOverrideValue,
+  EnvOverrides,
+} from './multi-service.types';
+
+// Service definition and client
+export { createServiceDefinition } from './service-definition';
+export type {
+  ServiceDefinition,
+  EndpointMetadata,
+  ControllerDefinition,
+} from './service-definition';
+
+export { createServiceClient, getServiceUrl } from './service-client';
+export type { ServiceClientOptions, ControllerClient } from './service-client.types';
+
+// ENV resolver
+export { resolveEnvOverrides, resolveEnvOverridesSync } from './env-resolver';
