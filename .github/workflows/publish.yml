@@ -6,6 +6,10 @@ on:
       - 'v*'  # Запускается при пуше тега v0.1.0, v1.0.0, etc.
   workflow_dispatch:  # Или вручную через UI
 
+permissions:
+  id-token: write  # Required for npm OIDC trusted publishing
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -14,6 +18,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -30,5 +39,3 @@ jobs:
 
       - name: Publish packages
         run: bun run publish:packages
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
