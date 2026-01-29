@@ -1,9 +1,10 @@
 name: Publish
 
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'  # Запускается при пуше тега v0.1.0, v1.0.0, etc.
+  workflow_dispatch:  # Или вручную через UI
 
 jobs:
   publish:
