@@ -51,6 +51,6 @@
       "@utils/*": ["./src/utils/*"]
     }
   },
-  "include": ["example/**/*", "packages/**/*"],
+  "include": ["example/**/*", "packages/**/*", "scripts/**/*"],
   "exclude": ["node_modules", "dist"]
 }

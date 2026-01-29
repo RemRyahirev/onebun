@@ -1,166 +1,98 @@
-# OneBun Framework
+# OneBun
 
-OneBun - это фреймворк для разработки приложений на Bun.js, вдохновленный Nest.js и использующий Effect.ts для управления побочными эффектами.
+[![License: LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-blue.svg)](LICENSE)
+[![CI](https://github.com/RemRyahirev/onebun/actions/workflows/ci.yml/badge.svg)](https://github.com/RemRyahirev/onebun/actions)
 
-## Недавние улучшения
+A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows the principle of "exactly one default way to solve each problem" - trading flexibility for development speed and performance.
 
-### Интеграция логгера с Effect
+## Features
 
-Мы улучшили интеграцию логгера с библиотекой Effect, добавив следующие возможности:
+- **Modular Architecture** - Organize code in modules with controllers and services
+- **Declarative Routes** - Use decorators (@Controller, @Get, @Post, etc.)
+- **Type-safe DI** - Effect.Context and Layer for dependency management
+- **Built-in Logging** - Extended logging based on Effect.Logger
+- **Unified HTTP Requests** - @onebun/requests with retries, auth, and tracing
+- **Metrics & Tracing** - Prometheus metrics and OpenTelemetry-compatible tracing
+- **Environment Management** - Typed configuration with validation
+- **High Performance** - Built on Bun.js for maximum speed
 
-1. Использование встроенного в Effect логгера с нашим форматтером и транспортом
-2. Поддержка аннотаций контекста для логов
-3. Правильное обработка ошибок через Cause
+## Packages
 
-```typescript
-// Пример использования логгера
-const program = pipe(
-  LoggerService,
-  Effect.flatMap(logger => pipe(
-    logger.info('Getting counter value', { requestId: '123' }),
-    Effect.flatMap(() => CounterService),
-    Effect.map(counterService => counterService.getCount())
-  ))
-);
-```
+| Package | Description |
+|---------|-------------|
+| [@onebun/core](packages/core) | Core framework (decorators, DI, modules) |
+| [@onebun/cache](packages/cache) | Caching with in-memory and Redis support |
+| [@onebun/docs](packages/docs) | OpenAPI documentation generation |
+| [@onebun/drizzle](packages/drizzle) | Drizzle ORM integration |
+| [@onebun/envs](packages/envs) | Environment variables management |
+| [@onebun/logger](packages/logger) | Structured logging |
+| [@onebun/metrics](packages/metrics) | Prometheus-compatible metrics |
+| [@onebun/requests](packages/requests) | Unified HTTP client |
+| [@onebun/trace](packages/trace) | OpenTelemetry tracing |
 
-### Работающий пример приложения
-
-Мы создали рабочий пример приложения, демонстрирующий использование:
-
-1. **Логгера** с контекстом и трейсингом
-2. **Сервисов** с инъекцией зависимостей через Effect
-3. **HTTP маршрутизации** с декораторами
-4. **@onebun/requests** для внешних API вызовов с:
-   - Автоматическими ретраями
-   - Различными схемами аутентификации
-   - Структурированной обработкой ошибок
-   - Трейсингом запросов
-5. **Метрики** и **трейсинг** в действии
-
-Пример можно запустить командой `bun run dev:once` из корневой директории проекта.
-
-Доступные эндпоинты:
-- `GET /api/users` - получить пользователей через @onebun/requests
-- `GET /api/users/:id` - получить пользователя по ID
-- `GET /api/users/:id/posts` - получить посты пользователя
-- `POST /api/posts` - создать новый пост
-- `GET /api/demo/error-chain` - демонстрация цепочки ошибок
-- `GET /api/demo/auth-methods` - демонстрация методов аутентификации
-
-## Известные проблемы и планы по их решению
-
-1. Декораторы для маршрутов не работают должным образом - метаданные не сохраняются или не считываются правильно.
-2. Инъекция зависимостей через модули и контроллеры требует доработки.
-
-## Дальнейшие шаги
-
-1. Исправить работу декораторов для более декларативной маршрутизации
-2. Улучшить систему модулей и инъекцию зависимостей
-3. Добавить дополнительные транспорты для логгера (файловый, сетевой)
-
-## Особенности
-
-- **Модульная архитектура**: организация кода в модули с контроллерами и сервисами
-- **Декларативные маршруты**: использование декораторов (@Controller, @Get, @Post и т.д.)
-- **Типобезопасный DI**: использование Effect.Context и Layer для управления зависимостями
-- **Встроенное логирование**: расширенное логирование на основе Effect.Logger
-- **Унифицированные HTTP запросы**: @onebun/requests с ретраями, аутентификацией и трейсингом
-- **Метрики и трейсинг**: автоматический сбор метрик и OpenTelemetry-совместимый трейсинг
-- **Управление переменными окружения**: типизированная конфигурация с валидацией
-- **Высокая производительность**: использование bun.js для максимальной скорости
-
-## Установка
+## Installation
 
 ```bash
-# Установка bun (если еще не установлен)
+# Install Bun if not installed
 curl -fsSL https://bun.sh/install | bash
 
-# Создание нового проекта
-mkdir my-onebun-app
-cd my-onebun-app
-bun init
-
-# Установка зависимостей
-bun add @onebun/core @onebun/logger effect
+# Add core package
+bun add @onebun/core
 ```
 
-## Пример использования
+## Quick Start
 
 ```typescript
 import { Effect, Layer } from 'effect';
 import { OneBunApplication, Controller, Get, Module } from '@onebun/core';
-import { makeDevLogger, LoggerService } from '@onebun/logger';
 
-// Service с использованием Effect Context
-class CounterService extends Effect.Tag('CounterService')<CounterService>() {
-  private count = 0;
-
-  increment(): number {
-    return ++this.count;
-  }
-
-  getCount(): number {
-    return this.count;
-  }
-}
-
-// Контроллер
 @Controller('api')
 class AppController {
-  @Get('counter')
-  async getCounter(req: Request): Promise<Response> {
-    const program = Effect.gen(function* ($) {
-      const counterService = yield* CounterService;
-      const logger = yield* LoggerService;
-      
-      yield* logger.info('Getting counter value');
-      
-      return counterService.getCount();
-    });
-    
-    const count = await Effect.runPromise(program);
-    
-    return new Response(JSON.stringify({ count }), {
+  @Get('hello')
+  async hello(): Promise<Response> {
+    return new Response(JSON.stringify({ message: 'Hello, OneBun!' }), {
       headers: { 'Content-Type': 'application/json' }
     });
   }
 }
 
-// Модуль приложения
 @Module({
   controllers: [AppController],
-  providers: [CounterService]
 })
 class AppModule {}
 
-// Создание и запуск приложения
-const startApp = async () => {
-  const app = new OneBunApplication(AppModule);
-  
-  const rootLayer = Layer.merge(
-    app.getLayer(),
-    makeDevLogger(),
-    Layer.succeed(CounterService, new CounterService())
-  );
-  
-  await Effect.runPromise(
-    app.start().pipe(Effect.provide(rootLayer))
-  );
-};
-
-startApp().catch(console.error);
+const app = new OneBunApplication(AppModule);
+await Effect.runPromise(app.start());
 ```
 
-## Структура проекта
+## Documentation
 
+- [Getting Started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [API Reference](docs/api/)
+- [Examples](docs/examples/)
+
+## Development
+
+```bash
+# Clone repository
+git clone https://github.com/RemRyahirev/onebun.git
+cd onebun
+
+# Install dependencies
+bun install
+
+# Run tests
+bun test
+
+# Run example
+bun run dev
 ```
-|- packages/
-|  |- core/            # Основной пакет фреймворка
-|  |- logger/          # Модуль логирования
-|- example/            # Пример приложения
-```
 
-## Лицензия
+## Contributing
 
-MIT 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+[LGPL-3.0](LICENSE) - You can use OneBun freely in commercial projects, but modifications to the framework itself must remain open source.

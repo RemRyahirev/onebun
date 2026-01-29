@@ -2,6 +2,25 @@
   "name": "@onebun/metrics",
   "version": "0.1.0",
   "description": "Prometheus-compatible metrics module for OneBun framework",
+  "license": "LGPL-3.0",
+  "author": "RemRyahirev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RemRyahirev/onebun.git",
+    "directory": "packages/metrics"
+  },
+  "bugs": {
+    "url": "https://github.com/RemRyahirev/onebun/issues"
+  },
+  "homepage": "https://github.com/RemRyahirev/onebun/tree/master/packages/metrics#readme",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
   "main": "src/index.ts",
   "module": "src/index.ts",
   "types": "src/index.ts",

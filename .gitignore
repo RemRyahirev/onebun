@@ -1,7 +1,37 @@
-/.idea
-node_modules/
-tsconfig.tsbuildinfo
-dist/
-/padel
+# IDE
+.idea/
+.vscode/
 
-.idea/**/*
+# Build
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# AI assistant configs
+CLAUDE.md
+_LAUDE.md
+.claude/
+.cursor/rules/
+.junie/
+
+# Internal files
+SWEEP.md
+plan.md
+
+# Test projects
+padel
+repofleet/
+
+# NPM
+.npmrc
+
+# Keys
+*.pem
+*.key
+credentials.json
+secrets.json

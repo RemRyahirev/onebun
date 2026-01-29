@@ -1,19 +1,31 @@
 {
   "name": "onebun",
   "version": "0.1.0",
-  "author": "",
+  "author": "RemRyahirev",
   "description": "OneBun framework monorepo - A bun.js framework inspired by nest.js with effect.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RemRyahirev/onebun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/RemRyahirev/onebun/issues"
+  },
+  "homepage": "https://github.com/RemRyahirev/onebun#readme",
   "engines": {
     "bun": "1.2.12",
     "node": "24"
   },
-  "license": "MIT",
+  "license": "LGPL-3.0",
   "private": true,
   "scripts": {
     "dev": "bun run --watch example/src/index.ts",
     "dev:once": "bun run example/src/index.ts",
     "test": "bun test",
     "lint": "eslint --fix",
+    "typecheck": "bunx tsc --noEmit",
+    "publish:check": "bun scripts/publish.ts --dry-run",
+    "publish:packages": "bun scripts/publish.ts",
+    "version:bump": "bun scripts/version-bump.ts",
     "compose:up": "docker-compose -p onebun-example",
     "redis:cli": "docker-compose exec redis redis-cli -a $REDIS_PASSWORD"
   },

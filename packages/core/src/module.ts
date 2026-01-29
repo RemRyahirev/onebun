@@ -17,11 +17,12 @@ import {
 
 
 import {
+  autoDetectDependencies,
   getConstructorParamTypes,
   getModuleMetadata,
   registerControllerDependencies,
 } from './decorators';
-import { createServiceLayer, getServiceMetadata } from './service';
+import { getServiceMetadata, getServiceTag } from './service';
 
 /**
  * OneBun Module implementation
@@ -62,6 +63,11 @@ export class OneBunModule implements Module {
   }
 
   /**
+   * Child modules instances (for accessing their exported services)
+   */
+  private childModules: OneBunModule[] = [];
+
+  /**
    * Initialize module from metadata and create layer
    */
   private initModule(): {
@@ -79,7 +85,6 @@ export class OneBunModule implements Module {
     // Use provided logger layer or create a default one
     let layer: Layer.Layer<never, never, unknown> = this.loggerLayer || makeLogger();
     const controllers: Function[] = [];
-    const serviceLayers: Layer.Layer<never, never, unknown>[] = [];
 
     // Add controllers
     if (metadata.controllers) {
@@ -88,107 +93,166 @@ export class OneBunModule implements Module {
       }
     }
 
-    // Initialize provider layers
-    if (metadata.providers) {
-      // For each provider, create a layer
-      for (const provider of metadata.providers) {
-        // Check if provider has @Service decorator
-        if (typeof provider === 'function') {
-          this.logger.debug(`Checking if provider ${provider.name} has @Service decorator`);
-          const serviceMetadata = getServiceMetadata(provider);
-          if (serviceMetadata) {
-            // This is a service with @Service decorator
-            this.logger.debug(
-              `Provider ${provider.name} has @Service decorator, creating service layer`,
-            );
-            const serviceLayer = createServiceLayer(
-              provider as new (
-                ...args: unknown[]
-              ) => unknown,
-              this.logger,
-              this.config,
-            );
-            serviceLayers.push(serviceLayer);
-            layer = Layer.merge(layer, serviceLayer);
-            this.logger.debug(`Added service layer for ${provider.name}`);
-            continue;
-          } else {
-            this.logger.warn(`Provider ${provider.name} does not have @Service decorator`);
-          }
-        }
-
-        // Legacy provider handling
-        if (
-          typeof provider === 'object' &&
-          provider !== null &&
-          'prototype' in provider &&
-          'tag' in provider
-        ) {
-          // This is a Context Tag, we need to get implementation
-          // Find matching implementation in providers array
-          const tagProvider = provider as {
-            isTag?: boolean;
-            service?: Function;
-          };
-          const impl = metadata.providers.find(
-            (p: unknown) =>
-              tagProvider.isTag &&
-              typeof p === 'function' &&
-              typeof tagProvider.service === 'function' &&
-              'prototype' in p &&
-              p.prototype instanceof tagProvider.service,
-          );
-
-          if (impl && typeof impl === 'function') {
-            // Create layer for this service
-            const implConstructor = impl as new () => unknown;
-            const serviceLayer = Layer.succeed(
-              provider as unknown as Context.Tag<unknown, unknown>,
-              new implConstructor(),
-            );
-            serviceLayers.push(serviceLayer);
-            layer = Layer.merge(layer, serviceLayer);
-          }
-        } else if (typeof provider === 'function') {
-          // This is a class, try to create instance and find if it implements a Tag
-          try {
-            const providerConstructor = provider as new () => unknown;
-            const instance = new providerConstructor();
-            // Find matching tag in providers
-            const tag = metadata.providers.find(
-              (p: unknown) =>
-                typeof p === 'object' &&
-                p !== null &&
-                'isTag' in p &&
-                'service' in p &&
-                instance instanceof (p as { service: Function }).service,
-            );
-
-            if (tag) {
-              const serviceLayer = Layer.succeed(tag as Context.Tag<unknown, unknown>, instance);
-              serviceLayers.push(serviceLayer);
-              layer = Layer.merge(layer, serviceLayer);
-            }
-          } catch {
-            this.logger.warn(`Failed to auto-create instance of ${provider.name}`);
-          }
-        }
-      }
-    }
-
-    // Import child modules and merge their layers
+    // PHASE 1: Import child modules FIRST and collect their exported services
     if (metadata.imports) {
       for (const importModule of metadata.imports) {
         // Pass the logger layer and config to child modules
         const childModule = new OneBunModule(importModule, this.loggerLayer, this.config);
+        this.childModules.push(childModule);
+
         // Merge layers
         layer = Layer.merge(layer, childModule.getLayer());
-        // Add controllers
+
+        // Add controllers from child module
         controllers.push(...childModule.getControllers());
+
+        // Get exported services from child module and register them for DI
+        const exportedServices = childModule.getExportedServices();
+        for (const [tag, instance] of exportedServices) {
+          this.serviceInstances.set(tag, instance);
+          this.logger.debug(
+            `Imported service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
+          );
+        }
       }
     }
 
+    // PHASE 2: Create services of THIS module with DI (can now access imported services)
+    this.createServicesWithDI(metadata);
+
+    // Create Effect layers for all registered services
+    for (const [tag, instance] of this.serviceInstances) {
+      const serviceLayer = Layer.succeed(tag, instance);
+      layer = Layer.merge(layer, serviceLayer);
+    }
+
     return { layer, controllers };
+  }
+
+  /**
+   * Create services with automatic dependency injection
+   * Services can depend on other services (including imported ones)
+   */
+  private createServicesWithDI(metadata: ReturnType<typeof getModuleMetadata>): void {
+    if (!metadata?.providers) {
+      return;
+    }
+
+    // Build a map of available service classes for dependency resolution
+    // Include both current module providers and imported services
+    const availableServiceClasses = new Map<string, Function>();
+    for (const provider of metadata.providers) {
+      if (typeof provider === 'function') {
+        availableServiceClasses.set(provider.name, provider);
+      }
+    }
+
+    // Add imported services to available classes
+    for (const [, instance] of this.serviceInstances) {
+      if (instance && typeof instance === 'object') {
+        availableServiceClasses.set(instance.constructor.name, instance.constructor);
+      }
+    }
+
+    // Create services in dependency order
+    const pendingProviders = [...metadata.providers.filter((p) => typeof p === 'function')];
+    const createdServices = new Set<string>();
+    let iterations = 0;
+    const maxIterations = pendingProviders.length * 2; // Prevent infinite loops
+
+    while (pendingProviders.length > 0 && iterations < maxIterations) {
+      iterations++;
+      const provider = pendingProviders.shift();
+      if (!provider || typeof provider !== 'function') {
+        continue;
+      }
+
+      const serviceMetadata = getServiceMetadata(provider);
+      if (!serviceMetadata) {
+        this.logger.debug(`Provider ${provider.name} does not have @Service decorator, skipping`);
+        continue;
+      }
+
+      // Use autoDetectDependencies to find dependencies from constructor
+      const detectedDeps = autoDetectDependencies(provider, availableServiceClasses);
+      const dependencies: unknown[] = [];
+      let allDependenciesResolved = true;
+
+      if (detectedDeps && detectedDeps.length > 0) {
+        for (const depType of detectedDeps) {
+          const dependency = this.resolveDependencyByType(depType);
+          if (dependency) {
+            dependencies.push(dependency);
+          } else {
+            // Check if it's a service that hasn't been created yet
+            const isServiceInModule = availableServiceClasses.has(depType.name);
+            if (isServiceInModule && !createdServices.has(depType.name)) {
+              // This dependency will be created later, defer this service
+              allDependenciesResolved = false;
+              pendingProviders.push(provider);
+              break;
+            } else {
+              this.logger.warn(
+                `Could not resolve dependency ${depType.name} for service ${provider.name}`,
+              );
+            }
+          }
+        }
+      }
+
+      if (!allDependenciesResolved) {
+        continue;
+      }
+
+      // Add logger and config at the end
+      dependencies.push(this.logger, this.config);
+
+      // Create service instance with resolved dependencies
+      try {
+        const serviceConstructor = provider as new (...args: unknown[]) => unknown;
+        const serviceInstance = new serviceConstructor(...dependencies);
+        this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
+        createdServices.add(provider.name);
+        this.logger.debug(
+          `Created service ${provider.name} with ${dependencies.length - 2} injected dependencies`,
+        );
+      } catch (error) {
+        this.logger.error(`Failed to create service ${provider.name}: ${error}`);
+      }
+    }
+
+    if (iterations >= maxIterations) {
+      this.logger.error('Possible circular dependency detected in services');
+    }
+  }
+
+  /**
+   * Get exported services from this module
+   * Returns services that are listed in the module's exports array
+   */
+  getExportedServices(): Map<Context.Tag<unknown, unknown>, unknown> {
+    const metadata = getModuleMetadata(this.moduleClass);
+    const exported = new Map<Context.Tag<unknown, unknown>, unknown>();
+
+    if (!metadata?.exports) {
+      return exported;
+    }
+
+    for (const exportedProvider of metadata.exports) {
+      if (typeof exportedProvider === 'function') {
+        try {
+          const tag = getServiceTag(exportedProvider as new (...args: unknown[]) => unknown);
+          const instance = this.serviceInstances.get(tag);
+          if (instance) {
+            exported.set(tag, instance);
+          }
+        } catch {
+          // Not a service with @Service decorator
+        }
+      }
+    }
+
+    return exported;
   }
 
   /**
@@ -198,63 +262,30 @@ export class OneBunModule implements Module {
     const self = this;
 
     return Effect.gen(function* (_) {
-      // Get all services from the layer
-      const services = yield* _(Effect.context());
+      // Services are already created in initModule via createServicesWithDI
+      // Just need to set up controllers with DI
 
-      // First, process all services from context and register them
-      for (const [key, value] of Object.entries(services)) {
-        if (key && value && typeof key === 'object' && 'Identifier' in key) {
-          const tag = key as Context.Tag<unknown, unknown>;
-          self.serviceInstances.set(tag, value);
-        }
-      }
-
-      // Get module metadata to access providers and register any missing services
+      // Get module metadata to access providers for controller dependency registration
       const moduleMetadata = getModuleMetadata(self.moduleClass);
       if (moduleMetadata && moduleMetadata.providers) {
-        // Import getServiceTag function to avoid circular dependency
-        const { getServiceTag } = require('./service');
-
         // Create map of available services for dependency resolution
         const availableServices = new Map<string, Function>();
 
-        // For each provider that is a class constructor, register it with its tag
+        // For each provider that is a class constructor, add to available services map
         for (const provider of moduleMetadata.providers) {
           if (typeof provider === 'function') {
-            // Add to available services map
             availableServices.set(provider.name, provider);
+          }
+        }
 
-            try {
-              // Get the service tag for this provider
-              const tag = getServiceTag(provider);
-
-              // Find the service instance in the services context
-              let found = false;
-              for (const [key, value] of Object.entries(services)) {
-                if (key && value && typeof key === 'object' && 'Identifier' in key) {
-                  if (
-                    key === tag ||
-                    (key as Context.Tag<unknown, unknown>).Identifier ===
-                      (tag as Context.Tag<unknown, unknown>).Identifier
-                  ) {
-                    // Register the service with its tag
-                    self.serviceInstances.set(tag, value);
-                    found = true;
-                    break;
-                  }
-                }
+        // Also add services from imported modules
+        for (const childModule of self.childModules) {
+          const childMetadata = getModuleMetadata(childModule.moduleClass);
+          if (childMetadata?.exports) {
+            for (const exported of childMetadata.exports) {
+              if (typeof exported === 'function') {
+                availableServices.set(exported.name, exported);
               }
-
-              if (!found) {
-                // Create an instance of the service and register it
-                // Pass logger and config at the end, same as controllers
-                const serviceConstructor = provider as new (...args: unknown[]) => unknown;
-                const serviceInstance = new serviceConstructor(self.logger, self.config);
-                self.serviceInstances.set(tag, serviceInstance);
-              }
-            } catch (error) {
-              // If getServiceTag fails, the provider might not have @Service decorator
-              self.logger.warn(`Failed to get service tag for provider ${provider.name}: ${error}`);
             }
           }
         }

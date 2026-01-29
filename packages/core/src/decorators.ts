@@ -35,7 +35,7 @@ export function injectable() {
  * Automatic dependency detection through smart constructor analysis
  * This function analyzes constructor parameters and matches them with available services
  */
-function autoDetectDependencies(
+export function autoDetectDependencies(
   target: Function,
   availableServices: Map<string, Function>,
 ): Function[] {
@@ -65,6 +65,7 @@ function autoDetectDependencies(
 
     // Try to extract type information
     // Look for patterns like: "private counterService: CounterService"
+    // or "drizzleService" (just the name)
     const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
     if (typeMatch) {
       const typeName = typeMatch[1];
@@ -73,23 +74,29 @@ function autoDetectDependencies(
       if (serviceType) {
         dependencies.push(serviceType);
       }
-    } else {
-      // Try to guess from parameter name
-      const paramNameMatch = param.match(/([a-zA-Z][a-zA-Z0-9]*)/);
-      if (paramNameMatch) {
-        const paramName = paramNameMatch[1];
+    }
 
-        // Convert camelCase service name to PascalCase class name
-        // e.g., counterService -> CounterService
-        const guessedTypeName =
-          paramName
-            .replace(/Service$/, '') // Remove Service suffix if present
-            .replace(/^[a-z]/, (c) => c.toUpperCase()) + 'Service';
+    // Always try to guess from parameter name as well
+    const paramNameMatch = param.match(/([a-zA-Z][a-zA-Z0-9]*)/);
+    if (paramNameMatch) {
+      const paramName = paramNameMatch[1];
 
-        const serviceType = availableServices.get(guessedTypeName);
-        if (serviceType) {
-          dependencies.push(serviceType);
-        }
+      // Convert camelCase service name to PascalCase class name
+      // e.g., drizzleService -> DrizzleService
+      let guessedTypeName = paramName;
+
+      // If it ends with Service, capitalize first letter
+      if (paramName.endsWith('Service')) {
+        guessedTypeName = paramName.replace(/^[a-z]/, (c) => c.toUpperCase());
+      } else {
+        // Add Service suffix and capitalize
+        guessedTypeName =
+          paramName.replace(/^[a-z]/, (c) => c.toUpperCase()) + 'Service';
+      }
+
+      const serviceType = availableServices.get(guessedTypeName);
+      if (serviceType && !dependencies.includes(serviceType)) {
+        dependencies.push(serviceType);
       }
     }
   }

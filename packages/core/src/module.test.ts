@@ -252,8 +252,8 @@ describe('OneBunModule', () => {
       // Access private method via type assertion
       const resolved = (module as any).resolveDependencyByType(TestService);
       
-      // When no instances match, it should return undefined or null
-      expect(resolved === undefined || resolved === null).toBe(true);
+      // Service should now be created and resolvable via DI
+      expect(resolved).toBeInstanceOf(TestService);
     });
 
     test('should resolve dependency by name (deprecated)', () => {
