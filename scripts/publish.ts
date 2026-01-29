@@ -421,8 +421,8 @@ async function main(): Promise<void> {
   // Step 5: Check for secrets (warning only)
   await checkForSecrets();
 
-  // Step 6: Get changed packages
-  log.step('Detecting changed packages...');
+  // Step 6: Get packages to process
+  log.step('Detecting packages to publish...');
 
   const lastRef = await getLastPublishRef();
   const changedFiles = lastRef ? await getChangedFiles(lastRef) : ['packages/'];
@@ -434,22 +434,40 @@ async function main(): Promise<void> {
     pkg.hasChanges = changedFiles.some((file) => file.startsWith(pkgDir));
   }
 
-  const changedPackages = allPackages.filter((p) => p.hasChanges);
+  // Check which packages need publishing (not yet in npm or have changes)
+  const packagesToProcess: PackageInfo[] = [];
 
-  if (changedPackages.length === 0) {
-    log.info('No packages have changes since last publish');
+  for (const pkg of allPackages) {
+    const publishedVersion = await getPublishedVersion(pkg.name);
+
+    if (publishedVersion === null) {
+      // Not published yet - always include
+      pkg.hasChanges = true;
+      packagesToProcess.push(pkg);
+    } else if (pkg.hasChanges) {
+      // Has changes since last tag
+      packagesToProcess.push(pkg);
+    } else if (compareVersions(pkg.version, publishedVersion) > 0) {
+      // Version bumped but no git changes detected (edge case)
+      pkg.hasChanges = true;
+      packagesToProcess.push(pkg);
+    }
+  }
+
+  if (packagesToProcess.length === 0) {
+    log.info('No packages need publishing');
     return;
   }
 
-  log.info(`Found ${changedPackages.length} changed package(s):`);
-  changedPackages.forEach((p) => log.dim(`  - ${p.name}@${p.version}`));
+  log.info(`Found ${packagesToProcess.length} package(s) to process:`);
+  packagesToProcess.forEach((p) => log.dim(`  - ${p.name}@${p.version}`));
 
-  // Step 7: Process each changed package
+  // Step 7: Process each package
   log.step('Processing packages...');
 
   const results: PublishResult[] = [];
 
-  for (const pkg of changedPackages) {
+  for (const pkg of packagesToProcess) {
     const publishedVersion = await getPublishedVersion(pkg.name);
 
     if (publishedVersion === null) {
