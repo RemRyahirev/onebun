@@ -28,7 +28,7 @@ describe('DrizzleService', () => {
     originalDbType = process.env.DB_TYPE;
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     // Restore original env vars at the end of all tests
     if (originalDbUrl !== undefined) {
       process.env.DB_URL = originalDbUrl;
@@ -41,13 +41,12 @@ describe('DrizzleService', () => {
       delete process.env.DB_TYPE;
     }
 
-    afterAll(async () => {
-      try {
-        await Bun.file('./test.db').unlink();
-      } catch (_) {
-
-      }
-    });
+    // Clean up test database file
+    try {
+      await Bun.file('./test.db').unlink();
+    } catch {
+      // Ignore if file doesn't exist
+    }
   });
 
   beforeEach(() => {
