@@ -1,20 +1,20 @@
-name: Publish
+name: CI & Publish
 
 on:
   push:
     branches:
       - master
-    paths:
-      - 'packages/**/package.json'  # Запускается при изменении версии в любом пакете
-      - 'package.json'              # Или при изменении корневого package.json
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:  # Или вручную через UI
 
 permissions:
   id-token: write  # Required for npm OIDC trusted publishing
-  contents: read
+  contents: write  # Required for git tags
 
 jobs:
-  publish:
+  ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -37,8 +37,13 @@ jobs:
       - name: Type check
         run: bunx tsc --noEmit
 
+      - name: Lint
+        run: bunx eslint packages/
+
       - name: Test
         run: bun test
 
       - name: Publish packages
+        # Publish only on push to master or manual trigger (not on PRs)
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch'
         run: bun run publish:packages
