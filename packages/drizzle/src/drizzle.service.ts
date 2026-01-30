@@ -448,7 +448,11 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    * Close database connection
    */
   async close(): Promise<void> {
-    await this.waitForInit();
+    // Only wait for init if there's something to close
+    // This prevents hanging when close() is called on an uninitialized service
+    if (this.postgresClient || this.sqliteClient || this.initialized) {
+      await this.waitForInit();
+    }
 
     if (this.postgresClient) {
       // Bun.SQL uses close() instead of end()

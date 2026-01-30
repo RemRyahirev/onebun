@@ -2,8 +2,11 @@ name: Publish
 
 on:
   push:
-    tags:
-      - 'v*'  # Запускается при пуше тега v0.1.0, v1.0.0, etc.
+    branches:
+      - master
+    paths:
+      - 'packages/**/package.json'  # Запускается при изменении версии в любом пакете
+      - 'package.json'              # Или при изменении корневого package.json
   workflow_dispatch:  # Или вручную через UI
 
 permissions:
