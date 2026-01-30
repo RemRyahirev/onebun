@@ -185,7 +185,34 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
 
   constructor(...args: unknown[]) {
     super(...args);
-    this.initPromise = this.autoInitialize();
+    // Only start auto-initialization if there's configuration to use
+    // Check synchronously to avoid unnecessary async work
+    if (this.shouldAutoInitialize()) {
+      this.initPromise = this.autoInitialize();
+    }
+  }
+
+  /**
+   * Check synchronously if auto-initialization should be attempted
+   * This avoids starting async work when there's no configuration
+   */
+  private shouldAutoInitialize(): boolean {
+    // Check if module options exist (requires sync require)
+    try {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleModule: DrizzleModuleClass } = require('./drizzle.module');
+      const options = DrizzleModuleClass.getOptions();
+      if (options?.connection) {
+        return true;
+      }
+    } catch {
+      // Module not available
+    }
+
+    // Check if DB_URL env var is set
+    const dbUrl = process.env.DB_URL;
+
+    return Boolean(dbUrl && dbUrl.trim() !== '');
   }
 
   /**
@@ -448,9 +475,11 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    * Close database connection
    */
   async close(): Promise<void> {
-    // Only wait for init if there's something to close
+    // Only wait for init if there are actual database clients to close
     // This prevents hanging when close() is called on an uninitialized service
-    if (this.postgresClient || this.sqliteClient || this.initialized) {
+    // Note: we check clients directly, not `initialized` flag, because autoInitialize()
+    // may still be running and `initialized` could be false while initPromise is pending
+    if (this.postgresClient || this.sqliteClient) {
       await this.waitForInit();
     }
 

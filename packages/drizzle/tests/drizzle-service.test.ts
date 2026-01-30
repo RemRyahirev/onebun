@@ -77,10 +77,18 @@ describe('DrizzleService', () => {
       // Ignore if module not available
     }
 
-    try {
-      await service.close();
-    } catch {
-      // Ignore errors during cleanup
+    // Wait for any pending autoInitialize to complete (with timeout to prevent hanging)
+    // This is necessary because autoInitialize runs in constructor and may still be pending
+    if (service) {
+      try {
+        await Promise.race([
+          service.waitForInit(),
+          new Promise((resolve) => setTimeout(resolve, 100)), // 100ms timeout
+        ]);
+        await service.close();
+      } catch {
+        // Ignore errors during cleanup
+      }
     }
   });
 
