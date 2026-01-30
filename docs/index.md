@@ -1,6 +1,35 @@
-# OneBun Framework - AI Documentation
+---
+layout: home
 
-> **Purpose**: This documentation is designed for AI agents to understand and implement applications using the OneBun framework. It provides structured, code-focused guidance with clear patterns and complete examples.
+hero:
+  name: OneBun Framework
+  text: Bun.js Framework with Effect.ts
+  tagline: NestJS-inspired framework with one default solution per problem. Promise-based API for client code, Effect.js internally.
+  image:
+    src: /logo.png
+    alt: OneBun Framework
+  actions:
+    - theme: brand
+      text: Get Started
+      link: /getting-started
+    - theme: alt
+      text: View on GitHub
+      link: https://github.com/RemRyahirev/onebun
+
+features:
+  - icon: 🚀
+    title: Bun.js Native
+    details: Built specifically for Bun.js runtime. Fast startup, native TypeScript support, and modern JavaScript features.
+  - icon: 🎯
+    title: One Solution per Problem
+    details: Opinionated framework that provides a single, well-designed solution for each common problem. Less decisions, more productivity.
+  - icon: 🔧
+    title: Effect.ts Powered
+    details: Leverages Effect.ts internally for robust error handling, dependency injection, and composable side effects.
+  - icon: 📦
+    title: Modular Architecture
+    details: NestJS-inspired module system with decorators, controllers, and services. Familiar patterns, modern implementation.
+---
 
 ## Quick Reference
 
@@ -14,7 +43,7 @@
 
 ## Core Concepts
 
-### 1. Application Structure
+### Application Structure
 
 ```
 my-app/
@@ -34,7 +63,7 @@ my-app/
 └── tsconfig.json
 ```
 
-### 2. Decorator System
+### Decorator System
 
 | Decorator | Purpose | Example |
 |-----------|---------|---------|
@@ -45,62 +74,44 @@ my-app/
 | `@Body()`, `@Param()`, `@Query()` | Parameter injection | `@Param('id') id: string` |
 | `@Inject()` | Explicit dependency injection | `@Inject(UserService)` |
 
-### 3. Base Classes
+### Base Classes
 
 | Class | Purpose | Inherit When |
 |-------|---------|--------------|
 | `BaseController` | HTTP controller functionality | Creating any controller |
 | `BaseService` | Service with logger and config | Creating any service |
 
-## Documentation Structure
-
-### [Getting Started](./getting-started.md)
-Step-by-step guide to create your first OneBun application.
-
-### [Architecture](./architecture.md)
-Deep dive into framework architecture, DI system, and Effect.js integration.
-
-### API Reference
-- [Core Package](./api/core.md) - Application, modules, lifecycle
-- [Decorators](./api/decorators.md) - All available decorators
-- [Controllers](./api/controllers.md) - HTTP controllers and routing
-- [Services](./api/services.md) - Service layer and DI
-- [Validation](./api/validation.md) - ArkType-based validation
-- [Environment](./api/envs.md) - Type-safe configuration
-- [Logger](./api/logger.md) - Structured logging
-- [HTTP Client](./api/requests.md) - External API calls
-- [Cache](./api/cache.md) - In-memory and Redis caching
-- [Database](./api/drizzle.md) - Drizzle ORM integration
-- [Metrics](./api/metrics.md) - Prometheus metrics
-- [Tracing](./api/trace.md) - Distributed tracing
-
-### Examples
-- [Basic Application](./examples/basic-app.md) - Minimal working app
-- [CRUD API](./examples/crud-api.md) - Full CRUD with validation
-- [Multi-Service](./examples/multi-service.md) - Microservices pattern
-
 ## Minimal Working Example
 
 ```typescript
-// src/config.ts
-import { Env } from '@onebun/core';
+import {
+  BaseController,
+  BaseService,
+  Controller,
+  Env,
+  Get,
+  Module,
+  OneBunApplication,
+  Post,
+  Body,
+  Service,
+} from '@onebun/core';
 
-export const envSchema = {
+// ============================================================================
+// 1. Environment Schema (src/config.ts)
+// ============================================================================
+const envSchema = {
   server: {
     port: Env.number({ default: 3000 }),
     host: Env.string({ default: '0.0.0.0' }),
   },
 };
 
-export type AppConfig = typeof envSchema;
-```
-
-```typescript
-// src/counter.service.ts
-import { BaseService, Service } from '@onebun/core';
-
+// ============================================================================
+// 2. Service Layer (src/counter.service.ts)
+// ============================================================================
 @Service()
-export class CounterService extends BaseService {
+class CounterService extends BaseService {
   private value = 0;
 
   getValue(): number {
@@ -113,15 +124,12 @@ export class CounterService extends BaseService {
     return this.value;
   }
 }
-```
 
-```typescript
-// src/counter.controller.ts
-import { BaseController, Controller, Get, Post, Body } from '@onebun/core';
-import { CounterService } from './counter.service';
-
+// ============================================================================
+// 3. Controller Layer (src/counter.controller.ts)
+// ============================================================================
 @Controller('/api/counter')
-export class CounterController extends BaseController {
+class CounterController extends BaseController {
   constructor(private counterService: CounterService) {
     super();
   }
@@ -138,27 +146,19 @@ export class CounterController extends BaseController {
     return this.success({ value: newValue });
   }
 }
-```
 
-```typescript
-// src/app.module.ts
-import { Module } from '@onebun/core';
-import { CounterController } from './counter.controller';
-import { CounterService } from './counter.service';
-
+// ============================================================================
+// 4. Module Definition (src/app.module.ts)
+// ============================================================================
 @Module({
   controllers: [CounterController],
   providers: [CounterService],
 })
-export class AppModule {}
-```
+class AppModule {}
 
-```typescript
-// src/index.ts
-import { OneBunApplication } from '@onebun/core';
-import { AppModule } from './app.module';
-import { envSchema } from './config';
-
+// ============================================================================
+// 5. Application Entry Point (src/index.ts)
+// ============================================================================
 const app = new OneBunApplication(AppModule, {
   port: 3000,
   envSchema,
@@ -169,10 +169,12 @@ const app = new OneBunApplication(AppModule, {
 app.start();
 ```
 
-## Key Patterns for AI Agents
+## Key Patterns
 
-### 1. Response Format
+### Response Format
+
 Always use standardized responses:
+
 ```typescript
 // Success
 return this.success(data);           // { success: true, result: data }
@@ -181,8 +183,10 @@ return this.success(data);           // { success: true, result: data }
 return this.error('message', 400);   // { success: false, code: 400, message: 'message' }
 ```
 
-### 2. Dependency Injection
+### Dependency Injection
+
 Dependencies are auto-detected from constructor:
+
 ```typescript
 @Controller('/users')
 export class UserController extends BaseController {
@@ -193,7 +197,8 @@ export class UserController extends BaseController {
 }
 ```
 
-### 3. Validation with ArkType
+### Validation with ArkType
+
 ```typescript
 import { type } from 'arktype';
 
@@ -207,12 +212,6 @@ const createUserSchema = type({
 async createUser(@Body(createUserSchema) user: typeof createUserSchema.infer) {
   // user is validated and typed
 }
-```
-
-### 4. Environment Configuration
-```typescript
-// Access config in service/controller
-const port = this.config.get('server.port');
 ```
 
 ## Commands

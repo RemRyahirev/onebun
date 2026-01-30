@@ -139,10 +139,11 @@ const app = new OneBunApplication(AppModule, {
     // Default separator for arrays (default: ',')
     defaultArraySeparator: ',',
 
-    // Override specific values (takes precedence)
+    // Override specific values using env variable names (takes precedence)
+    // Note: Use actual env variable names, not dot-notation paths
     valueOverrides: {
-      'server.port': 4000,
-      'app.debug': true,
+      PORT: 4000,        // Overrides server.port (env: 'PORT')
+      DEBUG: true,       // Overrides app.debug (env: 'DEBUG')
     },
   },
 });

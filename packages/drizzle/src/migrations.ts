@@ -7,10 +7,10 @@ import { spawnSync } from 'bun';
  * using pgTable() or sqliteTable(). The schemas should be exported from schema files
  * specified in schemaPath.
  * 
- * @param options - Migration generation options
- * @param options.schemaPath - Path or paths to schema files containing pgTable/sqliteTable definitions
- * @param options.migrationsFolder - Output folder for migration files
- * @param options.dialect - Database dialect (sqlite or postgresql)
+ * @param options - Migration generation options:
+ *   - schemaPath: Path or paths to schema files containing pgTable/sqliteTable definitions
+ *   - migrationsFolder: Output folder for migration files
+ *   - dialect: Database dialect (sqlite or postgresql)
  * 
  * @example
  * ```typescript
@@ -73,10 +73,10 @@ export default {
  * This function applies schema changes directly to the database without creating
  * migration files. Useful for development, but not recommended for production.
  * 
- * @param options - Schema push options
- * @param options.schemaPath - Path(s) to schema files containing pgTable/sqliteTable definitions
- * @param options.dialect - Database dialect ('sqlite' or 'postgresql')
- * @param options.connectionString - Database connection string
+ * @param options - Schema push options:
+ *   - schemaPath: Path(s) to schema files containing pgTable/sqliteTable definitions
+ *   - dialect: Database dialect ('sqlite' or 'postgresql')
+ *   - connectionString: Database connection string
  * 
  * @example
  * ```typescript

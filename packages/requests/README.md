@@ -148,7 +148,7 @@ const program = pipe(
   client.getEffect<User[]>('/users'),
   Effect.flatMap(response => 
     response.success 
-      ? Effect.succeed(response.data!)
+      ? Effect.succeed(response.result!)
       : Effect.fail(response.error!)
   ),
   Effect.tap(users => Effect.sync(() => console.log('Users:', users))),
@@ -337,7 +337,7 @@ const program = pipe(
   client.getEffect<User>('/users/1'),
   Effect.flatMap(response => 
     response.success 
-      ? Effect.succeed(response.data!)
+      ? Effect.succeed(response.result!)
       : Effect.fail(response.error!)
   ),
   Effect.catchAll(error => {
@@ -419,4 +419,4 @@ Where:
 
 ## License
 
-MIT License - see LICENSE file for details. 
+[LGPL-3.0](../../LICENSE) 

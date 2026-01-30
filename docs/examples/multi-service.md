@@ -357,12 +357,12 @@ const app = new MultiServiceApplication({
     users: {
       module: UserModule,
       port: 3001,
-      routePrefix: 'users',
+      routePrefix: true, // Uses 'users' as route prefix
     },
     orders: {
       module: OrderModule,
       port: 3002,
-      routePrefix: 'orders',
+      routePrefix: true, // Uses 'orders' as route prefix
       // Orders service can have different env overrides
       envOverrides: {
         // Use different database for orders

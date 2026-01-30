@@ -1,9 +1,19 @@
 {
   "name": "@onebun/trace",
-  "version": "0.1.0",
-  "description": "OpenTelemetry-compatible tracing module for OneBun framework",
+  "version": "0.1.1",
+  "description": "OpenTelemetry-compatible tracing for OneBun framework - distributed tracing support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "tracing",
+    "opentelemetry",
+    "distributed-tracing",
+    "observability",
+    "bun",
+    "typescript",
+    "effect"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

@@ -167,23 +167,56 @@ const schema = {
 
 ### Nested Configuration
 
+For nested schemas, use `EnvSchema<T>` type annotation for proper type inference:
+
 ```typescript
-const schema = {
+import { TypedEnv, Env, type EnvSchema } from '@onebun/envs';
+
+// Define the type structure for nested configuration
+const schema: EnvSchema<{
   server: {
-    http: {
-      port: Env.number({ default: 3000 }),
-      host: Env.string({ default: 'localhost' })
-    },
-    https: {
-      port: Env.number({ default: 3443 }),
-      cert: Env.string({ sensitive: true })
-    }
-  }
+    port: number;
+    host: string;
+  };
+  database: {
+    host: string;
+    password: string;
+  };
+}> = {
+  server: {
+    port: Env.number({ default: 3000 }),
+    host: Env.string({ default: 'localhost' }),
+  },
+  database: {
+    host: Env.string({ default: '127.0.0.1' }),
+    password: Env.string({ sensitive: true }),
+  },
 };
 
-// Access nested values
-const httpPort = config.get('server.http.port');
-const httpsCert = config.get('server.https.cert');
+const config = await TypedEnv.createAsync(schema);
+
+// Access nested values with full type safety
+const port = config.get('server.port');     // number
+const dbHost = config.get('database.host'); // string
+```
+
+**Environment Variable Naming:**
+
+Nested paths are converted to uppercase with underscores:
+
+| Schema Path | Environment Variable |
+|-------------|---------------------|
+| `server.port` | `SERVER_PORT` |
+| `database.host` | `DATABASE_HOST` |
+| `database.password` | `DATABASE_PASSWORD` |
+
+You can override the auto-generated name with the `env` option:
+
+```typescript
+port: Env.number({ 
+  default: 3000, 
+  env: 'PORT'  // Uses PORT instead of SERVER_PORT
+})
 ```
 
 ## Error Handling
@@ -203,4 +236,4 @@ try {
 
 ## License
 
-MIT 
+[LGPL-3.0](../../LICENSE)

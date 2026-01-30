@@ -24,12 +24,15 @@ import * as schema from './schema';
 
 @Module({
   imports: [
-    DrizzleModule.register({
-      type: DatabaseType.SQLite,
-      sqlite: {
-        filename: './data/app.db',
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.SQLITE,
+        options: {
+          url: './data/app.db',
+        },
       },
-      schema,
+      autoMigrate: true,
+      migrationsFolder: './drizzle',
     }),
   ],
   controllers: [UserController],
@@ -41,19 +44,22 @@ export class UserModule {}
 ### PostgreSQL Setup
 
 ```typescript
-DrizzleModule.register({
-  type: DatabaseType.PostgreSQL,
-  postgres: {
-    connectionString: process.env.DATABASE_URL,
-    // Or individual options:
-    host: 'localhost',
-    port: 5432,
-    database: 'myapp',
-    user: 'postgres',
-    password: 'password',
-    ssl: process.env.NODE_ENV === 'production',
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.POSTGRESQL,
+    options: {
+      connectionString: process.env.DATABASE_URL,
+      // Or individual options:
+      host: 'localhost',
+      port: 5432,
+      database: 'myapp',
+      user: 'postgres',
+      password: 'password',
+      ssl: process.env.NODE_ENV === 'production',
+    },
   },
-  schema,
+  autoMigrate: true,
+  migrationsFolder: './drizzle',
 })
 ```
 
@@ -82,35 +88,46 @@ export type InsertUser = typeof users.$inferInsert;
 
 ```typescript
 // schema/users.ts
-import { pgTable, text, integer, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
+  // Use generatedAlwaysAsIdentity() for auto-increment integer primary key
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   name: text('name').notNull(),
   email: text('email').notNull().unique(),
   age: integer('age'),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
-  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { mode: 'date' }).notNull().defaultNow(),
 });
 
 export type User = typeof users.$inferSelect;
 export type InsertUser = typeof users.$inferInsert;
 ```
 
+**Alternative with UUID:**
+```typescript
+import { pgTable, text, integer, timestamp, uuid } from 'drizzle-orm/pg-core';
+
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  // ... rest of schema
+});
+```
+
 ### Relations
 
 ```typescript
 // schema/posts.ts
-import { pgTable, text, uuid, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 import { users } from './users';
 
 export const posts = pgTable('posts', {
-  id: uuid('id').primaryKey().defaultRandom(),
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   title: text('title').notNull(),
   content: text('content'),
-  authorId: uuid('author_id').notNull().references(() => users.id),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
+  authorId: integer('author_id').notNull().references(() => users.id),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
 });
 
 export const postsRelations = relations(posts, ({ one }) => ({
@@ -447,23 +464,23 @@ await pushSchema({
 
 ```typescript
 // schema/index.ts
-import { pgTable, text, uuid, timestamp, integer } from 'drizzle-orm/pg-core';
+import { pgTable, text, timestamp, integer } from 'drizzle-orm/pg-core';
 import { relations } from 'drizzle-orm';
 
 export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   name: text('name').notNull(),
   email: text('email').notNull().unique(),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
 });
 
 export const posts = pgTable('posts', {
-  id: uuid('id').primaryKey().defaultRandom(),
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   title: text('title').notNull(),
   content: text('content'),
-  authorId: uuid('author_id').notNull().references(() => users.id),
+  authorId: integer('author_id').notNull().references(() => users.id),
   views: integer('views').default(0),
-  createdAt: timestamp('created_at').notNull().defaultNow(),
+  createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -571,19 +588,21 @@ export class UserService extends BaseService {
 // user.module.ts
 import { Module } from '@onebun/core';
 import { DrizzleModule, DatabaseType } from '@onebun/drizzle';
-import { CacheModule } from '@onebun/cache';
-import * as schema from './schema';
+import { CacheModule, CacheType } from '@onebun/cache';
 
 @Module({
   imports: [
-    DrizzleModule.register({
-      type: DatabaseType.PostgreSQL,
-      postgres: {
-        connectionString: process.env.DATABASE_URL,
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.POSTGRESQL,
+        options: {
+          connectionString: process.env.DATABASE_URL,
+        },
       },
-      schema,
+      autoMigrate: true,
+      migrationsFolder: './drizzle',
     }),
-    CacheModule.register({ type: 'memory', ttl: 300 }),
+    CacheModule.forRoot({ type: CacheType.MEMORY, cacheOptions: { defaultTtl: 300000 } }),
   ],
   controllers: [UserController],
   providers: [UserService, UserRepository],

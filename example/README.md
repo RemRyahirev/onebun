@@ -24,7 +24,7 @@ export class UserService extends BaseService {
   async getUsers(): Promise<User[]> {
     try {
       const response = await this.client.get<User[]>('/users');
-      return response.success ? response.data : [];
+      return response.success ? response.result : [];
     } catch (error) {
       this.logger.error('Failed to fetch users', error);
       return [];
@@ -34,7 +34,7 @@ export class UserService extends BaseService {
   async createUser(userData: CreateUserRequest): Promise<User> {
     const response = await this.client.post<User>('/users', userData);
     if (response.success) {
-      return response.data;
+      return response.result;
     }
     throw new Error(`Failed to create user: ${response.error}`);
   }
@@ -53,7 +53,7 @@ export class UserService extends BaseService {
   getUsersEffect(): Effect.Effect<User[]> {
     return pipe(
       this.client.getEffect<User[]>('/users'),
-      Effect.map(response => response.success ? response.data : []),
+      Effect.map(response => response.success ? response.result : []),
       Effect.catchAll(error => {
         return pipe(
           Effect.sync(() => this.logger.error('Failed to fetch users', error)),
@@ -68,7 +68,7 @@ export class UserService extends BaseService {
       this.client.postEffect<User>('/users', userData),
       Effect.flatMap(response => 
         response.success 
-          ? Effect.succeed(response.data)
+          ? Effect.succeed(response.result)
           : Effect.fail(new RequestError(`Failed to create user: ${response.error}`))
       )
     );

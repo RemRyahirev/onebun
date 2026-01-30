@@ -26,10 +26,11 @@ Choose the function that matches your database type configured in step 2.
 **For PostgreSQL:**
 ```typescript
 // src/schema/users.ts
-import { pgTable, serial, text, integer, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
 
 export const users = pgTable('users', {
-  id: serial('id').primaryKey(),
+  // Use generatedAlwaysAsIdentity() for auto-increment primary key
+  id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
   name: text('name').notNull(),
   email: text('email').notNull().unique(),
   age: integer('age'),
@@ -281,3 +282,7 @@ DB_MIGRATIONS_FOLDER=./drizzle
 DB_AUTO_MIGRATE=true
 DB_LOG_QUERIES=false
 ```
+
+## License
+
+[LGPL-3.0](../../LICENSE)

@@ -135,24 +135,26 @@ const client = createHttpClient({
 ```typescript
 const client = createHttpClient({
   baseUrl: 'https://api.example.com',
-  retry: {
+  retries: {
     // Number of retry attempts
-    times: 3,
+    max: 3,
 
-    // Retry strategy: 'fixed', 'linear', 'exponential'
-    strategy: 'exponential',
+    // Backoff strategy: 'fixed', 'linear', 'exponential'
+    backoff: 'exponential',
 
     // Base delay in milliseconds
     delay: 1000,
 
-    // Maximum delay (for exponential)
-    maxDelay: 30000,
+    // Multiplier for exponential backoff (default: 2)
+    factor: 2,
 
     // HTTP status codes to retry
     retryOn: [408, 429, 500, 502, 503, 504],
 
-    // Don't retry on these methods
-    skipMethods: ['POST', 'PUT', 'DELETE'],
+    // Callback on retry
+    onRetry: (error, attempt) => {
+      console.log(`Retry attempt ${attempt}:`, error);
+    },
   },
 });
 ```
@@ -162,15 +164,15 @@ const client = createHttpClient({
 ```typescript
 // Fixed delay
 // Retries after: 1000ms, 1000ms, 1000ms
-retry: { strategy: 'fixed', delay: 1000 }
+retries: { max: 3, backoff: 'fixed', delay: 1000 }
 
 // Linear backoff
 // Retries after: 1000ms, 2000ms, 3000ms
-retry: { strategy: 'linear', delay: 1000 }
+retries: { max: 3, backoff: 'linear', delay: 1000 }
 
 // Exponential backoff
 // Retries after: 1000ms, 2000ms, 4000ms, 8000ms...
-retry: { strategy: 'exponential', delay: 1000, maxDelay: 30000 }
+retries: { max: 3, backoff: 'exponential', delay: 1000, factor: 2 }
 ```
 
 ## Error Handling
@@ -247,7 +249,7 @@ interface RequestConfig {
   body?: unknown;
 
   /** Override retry config for this request */
-  retry?: RetryConfig;
+  retries?: RetryConfig;
 
   /** Override auth for this request */
   auth?: AuthConfig;
@@ -289,9 +291,9 @@ export class ExternalApiService extends BaseService {
       type: 'bearer',
       token: process.env.EXTERNAL_API_TOKEN!,
     },
-    retry: {
-      times: 3,
-      strategy: 'exponential',
+    retries: {
+      max: 3,
+      backoff: 'exponential',
       delay: 1000,
     },
   });
@@ -424,11 +426,11 @@ export class UserApiService extends BaseService {
       serviceId: 'my-service',
       secretKey: process.env.SERVICE_SECRET!,
     },
-    retry: {
-      times: 3,
-      strategy: 'exponential',
+    retries: {
+      max: 3,
+      backoff: 'exponential',
       delay: 1000,
-      maxDelay: 10000,
+      factor: 2,
       retryOn: [408, 429, 500, 502, 503, 504],
     },
   });

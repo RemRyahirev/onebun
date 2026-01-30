@@ -1,9 +1,19 @@
 {
   "name": "@onebun/requests",
-  "version": "0.1.0",
-  "description": "Unified HTTP request service for OneBun framework",
+  "version": "0.1.1",
+  "description": "Unified HTTP client for OneBun framework - retries, auth, tracing, and metrics",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "http-client",
+    "requests",
+    "fetch",
+    "retry",
+    "bun",
+    "typescript",
+    "effect"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

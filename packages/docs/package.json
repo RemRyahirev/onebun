@@ -1,9 +1,18 @@
 {
   "name": "@onebun/docs",
-  "version": "0.1.0",
-  "description": "Documentation generation package for OneBun framework (OpenAPI, AsyncAPI, Pretty docs)",
+  "version": "0.1.1",
+  "description": "Documentation generation for OneBun framework - OpenAPI, Swagger UI",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "openapi",
+    "swagger",
+    "documentation",
+    "api-docs",
+    "bun",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

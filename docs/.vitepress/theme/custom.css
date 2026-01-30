@@ -1,0 +1,12 @@
+/* Center logo vertically in navbar */
+.VPNavBarTitle .logo {
+  height: 28px;
+  width: auto;
+  vertical-align: middle;
+}
+
+/* Adjust logo in sidebar if needed */
+.VPNavBarTitle {
+  display: flex;
+  align-items: center;
+}

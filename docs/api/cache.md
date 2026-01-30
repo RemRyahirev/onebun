@@ -15,15 +15,17 @@ OneBun provides a caching module with support for:
 
 ```typescript
 import { Module } from '@onebun/core';
-import { CacheModule } from '@onebun/cache';
+import { CacheModule, CacheType } from '@onebun/cache';
 import { UserController } from './user.controller';
 import { UserService } from './user.service';
 
 @Module({
   imports: [
-    CacheModule.register({
-      type: 'memory',  // 'memory' or 'redis'
-      ttl: 300,        // Default TTL in seconds
+    CacheModule.forRoot({
+      type: CacheType.MEMORY,  // CacheType.MEMORY or CacheType.REDIS
+      cacheOptions: {
+        defaultTtl: 300000,   // Default TTL in milliseconds
+      },
     }),
   ],
   controllers: [UserController],
@@ -35,14 +37,16 @@ export class UserModule {}
 ### Redis Configuration
 
 ```typescript
-CacheModule.register({
-  type: 'redis',
-  ttl: 300,
-  redis: {
+CacheModule.forRoot({
+  type: CacheType.REDIS,
+  cacheOptions: {
+    defaultTtl: 300000,  // TTL in milliseconds
+  },
+  redisOptions: {
     host: process.env.REDIS_HOST || 'localhost',
     port: parseInt(process.env.REDIS_PORT || '6379'),
     password: process.env.REDIS_PASSWORD,
-    db: 0,
+    database: 0,
   },
 })
 ```
@@ -50,12 +54,12 @@ CacheModule.register({
 ### Memory Configuration
 
 ```typescript
-CacheModule.register({
-  type: 'memory',
-  ttl: 300,
-  memory: {
-    maxSize: 1000,        // Maximum items
-    cleanupInterval: 60,  // Cleanup every 60 seconds
+CacheModule.forRoot({
+  type: CacheType.MEMORY,
+  cacheOptions: {
+    defaultTtl: 300000,       // TTL in milliseconds
+    maxSize: 1000,            // Maximum items
+    cleanupInterval: 60000,   // Cleanup every 60 seconds (ms)
   },
 })
 ```
@@ -78,7 +82,7 @@ export class UserService extends BaseService {
 
 ### Methods
 
-#### get<T>()
+#### `get<T>()`
 
 Retrieve value from cache.
 
@@ -154,7 +158,7 @@ async clear(): Promise<void>
 await this.cacheService.clear();
 ```
 
-#### getMany<T>()
+#### `getMany<T>()`
 
 Get multiple values at once.
 
@@ -357,13 +361,15 @@ interface CacheStats {
 For Effect.js-based usage:
 
 ```typescript
-import { makeCacheService, cacheServiceTag } from '@onebun/cache';
+import { createCacheModule, cacheServiceTag, CacheType } from '@onebun/cache';
 import { Effect, pipe } from 'effect';
 
 // Create service
-const cacheLayer = makeCacheService({
-  type: 'memory',
-  ttl: 300,
+const cacheLayer = createCacheModule({
+  type: CacheType.MEMORY,
+  cacheOptions: {
+    defaultTtl: 300000,
+  },
 });
 
 // Use in Effect
@@ -384,7 +390,7 @@ Effect.runPromise(
 
 ```typescript
 import { Module, Controller, BaseController, Service, BaseService, Get, Post, Delete, Param, Body } from '@onebun/core';
-import { CacheModule, CacheService } from '@onebun/cache';
+import { CacheModule, CacheService, CacheType } from '@onebun/cache';
 import { type } from 'arktype';
 
 // Types
@@ -501,10 +507,10 @@ export class ProductController extends BaseController {
 // Module
 @Module({
   imports: [
-    CacheModule.register({
-      type: 'memory',
-      ttl: 300,
-      memory: {
+    CacheModule.forRoot({
+      type: CacheType.MEMORY,
+      cacheOptions: {
+        defaultTtl: 300000,
         maxSize: 1000,
       },
     }),

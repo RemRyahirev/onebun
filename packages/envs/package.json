@@ -1,9 +1,19 @@
 {
   "name": "@onebun/envs",
-  "version": "0.1.0",
-  "description": "Environment variables management package for OneBun framework",
+  "version": "0.1.1",
+  "description": "Environment variables management for OneBun framework - typed config with validation",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "environment",
+    "config",
+    "dotenv",
+    "validation",
+    "bun",
+    "typescript",
+    "effect"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

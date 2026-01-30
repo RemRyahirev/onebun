@@ -1,10 +1,47 @@
-# OneBun Core Package
+# @onebun/core
 
-This package provides the core functionality for the OneBun framework.
+Core package for OneBun framework providing decorators, dependency injection, and modular architecture.
 
 ## Features
 
-### Route Decorators
+- 🎯 **Modular Architecture** - Organize code in modules with controllers and services
+- 🏷️ **Declarative Routes** - Use decorators (@Controller, @Get, @Post, etc.)
+- 💉 **Type-safe DI** - Effect.Context and Layer for dependency management
+- ✅ **Built-in Validation** - Schema-based validation with ArkType integration
+- 🔧 **Middleware Support** - Chainable middleware with decorators
+- 📦 **Service Pattern** - BaseService and BaseController for standardized code
+- 🔄 **Multi-service Support** - Run multiple services in one process
+- ⚡ **Effect.js Integration** - Full Effect.js ecosystem support
+
+## Installation
+
+```bash
+bun add @onebun/core
+```
+
+## Quick Start
+
+```typescript
+import { OneBunApplication, Controller, Get, Module } from '@onebun/core';
+
+@Controller('/api')
+class AppController {
+  @Get('/hello')
+  async hello() {
+    return { message: 'Hello, OneBun!' };
+  }
+}
+
+@Module({
+  controllers: [AppController],
+})
+class AppModule {}
+
+const app = new OneBunApplication(AppModule);
+await app.start();
+```
+
+## Route Decorators
 
 The OneBun framework provides a set of decorators for defining routes in controllers:
 
@@ -275,3 +312,7 @@ app.start()
 ```
 
 The application automatically creates a logger based on NODE_ENV (development or production) and handles all Effect.js calls internally.
+
+## License
+
+[LGPL-3.0](../../LICENSE)

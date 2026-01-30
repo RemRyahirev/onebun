@@ -1,9 +1,18 @@
 {
   "name": "@onebun/cache",
-  "version": "0.1.0",
-  "description": "Caching module for OneBun framework with in-memory and Redis support",
+  "version": "0.1.1",
+  "description": "Caching module for OneBun framework - in-memory and Redis support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "cache",
+    "redis",
+    "memory-cache",
+    "bun",
+    "typescript",
+    "effect"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

@@ -173,12 +173,12 @@ const multiApp = new MultiServiceApplication({
     users: {
       module: UsersModule,
       port: 3001,
-      routePrefix: 'users',
+      routePrefix: true, // Uses 'users' as route prefix
     },
     orders: {
       module: OrdersModule,
       port: 3002,
-      routePrefix: 'orders',
+      routePrefix: true, // Uses 'orders' as route prefix
       envOverrides: {
         DB_NAME: { value: 'orders_db' },
       },

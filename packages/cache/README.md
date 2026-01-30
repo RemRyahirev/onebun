@@ -489,4 +489,4 @@ For more details, see the [official Bun Redis documentation](https://bun.com/doc
 
 ## License
 
-MIT
+[LGPL-3.0](../../LICENSE)

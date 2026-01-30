@@ -1,9 +1,19 @@
 {
   "name": "@onebun/drizzle",
-  "version": "0.1.0",
-  "description": "Drizzle ORM module for OneBun framework with SQLite and PostgreSQL support",
+  "version": "0.1.1",
+  "description": "Drizzle ORM module for OneBun framework - SQLite and PostgreSQL support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
+  "keywords": [
+    "onebun",
+    "drizzle",
+    "orm",
+    "database",
+    "sqlite",
+    "postgresql",
+    "bun",
+    "typescript"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/RemRyahirev/onebun.git",

@@ -242,4 +242,8 @@ The metrics endpoint is compatible with:
 - **Prometheus** - For scraping and storage
 - **Grafana** - For visualization and dashboards
 - **AlertManager** - For alerting based on metrics
-- Any other Prometheus-compatible monitoring solution 
+- Any other Prometheus-compatible monitoring solution
+
+## License
+
+[LGPL-3.0](../../LICENSE) 

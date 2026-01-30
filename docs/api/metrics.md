@@ -127,23 +127,18 @@ export class OrderService extends BaseService {
 Track cumulative values that only increase.
 
 ```typescript
-// Create counter
-this.metricsService.createCounter({
+// Create counter - returns prom-client Counter object
+const ordersCounter = this.metricsService.createCounter({
   name: 'orders_created_total',
   help: 'Total number of orders created',
   labelNames: ['status', 'payment_method'],
 });
 
-// Increment
-this.metricsService.incrementCounter('orders_created_total', {
-  status: 'completed',
-  payment_method: 'credit_card',
-});
+// Increment using prom-client API
+ordersCounter.inc({ status: 'completed', payment_method: 'credit_card' });
 
 // Increment by value
-this.metricsService.incrementCounter('orders_created_total', {
-  status: 'completed',
-}, 5);
+ordersCounter.inc({ status: 'completed', payment_method: 'credit_card' }, 5);
 ```
 
 ### Gauge
@@ -151,21 +146,21 @@ this.metricsService.incrementCounter('orders_created_total', {
 Track values that can go up and down.
 
 ```typescript
-// Create gauge
-this.metricsService.createGauge({
+// Create gauge - returns prom-client Gauge object
+const pendingGauge = this.metricsService.createGauge({
   name: 'orders_pending',
   help: 'Number of pending orders',
   labelNames: ['priority'],
 });
 
-// Set value
-this.metricsService.setGauge('orders_pending', { priority: 'high' }, 42);
+// Set value using prom-client API
+pendingGauge.set({ priority: 'high' }, 42);
 
 // Increment
-this.metricsService.incrementGauge('orders_pending', { priority: 'high' });
+pendingGauge.inc({ priority: 'high' });
 
 // Decrement
-this.metricsService.decrementGauge('orders_pending', { priority: 'high' });
+pendingGauge.dec({ priority: 'high' });
 ```
 
 ### Histogram
@@ -173,22 +168,20 @@ this.metricsService.decrementGauge('orders_pending', { priority: 'high' });
 Track distributions of values.
 
 ```typescript
-// Create histogram
-this.metricsService.createHistogram({
+// Create histogram - returns prom-client Histogram object
+const processingHistogram = this.metricsService.createHistogram({
   name: 'order_processing_duration_seconds',
   help: 'Order processing duration in seconds',
   labelNames: ['order_type'],
   buckets: [0.1, 0.5, 1, 2, 5, 10],
 });
 
-// Observe value
+// Observe value using prom-client API
 const startTime = Date.now();
 // ... process order ...
 const duration = (Date.now() - startTime) / 1000;
 
-this.metricsService.observeHistogram('order_processing_duration_seconds', {
-  order_type: 'standard',
-}, duration);
+processingHistogram.observe({ order_type: 'standard' }, duration);
 ```
 
 ## Decorator-based Metrics
@@ -230,9 +223,14 @@ export class EmailService extends BaseService {
 ## Service Metrics Pattern
 
 ```typescript
+import type { Counter, Gauge, Histogram } from 'prom-client';
+
 @Service()
 export class PaymentService extends BaseService {
   private metricsService: any;
+  private paymentsCounter?: Counter<string>;
+  private processingHistogram?: Histogram<string>;
+  private queueGauge?: Gauge<string>;
 
   constructor() {
     super();
@@ -245,19 +243,20 @@ export class PaymentService extends BaseService {
   private registerMetrics(): void {
     if (!this.metricsService) return;
 
-    this.metricsService.createCounter({
+    // Store references to metric objects for later use
+    this.paymentsCounter = this.metricsService.createCounter({
       name: 'payments_processed_total',
       help: 'Total number of payments processed',
       labelNames: ['status', 'method'],
     });
 
-    this.metricsService.createHistogram({
+    this.processingHistogram = this.metricsService.createHistogram({
       name: 'payment_processing_seconds',
       help: 'Payment processing duration',
       buckets: [0.1, 0.5, 1, 2, 5, 10],
     });
 
-    this.metricsService.createGauge({
+    this.queueGauge = this.metricsService.createGauge({
       name: 'payment_queue_size',
       help: 'Current payment queue size',
     });
@@ -269,26 +268,24 @@ export class PaymentService extends BaseService {
     try {
       const result = await this.gateway.charge(payment);
 
-      // Record success
-      this.metricsService?.incrementCounter('payments_processed_total', {
-        status: 'success',
-        method: payment.method,
-      });
+      // Record success using prom-client API
+      this.paymentsCounter?.inc({ status: 'success', method: payment.method });
 
       return result;
     } catch (error) {
       // Record failure
-      this.metricsService?.incrementCounter('payments_processed_total', {
-        status: 'failure',
-        method: payment.method,
-      });
+      this.paymentsCounter?.inc({ status: 'failure', method: payment.method });
 
       throw error;
     } finally {
       // Record duration
       const duration = (Date.now() - startTime) / 1000;
-      this.metricsService?.observeHistogram('payment_processing_seconds', {}, duration);
+      this.processingHistogram?.observe(duration);
     }
+  }
+
+  updateQueueSize(size: number): void {
+    this.queueGauge?.set(size);
   }
 }
 ```
@@ -363,11 +360,15 @@ rate(payments_processed_total{status="success"}[5m])
 
 ```typescript
 import { Module, Controller, BaseController, Service, BaseService, Get, Post, Body } from '@onebun/core';
+import type { Counter, Gauge, Histogram } from 'prom-client';
 
 // Service with custom metrics
 @Service()
 export class AnalyticsService extends BaseService {
   private metricsService: any;
+  private eventsCounter?: Counter<string>;
+  private processingHistogram?: Histogram<string>;
+  private queueGauge?: Gauge<string>;
 
   constructor() {
     super();
@@ -378,19 +379,20 @@ export class AnalyticsService extends BaseService {
   private initMetrics(): void {
     if (!this.metricsService) return;
 
-    this.metricsService.createCounter({
+    // Store references to prom-client metric objects
+    this.eventsCounter = this.metricsService.createCounter({
       name: 'analytics_events_total',
       help: 'Total analytics events',
       labelNames: ['event_type', 'source'],
     });
 
-    this.metricsService.createHistogram({
+    this.processingHistogram = this.metricsService.createHistogram({
       name: 'analytics_processing_seconds',
       help: 'Analytics event processing time',
       buckets: [0.001, 0.005, 0.01, 0.05, 0.1],
     });
 
-    this.metricsService.createGauge({
+    this.queueGauge = this.metricsService.createGauge({
       name: 'analytics_queue_depth',
       help: 'Current queue depth',
     });
@@ -403,19 +405,16 @@ export class AnalyticsService extends BaseService {
       // Process event
       await this.processEvent(eventType, data);
 
-      // Record metrics
-      this.metricsService?.incrementCounter('analytics_events_total', {
-        event_type: eventType,
-        source,
-      });
+      // Record metrics using prom-client API
+      this.eventsCounter?.inc({ event_type: eventType, source });
     } finally {
       const duration = (performance.now() - startTime) / 1000;
-      this.metricsService?.observeHistogram('analytics_processing_seconds', {}, duration);
+      this.processingHistogram?.observe(duration);
     }
   }
 
   updateQueueDepth(depth: number): void {
-    this.metricsService?.setGauge('analytics_queue_depth', {}, depth);
+    this.queueGauge?.set(depth);
   }
 
   private async processEvent(eventType: string, data: unknown): Promise<void> {
