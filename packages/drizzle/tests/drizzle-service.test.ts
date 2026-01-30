@@ -50,6 +50,15 @@ describe('DrizzleService', () => {
   });
 
   beforeEach(() => {
+    // Clear module options BEFORE creating service to prevent auto-initialization
+    try {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleModule } = require('../src/drizzle.module');
+      DrizzleModule.clearOptions();
+    } catch {
+      // Ignore if module not available
+    }
+
     // Clear DB env vars to prevent auto-initialization
     // Delete from process.env to ensure EnvLoader doesn't find them
     delete process.env.DB_URL;
@@ -68,23 +77,10 @@ describe('DrizzleService', () => {
   });
 
   afterEach(async () => {
-    // Clear module options to prevent interference between tests
-    try {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const { DrizzleModule } = require('../src/drizzle.module');
-      DrizzleModule.clearOptions();
-    } catch {
-      // Ignore if module not available
-    }
-
-    // Wait for any pending autoInitialize to complete (with timeout to prevent hanging)
-    // This is necessary because autoInitialize runs in constructor and may still be pending
+    // Close service if it exists
+    // Note: close() now only waits for init if there are actual DB clients
     if (service) {
       try {
-        await Promise.race([
-          service.waitForInit(),
-          new Promise((resolve) => setTimeout(resolve, 100)), // 100ms timeout
-        ]);
         await service.close();
       } catch {
         // Ignore errors during cleanup

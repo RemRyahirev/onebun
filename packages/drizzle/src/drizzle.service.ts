@@ -195,24 +195,31 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   /**
    * Check synchronously if auto-initialization should be attempted
    * This avoids starting async work when there's no configuration
+   * Note: Only checks env vars here to avoid slow require() in constructor.
+   * Module options are checked in autoInitialize() which is async.
    */
   private shouldAutoInitialize(): boolean {
-    // Check if module options exist (requires sync require)
+    // Check if DB_URL env var is set
+    // Module options will be checked in autoInitialize() if this returns false
+    const dbUrl = process.env.DB_URL;
+    if (dbUrl && dbUrl.trim() !== '') {
+      return true;
+    }
+
+    // Also check if DrizzleModule has options set (static check without require)
+    // This is done by checking if the module was already loaded
     try {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const { DrizzleModule: DrizzleModuleClass } = require('./drizzle.module');
-      const options = DrizzleModuleClass.getOptions();
-      if (options?.connection) {
+      // Only check if module is already in cache (don't trigger new require)
+      const modulePath = require.resolve('./drizzle.module');
+      const cachedModule = require.cache[modulePath];
+      if (cachedModule?.exports?.DrizzleModule?.getOptions?.()?.connection) {
         return true;
       }
     } catch {
-      // Module not available
+      // Module not resolved or not in cache
     }
 
-    // Check if DB_URL env var is set
-    const dbUrl = process.env.DB_URL;
-
-    return Boolean(dbUrl && dbUrl.trim() !== '');
+    return false;
   }
 
   /**
