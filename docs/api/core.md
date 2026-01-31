@@ -58,6 +58,12 @@ interface ApplicationOptions {
 
   /** Tracing configuration */
   tracing?: TracingOptions;
+
+  /** WebSocket configuration */
+  websocket?: WebSocketApplicationOptions;
+
+  /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
+  gracefulShutdown?: boolean;
 }
 ```
 
@@ -68,8 +74,11 @@ class OneBunApplication {
   /** Start the HTTP server */
   async start(): Promise<void>;
 
-  /** Stop the HTTP server */
-  stop(): void;
+  /** Stop the HTTP server with optional cleanup options */
+  async stop(options?: { closeSharedRedis?: boolean }): Promise<void>;
+
+  /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT) */
+  enableGracefulShutdown(): void;
 
   /** Get configuration service */
   getConfig(): ConfigServiceImpl;
@@ -120,8 +129,36 @@ const port = app.getConfigValue<number>('server.port');
 const logger = app.getLogger({ component: 'main' });
 logger.info('Application started', { port });
 
-// Stop application
-app.stop();
+// Application will automatically handle shutdown signals (SIGTERM, SIGINT)
+// Or stop manually:
+await app.stop();
+```
+
+### Graceful Shutdown
+
+OneBun enables graceful shutdown **by default**. When the application receives SIGTERM or SIGINT signals, it automatically:
+1. Stops the HTTP server
+2. Closes all WebSocket connections
+3. Disconnects shared Redis connection
+
+```typescript
+// Default: graceful shutdown is enabled
+const app = new OneBunApplication(AppModule);
+await app.start();
+// SIGTERM/SIGINT handlers are automatically registered
+
+// To disable automatic shutdown handling:
+const app = new OneBunApplication(AppModule, {
+  gracefulShutdown: false,
+});
+await app.start();
+app.enableGracefulShutdown(); // Enable manually later if needed
+
+// Programmatic shutdown
+await app.stop(); // Closes server, WebSocket, and shared Redis
+
+// Keep shared Redis open for other consumers
+await app.stop({ closeSharedRedis: false });
 ```
 
 ## MultiServiceApplication

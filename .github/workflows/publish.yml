@@ -40,8 +40,16 @@ jobs:
       - name: Lint
         run: bunx eslint packages/
 
-      - name: Test
-        run: bun test
+      - name: Test with coverage
+        run: bun test --coverage --coverage-reporter=lcov
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}  # Optional for public repos, but recommended
+          files: ./coverage/lcov.info
+          fail_ci_if_error: false
+          verbose: true
 
       - name: Publish packages
         # Publish only on push to master or manual trigger (not on PRs)

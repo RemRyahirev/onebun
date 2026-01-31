@@ -37,12 +37,9 @@ export {
   RedisCache,
 } from './redis-cache';
 
-// Redis type definitions (until official types are available)
-export type {
-  RedisClient,
-  RedisClientOptions,
-} from './bun-redis-types';
-export { hasRedisClient } from './bun-redis-types';
+// Re-export Redis client from @onebun/core for convenience
+export type { RedisClient, RedisClientOptions } from '@onebun/core';
+export { SharedRedisProvider, createRedisClient } from '@onebun/core';
 
 // NestJS-like module and service for use with @Module decorator (recommended for new applications)
 export { CacheModule } from './cache.module';

@@ -356,6 +356,40 @@ interface CacheStats {
 }
 ```
 
+## Shared Redis Connection
+
+For applications using both cache and WebSocket (or other Redis-based features), you can share a single Redis connection:
+
+```typescript
+import { SharedRedisProvider } from '@onebun/core';
+import { createRedisCache, RedisCache } from '@onebun/cache';
+
+// Configure shared Redis at app startup
+SharedRedisProvider.configure({
+  url: 'redis://localhost:6379',
+  keyPrefix: 'myapp:',
+});
+
+// Option 1: Use shared client via options
+const cache = createRedisCache({
+  useSharedClient: true,
+  defaultTtl: 60000,
+});
+await cache.connect();
+
+// Option 2: Pass RedisClient directly  
+const sharedClient = await SharedRedisProvider.getClient();
+const cache = new RedisCache(sharedClient);
+
+// Check if using shared connection
+console.log(cache.isUsingSharedClient()); // true
+```
+
+**Benefits:**
+- Single connection pool for cache and WebSocket
+- Reduced memory footprint
+- Consistent key prefixing across features
+
 ## Effect.js Integration
 
 For Effect.js-based usage:

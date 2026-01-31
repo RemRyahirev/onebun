@@ -1,11 +1,13 @@
 /**
- * Redis cache implementation using Bun's native RedisClient
+ * Redis cache implementation using @onebun/core RedisClient
  * 
- * Requires Bun v1.2.9 or later
+ * Supports two modes:
+ * 1. Standalone - creates its own Redis connection
+ * 2. Shared - uses SharedRedisProvider from @onebun/core
+ * 
  * @see https://bun.com/docs/api/redis
  */
 
-import type { RedisClient } from './bun-redis-types';
 import type {
   CacheService,
   CacheSetOptions,
@@ -13,10 +15,17 @@ import type {
   RedisCacheOptions,
 } from './types';
 
+import type { RedisClientOptions } from '@onebun/core';
+import {
+  RedisClient,
+  SharedRedisProvider,
+  createRedisClient,
+} from '@onebun/core';
+
 import { DEFAULT_REDIS_CACHE_OPTIONS } from './types';
 
 /**
- * Redis-based cache implementation using Bun's native RedisClient
+ * Redis-based cache implementation using @onebun/core RedisClient
  * Implements CacheService interface with Redis as the backing store
  */
 export class RedisCache implements CacheService {
@@ -24,68 +33,88 @@ export class RedisCache implements CacheService {
   private readonly options: Required<RedisCacheOptions>;
   private hits = 0;
   private misses = 0;
+  private ownsClient = false;
+  private useShared = false;
 
   /**
    * Create a new Redis cache instance
-   * @param options - Redis cache configuration options
+   * @param optionsOrClient - Redis cache configuration options or existing RedisClient
    */
-  constructor(options: RedisCacheOptions = {}) {
-    this.options = {
-      ...DEFAULT_REDIS_CACHE_OPTIONS,
-      ...options,
-    } as Required<RedisCacheOptions>;
+  constructor(optionsOrClient: RedisCacheOptions | RedisClient = {}) {
+    if (optionsOrClient instanceof RedisClient) {
+      // Use provided client
+      this.client = optionsOrClient;
+      this.ownsClient = false;
+      this.options = {
+        ...DEFAULT_REDIS_CACHE_OPTIONS,
+        keyPrefix: '',  // Client already has prefix configured
+      } as Required<RedisCacheOptions>;
+    } else {
+      // Configure from options
+      this.options = {
+        ...DEFAULT_REDIS_CACHE_OPTIONS,
+        ...optionsOrClient,
+      } as Required<RedisCacheOptions>;
+      this.useShared = optionsOrClient.useSharedClient ?? false;
+    }
   }
 
   /**
    * Connect to Redis
    */
   async connect(): Promise<void> {
+    // Skip if already have a client
+    if (this.client?.isConnected()) {
+      return;
+    }
+
     try {
-      // Build Redis URL
-      const {
-        host, port, password, database, 
-      } = this.options;
-      let url = 'redis://';
-
-      if (password) {
-        url += `:${password}@`;
+      if (this.useShared) {
+        // Use shared client from core
+        this.client = await SharedRedisProvider.getClient();
+        this.ownsClient = false;
+      } else if (!this.client) {
+        // Create new client
+        const clientOptions = this.buildClientOptions();
+        this.client = createRedisClient(clientOptions);
+        this.ownsClient = true;
+        await this.client.connect();
+      } else if (!this.client.isConnected()) {
+        // Reconnect existing client (passed via constructor)
+        await this.client.connect();
       }
-
-      url += `${host}:${port}`;
-
-      if (database) {
-        url += `/${database}`;
-      }
-
-      // Create Bun's native RedisClient
-      // Type assertion needed until official types are available in bun-types
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/naming-convention
-      const BunGlobal = (globalThis as any).Bun;
-      
-      // Try alternative access methods if BunGlobal doesn't have RedisClient
-      // Bun is available at runtime but may not be in TypeScript types
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/naming-convention
-      const BunDirect = typeof Bun !== 'undefined' ? (Bun as any) : null;
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const BunRedisClient = BunGlobal?.RedisClient 
-        || BunDirect?.RedisClient 
-        || BunGlobal?.Redis;
-      
-      if (!BunRedisClient) {
-        throw new Error('RedisClient is not available. Make sure you are using Bun runtime.');
-      }
-      
-      this.client = new BunRedisClient(url, {
-        connectionTimeout: this.options.connectTimeout,
-        enableAutoPipelining: true,
-        autoReconnect: true,
-      }) as RedisClient;
-
-      // Connect to Redis
-      await this.client.connect();
     } catch (error) {
       throw new Error(`Failed to connect to Redis: ${error}`);
     }
+  }
+
+  /**
+   * Build client options from cache options
+   */
+  private buildClientOptions(): RedisClientOptions {
+    const {
+      host, port, password, database, url, keyPrefix, connectTimeout, 
+    } = this.options;
+
+    // Use URL if provided, otherwise build from components
+    let redisUrl = url;
+    if (!redisUrl) {
+      redisUrl = 'redis://';
+      if (password) {
+        redisUrl += `:${password}@`;
+      }
+      redisUrl += `${host}:${port}`;
+      if (database) {
+        redisUrl += `/${database}`;
+      }
+    }
+
+    return {
+      url: redisUrl,
+      keyPrefix,
+      connectTimeout,
+      reconnect: true,
+    };
   }
 
   /**
@@ -133,13 +162,8 @@ export class RedisCache implements CacheService {
       const serialized = JSON.stringify(value);
       const ttl = options.ttl ?? this.options.defaultTtl;
 
-      // Set value with TTL atomically using PX (milliseconds)
-      if (ttl && ttl > 0) {
-        // Use send command to set value with TTL atomically
-        await this.client.send('SET', [fullKey, serialized, 'PX', String(ttl)]);
-      } else {
-        await this.client.set(fullKey, serialized);
-      }
+      // Set value with TTL
+      await this.client.set(fullKey, serialized, ttl);
     } catch (error) {
       throw new Error(`Redis cache set error for key ${key}: ${error}`);
     }
@@ -155,9 +179,10 @@ export class RedisCache implements CacheService {
 
     try {
       const fullKey = this.getFullKey(key);
-      const result = await this.client.del(fullKey);
+      const existed = await this.client.exists(fullKey);
+      await this.client.del(fullKey);
 
-      return result > 0;
+      return existed;
     } catch {
       return false;
     }
@@ -173,10 +198,8 @@ export class RedisCache implements CacheService {
 
     try {
       const fullKey = this.getFullKey(key);
-      // Bun's exists returns boolean instead of number
-      const result = await this.client.exists(fullKey);
 
-      return Boolean(result);
+      return await this.client.exists(fullKey);
     } catch {
       return false;
     }
@@ -193,12 +216,12 @@ export class RedisCache implements CacheService {
 
     try {
       const pattern = `${this.options.keyPrefix}*`;
-      // Use SCAN instead of KEYS for better performance in production
-      // For now, using send() method for KEYS command
-      const keys = await this.client.send('KEYS', [pattern]);
+      const keys = await this.client.keys(pattern);
 
       if (keys && Array.isArray(keys) && keys.length > 0) {
-        await this.client.del(...keys);
+        for (const key of keys) {
+          await this.client.del(key);
+        }
       }
 
       this.resetStats();
@@ -217,13 +240,7 @@ export class RedisCache implements CacheService {
 
     try {
       const fullKeys = keys.map((key) => this.getFullKey(key));
-      const values = await this.client.send('MGET', fullKeys);
-
-      if (!Array.isArray(values)) {
-        this.misses += keys.length;
-
-        return new Array(keys.length).fill(undefined);
-      }
+      const values = await this.client.mget(fullKeys);
 
       return values.map((value) => {
         if (value === null || value === undefined) {
@@ -234,7 +251,7 @@ export class RedisCache implements CacheService {
 
         this.hits++;
         try {
-          return JSON.parse(value as string) as T;
+          return JSON.parse(value) as T;
         } catch {
           this.misses++;
 
@@ -260,11 +277,13 @@ export class RedisCache implements CacheService {
     }
 
     try {
-      // Bun's RedisClient has auto-pipelining enabled by default
-      // We can execute commands sequentially and they will be pipelined automatically
-      for (const { key, value, options } of entries) {
-        await this.set(key, value, options);
-      }
+      const msetEntries = entries.map(({ key, value, options }) => ({
+        key: this.getFullKey(key),
+        value: JSON.stringify(value),
+        ttlMs: options?.ttl ?? this.options.defaultTtl,
+      }));
+
+      await this.client.mset(msetEntries);
     } catch (error) {
       throw new Error(`Redis cache mset error: ${error}`);
     }
@@ -280,7 +299,7 @@ export class RedisCache implements CacheService {
 
     try {
       const pattern = `${this.options.keyPrefix}*`;
-      const keys = await this.client.send('KEYS', [pattern]);
+      const keys = await this.client.keys(pattern);
       const totalRequests = this.hits + this.misses;
       const hitRate = totalRequests > 0 ? this.hits / totalRequests : 0;
 
@@ -302,25 +321,35 @@ export class RedisCache implements CacheService {
 
   /**
    * Close cache connection and cleanup resources
+   * Note: Only disconnects if this instance owns the client
    */
   async close(): Promise<void> {
     if (!this.client) {
       return;
     }
 
-    try {
-      this.client.close();
-      this.client = null;
-    } catch {
-      // Force disconnect if graceful close fails
-      this.client = null;
+    // Only disconnect if we own the client (not shared)
+    if (this.ownsClient) {
+      try {
+        await this.client.disconnect();
+      } catch {
+        // Ignore errors during cleanup
+      }
     }
+
+    this.client = null;
   }
 
   /**
    * Get full key with prefix
+   * Note: When using shared client, prefix is already applied
    */
   private getFullKey(key: string): string {
+    // If client is shared or passed in, don't add prefix (client has its own)
+    if (!this.ownsClient || this.useShared) {
+      return key;
+    }
+
     return `${this.options.keyPrefix}${key}`;
   }
 
@@ -338,13 +367,20 @@ export class RedisCache implements CacheService {
   getClient(): RedisClient | null {
     return this.client;
   }
+
+  /**
+   * Check if using shared client
+   */
+  isUsingSharedClient(): boolean {
+    return this.useShared || !this.ownsClient;
+  }
 }
 
 /**
  * Create a new Redis cache instance
- * @param options - Redis cache configuration options
+ * @param optionsOrClient - Redis cache configuration options or existing RedisClient
  * @returns RedisCache instance
  */
-export function createRedisCache(options: RedisCacheOptions = {}): RedisCache {
-  return new RedisCache(options);
+export function createRedisCache(optionsOrClient: RedisCacheOptions | RedisClient = {}): RedisCache {
+  return new RedisCache(optionsOrClient);
 }

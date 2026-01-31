@@ -266,6 +266,56 @@ export interface ApplicationOptions {
       batchTimeout?: number;
     };
   };
+
+  /**
+   * WebSocket configuration
+   */
+  websocket?: WebSocketApplicationOptions;
+
+  /**
+   * Enable graceful shutdown on SIGTERM/SIGINT
+   * When enabled, the application will cleanly shutdown on process signals,
+   * including closing shared Redis connections.
+   * Set to false to disable automatic signal handling.
+   * @defaultValue true
+   */
+  gracefulShutdown?: boolean;
+}
+
+/**
+ * WebSocket storage type
+ */
+export type WsStorageType = 'memory' | 'redis';
+
+/**
+ * WebSocket storage options
+ */
+export interface WsStorageOptions {
+  /** Storage type */
+  type: WsStorageType;
+  /** Redis-specific options */
+  redis?: {
+    /** Redis connection URL */
+    url: string;
+    /** Key prefix for Redis keys */
+    prefix?: string;
+  };
+}
+
+/**
+ * WebSocket configuration for OneBunApplication
+ */
+export interface WebSocketApplicationOptions {
+  /** Enable/disable WebSocket (default: auto - enabled if gateways exist) */
+  enabled?: boolean;
+  /** Storage options */
+  storage?: WsStorageOptions;
+  /** Ping interval in milliseconds for heartbeat (socket.io) */
+  pingInterval?: number;
+  /** Ping timeout in milliseconds (socket.io) */
+  pingTimeout?: number;
+  /** Maximum payload size in bytes */
+  maxPayload?: number;
 }
 
 /**

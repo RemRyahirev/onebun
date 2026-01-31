@@ -631,4 +631,89 @@ const workflow = pipe(
 1. **Сохраните существующие Effect методы** с суффиксом `Effect`
 2. **Добавьте Promise обёртки** как основные методы
 3. **Обновите документацию** с примерами обеих подходов
-4. **Обеспечьте** постепенную миграцию без breaking changes 
+4. **Обеспечьте** постепенную миграцию без breaking changes
+
+## WebSocket
+
+### Bun WebSocket
+- [Bun WebSocket Server](https://bun.sh/docs/api/websockets)
+- [WebSocket Examples](https://bun.sh/guides/websocket)
+- **Особенности**: Встроенная поддержка WebSocket в Bun.serve с pub/sub
+
+### Socket.IO Protocol
+- [Engine.IO Protocol](https://socket.io/docs/v4/engine-io-protocol/) - транспортный уровень Socket.IO
+- [Socket.IO Protocol](https://socket.io/docs/v4/socket-io-protocol/) - прикладной уровень
+- [Socket.IO Client](https://socket.io/docs/v4/client-api/) - клиентское API
+
+### NestJS WebSocket (Reference Architecture)
+- [NestJS Gateways](https://docs.nestjs.com/websockets/gateways) - архитектурный паттерн для гейтвеев
+- [NestJS Exception Filters](https://docs.nestjs.com/websockets/exception-filters) - обработка ошибок
+- [NestJS Guards](https://docs.nestjs.com/websockets/guards) - авторизация для WebSocket
+
+### @onebun/core WebSocket Features
+
+#### Gateway Pattern
+```typescript
+import { 
+  WebSocketGateway, 
+  BaseWebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnMessage,
+  Client,
+  MessageData,
+} from '@onebun/core';
+
+@WebSocketGateway({ path: '/ws' })
+export class ChatGateway extends BaseWebSocketGateway {
+  @OnConnect()
+  handleConnect(@Client() client: WsClientData) {
+    return { event: 'welcome', data: { clientId: client.id } };
+  }
+
+  @OnMessage('chat:message')
+  handleMessage(
+    @Client() client: WsClientData,
+    @MessageData() data: { text: string }
+  ) {
+    this.broadcast('chat:message', {
+      userId: client.id,
+      text: data.text,
+    });
+  }
+}
+```
+
+#### Pattern Matching
+- Wildcard patterns: `chat:*`, `user:*:action`
+- Parameterized patterns: `chat:{roomId}:message`
+- Combined patterns: `service:{service}:*`
+
+#### Storage Options
+- **In-Memory**: Default для single-instance deployments
+- **Redis**: Для multi-instance deployments с pub/sub
+
+#### Guards
+```typescript
+import { UseWsGuards, WsAuthGuard, WsPermissionGuard } from '@onebun/core';
+
+@UseWsGuards(WsAuthGuard)
+@OnMessage('admin:*')
+handleAdminMessage(@Client() client: WsClientData) {
+  // Only authenticated clients
+}
+```
+
+#### Typed Client
+```typescript
+import { createWsServiceDefinition, createWsClient } from '@onebun/core';
+
+const definition = createWsServiceDefinition(ChatModule);
+const client = createWsClient(definition, {
+  url: 'ws://localhost:3000',
+  auth: { token: 'xxx' },
+});
+
+await client.connect();
+await client.ChatGateway.emit('chat:message', { text: 'Hello' });
+```

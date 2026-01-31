@@ -63,3 +63,99 @@ export type { ServiceClientOptions, ControllerClient } from './service-client.ty
 
 // ENV resolver
 export { resolveEnvOverrides, resolveEnvOverridesSync } from './env-resolver';
+
+// WebSocket Gateway
+export { BaseWebSocketGateway } from './ws-base-gateway';
+export {
+  WebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnJoinRoom,
+  OnLeaveRoom,
+  OnMessage,
+  Client,
+  Socket,
+  MessageData,
+  RoomName,
+  PatternParams,
+  WsServer,
+  UseWsGuards,
+  getGatewayMetadata,
+  isWebSocketGateway,
+} from './ws-decorators';
+export {
+  WsAuthGuard,
+  WsPermissionGuard,
+  WsRoomGuard,
+  WsAnyPermissionGuard,
+  WsServiceGuard,
+  WsAllGuards,
+  WsAnyGuard,
+  WsExecutionContextImpl,
+  executeGuards,
+  createGuard,
+} from './ws-guards';
+export type {
+  WsClientData,
+  WsAuthData,
+  WsRoom,
+  WsHandlerType,
+  WsParamType,
+  GatewayMetadata,
+  WsHandlerMetadata,
+  WsParamMetadata,
+  WebSocketGatewayOptions,
+  WsStorageOptions,
+  WebSocketApplicationOptions,
+  WsMessage,
+  WsHandlerResponse,
+  PatternMatch,
+  WsExecutionContext,
+  WsGuard,
+  WsServer as WsServerType,
+} from './ws.types';
+export {
+  WsHandlerType as WsHandlerTypeEnum,
+  WsParamType as WsParamTypeEnum,
+  isWsMessage,
+  isWsHandlerResponse,
+  isWsClientData,
+  isWsRoom,
+} from './ws.types';
+export {
+  matchPattern,
+  isPatternMatch,
+  createPatternMatcher,
+  isPattern,
+  getPatternParams,
+  buildFromPattern,
+} from './ws-pattern-matcher';
+export type { WsStorageAdapter, WsPubSubStorageAdapter, WsStorageEventPayload } from './ws-storage';
+export { WsStorageEvent, isPubSubAdapter } from './ws-storage';
+export { InMemoryWsStorage, createInMemoryWsStorage } from './ws-storage-memory';
+export { RedisWsStorage, createRedisWsStorage } from './ws-storage-redis';
+
+// Redis Client (shared)
+export { RedisClient, createRedisClient } from './redis-client';
+export type { RedisClientOptions } from './redis-client';
+export {
+  SharedRedisProvider, SharedRedisService, makeSharedRedisLayer, getSharedRedis, 
+} from './shared-redis';
+export type { SharedRedisOptions } from './shared-redis';
+
+// WebSocket Service Definition and Client
+export {
+  createWsServiceDefinition, getWsGatewayNames, getWsEventNames, getWsEndpoint, 
+} from './ws-service-definition';
+export type { WsServiceDefinition, WsGatewayDefinition, WsEndpointMetadata } from './ws-service-definition';
+export { createWsClient } from './ws-client';
+export type {
+  WsClientOptions,
+  WsClient,
+  WsGatewayClient,
+  WsEventListener,
+  WsClientEvent,
+  WsClientEventListeners,
+  TypedWsClient,
+} from './ws-client.types';
+export { WsConnectionState } from './ws-client.types';

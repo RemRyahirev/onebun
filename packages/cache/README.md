@@ -261,6 +261,43 @@ await cache.close();
 - ✅ TLS support
 - ✅ Fully typed responses
 
+### Shared Redis Connection
+
+For applications using both cache and WebSocket (or other Redis-based features), you can share a single Redis connection using `SharedRedisProvider` from `@onebun/core`:
+
+```typescript
+import { SharedRedisProvider } from '@onebun/core';
+import { createRedisCache, RedisCache } from '@onebun/cache';
+
+// Configure shared Redis connection at app startup
+SharedRedisProvider.configure({
+  url: 'redis://localhost:6379',
+  keyPrefix: 'myapp:',
+});
+
+// Option 1: Use shared client via options
+const cache = createRedisCache({
+  useSharedClient: true,
+  defaultTtl: 60000,
+});
+await cache.connect(); // Will use SharedRedisProvider
+
+// Option 2: Pass existing RedisClient directly
+const sharedClient = await SharedRedisProvider.getClient();
+const cache = new RedisCache(sharedClient);
+
+// Check if using shared client
+console.log(cache.isUsingSharedClient()); // true
+```
+
+**Benefits of shared connection:**
+- ✅ Single connection pool for cache and WebSocket
+- ✅ Reduced memory footprint
+- ✅ Consistent key prefixing
+- ✅ Centralized connection management
+
+**Note:** When using shared client, the cache will NOT disconnect the client when `close()` is called, as other parts of your application may still be using it.
+
 ### TTL Examples
 
 ```typescript
@@ -434,6 +471,12 @@ interface RedisCacheOptions extends CacheOptions {
   
   // Key prefix for all cache keys (default: 'onebun:cache:')
   keyPrefix?: string;
+  
+  // Use shared Redis client from SharedRedisProvider (default: false)
+  useSharedClient?: boolean;
+  
+  // Redis URL (alternative to host/port/password)
+  url?: string;
 }
 ```
 
@@ -463,15 +506,14 @@ interface CacheSetOptions {
 
 ## Implementation Details
 
-### Redis Client Types
+### Redis Client Integration
 
-This package includes minimal type definitions for Bun's `RedisClient` (in `bun-redis-types.ts`) until official types are available in `bun-types`. These types provide:
+This package uses `RedisClient` from `@onebun/core`, which wraps Bun's native Redis implementation with:
 
-- Type safety for Redis operations
-- IntelliSense support in IDEs  
-- Compatibility with TypeScript strict mode
-
-The types will be automatically replaced once official types are published in future versions of `bun-types`.
+- Unified API for cache and WebSocket features
+- Automatic key prefixing
+- Connection management with auto-reconnect
+- Pub/Sub support for distributed features
 
 ### Auto-Pipelining
 

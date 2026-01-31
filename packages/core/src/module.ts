@@ -23,6 +23,7 @@ import {
   registerControllerDependencies,
 } from './decorators';
 import { getServiceMetadata, getServiceTag } from './service';
+import { isWebSocketGateway } from './ws-decorators';
 
 /**
  * OneBun Module implementation
@@ -331,14 +332,19 @@ export class OneBunModule implements Module {
       const controllerConstructor = controllerClass as new (...args: unknown[]) => Controller;
       const controller = new controllerConstructor(...dependencies);
 
-      // Initialize controller with logger and config
-      controller.initializeController(this.logger, this.config);
+      // Initialize controller with logger and config (skip for WebSocket gateways)
+      if (!isWebSocketGateway(controllerClass) && typeof controller.initializeController === 'function') {
+        controller.initializeController(this.logger, this.config);
+      }
 
       this.controllerInstances.set(controllerClass, controller);
 
       // Inject all services into controller (for legacy compatibility)
-      for (const [tag, serviceInstance] of this.serviceInstances.entries()) {
-        controller.setService(tag, serviceInstance);
+      // Skip for WebSocket gateways which don't have setService
+      if (!isWebSocketGateway(controllerClass) && typeof controller.setService === 'function') {
+        for (const [tag, serviceInstance] of this.serviceInstances.entries()) {
+          controller.setService(tag, serviceInstance);
+        }
       }
 
       if (paramTypes && paramTypes.length > 0) {

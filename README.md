@@ -1,7 +1,12 @@
 # OneBun
 
+[![CI](https://github.com/RemRyahirev/onebun/actions/workflows/publish.yml/badge.svg)](https://github.com/RemRyahirev/onebun/actions/workflows/publish.yml)
+[![codecov](https://codecov.io/gh/RemRyahirev/onebun/branch/master/graph/badge.svg)](https://codecov.io/gh/RemRyahirev/onebun)
 [![License: LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-blue.svg)](LICENSE)
-[![CI](https://github.com/RemRyahirev/onebun/actions/workflows/ci.yml/badge.svg)](https://github.com/RemRyahirev/onebun/actions)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Bun](https://img.shields.io/badge/Bun-1.2+-black?logo=bun&logoColor=white)](https://bun.sh/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![Documentation](https://img.shields.io/badge/docs-online-blue?logo=gitbook&logoColor=white)](https://remryahirev.github.io/onebun/)
 
 A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows the principle of "exactly one default way to solve each problem" - trading flexibility for development speed and performance.
 
@@ -18,17 +23,17 @@ A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows
 
 ## Packages
 
-| Package | Description |
-|---------|-------------|
-| [@onebun/core](packages/core) | Core framework (decorators, DI, modules) |
-| [@onebun/cache](packages/cache) | Caching with in-memory and Redis support |
-| [@onebun/docs](packages/docs) | OpenAPI documentation generation |
-| [@onebun/drizzle](packages/drizzle) | Drizzle ORM integration |
-| [@onebun/envs](packages/envs) | Environment variables management |
-| [@onebun/logger](packages/logger) | Structured logging |
-| [@onebun/metrics](packages/metrics) | Prometheus-compatible metrics |
-| [@onebun/requests](packages/requests) | Unified HTTP client |
-| [@onebun/trace](packages/trace) | OpenTelemetry tracing |
+| Package | Version | Description |
+|---------|---------|-------------|
+| [@onebun/core](packages/core) | [![npm](https://img.shields.io/npm/v/@onebun/core?color=blue)](https://www.npmjs.com/package/@onebun/core) | Core framework (decorators, DI, modules) |
+| [@onebun/cache](packages/cache) | [![npm](https://img.shields.io/npm/v/@onebun/cache?color=blue)](https://www.npmjs.com/package/@onebun/cache) | Caching with in-memory and Redis support |
+| [@onebun/docs](packages/docs) | [![npm](https://img.shields.io/npm/v/@onebun/docs?color=blue)](https://www.npmjs.com/package/@onebun/docs) | OpenAPI documentation generation |
+| [@onebun/drizzle](packages/drizzle) | [![npm](https://img.shields.io/npm/v/@onebun/drizzle?color=blue)](https://www.npmjs.com/package/@onebun/drizzle) | Drizzle ORM integration |
+| [@onebun/envs](packages/envs) | [![npm](https://img.shields.io/npm/v/@onebun/envs?color=blue)](https://www.npmjs.com/package/@onebun/envs) | Environment variables management |
+| [@onebun/logger](packages/logger) | [![npm](https://img.shields.io/npm/v/@onebun/logger?color=blue)](https://www.npmjs.com/package/@onebun/logger) | Structured logging |
+| [@onebun/metrics](packages/metrics) | [![npm](https://img.shields.io/npm/v/@onebun/metrics?color=blue)](https://www.npmjs.com/package/@onebun/metrics) | Prometheus-compatible metrics |
+| [@onebun/requests](packages/requests) | [![npm](https://img.shields.io/npm/v/@onebun/requests?color=blue)](https://www.npmjs.com/package/@onebun/requests) | Unified HTTP client |
+| [@onebun/trace](packages/trace) | [![npm](https://img.shields.io/npm/v/@onebun/trace?color=blue)](https://www.npmjs.com/package/@onebun/trace) | OpenTelemetry tracing |
 
 ## Installation
 
@@ -67,10 +72,12 @@ await Effect.runPromise(app.start());
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [Architecture](docs/architecture.md)
-- [API Reference](docs/api/)
-- [Examples](docs/examples/)
+📚 **[Full Documentation](https://remryahirev.github.io/onebun/)**
+
+- [Getting Started](https://remryahirev.github.io/onebun/getting-started)
+- [Architecture](https://remryahirev.github.io/onebun/architecture)
+- [API Reference](https://remryahirev.github.io/onebun/api/core)
+- [Examples](https://remryahirev.github.io/onebun/examples/basic-app)
 
 ## Development
 

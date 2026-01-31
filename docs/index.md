@@ -29,6 +29,9 @@ features:
   - icon: 📦
     title: Modular Architecture
     details: NestJS-inspired module system with decorators, controllers, and services. Familiar patterns, modern implementation.
+  - icon: 🔌
+    title: WebSocket Gateway
+    details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and type-safe clients.
 ---
 
 ## Quick Reference
@@ -73,6 +76,8 @@ my-app/
 | `@Get()`, `@Post()`, etc. | Define HTTP endpoints | `@Get('/:id')` |
 | `@Body()`, `@Param()`, `@Query()` | Parameter injection | `@Param('id') id: string` |
 | `@Inject()` | Explicit dependency injection | `@Inject(UserService)` |
+| `@WebSocketGateway()` | Define WebSocket gateway | `@WebSocketGateway({ path: '/ws' })` |
+| `@OnMessage()`, `@OnConnect()`, etc. | WebSocket event handlers | `@OnMessage('chat:*')` |
 
 ### Base Classes
 
@@ -80,6 +85,7 @@ my-app/
 |-------|---------|--------------|
 | `BaseController` | HTTP controller functionality | Creating any controller |
 | `BaseService` | Service with logger and config | Creating any service |
+| `BaseWebSocketGateway` | WebSocket gateway with rooms and emit | Creating WebSocket gateway |
 
 ## Minimal Working Example
 

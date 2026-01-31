@@ -196,6 +196,19 @@ export interface RedisCacheOptions extends CacheOptions {
    * @defaultValue 'onebun:cache:'
    */
   keyPrefix?: string;
+
+  /**
+   * Use shared Redis client from @onebun/core SharedRedisProvider
+   * When true, expects SharedRedisProvider to be configured
+   * @defaultValue false
+   */
+  useSharedClient?: boolean;
+
+  /**
+   * Redis connection URL (alternative to host/port/password)
+   * When provided, takes precedence over host/port/password
+   */
+  url?: string;
 }
 
 /**

@@ -1102,4 +1102,123 @@ describe('OneBunApplication', () => {
       expect(mockTraceService.extractFromHeaders).not.toHaveBeenCalled();
     });
   });
+
+  describe('Graceful shutdown', () => {
+    let originalServe: typeof Bun.serve;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockServer: any;
+
+    beforeEach(() => {
+      register.clear();
+
+      mockServer = {
+        stop: mock(),
+        hostname: 'localhost',
+        port: 3000,
+      };
+
+      originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = mock(() => mockServer);
+    });
+
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = originalServe;
+    });
+
+    test('should stop server and cleanup resources on stop()', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      await app.stop();
+
+      expect(mockServer.stop).toHaveBeenCalled();
+    });
+
+    test('should accept closeSharedRedis option in stop()', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Stop without closing Redis
+      await app.stop({ closeSharedRedis: false });
+
+      expect(mockServer.stop).toHaveBeenCalled();
+    });
+
+    test('should enable graceful shutdown by default', async () => {
+      @Module({})
+      class TestModule {}
+
+      // Track process.on calls
+      const processOnMock = mock();
+      const originalProcessOn = process.on;
+      process.on = processOnMock as typeof process.on;
+
+      // No gracefulShutdown option - should be enabled by default
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Verify handlers were registered
+      expect(processOnMock).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+      expect(processOnMock).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+
+      // Cleanup
+      process.on = originalProcessOn;
+      await app.stop();
+    });
+
+    test('should disable graceful shutdown when option is false', async () => {
+      @Module({})
+      class TestModule {}
+
+      // Track process.on calls
+      const processOnMock = mock();
+      const originalProcessOn = process.on;
+      process.on = processOnMock as typeof process.on;
+
+      // Explicitly disable graceful shutdown
+      const app = createTestApp(TestModule, { gracefulShutdown: false });
+      await app.start();
+
+      // Verify handlers were NOT registered
+      expect(processOnMock).not.toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+      expect(processOnMock).not.toHaveBeenCalledWith('SIGINT', expect.any(Function));
+
+      // Cleanup
+      process.on = originalProcessOn;
+      await app.stop();
+    });
+
+    test('should provide enableGracefulShutdown method for manual setup', async () => {
+      @Module({})
+      class TestModule {}
+
+      // Disable automatic graceful shutdown
+      const app = createTestApp(TestModule, { gracefulShutdown: false });
+      await app.start();
+
+      // Track process.on calls
+      const processOnMock = mock();
+      const originalProcessOn = process.on;
+      process.on = processOnMock as typeof process.on;
+
+      // Manually enable graceful shutdown
+      app.enableGracefulShutdown();
+
+      // Verify handlers were registered
+      expect(processOnMock).toHaveBeenCalledWith('SIGTERM', expect.any(Function));
+      expect(processOnMock).toHaveBeenCalledWith('SIGINT', expect.any(Function));
+
+      // Cleanup
+      process.on = originalProcessOn;
+      await app.stop();
+    });
+  });
 });

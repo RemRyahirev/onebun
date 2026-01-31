@@ -8,8 +8,10 @@
  * - docs/api/decorators.md
  * - docs/api/services.md
  * - docs/api/validation.md
+ * - docs/api/websocket.md
  * - docs/examples/basic-app.md
  * - docs/examples/crud-api.md
+ * - docs/examples/websocket-chat.md
  */
 
 import { type } from 'arktype';
@@ -18,6 +20,13 @@ import {
   it,
   expect,
 } from 'bun:test';
+
+import type {
+  WsClientData,
+  WsExecutionContext,
+  WsServerType,
+} from './';
+import type { ServerWebSocket } from 'bun';
 
 import {
   Controller,
@@ -48,6 +57,29 @@ import {
   OneBunApplication,
   createServiceDefinition,
   createServiceClient,
+  WebSocketGateway,
+  BaseWebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnJoinRoom,
+  OnLeaveRoom,
+  OnMessage,
+  Client,
+  Socket,
+  MessageData,
+  RoomName,
+  PatternParams,
+  WsServer,
+  UseWsGuards,
+  WsAuthGuard,
+  WsPermissionGuard,
+  WsAnyPermissionGuard,
+  createGuard,
+  createInMemoryWsStorage,
+  SharedRedisProvider,
+  createWsServiceDefinition,
+  createWsClient,
+  matchPattern,
 } from './';
 
 /**
@@ -2161,6 +2193,727 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
       expect(typeof app.stop).toBe('function');
       expect(typeof app.getConfig).toBe('function');
       expect(typeof app.getLogger).toBe('function');
+    });
+  });
+});
+
+// ============================================================================
+// WebSocket Gateway Documentation Tests
+// ============================================================================
+
+describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
+  describe('@WebSocketGateway decorator', () => {
+    /**
+     * @source docs/api/websocket.md#websocketgateway-decorator
+     */
+    it('should define gateway with path and namespace', () => {
+      // From docs: WebSocketGateway Decorator example
+      @WebSocketGateway({ path: '/ws', namespace: 'chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        // handlers...
+      }
+
+      expect(ChatGateway).toBeDefined();
+    });
+  });
+
+  describe('Event Decorators', () => {
+    /**
+     * @source docs/api/websocket.md#onconnect
+     */
+    it('should handle @OnConnect decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnConnect()
+        handleConnect(@Client() client: WsClientData) {
+          // eslint-disable-next-line no-console
+          console.log(`Client ${client.id} connected`);
+
+          return { event: 'welcome', data: { message: 'Welcome!' } };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#ondisconnect
+     */
+    it('should handle @OnDisconnect decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnDisconnect()
+        handleDisconnect(@Client() client: WsClientData) {
+          // eslint-disable-next-line no-console
+          console.log(`Client ${client.id} disconnected`);
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#onjoinroom
+     */
+    it('should handle @OnJoinRoom decorator with pattern', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnJoinRoom('room:{roomId}')
+        handleJoinRoom(
+          @Client() client: WsClientData,
+          @RoomName() room: string,
+          @PatternParams() params: { roomId: string },
+        ) {
+          this.emitToRoom(room, 'user:joined', { userId: client.id });
+
+          return { event: 'joined', data: { roomId: params.roomId } };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#onleaveroom
+     */
+    it('should handle @OnLeaveRoom decorator with wildcard', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnLeaveRoom('room:*')
+        handleLeaveRoom(@Client() client: WsClientData, @RoomName() room: string) {
+          this.emitToRoom(room, 'user:left', { userId: client.id });
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#onmessage
+     */
+    it('should handle @OnMessage decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnMessage('chat:message')
+        handleMessage(@Client() client: WsClientData, @MessageData() data: { text: string }) {
+          this.broadcast('chat:message', { userId: client.id, text: data.text });
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+  });
+
+  describe('Pattern Syntax', () => {
+    /**
+     * @source docs/api/websocket.md#pattern-syntax
+     */
+    it('should match exact patterns', () => {
+      const match = matchPattern('chat:message', 'chat:message');
+      expect(match.matched).toBe(true);
+    });
+
+    it('should match wildcard patterns', () => {
+      const match = matchPattern('chat:*', 'chat:general');
+      expect(match.matched).toBe(true);
+    });
+
+    it('should match named parameter patterns', () => {
+      const match = matchPattern('chat:{roomId}', 'chat:general');
+      expect(match.matched).toBe(true);
+      expect(match.params?.roomId).toBe('general');
+    });
+
+    it('should match combined patterns', () => {
+      const match = matchPattern('user:{id}:*', 'user:123:action');
+      expect(match.matched).toBe(true);
+      expect(match.params?.id).toBe('123');
+    });
+  });
+
+  describe('Parameter Decorators', () => {
+    /**
+     * @source docs/api/websocket.md#client
+     */
+    it('should use @Client() decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnMessage('ping')
+        handlePing(@Client() client: WsClientData) {
+          // eslint-disable-next-line no-console
+          console.log(`Ping from ${client.id}`);
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#socket
+     */
+    it('should use @Socket() decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnMessage('raw')
+        handleRaw(@Socket() socket: ServerWebSocket<WsClientData>) {
+          socket.send('raw message');
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#messagedata
+     */
+    it('should use @MessageData() decorator with property', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        // Full data
+        @OnMessage('chat:full')
+        handleFull(@MessageData() data: { text: string }) {
+          return data;
+        }
+
+        // Specific property
+        @OnMessage('chat:text')
+        handleText(@MessageData('text') text: string) {
+          return text;
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#roomname
+     */
+    it('should use @RoomName() decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnJoinRoom()
+        handleJoin(@RoomName() room: string) {
+          return { room };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#patternparams
+     */
+    it('should use @PatternParams() decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnMessage('chat:{roomId}:message')
+        handleMessage(@PatternParams() params: { roomId: string }) {
+          return { roomId: params.roomId };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#wsserver
+     */
+    it('should use @WsServer() decorator', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @OnMessage('broadcast')
+        handleBroadcast(@WsServer() server: WsServerType) {
+          server.publish('all', 'Hello everyone!');
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+  });
+
+  describe('Guards', () => {
+    /**
+     * @source docs/api/websocket.md#built-in-guards
+     */
+    it('should use WsAuthGuard', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @UseWsGuards(WsAuthGuard)
+        @OnMessage('protected:*')
+        handleProtected(@Client() client: WsClientData) {
+          return { userId: client.auth?.userId };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#built-in-guards
+     */
+    it('should use WsPermissionGuard', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @UseWsGuards(new WsPermissionGuard('admin'))
+        @OnMessage('admin:*')
+        handleAdmin(@Client() client: WsClientData) {
+          return { admin: true, userId: client.id };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#built-in-guards
+     */
+    it('should use WsAnyPermissionGuard', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @UseWsGuards(new WsAnyPermissionGuard(['admin', 'moderator']))
+        @OnMessage('manage:*')
+        handleManage(@Client() client: WsClientData) {
+          return { clientId: client.id };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#custom-guards
+     */
+    it('should create custom guard', () => {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const CustomGuard = createGuard((ctx: WsExecutionContext) => {
+        return ctx.getClient().metadata.customCheck === true;
+      });
+
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        @UseWsGuards(CustomGuard)
+        @OnMessage('custom:*')
+        handleCustom(@Client() client: WsClientData) {
+          return { clientId: client.id };
+        }
+      }
+
+      expect(TestGateway).toBeDefined();
+      expect(CustomGuard).toBeDefined();
+    });
+  });
+
+  describe('Storage Adapters', () => {
+    /**
+     * @source docs/api/websocket.md#in-memory-storage-default
+     */
+    it('should create in-memory storage', () => {
+      const storage = createInMemoryWsStorage();
+      expect(storage).toBeDefined();
+      expect(typeof storage.addClient).toBe('function');
+      expect(typeof storage.removeClient).toBe('function');
+      expect(typeof storage.getClient).toBe('function');
+    });
+
+    /**
+     * @source docs/api/websocket.md#redis-storage
+     */
+    it('should configure SharedRedisProvider', () => {
+      // From docs: Redis Storage example
+      // Note: This just tests the API, not actual connection
+      expect(typeof SharedRedisProvider.configure).toBe('function');
+      expect(typeof SharedRedisProvider.getClient).toBe('function');
+    });
+  });
+
+  describe('WebSocket Client', () => {
+    /**
+     * @source docs/api/websocket.md#creating-a-client
+     */
+    it('should create typed client from definition', () => {
+      @WebSocketGateway({ path: '/chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        @OnMessage('chat:message')
+        handleMessage(@Client() _client: WsClientData, @MessageData() data: { text: string }) {
+          return { event: 'received', data };
+        }
+      }
+
+      @Module({ controllers: [ChatGateway] })
+      class ChatModule {}
+
+      const definition = createWsServiceDefinition(ChatModule);
+      expect(definition).toBeDefined();
+      expect(definition._gateways).toBeDefined();
+
+      // Client creation (without actual connection)
+      const client = createWsClient(definition, {
+        url: 'ws://localhost:3000',
+        auth: { token: 'xxx' },
+        reconnect: true,
+        reconnectInterval: 1000,
+        maxReconnectAttempts: 10,
+      });
+
+      expect(client).toBeDefined();
+      expect(typeof client.connect).toBe('function');
+      expect(typeof client.disconnect).toBe('function');
+      expect(typeof client.on).toBe('function');
+    });
+  });
+
+  describe('Application Configuration', () => {
+    /**
+     * @source docs/api/websocket.md#application-options
+     */
+    it('should accept WebSocket configuration', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {}
+
+      @Module({ controllers: [TestGateway] })
+      class AppModule {}
+
+      // From docs: Application Options example
+      const app = new OneBunApplication(AppModule, {
+        port: 3000,
+        websocket: {
+          enabled: true,
+          storage: {
+            type: 'memory',
+          },
+          pingInterval: 25000,
+          pingTimeout: 20000,
+          maxPayload: 1048576,
+        },
+      });
+
+      expect(app).toBeDefined();
+    });
+  });
+});
+
+describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
+  describe('Chat Gateway', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#chat-gateway
+     */
+    it('should define ChatGateway with all handlers', () => {
+      interface ChatMessage {
+        text: string;
+      }
+
+      // Simplified ChatService for testing
+      @Service()
+      class ChatService extends BaseService {
+        async getMessageHistory(_roomId: string): Promise<unknown[]> {
+          return [];
+        }
+
+        async saveMessage(data: { roomId: string; userId: string; text: string; timestamp: number }) {
+          return { id: 'msg_1', ...data };
+        }
+      }
+
+      // From docs: Chat Gateway example
+      @WebSocketGateway({ path: '/chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        constructor(private chatService: ChatService) {
+          super();
+        }
+
+        @OnConnect()
+        async handleConnect(@Client() client: WsClientData) {
+          // eslint-disable-next-line no-console
+          console.log(`Client ${client.id} connected`);
+
+          return {
+            event: 'welcome',
+            data: {
+              message: 'Welcome to the chat!',
+              clientId: client.id,
+              timestamp: Date.now(),
+            },
+          };
+        }
+
+        @OnDisconnect()
+        async handleDisconnect(@Client() client: WsClientData) {
+          // eslint-disable-next-line no-console
+          console.log(`Client ${client.id} disconnected`);
+
+          for (const room of client.rooms) {
+            this.emitToRoom(room, 'user:left', {
+              userId: client.id,
+              room,
+            });
+          }
+        }
+
+        @OnJoinRoom('room:{roomId}')
+        async handleJoinRoom(
+          @Client() client: WsClientData,
+          @RoomName() room: string,
+          @PatternParams() params: { roomId: string },
+        ) {
+          // eslint-disable-next-line no-console
+          console.log(`Client ${client.id} joining room ${params.roomId}`);
+
+          await this.joinRoom(client.id, room);
+
+          this.emitToRoom(room, 'user:joined', {
+            userId: client.id,
+            room,
+          }, [client.id]);
+
+          const history = await this.chatService.getMessageHistory(params.roomId);
+
+          return {
+            event: 'room:joined',
+            data: {
+              room: params.roomId,
+              history,
+            },
+          };
+        }
+
+        @OnLeaveRoom('room:{roomId}')
+        async handleLeaveRoom(
+          @Client() client: WsClientData,
+          @RoomName() room: string,
+        ) {
+          await this.leaveRoom(client.id, room);
+
+          this.emitToRoom(room, 'user:left', {
+            userId: client.id,
+            room,
+          });
+        }
+
+        @OnMessage('chat:{roomId}:message')
+        async handleMessage(
+          @Client() client: WsClientData,
+          @MessageData() data: ChatMessage,
+          @PatternParams() params: { roomId: string },
+        ) {
+          if (!client.rooms.includes(`room:${params.roomId}`)) {
+            return {
+              event: 'error',
+              data: { message: 'Not in room' },
+            };
+          }
+
+          const message = await this.chatService.saveMessage({
+            roomId: params.roomId,
+            userId: client.id,
+            text: data.text,
+            timestamp: Date.now(),
+          });
+
+          this.emitToRoom(`room:${params.roomId}`, 'chat:message', message);
+
+          return {
+            event: 'chat:message:ack',
+            data: { messageId: message.id },
+          };
+        }
+
+        @OnMessage('typing:{roomId}')
+        handleTyping(
+          @Client() client: WsClientData,
+          @PatternParams() params: { roomId: string },
+        ) {
+          this.emitToRoom(
+            `room:${params.roomId}`,
+            'typing',
+            { userId: client.id },
+            [client.id],
+          );
+        }
+      }
+
+      expect(ChatGateway).toBeDefined();
+      expect(ChatService).toBeDefined();
+    });
+  });
+
+  describe('Chat Service', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#chat-service
+     */
+    it('should define ChatService', () => {
+      interface Message {
+        id: string;
+        roomId: string;
+        userId: string;
+        text: string;
+        timestamp: number;
+      }
+
+      // From docs: Chat Service example
+      @Service()
+      class ChatService extends BaseService {
+        private messages: Map<string, Message[]> = new Map();
+        private messageIdCounter = 0;
+
+        async saveMessage(data: Omit<Message, 'id'>): Promise<Message> {
+          const message: Message = {
+            id: `msg_${++this.messageIdCounter}`,
+            ...data,
+          };
+
+          const roomMessages = this.messages.get(data.roomId) || [];
+          roomMessages.push(message);
+          this.messages.set(data.roomId, roomMessages);
+
+          return message;
+        }
+
+        async getMessageHistory(roomId: string, limit = 50): Promise<Message[]> {
+          const roomMessages = this.messages.get(roomId) || [];
+
+          return roomMessages.slice(-limit);
+        }
+
+        async clearRoom(roomId: string): Promise<void> {
+          this.messages.delete(roomId);
+        }
+      }
+
+      expect(ChatService).toBeDefined();
+    });
+  });
+
+  describe('Auth Guard', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#auth-guard
+     */
+    it('should define custom ChatAuthGuard', () => {
+      // From docs: Auth Guard example
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const ChatAuthGuard = createGuard((context: WsExecutionContext) => {
+        const client = context.getClient();
+
+        if (!client.auth?.authenticated) {
+          return false;
+        }
+
+        return true;
+      });
+
+      expect(ChatAuthGuard).toBeDefined();
+      // createGuard returns a class, not an instance
+      const guardInstance = new ChatAuthGuard();
+      expect(typeof guardInstance.canActivate).toBe('function');
+    });
+  });
+
+  describe('Module Setup', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#module-setup
+     */
+    it('should define ChatModule', () => {
+      @Service()
+      class ChatService extends BaseService {}
+
+      @WebSocketGateway({ path: '/chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        constructor(private chatService: ChatService) {
+          super();
+        }
+      }
+
+      // From docs: Module Setup example - Gateways go in controllers
+      @Module({
+        controllers: [ChatGateway],
+        providers: [ChatService],
+      })
+      class ChatModule {}
+
+      expect(ChatModule).toBeDefined();
+    });
+  });
+
+  describe('Application Entry', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#application-entry
+     */
+    it('should create chat application', () => {
+      @Service()
+      class ChatService extends BaseService {}
+
+      @WebSocketGateway({ path: '/chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        constructor(private chatService: ChatService) {
+          super();
+        }
+      }
+
+      @Module({
+        controllers: [ChatGateway],
+        providers: [ChatService],
+      })
+      class ChatModule {}
+
+      // From docs: Application Entry example
+      const app = new OneBunApplication(ChatModule, {
+        port: 3000,
+        websocket: {
+          pingInterval: 25000,
+          pingTimeout: 20000,
+        },
+      });
+
+      expect(app).toBeDefined();
+    });
+  });
+
+  describe('Client Implementation', () => {
+    /**
+     * @source docs/examples/websocket-chat.md#typed-client
+     */
+    it('should create typed chat client', () => {
+      @Service()
+      class ChatService extends BaseService {}
+
+      @WebSocketGateway({ path: '/chat' })
+      class ChatGateway extends BaseWebSocketGateway {
+        constructor(private chatService: ChatService) {
+          super();
+        }
+
+        @OnMessage('chat:message')
+        handleMessage(@MessageData() data: { text: string }) {
+          return { event: 'received', data };
+        }
+      }
+
+      @Module({
+        controllers: [ChatGateway],
+        providers: [ChatService],
+      })
+      class ChatModule {}
+
+      // From docs: Typed Client example
+      const definition = createWsServiceDefinition(ChatModule);
+      const client = createWsClient(definition, {
+        url: 'ws://localhost:3000/chat',
+        auth: {
+          token: 'user-jwt-token',
+        },
+        reconnect: true,
+        reconnectInterval: 2000,
+        maxReconnectAttempts: 5,
+      });
+
+      // Lifecycle events
+      expect(typeof client.on).toBe('function');
+
+      // Connect/disconnect
+      expect(typeof client.connect).toBe('function');
+      expect(typeof client.disconnect).toBe('function');
+
+      // Gateway access
+      expect(client.ChatGateway).toBeDefined();
     });
   });
 });

@@ -1,6 +1,7 @@
 import { Effect, type Layer } from 'effect';
 
 import type { Controller } from './controller';
+import type { WsClientData } from './ws.types';
 
 import { TypedEnv } from '@onebun/envs';
 import {
@@ -22,6 +23,7 @@ import { makeTraceService, TraceService } from '@onebun/trace';
 import { ConfigServiceImpl } from './config.service';
 import { getControllerMetadata } from './decorators';
 import { OneBunModule } from './module';
+import { SharedRedisProvider } from './shared-redis';
 import {
   type ApplicationOptions,
   type HttpMethod,
@@ -31,6 +33,7 @@ import {
   type RouteMetadata,
 } from './types';
 import { validateOrThrow } from './validation';
+import { WsHandler, isWebSocketGateway } from './ws-handler';
 
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -75,6 +78,7 @@ export class OneBunApplication {
   private metricsService: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
+  private wsHandler: WsHandler | null = null;
 
   /**
    * Create application instance
@@ -260,6 +264,20 @@ export class OneBunApplication {
       const controllers = this.rootModule.getControllers();
       this.logger.debug(`Loaded ${controllers.length} controllers`);
 
+      // Initialize WebSocket handler and detect gateways
+      this.wsHandler = new WsHandler(this.logger, this.options.websocket);
+      
+      // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
+      for (const controllerClass of controllers) {
+        if (isWebSocketGateway(controllerClass)) {
+          const instance = this.rootModule.getControllerInstance?.(controllerClass);
+          if (instance) {
+            this.wsHandler.registerGateway(controllerClass, instance as import('./ws-base-gateway').BaseWebSocketGateway);
+            this.logger.info(`Registered WebSocket gateway: ${controllerClass.name}`);
+          }
+        }
+      }
+
       // Create a map of routes with metadata
       const routes = new Map<
         string,
@@ -359,14 +377,47 @@ export class OneBunApplication {
 
       // Create server with proper context binding
       const app = this;
-      this.server = Bun.serve({
+      const hasWebSocketGateways = this.wsHandler?.hasGateways() ?? false;
+      
+      // Prepare WebSocket handlers if gateways exist
+      // When no gateways, use no-op handlers (required by Bun.serve)
+      const wsHandlers = hasWebSocketGateways ? this.wsHandler!.createWebSocketHandlers() : {
+         
+        open() { /* no-op */ },
+         
+        message() { /* no-op */ },
+         
+        close() { /* no-op */ },
+         
+        drain() { /* no-op */ },
+      };
+      
+      this.server = Bun.serve<WsClientData>({
         port: this.options.port,
         hostname: this.options.host,
-        async fetch(req) {
+        // WebSocket handlers
+        websocket: wsHandlers,
+        async fetch(req, server) {
           const url = new URL(req.url);
           const path = url.pathname;
           const method = req.method;
           const startTime = Date.now();
+
+          // Handle WebSocket upgrade if gateways exist
+          if (hasWebSocketGateways && app.wsHandler) {
+            const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();
+            
+            // Check for WebSocket upgrade or Socket.IO polling
+            if (upgradeHeader === 'websocket' || path.startsWith('/socket.io')) {
+              const response = await app.wsHandler.handleUpgrade(req, server);
+              if (response === undefined) {
+                return undefined; // Successfully upgraded
+              }
+
+              // Return response if upgrade failed
+              return response;
+            }
+          }
 
           // Setup tracing context if available and enabled
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -675,6 +726,12 @@ export class OneBunApplication {
         },
       });
 
+      // Initialize WebSocket gateways with server
+      if (hasWebSocketGateways && this.wsHandler && this.server) {
+        this.wsHandler.initializeGateways(this.server);
+        this.logger.info(`WebSocket server enabled at ws://${this.options.host}:${this.options.port}`);
+      }
+
       this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);
       if (this.metricsService) {
         this.logger.info(
@@ -684,6 +741,11 @@ export class OneBunApplication {
         this.logger.warn(
           'Metrics enabled but @onebun/metrics module not available. Install with: bun add @onebun/metrics',
         );
+      }
+
+      // Enable graceful shutdown by default (can be disabled with gracefulShutdown: false)
+      if (this.options.gracefulShutdown !== false) {
+        this.enableGracefulShutdown();
       }
     } catch (error) {
       this.logger.error(
@@ -910,14 +972,59 @@ export class OneBunApplication {
   }
 
   /**
-   * Stop the application
+   * Stop the application with graceful shutdown
+   * @param options - Shutdown options
    */
-  stop(): void {
+  async stop(options?: { closeSharedRedis?: boolean }): Promise<void> {
+    const closeRedis = options?.closeSharedRedis ?? true;
+
+    this.logger.info('Stopping OneBun application...');
+
+    // Cleanup WebSocket resources
+    if (this.wsHandler) {
+      this.logger.debug('Cleaning up WebSocket handler');
+      await this.wsHandler.cleanup();
+      this.wsHandler = null;
+    }
+
+    // Stop HTTP server
     if (this.server) {
       this.server.stop();
       this.server = null;
-      this.logger.info('OneBun application stopped');
+      this.logger.debug('HTTP server stopped');
     }
+
+    // Close shared Redis connection if configured and requested
+    if (closeRedis && SharedRedisProvider.isConnected()) {
+      this.logger.debug('Disconnecting shared Redis');
+      await SharedRedisProvider.disconnect();
+    }
+
+    this.logger.info('OneBun application stopped');
+  }
+
+  /**
+   * Register signal handlers for graceful shutdown
+   * Call this after start() to enable automatic shutdown on SIGTERM/SIGINT
+   * 
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, options);
+   * await app.start();
+   * app.enableGracefulShutdown();
+   * ```
+   */
+  enableGracefulShutdown(): void {
+    const shutdown = async (signal: string) => {
+      this.logger.info(`Received ${signal}, initiating graceful shutdown...`);
+      await this.stop();
+      process.exit(0);
+    };
+
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
+    this.logger.debug('Graceful shutdown handlers registered');
   }
 
   /**

@@ -291,6 +291,170 @@ return this.error('User not found', 404);
 
 Errors thrown in controller methods are automatically caught and converted to standardized error responses.
 
+## WebSocket Gateway
+
+OneBun provides WebSocket support with a Gateway pattern similar to NestJS, with full Socket.IO protocol compatibility.
+
+### Basic Gateway
+
+```typescript
+import {
+  WebSocketGateway,
+  BaseWebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnMessage,
+  Client,
+  MessageData,
+} from '@onebun/core';
+import type { WsClientData } from '@onebun/core';
+
+@WebSocketGateway({ path: '/ws' })
+export class ChatGateway extends BaseWebSocketGateway {
+  @OnConnect()
+  handleConnect(@Client() client: WsClientData) {
+    console.log(`Client ${client.id} connected`);
+    return { event: 'welcome', data: { clientId: client.id } };
+  }
+
+  @OnDisconnect()
+  handleDisconnect(@Client() client: WsClientData) {
+    console.log(`Client ${client.id} disconnected`);
+  }
+
+  @OnMessage('chat:message')
+  handleMessage(
+    @Client() client: WsClientData,
+    @MessageData() data: { text: string }
+  ) {
+    // Broadcast to all clients
+    this.broadcast('chat:message', {
+      userId: client.id,
+      text: data.text,
+    });
+  }
+}
+```
+
+### Pattern Matching
+
+Event patterns support wildcards and named parameters:
+
+```typescript
+// Wildcard: matches chat:general, chat:private, etc.
+@OnMessage('chat:*')
+handleAnyChat(@MessageData() data: unknown) {}
+
+// Named parameter: extracts roomId
+@OnMessage('chat:{roomId}:message')
+handleRoomMessage(@PatternParams() params: { roomId: string }) {}
+```
+
+### Room Management
+
+```typescript
+@WebSocketGateway({ path: '/ws' })
+export class RoomGateway extends BaseWebSocketGateway {
+  @OnJoinRoom('room:{roomId}')
+  async handleJoin(
+    @Client() client: WsClientData,
+    @RoomName() room: string,
+    @PatternParams() params: { roomId: string }
+  ) {
+    await this.joinRoom(client.id, room);
+    this.emitToRoom(room, 'user:joined', { userId: client.id });
+  }
+
+  @OnLeaveRoom('room:*')
+  async handleLeave(@Client() client: WsClientData, @RoomName() room: string) {
+    await this.leaveRoom(client.id, room);
+    this.emitToRoom(room, 'user:left', { userId: client.id });
+  }
+}
+```
+
+### Guards
+
+Protect WebSocket handlers with guards:
+
+```typescript
+import { UseWsGuards, WsAuthGuard, WsPermissionGuard } from '@onebun/core';
+
+@UseWsGuards(WsAuthGuard)
+@OnMessage('protected:*')
+handleProtected(@Client() client: WsClientData) {
+  // Only authenticated clients can access
+}
+
+@UseWsGuards(new WsPermissionGuard('admin'))
+@OnMessage('admin:*')
+handleAdmin(@Client() client: WsClientData) {
+  // Only clients with 'admin' permission
+}
+```
+
+### Typed Client
+
+Generate a type-safe WebSocket client:
+
+```typescript
+import { createWsServiceDefinition, createWsClient } from '@onebun/core';
+import { AppModule } from './app.module';
+
+const definition = createWsServiceDefinition(AppModule);
+const client = createWsClient(definition, {
+  url: 'ws://localhost:3000/ws',
+  auth: { token: 'your-token' },
+});
+
+await client.connect();
+
+// Type-safe event emission
+await client.ChatGateway.emit('chat:message', { text: 'Hello!' });
+
+// Subscribe to events
+client.ChatGateway.on('chat:message', (data) => {
+  console.log('Received:', data);
+});
+
+client.disconnect();
+```
+
+### Storage Options
+
+Configure client/room storage:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  websocket: {
+    storage: {
+      type: 'memory', // or 'redis' for multi-instance
+      redis: {
+        url: 'redis://localhost:6379',
+        prefix: 'ws:',
+      },
+    },
+  },
+});
+```
+
+### Socket.IO Compatibility
+
+OneBun WebSocket Gateway is fully compatible with `socket.io-client`:
+
+```typescript
+import { io } from 'socket.io-client';
+
+const socket = io('ws://localhost:3000/ws', {
+  auth: { token: 'your-token' },
+});
+
+socket.on('chat:message', (data) => console.log(data));
+socket.emit('chat:message', { text: 'Hello!' });
+```
+
+For complete API documentation, see [docs/api/websocket.md](../../docs/api/websocket.md).
+
 ## Application
 
 Create and start an OneBun application:
@@ -312,6 +476,75 @@ app.start()
 ```
 
 The application automatically creates a logger based on NODE_ENV (development or production) and handles all Effect.js calls internally.
+
+## Graceful Shutdown
+
+OneBun supports graceful shutdown to cleanly close connections and release resources when the application stops. **Graceful shutdown is enabled by default.**
+
+### Default Behavior
+
+By default, the application automatically handles SIGTERM and SIGINT signals:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  // gracefulShutdown: true is the default
+});
+
+await app.start();
+// Application will automatically handle shutdown signals
+```
+
+### Disabling Graceful Shutdown
+
+If you need to manage shutdown manually, you can disable automatic handling:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  gracefulShutdown: false, // Disable automatic SIGTERM/SIGINT handling
+});
+
+await app.start();
+
+// Now you must handle shutdown manually:
+// Option 1: Enable signal handlers later
+app.enableGracefulShutdown();
+
+// Option 2: Stop programmatically
+await app.stop();
+
+// Option 3: Stop but keep shared Redis connection open (for other consumers)
+await app.stop({ closeSharedRedis: false });
+```
+
+### What Gets Cleaned Up
+
+When the application stops, the following resources are cleaned up:
+
+1. **HTTP Server** - Bun server is stopped
+2. **WebSocket Handler** - All WebSocket connections are closed
+3. **Shared Redis** - If using SharedRedisProvider, the connection is closed (unless `closeSharedRedis: false`)
+
+### Shared Redis Connection
+
+When using `SharedRedisProvider` for cache, WebSocket storage, or other features, the connection is automatically closed on shutdown:
+
+```typescript
+import { SharedRedisProvider, OneBunApplication } from '@onebun/core';
+
+// Configure shared Redis at startup
+SharedRedisProvider.configure({
+  url: 'redis://localhost:6379',
+  keyPrefix: 'myapp:',
+});
+
+const app = new OneBunApplication(AppModule, {
+  gracefulShutdown: true,
+});
+
+await app.start();
+// Shared Redis will be closed when app receives SIGTERM/SIGINT
+```
 
 ## License
 
