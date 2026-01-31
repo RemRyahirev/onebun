@@ -19,6 +19,7 @@
         "eslint-plugin-import-newlines": "^1.4.0",
         "eslint-plugin-jest": "^29.0.1",
         "eslint-plugin-tsdoc": "^0.4.0",
+        "jiti": "^2.6.1",
         "testcontainers": "^11.7.1",
         "vitepress": "^1.6.4",
       },
@@ -37,7 +38,7 @@
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "dependencies": {
         "@onebun/core": "workspace:*",
         "@onebun/envs": "workspace:*",
@@ -50,7 +51,7 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "dependencies": {
         "@onebun/envs": "^0.1.0",
         "@onebun/logger": "^0.1.0",
@@ -66,7 +67,7 @@
     },
     "packages/docs": {
       "name": "@onebun/docs",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@onebun/core": "workspace:*",
         "swagger-ui-dist": "^5.17.14",
@@ -77,7 +78,7 @@
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.1.0",
+      "version": "0.1.2",
       "dependencies": {
         "@onebun/core": "workspace:*",
         "@onebun/envs": "workspace:*",
@@ -95,7 +96,7 @@
     },
     "packages/envs": {
       "name": "@onebun/envs",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -105,7 +106,7 @@
     },
     "packages/logger": {
       "name": "@onebun/logger",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -115,7 +116,7 @@
     },
     "packages/metrics": {
       "name": "@onebun/metrics",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@onebun/requests": "^0.1.0",
         "effect": "^3.13.10",
@@ -127,7 +128,7 @@
     },
     "packages/requests": {
       "name": "@onebun/requests",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -137,7 +138,7 @@
     },
     "packages/trace": {
       "name": "@onebun/trace",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "dependencies": {
         "@onebun/requests": "^0.1.0",
         "@opentelemetry/api": "^1.8.0",
@@ -982,6 +983,8 @@
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
     "jackspeak": ["jackspeak@3.4.3", "", { "dependencies": { "@isaacs/cliui": "^8.0.2" }, "optionalDependencies": { "@pkgjs/parseargs": "^0.11.0" } }, "sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw=="],
+
+    "jiti": ["jiti@2.6.1", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ=="],
 
     "jju": ["jju@1.4.0", "", {}, "sha512-8wb9Yw966OSxApiCt0K3yNJL8pnNeIv+OEq2YMidz4FKP6nonSRoOXc80iXY4JaN2FC11B9qsNmDsm+ZOfMROA=="],
 

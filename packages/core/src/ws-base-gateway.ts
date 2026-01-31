@@ -23,6 +23,14 @@ import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
 const clientSockets = new Map<string, ServerWebSocket<WsClientData>>();
 
 /**
+ * Clear all client sockets (for testing purposes only)
+ * @internal
+ */
+export function _resetClientSocketsForTesting(): void {
+  clientSockets.clear();
+}
+
+/**
  * Base class for WebSocket gateways
  *
  * @example

@@ -12,7 +12,7 @@ import {
 
 import type { WsClientData } from './ws.types';
 
-import { BaseWebSocketGateway } from './ws-base-gateway';
+import { BaseWebSocketGateway, _resetClientSocketsForTesting } from './ws-base-gateway';
 import { InMemoryWsStorage } from './ws-storage-memory';
 
 // Mock WebSocket
@@ -73,6 +73,7 @@ describe('BaseWebSocketGateway', () => {
   let storage: InMemoryWsStorage;
 
   beforeEach(() => {
+    _resetClientSocketsForTesting();
     gateway = new TestGateway();
     storage = new InMemoryWsStorage();
     gateway.exposeInitialize(storage, {});

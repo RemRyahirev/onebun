@@ -51,6 +51,7 @@
     "eslint-plugin-import-newlines": "^1.4.0",
     "eslint-plugin-jest": "^29.0.1",
     "eslint-plugin-tsdoc": "^0.4.0",
+    "jiti": "^2.6.1",
     "testcontainers": "^11.7.1",
     "vitepress": "^1.6.4"
   }
