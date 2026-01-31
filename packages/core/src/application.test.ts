@@ -1158,7 +1158,7 @@ describe('OneBunApplication', () => {
 
       // Track process.on calls
       const processOnMock = mock();
-      const originalProcessOn = process.on;
+      const originalProcessOn = process.on.bind(process);
       process.on = processOnMock as typeof process.on;
 
       // No gracefulShutdown option - should be enabled by default
@@ -1180,7 +1180,7 @@ describe('OneBunApplication', () => {
 
       // Track process.on calls
       const processOnMock = mock();
-      const originalProcessOn = process.on;
+      const originalProcessOn = process.on.bind(process);
       process.on = processOnMock as typeof process.on;
 
       // Explicitly disable graceful shutdown
@@ -1206,7 +1206,7 @@ describe('OneBunApplication', () => {
 
       // Track process.on calls
       const processOnMock = mock();
-      const originalProcessOn = process.on;
+      const originalProcessOn = process.on.bind(process);
       process.on = processOnMock as typeof process.on;
 
       // Manually enable graceful shutdown
