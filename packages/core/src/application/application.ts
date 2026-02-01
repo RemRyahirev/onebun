@@ -50,6 +50,21 @@ try {
   // Metrics module not available - this is optional
 }
 
+// Conditionally import docs (optional dependency - not added to package.json to avoid circular deps)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let generateOpenApiSpec: any;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let generateSwaggerUiHtml: any;
+
+try {
+  // eslint-disable-next-line import/no-extraneous-dependencies
+  const docsModule = require('@onebun/docs');
+  generateOpenApiSpec = docsModule.generateOpenApiSpec;
+  generateSwaggerUiHtml = docsModule.generateSwaggerUiHtml;
+} catch {
+  // Docs module not available - this is optional
+}
+
 // Import tracing modules directly
 
 // Global trace context for current request
@@ -61,6 +76,26 @@ function clearGlobalTraceContext(): void {
   if (typeof globalThis !== 'undefined') {
     (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = null;
   }
+}
+
+/**
+ * Normalize URL path by removing trailing slashes (except for root path).
+ * This ensures consistent route matching and metrics collection.
+ * 
+ * @param path - The URL path to normalize
+ * @returns Normalized path without trailing slash
+ * @example
+ * normalizePath('/users/') // => '/users'
+ * normalizePath('/users')  // => '/users'
+ * normalizePath('/')       // => '/'
+ * normalizePath('/api/v1/') // => '/api/v1'
+ */
+function normalizePath(path: string): string {
+  if (path === '/' || path.length <= 1) {
+    return path;
+  }
+
+  return path.endsWith('/') ? path.slice(0, -1) : path;
 }
 
 /**
@@ -85,6 +120,9 @@ export class OneBunApplication {
   private wsHandler: WsHandler | null = null;
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
+  // Docs (OpenAPI/Swagger) - generated on start()
+  private openApiSpec: Record<string, unknown> | null = null;
+  private swaggerHtml: string | null = null;
 
   /**
    * Create application instance
@@ -287,6 +325,9 @@ export class OneBunApplication {
       // Initialize Queue system if configured or handlers exist
       await this.initializeQueue(controllers);
 
+      // Initialize Docs (OpenAPI/Swagger) if enabled and available
+      await this.initializeDocs(controllers);
+
       // Create a map of routes with metadata
       const routes = new Map<
         string,
@@ -384,6 +425,10 @@ export class OneBunApplication {
       // Get metrics path
       const metricsPath = this.options.metrics?.path || '/metrics';
 
+      // Get docs paths
+      const docsPath = this.options.docs?.path || '/docs';
+      const openApiPath = this.options.docs?.jsonPath || '/openapi.json';
+
       // Create server with proper context binding
       const app = this;
       const hasWebSocketGateways = this.wsHandler?.hasGateways() ?? false;
@@ -408,7 +453,10 @@ export class OneBunApplication {
         websocket: wsHandlers,
         async fetch(req, server) {
           const url = new URL(req.url);
-          const path = url.pathname;
+          const rawPath = url.pathname;
+          // Normalize path to ensure consistent routing and metrics
+          // (removes trailing slash except for root path)
+          const path = normalizePath(rawPath);
           const method = req.method;
           const startTime = Date.now();
 
@@ -495,6 +543,29 @@ export class OneBunApplication {
                 'Failed to setup tracing:',
                 error instanceof Error ? error : new Error(String(error)),
               );
+            }
+          }
+
+          // Handle docs endpoints (OpenAPI/Swagger)
+          if (app.options.docs?.enabled !== false && app.openApiSpec) {
+            // Serve Swagger UI HTML
+            if (path === docsPath && method === 'GET' && app.swaggerHtml) {
+              return new Response(app.swaggerHtml, {
+                headers: {
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'Content-Type': 'text/html; charset=utf-8',
+                },
+              });
+            }
+
+            // Serve OpenAPI JSON spec
+            if (path === openApiPath && method === 'GET') {
+              return new Response(JSON.stringify(app.openApiSpec, null, 2), {
+                headers: {
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'Content-Type': 'application/json',
+                },
+              });
             }
           }
 
@@ -1120,6 +1191,80 @@ export class OneBunApplication {
    */
   getQueueService(): QueueService | null {
     return this.queueService;
+  }
+
+  /**
+   * Initialize the documentation system (OpenAPI/Swagger)
+   */
+  private async initializeDocs(controllers: Function[]): Promise<void> {
+    const docsOptions = this.options.docs;
+
+    // Skip if docs are explicitly disabled or @onebun/docs is not available
+    if (docsOptions?.enabled === false) {
+      this.logger.debug('Documentation explicitly disabled');
+
+      return;
+    }
+
+    if (!generateOpenApiSpec || !generateSwaggerUiHtml) {
+      if (docsOptions?.enabled === true) {
+        this.logger.warn(
+          'Documentation enabled but @onebun/docs module not available. Install with: bun add @onebun/docs',
+        );
+      } else {
+        this.logger.debug('@onebun/docs module not available, documentation disabled');
+      }
+
+      return;
+    }
+
+    try {
+      // Generate OpenAPI spec from controllers
+      this.openApiSpec = generateOpenApiSpec(controllers, {
+        title: docsOptions?.title || this.options.name || 'OneBun API',
+        version: docsOptions?.version || '1.0.0',
+        description: docsOptions?.description,
+      });
+
+      // Add additional OpenAPI info if provided
+      if (this.openApiSpec && docsOptions?.contact) {
+        (this.openApiSpec.info as Record<string, unknown>).contact = docsOptions.contact;
+      }
+      if (this.openApiSpec && docsOptions?.license) {
+        (this.openApiSpec.info as Record<string, unknown>).license = docsOptions.license;
+      }
+      if (this.openApiSpec && docsOptions?.externalDocs) {
+        this.openApiSpec.externalDocs = docsOptions.externalDocs;
+      }
+      if (this.openApiSpec && docsOptions?.servers && docsOptions.servers.length > 0) {
+        this.openApiSpec.servers = docsOptions.servers;
+      }
+
+      // Generate Swagger UI HTML
+      const openApiPath = docsOptions?.jsonPath || '/openapi.json';
+      this.swaggerHtml = generateSwaggerUiHtml(openApiPath);
+
+      const docsPath = docsOptions?.path || '/docs';
+      this.logger.info(
+        `Documentation available at http://${this.options.host}:${this.options.port}${docsPath}`,
+      );
+      this.logger.info(
+        `OpenAPI spec available at http://${this.options.host}:${this.options.port}${openApiPath}`,
+      );
+    } catch (error) {
+      this.logger.error(
+        'Failed to initialize documentation:',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  /**
+   * Get the OpenAPI specification
+   * @returns The OpenAPI spec or null if not generated
+   */
+  getOpenApiSpec(): Record<string, unknown> | null {
+    return this.openApiSpec;
   }
 
   /**

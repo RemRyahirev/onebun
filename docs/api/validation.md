@@ -434,7 +434,7 @@ if (result instanceof type.errors) {
 Convert ArkType schemas to JSON Schema for OpenAPI/Swagger:
 
 ```typescript
-import { arktypeToJsonSchema } from '@onebun/core';
+import { toJsonSchema, getJsonSchema } from '@onebun/core';
 import { type } from 'arktype';
 
 const userSchema = type({
@@ -442,12 +442,20 @@ const userSchema = type({
   age: 'number > 0',
 });
 
-const jsonSchema = arktypeToJsonSchema(userSchema);
+// Basic conversion
+const jsonSchema = toJsonSchema(userSchema);
+
+// With fallback for unsupported types
+const jsonSchemaWithFallback = getJsonSchema(userSchema, {
+  fallback: (ctx) => ({ ...ctx.base, description: 'Custom fallback' }),
+});
+
+// Result:
 // {
 //   type: 'object',
 //   properties: {
 //     name: { type: 'string' },
-//     age: { type: 'number', minimum: 0, exclusiveMinimum: true },
+//     age: { type: 'number', exclusiveMinimum: 0 },
 //   },
 //   required: ['name', 'age'],
 // }

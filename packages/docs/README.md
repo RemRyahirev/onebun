@@ -4,12 +4,11 @@ Documentation generation package for OneBun framework with OpenAPI/Swagger suppo
 
 ## Features
 
-- 📖 **OpenAPI Generation** - Automatic OpenAPI 3.0 specification from decorators
-- 🎨 **Swagger UI** - Built-in Swagger UI for interactive API documentation
-- 🔄 **JSON Schema Converter** - Convert validation schemas to JSON Schema format
-- 🏷️ **Decorator-based** - Use decorators to document your API endpoints
-- 📝 **Type-safe** - Full TypeScript support with type inference
-- ⚡ **Effect.js Integration** - Seamless integration with Effect.js ecosystem
+- OpenAPI Generation - Automatic OpenAPI 3.1 specification from decorators
+- Swagger UI - Built-in Swagger UI HTML generation for interactive API documentation
+- JSON Schema Converter - Convert ArkType validation schemas to JSON Schema format
+- Decorator-based - Use decorators to add metadata for documentation
+- Type-safe - Full TypeScript support with type inference
 
 ## Installation
 
@@ -21,177 +20,211 @@ bun add @onebun/docs
 
 ### Basic Usage
 
-```typescript
-import { OneBunApplication, Controller, Get, Post, Body } from '@onebun/core';
-import { ApiTag, ApiOperation, ApiResponse, ApiBody } from '@onebun/docs';
+The `@onebun/docs` package provides decorators for adding documentation metadata to your controllers. Note that `@ApiResponse` for response validation is provided by `@onebun/core`.
 
+**Important: Decorator Order Matters!**
+- `@ApiTags` must be placed **above** `@Controller` (because `@Controller` wraps the class)
+- `@ApiOperation` must be placed **above** route decorators (`@Get`, `@Post`, etc.)
+- `@ApiResponse` must be placed **below** route decorators
+
+```typescript
+import { Controller, Get, Post, Body, BaseController, ApiResponse } from '@onebun/core';
+import { ApiTags, ApiOperation } from '@onebun/docs';
+import { type } from 'arktype';
+
+const createUserSchema = type({
+  name: 'string',
+  email: 'string.email',
+});
+
+// @ApiTags ABOVE @Controller
+@ApiTags('Users')
 @Controller('/users')
-@ApiTag('Users', 'User management endpoints')
-export class UserController {
-  @Get()
+export class UserController extends BaseController {
+  // @ApiOperation ABOVE @Get, @ApiResponse BELOW @Get
   @ApiOperation({ summary: 'Get all users', description: 'Returns a list of all users' })
-  @ApiResponse({ status: 200, description: 'List of users returned successfully' })
-  async getUsers() {
-    return { users: [] };
+  @Get('/')
+  @ApiResponse(200, { description: 'List of users returned successfully' })
+  async getUsers(): Promise<Response> {
+    return this.success({ users: [] });
   }
 
-  @Post()
   @ApiOperation({ summary: 'Create user', description: 'Creates a new user' })
-  @ApiBody({ description: 'User data', required: true })
-  @ApiResponse({ status: 201, description: 'User created successfully' })
-  @ApiResponse({ status: 400, description: 'Invalid input data' })
-  async createUser(@Body() userData: CreateUserDto) {
-    return { id: '1', ...userData };
+  @Post('/')
+  @ApiResponse(201, { schema: createUserSchema, description: 'User created successfully' })
+  @ApiResponse(400, { description: 'Invalid input data' })
+  async createUser(@Body(createUserSchema) userData: typeof createUserSchema.infer): Promise<Response> {
+    return this.success({ id: '1', ...userData });
   }
 }
 ```
 
-### Enable Swagger UI
-
-```typescript
-import { OneBunApplication } from '@onebun/core';
-import { AppModule } from './app.module';
-
-const app = new OneBunApplication(AppModule, {
-  docs: {
-    enabled: true,
-    path: '/docs',
-    title: 'My API',
-    version: '1.0.0',
-    description: 'API documentation for my service'
-  }
-});
-
-await app.start();
-// Swagger UI available at http://localhost:3000/docs
-```
-
 ## Decorators
 
-### Controller Level
+### From @onebun/docs
 
-- `@ApiTag(name, description?)` - Group endpoints under a tag
+#### @ApiTags(...tags)
 
-### Method Level
-
-- `@ApiOperation(options)` - Describe the operation
-- `@ApiResponse(options)` - Document response types
-- `@ApiBody(options)` - Document request body
-- `@ApiParam(options)` - Document path parameters
-- `@ApiQuery(options)` - Document query parameters
-- `@ApiHeader(options)` - Document header parameters
-
-## Configuration Options
+Group endpoints under tags. Can be used on controller class or individual methods.
 
 ```typescript
-interface DocsOptions {
-  // Enable/disable documentation (default: true)
-  enabled?: boolean;
+import { ApiTags } from '@onebun/docs';
 
-  // Path for Swagger UI (default: '/docs')
-  path?: string;
+// @ApiTags must be ABOVE @Controller
+@ApiTags('Users', 'User Management')
+@Controller('/users')
+export class UserController extends BaseController {
+  // All endpoints in this controller will be tagged with 'Users' and 'User Management'
+}
+```
 
-  // API title
-  title?: string;
+#### @ApiOperation(options)
 
-  // API version
-  version?: string;
+Describe an API operation with summary, description, and additional tags.
 
-  // API description
-  description?: string;
+```typescript
+import { ApiOperation } from '@onebun/docs';
 
-  // Contact information
-  contact?: {
-    name?: string;
-    email?: string;
-    url?: string;
-  };
+// @ApiOperation must be ABOVE route decorator
+@ApiOperation({
+  summary: 'Get user by ID',
+  description: 'Returns a single user by their unique identifier',
+  tags: ['Users'],  // Additional tags for this specific endpoint
+})
+@Get('/:id')
+async getUser(@Param('id') id: string): Promise<Response> {
+  // ...
+}
+```
 
-  // License information
-  license?: {
-    name: string;
-    url?: string;
-  };
+### From @onebun/core
 
-  // External documentation
-  externalDocs?: {
-    description?: string;
-    url: string;
-  };
+#### @ApiResponse(statusCode, options?)
 
-  // Server URLs
-  servers?: Array<{
-    url: string;
-    description?: string;
-  }>;
+Document and validate response types. This decorator is provided by `@onebun/core`.
+
+```typescript
+import { ApiResponse } from '@onebun/core';
+import { type } from 'arktype';
+
+const userSchema = type({
+  id: 'string',
+  name: 'string',
+  email: 'string.email',
+});
+
+// @ApiResponse must be BELOW route decorator
+@Get('/:id')
+@ApiResponse(200, { schema: userSchema, description: 'User found' })
+@ApiResponse(404, { description: 'User not found' })
+async getUser(@Param('id') id: string): Promise<Response> {
+  // Response will be validated against userSchema for 200 responses
 }
 ```
 
 ## OpenAPI Generation
 
-### Programmatic Access
+### Generate OpenAPI Spec from Controllers
 
 ```typescript
 import { generateOpenApiSpec } from '@onebun/docs';
+import { UserController } from './user.controller';
+import { OrderController } from './order.controller';
 
-const spec = generateOpenApiSpec(AppModule, {
+const spec = generateOpenApiSpec([UserController, OrderController], {
   title: 'My API',
-  version: '1.0.0'
+  version: '1.0.0',
+  description: 'API documentation for my service',
 });
 
 // Save to file
 await Bun.write('openapi.json', JSON.stringify(spec, null, 2));
 ```
 
-### JSON Schema Conversion
+### Generate Swagger UI HTML
 
 ```typescript
-import { toJsonSchema } from '@onebun/docs';
-import { S } from '@onebun/core';
+import { generateSwaggerUiHtml } from '@onebun/docs';
 
-const userSchema = S.object({
-  id: S.string(),
-  email: S.string().email(),
-  age: S.number().min(0).max(150)
-});
+// Generate HTML that loads OpenAPI spec from a URL
+const html = generateSwaggerUiHtml('/openapi.json');
 
-const jsonSchema = toJsonSchema(userSchema);
-// Returns JSON Schema compatible object
-```
-
-## Integration with Validation
-
-The docs package works seamlessly with `@onebun/core` validation schemas:
-
-```typescript
-import { Controller, Post, Body, S } from '@onebun/core';
-import { ApiOperation, ApiBody, ApiResponse } from '@onebun/docs';
-
-const CreateUserSchema = S.object({
-  name: S.string().min(1).max(100),
-  email: S.string().email(),
-  age: S.number().optional()
-});
-
-@Controller('/users')
-export class UserController {
-  @Post()
-  @ApiOperation({ summary: 'Create user' })
-  @ApiBody({ schema: CreateUserSchema })
-  @ApiResponse({ status: 201, schema: CreateUserSchema })
-  async createUser(@Body(CreateUserSchema) userData: typeof CreateUserSchema.infer) {
-    return userData;
-  }
+// Serve as an endpoint
+@Get('/docs')
+async getDocs(): Promise<Response> {
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' },
+  });
 }
 ```
 
+### JSON Schema Conversion
+
+Convert ArkType schemas to JSON Schema format for OpenAPI documentation:
+
+```typescript
+import { arktypeToJsonSchema } from '@onebun/docs';
+import { type } from 'arktype';
+
+const userSchema = type({
+  id: 'string',
+  email: 'string.email',
+  age: 'number > 0',
+});
+
+const jsonSchema = arktypeToJsonSchema(userSchema);
+// Returns JSON Schema compatible object
+```
+
+## Integration with @onebun/core
+
+The docs package reads metadata from `@onebun/core` decorators automatically:
+
+- Route information from `@Get`, `@Post`, `@Put`, `@Delete`, `@Patch`
+- Path parameters from `@Param`
+- Query parameters from `@Query`
+- Request body from `@Body`
+- Response schemas from `@ApiResponse`
+
+This means your existing controller decorators contribute to the generated OpenAPI spec.
+
 ## Best Practices
 
-1. **Document all endpoints** - Add at least `@ApiOperation` and `@ApiResponse` to every endpoint
-2. **Use meaningful descriptions** - Help consumers understand your API
-3. **Group related endpoints** - Use `@ApiTag` for logical grouping
-4. **Document error responses** - Include common error status codes
+1. **Use @ApiOperation for all endpoints** - Add summary and description
+2. **Use @ApiTags for grouping** - Group related endpoints logically
+3. **Document response types** - Use `@ApiResponse` with schemas from `@onebun/core`
+4. **Use meaningful descriptions** - Help API consumers understand your endpoints
 5. **Keep documentation updated** - Decorators ensure docs stay in sync with code
+
+## API Reference
+
+### generateOpenApiSpec(controllers, options)
+
+Generate OpenAPI 3.1 specification from controller classes.
+
+**Parameters:**
+- `controllers: Function[]` - Array of controller classes
+- `options: { title?: string; version?: string; description?: string }` - OpenAPI info options
+
+**Returns:** `OpenApiSpec` - OpenAPI 3.1 compliant specification object
+
+### generateSwaggerUiHtml(specUrl)
+
+Generate HTML page with Swagger UI.
+
+**Parameters:**
+- `specUrl: string` - URL to the OpenAPI JSON specification
+
+**Returns:** `string` - HTML string
+
+### arktypeToJsonSchema(schema)
+
+Convert ArkType schema to JSON Schema.
+
+**Parameters:**
+- `schema: Type<unknown>` - ArkType schema
+
+**Returns:** `Record<string, unknown>` - JSON Schema object
 
 ## License
 

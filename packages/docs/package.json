@@ -1,6 +1,6 @@
 {
   "name": "@onebun/docs",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Documentation generation for OneBun framework - OpenAPI, Swagger UI",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
@@ -41,6 +41,7 @@
     "swagger-ui-dist": "^5.17.14"
   },
   "devDependencies": {
+    "arktype": "^2.0.0",
     "bun-types": "1.2.2"
   },
   "engines": {

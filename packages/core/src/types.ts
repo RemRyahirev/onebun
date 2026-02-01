@@ -278,6 +278,11 @@ export interface ApplicationOptions {
   queue?: QueueApplicationOptions;
 
   /**
+   * Documentation configuration (OpenAPI/Swagger)
+   */
+  docs?: DocsApplicationOptions;
+
+  /**
    * Enable graceful shutdown on SIGTERM/SIGINT
    * When enabled, the application will cleanly shutdown on process signals,
    * including closing shared Redis connections.
@@ -345,6 +350,80 @@ export interface WebSocketApplicationOptions {
   pingTimeout?: number;
   /** Maximum payload size in bytes */
   maxPayload?: number;
+}
+
+/**
+ * Documentation configuration for OneBunApplication
+ * Enables automatic OpenAPI spec generation and Swagger UI
+ */
+export interface DocsApplicationOptions {
+  /**
+   * Enable/disable documentation endpoints
+   * @defaultValue true
+   */
+  enabled?: boolean;
+
+  /**
+   * Path for Swagger UI
+   * @defaultValue '/docs'
+   */
+  path?: string;
+
+  /**
+   * Path for OpenAPI JSON specification
+   * @defaultValue '/openapi.json'
+   */
+  jsonPath?: string;
+
+  /**
+   * API title for OpenAPI spec
+   * @defaultValue Application name or 'OneBun API'
+   */
+  title?: string;
+
+  /**
+   * API version for OpenAPI spec
+   * @defaultValue '1.0.0'
+   */
+  version?: string;
+
+  /**
+   * API description for OpenAPI spec
+   */
+  description?: string;
+
+  /**
+   * Contact information
+   */
+  contact?: {
+    name?: string;
+    email?: string;
+    url?: string;
+  };
+
+  /**
+   * License information
+   */
+  license?: {
+    name: string;
+    url?: string;
+  };
+
+  /**
+   * External documentation link
+   */
+  externalDocs?: {
+    description?: string;
+    url: string;
+  };
+
+  /**
+   * Server URLs for OpenAPI spec
+   */
+  servers?: Array<{
+    url: string;
+    description?: string;
+  }>;
 }
 
 /**

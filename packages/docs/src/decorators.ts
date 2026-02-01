@@ -72,24 +72,58 @@ export function ApiTags(...tags: string[]): ClassDecorator & MethodDecorator {
 
 /**
  * Get API operation metadata for a method
+ * Walks up the prototype chain to find metadata (needed because @Controller wraps classes)
  */
 export function getApiOperationMetadata(
   target: object,
   propertyKey: string | symbol,
 ): { summary?: string; description?: string; tags?: string[] } | undefined {
-  return getMetadata(API_OPERATION_METADATA, target, propertyKey);
+  // Try to get metadata from target directly
+  let result = getMetadata(API_OPERATION_METADATA, target, propertyKey);
+  if (result) {
+    return result;
+  }
+
+  // Walk up prototype chain (needed for wrapped classes)
+  let proto = Object.getPrototypeOf(target);
+  while (proto && proto !== Object.prototype) {
+    result = getMetadata(API_OPERATION_METADATA, proto, propertyKey);
+    if (result) {
+      return result;
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  return undefined;
 }
 
 /**
  * Get API tags for a class or method
+ * Walks up the prototype chain to find metadata (needed because @Controller wraps classes)
  */
 export function getApiTagsMetadata(
   target: object | Function,
   propertyKey?: string | symbol,
 ): string[] | undefined {
   if (propertyKey !== undefined) {
-    return getMetadata(API_TAGS_METADATA, target, propertyKey);
+    // Method-level tags - walk prototype chain
+    let result = getMetadata(API_TAGS_METADATA, target, propertyKey);
+    if (result) {
+      return result;
+    }
+
+    let proto = Object.getPrototypeOf(target);
+    while (proto && proto !== Object.prototype) {
+      result = getMetadata(API_TAGS_METADATA, proto, propertyKey);
+      if (result) {
+        return result;
+      }
+      proto = Object.getPrototypeOf(proto);
+    }
+
+    return undefined;
   }
 
+  // Class-level tags
   return getMetadata(API_TAGS_METADATA, target);
 }

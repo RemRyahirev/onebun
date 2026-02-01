@@ -348,6 +348,10 @@ Define response schema for documentation and validation.
 })
 ```
 
+::: tip Decorator Order
+`@ApiResponse` must be placed **below** the route decorator (`@Get`, `@Post`, etc.) because the route decorator reads response schemas when it runs.
+:::
+
 **Example:**
 
 ```typescript
@@ -361,6 +365,7 @@ const userResponseSchema = type({
 
 @Controller('/users')
 export class UserController extends BaseController {
+  // @ApiResponse must be BELOW @Get
   @Get('/:id')
   @ApiResponse(200, {
     schema: userResponseSchema,
@@ -372,6 +377,128 @@ export class UserController extends BaseController {
   async findOne(@Param('id') id: string) {
     // Response will be validated against userResponseSchema
     return this.success({ id, name: 'John', email: 'john@example.com' });
+  }
+}
+```
+
+## Documentation Decorators
+
+Package: `@onebun/docs`
+
+These decorators add metadata for OpenAPI/Swagger documentation generation.
+
+::: warning Decorator Order Matters
+Due to how TypeScript decorators work with the `@Controller` wrapper:
+- `@ApiTags` must be placed **above** `@Controller`
+- `@ApiOperation` must be placed **above** route decorators (`@Get`, `@Post`, etc.)
+- `@ApiResponse` must be placed **below** route decorators
+:::
+
+### @ApiTags()
+
+Group endpoints under tags for documentation organization.
+
+```typescript
+import { ApiTags } from '@onebun/docs';
+
+@ApiTags(...tags: string[])
+```
+
+Can be used on controller class or individual methods:
+
+**Example:**
+
+```typescript
+import { Controller, BaseController, Get } from '@onebun/core';
+import { ApiTags } from '@onebun/docs';
+
+// @ApiTags must be ABOVE @Controller
+@ApiTags('Users', 'User Management')
+@Controller('/users')
+export class UserController extends BaseController {
+  // All endpoints tagged with 'Users' and 'User Management'
+
+  // For method-level tags, place above the route decorator
+  @ApiTags('Admin')
+  @Get('/admins')
+  async getAdmins() {
+    return this.success([]);
+  }
+}
+```
+
+### @ApiOperation()
+
+Describe an API operation with summary, description, and additional tags.
+
+```typescript
+import { ApiOperation } from '@onebun/docs';
+
+@ApiOperation(options: {
+  summary?: string;
+  description?: string;
+  tags?: string[];
+})
+```
+
+**Example:**
+
+```typescript
+import { Controller, BaseController, Get, Param } from '@onebun/core';
+import { ApiOperation } from '@onebun/docs';
+
+@Controller('/users')
+export class UserController extends BaseController {
+  // @ApiOperation must be ABOVE the route decorator
+  @ApiOperation({
+    summary: 'Get user by ID',
+    description: 'Returns a single user by their unique identifier. Returns 404 if user not found.',
+    tags: ['Users'],
+  })
+  @Get('/:id')
+  async getUser(@Param('id') id: string) {
+    return this.success({ id, name: 'John' });
+  }
+}
+```
+
+### Combining Documentation Decorators
+
+Use both `@onebun/core` and `@onebun/docs` decorators together for complete documentation:
+
+```typescript
+import { Controller, BaseController, Get, Post, Body, Param, ApiResponse } from '@onebun/core';
+import { ApiTags, ApiOperation } from '@onebun/docs';
+import { type } from 'arktype';
+
+const userSchema = type({
+  id: 'string',
+  name: 'string',
+  email: 'string.email',
+});
+
+const createUserSchema = type({
+  name: 'string',
+  email: 'string.email',
+});
+
+@Controller('/users')
+@ApiTags('Users')
+export class UserController extends BaseController {
+  @ApiOperation({ summary: 'Get user by ID' })
+  @Get('/:id')
+  @ApiResponse(200, { schema: userSchema, description: 'User found' })
+  @ApiResponse(404, { description: 'User not found' })
+  async getUser(@Param('id') id: string) {
+    // ...
+  }
+
+  @ApiOperation({ summary: 'Create new user', description: 'Creates a new user account' })
+  @Post('/')
+  @ApiResponse(201, { schema: userSchema, description: 'User created' })
+  @ApiResponse(400, { description: 'Invalid input' })
+  async createUser(@Body(createUserSchema) body: typeof createUserSchema.infer) {
+    // ...
   }
 }
 ```

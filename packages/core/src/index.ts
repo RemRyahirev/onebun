@@ -33,6 +33,8 @@ export {
   type WsStorageType,
   type WsStorageOptions,
   type WebSocketApplicationOptions,
+  // Docs types
+  type DocsApplicationOptions,
 } from './types';
 
 // Decorators and Metadata (exports Controller decorator, Module decorator, etc.)

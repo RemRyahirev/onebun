@@ -1000,6 +1000,243 @@ describe('OneBunApplication', () => {
         title: 'Post 123 by User 42',
       });
     });
+
+    test('should handle trailing slashes - route without trailing slash matches request with trailing slash', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/users/:page')
+        async getUsers(@Param('page') page: string) {
+          return { users: ['Alice', 'Bob'], page: parseInt(page) };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Request WITH trailing slash should match route WITHOUT trailing slash
+      const request = new Request('http://localhost:3000/api/users/1/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      // Should return 200, not 404 (route should be found)
+      expect(response).toBeInstanceOf(Response);
+      expect(response.status).toBe(200);
+
+      const body = await response.json();
+      expect(body.result).toEqual({ users: ['Alice', 'Bob'], page: 1 });
+    });
+
+    test('should handle trailing slashes - both with and without slash return same result', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/items/:category')
+        async getItems(@Param('category') category: string) {
+          return { items: [1, 2, 3], category };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Request WITHOUT trailing slash
+      const requestWithout = new Request('http://localhost:3000/api/items/electronics', {
+        method: 'GET',
+      });
+
+      // Request WITH trailing slash
+      const requestWith = new Request('http://localhost:3000/api/items/electronics/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseWithout = await (mockServer as any).fetchHandler(requestWithout);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseWith = await (mockServer as any).fetchHandler(requestWith);
+
+      // Both should be valid Response objects
+      expect(responseWithout).toBeInstanceOf(Response);
+      expect(responseWith).toBeInstanceOf(Response);
+
+      // Both should return 200 (not 404)
+      expect(responseWithout.status).toBe(200);
+      expect(responseWith.status).toBe(200);
+
+      const bodyWithout = await responseWithout.json();
+      const bodyWith = await responseWith.json();
+
+      expect(bodyWithout.result).toEqual(bodyWith.result);
+    });
+
+    test('should handle trailing slashes with route parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/users/:id')
+        async getUser(@Param('id') id: string) {
+          return { id: parseInt(id) };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Request WITH trailing slash on parameterized route
+      const request = new Request('http://localhost:3000/api/users/123/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result).toEqual({ id: 123 });
+    });
+
+    test('should handle root path correctly (no trailing slash removal)', async () => {
+      @Controller('/root')
+      class RootController extends BaseController {
+        @Get('/:id')
+        async getById(@Param('id') id: string) {
+          return { message: 'root', id };
+        }
+      }
+
+      @Module({
+        controllers: [RootController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Test that trailing slash is handled correctly even for short paths
+      const request = new Request('http://localhost:3000/root/42/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response).toBeInstanceOf(Response);
+      expect(response.status).toBe(200);
+
+      const body = await response.json();
+      expect(body.result).toEqual({ message: 'root', id: '42' });
+    });
+
+    test('should handle exact root path with trailing slash', async () => {
+      @Controller('/health')
+      class HealthController extends BaseController {
+        @Get('/:type')
+        async check(@Param('type') type: string) {
+          return { status: 'ok', type };
+        }
+      }
+
+      @Module({
+        controllers: [HealthController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Root path "/" should remain "/" after normalization
+      const requestWithSlash = new Request('http://localhost:3000/health/live/', {
+        method: 'GET',
+      });
+
+      const requestWithoutSlash = new Request('http://localhost:3000/health/live', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseWith = await (mockServer as any).fetchHandler(requestWithSlash);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseWithout = await (mockServer as any).fetchHandler(requestWithoutSlash);
+
+      // Both should work identically
+      expect(responseWith.status).toBe(200);
+      expect(responseWithout.status).toBe(200);
+
+      const bodyWith = await responseWith.json();
+      const bodyWithout = await responseWithout.json();
+      expect(bodyWith.result).toEqual(bodyWithout.result);
+    });
+
+    test('should normalize metrics route labels - trailing slash requests use same label as non-trailing', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/data')
+        async getData() {
+          return { data: 'test' };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, {
+        metrics: { path: '/metrics' },
+      });
+
+      // Track recorded metrics
+      const recordedMetrics: Array<{ route: string }> = [];
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const mockMetricsService: any = {
+        getMetrics: mock(() => Promise.resolve('# metrics data')),
+        getContentType: mock(() => 'text/plain'),
+        startSystemMetricsCollection: mock(),
+        recordHttpRequest: mock((data: { route: string }) => {
+          recordedMetrics.push({ route: data.route });
+        }),
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (app as any).metricsService = mockMetricsService;
+
+      await app.start();
+
+      // Make requests with both trailing and non-trailing slash
+      const requestWithout = new Request('http://localhost:3000/api/data', {
+        method: 'GET',
+      });
+      const requestWith = new Request('http://localhost:3000/api/data/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mockServer as any).fetchHandler(requestWithout);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (mockServer as any).fetchHandler(requestWith);
+
+      // Both requests should record metrics with the same route label (without trailing slash)
+      expect(recordedMetrics.length).toBe(2);
+      expect(recordedMetrics[0].route).toBe('/api/data');
+      expect(recordedMetrics[1].route).toBe('/api/data');
+      // Verify they are the same (no duplication due to trailing slash)
+      expect(recordedMetrics[0].route).toBe(recordedMetrics[1].route);
+    });
   });
 
   describe('Tracing integration', () => {
