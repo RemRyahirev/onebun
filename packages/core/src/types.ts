@@ -6,7 +6,7 @@ import type { Logger } from '@onebun/logger';
 /**
  * Base interface for all OneBun services
  */
-export interface Service {
+export interface ServiceInterface {
   readonly [key: string]: unknown;
 }
 
@@ -17,7 +17,7 @@ export interface ModuleProviders {
   /**
    * Services to provide
    */
-  providers?: Service[];
+  providers?: ServiceInterface[];
 
   /**
    * Controllers to include
@@ -27,7 +27,7 @@ export interface ModuleProviders {
   /**
    * Modules to import
    */
-  imports?: Module[];
+  imports?: ModuleInstance[];
 
   /**
    * Services to export to parent modules
@@ -36,9 +36,9 @@ export interface ModuleProviders {
 }
 
 /**
- * Module interface
+ * Module instance interface
  */
-export interface Module {
+export interface ModuleInstance {
   /**
    * Setup the module
    */
@@ -273,6 +273,11 @@ export interface ApplicationOptions {
   websocket?: WebSocketApplicationOptions;
 
   /**
+   * Queue configuration
+   */
+  queue?: QueueApplicationOptions;
+
+  /**
    * Enable graceful shutdown on SIGTERM/SIGINT
    * When enabled, the application will cleanly shutdown on process signals,
    * including closing shared Redis connections.
@@ -280,6 +285,30 @@ export interface ApplicationOptions {
    * @defaultValue true
    */
   gracefulShutdown?: boolean;
+}
+
+/**
+ * Queue adapter type for application configuration
+ */
+export type QueueAdapterType = 'memory' | 'redis';
+
+/**
+ * Queue configuration for OneBunApplication
+ */
+export interface QueueApplicationOptions {
+  /** Enable/disable queue (default: auto - enabled if handlers exist) */
+  enabled?: boolean;
+  /** Adapter type or custom adapter instance */
+  adapter?: QueueAdapterType;
+  /** Redis-specific options (only used when adapter is 'redis') */
+  redis?: {
+    /** Use shared Redis provider instead of dedicated connection */
+    useSharedProvider?: boolean;
+    /** Redis connection URL (required if not using shared provider) */
+    url?: string;
+    /** Key prefix for Redis keys */
+    prefix?: string;
+  };
 }
 
 /**

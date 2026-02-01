@@ -44,6 +44,8 @@ interface PackageInfo {
   path: string;
   version: string;
   hasChanges: boolean;
+  changeDetectionMethod?: 'npm-githead' | 'git-tag' | 'version-compare' | 'unknown';
+  changedFiles?: string[];
 }
 
 interface PublishResult {
@@ -259,43 +261,115 @@ async function checkForSecrets(): Promise<void> {
 }
 
 /**
- * Get the last publish tag or commit
+ * Get gitHead (commit hash) from npm registry for a published package
  */
-async function getLastPublishRef(): Promise<string | null> {
+async function getPublishedGitHead(packageName: string): Promise<string | null> {
   try {
-    // Try to get the latest tag
-    const result = await $`git describe --tags --abbrev=0 2>/dev/null`.quiet();
+    const result = await $`npm view ${packageName} gitHead 2>/dev/null`.quiet();
     if (result.exitCode === 0) {
-      return result.stdout.toString().trim();
+      const gitHead = result.stdout.toString().trim();
+      // Validate it looks like a git hash (40 hex chars)
+      if (gitHead && /^[a-f0-9]{40}$/i.test(gitHead)) {
+        return gitHead;
+      }
     }
   } catch {
-    // No tags exist
+    // gitHead not available
   }
+  return null;
+}
 
-  // If no tags, use first commit
+/**
+ * Fetch tags from remote (run once before checking tags)
+ */
+let tagsFetched = false;
+async function ensureTagsFetched(): Promise<void> {
+  if (tagsFetched) return;
+
   try {
-    const result = await $`git rev-list --max-parents=0 HEAD`.quiet();
-    return result.stdout.toString().trim();
+    log.dim('Fetching tags from remote...');
+    await $`git fetch --tags --quiet`.quiet();
+    tagsFetched = true;
   } catch {
-    return null;
+    log.warn('Failed to fetch tags from remote');
   }
 }
 
 /**
- * Get list of changed files since last publish
+ * Get the last publish tag for a specific package
+ * Returns the most recent tag matching the package name pattern (e.g., @onebun/cache@*)
  */
-async function getChangedFiles(sinceRef: string): Promise<string[]> {
+async function getLastPublishTagForPackage(packageName: string): Promise<string | null> {
+  await ensureTagsFetched();
+
   try {
-    const result = await $`git diff --name-only ${sinceRef}...HEAD -- packages/`.quiet();
-    return result.stdout
-      .toString()
-      .trim()
-      .split('\n')
-      .filter(Boolean);
+    // Find tags matching this package, sorted by version (newest first)
+    const result = await $`git tag --list ${packageName}@* --sort=-v:refname`.quiet();
+    if (result.exitCode === 0) {
+      const tags = result.stdout.toString().trim().split('\n').filter(Boolean);
+      if (tags.length > 0) {
+        return tags[0]; // Return most recent tag for this package
+      }
+    }
   } catch {
-    // If comparison fails, consider all packages changed
-    return ['packages/'];
+    // No tags for this package
   }
+  return null;
+}
+
+/**
+ * Get list of changed files in a package directory since a given git ref
+ */
+async function getChangedFilesSinceRef(pkg: PackageInfo, ref: string): Promise<string[]> {
+  try {
+    const pkgDir = pkg.path.replace(ROOT_DIR + '/', '');
+    const result = await $`git diff --name-only ${ref}...HEAD -- ${pkgDir}/`.quiet();
+    return result.stdout.toString().trim().split('\n').filter(Boolean);
+  } catch {
+    // If comparison fails, return empty (can't determine)
+    return [];
+  }
+}
+
+interface ChangeDetectionResult {
+  hasChanges: boolean;
+  method: 'npm-githead' | 'git-tag' | 'version-compare' | 'unknown';
+  changedFiles: string[];
+}
+
+/**
+ * Detect if a package has changes since last publish using multiple strategies:
+ * 1. First try gitHead from npm registry (most reliable)
+ * 2. If that fails, try git tags (after fetching from remote)
+ * 3. If nothing works, compare versions or mark as unknown
+ */
+async function detectPackageChanges(pkg: PackageInfo, publishedVersion: string | null): Promise<ChangeDetectionResult> {
+  // Strategy 1: Try gitHead from npm
+  const gitHead = await getPublishedGitHead(pkg.name);
+  if (gitHead) {
+    const changedFiles = await getChangedFilesSinceRef(pkg, gitHead);
+    return { hasChanges: changedFiles.length > 0, method: 'npm-githead', changedFiles };
+  }
+
+  // Strategy 2: Try git tags (fetch first)
+  const lastTag = await getLastPublishTagForPackage(pkg.name);
+  if (lastTag) {
+    const changedFiles = await getChangedFilesSinceRef(pkg, lastTag);
+    return { hasChanges: changedFiles.length > 0, method: 'git-tag', changedFiles };
+  }
+
+  // Strategy 3: Fall back to version comparison
+  if (publishedVersion !== null) {
+    if (compareVersions(pkg.version, publishedVersion) === 0) {
+      // Same version - assume no changes (can't verify)
+      return { hasChanges: false, method: 'version-compare', changedFiles: [] };
+    }
+    // Different version - assume there are changes
+    return { hasChanges: true, method: 'version-compare', changedFiles: [] };
+  }
+
+  // Can't determine - package is published but we have no way to check changes
+  return { hasChanges: true, method: 'unknown', changedFiles: [] };
 }
 
 /**
@@ -424,18 +498,11 @@ async function main(): Promise<void> {
   // Step 6: Get packages to process
   log.step('Detecting packages to publish...');
 
-  const lastRef = await getLastPublishRef();
-  const changedFiles = lastRef ? await getChangedFiles(lastRef) : ['packages/'];
   const allPackages = await getAllPackages();
 
-  // Mark packages as changed based on file changes
-  for (const pkg of allPackages) {
-    const pkgDir = pkg.path.replace(ROOT_DIR + '/', '');
-    pkg.hasChanges = changedFiles.some((file) => file.startsWith(pkgDir));
-  }
-
-  // Check which packages need publishing (not yet in npm or have changes)
+  // Check which packages need publishing (not yet in npm or have changes since their own last tag)
   const packagesToProcess: PackageInfo[] = [];
+  const unknownStatePackages: PackageInfo[] = [];
 
   for (const pkg of allPackages) {
     const publishedVersion = await getPublishedVersion(pkg.name);
@@ -443,15 +510,36 @@ async function main(): Promise<void> {
     if (publishedVersion === null) {
       // Not published yet - always include
       pkg.hasChanges = true;
+      pkg.changeDetectionMethod = 'version-compare';
       packagesToProcess.push(pkg);
-    } else if (pkg.hasChanges) {
-      // Has changes since last tag
-      packagesToProcess.push(pkg);
-    } else if (compareVersions(pkg.version, publishedVersion) > 0) {
-      // Version bumped but no git changes detected (edge case)
-      pkg.hasChanges = true;
-      packagesToProcess.push(pkg);
+    } else {
+      // Detect changes using multiple strategies
+      const detection = await detectPackageChanges(pkg, publishedVersion);
+      pkg.hasChanges = detection.hasChanges;
+      pkg.changeDetectionMethod = detection.method;
+      pkg.changedFiles = detection.changedFiles;
+
+      if (detection.method === 'unknown') {
+        // Can't reliably determine changes - track for warning
+        unknownStatePackages.push(pkg);
+      }
+
+      if (pkg.hasChanges) {
+        // Has changes since last publish
+        packagesToProcess.push(pkg);
+      } else if (compareVersions(pkg.version, publishedVersion) > 0) {
+        // Version bumped but no git changes detected (edge case)
+        pkg.hasChanges = true;
+        packagesToProcess.push(pkg);
+      }
     }
+  }
+
+  // Warn about packages where we couldn't determine change state
+  if (unknownStatePackages.length > 0) {
+    log.warn(`Could not reliably detect changes for ${unknownStatePackages.length} package(s):`);
+    unknownStatePackages.forEach((p) => log.dim(`  - ${p.name}: no gitHead in npm and no git tags found`));
+    log.dim('  These packages will be included if version differs from published.');
   }
 
   if (packagesToProcess.length === 0) {
@@ -460,7 +548,13 @@ async function main(): Promise<void> {
   }
 
   log.info(`Found ${packagesToProcess.length} package(s) to process:`);
-  packagesToProcess.forEach((p) => log.dim(`  - ${p.name}@${p.version}`));
+  packagesToProcess.forEach((p) => {
+    const methodHint = p.changeDetectionMethod === 'npm-githead' ? 'via npm gitHead'
+      : p.changeDetectionMethod === 'git-tag' ? 'via git tag'
+        : p.changeDetectionMethod === 'version-compare' ? 'via version compare'
+          : 'detection uncertain';
+    log.dim(`  - ${p.name}@${p.version} (${methodHint})`);
+  });
 
   // Step 7: Process each package
   log.step('Processing packages...');
@@ -491,12 +585,24 @@ async function main(): Promise<void> {
         results.push({ name: pkg.name, status: 'error', message: 'Failed to publish' });
       }
     } else {
-      // Version not bumped
-      log.warn(`${pkg.name} has changes but version (${pkg.version}) not bumped!`);
+      // Version not bumped - show changed files info
+      const fileCount = pkg.changedFiles?.length ?? 0;
+      const fileCountStr = fileCount > 0 ? ` (${fileCount} file${fileCount > 1 ? 's' : ''} changed)` : '';
+      log.warn(`${pkg.name} has changes but version (${pkg.version}) not bumped!${fileCountStr}`);
+
+      // Show first 3 changed files
+      if (pkg.changedFiles && pkg.changedFiles.length > 0) {
+        const filesToShow = pkg.changedFiles.slice(0, 3);
+        filesToShow.forEach((file) => log.dim(`    ${file}`));
+        if (pkg.changedFiles.length > 3) {
+          log.dim(`    ... and ${pkg.changedFiles.length - 3} more`);
+        }
+      }
+
       results.push({
         name: pkg.name,
         status: 'warning',
-        message: `Changes detected but version ${pkg.version} already published`,
+        message: `Changes detected (${fileCount} files) but version ${pkg.version} already published`,
       });
     }
   }

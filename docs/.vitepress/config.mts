@@ -54,6 +54,7 @@ export default defineConfig({
             { text: 'Controllers', link: '/api/controllers' },
             { text: 'Services', link: '/api/services' },
             { text: 'WebSocket Gateway', link: '/api/websocket' },
+            { text: 'Queue', link: '/api/queue' },
             { text: 'Validation', link: '/api/validation' },
             { text: 'Environment', link: '/api/envs' },
             { text: 'Logger', link: '/api/logger' },
