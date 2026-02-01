@@ -1,6 +1,6 @@
 {
   "name": "@onebun/nats",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "NATS and JetStream integration for OneBun framework",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
@@ -38,7 +38,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@onebun/core": "workspace:*",
+    "@onebun/core": "workspace:^",
     "@nats-io/transport-node": "^3.0.0-31",
     "@nats-io/jetstream": "^3.0.0-31",
     "effect": "^3.13.10"

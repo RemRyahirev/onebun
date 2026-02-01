@@ -1,6 +1,6 @@
 {
   "name": "@onebun/core",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Core package for OneBun framework - decorators, DI, modules, controllers",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
@@ -41,11 +41,11 @@
   "dependencies": {
     "effect": "^3.13.10",
     "arktype": "^2.0.0",
-    "@onebun/logger": "^0.1.0",
-    "@onebun/envs": "^0.1.0",
-    "@onebun/metrics": "^0.1.0",
-    "@onebun/requests": "^0.1.0",
-    "@onebun/trace": "^0.1.0"
+    "@onebun/logger": "workspace:^",
+    "@onebun/envs": "workspace:^",
+    "@onebun/metrics": "workspace:^",
+    "@onebun/requests": "workspace:^",
+    "@onebun/trace": "workspace:^"
   },
   "devDependencies": {
     "bun-types": "1.2.2"

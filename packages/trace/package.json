@@ -1,6 +1,6 @@
 {
   "name": "@onebun/trace",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "OpenTelemetry-compatible tracing for OneBun framework - distributed tracing support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
@@ -40,7 +40,7 @@
   "dependencies": {
     "effect": "^3.13.10",
     "@opentelemetry/api": "^1.8.0",
-    "@onebun/requests": "^0.1.0"
+    "@onebun/requests": "workspace:^"
   },
   "devDependencies": {
     "bun-types": "1.2.2"

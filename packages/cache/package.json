@@ -1,6 +1,6 @@
 {
   "name": "@onebun/cache",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Caching module for OneBun framework - in-memory and Redis support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
@@ -37,8 +37,8 @@
     "dev": "bun run --watch src/index.ts"
   },
   "dependencies": {
-    "@onebun/core": "workspace:*",
-    "@onebun/envs": "workspace:*",
+    "@onebun/core": "workspace:^",
+    "@onebun/envs": "workspace:^",
     "effect": "^3.13.10"
   },
   "devDependencies": {
