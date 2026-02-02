@@ -34,7 +34,8 @@
   },
   "workspaces": [
     "packages/*",
-    "example"
+    "example",
+    "!repofleet/**"
   ],
   "dependencies": {
     "effect": "^3.13.10"

@@ -402,6 +402,59 @@ async function getAllPackages(): Promise<PackageInfo[]> {
 }
 
 /**
+ * Build a map of package name -> version for all packages in monorepo
+ */
+async function buildWorkspaceVersionMap(): Promise<Map<string, string>> {
+  const packages = await getAllPackages();
+  const versionMap = new Map<string, string>();
+  for (const pkg of packages) {
+    versionMap.set(pkg.name, pkg.version);
+  }
+  return versionMap;
+}
+
+/**
+ * Replace workspace:^ and workspace:* dependencies with actual versions
+ * Returns the original package.json content for restoration
+ */
+async function replaceWorkspaceDeps(pkgPath: string, versionMap: Map<string, string>): Promise<string> {
+  const pkgJsonPath = join(pkgPath, 'package.json');
+  const originalContent = await Bun.file(pkgJsonPath).text();
+  const pkgJson = JSON.parse(originalContent);
+
+  const replaceDeps = (deps: Record<string, string> | undefined) => {
+    if (!deps) return;
+    for (const [name, version] of Object.entries(deps)) {
+      if (version.startsWith('workspace:')) {
+        const realVersion = versionMap.get(name);
+        if (realVersion) {
+          // workspace:^ -> ^version, workspace:* -> version
+          deps[name] = version === 'workspace:*' ? realVersion : `^${realVersion}`;
+        } else {
+          log.warn(`Could not resolve workspace dependency: ${name}`);
+        }
+      }
+    }
+  };
+
+  replaceDeps(pkgJson.dependencies);
+  replaceDeps(pkgJson.devDependencies);
+  replaceDeps(pkgJson.peerDependencies);
+  replaceDeps(pkgJson.optionalDependencies);
+
+  await Bun.write(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + '\n');
+  return originalContent;
+}
+
+/**
+ * Restore original package.json content after publish
+ */
+async function restorePackageJson(pkgPath: string, originalContent: string): Promise<void> {
+  const pkgJsonPath = join(pkgPath, 'package.json');
+  await Bun.write(pkgJsonPath, originalContent);
+}
+
+/**
  * Get published version of a package from npm
  */
 async function getPublishedVersion(packageName: string): Promise<string | null> {
@@ -419,22 +472,46 @@ async function getPublishedVersion(packageName: string): Promise<string | null> 
 /**
  * Publish a single package
  */
-async function publishPackage(pkg: PackageInfo): Promise<boolean> {
+async function publishPackage(pkg: PackageInfo, versionMap: Map<string, string>): Promise<boolean> {
   log.dim(`Publishing ${pkg.name}@${pkg.version}...`);
+
+  // Replace workspace deps with real versions
+  let originalContent: string | null = null;
+  try {
+    originalContent = await replaceWorkspaceDeps(pkg.path, versionMap);
+  } catch (error) {
+    log.error(`Failed to replace workspace deps for ${pkg.name}`);
+    console.error(error);
+    return false;
+  }
 
   if (DRY_RUN) {
     log.dim(`[DRY RUN] Would publish ${pkg.name}@${pkg.version}`);
+    // Restore original package.json
+    if (originalContent) {
+      await restorePackageJson(pkg.path, originalContent);
+    }
     return true;
   }
 
   try {
     const result = await $`npm publish --access public`.cwd(pkg.path).quiet();
+
+    // Always restore original package.json after publish attempt
+    if (originalContent) {
+      await restorePackageJson(pkg.path, originalContent);
+    }
+
     if (result.exitCode === 0) {
       return true;
     }
     log.error(`Failed to publish ${pkg.name}: ${result.stderr.toString()}`);
     return false;
   } catch (error) {
+    // Restore original package.json even on error
+    if (originalContent) {
+      await restorePackageJson(pkg.path, originalContent);
+    }
     log.error(`Failed to publish ${pkg.name}`);
     console.error(error);
     return false;
@@ -559,6 +636,9 @@ async function main(): Promise<void> {
   // Step 7: Process each package
   log.step('Processing packages...');
 
+  // Build version map for workspace dependency resolution
+  const versionMap = await buildWorkspaceVersionMap();
+
   const results: PublishResult[] = [];
 
   for (const pkg of packagesToProcess) {
@@ -567,7 +647,7 @@ async function main(): Promise<void> {
     if (publishedVersion === null) {
       // Package not published yet - publish it
       log.info(`${pkg.name} not published yet, publishing ${pkg.version}...`);
-      const success = await publishPackage(pkg);
+      const success = await publishPackage(pkg, versionMap);
       if (success) {
         await createGitTag(pkg);
         results.push({ name: pkg.name, status: 'published', message: `Published ${pkg.version}` });
@@ -577,7 +657,7 @@ async function main(): Promise<void> {
     } else if (compareVersions(pkg.version, publishedVersion) > 0) {
       // Local version is newer - publish it
       log.info(`${pkg.name}: ${publishedVersion} → ${pkg.version}`);
-      const success = await publishPackage(pkg);
+      const success = await publishPackage(pkg, versionMap);
       if (success) {
         await createGitTag(pkg);
         results.push({ name: pkg.name, status: 'published', message: `Published ${pkg.version}` });
