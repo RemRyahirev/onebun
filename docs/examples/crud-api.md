@@ -1,3 +1,7 @@
+---
+description: Complete CRUD API example with database, validation, error handling. REST endpoints, repository pattern.
+---
+
 # CRUD API Example
 
 A complete CRUD API with validation, error handling, and best practices.

@@ -1,3 +1,41 @@
+---
+description: System architecture overview. Module hierarchy, DI container, request lifecycle, Effect.js integration patterns.
+---
+
+<llms-only>
+
+## Internal Architecture Notes
+
+**DI Resolution Order**:
+1. Module imports resolved first (depth-first)
+2. Providers instantiated in declaration order
+3. Controllers receive injected services via constructor
+4. Exported services available to importing modules
+
+**Effect.js Usage**:
+- Framework internals use Effect.pipe for composition
+- Services can use Effect for complex async flows
+- Application code typically uses Promise wrappers
+- Layer system manages service lifecycles
+
+**Request Flow**:
+1. Bun.serve receives HTTP request
+2. TraceMiddleware adds trace context
+3. MetricsMiddleware records metrics
+4. Router matches path to controller method
+5. Parameter decorators extract @Param, @Query, @Body
+6. Controller method executes with injected services
+7. Response serialized (this.success/this.error or direct return)
+
+**Module Metadata Storage**:
+- Reflect.metadata stores decorator info
+- MODULE_METADATA_KEY for @Module options
+- CONTROLLER_METADATA_KEY for route paths
+- METHOD_METADATA_KEY for HTTP methods
+- PARAM_METADATA_KEY for parameter extraction
+
+</llms-only>
+
 # OneBun Architecture
 
 ## Overview

@@ -1,3 +1,7 @@
+---
+description: "Prometheus-compatible metrics. @MeasureTime, @CountCalls decorators. HTTP, system, GC metrics. Custom counters, gauges, histograms."
+---
+
 # Metrics API
 
 Package: `@onebun/metrics`

@@ -1,3 +1,7 @@
+---
+description: Schema validation with ArkType. validate(), validateOrThrow(), toJsonSchema(). Built-in schema helpers.
+---
+
 # Validation API
 
 Package: `@onebun/core` (uses ArkType)

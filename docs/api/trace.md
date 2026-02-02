@@ -1,3 +1,7 @@
+---
+description: "Distributed tracing with @Span decorator. TraceService, W3C trace context, span attributes, OpenTelemetry-compatible export."
+---
+
 # Tracing API
 
 Package: `@onebun/trace`

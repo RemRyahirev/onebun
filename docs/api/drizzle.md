@@ -1,3 +1,7 @@
+---
+description: "DrizzleModule for SQLite and PostgreSQL. DrizzleService, BaseRepository, @Entity decorator. Migrations, type-safe queries."
+---
+
 # Database (Drizzle) API
 
 Package: `@onebun/drizzle`

@@ -1,3 +1,44 @@
+---
+description: OneBunApplication, MultiServiceApplication classes. Bootstrap options, graceful shutdown, metrics and tracing configuration.
+---
+
+<llms-only>
+
+## Quick Reference for AI
+
+**Minimal App Bootstrap**:
+```typescript
+import { OneBunApplication } from '@onebun/core';
+import { AppModule } from './app.module';
+
+const app = new OneBunApplication(AppModule, { port: 3000 });
+await app.start();
+```
+
+**With Full Options**:
+```typescript
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  host: '0.0.0.0',
+  basePath: '/api/v1',
+  envSchema,  // from @onebun/envs
+  metrics: { enabled: true, path: '/metrics', prefix: 'myapp_' },
+  tracing: { enabled: true, serviceName: 'my-service' },
+  gracefulShutdown: true,  // default
+});
+```
+
+**Important Methods**:
+- `app.start()` - starts HTTP server
+- `app.stop()` - graceful shutdown
+- `app.getLogger({ className: 'X' })` - get logger instance
+- `app.getConfigValue<T>('path.to.config')` - read config
+- `app.getHttpUrl()` - get listening URL
+
+**MultiServiceApplication** - for running multiple services in one process, useful for local development or monolith deployment.
+
+</llms-only>
+
 # Core Package API
 
 Package: `@onebun/core`

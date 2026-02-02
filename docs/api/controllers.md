@@ -1,3 +1,7 @@
+---
+description: BaseController class, response methods (success/error), routing patterns, middleware integration, service injection.
+---
+
 # Controllers API
 
 Package: `@onebun/core`

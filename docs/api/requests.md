@@ -1,3 +1,7 @@
+---
+description: HTTP client with createHttpClient(). Retries, timeouts, error handling. Promise and Effect API. Authentication helpers.
+---
+
 # HTTP Client API
 
 Package: `@onebun/requests`

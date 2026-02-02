@@ -1,3 +1,7 @@
+---
+description: "Message queues with @Subscribe, @Cron, @Interval decorators. In-memory, Redis, NATS, JetStream backends. Message guards."
+---
+
 # Queue API
 
 ## Overview

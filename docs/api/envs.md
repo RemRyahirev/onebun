@@ -1,3 +1,7 @@
+---
+description: Type-safe environment configuration. Env.string(), Env.number(), Env.boolean(). Validation, defaults, sensitive data handling.
+---
+
 # Environment Configuration API
 
 Package: `@onebun/envs`

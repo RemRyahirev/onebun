@@ -1,3 +1,7 @@
+---
+description: CacheModule for in-memory and Redis caching. CacheService methods, TTL configuration, cache statistics.
+---
+
 # Cache API
 
 Package: `@onebun/cache`

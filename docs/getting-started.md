@@ -1,3 +1,41 @@
+---
+description: Installation and basic setup guide for OneBun framework. Prerequisites, project structure, modules, controllers, services.
+---
+
+<llms-only>
+
+## Technical Context for AI Agents
+
+**Framework Version**: 0.1.0  
+**Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)  
+**TypeScript**: strict mode required
+
+**Key Patterns**:
+- Always extend BaseController for HTTP controllers
+- Always extend BaseService for services
+- Use @Module decorator for DI container registration
+- Prefer Promise API over Effect API in application code
+- Effect.pipe is used internally, not Effect.gen
+
+**Package Structure**:
+- @onebun/core - main framework (decorators, app, controllers, services)
+- @onebun/cache - caching module
+- @onebun/drizzle - database integration
+- @onebun/envs - environment configuration
+- @onebun/logger - logging
+- @onebun/metrics - Prometheus metrics
+- @onebun/trace - distributed tracing
+- @onebun/requests - HTTP client
+- @onebun/nats - NATS/JetStream integration
+
+**Common Mistakes**:
+- Forgetting super() call in controller/service constructors
+- Using Node.js APIs instead of Bun.js
+- Using Effect.gen instead of Effect.pipe
+- Not registering services in @Module providers array
+
+</llms-only>
+
 # Getting Started with OneBun
 
 ## Prerequisites

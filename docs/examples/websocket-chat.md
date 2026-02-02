@@ -1,3 +1,7 @@
+---
+description: Real-time chat application with WebSocket Gateway. Rooms, message broadcasting, connection handling.
+---
+
 # WebSocket Chat Application
 
 This example demonstrates how to build a real-time chat application using OneBun WebSocket Gateway.

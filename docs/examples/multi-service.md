@@ -1,3 +1,7 @@
+---
+description: Running multiple microservices from single process. MultiServiceApplication, shared config, service communication.
+---
+
 # Multi-Service Application Example
 
 Running multiple microservices from a single process with shared configuration.

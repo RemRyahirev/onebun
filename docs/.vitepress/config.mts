@@ -1,6 +1,12 @@
 import { defineConfig } from 'vitepress';
+import llmstxt from 'vitepress-plugin-llms';
 
 export default defineConfig({
+  // LLM-friendly documentation generation
+  vite: {
+    plugins: [llmstxt()],
+  },
+
   title: 'OneBun Framework',
   description: 'A bun.js framework inspired by nest.js with effect.ts',
 
@@ -32,6 +38,7 @@ export default defineConfig({
       { text: 'Getting Started', link: '/getting-started' },
       { text: 'API', link: '/api/core' },
       { text: 'Examples', link: '/examples/basic-app' },
+      { text: 'AI Docs', link: '/ai-docs' },
     ],
 
     // Sidebar navigation
@@ -43,6 +50,7 @@ export default defineConfig({
             { text: 'Home', link: '/' },
             { text: 'Getting Started', link: '/getting-started' },
             { text: 'Architecture', link: '/architecture' },
+            { text: 'AI Documentation', link: '/ai-docs' },
           ],
         },
         {

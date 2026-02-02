@@ -1,3 +1,7 @@
+---
+description: "BaseService class, @Service decorator, dependency injection patterns, service lifecycle, Effect.js integration."
+---
+
 # Services API
 
 Package: `@onebun/core`

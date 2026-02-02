@@ -1,3 +1,7 @@
+---
+description: Minimal OneBun application example. Single controller and service, project structure, running and testing.
+---
+
 # Basic Application Example
 
 A minimal OneBun application with a single controller and service.

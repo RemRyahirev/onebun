@@ -1,3 +1,7 @@
+---
+description: Structured logging with SyncLogger. Log levels, JSON/pretty output, trace context, child loggers with context inheritance.
+---
+
 # Logger API
 
 Package: `@onebun/logger`

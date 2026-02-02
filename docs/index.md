@@ -1,5 +1,6 @@
 ---
 layout: home
+description: OneBun framework overview - Bun.js framework with Effect.ts, NestJS-inspired DI, and one default solution per problem.
 
 hero:
   name: OneBun Framework

@@ -1,3 +1,59 @@
+---
+description: "@Module, @Controller, @Service decorators. HTTP method decorators (@Get, @Post, etc). Parameter decorators (@Param, @Query, @Body)."
+---
+
+<llms-only>
+
+## Decorator Quick Reference
+
+**Module Structure**:
+```typescript
+@Module({
+  imports: [OtherModule],      // import modules
+  controllers: [MyController], // register controllers
+  providers: [MyService],      // register services
+  exports: [MyService],        // export for other modules
+})
+export class MyModule {}
+```
+
+**Controller with Routes**:
+```typescript
+@Controller('/api/users')
+export class UserController extends BaseController {
+  constructor(private userService: UserService) { super(); }
+
+  @Get('/')           // GET /api/users
+  @Get('/:id')        // GET /api/users/:id
+  @Post('/')          // POST /api/users
+  @Put('/:id')        // PUT /api/users/:id
+  @Delete('/:id')     // DELETE /api/users/:id
+}
+```
+
+**Parameter Extraction**:
+```typescript
+@Get('/:id')
+async getUser(
+  @Param('id') id: string,        // from path
+  @Query('page') page?: number,   // from query string
+  @Body() body: CreateUserDto,    // from request body
+  @Header('x-api-key') key: string, // from headers
+): Promise<Response> {
+  return this.success({ id, page });
+}
+```
+
+**Service Definition**:
+```typescript
+@Service()
+export class UserService extends BaseService {
+  // this.logger and this.config available from BaseService
+}
+```
+
+</llms-only>
+
 # Decorators API
 
 Package: `@onebun/core`

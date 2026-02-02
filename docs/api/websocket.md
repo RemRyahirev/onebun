@@ -1,3 +1,7 @@
+---
+description: "@WebSocketGateway decorator, message handlers (@OnMessage, @OnConnect), rooms, guards, Socket.IO compatibility."
+---
+
 # WebSocket Gateway API
 
 ## Overview
