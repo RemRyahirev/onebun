@@ -2,10 +2,12 @@
  * User repository for integration tests
  * Extends BaseRepository with business logic methods
  */
-import { eq, between } from 'drizzle-orm';
-
-import { Entity } from '../../../src/entity.decorator';
-import { BaseRepository } from '../../../src/repository';
+import {
+  Entity,
+  BaseRepository,
+  eq,
+  between,
+} from '../../../src';
 import { users, type User } from '../schema/users';
 
 /**

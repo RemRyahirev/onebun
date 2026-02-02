@@ -14,7 +14,7 @@ import {
 import { Effect } from 'effect';
 import { register } from 'prom-client';
 
-// eslint-disable-next-line import/no-extraneous-dependencies
+ 
 import { useFakeTimers } from '@onebun/core';
 
 import {

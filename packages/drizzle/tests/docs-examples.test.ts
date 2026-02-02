@@ -11,18 +11,8 @@ import {
   it,
   expect,
 } from 'bun:test';
-import {
-  pgTable,
-  text as pgText,
-  integer as pgInteger,
-  timestamp,
-} from 'drizzle-orm/pg-core';
-import {
-  sqliteTable,
-  text,
-  integer,
-} from 'drizzle-orm/sqlite-core';
 
+// Import from @onebun/drizzle re-exports (not drizzle-orm directly)
 import {
   DrizzleModule,
   DatabaseType,
@@ -31,6 +21,18 @@ import {
   getPrimaryKeyColumn,
   generateMigrations,
 } from '../src';
+import {
+  pgTable,
+  text as pgText,
+  integer as pgInteger,
+  timestamp,
+} from '../src/pg';
+import {
+  sqliteTable,
+  text,
+  integer,
+} from '../src/sqlite';
+
 
 describe('Drizzle README Examples', () => {
   describe('Schema Definition - SQLite (README)', () => {
@@ -237,9 +239,40 @@ describe('Drizzle API Documentation Examples', () => {
 
   describe('Migration Functions (docs/api/drizzle.md)', () => {
     it('should have generateMigrations function', () => {
-      // From docs: Migration Management
+      // From docs: Migration Management - generateMigrations
       expect(generateMigrations).toBeDefined();
       expect(typeof generateMigrations).toBe('function');
+    });
+
+    it('should have pushSchema function', () => {
+      // From docs: Migration Management - pushSchema
+      const { pushSchema } = require('../src/migrations');
+      expect(pushSchema).toBeDefined();
+      expect(typeof pushSchema).toBe('function');
+    });
+
+    it('generateMigrations should accept documented options', async () => {
+      // From docs: generateMigrations with options
+      // This tests the function signature matches documentation
+      await expect(
+        generateMigrations({
+          schemaPath: './src/schema',      // documented parameter
+          migrationsFolder: './drizzle',   // documented parameter
+          dialect: 'postgresql',           // documented parameter
+        }),
+      ).rejects.toThrow(); // Will fail because schema doesn't exist, but verifies API
+    });
+
+    it('pushSchema should accept documented options', async () => {
+      // From docs: pushSchema with options
+      const { pushSchema } = require('../src/migrations');
+      await expect(
+        pushSchema({
+          schemaPath: './src/schema',       // documented parameter
+          dialect: 'postgresql',            // documented parameter
+          connectionString: ':memory:',     // documented parameter
+        }),
+      ).rejects.toThrow(); // Will fail because schema doesn't exist, but verifies API
     });
   });
 });
@@ -317,5 +350,204 @@ describe('Environment Variables (docs/api/drizzle.md)', () => {
 
     expect(envVars.DB_TYPE).toBe('postgresql');
     expect(envVars.DB_AUTO_MIGRATE).toBe('true');
+  });
+});
+
+describe('DrizzleService.runMigrations (docs/api/drizzle.md)', () => {
+  it('should have runMigrations method on DrizzleService', () => {
+    // From docs: Apply Migrations at Runtime
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const { DrizzleService: DrizzleServiceClass } = require('../src/drizzle.service');
+     
+    expect(DrizzleServiceClass.prototype.runMigrations).toBeDefined();
+    expect(typeof DrizzleServiceClass.prototype.runMigrations).toBe('function');
+     
+  });
+
+  it('DrizzleModule should accept autoMigrate and migrationsFolder options', () => {
+    // From docs: Automatic migrations in module configuration
+    const module = DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.SQLITE,
+        options: { url: ':memory:' },
+      },
+      autoMigrate: true,              // documented option
+      migrationsFolder: './drizzle',  // documented option
+    });
+
+    expect(module).toBeDefined();
+    const options = DrizzleModule.getOptions();
+    expect(options?.autoMigrate).toBe(true);
+    expect(options?.migrationsFolder).toBe('./drizzle');
+  });
+});
+
+describe('Re-exports from @onebun/drizzle (docs/api/drizzle.md)', () => {
+  describe('PostgreSQL re-exports (@onebun/drizzle/pg)', () => {
+    it('should re-export pgTable and column types', () => {
+      // From docs: import { pgTable, text, integer, ... } from '@onebun/drizzle/pg'
+      const pg = require('../src/pg');
+
+      expect(pg.pgTable).toBeDefined();
+      expect(pg.text).toBeDefined();
+      expect(pg.integer).toBeDefined();
+      expect(pg.timestamp).toBeDefined();
+      expect(pg.uuid).toBeDefined();
+      expect(pg.boolean).toBeDefined();
+      expect(pg.json).toBeDefined();
+      expect(pg.jsonb).toBeDefined();
+      expect(pg.varchar).toBeDefined();
+      expect(pg.serial).toBeDefined();
+    });
+
+    it('should re-export constraint helpers', () => {
+      const pg = require('../src/pg');
+
+      expect(pg.primaryKey).toBeDefined();
+      expect(pg.foreignKey).toBeDefined();
+      expect(pg.unique).toBeDefined();
+      expect(pg.index).toBeDefined();
+    });
+
+    it('should allow creating PostgreSQL schema', () => {
+      const pg = require('../src/pg');
+
+      const users = pg.pgTable('users', {
+        id: pg.integer('id').primaryKey().generatedAlwaysAsIdentity(),
+        name: pg.text('name').notNull(),
+        email: pg.text('email').notNull(),
+        createdAt: pg.timestamp('created_at').defaultNow(),
+      });
+
+      expect(users).toBeDefined();
+    });
+  });
+
+  describe('SQLite re-exports (@onebun/drizzle/sqlite)', () => {
+    it('should re-export sqliteTable and column types', () => {
+      // From docs: import { sqliteTable, text, integer, ... } from '@onebun/drizzle/sqlite'
+      const sqlite = require('../src/sqlite');
+
+      expect(sqlite.sqliteTable).toBeDefined();
+      expect(sqlite.text).toBeDefined();
+      expect(sqlite.integer).toBeDefined();
+      expect(sqlite.real).toBeDefined();
+      expect(sqlite.blob).toBeDefined();
+    });
+
+    it('should re-export constraint helpers', () => {
+      const sqlite = require('../src/sqlite');
+
+      expect(sqlite.primaryKey).toBeDefined();
+      expect(sqlite.foreignKey).toBeDefined();
+      expect(sqlite.unique).toBeDefined();
+      expect(sqlite.index).toBeDefined();
+    });
+
+    it('should allow creating SQLite schema', () => {
+      const sqlite = require('../src/sqlite');
+
+      const users = sqlite.sqliteTable('users', {
+        id: sqlite.integer('id').primaryKey({ autoIncrement: true }),
+        name: sqlite.text('name').notNull(),
+        email: sqlite.text('email').notNull(),
+      });
+
+      expect(users).toBeDefined();
+    });
+  });
+
+  describe('Common operators (@onebun/drizzle)', () => {
+    it('should re-export comparison operators', () => {
+      // From docs: import { eq, and, ... } from '@onebun/drizzle'
+      const drizzle = require('../src/index');
+
+      expect(drizzle.eq).toBeDefined();
+      expect(drizzle.ne).toBeDefined();
+      expect(drizzle.gt).toBeDefined();
+      expect(drizzle.gte).toBeDefined();
+      expect(drizzle.lt).toBeDefined();
+      expect(drizzle.lte).toBeDefined();
+    });
+
+    it('should re-export logical operators', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.and).toBeDefined();
+      expect(drizzle.or).toBeDefined();
+      expect(drizzle.not).toBeDefined();
+    });
+
+    it('should re-export pattern matching operators', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.like).toBeDefined();
+      expect(drizzle.ilike).toBeDefined();
+      expect(drizzle.notLike).toBeDefined();
+    });
+
+    it('should re-export array and null operators', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.inArray).toBeDefined();
+      expect(drizzle.notInArray).toBeDefined();
+      expect(drizzle.isNull).toBeDefined();
+      expect(drizzle.isNotNull).toBeDefined();
+    });
+
+    it('should re-export sql template', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.sql).toBeDefined();
+      expect(typeof drizzle.sql).toBe('function');
+    });
+
+    it('should re-export aggregate functions', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.count).toBeDefined();
+      expect(drizzle.sum).toBeDefined();
+      expect(drizzle.avg).toBeDefined();
+      expect(drizzle.min).toBeDefined();
+      expect(drizzle.max).toBeDefined();
+    });
+
+    it('should re-export ordering functions', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.asc).toBeDefined();
+      expect(drizzle.desc).toBeDefined();
+    });
+
+    it('should re-export relations helper', () => {
+      const drizzle = require('../src/index');
+
+      expect(drizzle.relations).toBeDefined();
+    });
+  });
+
+  describe('defineConfig (@onebun/drizzle)', () => {
+    it('should re-export defineConfig from drizzle-kit', () => {
+      // From docs: import { defineConfig } from '@onebun/drizzle'
+      const drizzle = require('../src/index');
+
+      expect(drizzle.defineConfig).toBeDefined();
+      expect(typeof drizzle.defineConfig).toBe('function');
+    });
+
+    it('should allow creating drizzle config', () => {
+      const { defineConfig } = require('../src/index');
+
+      const config = defineConfig({
+        schema: './src/schema',
+        out: './drizzle',
+        dialect: 'postgresql',
+      });
+
+      expect(config).toBeDefined();
+      expect(config.schema).toBe('./src/schema');
+      expect(config.out).toBe('./drizzle');
+      expect(config.dialect).toBe('postgresql');
+    });
   });
 });

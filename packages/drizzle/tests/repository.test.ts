@@ -5,11 +5,6 @@ import {
   test,
   beforeEach,
 } from 'bun:test';
-import {
-  sqliteTable,
-  integer,
-  text,
-} from 'drizzle-orm/sqlite-core';
 import { Effect } from 'effect';
 
 import { makeMockLoggerLayer } from '@onebun/core';
@@ -17,6 +12,11 @@ import { LoggerService } from '@onebun/logger';
 
 import { DrizzleService } from '../src/drizzle.service';
 import { BaseRepository } from '../src/repository';
+import {
+  sqliteTable,
+  integer,
+  text,
+} from '../src/sqlite';
 import { DatabaseType } from '../src/types';
 
 // Test schema

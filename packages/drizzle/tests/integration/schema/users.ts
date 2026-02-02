@@ -9,7 +9,7 @@ import {
   sqliteTable,
   integer,
   text,
-} from 'drizzle-orm/sqlite-core';
+} from '../../../src/sqlite';
 
 /**
  * SQLite schema for users table

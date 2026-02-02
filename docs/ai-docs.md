@@ -61,11 +61,47 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 
 ## What's Included
 
-- API reference for all packages (@onebun/core, @onebun/cache, etc.)
+- API reference for all packages (@onebun/core, @onebun/cache, @onebun/drizzle, etc.)
 - Code examples and patterns
 - Type signatures and interfaces
 - Common errors and solutions
 - Technical notes in `<llms-only>` blocks (visible only to AI)
+
+### Key Packages
+
+| Package | Description |
+|---------|-------------|
+| `@onebun/core` | Decorators, modules, controllers, services, websockets, queues |
+| `@onebun/drizzle` | Database ORM with SQLite/PostgreSQL, migrations, repositories |
+| `@onebun/cache` | Caching with memory and Redis backends |
+| `@onebun/envs` | Type-safe environment variables |
+| `@onebun/logger` | Structured logging with context |
+| `@onebun/metrics` | Prometheus-compatible metrics |
+| `@onebun/trace` | Request tracing and correlation |
+| `@onebun/requests` | HTTP client for external APIs |
+| `@onebun/docs` | OpenAPI/Swagger documentation generation |
+
+### Database Migrations (@onebun/drizzle)
+
+The Drizzle package provides database schema management:
+
+**Schema imports:**
+- PostgreSQL: `import { pgTable, text, integer, ... } from '@onebun/drizzle/pg'`
+- SQLite: `import { sqliteTable, text, integer, ... } from '@onebun/drizzle/sqlite'`
+- Common operators: `import { eq, and, sql, count, defineConfig, ... } from '@onebun/drizzle'`
+
+**CLI (use `onebun-drizzle` wrapper for correct version):**
+- `bunx onebun-drizzle generate` - Generate migration files
+- `bunx onebun-drizzle push` - Push schema directly (dev only)
+- `bunx onebun-drizzle studio` - Open Drizzle Studio
+
+**Programmatic API:**
+- `generateMigrations()` - Generate SQL files from schema (build step)
+- `pushSchema()` - Apply schema directly (development)
+- `DrizzleService.runMigrations()` - Apply migrations at runtime
+- `autoMigrate: true` - Auto-run migrations on app startup
+
+See [Database API](/api/drizzle) for full documentation.
 
 ## Format Details
 

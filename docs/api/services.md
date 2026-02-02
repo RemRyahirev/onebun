@@ -285,9 +285,8 @@ Services often work with repositories:
 ```typescript
 // user.repository.ts
 import { Service, BaseService } from '@onebun/core';
-import { DrizzleService } from '@onebun/drizzle';
+import { DrizzleService, eq } from '@onebun/drizzle';
 import { users } from './schema';
-import { eq } from 'drizzle-orm';
 
 @Service()
 export class UserRepository extends BaseService {

@@ -69,11 +69,17 @@ DrizzleModule.forRoot({
 
 ## Schema Definition
 
+All schema builders are re-exported from `@onebun/drizzle`:
+- PostgreSQL: `import { ... } from '@onebun/drizzle/pg'`
+- SQLite: `import { ... } from '@onebun/drizzle/sqlite'`
+- Common operators: `import { eq, and, ... } from '@onebun/drizzle'`
+
 ### SQLite Schema
 
 ```typescript
 // schema/users.ts
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer } from '@onebun/drizzle/sqlite';
+import { sql } from '@onebun/drizzle';
 
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
@@ -92,7 +98,7 @@ export type InsertUser = typeof users.$inferInsert;
 
 ```typescript
 // schema/users.ts
-import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
+import { pgTable, text, integer, timestamp } from '@onebun/drizzle/pg';
 
 export const users = pgTable('users', {
   // Use generatedAlwaysAsIdentity() for auto-increment integer primary key
@@ -110,7 +116,7 @@ export type InsertUser = typeof users.$inferInsert;
 
 **Alternative with UUID:**
 ```typescript
-import { pgTable, text, integer, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { pgTable, uuid } from '@onebun/drizzle/pg';
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -122,8 +128,8 @@ export const users = pgTable('users', {
 
 ```typescript
 // schema/posts.ts
-import { pgTable, text, integer, timestamp } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { pgTable, text, integer, timestamp } from '@onebun/drizzle/pg';
+import { relations } from '@onebun/drizzle';
 import { users } from './users';
 
 export const posts = pgTable('posts', {
@@ -189,7 +195,7 @@ const users = await this.db.query(
 );
 
 // Select with conditions
-import { eq, and, or, like } from 'drizzle-orm';
+import { eq, and, or, like } from '@onebun/drizzle';
 
 const user = await this.db.query(
   db => db.select()
@@ -330,7 +336,7 @@ const users = await this.db.query(
 ### Filtering
 
 ```typescript
-import { eq, ne, gt, gte, lt, lte, like, ilike, and, or, not, isNull, isNotNull, inArray, notInArray } from 'drizzle-orm';
+import { eq, ne, gt, gte, lt, lte, like, ilike, and, or, not, isNull, isNotNull, inArray, notInArray } from '@onebun/drizzle';
 
 // Equal
 const user = await this.db.query(
@@ -413,7 +419,7 @@ const userWithPosts = await this.db.query(
 ### Aggregations
 
 ```typescript
-import { sql, count, sum, avg, min, max } from 'drizzle-orm';
+import { sql, count, sum, avg, min, max } from '@onebun/drizzle';
 
 // Count
 const total = await this.db.query(
@@ -440,36 +446,129 @@ const totalSales = await this.db.query(
 
 ## Migrations
 
-### Generate Migrations
+OneBun uses Drizzle ORM migrations. Typical workflow:
+
+1. **Generate migrations** - Create SQL files from schema changes (CLI)
+2. **Apply migrations** - Run migrations on app startup (automatic or manual)
+
+### Generate Migrations (CLI)
+
+Create a `drizzle.config.ts` in your project root:
 
 ```typescript
-import { generateMigrations } from '@onebun/drizzle';
+// drizzle.config.ts
+import { defineConfig } from '@onebun/drizzle';
+
+export default defineConfig({
+  schema: './src/schema/index.ts',
+  out: './drizzle',
+  dialect: 'postgresql', // or 'sqlite'
+  dbCredentials: {
+    url: process.env.DATABASE_URL!,
+  },
+});
+```
+
+Then run from terminal using `onebun-drizzle` CLI wrapper (ensures correct version):
+
+```bash
+# Generate migration after schema changes
+bunx onebun-drizzle generate
+
+# Push schema directly to DB (development only, no migration files)
+bunx onebun-drizzle push
+
+# Open Drizzle Studio to browse database
+bunx onebun-drizzle studio
+```
+
+Add scripts to `package.json`:
+
+```json
+{
+  "scripts": {
+    "db:generate": "onebun-drizzle generate",
+    "db:push": "onebun-drizzle push",
+    "db:studio": "onebun-drizzle studio"
+  }
+}
+```
+
+> **Note**: Use `onebun-drizzle` instead of `drizzle-kit` directly. This ensures the correct version of drizzle-kit is used (the one installed with `@onebun/drizzle`).
+
+### Programmatic Generation (Optional)
+
+For build scripts or CI pipelines, use programmatic API:
+
+```typescript
+import { generateMigrations, pushSchema } from '@onebun/drizzle';
 
 // Generate migration files
 await generateMigrations({
-  schema: './src/schema/index.ts',
-  out: './drizzle/migrations',
+  schemaPath: './src/schema',
+  migrationsFolder: './drizzle',
+  dialect: 'postgresql',
 });
-```
-
-### Push Schema
-
-```typescript
-import { pushSchema } from '@onebun/drizzle';
 
 // Push schema directly (development only)
 await pushSchema({
-  schema: './src/schema/index.ts',
+  schemaPath: './src/schema',
+  dialect: 'postgresql',
   connectionString: process.env.DATABASE_URL,
 });
 ```
+
+### Apply Migrations at Runtime
+
+Use `DrizzleService.runMigrations()` to apply migrations when the application starts:
+
+```typescript
+// Manual migration
+const drizzleService = new DrizzleService();
+await drizzleService.initialize({ /* connection options */ });
+await drizzleService.runMigrations({ migrationsFolder: './drizzle' });
+```
+
+Or enable automatic migrations in module configuration:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: { /* ... */ },
+  autoMigrate: true,              // Run migrations on startup
+  migrationsFolder: './drizzle',  // Migration files location
+})
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DB_AUTO_MIGRATE` | Auto-run migrations on startup | `true` |
+| `DB_MIGRATIONS_FOLDER` | Path to migrations folder | `'./drizzle'` |
+| `DB_SCHEMA_PATH` | Path to schema files | - |
+
+### Migration Tracking
+
+Drizzle automatically tracks applied migrations in the `__drizzle_migrations` table. This ensures:
+- Migrations are only applied once (idempotency)
+- Running `runMigrations()` multiple times is safe
+- No duplicate table creation errors
+
+<llms-only>
+**Technical details for AI agents:**
+- `generateMigrations()` creates a temporary `drizzle.config.temp.ts` file and runs `bunx drizzle-kit generate`
+- `pushSchema()` runs `bunx drizzle-kit push:sqlite` or `push:pg` depending on dialect
+- `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
+- Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
+- The `__drizzle_migrations` table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
+</llms-only>
 
 ## Complete Example
 
 ```typescript
 // schema/index.ts
-import { pgTable, text, timestamp, integer } from 'drizzle-orm/pg-core';
-import { relations } from 'drizzle-orm';
+import { pgTable, text, timestamp, integer } from '@onebun/drizzle/pg';
+import { relations } from '@onebun/drizzle';
 
 export const users = pgTable('users', {
   id: integer('id').primaryKey().generatedAlwaysAsIdentity(),
@@ -505,9 +604,8 @@ export type InsertPost = typeof posts.$inferInsert;
 
 // user.repository.ts
 import { Service, BaseService } from '@onebun/core';
-import { DrizzleService, BaseRepository } from '@onebun/drizzle';
+import { DrizzleService, BaseRepository, eq } from '@onebun/drizzle';
 import { users, type User, type InsertUser } from './schema';
-import { eq } from 'drizzle-orm';
 
 @Service()
 export class UserRepository extends BaseService {

@@ -3,12 +3,12 @@ import {
   pgTable,
   text,
   timestamp,
-} from 'drizzle-orm/pg-core';
+} from '../src/pg';
 import {
   sqliteTable as sqliteTableCore,
   integer as sqliteInteger,
   text as sqliteText,
-} from 'drizzle-orm/sqlite-core';
+} from '../src/sqlite';
 
 /**
  * Test schema for SQLite
