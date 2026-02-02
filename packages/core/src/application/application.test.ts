@@ -1182,6 +1182,161 @@ describe('OneBunApplication', () => {
       expect(bodyWith.result).toEqual(bodyWithout.result);
     });
 
+    test('should handle @Get("/") route correctly (controller root endpoint)', async () => {
+      @Controller('/api/workspaces')
+      class WorkspacesController extends BaseController {
+        @Get('/')
+        async list(@Query('page') page?: string) {
+          return { workspaces: ['ws1', 'ws2'], page: page ? parseInt(page) : 1 };
+        }
+
+        @Get('/:id')
+        async getOne(@Param('id') id: string) {
+          return { id, name: 'Workspace ' + id };
+        }
+      }
+
+      @Module({
+        controllers: [WorkspacesController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Test @Get('/') route - should match /api/workspaces (not /api/workspaces/)
+      const requestList = new Request('http://localhost:3000/api/workspaces', {
+        method: 'GET',
+      });
+
+      // Also test with trailing slash
+      const requestListWithSlash = new Request('http://localhost:3000/api/workspaces/', {
+        method: 'GET',
+      });
+
+      // Test @Get('/:id') route
+      const requestOne = new Request('http://localhost:3000/api/workspaces/123', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseList = await (mockServer as any).fetchHandler(requestList);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseListWithSlash = await (mockServer as any).fetchHandler(requestListWithSlash);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseOne = await (mockServer as any).fetchHandler(requestOne);
+
+      // All should return 200
+      expect(responseList.status).toBe(200);
+      expect(responseListWithSlash.status).toBe(200);
+      expect(responseOne.status).toBe(200);
+
+      const bodyList = await responseList.json();
+      const bodyListWithSlash = await responseListWithSlash.json();
+      const bodyOne = await responseOne.json();
+
+      // Verify correct handlers were called
+      expect(bodyList.result).toEqual({ workspaces: ['ws1', 'ws2'], page: 1 });
+      expect(bodyListWithSlash.result).toEqual({ workspaces: ['ws1', 'ws2'], page: 1 });
+      expect(bodyOne.result).toEqual({ id: '123', name: 'Workspace 123' });
+    });
+
+    test('should handle @Get() without parameter (equivalent to @Get("/"))', async () => {
+      @Controller('/api/projects')
+      class ProjectsController extends BaseController {
+        // @Get() without parameter should be equivalent to @Get('/')
+        @Get()
+        async list(@Query('limit') limit?: string) {
+          return { projects: ['p1', 'p2'], limit: limit ? parseInt(limit) : 10 };
+        }
+
+        @Get('/:id')
+        async getOne(@Param('id') id: string) {
+          return { id, name: 'Project ' + id };
+        }
+      }
+
+      @Module({
+        controllers: [ProjectsController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Test @Get() route - should match /api/projects
+      const requestList = new Request('http://localhost:3000/api/projects', {
+        method: 'GET',
+      });
+
+      // Also with trailing slash
+      const requestListWithSlash = new Request('http://localhost:3000/api/projects/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseList = await (mockServer as any).fetchHandler(requestList);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseListWithSlash = await (mockServer as any).fetchHandler(requestListWithSlash);
+
+      expect(responseList.status).toBe(200);
+      expect(responseListWithSlash.status).toBe(200);
+
+      const bodyList = await responseList.json();
+      const bodyListWithSlash = await responseListWithSlash.json();
+
+      expect(bodyList.result).toEqual({ projects: ['p1', 'p2'], limit: 10 });
+      expect(bodyListWithSlash.result).toEqual({ projects: ['p1', 'p2'], limit: 10 });
+    });
+
+    test('should handle @Get("") with empty string (equivalent to @Get("/"))', async () => {
+      @Controller('/api/tasks')
+      class TasksController extends BaseController {
+        // @Get('') with empty string should be equivalent to @Get('/')
+        @Get('')
+        async list(@Query('status') status?: string) {
+          return { tasks: ['t1', 't2'], status: status || 'all' };
+        }
+
+        @Get('/:id')
+        async getOne(@Param('id') id: string) {
+          return { id, name: 'Task ' + id };
+        }
+      }
+
+      @Module({
+        controllers: [TasksController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Test @Get('') route - should match /api/tasks
+      const requestList = new Request('http://localhost:3000/api/tasks', {
+        method: 'GET',
+      });
+
+      // Also with trailing slash
+      const requestListWithSlash = new Request('http://localhost:3000/api/tasks/', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseList = await (mockServer as any).fetchHandler(requestList);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const responseListWithSlash = await (mockServer as any).fetchHandler(requestListWithSlash);
+
+      expect(responseList.status).toBe(200);
+      expect(responseListWithSlash.status).toBe(200);
+
+      const bodyList = await responseList.json();
+      const bodyListWithSlash = await responseListWithSlash.json();
+
+      expect(bodyList.result).toEqual({ tasks: ['t1', 't2'], status: 'all' });
+      expect(bodyListWithSlash.result).toEqual({ tasks: ['t1', 't2'], status: 'all' });
+    });
+
     test('should normalize metrics route labels - trailing slash requests use same label as non-trailing', async () => {
       @Controller('/api')
       class ApiController extends BaseController {

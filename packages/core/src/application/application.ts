@@ -372,7 +372,8 @@ export class OneBunApplication {
 
         for (const route of controllerMetadata.routes) {
           // Combine: appPrefix + controllerPath + routePath
-          const fullPath = `${appPrefix}${controllerPath}${route.path}`;
+          // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
+          const fullPath = normalizePath(`${appPrefix}${controllerPath}${route.path}`);
           const method = this.mapHttpMethod(route.method);
           const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
             controller,
@@ -416,7 +417,7 @@ export class OneBunApplication {
         }
 
         for (const route of metadata.routes) {
-          const fullPath = `${appPrefix}${metadata.path}${route.path}`;
+          const fullPath = normalizePath(`${appPrefix}${metadata.path}${route.path}`);
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }

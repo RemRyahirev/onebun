@@ -2,7 +2,7 @@
   "compilerOptions": {
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "node",
+    "moduleResolution": "bundler",
     "moduleDetection": "force",
     "noEmit": true,
     "composite": true,
@@ -48,7 +48,17 @@
       "@modules/*": ["./src/modules/*"],
       "@config/*": ["./src/config/*"],
       "@types/*": ["./src/types/*"],
-      "@utils/*": ["./src/utils/*"]
+      "@utils/*": ["./src/utils/*"],
+      "@onebun/cache": ["./packages/cache/src"],
+      "@onebun/core": ["./packages/core/src"],
+      "@onebun/docs": ["./packages/docs/src"],
+      "@onebun/drizzle": ["./packages/drizzle/src"],
+      "@onebun/envs": ["./packages/envs/src"],
+      "@onebun/logger": ["./packages/logger/src"],
+      "@onebun/metrics": ["./packages/metrics/src"],
+      "@onebun/nats": ["./packages/nats/src"],
+      "@onebun/requests": ["./packages/requests/src"],
+      "@onebun/trace": ["./packages/trace/src"]
     }
   },
   "include": ["example/**/*", "packages/**/*", "scripts/**/*"],
