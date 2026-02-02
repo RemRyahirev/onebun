@@ -481,7 +481,7 @@ describe('decorators', () => {
       expect(route?.params?.[0].type).toBe(ParamType.RESPONSE);
     });
 
-    test('should handle parameter options', () => {
+    test('should handle parameter with schema (optional by default for Query)', () => {
       @Controller()
       class TestController {
         @Get()
@@ -493,8 +493,135 @@ describe('decorators', () => {
       const metadata = getControllerMetadata(TestController);
       const route = metadata?.routes[0];
       const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(false); // Query is optional by default
+      expect(param?.schema).toBeDefined();
+    });
+
+    test('should make Query required with { required: true } option', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        test(
+          @Query('filter', { required: true }) filter: string,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(true);
+    });
+
+    test('should make Query with schema required with { required: true } option', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        test(
+          @Query('filter', type('string'), { required: true }) filter: string,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
       expect(param?.isRequired).toBe(true);
       expect(param?.schema).toBeDefined();
+    });
+
+    test('should make Header optional by default', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        test(
+          @Header('X-Token') token: string,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(false);
+    });
+
+    test('should make Header required with { required: true } option', () => {
+      @Controller()
+      class TestController {
+        @Get()
+        test(
+          @Header('Authorization', { required: true }) auth: string,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(true);
+    });
+
+    test('should make Param always required (OpenAPI spec)', () => {
+      @Controller()
+      class TestController {
+        @Get(':id')
+        test(
+          @Param('id') id: string,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(true);
+    });
+
+    test('should determine Body required from schema (not accepting undefined)', () => {
+      const bodySchema = type({ name: 'string' });
+
+      @Controller()
+      class TestController {
+        @Post()
+        test(
+          @Body(bodySchema) data: { name: string },
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(true); // Schema doesn't accept undefined
+    });
+
+    test('should determine Body optional from schema (accepting undefined)', () => {
+      const bodySchema = type({ name: 'string' }).or(type.undefined);
+
+      @Controller()
+      class TestController {
+        @Post()
+        test(
+          @Body(bodySchema) data: { name: string } | undefined,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(false); // Schema accepts undefined
+    });
+
+    test('should allow explicit override of Body required', () => {
+      const bodySchema = type({ name: 'string' });
+
+      @Controller()
+      class TestController {
+        @Post()
+        test(
+          @Body(bodySchema, { required: false }) data: { name: string },
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      expect(param?.isRequired).toBe(false); // Explicitly set to optional
     });
 
     test('should handle multiple parameters', () => {

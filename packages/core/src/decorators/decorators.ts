@@ -1,9 +1,10 @@
 import './metadata'; // Import polyfill first
-import type { Type } from 'arktype';
+import { type, type Type } from 'arktype';
 
 import {
   type ControllerMetadata,
   HttpMethod,
+  type ParamDecoratorOptions,
   type ParamMetadata,
   ParamType,
 } from '../types';
@@ -193,7 +194,7 @@ export function controllerDecorator(basePath: string = '') {
  * Usage: constructor(\@Inject(CounterService) private counterService: CounterService)
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
-export function Inject<T>(type: new (...args: any[]) => T) {
+export function Inject<T>(serviceType: new (...args: any[]) => T) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
   return (target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void => {
     // Get existing dependencies or create new array
@@ -206,7 +207,7 @@ export function Inject<T>(type: new (...args: any[]) => T) {
     }
 
     // Set the explicit type
-    existingDeps[parameterIndex] = type;
+    existingDeps[parameterIndex] = serviceType;
     META_CONSTRUCTOR_PARAMS.set(target, existingDeps);
   };
 }
@@ -302,61 +303,134 @@ function createRouteDecorator(method: HttpMethod) {
 }
 
 /**
+ * Helper function to check if a schema accepts undefined
+ * Used to determine if @Body is required by default
+ */
+function schemaAcceptsUndefined(schema: Type<unknown>): boolean {
+  return !(schema(undefined) instanceof type.errors);
+}
+
+/**
+ * Helper function to check if value is an arktype schema
+ */
+function isArkTypeSchema(value: unknown): value is Type<unknown> {
+  if (!value) {
+    return false;
+  }
+
+  // ArkType schemas are functions with 'kind' property
+  return (
+    typeof value === 'function' &&
+    ('kind' in value || 'impl' in value || typeof (value as Type<unknown>)({}) !== 'undefined')
+  );
+}
+
+/**
+ * Helper function to check if value is options object
+ */
+function isOptions(value: unknown): value is ParamDecoratorOptions {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+  // Options object has 'required' property or is an empty object
+  const keys = Object.keys(value);
+
+  return keys.length === 0 || keys.every((k) => k === 'required');
+}
+
+/**
+ * Determine isRequired based on param type and options
+ * - PATH: always true (OpenAPI spec)
+ * - BODY: options?.required ?? !schemaAcceptsUndefined(schema) (determined from schema)
+ * - QUERY, HEADER: options?.required ?? false (optional by default)
+ */
+function determineIsRequired(
+  paramType: ParamType,
+  schema: Type<unknown> | undefined,
+  options: ParamDecoratorOptions | undefined,
+): boolean {
+  // PATH parameters are always required per OpenAPI spec
+  if (paramType === ParamType.PATH) {
+    return true;
+  }
+
+  // If options explicitly set required, use that
+  if (options?.required !== undefined) {
+    return options.required;
+  }
+
+  // For BODY, determine from schema
+  if (paramType === ParamType.BODY && schema) {
+    return !schemaAcceptsUndefined(schema);
+  }
+
+  // QUERY, HEADER are optional by default
+  return false;
+}
+
+/**
  * Create parameter decorator factory
- * Supports \@Body(schema), \@Query(schema), \@Param('id', schema) or \@Param('id') for simple cases
+ * Supports multiple signatures:
+ * - \@Param('id') - path parameter (always required)
+ * - \@Query('name') - optional by default
+ * - \@Query('name', { required: true }) - explicitly required
+ * - \@Query('name', schema) - with validation, optional by default
+ * - \@Query('name', schema, { required: true }) - with validation, explicitly required
+ * - \@Body(schema) - required determined from schema
+ * - \@Body(schema, { required: false }) - explicitly optional
+ * - \@Header('X-Token') - optional by default
+ * - \@Header('X-Token', { required: true }) - explicitly required
  */
 function createParamDecorator(paramType: ParamType) {
   return (
-    nameOrSchema?: string | Type<unknown>,
-    schema?: Type<unknown>,
+    nameOrSchema?: string | Type<unknown> | ParamDecoratorOptions,
+    schemaOrOptions?: Type<unknown> | ParamDecoratorOptions,
+    options?: ParamDecoratorOptions,
   ) =>
     (target: object, propertyKey: string, parameterIndex: number) => {
       const params: ParamMetadata[] =
         Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
 
       let metadata: ParamMetadata;
+      let name = '';
+      let schema: Type<unknown> | undefined;
+      let opts: ParamDecoratorOptions | undefined;
 
-      // Helper function to check if value is an arktype schema
-      const isArkTypeSchema = (value: unknown): value is Type<unknown> => {
-        if (!value) {
-          return false;
-        }
-
-        // ArkType schemas are functions with 'kind' property
-        return (
-          typeof value === 'function' &&
-          ('kind' in value || 'impl' in value || typeof (value as Type<unknown>)({}) !== 'undefined')
-        );
-      };
-
-      // @Body(schema) or @Query(schema) - first argument is a schema
+      // Parse arguments based on their types
+      // Case 1: @Body(schema) or @Body(schema, options)
       if (isArkTypeSchema(nameOrSchema)) {
-        const schemaValue = nameOrSchema as Type<unknown>;
-        metadata = {
-          type: paramType,
-          name: '',
-          index: parameterIndex,
-          schema: schemaValue,
-          isRequired: true,
-        };
-      } else if (typeof nameOrSchema === 'string' && isArkTypeSchema(schema)) {
-        // @Param('id', schema) or @Query('filter', schema)
-        metadata = {
-          type: paramType,
-          name: nameOrSchema,
-          index: parameterIndex,
-          schema: schema as Type<unknown>,
-          isRequired: true,
-        };
-      } else {
-        // Simple case: @Param('id') or @Query('filter') - no schema, no validation
-        const name = typeof nameOrSchema === 'string' ? nameOrSchema : '';
-        metadata = {
-          type: paramType,
-          name,
-          index: parameterIndex,
-        };
+        schema = nameOrSchema;
+        if (isOptions(schemaOrOptions)) {
+          opts = schemaOrOptions;
+        }
+      } else if (typeof nameOrSchema === 'string' && isOptions(schemaOrOptions)) {
+        // Case 2: @Query('name', options) - name + options, no schema
+        name = nameOrSchema;
+        opts = schemaOrOptions;
+      } else if (typeof nameOrSchema === 'string' && isArkTypeSchema(schemaOrOptions)) {
+        // Case 3: @Query('name', schema) or @Query('name', schema, options)
+        name = nameOrSchema;
+        schema = schemaOrOptions;
+        if (isOptions(options)) {
+          opts = options;
+        }
+      } else if (typeof nameOrSchema === 'string') {
+        // Case 4: @Query('name') or @Body() - simple case
+        name = nameOrSchema;
+      } else if (isOptions(nameOrSchema)) {
+        // Case 5: @Query(options) - options only (edge case)
+        opts = nameOrSchema;
       }
+
+      const isRequired = determineIsRequired(paramType, schema, opts);
+
+      metadata = {
+        type: paramType,
+        name,
+        index: parameterIndex,
+        schema,
+        isRequired,
+      };
 
       params.push(metadata);
 
@@ -366,28 +440,42 @@ function createParamDecorator(paramType: ParamType) {
 
 /**
  * Path parameter decorator
+ * Path parameters are always required per OpenAPI spec
  * @example \@Param('id')
+ * @example \@Param('id', idSchema) - with validation
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Param = createParamDecorator(ParamType.PATH);
 
 /**
  * Query parameter decorator
- * @example \@Query('filter')
+ * Optional by default, use { required: true } for required parameters
+ * @example \@Query('filter') - optional
+ * @example \@Query('filter', { required: true }) - required
+ * @example \@Query('filter', schema) - optional with validation
+ * @example \@Query('filter', schema, { required: true }) - required with validation
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Query = createParamDecorator(ParamType.QUERY);
 
 /**
  * Body parameter decorator
- * @example \@Body()
+ * Required is determined from schema (accepts undefined = optional)
+ * @example \@Body(schema) - required if schema doesn't accept undefined
+ * @example \@Body(schema.or(type.undefined)) - optional (schema accepts undefined)
+ * @example \@Body(schema, { required: false }) - explicitly optional
+ * @example \@Body(schema, { required: true }) - explicitly required
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Body = createParamDecorator(ParamType.BODY);
 
 /**
  * Header parameter decorator
- * @example \@Header('Authorization')
+ * Optional by default, use { required: true } for required parameters
+ * @example \@Header('Authorization') - optional
+ * @example \@Header('Authorization', { required: true }) - required
+ * @example \@Header('Authorization', schema) - optional with validation
+ * @example \@Header('Authorization', schema, { required: true }) - required with validation
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Header = createParamDecorator(ParamType.HEADER);

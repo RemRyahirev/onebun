@@ -100,7 +100,7 @@ function routeToOperation(
         const parameter: Parameter = {
           name: param.name || '',
           in: param.type === 'path' ? 'path' : param.type === 'query' ? 'query' : 'header',
-          required: param.isRequired !== false,
+          required: param.isRequired === true,
         };
 
         if (param.schema) {
@@ -110,7 +110,7 @@ function routeToOperation(
         operation.parameters?.push(parameter);
       } else if (param.type === 'body' && param.schema) {
         operation.requestBody = {
-          required: param.isRequired !== false,
+          required: param.isRequired === true,
           content: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'application/json': {

@@ -453,6 +453,19 @@ export enum ParamType {
 }
 
 /**
+ * Options for parameter decorators (@Query, @Header, @Body, etc.)
+ */
+export interface ParamDecoratorOptions {
+  /**
+   * Whether the parameter is required
+   * - @Param: always true (OpenAPI spec requirement)
+   * - @Query, @Header: false by default
+   * - @Body: determined from schema (accepts undefined = optional)
+   */
+  required?: boolean;
+}
+
+/**
  * Parameter metadata
  */
 export interface ParamMetadata {

@@ -25,6 +25,7 @@ export {
   type ModuleInstance,
   type TypedEnvSchema,
   type ApplicationOptions,
+  type ParamDecoratorOptions,
   type ParamMetadata,
   type ResponseSchemaMetadata,
   type RouteMetadata,

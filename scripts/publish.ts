@@ -340,12 +340,26 @@ async function getLastPublishTagForPackage(packageName: string): Promise<string 
 
 /**
  * Get list of changed files in a package directory since a given git ref
+ * Includes both committed changes (since ref) and uncommitted changes (staged + unstaged)
  */
 async function getChangedFilesSinceRef(pkg: PackageInfo, ref: string): Promise<string[]> {
   try {
     const pkgDir = pkg.path.replace(ROOT_DIR + '/', '');
-    const result = await $`git diff --name-only ${ref}...HEAD -- ${pkgDir}/`.quiet();
-    return result.stdout.toString().trim().split('\n').filter(Boolean);
+    const changedFiles = new Set<string>();
+
+    // Get committed changes since ref (ref...HEAD)
+    const committedResult = await $`git diff --name-only ${ref}...HEAD -- ${pkgDir}/`.quiet();
+    committedResult.stdout.toString().trim().split('\n').filter(Boolean).forEach((f) => changedFiles.add(f));
+
+    // Get uncommitted changes (working directory vs HEAD) - includes both staged and unstaged
+    const uncommittedResult = await $`git diff --name-only HEAD -- ${pkgDir}/`.quiet();
+    uncommittedResult.stdout.toString().trim().split('\n').filter(Boolean).forEach((f) => changedFiles.add(f));
+
+    // Get staged changes (in case HEAD comparison missed something)
+    const stagedResult = await $`git diff --name-only --cached -- ${pkgDir}/`.quiet();
+    stagedResult.stdout.toString().trim().split('\n').filter(Boolean).forEach((f) => changedFiles.add(f));
+
+    return Array.from(changedFiles);
   } catch {
     // If comparison fails, return empty (can't determine)
     return [];

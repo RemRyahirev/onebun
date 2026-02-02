@@ -35,12 +35,14 @@ export class UserController extends BaseController {
 ```typescript
 @Get('/:id')
 async getUser(
-  @Param('id') id: string,        // from path
-  @Query('page') page?: number,   // from query string
-  @Body() body: CreateUserDto,    // from request body
-  @Header('x-api-key') key: string, // from headers
+  @Param('id') id: string,                      // from path (always required)
+  @Query('page') page?: string,                 // optional by default
+  @Query('limit', { required: true }) limit: string, // explicitly required
+  @Body(schema) body: CreateUserDto,            // required based on schema
+  @Header('x-api-key') key?: string,            // optional by default
+  @Header('Authorization', { required: true }) auth: string, // explicitly required
 ): Promise<Response> {
-  return this.success({ id, page });
+  return this.success({ id, page, limit });
 }
 ```
 
@@ -170,9 +172,17 @@ export class UserController extends BaseController {
 
 ## Parameter Decorators
 
+All parameter decorators support an options object to control whether the parameter is required:
+
+```typescript
+interface ParamDecoratorOptions {
+  required?: boolean;
+}
+```
+
 ### @Param()
 
-Extract path parameter from URL.
+Extract path parameter from URL. **Path parameters are always required** per OpenAPI specification.
 
 ```typescript
 @Param(name: string, schema?: Type<unknown>)
@@ -187,17 +197,18 @@ const idSchema = type('string.uuid');
 
 @Get('/:id')
 async findOne(
-  @Param('id') id: string,                    // No validation
-  @Param('id', idSchema) id: string,          // With validation
+  @Param('id') id: string,                    // Always required (OpenAPI spec)
+  @Param('id', idSchema) id: string,          // With validation, always required
 ) {}
 ```
 
 ### @Query()
 
-Extract query parameter from URL.
+Extract query parameter from URL. **Optional by default.**
 
 ```typescript
-@Query(name?: string, schema?: Type<unknown>)
+@Query(name: string, options?: ParamDecoratorOptions)
+@Query(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
 ```
 
 **Example:**
@@ -206,17 +217,24 @@ Extract query parameter from URL.
 // GET /users?page=1&limit=10
 @Get('/')
 async findAll(
-  @Query('page') page?: string,
-  @Query('limit') limit?: string,
+  @Query('page') page?: string,                        // Optional (default)
+  @Query('limit', { required: true }) limit: string,   // Explicitly required
+) {}
+
+// With validation schema
+@Get('/search')
+async search(
+  @Query('q', type('string')) query?: string,                      // Optional with validation
+  @Query('sort', type('string'), { required: true }) sort: string, // Required with validation
 ) {}
 ```
 
 ### @Body()
 
-Extract and optionally validate request body.
+Extract and optionally validate request body. **Required is determined from schema** - if the schema accepts `undefined`, the body is optional; otherwise it's required.
 
 ```typescript
-@Body(schema?: Type<unknown>)
+@Body(schema?: Type<unknown>, options?: ParamDecoratorOptions)
 ```
 
 **Example:**
@@ -230,25 +248,42 @@ const createUserSchema = type({
   'age?': 'number > 0',
 });
 
+// Schema doesn't accept undefined → required
 @Post('/')
 async create(
-  // With validation - body is typed as schema's infer type
   @Body(createUserSchema) body: typeof createUserSchema.infer,
 ) {}
 
+// Schema accepts undefined → optional
+const optionalBodySchema = type({
+  name: 'string',
+}).or(type.undefined);
+
+@Post('/optional')
+async createOptional(
+  @Body(optionalBodySchema) body: typeof optionalBodySchema.infer,
+) {}
+
+// Explicit override
+@Post('/force-optional')
+async forceOptional(
+  @Body(createUserSchema, { required: false }) body: typeof createUserSchema.infer,
+) {}
+
+// Without validation - body is unknown
 @Post('/simple')
 async createSimple(
-  // Without validation - body is unknown
   @Body() body: unknown,
 ) {}
 ```
 
 ### @Header()
 
-Extract header value.
+Extract header value. **Optional by default.**
 
 ```typescript
-@Header(name: string)
+@Header(name: string, options?: ParamDecoratorOptions)
+@Header(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
 ```
 
 **Example:**
@@ -256,8 +291,14 @@ Extract header value.
 ```typescript
 @Get('/protected')
 async protected(
-  @Header('Authorization') auth: string,
-  @Header('X-Request-ID') requestId?: string,
+  @Header('X-Request-ID') requestId?: string,                      // Optional (default)
+  @Header('Authorization', { required: true }) auth: string,       // Explicitly required
+) {}
+
+// With validation schema
+@Get('/api')
+async api(
+  @Header('X-API-Key', type('string'), { required: true }) apiKey: string,
 ) {}
 ```
 
