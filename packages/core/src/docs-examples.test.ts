@@ -1974,17 +1974,19 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
     });
 
     /**
-     * @source docs/architecture.md#explicit-injection
+     * @source docs/architecture.md#automatic-injection
      */
-    it('should demonstrate explicit injection pattern', () => {
-      // From docs: Explicit Injection example
+    it('should demonstrate automatic DI without @Inject', () => {
+      // From docs: Automatic DI example
+      // TypeScript's emitDecoratorMetadata provides type info automatically
       @Service()
       class UserService extends BaseService {}
 
       @Service()
       class CacheService extends BaseService {}
 
-      // For complex cases, use @Inject() - here we just verify pattern works
+      // No @Inject needed - automatic DI works via emitDecoratorMetadata
+      // @Inject is only needed for: interfaces, abstract classes, token-based injection
       @Controller('/users')
       class UserController extends BaseController {
         constructor(

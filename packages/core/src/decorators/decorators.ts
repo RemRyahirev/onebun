@@ -111,9 +111,17 @@ export function registerControllerDependencies(
 
 /**
  * Get constructor parameter types (automatically detected or explicitly set)
+ * Priority: 1) Explicit @Inject registrations, 2) TypeScript's design:paramtypes
  */
 export function getConstructorParamTypes(target: Function): Function[] | undefined {
-  return META_CONSTRUCTOR_PARAMS.get(target);
+  // First check explicit @Inject registrations
+  const explicitDeps = META_CONSTRUCTOR_PARAMS.get(target);
+  if (explicitDeps && explicitDeps.length > 0) {
+    return explicitDeps;
+  }
+
+  // Fallback to TypeScript's design:paramtypes (automatic DI)
+  return getDesignParamTypes(target);
 }
 
 /**
@@ -173,6 +181,15 @@ export function controllerDecorator(basePath: string = '') {
 
     // Mark controller as injectable automatically
     injectable()(WrappedController);
+
+    // Copy design:paramtypes from original class to wrapped class
+    // This enables automatic DI without @Inject when emitDecoratorMetadata is enabled
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const designParamTypes = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
+    if (designParamTypes) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (globalThis as any).Reflect?.defineMetadata?.('design:paramtypes', designParamTypes, WrappedController);
+    }
 
     // Copy constructor params metadata from original class to wrapped class
     // This is needed for @Inject decorator to work correctly with @Controller wrapping

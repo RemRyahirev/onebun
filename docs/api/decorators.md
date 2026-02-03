@@ -422,11 +422,16 @@ export class CustomService extends BaseService {
 
 ### @Inject()
 
-Explicit dependency injection (for complex cases).
+Explicit dependency injection for edge cases. **In most cases, automatic DI works without this decorator.**
 
 ```typescript
 @Inject(type: new (...args: any[]) => T)
 ```
+
+**When to use @Inject:**
+- Interface or abstract class injection
+- Token-based injection (custom Context.Tag)
+- Overriding automatic resolution
 
 **Example:**
 
@@ -434,11 +439,14 @@ Explicit dependency injection (for complex cases).
 @Controller('/users')
 export class UserController extends BaseController {
   constructor(
-    // Automatic injection (works in most cases)
+    // Automatic injection (works in most cases) - no @Inject needed
     private userService: UserService,
+    private cacheService: CacheService,
 
-    // Explicit injection (for edge cases)
-    @Inject(CacheService) private cache: CacheService,
+    // @Inject needed only for edge cases:
+    // - When injecting by interface instead of concrete class
+    // - When using custom Effect.js Context.Tag
+    @Inject(SomeAbstractService) private abstractService: SomeAbstractService,
   ) {
     super();
   }

@@ -117,16 +117,37 @@ const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
 // design:paramtypes to be emitted. Without a decorator, DI will not work.
 ```
 
-### Explicit Injection
+### Automatic DI (Recommended)
 
-For complex cases, use `@Inject()`:
+In most cases, dependencies are injected automatically without any decorator:
 
 ```typescript
 @Controller('/users')
 export class UserController extends BaseController {
   constructor(
+    private userService: UserService,  // Automatically injected
+    private cache: CacheService,        // Automatically injected
+  ) {
+    super();
+  }
+}
+```
+
+### Explicit Injection (Edge Cases)
+
+Use `@Inject()` only when automatic DI cannot resolve the dependency:
+
+```typescript
+import { Inject } from '@onebun/core';
+
+@Controller('/users')
+export class UserController extends BaseController {
+  constructor(
+    // Use @Inject for:
+    // - Interface/abstract class injection
+    // - Token-based injection
+    // - Overriding automatic resolution
     @Inject(UserService) private userService: UserService,
-    @Inject(CacheService) private cache: CacheService,
   ) {
     super();
   }

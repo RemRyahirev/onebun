@@ -76,7 +76,7 @@ my-app/
 | `@Service()` | Mark class as injectable service | `@Service()` |
 | `@Get()`, `@Post()`, etc. | Define HTTP endpoints | `@Get('/:id')` |
 | `@Body()`, `@Param()`, `@Query()` | Parameter injection | `@Param('id') id: string` |
-| `@Inject()` | Explicit dependency injection | `@Inject(UserService)` |
+| `@Inject()` | Explicit DI (edge cases only) | `@Inject(AbstractService)` |
 | `@WebSocketGateway()` | Define WebSocket gateway | `@WebSocketGateway({ path: '/ws' })` |
 | `@OnMessage()`, `@OnConnect()`, etc. | WebSocket event handlers | `@OnMessage('chat:*')` |
 
