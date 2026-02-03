@@ -68,7 +68,8 @@ describe('BaseRepository', () => {
         loggerLayer,
       ),
     );
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>(logger, undefined);
+    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService.initializeService(logger, undefined);
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,
       options: {

@@ -204,6 +204,42 @@ import { UsersService } from './users.service';
 export class UsersModule {}
 ```
 
+### Global Modules
+
+Use `@Global()` decorator to make a module's exports available in all other modules without explicit import:
+
+```typescript
+import { Module, Global, Service, BaseService } from '@onebun/core';
+
+@Service()
+export class DatabaseService extends BaseService {
+  async query(sql: string) { /* ... */ }
+}
+
+// Mark module as global - DatabaseService is now available everywhere
+@Global()
+@Module({
+  providers: [DatabaseService],
+  exports: [DatabaseService],
+})
+export class DatabaseModule {}
+
+// Import once in root module
+@Module({
+  imports: [DatabaseModule, UserModule],
+})
+export class AppModule {}
+
+// UserModule can use DatabaseService without importing DatabaseModule
+@Module({
+  controllers: [UserController],
+  providers: [UserService], // UserService can inject DatabaseService
+})
+export class UserModule {}
+```
+
+This is particularly useful for cross-cutting concerns like database connections, caching, or logging services that are needed throughout the application.
+
 ## Services
 
 OneBun provides a simple way to define services with the `@Service` decorator:

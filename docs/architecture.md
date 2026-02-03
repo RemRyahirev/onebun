@@ -78,7 +78,9 @@ OneBunApplication
 // 1. Service is decorated
 @Service()
 export class UserService extends BaseService {
-  constructor(private cacheService: CacheService) {  // dependency
+  // Dependencies are injected via constructor
+  // Logger and config are injected automatically
+  constructor(private cacheService: CacheService) {
     super();
   }
 }
@@ -94,7 +96,8 @@ export class UserModule {}
 // 3. At startup, framework:
 //    a. Creates CacheService first (from imported module)
 //    b. Creates UserService with CacheService injected
-//    c. Creates UserController with UserService injected
+//    c. Calls initializeService() to inject logger and config
+//    d. Creates UserController with UserService injected
 ```
 
 ### Auto-Detection Algorithm
@@ -105,13 +108,13 @@ The framework uses multiple strategies to detect dependencies:
 // Priority 1: TypeScript design:paramtypes (when emitDecoratorMetadata is true)
 const designTypes = Reflect.getMetadata('design:paramtypes', target);
 
-// Priority 2: Constructor source code analysis
+// Priority 2: Constructor source code analysis (fallback)
 // Matches patterns like: "private userService: UserService"
 const constructorStr = target.toString();
 const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
 
-// Priority 3: Parameter name guessing
-// "userService" → "UserService" → find in available services
+// Note: Classes MUST have a decorator (@Service, @Controller, etc.) for
+// design:paramtypes to be emitted. Without a decorator, DI will not work.
 ```
 
 ### Explicit Injection
@@ -323,13 +326,11 @@ const metadata: ControllerMetadata = {
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;  // Auto-injected
-  protected config: unknown;     // Auto-injected
+  protected logger: SyncLogger;  // Auto-injected via initializeService()
+  protected config: unknown;     // Auto-injected via initializeService()
 
-  constructor(...args: unknown[]) {
-    // Extract logger and config from last two args
-    // Module passes: [dependency1, ..., logger, config]
-  }
+  // Logger and config are injected by the framework after construction
+  // via the initializeService(logger, config) method
 }
 ```
 
@@ -338,6 +339,8 @@ export class BaseService {
 ```typescript
 @Service()
 export class UserService extends BaseService {
+  // Dependencies injected via constructor
+  // Logger and config auto-injected via initializeService()
   constructor(
     private repository: UserRepository,  // Data access
     private cacheService: CacheService,  // Cross-cutting

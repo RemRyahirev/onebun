@@ -5,7 +5,7 @@
  */
 
 /* eslint-disable @typescript-eslint/naming-convention */
-/* eslint-disable no-magic-numbers */
+/* eslint-disable @typescript-eslint/no-magic-numbers */
 
 import type { WsStorageAdapter } from './ws-storage';
 import type {

@@ -53,6 +53,9 @@ export {
   ConfigServiceImpl,
   ConfigServiceTag,
   ConfigService,
+  // Global modules support
+  clearGlobalServicesRegistry,
+  getGlobalServicesRegistry,
 } from './module';
 
 // Application

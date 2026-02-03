@@ -52,10 +52,11 @@ describe('ConfigService', () => {
       expect(service.instance).toBe(mockConfig);
     });
 
-    test('should require logger for service creation', () => {
-      expect(() => {
-        new ConfigServiceImpl();
-      }).toThrow('Logger is required for service ConfigServiceImpl');
+    test('should create instance without logger (uninitialized)', () => {
+      const service = new ConfigServiceImpl();
+      expect(service).toBeInstanceOf(ConfigServiceImpl);
+      // Service exists but is not initialized
+      expect((service as any).isInitialized).toBe(false);
     });
 
     test('should create instance with logger only', () => {
@@ -65,10 +66,11 @@ describe('ConfigService', () => {
       expect(service.instance).toBeUndefined();
     });
 
-    test('should require logger even with config', () => {
-      expect(() => {
-        new ConfigServiceImpl(undefined, mockConfig);
-      }).toThrow('Logger is required for service ConfigServiceImpl');
+    test('should create instance with config but without logger (uninitialized)', () => {
+      const service = new ConfigServiceImpl(undefined, mockConfig);
+      expect(service).toBeInstanceOf(ConfigServiceImpl);
+      expect(service.instance).toBe(mockConfig);
+      // Config is available but logger is not initialized
     });
 
     describe('initialize', () => {

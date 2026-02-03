@@ -63,7 +63,7 @@ describe('DrizzleService', () => {
     delete process.env.DB_URL;
     delete process.env.DB_TYPE;
 
-    // Create service with mock logger
+    // Create service and initialize with mock logger
     const loggerLayer = makeMockLoggerLayer();
     const logger = Effect.runSync(
       Effect.provide(
@@ -71,8 +71,9 @@ describe('DrizzleService', () => {
         loggerLayer,
       ),
     );
-    // BaseService expects logger as second-to-last argument
-    service = new DrizzleService(logger, undefined);
+    // Create service and initialize via initializeService method
+    service = new DrizzleService();
+    service.initializeService(logger, undefined);
   });
 
   afterEach(async () => {
@@ -146,7 +147,8 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const newService = new DrizzleService(logger, undefined);
+      const newService = new DrizzleService();
+      newService.initializeService(logger, undefined);
       expect(() => newService.getDatabase()).toThrow('Database not initialized');
     });
 
@@ -207,7 +209,8 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const newService = new DrizzleService(logger, undefined);
+      const newService = new DrizzleService();
+      newService.initializeService(logger, undefined);
       const options = newService.getConnectionOptions();
       expect(options).toBeNull();
     });
@@ -245,7 +248,8 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const newService = new DrizzleService(logger, undefined);
+        const newService = new DrizzleService();
+        newService.initializeService(logger, undefined);
         // Wait for auto-init to complete
         await newService.waitForInit();
         // Verify database is not initialized
@@ -327,7 +331,8 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const newService = new DrizzleService(logger, undefined);
+        const newService = new DrizzleService();
+        newService.initializeService(logger, undefined);
         // Wait for auto-init to complete
         await newService.waitForInit();
         // Verify database is not initialized
@@ -366,7 +371,8 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const newService = new DrizzleService(logger, undefined);
+        const newService = new DrizzleService();
+        newService.initializeService(logger, undefined);
         // waitForInit should complete without error even if no DB_URL is set
         await newService.waitForInit();
         // But database should not be initialized

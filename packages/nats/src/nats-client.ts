@@ -6,6 +6,8 @@
 
 import type { NatsConnectionOptions } from './types';
 
+const DEFAULT_TIMEOUT = 5_000; // 5 seconds
+
 // Import NATS types dynamically to handle potential import issues
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let natsModule: any = null;
@@ -170,7 +172,7 @@ export class NatsClient {
 
      
     const response = await this.nc.request(subject, encoder.encode(data), {
-      timeout: options?.timeout ?? 5000,
+      timeout: options?.timeout ?? DEFAULT_TIMEOUT,
     });
 
     return {

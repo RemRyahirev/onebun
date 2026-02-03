@@ -859,8 +859,10 @@ describe('Services API Documentation Examples', () => {
 
       @Service()
       class UserService extends BaseService {
+        // Dependencies are auto-injected via constructor
+        // Logger and config are auto-injected via initializeService()
         constructor(private repository: UserRepository) {
-          super(); // Must call super()
+          super();
         }
       }
 

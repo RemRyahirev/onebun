@@ -77,7 +77,7 @@ export async function resolveEnvOverrides(
   let referencedValues: Record<string, string | undefined> = {};
   if (Object.keys(referencedSchema).length > 0) {
     // Generate unique key to avoid conflicts with other TypedEnv instances
-    // eslint-disable-next-line no-magic-numbers -- Base 36 for alphanumeric random string
+    // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Base 36 for alphanumeric random string
     const uniqueKey = `env-resolver-refs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const envConfig = await TypedEnv.createAsync(
       referencedSchema,

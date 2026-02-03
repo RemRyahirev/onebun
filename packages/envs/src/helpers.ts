@@ -242,7 +242,7 @@ export const Env = {
    */
   port(errorMessage?: string): (value: number) => Effect.Effect<number, EnvValidationError> {
     return (value: number) => {
-      // eslint-disable-next-line no-magic-numbers
+      // eslint-disable-next-line @typescript-eslint/no-magic-numbers
       if (!Number.isInteger(value) || value < 1 || value > 65535) {
         return Effect.fail(
           new EnvValidationError(

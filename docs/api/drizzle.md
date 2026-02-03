@@ -67,6 +67,129 @@ DrizzleModule.forRoot({
 })
 ```
 
+### Global Module (Default Behavior)
+
+By default, `DrizzleModule` is a **global module**. This means that once you import it in your root module, `DrizzleService` is automatically available in all submodules without explicit imports.
+
+```typescript
+// app.module.ts - Import once in root module
+import { Module } from '@onebun/core';
+import { DrizzleModule, DatabaseType } from '@onebun/drizzle';
+import { UserModule } from './user/user.module';
+import { PostModule } from './post/post.module';
+
+@Module({
+  imports: [
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.POSTGRESQL,
+        options: { host: 'localhost', port: 5432, user: 'app', password: 'secret', database: 'myapp' },
+      },
+    }),
+    UserModule,
+    PostModule,
+  ],
+})
+export class AppModule {}
+
+// user/user.module.ts - DrizzleService available without importing DrizzleModule
+import { Module } from '@onebun/core';
+import { UserController } from './user.controller';
+import { UserService } from './user.service';
+
+@Module({
+  controllers: [UserController],
+  providers: [UserService], // UserService can inject DrizzleService
+})
+export class UserModule {}
+
+// user/user.service.ts - DrizzleService is automatically available
+import { Service, BaseService } from '@onebun/core';
+import { DrizzleService } from '@onebun/drizzle';
+
+@Service()
+export class UserService extends BaseService {
+  constructor(private db: DrizzleService) {
+    super();
+  }
+
+  async findAll() {
+    return this.db.query(db => db.select().from(users));
+  }
+}
+```
+
+### Non-Global Mode (Multiple Databases)
+
+For scenarios where you need multiple database connections (e.g., main database + analytics database), you can disable global behavior:
+
+```typescript
+// Main database - global (available everywhere)
+@Module({
+  imports: [
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.POSTGRESQL,
+        options: { host: 'main-db', port: 5432, user: 'app', password: 'secret', database: 'main' },
+      },
+      isGlobal: true, // Default, can be omitted
+    }),
+  ],
+})
+export class AppModule {}
+
+// Analytics module with separate database - non-global
+@Module({
+  imports: [
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.POSTGRESQL,
+        options: { host: 'analytics-db', port: 5432, user: 'analytics', password: 'secret', database: 'analytics' },
+      },
+      isGlobal: false, // Each import creates new instance
+    }),
+  ],
+  providers: [AnalyticsService],
+})
+export class AnalyticsModule {}
+```
+
+### forFeature() Method
+
+When `DrizzleModule` is not global (`isGlobal: false`), submodules must explicitly import it using `forFeature()`:
+
+```typescript
+// Root module with non-global DrizzleModule
+@Module({
+  imports: [
+    DrizzleModule.forRoot({
+      connection: { ... },
+      isGlobal: false,
+    }),
+    UserModule,
+  ],
+})
+export class AppModule {}
+
+// Feature module must explicitly import DrizzleService
+@Module({
+  imports: [DrizzleModule.forFeature()], // Required when isGlobal: false
+  controllers: [UserController],
+  providers: [UserService],
+})
+export class UserModule {}
+```
+
+<llms-only>
+**Technical details for AI agents:**
+- `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
+- `isGlobal: true` (default) - singleton DrizzleService, one DB connection for entire app
+- `isGlobal: false` - each import creates new DrizzleService instance (useful for multi-DB scenarios)
+- `forFeature()` simply returns the DrizzleModule class for explicit imports in feature modules
+- Global services are stored in a registry and automatically injected into all modules
+- When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`
+</llms-only>
+
 ## Schema Definition
 
 All schema builders are re-exported from `@onebun/drizzle`:

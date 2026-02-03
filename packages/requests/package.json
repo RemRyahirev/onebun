@@ -1,6 +1,6 @@
 {
   "name": "@onebun/requests",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Unified HTTP client for OneBun framework - retries, auth, tracing, and metrics",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",

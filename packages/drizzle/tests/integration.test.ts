@@ -39,7 +39,8 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
         loggerLayer,
       ),
     );
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>(logger, undefined);
+    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService.initializeService(logger, undefined);
     
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,

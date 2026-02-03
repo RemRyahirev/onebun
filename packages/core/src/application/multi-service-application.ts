@@ -322,7 +322,7 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
    * LogLevel values: Fatal=60, Error=50, Warning=40, Info=30, Debug=20, Trace=10
    */
   private getLogLevel(level: string): number {
-    /* eslint-disable no-magic-numbers */
+    /* eslint-disable @typescript-eslint/no-magic-numbers */
     const LOG_LEVEL_INFO = 30;
     const levelMap: Record<string, number> = {
       fatal: 60,
@@ -334,6 +334,6 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
     };
 
     return levelMap[level.toLowerCase()] ?? LOG_LEVEL_INFO;
-    /* eslint-enable no-magic-numbers */
+    /* eslint-enable @typescript-eslint/no-magic-numbers */
   }
 }

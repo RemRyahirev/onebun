@@ -10,8 +10,10 @@ import {
   test,
   expect,
   beforeEach,
+  afterEach,
 } from 'bun:test';
 
+import { Service } from '../module';
 import { HttpMethod, ParamType } from '../types';
 
 import {
@@ -50,7 +52,7 @@ describe('decorators', () => {
 
   describe('injectable', () => {
     test('should return the same class when applied', () => {
-      @injectable()
+      @Service()
       class TestService {
         getName() {
           return 'test';
@@ -63,7 +65,7 @@ describe('decorators', () => {
     });
 
     test('should work without any modifications to class functionality', () => {
-      @injectable()
+      @Service()
       class ServiceWithConstructor {
         constructor(private value: string) {}
 
@@ -155,12 +157,13 @@ describe('decorators', () => {
       }
     }
 
-    test('should register dependencies automatically', () => {
+    test('should register dependencies automatically with decorator', () => {
       const availableServices = new Map<string, any>([
         ['MockService', MockService],
         ['CounterService', CounterService],
       ]);
 
+      @injectable()
       class TestController {
         constructor(
           private mockService: MockService,
@@ -171,12 +174,15 @@ describe('decorators', () => {
       registerControllerDependencies(TestController, availableServices);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeDefined();
-      expect(deps?.length).toBeGreaterThan(0);
+      expect(deps?.length).toBe(2);
+      expect(deps).toContain(MockService);
+      expect(deps).toContain(CounterService);
     });
 
     test('should handle constructor without parameters', () => {
       const availableServices = new Map();
 
+      @injectable()
       class TestController {
         constructor() {}
       }
@@ -189,6 +195,7 @@ describe('decorators', () => {
     test('should skip logger and config parameters', () => {
       const availableServices = new Map([['MockService', MockService]]);
 
+      @injectable()
       class TestController {
         constructor(
           private mockService: MockService,
@@ -200,19 +207,22 @@ describe('decorators', () => {
       registerControllerDependencies(TestController, availableServices);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeDefined();
+      expect(deps?.length).toBe(1);
+      expect(deps?.[0]).toBe(MockService);
     });
 
-    test('should guess service types from parameter names', () => {
+    test('should return undefined for class without decorator (no design:paramtypes)', () => {
       const availableServices = new Map([['CounterService', CounterService]]);
 
-      // Simulate a constructor string that would match the guessing logic
-      class TestController {
-        constructor(counterService: any) {} // Use any to simulate untyped parameter
+      // Without decorator, TypeScript does not emit design:paramtypes
+      class TestControllerWithoutDecorator {
+        constructor(private counterService: CounterService) {}
       }
 
-      registerControllerDependencies(TestController, availableServices);
-      const deps = getConstructorParamTypes(TestController);
-      expect(deps).toBeDefined();
+      registerControllerDependencies(TestControllerWithoutDecorator, availableServices);
+      const deps = getConstructorParamTypes(TestControllerWithoutDecorator);
+      // Without decorator, design:paramtypes is not available
+      expect(deps).toBeUndefined();
     });
   });
 
@@ -799,22 +809,6 @@ describe('decorators', () => {
       const deps = getConstructorParamTypes(malformedClass);
       expect(deps).toBeUndefined();
     });
-
-    test('should handle parameter with no type annotation', () => {
-      const TestService = class TestService {};
-      const availableServices = new Map([['TestService', TestService]]);
-
-      // Simulate parameter that can be guessed from name
-      class TestController {
-        constructor(testService: any) {}
-      }
-
-      registerControllerDependencies(TestController, availableServices);
-      const deps = getConstructorParamTypes(TestController);
-      expect(deps).toBeDefined();
-      expect(deps?.length).toBe(1);
-      expect(deps?.[0]).toBe(TestService);
-    });
   });
 
   describe('ApiResponse decorator', () => {
@@ -874,6 +868,146 @@ describe('decorators', () => {
       expect(route?.responseSchemas?.[0].statusCode).toBe(200);
       expect(route?.responseSchemas?.[0].schema).toBeUndefined();
       expect(route?.responseSchemas?.[0].description).toBe('Success');
+    });
+  });
+
+  describe('Global decorator', () => {
+    // Import the functions we need to test
+    const {
+      Global,
+      isGlobalModule,
+      removeFromGlobalModules,
+      clearGlobalModules,
+    } = require('./decorators');
+
+    beforeEach(() => {
+      // Clear global modules before each test
+      clearGlobalModules();
+    });
+
+    afterEach(() => {
+      // Clean up after each test
+      clearGlobalModules();
+    });
+
+    test('should mark module as global', () => {
+      @Global()
+      @Module({})
+      class GlobalTestModule {}
+
+      expect(isGlobalModule(GlobalTestModule)).toBe(true);
+    });
+
+    test('should return false for non-global module', () => {
+      @Module({})
+      class NonGlobalModule {}
+
+      expect(isGlobalModule(NonGlobalModule)).toBe(false);
+    });
+
+    test('should return false for class without decorator', () => {
+      class PlainClass {}
+
+      expect(isGlobalModule(PlainClass)).toBe(false);
+    });
+
+    test('should work with @Global before @Module', () => {
+      @Global()
+      @Module({
+        providers: [],
+        exports: [],
+      })
+      class GlobalFirstModule {}
+
+      expect(isGlobalModule(GlobalFirstModule)).toBe(true);
+    });
+
+    test('should work with @Module before @Global', () => {
+      // Note: In TypeScript, decorators are applied bottom-up,
+      // so @Module is applied first, then @Global
+      @Module({})
+      @Global()
+      class ModuleFirstModule {}
+
+      expect(isGlobalModule(ModuleFirstModule)).toBe(true);
+    });
+
+    test('should allow removing module from global registry', () => {
+      @Global()
+      @Module({})
+      class RemovableModule {}
+
+      expect(isGlobalModule(RemovableModule)).toBe(true);
+
+      removeFromGlobalModules(RemovableModule);
+
+      expect(isGlobalModule(RemovableModule)).toBe(false);
+    });
+
+    test('should handle removing non-existent module gracefully', () => {
+      class NonExistentModule {}
+
+      // Should not throw
+      expect(() => removeFromGlobalModules(NonExistentModule)).not.toThrow();
+      expect(isGlobalModule(NonExistentModule)).toBe(false);
+    });
+
+    test('should clear all global modules', () => {
+      @Global()
+      @Module({})
+      class GlobalModule1 {}
+
+      @Global()
+      @Module({})
+      class GlobalModule2 {}
+
+      expect(isGlobalModule(GlobalModule1)).toBe(true);
+      expect(isGlobalModule(GlobalModule2)).toBe(true);
+
+      clearGlobalModules();
+
+      expect(isGlobalModule(GlobalModule1)).toBe(false);
+      expect(isGlobalModule(GlobalModule2)).toBe(false);
+    });
+
+    test('should preserve module metadata when using @Global', () => {
+      class TestService {}
+      class TestController {}
+
+      @Global()
+      @Module({
+        providers: [TestService],
+        exports: [TestService],
+        controllers: [TestController],
+      })
+      class GlobalModuleWithMetadata {}
+
+      // Module should be global
+      expect(isGlobalModule(GlobalModuleWithMetadata)).toBe(true);
+
+      // Module metadata should be preserved
+      const metadata = getModuleMetadata(GlobalModuleWithMetadata);
+      expect(metadata).toBeDefined();
+      expect(metadata?.providers).toContain(TestService);
+      expect(metadata?.exports).toContain(TestService);
+      expect(metadata?.controllers).toContain(TestController);
+    });
+
+    test('should handle multiple @Global decorators on different modules', () => {
+      @Global()
+      @Module({})
+      class GlobalModuleA {}
+
+      @Global()
+      @Module({})
+      class GlobalModuleB {}
+
+      @Module({})
+      class NonGlobalModuleC {}
+
+      expect(isGlobalModule(GlobalModuleA)).toBe(true);
+      expect(isGlobalModule(GlobalModuleB)).toBe(true);
+      expect(isGlobalModule(NonGlobalModuleC)).toBe(false);
     });
   });
 });

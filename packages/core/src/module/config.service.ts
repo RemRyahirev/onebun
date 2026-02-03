@@ -19,7 +19,12 @@ export class ConfigServiceImpl extends BaseService {
   private configInstance: any = null;
 
   constructor(logger?: SyncLogger, config?: unknown) {
-    super(logger, config);
+    super();
+    // If logger is provided directly (for backwards compatibility in tests),
+    // initialize the service immediately
+    if (logger) {
+      this.initializeService(logger, config);
+    }
     this.configInstance = config;
   }
 
@@ -69,7 +74,7 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Check if configuration is initialized
    */
-  get isInitialized(): boolean {
+  override get isInitialized(): boolean {
     return this.configInstance ? this.configInstance.isInitialized : false;
   }
 

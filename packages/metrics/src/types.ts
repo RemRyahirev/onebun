@@ -8,11 +8,11 @@ export const DEFAULT_SYSTEM_METRICS_INTERVAL = 5000;
 /**
  * Default HTTP duration buckets for histogram metrics (in seconds)
  */
-/* eslint-disable no-magic-numbers -- Standard Prometheus histogram buckets defined in one place */
+/* eslint-disable @typescript-eslint/no-magic-numbers -- Standard Prometheus histogram buckets defined in one place */
 export const DEFAULT_HTTP_DURATION_BUCKETS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10,
 ];
-/* eslint-enable no-magic-numbers */
+/* eslint-enable @typescript-eslint/no-magic-numbers */
 
 /**
  * Default metrics max age in seconds (10 minutes)

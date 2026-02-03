@@ -134,6 +134,14 @@ export interface DrizzleModuleOptions {
    * Default: false
    */
   logQueries?: boolean;
+  
+  /**
+   * Whether to register module as global
+   * When true, DrizzleService is available in all modules without explicit import.
+   * When false, each import creates a new instance (useful for multi-database scenarios).
+   * Default: true
+   */
+  isGlobal?: boolean;
 }
 
 /**

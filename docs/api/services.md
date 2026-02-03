@@ -14,10 +14,14 @@ Base class for all application services. Provides logger and configuration acces
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;
-  protected config: unknown;
+  protected logger: SyncLogger;  // Auto-injected by framework
+  protected config: unknown;     // Auto-injected by framework
 
-  constructor(...args: unknown[]);
+  /** Initialize service with logger and config (called by framework) */
+  initializeService(logger: SyncLogger, config: unknown): void;
+
+  /** Check if service is initialized */
+  get isInitialized(): boolean;
 
   /** Run an effect with error handling */
   protected async runEffect<A>(effect: Effect.Effect<never, never, A>): Promise<A>;
@@ -28,6 +32,10 @@ export class BaseService {
 ```
 
 ## Creating a Service
+
+::: tip Automatic Logger Injection
+The framework automatically injects `logger` and `config` into services extending `BaseService` via the `initializeService()` method. You don't need to manually pass them in the constructor.
+:::
 
 ### Basic Service
 
@@ -57,6 +65,8 @@ export class CounterService extends BaseService {
 
 ### Service with Dependencies
 
+Dependencies are automatically injected via constructor. Logger and config are available after framework initialization:
+
 ```typescript
 import { Service, BaseService } from '@onebun/core';
 import { CacheService } from '@onebun/cache';
@@ -64,11 +74,12 @@ import { CacheService } from '@onebun/cache';
 @Service()
 export class UserService extends BaseService {
   // Dependencies are auto-injected via constructor
+  // Logger and config are auto-injected via initializeService()
   constructor(
     private cacheService: CacheService,
     private repository: UserRepository,
   ) {
-    super();  // Must call super()
+    super();
   }
 
   async findById(id: string): Promise<User | null> {
@@ -426,7 +437,6 @@ export class UserService extends BaseService {
 
   constructor(private cacheService: CacheService) {
     super();
-    this.logger.info('UserService initialized');
   }
 
   @Span('user-find-all')

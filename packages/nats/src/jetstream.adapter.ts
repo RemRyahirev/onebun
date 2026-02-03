@@ -30,6 +30,9 @@ import {
 
 import { NatsClient } from './nats-client';
 
+const DEFAULT_ACK_WAIT_NANOSECONDS = 30_000_000_000; // 30 seconds in nanoseconds
+const DEFAULT_MAX_DELIVER = 3;
+
 // Import JetStream types dynamically
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let jetstreamModule: any = null;
@@ -345,9 +348,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         ack_policy: ackPolicy,
         filter_subject: filterSubject,
         max_ack_pending: options?.prefetch ?? 100,
-        // eslint-disable-next-line no-magic-numbers
-        ack_wait: this.options.consumerConfig?.ackWait ?? 30000000000, // 30s in nanoseconds
-        max_deliver: options?.retry?.attempts ?? this.options.consumerConfig?.maxDeliver ?? 3,
+        ack_wait: this.options.consumerConfig?.ackWait ?? DEFAULT_ACK_WAIT_NANOSECONDS,
+        max_deliver: options?.retry?.attempts ?? this.options.consumerConfig?.maxDeliver ?? DEFAULT_MAX_DELIVER,
       });
     } catch {
       // Consumer might already exist, try to get it
@@ -469,7 +471,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   }
 
   private generateMessageId(): string {
-    // eslint-disable-next-line no-magic-numbers
+    // eslint-disable-next-line @typescript-eslint/no-magic-numbers
     return `js-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 

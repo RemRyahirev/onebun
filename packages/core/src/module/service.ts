@@ -16,7 +16,11 @@ const META_SERVICES = new Map<
 
 /**
  * Service decorator
- * @param options - Options for the service
+ * Registers the class as a service with an optional Effect Context tag.
+ * Services extending BaseService will have logger and config injected
+ * via the initializeService method called by the module after instantiation.
+ * 
+ * @param tag - Optional Effect Context tag for the service
  */
 export function Service<T>(tag?: Context.Tag<T, T>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -60,36 +64,27 @@ export function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): C
  */
 export class BaseService {
   // Logger instance with service class name as context
-  protected logger: SyncLogger;
+  protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
-  protected config: unknown;
+  protected config!: unknown;
+  // Flag to track initialization status
+  private _initialized = false;
 
-  constructor(...args: unknown[]) {
-    // Extract logger and config from arguments
-    // Module passes: [service1, service2, ..., logger, config] - same as controller
-    let logger: SyncLogger | undefined;
-    let config: unknown;
-
-    if (args.length >= 2) {
-      // Last argument is config, second to last is logger
-      config = args[args.length - 1];
-      const potentialLogger = args[args.length - 2];
-      if (potentialLogger && typeof potentialLogger === 'object' && 'info' in potentialLogger) {
-        logger = potentialLogger as SyncLogger;
-      }
-    } else if (args.length === 1) {
-      // Only config provided
-      config = args[0];
+  /**
+   * Initialize service with logger and config (called by the framework)
+   * @internal
+   */
+  initializeService(logger: SyncLogger, config: unknown): void {
+    if (this._initialized) {
+      return; // Already initialized
     }
 
-    // Initialize logger with service class name as context
     const className = this.constructor.name;
 
     if (logger) {
       // Use provided logger and create a child with the service class name
       this.logger = logger.child({ className });
     } else {
-      // This should never happen since OneBunApplication always provides a logger
       throw new Error(
         `Logger is required for service ${className}. Make sure OneBunApplication is configured correctly.`,
       );
@@ -97,8 +92,17 @@ export class BaseService {
 
     // Set configuration instance
     this.config = config;
+    this._initialized = true;
 
     this.logger.debug(`Service ${className} initialized`);
+  }
+
+  /**
+   * Check if service is initialized
+   * @internal
+   */
+  get isInitialized(): boolean {
+    return this._initialized;
   }
 
   /**

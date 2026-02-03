@@ -25,7 +25,7 @@ import {
   DEFAULT_SYSTEM_METRICS_INTERVAL,
 } from './types';
 
-/* eslint-disable no-magic-numbers -- Metrics constants defined in one place */
+/* eslint-disable @typescript-eslint/no-magic-numbers -- Metrics constants defined in one place */
 /**
  * Default histogram buckets for GC metrics
  */
@@ -50,7 +50,7 @@ const DEFAULT_SUMMARY_AGE_BUCKETS = 5;
  * Microseconds to seconds conversion factor
  */
 const MICROSECONDS_TO_SECONDS = 1000000;
-/* eslint-enable no-magic-numbers */
+ 
 
 /**
  * Metrics service interface

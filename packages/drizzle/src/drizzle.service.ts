@@ -183,8 +183,8 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   private sqliteClient: Database | null = null;
   private postgresClient: SQL | null = null;
 
-  constructor(...args: unknown[]) {
-    super(...args);
+  constructor() {
+    super();
     // Only start auto-initialization if there's configuration to use
     // Check synchronously to avoid unnecessary async work
     if (this.shouldAutoInitialize()) {

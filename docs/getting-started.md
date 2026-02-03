@@ -410,7 +410,7 @@ Ensure `experimentalDecorators` and `emitDecoratorMetadata` are `true` in tsconf
 ### Service Not Found
 - Check that service has `@Service()` decorator
 - Ensure service is listed in module's `providers` array
-- Constructor parameter name should match service class name (e.g., `helloService: HelloService`)
+- Service class must have `@Service()` decorator for DI to work (enables TypeScript metadata emission)
 
 ### Type Errors
 Run `bunx tsc --noEmit` to check TypeScript errors before starting the app.

@@ -156,11 +156,12 @@ function parseField(field: string, min: number, max: number): number[] {
 export function parseCronExpression(expression: string): CronSchedule {
   const parts = expression.trim().split(/\s+/);
 
-  // Support 5 fields (standard cron) and 6 fields (with seconds)
+  // eslint-disable-next-line @typescript-eslint/no-magic-numbers -- Support 5 fields (standard cron) or 6 fields (with seconds)
   if (parts.length === 5) {
     parts.unshift('0'); // Default seconds to 0
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-magic-numbers
   if (parts.length !== 6) {
     throw new Error(
       `Invalid cron expression: "${expression}". Expected 5 or 6 fields, got ${parts.length}`,
@@ -168,12 +169,14 @@ export function parseCronExpression(expression: string): CronSchedule {
   }
 
   return {
+    /* eslint-disable @typescript-eslint/no-magic-numbers */
     seconds: parseField(parts[0], 0, 59),
     minutes: parseField(parts[1], 0, 59),
     hours: parseField(parts[2], 0, 23),
     daysOfMonth: parseField(parts[3], 1, 31),
     months: parseField(parts[4], 1, 12),
     daysOfWeek: parseField(parts[5], 0, 6),
+    /* eslint-enable @typescript-eslint/no-magic-numbers */
   };
 }
 
@@ -202,7 +205,7 @@ function matchesSchedule(date: Date, schedule: CronSchedule): boolean {
 export function getNextRun(
   schedule: CronSchedule,
   from: Date = new Date(),
-  maxIterations: number = 366 * 24 * 60 * 60, // 1 year in seconds
+  maxIterations: number = 366 * 24 * 60 * 60, // eslint-disable-line @typescript-eslint/no-magic-numbers -- 1 year in seconds
 ): Date | null {
   // Start from the next second
   const current = new Date(from);

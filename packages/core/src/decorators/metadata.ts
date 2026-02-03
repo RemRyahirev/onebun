@@ -218,16 +218,15 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
   try {
     types = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
     if (types && Array.isArray(types) && types.length > 0) {
-      // Filter out basic types and focus on service types
+      // Filter out basic types and framework-specific types
+      // Only filter exact framework type names, not user services containing these words
+      const frameworkTypes = new Set(['SyncLogger', 'Logger', 'Object', 'String', 'Number', 'Boolean']);
       const serviceTypes = types.filter((type: any) => {
         if (!type || type === Object || type === String || type === Number || type === Boolean) {
           return false;
         }
         const typeName = type.name;
-        if (
-          typeName &&
-          (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
-        ) {
+        if (typeName && frameworkTypes.has(typeName)) {
           return false;
         }
 
@@ -243,15 +242,13 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
   // Fallback to our custom metadata
   types = getMetadata('design:paramtypes', target);
   if (types && Array.isArray(types)) {
+    const frameworkTypes = new Set(['SyncLogger', 'Logger', 'Object', 'String', 'Number', 'Boolean']);
     const serviceTypes = types.filter((type: any) => {
       if (!type || type === Object || type === String || type === Number || type === Boolean) {
         return false;
       }
       const typeName = type.name;
-      if (
-        typeName &&
-        (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
-      ) {
+      if (typeName && frameworkTypes.has(typeName)) {
         return false;
       }
 

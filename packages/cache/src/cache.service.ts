@@ -199,8 +199,8 @@ export class CacheService extends BaseService implements ICacheService {
   private initialized = false;
   private initPromise: Promise<void> | null = null;
 
-  constructor(...args: unknown[]) {
-    super(...args);
+  constructor() {
+    super();
 
     // Create in-memory cache by default
     // Will be initialized properly in the initialize() method

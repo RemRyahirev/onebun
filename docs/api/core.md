@@ -296,6 +296,51 @@ class OneBunModule implements Module {
 }
 ```
 
+### Global Modules
+
+Modules decorated with `@Global()` automatically make their exported services available in all other modules without explicit import. This is useful for cross-cutting concerns like database connections.
+
+```typescript
+import { Module, Global, Service, BaseService } from '@onebun/core';
+
+@Service()
+export class DatabaseService extends BaseService {
+  async query(sql: string) { /* ... */ }
+}
+
+// Mark module as global
+@Global()
+@Module({
+  providers: [DatabaseService],
+  exports: [DatabaseService],
+})
+export class DatabaseModule {}
+
+// Root module imports DatabaseModule once
+@Module({
+  imports: [DatabaseModule],
+})
+export class AppModule {}
+
+// All other modules can inject DatabaseService without importing DatabaseModule
+@Module({
+  providers: [UserService], // UserService can inject DatabaseService automatically
+})
+export class UserModule {}
+```
+
+**Global Module Utilities:**
+
+```typescript
+// Check if module is global
+import { isGlobalModule } from '@onebun/core';
+isGlobalModule(DatabaseModule); // true
+
+// Clear global registries (for testing)
+import { clearGlobalServicesRegistry } from '@onebun/core';
+clearGlobalServicesRegistry();
+```
+
 ## Metrics Options
 
 ```typescript

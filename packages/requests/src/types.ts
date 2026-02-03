@@ -5,7 +5,6 @@
 /**
  * HTTP status codes enumeration
  */
-/* eslint-disable no-magic-numbers -- Standard HTTP status codes defined in one place */
 export enum HttpStatusCode {
   // 2xx Success
   OK = 200,
@@ -36,7 +35,6 @@ export enum HttpStatusCode {
   SERVICE_UNAVAILABLE = 503,
   GATEWAY_TIMEOUT = 504,
 }
-/* eslint-enable no-magic-numbers */
 
 /**
  * Recursive OneBun error type for error chaining

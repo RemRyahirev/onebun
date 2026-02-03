@@ -43,6 +43,7 @@ const config: Linter.Config[] = [
     },
     rules: {
       // disabled rules
+      'tsdoc/syntax': 'off',
       'no-await-in-loop': 'off',
       'no-continue': 'off',
       'no-plusplus': 'off',
@@ -310,14 +311,18 @@ const config: Linter.Config[] = [
       '@typescript-eslint/return-await': ['error', 'always'],
 
       // warning rules
-      'tsdoc/syntax': 'warn',
-      'no-magic-numbers': [
+      'no-magic-numbers': 'off',
+      '@typescript-eslint/no-magic-numbers': [
         'warn',
         {
-          ignore: [-1, 0, 1, 2, 4, 8, 10, 16, 32, 64, 100, 1000, 3000, 8080],
+          ignore: [-1, 0, 1, 2, 4, 8, 10, 16, 32, 64, 100, 1000, 1024, 3000, 8080],
           ignoreDefaultValues: true,
           ignoreClassFieldInitialValues: true,
           detectObjects: true,
+          ignoreEnums: true,
+          ignoreNumericLiteralTypes: true,
+          ignoreReadonlyClassProperties: true,
+          ignoreTypeIndexes: true,
         },
       ],
     },
@@ -328,9 +333,11 @@ const config: Linter.Config[] = [
       jest: jestPlugin,
     },
     rules: {
+      'tsdoc/syntax': 'off',
       '@typescript-eslint/unbound-method': 'off',
       'jest/unbound-method': 'error',
       'no-magic-numbers': 'off',
+      '@typescript-eslint/no-magic-numbers': 'off',
     },
   },
 ];

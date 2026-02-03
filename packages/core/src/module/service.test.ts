@@ -1,13 +1,11 @@
 /* eslint-disable
    @typescript-eslint/no-unused-vars,
-   @typescript-eslint/no-explicit-any,
-   @typescript-eslint/no-useless-constructor */
+   @typescript-eslint/no-explicit-any */
 import {
   describe,
   test,
   expect,
   beforeEach,
-  afterEach,
   mock,
 } from 'bun:test';
 import { Effect } from 'effect';
@@ -42,61 +40,65 @@ describe('BaseService', () => {
     };
   });
 
-  describe('Initialization', () => {
-    test('should initialize service with logger and config', () => {
-      class TestService extends BaseService {
-        constructor(logger: any, config?: any) {
-          super(logger, config);
-        }
-      }
+  describe('Initialization via initializeService', () => {
+    test('should initialize service with logger and config via initializeService', () => {
+      class TestService extends BaseService {}
 
-      const service = new TestService(mockLogger, mockConfig);
+      const service = new TestService();
       expect(service).toBeInstanceOf(BaseService);
-      expect((service as any).logger).toBe(mockLogger);
+      expect(service.isInitialized).toBe(false);
+
+      // Initialize service
+      service.initializeService(mockLogger, mockConfig);
+      
+      expect(service.isInitialized).toBe(true);
+      expect((service as any).logger).toBeDefined();
       expect((service as any).config).toBe(mockConfig);
     });
 
     test('should initialize service with logger and undefined config', () => {
-      class TestService extends BaseService {
-        constructor(logger: any, config?: any) {
-          super(logger, config);
-        }
-      }
+      class TestService extends BaseService {}
 
-      const service = new TestService(mockLogger, undefined);
-      expect(service).toBeInstanceOf(BaseService);
-      expect((service as any).logger).toBeDefined(); // Logger wrapper is created
+      const service = new TestService();
+      service.initializeService(mockLogger, undefined);
+      
+      expect(service.isInitialized).toBe(true);
+      expect((service as any).logger).toBeDefined();
       expect((service as any).config).toBeUndefined();
     });
 
-    test('should throw error when logger is not provided', () => {
-      class TestService extends BaseService {
-        constructor(logger?: any) {
-          super(logger!);
-        }
-      }
+    test('should throw error when logger is not provided to initializeService', () => {
+      class TestService extends BaseService {}
 
-      expect(() => new TestService()).toThrow('Logger is required for service TestService');
+      const service = new TestService();
+      expect(() => service.initializeService(undefined as any, mockConfig))
+        .toThrow('Logger is required for service TestService');
     });
 
-    test('should throw error for invalid logger', () => {
-      class TestService extends BaseService {
-        constructor(logger: any) {
-          super(logger);
-        }
-      }
+    test('should throw error for invalid logger in initializeService', () => {
+      class TestService extends BaseService {}
 
-      expect(() => new TestService(null)).toThrow('Logger is required for service TestService');
-      expect(() => new TestService({})).toThrow('Logger is required for service TestService');
+      const service = new TestService();
+      expect(() => service.initializeService(null as any, mockConfig))
+        .toThrow('Logger is required for service TestService');
+    });
+
+    test('should not reinitialize if already initialized', () => {
+      class TestService extends BaseService {}
+
+      const service = new TestService();
+      service.initializeService(mockLogger, mockConfig);
+      
+      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      service.initializeService(otherLogger, { other: 'config' });
+      
+      // Should still have original logger (no reinit)
+      expect((service as any).config).toBe(mockConfig);
     });
   });
 
   describe('Protected methods', () => {
     class TestService extends BaseService {
-      constructor(logger: any, config?: any) {
-        super(logger, config);
-      }
-
       async testRunEffect<A, E = never, R = never>(effect: Effect.Effect<A, E, R>): Promise<A> {
         return await this.runEffect(effect as any);
       }
@@ -109,7 +111,8 @@ describe('BaseService', () => {
     let service: TestService;
 
     beforeEach(() => {
-      service = new TestService(mockLogger, mockConfig);
+      service = new TestService();
+      service.initializeService(mockLogger, mockConfig);
     });
 
     test('should run effect successfully', async () => {
@@ -163,10 +166,6 @@ describe('BaseService', () => {
   describe('Error handling edge cases', () => {
     test('should handle complex effect scenarios', async () => {
       class TestService extends BaseService {
-        constructor(logger: any, config?: any) {
-          super(logger, config);
-        }
-
         async testComplexEffect() {
           const effect = Effect.succeed(84); // Simplify to avoid generator complexity
           
@@ -174,17 +173,14 @@ describe('BaseService', () => {
         }
       }
 
-      const service = new TestService(mockLogger, undefined);
+      const service = new TestService();
+      service.initializeService(mockLogger, undefined);
       const result = await service.testComplexEffect();
       expect(result).toBe(84);
     });
 
     test('should maintain error stack trace', () => {
       class TestService extends BaseService {
-        constructor(logger: any, config?: any) {
-          super(logger, config);
-        }
-
         testStackTrace() {
           const originalError = new Error('Original error');
           const formattedError = this.formatError(originalError);
@@ -193,7 +189,8 @@ describe('BaseService', () => {
         }
       }
 
-      const service = new TestService(mockLogger, undefined);
+      const service = new TestService();
+      service.initializeService(mockLogger, undefined);
       service.testStackTrace();
     });
   });

@@ -388,20 +388,38 @@ describe('Metadata System', () => {
       expect(types).toBeUndefined();
     });
 
-    test('should filter out logger and config types', () => {
-      class MyLogger {}
-      class ConfigService {}
+    test('should filter out framework logger types', () => {
+      // SyncLogger is a framework type that should be filtered
+      class SyncLogger {}
+      class Logger {}
       class ServiceA {}
       
       class TestClass {
-        constructor(logger: MyLogger, config: ConfigService, service: ServiceA) {}
+        constructor(syncLogger: SyncLogger, logger: Logger, service: ServiceA) {}
       }
       
-      setConstructorParamTypes(TestClass, [MyLogger, ConfigService, ServiceA]);
+      setConstructorParamTypes(TestClass, [SyncLogger, Logger, ServiceA]);
       const types = getConstructorParamTypes(TestClass);
       
-      // Should filter out logger/config types and return only ServiceA
+      // Should filter out framework logger types and return only ServiceA
       expect(types).toEqual([ServiceA]);
+    });
+
+    test('should NOT filter user services with config/logger in name', () => {
+      // User services with "config" or "logger" in name should NOT be filtered
+      class ConfigService {}
+      class MyLoggerService {}
+      class ServiceA {}
+      
+      class TestClass {
+        constructor(config: ConfigService, logger: MyLoggerService, service: ServiceA) {}
+      }
+      
+      setConstructorParamTypes(TestClass, [ConfigService, MyLoggerService, ServiceA]);
+      const types = getConstructorParamTypes(TestClass);
+      
+      // All user services should be preserved
+      expect(types).toEqual([ConfigService, MyLoggerService, ServiceA]);
     });
 
     test('should handle mixed service and basic types', () => {
@@ -467,21 +485,18 @@ describe('Metadata System', () => {
     });
 
     test('should return undefined when only excluded types present', () => {
-      class MyCustomLogger {}
-      class AppConfigService {}
-      
-      // Create classes that will be filtered out by name
-      Object.defineProperty(MyCustomLogger, 'name', { value: 'CustomLogger' });
-      Object.defineProperty(AppConfigService, 'name', { value: 'AppConfig' });
+      // Use exact framework type names that should be filtered
+      class SyncLogger {}
+      class Logger {}
       
       class TestClass {
-        constructor(logger: MyCustomLogger, config: AppConfigService) {}
+        constructor(syncLogger: SyncLogger, logger: Logger) {}
       }
       
-      setConstructorParamTypes(TestClass, [MyCustomLogger, AppConfigService]);
+      setConstructorParamTypes(TestClass, [SyncLogger, Logger]);
       const types = getConstructorParamTypes(TestClass);
       
-      // Both should be filtered out due to names containing 'logger' and 'config'
+      // Both should be filtered out as framework types
       expect(types).toBeUndefined();
     });
   });

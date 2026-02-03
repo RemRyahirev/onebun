@@ -12,6 +12,7 @@ import {
   Post,
   Put,
   type,
+  HttpStatusCode,
 } from '@onebun/core';
 import { createInsertSchema, createSelectSchema } from '@onebun/drizzle';
 
@@ -32,8 +33,7 @@ export class UserController extends BaseController {
   }
 
   @Get('/')
-  // eslint-disable-next-line no-magic-numbers
-  @ApiResponse(200, { schema: selectUserSchema.array() })
+  @ApiResponse(HttpStatusCode.OK, { schema: selectUserSchema.array() })
   async getAllUsers(): Promise<Response> {
     this.logger.info('Getting all users');
     const usersList = await this.userService.getAllUsers();
@@ -50,29 +50,25 @@ export class UserController extends BaseController {
   }
 
   @Get('/:id')
-  // eslint-disable-next-line no-magic-numbers
-  @ApiResponse(200, { schema: selectUserSchema })
+  @ApiResponse(HttpStatusCode.OK, { schema: selectUserSchema })
   async getUserById(@Param('id', type('string')) id: string): Promise<Response> {
     const userId = parseInt(id, 10);
     if (isNaN(userId)) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('Invalid user ID', 400);
+      return this.error('Invalid user ID', HttpStatusCode.BAD_REQUEST);
     }
 
     this.logger.info('Getting user by id', { id: userId });
     const user = await this.userService.getUserById(userId);
     
     if (!user) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('User not found', 404);
+      return this.error('User not found', HttpStatusCode.NOT_FOUND);
     }
 
     return this.success({ user });
   }
 
   @Post('/')
-  // eslint-disable-next-line no-magic-numbers
-  @ApiResponse(201, { schema: selectUserSchema })
+  @ApiResponse(HttpStatusCode.CREATED, { schema: selectUserSchema })
   async createUser(@Body(insertUserSchema) userData: InsertUser): Promise<Response> {
     this.logger.info('Creating user', { name: userData.name, email: userData.email });
     // Convert InsertUser to the format expected by service (exclude auto-generated fields)
@@ -82,13 +78,11 @@ export class UserController extends BaseController {
       age: userData.age ?? undefined,
     });
 
-    // eslint-disable-next-line no-magic-numbers
-    return this.success({ user }, 201);
+    return this.success({ user }, HttpStatusCode.CREATED);
   }
 
   @Put('/:id')
-  // eslint-disable-next-line no-magic-numbers
-  @ApiResponse(200, { schema: selectUserSchema })
+  @ApiResponse(HttpStatusCode.OK, { schema: selectUserSchema })
   async updateUser(
     @Param('id', type('string')) id: string,
     // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -96,42 +90,36 @@ export class UserController extends BaseController {
   ): Promise<Response> {
     const userId = parseInt(id, 10);
     if (isNaN(userId)) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('Invalid user ID', 400);
+      return this.error('Invalid user ID', HttpStatusCode.BAD_REQUEST);
     }
 
     if (!body || Object.keys(body).length === 0) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('No data provided for update', 400);
+      return this.error('No data provided for update', HttpStatusCode.BAD_REQUEST);
     }
 
     this.logger.info('Updating user', { id: userId, data: body });
     const user = await this.userService.updateUser(userId, body);
 
     if (!user) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('User not found', 404);
+      return this.error('User not found', HttpStatusCode.NOT_FOUND);
     }
 
     return this.success({ user });
   }
 
   @Delete('/:id')
-  // eslint-disable-next-line no-magic-numbers
-  @ApiResponse(200, { schema: type({ message: 'string' }) })
+  @ApiResponse(HttpStatusCode.OK, { schema: type({ message: 'string' }) })
   async deleteUser(@Param('id', type('string')) id: string): Promise<Response> {
     const userId = parseInt(id, 10);
     if (isNaN(userId)) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('Invalid user ID', 400);
+      return this.error('Invalid user ID', HttpStatusCode.BAD_REQUEST);
     }
 
     this.logger.info('Deleting user', { id: userId });
     const deleted = await this.userService.deleteUser(userId);
 
     if (!deleted) {
-      // eslint-disable-next-line no-magic-numbers
-      return this.error('User not found', 404);
+      return this.error('User not found', HttpStatusCode.NOT_FOUND);
     }
 
     return this.success({ message: 'User deleted successfully' });

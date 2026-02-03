@@ -5,7 +5,7 @@
  * Supports both native WebSocket and Socket.IO protocols.
  */
 
-/* eslint-disable no-magic-numbers */
+/* eslint-disable @typescript-eslint/no-magic-numbers */
 
 import type {
   WsClientOptions,

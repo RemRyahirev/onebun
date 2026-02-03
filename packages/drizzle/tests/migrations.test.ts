@@ -100,7 +100,7 @@ describe('runMigrations integration tests', () => {
     delete process.env.DB_URL;
     delete process.env.DB_TYPE;
 
-    // Create service with mock logger
+    // Create service and initialize with mock logger
     const loggerLayer = makeMockLoggerLayer();
     const logger = Effect.runSync(
       Effect.provide(
@@ -108,7 +108,8 @@ describe('runMigrations integration tests', () => {
         loggerLayer,
       ),
     );
-    service = new DrizzleService<DatabaseType.SQLITE>(logger, undefined);
+    service = new DrizzleService<DatabaseType.SQLITE>();
+    service.initializeService(logger, undefined);
   });
 
   afterEach(async () => {
@@ -245,7 +246,8 @@ describe('runMigrations integration tests', () => {
         loggerLayer,
       ),
     );
-    const uninitializedService = new DrizzleService(logger, undefined);
+    const uninitializedService = new DrizzleService();
+    uninitializedService.initializeService(logger, undefined);
     await uninitializedService.waitForInit();
 
     await expect(

@@ -60,44 +60,33 @@ export function autoDetectDependencies(
   const dependencies: Function[] = [];
 
   for (const param of params) {
-    // Skip logger and config parameters
-    if (param.includes('logger') || param.includes('config')) {
+    // Extract parameter name first (before the colon, handling modifiers like private/public)
+    // Pattern: "private configService: ConfigService" -> "configService"
+    const paramNameMatch = param.match(/^\s*(?:private|protected|public|readonly|\s)*(\w+)/);
+    if (!paramNameMatch) {
+      continue;
+    }
+    const paramName = paramNameMatch[1];
+
+    // Skip only if parameter name is exactly 'logger' or 'config'
+    if (paramName === 'logger' || paramName === 'config') {
       continue;
     }
 
     // Try to extract type information
     // Look for patterns like: "private counterService: CounterService"
-    // or "drizzleService" (just the name)
     const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
     if (typeMatch) {
       const typeName = typeMatch[1];
+
+      // Skip framework types (logger, config, etc.)
+      if (typeName === 'SyncLogger' || typeName === 'Logger' || typeName === 'unknown') {
+        continue;
+      }
+
+      // Try to find service by exact type name
       const serviceType = availableServices.get(typeName);
-
       if (serviceType) {
-        dependencies.push(serviceType);
-      }
-    }
-
-    // Always try to guess from parameter name as well
-    const paramNameMatch = param.match(/([a-zA-Z][a-zA-Z0-9]*)/);
-    if (paramNameMatch) {
-      const paramName = paramNameMatch[1];
-
-      // Convert camelCase service name to PascalCase class name
-      // e.g., drizzleService -> DrizzleService
-      let guessedTypeName = paramName;
-
-      // If it ends with Service, capitalize first letter
-      if (paramName.endsWith('Service')) {
-        guessedTypeName = paramName.replace(/^[a-z]/, (c) => c.toUpperCase());
-      } else {
-        // Add Service suffix and capitalize
-        guessedTypeName =
-          paramName.replace(/^[a-z]/, (c) => c.toUpperCase()) + 'Service';
-      }
-
-      const serviceType = availableServices.get(guessedTypeName);
-      if (serviceType && !dependencies.includes(serviceType)) {
         dependencies.push(serviceType);
       }
     }
@@ -184,6 +173,13 @@ export function controllerDecorator(basePath: string = '') {
 
     // Mark controller as injectable automatically
     injectable()(WrappedController);
+
+    // Copy constructor params metadata from original class to wrapped class
+    // This is needed for @Inject decorator to work correctly with @Controller wrapping
+    const existingDeps = META_CONSTRUCTOR_PARAMS.get(target);
+    if (existingDeps) {
+      META_CONSTRUCTOR_PARAMS.set(WrappedController, existingDeps);
+    }
 
     return WrappedController as T;
   };
@@ -606,6 +602,63 @@ export function getModuleMetadata(target: Function):
   const metadata = META_MODULES.get(target);
 
   return metadata;
+}
+
+/**
+ * Storage for global modules
+ * Global modules export their providers to all modules automatically
+ */
+const globalModules = new Set<Function>();
+
+/**
+ * @Global() decorator - marks module as global
+ * Global modules export their providers to all modules automatically without explicit import.
+ * This is useful for modules that provide cross-cutting concerns like database access.
+ * 
+ * @example
+ * ```typescript
+ * @Global()
+ * @Module({
+ *   providers: [DrizzleService],
+ *   exports: [DrizzleService],
+ * })
+ * export class DrizzleModule {}
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function Global() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return <T extends new (...args: any[]) => any>(target: T): T => {
+    globalModules.add(target);
+
+    return target;
+  };
+}
+
+/**
+ * Check if a module is marked as global
+ * @param target - Module class to check
+ * @returns true if module is marked with @Global() decorator
+ */
+export function isGlobalModule(target: Function): boolean {
+  return globalModules.has(target);
+}
+
+/**
+ * Remove module from global registry
+ * Used when module opts out of global registration (e.g., isGlobal: false)
+ * @param target - Module class to remove from global registry
+ */
+export function removeFromGlobalModules(target: Function): void {
+  globalModules.delete(target);
+}
+
+/**
+ * Clear all global modules (useful for testing)
+ * @internal
+ */
+export function clearGlobalModules(): void {
+  globalModules.clear();
 }
 
 /**

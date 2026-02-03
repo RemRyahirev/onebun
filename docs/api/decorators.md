@@ -15,6 +15,14 @@ description: "@Module, @Controller, @Service decorators. HTTP method decorators 
   exports: [MyService],        // export for other modules
 })
 export class MyModule {}
+
+// Global module - exports available everywhere without import
+@Global()
+@Module({
+  providers: [DbService],
+  exports: [DbService],
+})
+export class DbModule {}
 ```
 
 **Controller with Routes**:
@@ -104,6 +112,53 @@ import { UserService } from './user.service';
 })
 export class UserModule {}
 ```
+
+### @Global()
+
+Marks a module as global. Global modules export their providers to all modules automatically without explicit import. This is useful for modules that provide cross-cutting concerns like database access or caching.
+
+```typescript
+@Global()
+```
+
+**Example:**
+
+```typescript
+import { Module, Global } from '@onebun/core';
+import { DatabaseService } from './database.service';
+
+@Global()
+@Module({
+  providers: [DatabaseService],
+  exports: [DatabaseService],
+})
+export class DatabaseModule {}
+
+// Now DatabaseService is available in ALL modules without importing DatabaseModule
+@Module({
+  controllers: [UserController],
+  providers: [UserService], // UserService can inject DatabaseService
+})
+export class UserModule {}
+```
+
+**Related Functions:**
+
+```typescript
+// Check if a module is global
+function isGlobalModule(target: Function): boolean;
+
+// Remove module from global registry (used internally)
+function removeFromGlobalModules(target: Function): void;
+```
+
+<llms-only>
+**Technical details for AI agents:**
+- Global modules are stored in a Set and checked during module initialization
+- Global services are registered in a separate registry and automatically injected into all modules
+- To opt out of global behavior dynamically, use `removeFromGlobalModules()` (e.g., for multi-DB scenarios)
+- The `@Global()` decorator only runs once at module definition time
+</llms-only>
 
 ## Controller Decorators
 

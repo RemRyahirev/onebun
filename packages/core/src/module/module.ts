@@ -20,11 +20,41 @@ import {
   autoDetectDependencies,
   getConstructorParamTypes,
   getModuleMetadata,
+  isGlobalModule,
   registerControllerDependencies,
 } from '../decorators/decorators';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
 
 import { getServiceMetadata, getServiceTag } from './service';
+
+/**
+ * Global services registry
+ * Stores services from modules marked with @Global() decorator
+ * These services are automatically available in all modules without explicit import
+ */
+const globalServicesRegistry = new Map<Context.Tag<unknown, unknown>, unknown>();
+
+/**
+ * Registry of processed global modules to avoid duplicate initialization
+ */
+const processedGlobalModules = new Set<Function>();
+
+/**
+ * Clear global services registry (useful for testing)
+ * @internal
+ */
+export function clearGlobalServicesRegistry(): void {
+  globalServicesRegistry.clear();
+  processedGlobalModules.clear();
+}
+
+/**
+ * Get all global services (useful for debugging)
+ * @internal
+ */
+export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, unknown> {
+  return new Map(globalServicesRegistry);
+}
 
 /**
  * OneBun Module implementation
@@ -95,9 +125,31 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
+    // PHASE 0: Add global services from registry first
+    // Global services are available in all modules without explicit import
+    for (const [tag, instance] of globalServicesRegistry) {
+      if (!this.serviceInstances.has(tag)) {
+        this.serviceInstances.set(tag, instance);
+        this.logger.debug(
+          `Added global service ${(instance as object).constructor?.name || 'unknown'} to ${this.moduleClass.name}`,
+        );
+      }
+    }
+
     // PHASE 1: Import child modules FIRST and collect their exported services
     if (metadata.imports) {
       for (const importModule of metadata.imports) {
+        // Check if this is a global module that was already processed
+        const isGlobal = isGlobalModule(importModule);
+        
+        if (isGlobal && processedGlobalModules.has(importModule)) {
+          // Global module already processed, just use services from global registry
+          this.logger.debug(
+            `Global module ${importModule.name} already initialized, using services from global registry`,
+          );
+          continue;
+        }
+
         // Pass the logger layer and config to child modules
         const childModule = new OneBunModule(importModule, this.loggerLayer, this.config);
         this.childModules.push(childModule);
@@ -115,6 +167,19 @@ export class OneBunModule implements ModuleInstance {
           this.logger.debug(
             `Imported service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
           );
+
+          // If this is a global module, also register services in global registry
+          if (isGlobal) {
+            globalServicesRegistry.set(tag, instance);
+            this.logger.debug(
+              `Registered global service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
+            );
+          }
+        }
+
+        // Mark global module as processed
+        if (isGlobal) {
+          processedGlobalModules.add(importModule);
         }
       }
     }
@@ -206,17 +271,27 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
-      // Add logger and config at the end
-      dependencies.push(this.logger, this.config);
-
-      // Create service instance with resolved dependencies
+      // Create service instance with resolved dependencies (without logger/config in constructor)
       try {
         const serviceConstructor = provider as new (...args: unknown[]) => unknown;
         const serviceInstance = new serviceConstructor(...dependencies);
+
+        // Initialize service with logger and config if it has initializeService method
+        // This is the pattern used by BaseService
+        if (
+          serviceInstance &&
+          typeof serviceInstance === 'object' &&
+          'initializeService' in serviceInstance &&
+          typeof (serviceInstance as { initializeService: unknown }).initializeService === 'function'
+        ) {
+          (serviceInstance as { initializeService: (logger: SyncLogger, config: unknown) => void })
+            .initializeService(this.logger, this.config);
+        }
+
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
         createdServices.add(provider.name);
         this.logger.debug(
-          `Created service ${provider.name} with ${dependencies.length - 2} injected dependencies`,
+          `Created service ${provider.name} with ${dependencies.length} injected dependencies`,
         );
       } catch (error) {
         this.logger.error(`Failed to create service ${provider.name}: ${error}`);
@@ -289,6 +364,13 @@ export class OneBunModule implements ModuleInstance {
                 availableServices.set(exported.name, exported);
               }
             }
+          }
+        }
+
+        // Add global services to available services for dependency resolution
+        for (const [, instance] of globalServicesRegistry) {
+          if (instance && typeof instance === 'object') {
+            availableServices.set(instance.constructor.name, instance.constructor);
           }
         }
 
