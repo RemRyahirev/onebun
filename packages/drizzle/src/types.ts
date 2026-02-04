@@ -125,7 +125,7 @@ export interface DrizzleModuleOptions {
   
   /**
    * Whether to run migrations automatically on startup
-   * Default: false
+   * Default: true
    */
   autoMigrate?: boolean;
   

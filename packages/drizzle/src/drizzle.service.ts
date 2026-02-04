@@ -159,6 +159,16 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<Databas
 }
 
 /**
+ * Buffered log entry for pre-logger initialization logging
+ */
+interface BufferedLogEntry {
+  level: 'debug' | 'info' | 'warn' | 'error';
+  message: string;
+  meta?: object;
+  timestamp: number;
+}
+
+/**
  * Drizzle service for database operations
  * Generic type parameter TDbType specifies the database type (SQLITE or POSTGRESQL)
  *
@@ -182,44 +192,94 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   private initPromise: Promise<void> | null = null;
   private sqliteClient: Database | null = null;
   private postgresClient: SQL | null = null;
+  private logBuffer: BufferedLogEntry[] = [];
+  private exitHandlerRegistered = false;
 
   constructor() {
     super();
-    // Only start auto-initialization if there's configuration to use
-    // Check synchronously to avoid unnecessary async work
-    if (this.shouldAutoInitialize()) {
-      this.initPromise = this.autoInitialize();
+    // Register exit handler to flush buffered logs on crash
+    this.registerExitHandler();
+  }
+
+  /**
+   * Register process exit handler to flush buffered logs to console.error on crash
+   */
+  private registerExitHandler(): void {
+    if (this.exitHandlerRegistered) {
+      return;
+    }
+    this.exitHandlerRegistered = true;
+
+    const flushToConsole = () => {
+      if (this.logBuffer.length > 0) {
+        // eslint-disable-next-line no-console
+        console.error('[DrizzleService] Buffered logs (app crashed before logger init):');
+        for (const entry of this.logBuffer) {
+          const timestamp = new Date(entry.timestamp).toISOString();
+          // eslint-disable-next-line no-console
+          console.error(`  [${timestamp}] [${entry.level.toUpperCase()}] ${entry.message}`, entry.meta ?? '');
+        }
+      }
+    };
+
+    // Register handlers for various exit scenarios
+    process.on('exit', flushToConsole);
+    process.on('uncaughtException', (err) => {
+      flushToConsole();
+      // eslint-disable-next-line no-console
+      console.error('[DrizzleService] Uncaught exception:', err);
+    });
+    process.on('unhandledRejection', (reason) => {
+      flushToConsole();
+      // eslint-disable-next-line no-console
+      console.error('[DrizzleService] Unhandled rejection:', reason);
+    });
+  }
+
+  /**
+   * Safe logging that buffers logs before logger is available
+   * When logger becomes available, buffered logs are flushed
+   * If app crashes before logger init, logs are output via console.error
+   */
+  private safeLog(level: 'debug' | 'info' | 'warn' | 'error', message: string, meta?: object): void {
+    if (this.logger) {
+      this.logger[level](message, meta);
+    } else {
+      // Buffer the log for later
+      this.logBuffer.push({
+        level,
+        message,
+        meta,
+        timestamp: Date.now(),
+      });
     }
   }
 
   /**
-   * Check synchronously if auto-initialization should be attempted
-   * This avoids starting async work when there's no configuration
-   * Note: Only checks env vars here to avoid slow require() in constructor.
-   * Module options are checked in autoInitialize() which is async.
+   * Flush buffered logs to the logger (called when logger becomes available)
    */
-  private shouldAutoInitialize(): boolean {
-    // Check if DB_URL env var is set
-    // Module options will be checked in autoInitialize() if this returns false
-    const dbUrl = process.env.DB_URL;
-    if (dbUrl && dbUrl.trim() !== '') {
-      return true;
+  private flushLogBuffer(): void {
+    if (!this.logger || this.logBuffer.length === 0) {
+      return;
     }
 
-    // Also check if DrizzleModule has options set (static check without require)
-    // This is done by checking if the module was already loaded
-    try {
-      // Only check if module is already in cache (don't trigger new require)
-      const modulePath = require.resolve('./drizzle.module');
-      const cachedModule = require.cache[modulePath];
-      if (cachedModule?.exports?.DrizzleModule?.getOptions?.()?.connection) {
-        return true;
-      }
-    } catch {
-      // Module not resolved or not in cache
+    this.logger.debug(`Flushing ${this.logBuffer.length} buffered log entries`);
+    for (const entry of this.logBuffer) {
+      this.logger[entry.level](entry.message, entry.meta);
     }
+    this.logBuffer = [];
+  }
 
-    return false;
+  /**
+   * Async initialization hook - called by the framework after initializeService()
+   * This ensures the database is fully ready before client code runs
+   */
+  override async onAsyncInit(): Promise<void> {
+    // Flush any buffered logs now that logger is available
+    this.flushLogBuffer();
+
+    // Run auto-initialization
+    await this.autoInitialize();
   }
 
   /**
@@ -232,16 +292,30 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
 
       // If module options are provided, use them
       if (moduleOptions?.connection) {
-        this.logger.debug('Auto-initializing database service from module options', {
+        this.safeLog('debug', 'Auto-initializing database service from module options', {
           type: moduleOptions.connection.type,
         });
 
-        await this.initialize(moduleOptions.connection);
+        // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+        await this.initialize(moduleOptions.connection, true);
 
-        // Auto-migrate if enabled
-        if (moduleOptions.autoMigrate) {
+        // Auto-migrate is enabled by default (unless explicitly set to false)
+        const shouldAutoMigrate = moduleOptions.autoMigrate !== false;
+        if (shouldAutoMigrate) {
           const migrationsFolder = moduleOptions.migrationsFolder ?? './drizzle';
-          await this.runMigrations({ migrationsFolder });
+          this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
+          try {
+            // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+            await this.runMigrations({ migrationsFolder }, true);
+            this.safeLog('debug', 'Auto-migrations completed successfully');
+          } catch (migrationError) {
+            this.safeLog('warn', 'Auto-migration failed, database initialized without migrations', {
+              error: migrationError instanceof Error ? migrationError.message : String(migrationError),
+            });
+            // Don't rethrow - allow DB to be used even if migrations fail
+          }
+        } else {
+          this.safeLog('debug', 'Auto-migrations disabled via module options');
         }
 
         this.initialized = true;
@@ -255,7 +329,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       // Check process.env directly to ensure we only auto-initialize when explicitly configured
       const dbUrlFromProcess = process.env[`${envPrefix}_URL`];
       if (!dbUrlFromProcess || dbUrlFromProcess.trim() === '') {
-        this.logger.debug('Skipping auto-initialization: no database configuration found in process.env');
+        this.safeLog('debug', 'Skipping auto-initialization: no database configuration found in process.env');
         this.initialized = false;
 
         return;
@@ -275,22 +349,24 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
             options: parsePostgreSQLUrl(envConfig.url),
           };
 
-      this.logger.debug(`Auto-initializing database service with type: ${connectionOptions.type}`, {
+      this.safeLog('debug', `Auto-initializing database service with type: ${connectionOptions.type}`, {
         envPrefix,
       });
 
-      await this.initialize(connectionOptions);
+      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      await this.initialize(connectionOptions, true);
 
-      // Auto-migrate if enabled
+      // Auto-migrate is enabled by default (env schema default is true)
       if (envConfig.autoMigrate) {
         const migrationsFolder = envConfig.migrationsFolder ?? './drizzle';
-        await this.runMigrations({ migrationsFolder });
+        // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+        await this.runMigrations({ migrationsFolder }, true);
       }
 
       this.initialized = true;
     } catch (error) {
       // Don't throw error - just log it and allow manual initialization
-      this.logger.debug('Failed to auto-initialize database from environment', { error });
+      this.safeLog('debug', 'Failed to auto-initialize database from environment', { error });
       this.initialized = false;
     }
   }
@@ -320,12 +396,18 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
 
   /**
    * Initialize database connection
+   * @param options - Database connection options
+   * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
    */
-  async initialize(options: DatabaseConnectionOptions): Promise<void> {
-    await this.waitForInit();
+  async initialize(options: DatabaseConnectionOptions, skipWait = false): Promise<void> {
+    // Skip waitForInit when called from autoInitialize to avoid deadlock
+    // (autoInitialize is the function that creates initPromise)
+    if (!skipWait) {
+      await this.waitForInit();
+    }
 
     if (this.initialized && this.connectionOptions) {
-      this.logger.warn('Database already initialized, closing existing connection');
+      this.safeLog('warn', 'Database already initialized, closing existing connection');
       await this.close();
     }
 
@@ -336,7 +418,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       const sqliteOptions = options.options;
       this.sqliteClient = new Database(sqliteOptions.url, sqliteOptions.options);
       this.db = drizzleSQLite(this.sqliteClient);
-      this.logger.info('SQLite database initialized', { url: sqliteOptions.url });
+      this.safeLog('info', 'SQLite database initialized', { url: sqliteOptions.url });
     } else if (options.type === DatabaseType.POSTGRESQL) {
       const pgOptions = options.options;
 
@@ -352,7 +434,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.postgresClient = (this.db as any).$client as SQL | null;
 
-      this.logger.info('PostgreSQL database initialized with Bun.SQL', {
+      this.safeLog('info', 'PostgreSQL database initialized with Bun.SQL', {
         host: pgOptions.host,
         port: pgOptions.port,
         database: pgOptions.database,
@@ -448,10 +530,14 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    * migration system which ensures idempotency.
    *
    * @param options - Migration options
+   * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
    * @throws Error if database is not initialized
    */
-  async runMigrations(options?: MigrationOptions): Promise<void> {
-    await this.waitForInit();
+  async runMigrations(options?: MigrationOptions, skipWait = false): Promise<void> {
+    // Skip waitForInit when called from autoInitialize to avoid deadlock
+    if (!skipWait) {
+      await this.waitForInit();
+    }
 
     if (!this.db || !this.connectionOptions) {
       throw new Error('Database not initialized. Call initialize() first.');
@@ -466,7 +552,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       await migrate(this.db as BunSQLiteDatabase<Record<string, SQLiteTable>>, {
         migrationsFolder,
       });
-      this.logger.info('SQLite migrations applied', { migrationsFolder });
+      this.safeLog('info', 'SQLite migrations applied', { migrationsFolder });
     } else if (this.connectionOptions.type === DatabaseType.POSTGRESQL) {
       if (!this.db) {
         throw new Error('Database not initialized');
@@ -474,7 +560,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       await migratePostgres(this.db as BunSQLDatabase<Record<string, PgTable>>, {
         migrationsFolder,
       });
-      this.logger.info('PostgreSQL migrations applied', { migrationsFolder });
+      this.safeLog('info', 'PostgreSQL migrations applied', { migrationsFolder });
     }
   }
 
@@ -505,7 +591,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
     this.dbType = null;
     this.connectionOptions = null;
     this.initialized = false;
-    this.logger.info('Database connection closed');
+    this.safeLog('info', 'Database connection closed');
   }
 
   /**

@@ -30,7 +30,7 @@ const DRIZZLE_MODULE_OPTIONS = Symbol('DRIZZLE_MODULE_OPTIONS');
  * - DB_URL: Database connection URL (default: ':memory:' for SQLite)
  * - DB_SCHEMA_PATH: Path to schema files (optional)
  * - DB_MIGRATIONS_FOLDER: Path to migrations folder (default: './drizzle')
- * - DB_AUTO_MIGRATE: Whether to run migrations on startup (default: false)
+ * - DB_AUTO_MIGRATE: Whether to run migrations on startup (default: true)
  * - DB_LOG_QUERIES: Whether to log SQL queries (default: false)
  * 
  * @example Basic usage with environment variables (global by default)

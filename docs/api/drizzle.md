@@ -809,3 +809,139 @@ import { CacheModule, CacheType } from '@onebun/cache';
 })
 export class UserModule {}
 ```
+
+## Testing
+
+### Testing with DrizzleService
+
+For testing services that depend on DrizzleService, use in-memory SQLite database:
+
+```typescript
+import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { Effect } from 'effect';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
+import { LoggerService } from '@onebun/logger';
+import { DrizzleService, DrizzleModule, DatabaseType } from '@onebun/drizzle';
+
+describe('MyService', () => {
+  let drizzleService: DrizzleService<DatabaseType.SQLITE>;
+
+  beforeEach(async () => {
+    // Clear any previous configuration
+    DrizzleModule.clearOptions();
+
+    // Configure with in-memory database
+    // Note: autoMigrate defaults to true, set to false if you don't have migrations
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.SQLITE,
+        options: { url: ':memory:' },
+      },
+      autoMigrate: false, // Disable if no migrations folder exists
+    });
+
+    // Create and initialize service
+    const loggerLayer = makeMockLoggerLayer();
+    const logger = Effect.runSync(
+      Effect.provide(
+        Effect.map(LoggerService, (l) => l),
+        loggerLayer,
+      ),
+    );
+
+    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService.initializeService(logger, createMockConfig());
+    // onAsyncInit() is called automatically by the framework
+    // In tests, call it manually to simulate framework behavior
+    await drizzleService.onAsyncInit();
+
+    // Create test tables manually (when autoMigrate is false)
+    const sqliteClient = drizzleService.getSQLiteClient();
+    sqliteClient!.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL
+      )
+    `);
+  });
+
+  afterEach(async () => {
+    await drizzleService.close();
+    DrizzleModule.clearOptions();
+  });
+
+  test('should perform database operations', async () => {
+    const db = drizzleService.getDatabase();
+    expect(db).toBeDefined();
+  });
+});
+```
+
+### Testing with Auto-migrations
+
+Migrations run automatically by default. To test with migrations:
+
+```typescript
+import { join } from 'path';
+
+beforeEach(async () => {
+  DrizzleModule.forRoot({
+    connection: {
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    },
+    // autoMigrate defaults to true, so migrations run automatically
+    migrationsFolder: join(__dirname, 'test-migrations'),
+  });
+
+  // ... create and initialize service
+  await drizzleService.onAsyncInit();
+
+  // Tables from migrations should now exist
+  const sqliteClient = drizzleService.getSQLiteClient();
+  const tables = sqliteClient!.query(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='users'
+  `).all();
+  expect(tables.length).toBe(1);
+});
+```
+
+### Testing Environment Variables
+
+The service auto-initializes from environment variables. For testing:
+
+```typescript
+beforeEach(async () => {
+  // Clear previous state
+  DrizzleModule.clearOptions();
+  delete process.env.DB_URL;
+  delete process.env.DB_TYPE;
+  delete process.env.DB_AUTO_MIGRATE;
+
+  // Set test environment
+  process.env.DB_URL = ':memory:';
+  process.env.DB_TYPE = 'sqlite';
+  process.env.DB_AUTO_MIGRATE = 'false'; // Disable to avoid missing migrations folder error
+
+  // Create service - will auto-initialize from env vars
+  drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+  drizzleService.initializeService(logger, createMockConfig());
+  await drizzleService.onAsyncInit();
+});
+
+afterEach(() => {
+  // Cleanup
+  delete process.env.DB_URL;
+  delete process.env.DB_TYPE;
+  delete process.env.DB_AUTO_MIGRATE;
+});
+```
+
+### Key Testing Notes
+
+1. **Call `onAsyncInit()` in tests** - this triggers async initialization that the framework does automatically
+2. **Use `DrizzleModule.clearOptions()`** in beforeEach/afterEach to ensure test isolation
+3. **Clean up environment variables** when testing env-based initialization
+4. **Use `:memory:`** SQLite URL for in-memory databases that are faster and don't leave files
+5. **autoMigrate defaults to `true`** - set to `false` explicitly if you don't have migrations
+6. **Database is ready after `onAsyncInit()`** - no need to call `waitForInit()` in client code

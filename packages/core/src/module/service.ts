@@ -100,6 +100,16 @@ export class BaseService {
   }
 
   /**
+   * Async initialization hook - called by the framework after initializeService()
+   * Override in subclasses that need async initialization (e.g., database connections)
+   * The framework will await this method before making the service available
+   * @internal
+   */
+  async onAsyncInit(): Promise<void> {
+    // Default: no async init needed
+  }
+
+  /**
    * Check if service is initialized
    * @internal
    */

@@ -248,7 +248,8 @@ describe('runMigrations integration tests', () => {
     );
     const uninitializedService = new DrizzleService();
     uninitializedService.initializeService(logger, createMockConfig());
-    await uninitializedService.waitForInit();
+    // Call onAsyncInit but there's no config, so service won't be initialized
+    await uninitializedService.onAsyncInit();
 
     await expect(
       uninitializedService.runMigrations({ migrationsFolder: testMigrationsFolder }),

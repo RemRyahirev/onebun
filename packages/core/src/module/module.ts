@@ -68,6 +68,7 @@ export class OneBunModule implements ModuleInstance {
   private controllers: Function[] = [];
   private controllerInstances: Map<Function, Controller> = new Map();
   private serviceInstances: Map<Context.Tag<unknown, unknown>, unknown> = new Map();
+  private pendingAsyncInits: Array<{ name: string; init: () => Promise<void> }> = [];
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
 
@@ -292,6 +293,19 @@ export class OneBunModule implements ModuleInstance {
             .initializeService(this.logger, this.config);
         }
 
+        // Track services that need async initialization
+        if (
+          serviceInstance &&
+          typeof serviceInstance === 'object' &&
+          'onAsyncInit' in serviceInstance &&
+          typeof (serviceInstance as { onAsyncInit: unknown }).onAsyncInit === 'function'
+        ) {
+          this.pendingAsyncInits.push({
+            name: provider.name,
+            init: () => (serviceInstance as { onAsyncInit: () => Promise<void> }).onAsyncInit(),
+          });
+        }
+
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
         createdServices.add(provider.name);
         this.logger.debug(
@@ -340,14 +354,12 @@ export class OneBunModule implements ModuleInstance {
    * Create controller instances and inject services
    */
   createControllerInstances(): Effect.Effect<unknown, never, void> {
-    const self = this;
-
-    return Effect.gen(function* (_) {
+    return Effect.sync(() => {
       // Services are already created in initModule via createServicesWithDI
       // Just need to set up controllers with DI
 
       // Get module metadata to access providers for controller dependency registration
-      const moduleMetadata = getModuleMetadata(self.moduleClass);
+      const moduleMetadata = getModuleMetadata(this.moduleClass);
       if (moduleMetadata && moduleMetadata.providers) {
         // Create map of available services for dependency resolution
         const availableServices = new Map<string, Function>();
@@ -360,7 +372,7 @@ export class OneBunModule implements ModuleInstance {
         }
 
         // Also add services from imported modules
-        for (const childModule of self.childModules) {
+        for (const childModule of this.childModules) {
           const childMetadata = getModuleMetadata(childModule.moduleClass);
           if (childMetadata?.exports) {
             for (const exported of childMetadata.exports) {
@@ -379,13 +391,13 @@ export class OneBunModule implements ModuleInstance {
         }
 
         // Automatically analyze and register dependencies for all controllers
-        for (const controllerClass of self.controllers) {
+        for (const controllerClass of this.controllers) {
           registerControllerDependencies(controllerClass, availableServices);
         }
       }
 
       // Now create controller instances with automatic dependency injection
-      self.createControllersWithDI();
+      this.createControllersWithDI();
     }).pipe(Effect.provide(this.rootLayer));
   }
 
@@ -471,7 +483,45 @@ export class OneBunModule implements ModuleInstance {
    * Setup the module and its dependencies
    */
   setup(): Effect.Effect<unknown, never, void> {
-    return this.createControllerInstances();
+    return this.runAsyncServiceInit().pipe(
+      // Also run async init for child modules
+      Effect.flatMap(() =>
+        Effect.forEach(this.childModules, (childModule) => childModule.runAsyncServiceInit(), {
+          discard: true,
+        }),
+      ),
+      // Then create controller instances
+      Effect.flatMap(() => this.createControllerInstances()),
+    );
+  }
+
+  /**
+   * Run async initialization for all services that need it
+   */
+  runAsyncServiceInit(): Effect.Effect<unknown, never, void> {
+    if (this.pendingAsyncInits.length === 0) {
+      return Effect.void;
+    }
+
+    this.logger.debug(`Running async initialization for ${this.pendingAsyncInits.length} service(s)`);
+
+    // Run all async inits in parallel
+    const initPromises = this.pendingAsyncInits.map(async ({ name, init }) => {
+      try {
+        await init();
+        this.logger.debug(`Service ${name} async initialization completed`);
+      } catch (error) {
+        this.logger.error(`Service ${name} async initialization failed: ${error}`);
+        throw error;
+      }
+    });
+
+    return Effect.promise(() => Promise.all(initPromises)).pipe(
+      Effect.map(() => {
+        // Clear the list after initialization
+        this.pendingAsyncInits = [];
+      }),
+    );
   }
 
   /**
