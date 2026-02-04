@@ -12,18 +12,17 @@ import {
 } from 'bun:test';
 import { Context } from 'effect';
 
-import { makeDevLogger } from '@onebun/logger';
-
 import { Module } from '../decorators/decorators';
+import { makeMockLoggerLayer } from '../testing/test-utils';
 
 import { OneBunModule } from './module';
 import { Service } from './service';
 
 describe('OneBunModule', () => {
-  let mockLogger: any;
+  let mockLoggerLayer: any;
 
   beforeEach(() => {
-    mockLogger = makeDevLogger();
+    mockLoggerLayer = makeMockLoggerLayer();
   });
 
   describe('Module initialization', () => {
@@ -31,7 +30,7 @@ describe('OneBunModule', () => {
       @Module({})
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
       expect(module).toBeInstanceOf(OneBunModule);
       expect((module as any).logger).toBeDefined(); // Logger wrapper is created
       expect((module as any).moduleClass).toBe(TestModule);
@@ -49,7 +48,7 @@ describe('OneBunModule', () => {
     test('should handle module without metadata', () => {
       class TestModuleWithoutDecorator {}
 
-      expect(() => new OneBunModule(TestModuleWithoutDecorator, mockLogger)).toThrow();
+      expect(() => new OneBunModule(TestModuleWithoutDecorator, mockLoggerLayer)).toThrow();
     });
   });
 
@@ -58,7 +57,7 @@ describe('OneBunModule', () => {
       @Module({})
       class EmptyModule {}
 
-      const module = new OneBunModule(EmptyModule, mockLogger);
+      const module = new OneBunModule(EmptyModule, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -72,7 +71,7 @@ describe('OneBunModule', () => {
       })
       class ModuleWithProviders {}
 
-      const module = new OneBunModule(ModuleWithProviders, mockLogger);
+      const module = new OneBunModule(ModuleWithProviders, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -85,7 +84,7 @@ describe('OneBunModule', () => {
       })
       class ModuleWithControllers {}
 
-      const module = new OneBunModule(ModuleWithControllers, mockLogger);
+      const module = new OneBunModule(ModuleWithControllers, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -99,7 +98,7 @@ describe('OneBunModule', () => {
       })
       class ModuleWithImports {}
 
-      const module = new OneBunModule(ModuleWithImports, mockLogger);
+      const module = new OneBunModule(ModuleWithImports, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -110,7 +109,7 @@ describe('OneBunModule', () => {
       @Module({})
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -136,7 +135,7 @@ describe('OneBunModule', () => {
       })
       class ComplexModule {}
 
-      const module = new OneBunModule(ComplexModule, mockLogger);
+      const module = new OneBunModule(ComplexModule, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -144,8 +143,8 @@ describe('OneBunModule', () => {
 
   describe('Error handling', () => {
     test('should handle invalid module class', () => {
-      expect(() => new OneBunModule(null as any, mockLogger)).toThrow();
-      expect(() => new OneBunModule(undefined as any, mockLogger)).toThrow();
+      expect(() => new OneBunModule(null as any, mockLoggerLayer)).toThrow();
+      expect(() => new OneBunModule(undefined as any, mockLoggerLayer)).toThrow();
     });
 
     test('should handle malformed metadata', () => {
@@ -153,7 +152,7 @@ describe('OneBunModule', () => {
       const TestClass = class {};
       (TestClass as any)[Symbol.for('module:metadata')] = 'invalid';
 
-      expect(() => new OneBunModule(TestClass, mockLogger)).toThrow();
+      expect(() => new OneBunModule(TestClass, mockLoggerLayer)).toThrow();
     });
   });
 
@@ -162,7 +161,7 @@ describe('OneBunModule', () => {
       @Module({})
       class NamedModule {}
 
-      const module = new OneBunModule(NamedModule, mockLogger);
+      const module = new OneBunModule(NamedModule, mockLoggerLayer);
       expect((module as any).moduleClass.name).toBe('NamedModule');
     });
 
@@ -170,7 +169,7 @@ describe('OneBunModule', () => {
       @Module({})
       class InitModule {}
 
-      const module = new OneBunModule(InitModule, mockLogger);
+      const module = new OneBunModule(InitModule, mockLoggerLayer);
 
       // Test that initialization completes without error
       expect(() => module.getLayer()).not.toThrow();
@@ -191,7 +190,7 @@ describe('OneBunModule', () => {
       })
       class ServiceModule {}
 
-      const module = new OneBunModule(ServiceModule, mockLogger);
+      const module = new OneBunModule(ServiceModule, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -208,7 +207,7 @@ describe('OneBunModule', () => {
       })
       class ControllerModule {}
 
-      const module = new OneBunModule(ControllerModule, mockLogger);
+      const module = new OneBunModule(ControllerModule, mockLoggerLayer);
       const layer = module.getLayer();
       expect(layer).toBeDefined();
     });
@@ -227,7 +226,7 @@ describe('OneBunModule', () => {
       })
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
 
       // Access private method via type assertion
       const instances = (module as any).getControllerInstances();
@@ -248,7 +247,7 @@ describe('OneBunModule', () => {
       })
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
       module.getLayer(); // Initialize the module
 
       // Access private method via type assertion
@@ -262,7 +261,7 @@ describe('OneBunModule', () => {
       @Module({})
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
 
       // Access private deprecated method via type assertion
       const resolved = (module as any).resolveDependencyByName('SomeService');
@@ -295,7 +294,7 @@ describe('OneBunModule', () => {
       })
       class TagModule {}
 
-      const module = new OneBunModule(TagModule, mockLogger);
+      const module = new OneBunModule(TagModule, mockLoggerLayer);
       const layer = module.getLayer();
 
       expect(layer).toBeDefined();
@@ -321,7 +320,7 @@ describe('OneBunModule', () => {
       })
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
       module.getLayer(); // Initialize the module
 
       // Try to resolve ServiceB which is not in the module
@@ -350,7 +349,7 @@ describe('OneBunModule', () => {
       })
       class TestModule {}
 
-      const module = new OneBunModule(TestModule, mockLogger);
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
       module.getLayer(); // Initialize the module
 
       // Try to resolve by base type
@@ -400,7 +399,7 @@ describe('OneBunModule', () => {
       })
       class RootModule {}
 
-      const module = new OneBunModule(RootModule, mockLogger);
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
       module.getLayer();
 
       // Check that global service is registered
@@ -452,7 +451,7 @@ describe('OneBunModule', () => {
       })
       class RootModule {}
 
-      const module = new OneBunModule(RootModule, mockLogger);
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
       module.getLayer();
 
       // GlobalDbService should be in the global registry
@@ -498,7 +497,7 @@ describe('OneBunModule', () => {
       })
       class RootModule {}
 
-      const module = new OneBunModule(RootModule, mockLogger);
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
       module.getLayer();
 
       // Should have only one SingletonService instance in global registry
@@ -532,7 +531,7 @@ describe('OneBunModule', () => {
       })
       class RootModule {}
 
-      const module = new OneBunModule(RootModule, mockLogger);
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
       module.getLayer();
 
       // LocalService should NOT be in the global registry
@@ -567,7 +566,7 @@ describe('OneBunModule', () => {
       })
       class RootModule {}
 
-      const module = new OneBunModule(RootModule, mockLogger);
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
       module.getLayer();
 
       // Should have service in registry
@@ -693,7 +692,7 @@ describe('OneBunModule', () => {
       class TestModule {}
 
       // Initialize module
-      const module = new ModuleInstance(TestModule);
+      const module = new ModuleInstance(TestModule, mockLoggerLayer);
 
       // Verify services are created correctly
       const { getServiceTag } = require('./service');
@@ -752,7 +751,7 @@ describe('OneBunModule', () => {
       class ChainModule {}
 
       // Should not throw
-      const module = new ModuleInstance(ChainModule);
+      const module = new ModuleInstance(ChainModule, mockLoggerLayer);
 
       const { getServiceTag } = require('./service');
       const apiServiceTag = getServiceTag(ApiService);

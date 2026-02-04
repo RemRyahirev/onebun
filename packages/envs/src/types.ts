@@ -113,3 +113,31 @@ export interface EnvLoadOptions {
    */
   valueOverrides?: Record<string, string | number | boolean>;
 }
+
+/**
+ * Infer config type from EnvSchema.
+ * Recursively extracts value types from EnvVariableConfig at any depth.
+ * 
+ * @example
+ * const schema = {
+ *   server: {
+ *     port: Env.number({ default: 3000 }),
+ *     host: Env.string({ default: '0.0.0.0' }),
+ *   },
+ *   database: {
+ *     connection: {
+ *       host: Env.string({ default: 'localhost' }),
+ *       ssl: { enabled: Env.boolean({ default: true }) },
+ *     },
+ *   },
+ * };
+ * type Config = InferConfigType<typeof schema>;
+ * // { server: { port: number; host: string }; database: { connection: { host: string; ssl: { enabled: boolean } } } }
+ */
+export type InferConfigType<S> = {
+  [K in keyof S]: S[K] extends EnvVariableConfig<infer T>
+    ? T
+    : S[K] extends Record<string, unknown>
+      ? InferConfigType<S[K]>
+      : never;
+};

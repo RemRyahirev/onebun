@@ -292,4 +292,193 @@ describe('MetricsMiddleware', () => {
       expect(recordedData.duration).toBeLessThan(0.3); // Less than 300ms
     });
   });
+
+  describe('wrapControllerMethod - extract status from Response', () => {
+    test('should extract status code from Response result', async () => {
+      const originalMethod = mock(async () => new Response('OK', { status: 201 }));
+      
+      const wrappedMethod = middleware.wrapControllerMethod(
+        originalMethod,
+        'TestController',
+        'createMethod',
+        '/create',
+      );
+      
+      const result = await wrappedMethod();
+      
+      expect(result).toBeInstanceOf(Response);
+      expect(mockMetricsService.recordHttpRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statusCode: 201,
+          controller: 'TestController',
+          action: 'createMethod',
+          route: '/create',
+        }),
+      );
+    });
+
+    test('should record 500 status on error', async () => {
+      const originalMethod = mock(async () => {
+        throw new Error('Server error');
+      });
+      
+      const wrappedMethod = middleware.wrapControllerMethod(
+        originalMethod,
+        'ErrorController',
+        'failMethod',
+        '/fail',
+      );
+      
+      await expect(wrappedMethod()).rejects.toThrow('Server error');
+      expect(mockMetricsService.recordHttpRequest).toHaveBeenCalledWith(
+        expect.objectContaining({
+          statusCode: 500,
+          controller: 'ErrorController',
+          action: 'failMethod',
+        }),
+      );
+    });
+  });
+});
+
+describe('WithMetrics decorator', () => {
+  const { WithMetrics } = require('./middleware');
+
+  beforeEach(() => {
+    // Reset the global metrics service
+    (globalThis as any).__onebunMetricsService = {
+      recordHttpRequest: mock(() => {}),
+    };
+  });
+
+  test('should be a decorator factory function', () => {
+    expect(typeof WithMetrics).toBe('function');
+    expect(typeof WithMetrics()).toBe('function');
+  });
+
+  test('should decorate synchronous method', () => {
+    const decorator = WithMetrics('/test-route');
+    const originalMethod = mock(() => 'sync result');
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    const result = decorator({}, 'testMethod', descriptor);
+
+    expect(result).toBe(descriptor);
+    expect(typeof descriptor.value).toBe('function');
+    expect(descriptor.value).not.toBe(originalMethod);
+  });
+
+  test('should wrap method and call original', () => {
+    const decorator = WithMetrics('/decorated');
+    const originalMethod = mock(() => 'decorated result');
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'TestController' } }, 'decoratedMethod', descriptor);
+    
+    // Call the wrapped method
+    const result = descriptor.value();
+    
+    expect(result).toBe('decorated result');
+    expect(originalMethod).toHaveBeenCalled();
+  });
+
+  test('should handle async method success', async () => {
+    const decorator = WithMetrics('/async-decorated');
+    const originalMethod = mock(async () => 'async decorated result');
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'AsyncController' } }, 'asyncMethod', descriptor);
+    
+    const result = await descriptor.value();
+    
+    expect(result).toBe('async decorated result');
+    expect(originalMethod).toHaveBeenCalled();
+    expect((globalThis as any).__onebunMetricsService.recordHttpRequest).toHaveBeenCalled();
+  });
+
+  test('should handle async method error', async () => {
+    const decorator = WithMetrics('/async-error');
+    const originalMethod = mock(async () => {
+      throw new Error('Async decorated error');
+    });
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'ErrorController' } }, 'errorMethod', descriptor);
+    
+    await expect(descriptor.value()).rejects.toThrow('Async decorated error');
+    expect((globalThis as any).__onebunMetricsService.recordHttpRequest).toHaveBeenCalled();
+  });
+
+  test('should handle sync method error', () => {
+    const decorator = WithMetrics('/sync-error');
+    const originalMethod = mock(() => {
+      throw new Error('Sync decorated error');
+    });
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'SyncErrorController' } }, 'syncErrorMethod', descriptor);
+    
+    expect(() => descriptor.value()).toThrow('Sync decorated error');
+    expect((globalThis as any).__onebunMetricsService.recordHttpRequest).toHaveBeenCalled();
+  });
+
+  test('should use method name as route when not provided', () => {
+    const decorator = WithMetrics();
+    const originalMethod = mock(() => 'default route');
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'DefaultController' } }, 'myAction', descriptor);
+    
+    descriptor.value();
+    
+    expect((globalThis as any).__onebunMetricsService.recordHttpRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        route: '/myAction',
+      }),
+    );
+  });
+
+  test('should not record metrics when global service is not available', () => {
+    delete (globalThis as any).__onebunMetricsService;
+    
+    const decorator = WithMetrics('/no-service');
+    const originalMethod = mock(() => 'no service result');
+    const descriptor = {
+      value: originalMethod,
+    };
+
+    decorator({ constructor: { name: 'NoServiceController' } }, 'noService', descriptor);
+    
+    // Should not throw
+    expect(() => descriptor.value()).not.toThrow();
+    expect(originalMethod).toHaveBeenCalled();
+  });
+});
+
+describe('recordHttpMetrics Effect', () => {
+  const { recordHttpMetrics } = require('./middleware');
+
+  test('should create an Effect', () => {
+    const effect = recordHttpMetrics({
+      method: 'GET',
+      route: '/test',
+      statusCode: 200,
+      duration: 0.1,
+    });
+    
+    expect(effect).toBeDefined();
+    expect(typeof effect).toBe('object');
+  });
 });

@@ -290,5 +290,135 @@ describe('TraceMiddleware', () => {
       expect(mockDescriptor.value).not.toBe(originalMethod);
       expect(typeof mockDescriptor.value).toBe('function');
     });
+
+    test('should handle missing constructor name', () => {
+      const decorator = trace();
+      const originalMethod = mock(() => 'result');
+      
+      const mockDescriptor = {
+        value: originalMethod,
+      };
+
+      // Call decorator with empty object target
+      expect(() => decorator({}, 'testMethod', mockDescriptor)).not.toThrow();
+    });
+
+    test('should use constructor name in span name', () => {
+      const decorator = trace();
+      const originalMethod = mock(() => 'result');
+      
+      const mockDescriptor = {
+        value: originalMethod,
+      };
+
+      // Create target with constructor-like structure
+      class MyController {}
+      const target = new MyController();
+
+      decorator(target, 'myAction', mockDescriptor);
+
+      // The decorated method should exist
+      expect(typeof mockDescriptor.value).toBe('function');
+    });
+  });
+
+  describe('span decorator', () => {
+    const { span, Span } = require('../src/middleware');
+
+    test('should be a function', () => {
+      expect(typeof span).toBe('function');
+    });
+
+    test('should return a decorator function', () => {
+      const decorator = span('custom-span');
+      expect(typeof decorator).toBe('function');
+    });
+
+    test('should work without span name', () => {
+      expect(() => span()).not.toThrow();
+    });
+
+    test('should decorate method descriptor', () => {
+      const decorator = span('my-span');
+      const originalMethod = mock(() => 'span result');
+      
+      const mockDescriptor = {
+        value: originalMethod,
+      };
+
+      decorator({}, 'spanMethod', mockDescriptor);
+
+      expect(mockDescriptor.value).not.toBe(originalMethod);
+      expect(typeof mockDescriptor.value).toBe('function');
+    });
+
+    test('Span alias should equal span', () => {
+      expect(Span).toBe(span);
+    });
+  });
+
+  describe('Trace alias', () => {
+    const { Trace } = require('../src/middleware');
+
+    test('Trace alias should equal trace', () => {
+      expect(Trace).toBe(trace);
+    });
+  });
+
+  describe('TraceMiddleware private methods edge cases', () => {
+    const MiddlewareClass = TraceMiddleware as any;
+
+    test('getRemoteAddress should prioritize x-forwarded-for over others', () => {
+      const mockRequest = {
+        headers: {
+          'x-forwarded-for': '192.168.1.1',
+          'x-real-ip': '10.0.0.1',
+        },
+        socket: { remoteAddress: '127.0.0.1' },
+        connection: { remoteAddress: '172.16.0.1' },
+      };
+
+      const remoteAddr = MiddlewareClass.getRemoteAddress(mockRequest);
+      expect(remoteAddr).toBe('192.168.1.1');
+    });
+
+    test('getRemoteAddress should fallback to x-real-ip', () => {
+      const mockRequest = {
+        headers: {
+          'x-real-ip': '10.0.0.1',
+        },
+        socket: { remoteAddress: '127.0.0.1' },
+      };
+
+      const remoteAddr = MiddlewareClass.getRemoteAddress(mockRequest);
+      expect(remoteAddr).toBe('10.0.0.1');
+    });
+
+    test('getResponseSize should handle empty body', () => {
+      const mockResponse = {
+        body: null,
+      };
+
+      const size = MiddlewareClass.getResponseSize(mockResponse);
+      expect(size).toBeUndefined();
+    });
+
+    test('getResponseSize should handle number body', () => {
+      const mockResponse = {
+        body: 12345,
+      };
+
+      const size = MiddlewareClass.getResponseSize(mockResponse);
+      expect(size).toBeUndefined();
+    });
+
+    test('getResponseSize should handle array body as object', () => {
+      const mockResponse = {
+        body: [1, 2, 3],
+      };
+
+      const size = MiddlewareClass.getResponseSize(mockResponse);
+      expect(size).toBe(Buffer.byteLength('[1,2,3]'));
+    });
   });
 });

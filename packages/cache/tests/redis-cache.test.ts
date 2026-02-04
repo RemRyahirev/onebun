@@ -110,13 +110,13 @@ describe('RedisCache', () => {
 
   describe('TTL support', () => {
     it('should expire entries after TTL', async () => {
-      // Set with 50ms TTL
-      await cache.set('ttl-test', 'value', { ttl: 50 });
+      // Set with 10ms TTL (Redis minimum is 1ms)
+      await cache.set('ttl-test', 'value', { ttl: 10 });
       const valueBefore = await cache.get('ttl-test');
       expect(valueBefore).toBe('value');
 
       // Wait for expiration
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       const valueAfter = await cache.get('ttl-test');
       expect(valueAfter).toBeUndefined();
@@ -127,7 +127,7 @@ describe('RedisCache', () => {
         host: redisHost,
         port: redisPort,
         keyPrefix: 'test:cache:ttl:',
-        defaultTtl: 50,
+        defaultTtl: 10,
       });
       await cacheWithTtl.connect();
 
@@ -136,7 +136,7 @@ describe('RedisCache', () => {
       expect(valueBefore).toBe('value');
 
       // Wait for expiration
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       const valueAfter = await cacheWithTtl.get('default-ttl-test');
       expect(valueAfter).toBeUndefined();
@@ -173,7 +173,7 @@ describe('RedisCache', () => {
 
     it('should set multiple values with different TTLs', async () => {
       await cache.mset([
-        { key: 'mset-ttl-1', value: 'value1', options: { ttl: 50 } },
+        { key: 'mset-ttl-1', value: 'value1', options: { ttl: 10 } },
         { key: 'mset-ttl-2', value: 'value2' },
       ]);
 
@@ -183,7 +183,7 @@ describe('RedisCache', () => {
       expect(value2).toBe('value2');
 
       // Wait for first to expire
-      await new Promise((resolve) => setTimeout(resolve, 75));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       const value1After = await cache.get('mset-ttl-1');
       const value2After = await cache.get('mset-ttl-2');

@@ -5,6 +5,8 @@
 
 import { Effect, Layer } from 'effect';
 
+import type { IConfig, OneBunAppConfig } from '../module/config.interface';
+
 import type { Logger, SyncLogger } from '@onebun/logger';
 import { LoggerService } from '@onebun/logger';
 
@@ -336,4 +338,58 @@ export function createMockSyncLogger(): SyncLogger {
  */
 export function makeMockLoggerLayer(): Layer.Layer<Logger, never, never> {
   return Layer.succeed(LoggerService, createMockLogger());
+}
+
+/**
+ * Create a mock config for testing.
+ * Returns an IConfig-compatible object with customizable values.
+ * 
+ * @param values - Optional object with config values that get() will return
+ * @param options - Optional configuration options
+ * @returns An IConfig-compatible mock object
+ * 
+ * @example
+ * ```typescript
+ * const mockConfig = createMockConfig({ 
+ *   'server.port': 3000,
+ *   'server.host': '0.0.0.0'
+ * });
+ * controller.initializeController(mockLogger, mockConfig);
+ * ```
+ */
+export function createMockConfig(
+  values: Record<string, unknown> = {},
+  options?: { isInitialized?: boolean },
+): IConfig<OneBunAppConfig> {
+  const isInitialized = options?.isInitialized ?? true;
+  
+  return {
+    get(path: string): unknown {
+      if (!isInitialized) {
+        throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
+      }
+
+      return values[path];
+    },
+    get values(): OneBunAppConfig {
+      if (!isInitialized) {
+        throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
+      }
+
+      return values as unknown as OneBunAppConfig;
+    },
+    getSafeConfig(): OneBunAppConfig {
+      if (!isInitialized) {
+        throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
+      }
+
+      return values as unknown as OneBunAppConfig;
+    },
+    get isInitialized(): boolean {
+      return isInitialized;
+    },
+    async initialize(): Promise<void> {
+      // No-op for mock
+    },
+  };
 }

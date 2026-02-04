@@ -1,5 +1,7 @@
 import { Context } from 'effect';
 
+import type { IConfig, OneBunAppConfig } from './config.interface';
+
 import type { SyncLogger } from '@onebun/logger';
 
 import { BaseService, Service } from './service';
@@ -15,17 +17,16 @@ export const ConfigServiceTag = Context.GenericTag<ConfigServiceImpl>('ConfigSer
  */
 @Service(ConfigServiceTag)
 export class ConfigServiceImpl extends BaseService {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private configInstance: any = null;
+  private configInstance: IConfig<OneBunAppConfig> | null = null;
 
-  constructor(logger?: SyncLogger, config?: unknown) {
+  constructor(logger?: SyncLogger, config?: IConfig<OneBunAppConfig>) {
     super();
     // If logger is provided directly (for backwards compatibility in tests),
     // initialize the service immediately
-    if (logger) {
+    if (logger && config) {
       this.initializeService(logger, config);
     }
-    this.configInstance = config;
+    this.configInstance = config ?? null;
   }
 
   /**
@@ -46,7 +47,7 @@ export class ConfigServiceImpl extends BaseService {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
 
-    return this.configInstance.get(path);
+    return this.configInstance.get(path) as T;
   }
 
   /**

@@ -258,14 +258,14 @@ export class UserController extends BaseController {
 export class UserController extends BaseController {
   @Get('/info')
   async info(): Promise<Response> {
-    // Access typed configuration
-    const port = (this.config as any).get('server.port');
-    const appName = (this.config as any).get('app.name');
+    // Access typed configuration (with module augmentation, no cast needed)
+    const port = this.config.get('server.port');    // number
+    const appName = this.config.get('app.name');    // string
 
     return this.success({
       port,
       appName,
-      configAvailable: this.config !== null,
+      configAvailable: this.config.isInitialized,
     });
   }
 }

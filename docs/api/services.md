@@ -195,10 +195,9 @@ export class DatabaseService extends BaseService {
   }
 
   async connect(): Promise<void> {
-    // Access config
-    const config = this.config as any;
-    const url = config.get('database.url');
-    const maxConn = config.get('database.maxConnections');
+    // Access typed config (with module augmentation, no cast needed)
+    const url = this.config.get('database.url');              // string
+    const maxConn = this.config.get('database.maxConnections'); // number
 
     this.logger.info('Connecting to database', { maxConnections: maxConn });
     // ...

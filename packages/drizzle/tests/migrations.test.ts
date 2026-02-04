@@ -11,7 +11,7 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
 import { LoggerService } from '@onebun/logger';
 
 import { DrizzleService } from '../src/drizzle.service';
@@ -109,7 +109,7 @@ describe('runMigrations integration tests', () => {
       ),
     );
     service = new DrizzleService<DatabaseType.SQLITE>();
-    service.initializeService(logger, undefined);
+    service.initializeService(logger, createMockConfig());
   });
 
   afterEach(async () => {
@@ -247,7 +247,7 @@ describe('runMigrations integration tests', () => {
       ),
     );
     const uninitializedService = new DrizzleService();
-    uninitializedService.initializeService(logger, undefined);
+    uninitializedService.initializeService(logger, createMockConfig());
     await uninitializedService.waitForInit();
 
     await expect(

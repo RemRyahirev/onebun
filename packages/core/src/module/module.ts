@@ -15,7 +15,6 @@ import {
   type SyncLogger,
 } from '@onebun/logger';
 
-
 import {
   autoDetectDependencies,
   getConstructorParamTypes,
@@ -25,6 +24,11 @@ import {
 } from '../decorators/decorators';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
 
+import {
+  NotInitializedConfig,
+  type IConfig,
+  type OneBunAppConfig,
+} from './config.interface';
 import { getServiceMetadata, getServiceTag } from './service';
 
 /**
@@ -65,12 +69,12 @@ export class OneBunModule implements ModuleInstance {
   private controllerInstances: Map<Function, Controller> = new Map();
   private serviceInstances: Map<Context.Tag<unknown, unknown>, unknown> = new Map();
   private logger: SyncLogger;
-  private config: unknown;
+  private config: IConfig<OneBunAppConfig>;
 
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
-    config?: unknown,
+    config?: IConfig<OneBunAppConfig>,
   ) {
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
@@ -82,7 +86,7 @@ export class OneBunModule implements ModuleInstance {
       ) as Effect.Effect<Logger, never, never>,
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
-    this.config = config;
+    this.config = config ?? new NotInitializedConfig();
 
     this.logger.debug(`Initializing OneBunModule for ${moduleClass.name}`);
     const { layer, controllers } = this.initModule();
@@ -520,7 +524,7 @@ export class OneBunModule implements ModuleInstance {
   static create(
     moduleClass: Function,
     loggerLayer?: Layer.Layer<never, never, unknown>,
-    config?: unknown,
+    config?: IConfig<OneBunAppConfig>,
   ): ModuleInstance {
     // Using console.log here because we don't have access to the logger instance yet
     // The instance will create its own logger in the constructor

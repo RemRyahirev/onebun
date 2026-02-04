@@ -12,13 +12,17 @@ import {
 } from 'bun:test';
 import { Context } from 'effect';
 
+import type { IConfig, OneBunAppConfig } from './config.interface';
+
 import type { SyncLogger } from '@onebun/logger';
+
+import { createMockConfig } from '../testing/test-utils';
 
 import { Controller } from './controller';
 
 describe('Controller', () => {
   let mockLogger: SyncLogger;
-  let mockConfig: unknown;
+  let mockConfig: IConfig<OneBunAppConfig>;
 
   beforeEach(() => {
     mockLogger = {
@@ -31,13 +35,11 @@ describe('Controller', () => {
       child: mock(() => mockLogger),
     };
 
-    mockConfig = {
-      test: 'value',
-      database: {
-        host: 'localhost',
-        port: 5432,
-      },
-    };
+    mockConfig = createMockConfig({
+      'test': 'value',
+      'database.host': 'localhost',
+      'database.port': 5432,
+    });
   });
 
   describe('Controller initialization', () => {
@@ -139,33 +141,28 @@ describe('Controller', () => {
       expect(mockLogger.debug).toHaveBeenCalledWith('Controller CustomNamedController initialized');
     });
 
-    test('should work with different config types', () => {
+    test('should provide typed config access', () => {
       class TestController extends Controller {
-        getConfigType() {
-          return typeof this.config;
+        getConfigValue(path: string) {
+          return this.config.get(path);
+        }
+        
+        checkConfigInitialized() {
+          return this.config.isInitialized;
         }
       }
 
       const controller = new TestController();
+      const typedConfig = createMockConfig({
+        'server.port': 3000,
+        'server.host': '0.0.0.0',
+      });
       
-      // Test with object config
-      controller.initializeController(mockLogger, { test: 'value' });
-      expect(controller.getConfigType()).toBe('object');
+      controller.initializeController(mockLogger, typedConfig);
       
-      // Test with string config
-      const controller2 = new TestController();
-      controller2.initializeController(mockLogger, 'string-config');
-      expect(controller2.getConfigType()).toBe('string');
-
-      // Test with null config
-      const controller3 = new TestController();
-      controller3.initializeController(mockLogger, null);
-      expect(controller3.getConfigType()).toBe('object'); // null is typeof 'object'
-
-      // Test with undefined config
-      const controller4 = new TestController();
-      controller4.initializeController(mockLogger, undefined);
-      expect(controller4.getConfigType()).toBe('undefined');
+      expect(controller.getConfigValue('server.port')).toBe(3000);
+      expect(controller.getConfigValue('server.host')).toBe('0.0.0.0');
+      expect(controller.checkConfigInitialized()).toBe(true);
     });
   });
 
@@ -252,7 +249,8 @@ describe('Controller', () => {
         debug: mock(() => {}),
       };
 
-      controller.initializeController(newMockLogger, { newConfig: true });
+      const newConfig = createMockConfig({ 'newConfig': true });
+      controller.initializeController(newMockLogger, newConfig);
       expect(newMockLogger.debug).toHaveBeenCalledWith('Controller TestController initialized');
     });
   });

@@ -62,8 +62,9 @@ interface EnvVariableConfig {
 
 ```typescript
 // src/config.ts
-import { Env } from '@onebun/core';
+import { Env, type InferConfigType } from '@onebun/core';
 
+// Define schema using Env helpers
 export const envSchema = {
   // Nested structure becomes dotted paths
   server: {
@@ -113,7 +114,72 @@ export const envSchema = {
   },
 };
 
-export type AppConfig = typeof envSchema;
+// Infer config type automatically from schema
+export type AppConfig = InferConfigType<typeof envSchema>;
+// Result: { server: { port: number; host: string }; database: { url: string; ... }; ... }
+
+// Module augmentation for global type inference
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
+```
+
+## Type Inference and Module Augmentation
+
+OneBun provides automatic type inference for configuration access using TypeScript's module augmentation feature.
+
+### InferConfigType
+
+The `InferConfigType` utility automatically extracts value types from your schema:
+
+```typescript
+import { Env, type InferConfigType } from '@onebun/core';
+
+const envSchema = {
+  server: {
+    port: Env.number({ default: 3000 }),
+    host: Env.string({ default: '0.0.0.0' }),
+  },
+  database: {
+    url: Env.string({ required: true }),
+  },
+};
+
+type Config = InferConfigType<typeof envSchema>;
+// Result: { server: { port: number; host: string }; database: { url: string } }
+```
+
+### Module Augmentation
+
+To enable typed config access throughout your application (in controllers, services, etc.), use TypeScript's module augmentation:
+
+```typescript
+// config.ts
+import { Env, type InferConfigType } from '@onebun/core';
+
+export const envSchema = {
+  server: {
+    port: Env.number({ default: 3000 }),
+  },
+};
+
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+// This enables typed access to this.config.get() everywhere
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
+```
+
+After this setup, `this.config.get('server.port')` in any controller or service will return `number` (not `unknown`).
+
+### Without Module Augmentation
+
+If you don't use module augmentation, you can still access config but need type assertions:
+
+```typescript
+// Works but requires manual typing
+const port = this.config.get('server.port') as number;
 ```
 
 ## Loading Configuration
@@ -172,6 +238,8 @@ const port = config.get('server.port');
 
 ## Accessing Configuration
 
+With module augmentation in place, config access is fully typed - no `as any` needed!
+
 ### In Controllers
 
 ```typescript
@@ -179,11 +247,10 @@ const port = config.get('server.port');
 export class InfoController extends BaseController {
   @Get('/')
   async getInfo(): Promise<Response> {
-    const config = this.config as any;
-
-    const serverPort = config.get('server.port');
-    const appName = config.get('app.name');
-    const debug = config.get('app.debug');
+    // Fully typed access - no casting needed
+    const serverPort = this.config.get('server.port');  // number
+    const appName = this.config.get('app.name');        // string
+    const debug = this.config.get('app.debug');          // boolean
 
     return this.success({
       appName,
@@ -200,11 +267,10 @@ export class InfoController extends BaseController {
 @Service()
 export class DatabaseService extends BaseService {
   async connect(): Promise<void> {
-    const config = this.config as any;
-
-    const url = config.get('database.url');
-    const maxConnections = config.get('database.maxConnections');
-    const ssl = config.get('database.ssl');
+    // Fully typed access
+    const url = this.config.get('database.url');              // string (sensitive)
+    const maxConnections = this.config.get('database.maxConnections'); // number
+    const ssl = this.config.get('database.ssl');               // boolean
 
     this.logger.info('Connecting to database', { maxConnections, ssl });
 
@@ -246,9 +312,8 @@ const envSchema = {
   },
 };
 
-// Access the value
-const config = this.config as any;
-const password = config.get('database.password');
+// Access the value (fully typed with module augmentation)
+const password = this.config.get('database.password');
 
 // password.toString() returns '***'
 // password.value returns actual value
@@ -418,7 +483,7 @@ const multiApp = new MultiServiceApplication({
 
 ```typescript
 // config.ts
-import { Env } from '@onebun/core';
+import { Env, type InferConfigType } from '@onebun/core';
 
 export const envSchema = {
   server: {
@@ -479,7 +544,13 @@ export const envSchema = {
   },
 };
 
-export type Config = typeof envSchema;
+// Automatic type inference
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+// Module augmentation for global typed config access
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
 
 // index.ts
 import { OneBunApplication } from '@onebun/core';

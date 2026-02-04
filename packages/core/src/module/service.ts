@@ -4,6 +4,8 @@ import {
   Layer,
 } from 'effect';
 
+import type { IConfig, OneBunAppConfig } from './config.interface';
+
 import type { SyncLogger } from '@onebun/logger';
 
 /**
@@ -66,7 +68,7 @@ export class BaseService {
   // Logger instance with service class name as context
   protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
-  protected config!: unknown;
+  protected config!: IConfig<OneBunAppConfig>;
   // Flag to track initialization status
   private _initialized = false;
 
@@ -74,7 +76,7 @@ export class BaseService {
    * Initialize service with logger and config (called by the framework)
    * @internal
    */
-  initializeService(logger: SyncLogger, config: unknown): void {
+  initializeService(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
     if (this._initialized) {
       return; // Already initialized
     }
@@ -143,7 +145,7 @@ export class BaseService {
 export function createServiceLayer<T>(
   serviceClass: new (...args: unknown[]) => T,
   logger?: SyncLogger,
-  config?: unknown,
+  config?: IConfig<OneBunAppConfig>,
 ): Layer.Layer<never, never, unknown> {
   const metadata = getServiceMetadata(serviceClass);
   if (!metadata) {

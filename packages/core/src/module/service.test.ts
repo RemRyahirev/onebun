@@ -10,11 +10,18 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
+import { createMockConfig } from '../testing/test-utils';
+
+import {
+  NotInitializedConfig,
+  type IConfig,
+  type OneBunAppConfig,
+} from './config.interface';
 import { BaseService } from './service';
 
 describe('BaseService', () => {
   let mockLogger: any;
-  let mockConfig: any;
+  let mockConfig: IConfig<OneBunAppConfig>;
 
   beforeEach(() => {
     mockLogger = {
@@ -25,19 +32,12 @@ describe('BaseService', () => {
       error: mock(),
     };
     
-    mockConfig = {
-      get: mock((path: string) => {
-        if (path === 'database.host') {
-          return 'localhost';
-        }
-        if (path === 'app.name') {
-          return 'test-app';
-        }
-
-        return undefined;
-      }),
-      getSafeConfig: mock(() => ({ app: { name: 'test-app' } })),
-    };
+    mockConfig = createMockConfig({
+      /* eslint-disable @typescript-eslint/naming-convention */
+      'database.host': 'localhost',
+      'app.name': 'test-app',
+      /* eslint-enable @typescript-eslint/naming-convention */
+    });
   });
 
   describe('Initialization via initializeService', () => {
@@ -56,15 +56,16 @@ describe('BaseService', () => {
       expect((service as any).config).toBe(mockConfig);
     });
 
-    test('should initialize service with logger and undefined config', () => {
+    test('should initialize service with logger and NotInitializedConfig', () => {
       class TestService extends BaseService {}
 
       const service = new TestService();
-      service.initializeService(mockLogger, undefined);
+      const notInitConfig = new NotInitializedConfig();
+      service.initializeService(mockLogger, notInitConfig);
       
       expect(service.isInitialized).toBe(true);
       expect((service as any).logger).toBeDefined();
-      expect((service as any).config).toBeUndefined();
+      expect((service as any).config).toBeInstanceOf(NotInitializedConfig);
     });
 
     test('should throw error when logger is not provided to initializeService', () => {
@@ -90,7 +91,8 @@ describe('BaseService', () => {
       service.initializeService(mockLogger, mockConfig);
       
       const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
-      service.initializeService(otherLogger, { other: 'config' });
+      const otherConfig = createMockConfig({ 'other': 'config' });
+      service.initializeService(otherLogger, otherConfig);
       
       // Should still have original logger (no reinit)
       expect((service as any).config).toBe(mockConfig);
@@ -174,7 +176,7 @@ describe('BaseService', () => {
       }
 
       const service = new TestService();
-      service.initializeService(mockLogger, undefined);
+      service.initializeService(mockLogger, mockConfig);
       const result = await service.testComplexEffect();
       expect(result).toBe(84);
     });
@@ -190,7 +192,7 @@ describe('BaseService', () => {
       }
 
       const service = new TestService();
-      service.initializeService(mockLogger, undefined);
+      service.initializeService(mockLogger, mockConfig);
       service.testStackTrace();
     });
   });

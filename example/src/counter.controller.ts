@@ -24,12 +24,10 @@ export class CounterController extends BaseController {
 
   @Get('/info')
   async getInfo(): Promise<Response> {
-    // Demonstrate configuration access in controller
-    const DEFAULT_PORT = 3001;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const serverPort = (this.config as any)?.get('server.port') || DEFAULT_PORT;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const serverHost = (this.config as any)?.get('server.host') || '0.0.0.0';
+    // Demonstrate typed configuration access in controller
+    // No 'as any' needed - config is fully typed via module augmentation!
+    const serverPort = this.config.get('server.port'); // number
+    const serverHost = this.config.get('server.host'); // string
 
     this.logger.info('Getting application info', { port: serverPort, host: serverHost });
 
@@ -40,7 +38,7 @@ export class CounterController extends BaseController {
         host: serverHost,
       },
       timestamp: new Date().toISOString(),
-      configAvailable: this.config !== null && this.config !== undefined,
+      configAvailable: this.config.isInitialized,
     });
   }
 

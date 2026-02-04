@@ -1,13 +1,13 @@
-/* eslint-disable jest/unbound-method */
 import {
   describe,
   expect,
   test,
   beforeEach,
+  afterEach,
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
 import { LoggerService } from '@onebun/logger';
 
 import { DrizzleService } from '../src/drizzle.service';
@@ -25,31 +25,9 @@ const testEntities = sqliteTable('test_entities', {
   name: text('name').notNull(),
 });
 
-type TestEntity = typeof testEntities.$inferSelect;
-
+// Real repository that uses BaseRepository methods without overriding
 class TestRepository extends BaseRepository<typeof testEntities> {
-  override async findById(_id: unknown): Promise<TestEntity | null> {
-    // Mock implementation
-    return null;
-  }
-
-  override async create(data: Partial<typeof testEntities.$inferInsert>): Promise<TestEntity> {
-    // Mock implementation
-    return { id: 1, name: data.name || 'test' } as TestEntity;
-  }
-
-  override async update(
-    id: unknown,
-    data: Partial<typeof testEntities.$inferInsert>,
-  ): Promise<TestEntity | null> {
-    // Mock implementation
-    return { id: id as number, name: data.name || 'updated' } as TestEntity;
-  }
-
-  override async delete(_id: unknown): Promise<boolean> {
-    // Mock implementation
-    return true;
-  }
+  // No overrides - uses real BaseRepository implementation
 }
 
 describe('BaseRepository', () => {
@@ -69,7 +47,7 @@ describe('BaseRepository', () => {
       ),
     );
     drizzleService = new DrizzleService<DatabaseType.SQLITE>();
-    drizzleService.initializeService(logger, undefined);
+    drizzleService.initializeService(logger, createMockConfig());
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,
       options: {
@@ -89,56 +67,167 @@ describe('BaseRepository', () => {
     repository = new TestRepository(drizzleService, testEntities);
   });
 
+  afterEach(async () => {
+    // Clean up table data between tests
+    const sqliteDb = drizzleService.getSQLiteDatabase();
+    await sqliteDb.run('DELETE FROM test_entities');
+  });
+
   describe('Constructor', () => {
-    test('should create repository instance', () => {
+    test('should create repository instance with access to table and db', () => {
       expect(repository).toBeDefined();
       expect(repository).toBeInstanceOf(BaseRepository);
     });
   });
 
-  describe('Abstract methods', () => {
-    test('should have findById method', () => {
-      expect(repository.findById).toBeDefined();
-      expect(typeof repository.findById).toBe('function');
+  describe('create', () => {
+    test('should create a new entity and return it with generated id', async () => {
+      const entity = await repository.create({ name: 'Test Entity' });
+      
+      expect(entity).toBeDefined();
+      expect(entity.id).toBeDefined();
+      expect(typeof entity.id).toBe('number');
+      expect(entity.name).toBe('Test Entity');
     });
 
-    test('should have create method', () => {
-      expect(repository.create).toBeDefined();
-      expect(typeof repository.create).toBe('function');
+    test('should create multiple entities with unique ids', async () => {
+      const entity1 = await repository.create({ name: 'Entity 1' });
+      const entity2 = await repository.create({ name: 'Entity 2' });
+      
+      expect(entity1.id).not.toBe(entity2.id);
+      expect(entity1.name).toBe('Entity 1');
+      expect(entity2.name).toBe('Entity 2');
+    });
+  });
+
+  describe('findById', () => {
+    test('should find existing entity by id', async () => {
+      const created = await repository.create({ name: 'Find Me' });
+      const found = await repository.findById(created.id);
+      
+      expect(found).toBeDefined();
+      expect(found?.id).toBe(created.id);
+      expect(found?.name).toBe('Find Me');
     });
 
-    test('should have update method', () => {
-      expect(repository.update).toBeDefined();
-      expect(typeof repository.update).toBe('function');
-    });
-
-    test('should have delete method', () => {
-      expect(repository.delete).toBeDefined();
-      expect(typeof repository.delete).toBe('function');
+    test('should return null for non-existent id', async () => {
+      const found = await repository.findById(99999);
+      expect(found).toBeNull();
     });
   });
 
   describe('findAll', () => {
-    test('should have findAll method', () => {
-      expect(repository.findAll).toBeDefined();
-      expect(typeof repository.findAll).toBe('function');
+    test('should return empty array when no entities exist', async () => {
+      const results = await repository.findAll();
+      
+      expect(Array.isArray(results)).toBe(true);
+      expect(results.length).toBe(0);
     });
 
-    test('should return empty array if database is empty', async () => {
+    test('should return all entities', async () => {
+      await repository.create({ name: 'Entity 1' });
+      await repository.create({ name: 'Entity 2' });
+      await repository.create({ name: 'Entity 3' });
+      
       const results = await repository.findAll();
-      expect(Array.isArray(results)).toBe(true);
+      
+      expect(results.length).toBe(3);
+      expect(results.map(e => e.name).sort()).toEqual(['Entity 1', 'Entity 2', 'Entity 3']);
+    });
+  });
+
+  describe('update', () => {
+    test('should update existing entity and return updated data', async () => {
+      const created = await repository.create({ name: 'Original Name' });
+      const updated = await repository.update(created.id, { name: 'Updated Name' });
+      
+      expect(updated).toBeDefined();
+      expect(updated?.id).toBe(created.id);
+      expect(updated?.name).toBe('Updated Name');
+    });
+
+    test('should return null when updating non-existent entity', async () => {
+      const updated = await repository.update(99999, { name: 'Will Not Exist' });
+      expect(updated).toBeNull();
+    });
+
+    test('should persist changes to database', async () => {
+      const created = await repository.create({ name: 'Before Update' });
+      await repository.update(created.id, { name: 'After Update' });
+      
+      const found = await repository.findById(created.id);
+      expect(found?.name).toBe('After Update');
+    });
+  });
+
+  describe('delete', () => {
+    test('should delete existing entity and return true', async () => {
+      const created = await repository.create({ name: 'To Delete' });
+      const deleted = await repository.delete(created.id);
+      
+      expect(deleted).toBe(true);
+    });
+
+    test('should return false when deleting non-existent entity', async () => {
+      const deleted = await repository.delete(99999);
+      expect(deleted).toBe(false);
+    });
+
+    test('should remove entity from database', async () => {
+      const created = await repository.create({ name: 'Will Be Gone' });
+      await repository.delete(created.id);
+      
+      const found = await repository.findById(created.id);
+      expect(found).toBeNull();
     });
   });
 
   describe('count', () => {
-    test('should have count method', () => {
-      expect(repository.count).toBeDefined();
-      expect(typeof repository.count).toBe('function');
-    });
-
-    test('should return 0 if database is empty', async () => {
+    test('should return 0 when no entities exist', async () => {
       const count = await repository.count();
       expect(count).toBe(0);
+    });
+
+    test('should return correct count after creating entities', async () => {
+      await repository.create({ name: 'Entity 1' });
+      await repository.create({ name: 'Entity 2' });
+      
+      const count = await repository.count();
+      expect(count).toBe(2);
+    });
+
+    test('should update count after delete', async () => {
+      const entity1 = await repository.create({ name: 'Entity 1' });
+      await repository.create({ name: 'Entity 2' });
+      
+      expect(await repository.count()).toBe(2);
+      
+      await repository.delete(entity1.id);
+      
+      expect(await repository.count()).toBe(1);
+    });
+  });
+
+  describe('getQueryBuilder', () => {
+    test('should return query builder with all methods', () => {
+      const qb = repository.getQueryBuilder();
+      
+      expect(qb).toBeDefined();
+      expect(typeof qb.select).toBe('function');
+      expect(typeof qb.insert).toBe('function');
+      expect(typeof qb.update).toBe('function');
+      expect(typeof qb.delete).toBe('function');
+    });
+  });
+
+  describe('transaction', () => {
+    test('should execute operations within transaction', async () => {
+      await repository.transaction(async () => {
+        await repository.create({ name: 'In Transaction' });
+      });
+      
+      const count = await repository.count();
+      expect(count).toBe(1);
     });
   });
 });

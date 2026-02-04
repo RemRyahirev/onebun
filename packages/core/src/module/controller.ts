@@ -1,3 +1,4 @@
+import type { IConfig, OneBunAppConfig } from './config.interface';
 import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -14,13 +15,13 @@ export class Controller {
   // Logger instance with controller class name as context
   protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
-  protected config!: unknown;
+  protected config!: IConfig<OneBunAppConfig>;
 
   /**
    * Initialize controller with logger and config (called by the framework)
    * @internal
    */
-  initializeController(logger: SyncLogger, config: unknown): void {
+  initializeController(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
     const className = this.constructor.name;
 
     if (logger) {

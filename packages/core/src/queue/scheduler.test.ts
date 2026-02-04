@@ -12,14 +12,22 @@ import {
 
 import type { Message } from './types';
 
+import { useFakeTimers } from '../testing/test-utils';
+
 import { InMemoryQueueAdapter } from './adapters/memory.adapter';
 import { QueueScheduler, createQueueScheduler } from './scheduler';
 
 describe('QueueScheduler', () => {
   let adapter: InMemoryQueueAdapter;
   let scheduler: QueueScheduler;
+  let advanceTime: (ms: number) => void;
+  let restore: () => void;
 
   beforeEach(async () => {
+    const fakeTimers = useFakeTimers();
+    advanceTime = fakeTimers.advanceTime;
+    restore = fakeTimers.restore;
+
     adapter = new InMemoryQueueAdapter();
     await adapter.connect();
     scheduler = new QueueScheduler(adapter);
@@ -28,6 +36,7 @@ describe('QueueScheduler', () => {
   afterEach(async () => {
     scheduler.stop();
     await adapter.disconnect();
+    restore();
   });
 
   describe('interval jobs', () => {
@@ -40,8 +49,9 @@ describe('QueueScheduler', () => {
       scheduler.addIntervalJob('test-interval', 100000, 'test.interval', () => ({ count: 1 }));
       scheduler.start();
 
-      // Wait a bit for async processing
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Advance time and flush async handlers
+      advanceTime(10);
+      await Promise.resolve();
 
       // Should execute immediately
       expect(received.length).toBe(1);
@@ -59,7 +69,8 @@ describe('QueueScheduler', () => {
       }));
       scheduler.start();
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      advanceTime(10);
+      await Promise.resolve();
 
       expect(received.length).toBe(1);
       expect((received[0].data as { counter: number }).counter).toBe(1);
@@ -76,7 +87,8 @@ describe('QueueScheduler', () => {
       });
       scheduler.start();
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      advanceTime(10);
+      await Promise.resolve();
 
       expect(received.length).toBe(1);
       expect(received[0].metadata.serviceId).toBe('test-service');
@@ -96,20 +108,21 @@ describe('QueueScheduler', () => {
       // Should not have fired yet
       expect(received.length).toBe(0);
 
-      // Wait for timeout
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Advance time past the timeout and flush async handlers
+      advanceTime(100);
+      await Promise.resolve();
 
       expect(received.length).toBe(1);
       expect((received[0].data as { fired: boolean }).fired).toBe(true);
     });
 
-    it('should remove job after execution', async () => {
+    it('should remove job after execution', () => {
       scheduler.addTimeoutJob('one-time', 30, 'test.one-time');
       scheduler.start();
 
       expect(scheduler.hasJob('one-time')).toBe(true);
 
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      advanceTime(50);
 
       expect(scheduler.hasJob('one-time')).toBe(false);
     });
@@ -200,7 +213,7 @@ describe('QueueScheduler', () => {
       scheduler.addIntervalJob('test', 100000, 'test');
       // Not calling start()
 
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      advanceTime(50);
       expect(received.length).toBe(0);
     });
 

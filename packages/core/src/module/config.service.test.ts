@@ -11,6 +11,8 @@ import {
   mock,
 } from 'bun:test';
 
+import type { IConfig, OneBunAppConfig } from './config.interface';
+
 import type { SyncLogger } from '@onebun/logger';
 
 import {
@@ -22,7 +24,7 @@ import {
 describe('ConfigService', () => {
   let mockLogger: SyncLogger;
    
-  let mockConfig: any;
+  let mockConfig: IConfig<OneBunAppConfig>;
 
   beforeEach(() => {
     mockLogger = {
@@ -38,8 +40,8 @@ describe('ConfigService', () => {
     mockConfig = {
       initialize: mock(async () => {}),
       get: mock((path: string): any => `value-for-${path}`),
-      values: { test: 'value' },
-      getSafeConfig: mock(() => ({ test: '***' })),
+      values: { test: 'value' } as unknown as OneBunAppConfig,
+      getSafeConfig: mock(() => ({ test: '***' })) as unknown as () => OneBunAppConfig,
       isInitialized: true,
     };
   });
@@ -63,7 +65,7 @@ describe('ConfigService', () => {
       const service = new ConfigServiceImpl(mockLogger);
       
       expect(service).toBeInstanceOf(ConfigServiceImpl);
-      expect(service.instance).toBeUndefined();
+      expect(service.instance).toBeNull();
     });
 
     test('should create instance with config but without logger (uninitialized)', () => {
@@ -83,8 +85,8 @@ describe('ConfigService', () => {
         expect(mockLogger.info).toHaveBeenCalledWith('Configuration initialized successfully');
       });
 
-      test('should not throw when config instance is null', async () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+      test('should not throw when config instance is undefined', async () => {
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         await expect(service.initialize()).resolves.toBeUndefined();
         expect(mockLogger.info).not.toHaveBeenCalled();
@@ -109,7 +111,7 @@ describe('ConfigService', () => {
       });
 
       test('should throw error when config not initialized', () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         expect(() => service.get('test.path')).toThrow(
           'Configuration not initialized. Provide envSchema in ApplicationOptions.',
@@ -117,8 +119,14 @@ describe('ConfigService', () => {
       });
 
       test('should return typed value', () => {
-        mockConfig.get.mockReturnValue(42);
-        const service = new ConfigServiceImpl(mockLogger, mockConfig);
+        const typedConfig = {
+          initialize: mock(async () => {}),
+          get: mock((path: string) => path === 'test.number' ? 42 : undefined),
+          values: { test: 'value' } as unknown as OneBunAppConfig,
+          getSafeConfig: mock(() => ({ test: '***' })) as unknown as () => OneBunAppConfig,
+          isInitialized: true,
+        } as unknown as IConfig<OneBunAppConfig>;
+        const service = new ConfigServiceImpl(mockLogger, typedConfig);
         
         const result = service.get<number>('test.number');
         
@@ -137,7 +145,7 @@ describe('ConfigService', () => {
       });
 
       test('should throw error when config not initialized', () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         expect(() => service.values).toThrow(
           'Configuration not initialized. Provide envSchema in ApplicationOptions.',
@@ -156,7 +164,7 @@ describe('ConfigService', () => {
       });
 
       test('should throw error when config not initialized', () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         expect(() => service.getSafeConfig()).toThrow(
           'Configuration not initialized. Provide envSchema in ApplicationOptions.',
@@ -172,14 +180,20 @@ describe('ConfigService', () => {
       });
 
       test('should return false when config not initialized', () => {
-        mockConfig.isInitialized = false;
-        const service = new ConfigServiceImpl(mockLogger, mockConfig);
+        const uninitConfig = {
+          initialize: mock(async () => {}),
+          get: mock((path: string): any => `value-for-${path}`),
+          values: { test: 'value' } as unknown as OneBunAppConfig,
+          getSafeConfig: mock(() => ({ test: '***' })) as unknown as () => OneBunAppConfig,
+          isInitialized: false,
+        } as unknown as IConfig<OneBunAppConfig>;
+        const service = new ConfigServiceImpl(mockLogger, uninitConfig);
         
         expect(service.isInitialized).toBe(false);
       });
 
-      test('should return false when config instance is null', () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+      test('should return false when config instance is undefined', () => {
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         expect(service.isInitialized).toBe(false);
       });
@@ -193,7 +207,7 @@ describe('ConfigService', () => {
       });
 
       test('should return null when no config provided', () => {
-        const service = new ConfigServiceImpl(mockLogger, null);
+        const service = new ConfigServiceImpl(mockLogger, undefined);
         
         expect(service.instance).toBeNull();
       });
@@ -210,7 +224,7 @@ describe('ConfigService', () => {
       test('should handle undefined config in constructor', () => {
         const service = new ConfigServiceImpl(mockLogger, undefined);
         
-        expect(service.instance).toBeUndefined();
+        expect(service.instance).toBeNull();
         expect(service.isInitialized).toBe(false);
       });
     });
@@ -219,8 +233,11 @@ describe('ConfigService', () => {
       test('should handle initialization error gracefully', async () => {
         const errorConfig = {
           initialize: mock(() => Promise.reject(new Error('Init failed'))),
+          get: mock(() => undefined),
+          values: {} as unknown as OneBunAppConfig,
+          getSafeConfig: mock(() => ({})) as unknown as () => OneBunAppConfig,
           isInitialized: false,
-        };
+        } as unknown as IConfig<OneBunAppConfig>;
         
         const service = new ConfigServiceImpl(mockLogger, errorConfig);
         
@@ -229,15 +246,16 @@ describe('ConfigService', () => {
 
       test('should handle config method errors', () => {
         const errorConfig = {
+          initialize: mock(async () => {}),
           get: mock(() => {
             throw new Error('Get failed'); 
           }),
-          values: null,
+          values: null as unknown as unknown as OneBunAppConfig,
           getSafeConfig: mock(() => {
             throw new Error('Safe config failed'); 
-          }),
+          }) as unknown as () => OneBunAppConfig,
           isInitialized: true,
-        };
+        } as unknown as IConfig<OneBunAppConfig>;
         
         const service = new ConfigServiceImpl(mockLogger, errorConfig);
         
@@ -249,11 +267,12 @@ describe('ConfigService', () => {
     describe('edge cases', () => {
       test('should handle config with null values', () => {
         const nullConfig = {
+          initialize: mock(async () => {}),
           get: mock(() => null),
-          values: null,
-          getSafeConfig: mock(() => null),
+          values: null as unknown as unknown as OneBunAppConfig,
+          getSafeConfig: mock(() => null as unknown as unknown as OneBunAppConfig),
           isInitialized: true,
-        };
+        } as unknown as IConfig<OneBunAppConfig>;
         
         const service = new ConfigServiceImpl(mockLogger, nullConfig);
         
@@ -264,11 +283,12 @@ describe('ConfigService', () => {
 
       test('should handle config with undefined values', () => {
         const undefinedConfig = {
+          initialize: mock(async () => {}),
           get: mock(() => undefined),
-          values: undefined,
-          getSafeConfig: mock(() => undefined),
+          values: undefined as unknown as unknown as OneBunAppConfig,
+          getSafeConfig: mock(() => undefined as unknown as unknown as OneBunAppConfig),
           isInitialized: false,
-        };
+        } as unknown as IConfig<OneBunAppConfig>;
         
         const service = new ConfigServiceImpl(mockLogger, undefinedConfig);
         
@@ -318,7 +338,7 @@ describe('ConfigService', () => {
           api: { key: '***', timeout: 30000 },
         })),
         isInitialized: true,
-      };
+      } as unknown as IConfig<OneBunAppConfig>;
 
       const service = new ConfigServiceImpl(mockLogger, complexConfig);
 

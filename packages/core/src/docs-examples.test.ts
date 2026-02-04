@@ -80,6 +80,7 @@ import {
   createWsServiceDefinition,
   createWsClient,
   matchPattern,
+  makeMockLoggerLayer,
 } from './';
 
 /**
@@ -157,6 +158,7 @@ describe('Minimal Working Example (docs/index.md)', () => {
     const app = new OneBunApplication(AppModule, {
       port: 3000,
       envSchema,
+      loggerLayer: makeMockLoggerLayer(),
       metrics: { enabled: true },
       tracing: { enabled: true },
     });
@@ -1302,6 +1304,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
     // From docs: OneBunApplication constructor
     const app = new OneBunApplication(AppModule, {
+      loggerLayer: makeMockLoggerLayer(),
       port: 3000,
       basePath: '/api/v1',
     });
@@ -1330,6 +1333,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
       basePath: '/api/v1',
       routePrefix: 'myservice',
       development: true,
+      loggerLayer: makeMockLoggerLayer(),
       metrics: {
         enabled: true,
         path: '/metrics',
@@ -1369,7 +1373,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
       httpDurationBuckets: [0.01, 0.05, 0.1, 0.5, 1, 2, 5],
     };
 
-    const app = new OneBunApplication(AppModule, { metrics: metricsOptions });
+    const app = new OneBunApplication(AppModule, { metrics: metricsOptions, loggerLayer: makeMockLoggerLayer() });
     expect(app).toBeDefined();
   });
 
@@ -1400,7 +1404,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
     };
     /* eslint-enable @typescript-eslint/naming-convention */
 
-    const app = new OneBunApplication(AppModule, { tracing: tracingOptions });
+    const app = new OneBunApplication(AppModule, { tracing: tracingOptions, loggerLayer: makeMockLoggerLayer() });
     expect(app).toBeDefined();
   });
 });
@@ -2182,6 +2186,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
           loadDotEnv: true,
           envFilePath: '.env',
         },
+        loggerLayer: makeMockLoggerLayer(),
         metrics: {
           enabled: true,
           path: '/metrics',
@@ -2589,6 +2594,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
           pingTimeout: 20000,
           maxPayload: 1048576,
         },
+        loggerLayer: makeMockLoggerLayer(),
       });
 
       expect(app).toBeDefined();
@@ -2865,6 +2871,7 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
           pingInterval: 25000,
           pingTimeout: 20000,
         },
+        loggerLayer: makeMockLoggerLayer(),
       });
 
       expect(app).toBeDefined();

@@ -21,6 +21,11 @@ import {
 import { makeTraceService, TraceService } from '@onebun/trace';
 
 import { getControllerMetadata } from '../decorators/decorators';
+import {
+  NotInitializedConfig,
+  type IConfig,
+  type OneBunAppConfig,
+} from '../module/config.interface';
 import { ConfigServiceImpl } from '../module/config.service';
 import { OneBunModule } from '../module/module';
 import { QueueService, type QueueAdapter } from '../queue';
@@ -110,8 +115,7 @@ export class OneBunApplication {
     development: process.env.NODE_ENV !== 'production',
   };
   private logger: SyncLogger;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private config: any = null;
+  private config: IConfig<OneBunAppConfig>;
   private configService: ConfigServiceImpl | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
@@ -135,10 +139,12 @@ export class OneBunApplication {
       this.options = { ...this.options, ...options };
     }
 
-    // Initialize configuration if schema is provided
+    // Initialize configuration - TypedEnv if schema provided, otherwise NotInitializedConfig
     if (this.options.envSchema) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       this.config = TypedEnv.create(this.options.envSchema as any, this.options.envOptions);
+    } else {
+      this.config = new NotInitializedConfig();
     }
 
     // Use provided logger layer or create a default one
@@ -155,8 +161,8 @@ export class OneBunApplication {
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
 
-    // Create configuration service if config is available
-    if (this.config) {
+    // Create configuration service if config is initialized
+    if (this.config.isInitialized || !(this.config instanceof NotInitializedConfig)) {
       this.configService = new ConfigServiceImpl(this.logger, this.config);
     }
 
@@ -289,8 +295,8 @@ export class OneBunApplication {
    */
   async start(): Promise<void> {
     try {
-      // Initialize configuration if provided
-      if (this.config) {
+      // Initialize configuration if schema was provided
+      if (!(this.config instanceof NotInitializedConfig)) {
         await this.config.initialize();
         this.logger.info('Application configuration initialized');
       }

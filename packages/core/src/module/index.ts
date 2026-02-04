@@ -10,3 +10,4 @@ export * from './controller';
 export { Controller as BaseController } from './controller';
 export * from './service';
 export * from './config.service';
+export * from './config.interface';

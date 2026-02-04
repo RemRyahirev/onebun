@@ -1,27 +1,7 @@
-import { Env, type EnvSchema } from '@onebun/core';
+import { Env, type InferConfigType } from '@onebun/core';
 
-// Define configuration interface
-interface AppConfig {
-  server: {
-    port: number;
-    host: string;
-    ssl: {
-      enabled: boolean;
-      cert: string;
-    };
-  };
-  database: {
-    url: string;
-    password: string;
-  };
-  auth: {
-    jwtSecret: string;
-    apiKeys: string[];
-  };
-}
-
-// Define environment schema
-export const envSchema: EnvSchema<AppConfig> = {
+// Define environment schema using Env helpers
+export const envSchema = {
   server: {
     port: Env.number({ env: 'PORT', default: 3000 }),
     host: Env.string({ env: 'HOST', default: '0.0.0.0' }),
@@ -51,3 +31,12 @@ export const envSchema: EnvSchema<AppConfig> = {
     apiKeys: Env.array({ env: 'API_KEYS', default: [], sensitive: true }),
   },
 };
+
+// Infer config type from schema (automatic!)
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+// Module augmentation for global type inference
+declare module '@onebun/core' {
+   
+  interface OneBunAppConfig extends AppConfig {}
+}

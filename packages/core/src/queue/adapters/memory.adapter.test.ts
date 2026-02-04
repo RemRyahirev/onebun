@@ -12,6 +12,8 @@ import {
 
 import type { Message } from '../types';
 
+import { useFakeTimers } from '../../testing/test-utils';
+
 import { InMemoryQueueAdapter, createInMemoryQueueAdapter } from './memory.adapter';
 
 describe('InMemoryQueueAdapter', () => {
@@ -114,6 +116,19 @@ describe('InMemoryQueueAdapter', () => {
   });
 
   describe('delayed messages', () => {
+    let advanceTime: (ms: number) => void;
+    let restore: () => void;
+
+    beforeEach(() => {
+      const fakeTimers = useFakeTimers();
+      advanceTime = fakeTimers.advanceTime;
+      restore = fakeTimers.restore;
+    });
+
+    afterEach(() => {
+      restore();
+    });
+
     it('should delay message delivery', async () => {
       await adapter.connect();
 
@@ -127,8 +142,8 @@ describe('InMemoryQueueAdapter', () => {
       // Message should not be received immediately
       expect(received.length).toBe(0);
 
-      // Wait for delay + processing
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Advance time past the delay + processing
+      advanceTime(200);
 
       expect(received.length).toBe(1);
       expect(received[0].data).toEqual({ data: 'delayed' });
@@ -250,6 +265,7 @@ describe('InMemoryQueueAdapter', () => {
     });
 
     it('should support nack with requeue', async () => {
+      // This test uses real timers because requeue uses setImmediate internally
       await adapter.connect();
 
       let callCount = 0;
@@ -269,7 +285,7 @@ describe('InMemoryQueueAdapter', () => {
       await adapter.publish('test', { data: 'test' });
 
       // Wait for requeue processing (setImmediate is used for requeue)
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(callCount).toBeGreaterThanOrEqual(2); // Should be called at least twice due to requeue
     });

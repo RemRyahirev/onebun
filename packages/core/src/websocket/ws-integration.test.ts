@@ -22,6 +22,7 @@ import type { WsClientData } from './ws.types';
 
 import { OneBunApplication } from '../application/application';
 import { Module } from '../decorators/decorators';
+import { makeMockLoggerLayer } from '../testing/test-utils';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import { createWsClient } from './ws-client';
@@ -130,6 +131,7 @@ describe('WebSocket Integration', () => {
     app = new OneBunApplication(TestModule, {
       port: TEST_PORT,
       development: true,
+      loggerLayer: makeMockLoggerLayer(),
     });
     await app.start();
 
@@ -157,7 +159,7 @@ describe('WebSocket Integration', () => {
       await client.connect();
 
       // Wait for welcome message
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       expect(welcomeReceived).toBe(true);
       expect(welcomeData).toHaveProperty('message', 'Welcome!');
@@ -185,7 +187,7 @@ describe('WebSocket Integration', () => {
       client = createWsClient(definition, { url: TEST_URL, timeout: 2000 });
       await client.connect();
       // Wait for connection to stabilize
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
     afterEach(() => {
@@ -208,7 +210,7 @@ describe('WebSocket Integration', () => {
       client.TestGateway.send('echo', testData);
 
       // Wait for response
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(responseReceived).toBe(true);
       expect(responseData).toEqual(testData);
@@ -235,7 +237,7 @@ describe('WebSocket Integration', () => {
       client2 = createWsClient(definition, { url: TEST_URL, timeout: 2000 });
       await client1.connect();
       await client2.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
     afterEach(() => {
@@ -266,7 +268,7 @@ describe('WebSocket Integration', () => {
       // Both clients join the same room
       client1.TestGateway.send('join', roomName);
       client2.TestGateway.send('join', roomName);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       // Client2 listens for messages
       client2.TestGateway.on('chat:message', (data: unknown) => {
@@ -276,7 +278,7 @@ describe('WebSocket Integration', () => {
 
       // Client1 sends a message to the room
       client1.TestGateway.send('chat:chat:message', { text: 'Hello room!' });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(client2ReceivedMessage).toBe(true);
       expect(receivedData).toHaveProperty('text', 'Hello room!');
@@ -290,7 +292,7 @@ describe('WebSocket Integration', () => {
     beforeEach(async () => {
       client = createWsClient(definition, { url: TEST_URL, timeout: 2000 });
       await client.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
     afterEach(() => {
@@ -308,7 +310,7 @@ describe('WebSocket Integration', () => {
 
       // Send message to chat:room123:message pattern
       client.TestGateway.send('chat:room123:message', { text: 'Hello!' });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(sentResponse).toHaveProperty('roomId', 'room123');
     });
@@ -331,7 +333,7 @@ describe('WebSocket Integration', () => {
 
       // Connect all clients
       await Promise.all(clients.map((c) => c.connect()));
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(connectedClients.length).toBe(5);
 
@@ -361,12 +363,12 @@ describe('WebSocket Integration', () => {
 
       await client1.connect();
       await client2.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       // Client1 broadcasts
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client1 as any).TestGateway.send('broadcast', { text: 'Hello everyone!' });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(client1Received).toBe(true);
       expect(client2Received).toBe(true);
@@ -385,7 +387,7 @@ describe('WebSocket Integration', () => {
       });
 
       await client.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       // Try to access protected endpoint without auth - set up error listener
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -396,7 +398,7 @@ describe('WebSocket Integration', () => {
       // Send to protected endpoint - should not receive response
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       // We should not receive protected:response since guard blocks it
       let protectedResponseReceived = false;
@@ -421,7 +423,7 @@ describe('WebSocket Integration', () => {
       });
 
       await client.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       let responseReceived = false;
       let responseData: { userId?: string } | null = null;
@@ -435,7 +437,7 @@ describe('WebSocket Integration', () => {
       // Send to protected endpoint with auth
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       // With auth token, the request should be allowed
       expect(responseReceived).toBe(true);
@@ -455,7 +457,7 @@ describe('WebSocket Integration', () => {
       });
 
       await client.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       let responseData: { userId?: string } | null = null;
 
@@ -466,7 +468,7 @@ describe('WebSocket Integration', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       // Auth data should be available in handler
       expect(responseData).toBeDefined();
@@ -486,7 +488,7 @@ describe('WebSocket Integration', () => {
 
       await client1.connect();
       await client2.connect();
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
       let client1Response = false;
       let client2Response = false;
@@ -505,7 +507,7 @@ describe('WebSocket Integration', () => {
       (client1 as any).TestGateway.send('protected', {});
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client2 as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       // Both should receive responses
       expect(client1Response).toBe(true);

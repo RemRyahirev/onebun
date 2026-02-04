@@ -12,7 +12,7 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
 import { LoggerService } from '@onebun/logger';
 
 import { DrizzleService, DatabaseType } from '../src/index';
@@ -40,7 +40,7 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
       ),
     );
     drizzleService = new DrizzleService<DatabaseType.SQLITE>();
-    drizzleService.initializeService(logger, undefined);
+    drizzleService.initializeService(logger, createMockConfig());
     
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,

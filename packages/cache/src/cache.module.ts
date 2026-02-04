@@ -114,4 +114,13 @@ export class CacheModule {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return (CacheModule as any)[CACHE_MODULE_OPTIONS];
   }
+
+  /**
+   * Clear module options (used for testing)
+   * @internal
+   */
+  static clearOptions(): void {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    delete (CacheModule as any)[CACHE_MODULE_OPTIONS];
+  }
 }

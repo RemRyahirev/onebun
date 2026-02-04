@@ -9,7 +9,7 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
 import { LoggerService } from '@onebun/logger';
 
 import { DrizzleService } from '../src/drizzle.service';
@@ -73,7 +73,7 @@ describe('DrizzleService', () => {
     );
     // Create service and initialize via initializeService method
     service = new DrizzleService();
-    service.initializeService(logger, undefined);
+    service.initializeService(logger, createMockConfig());
   });
 
   afterEach(async () => {
@@ -148,7 +148,7 @@ describe('DrizzleService', () => {
         ),
       );
       const newService = new DrizzleService();
-      newService.initializeService(logger, undefined);
+      newService.initializeService(logger, createMockConfig());
       expect(() => newService.getDatabase()).toThrow('Database not initialized');
     });
 
@@ -210,7 +210,7 @@ describe('DrizzleService', () => {
         ),
       );
       const newService = new DrizzleService();
-      newService.initializeService(logger, undefined);
+      newService.initializeService(logger, createMockConfig());
       const options = newService.getConnectionOptions();
       expect(options).toBeNull();
     });
@@ -249,7 +249,7 @@ describe('DrizzleService', () => {
           ),
         );
         const newService = new DrizzleService();
-        newService.initializeService(logger, undefined);
+        newService.initializeService(logger, createMockConfig());
         // Wait for auto-init to complete
         await newService.waitForInit();
         // Verify database is not initialized
@@ -332,7 +332,7 @@ describe('DrizzleService', () => {
           ),
         );
         const newService = new DrizzleService();
-        newService.initializeService(logger, undefined);
+        newService.initializeService(logger, createMockConfig());
         // Wait for auto-init to complete
         await newService.waitForInit();
         // Verify database is not initialized
@@ -372,7 +372,7 @@ describe('DrizzleService', () => {
           ),
         );
         const newService = new DrizzleService();
-        newService.initializeService(logger, undefined);
+        newService.initializeService(logger, createMockConfig());
         // waitForInit should complete without error even if no DB_URL is set
         await newService.waitForInit();
         // But database should not be initialized

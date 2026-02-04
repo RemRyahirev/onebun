@@ -1,5 +1,11 @@
 // Re-export from external packages
-export { Env, type EnvSchema, EnvValidationError } from '@onebun/envs';
+export {
+  Env,
+  type EnvSchema,
+  EnvValidationError,
+  type InferConfigType,
+  type EnvVariableConfig,
+} from '@onebun/envs';
 export type { SyncLogger } from '@onebun/logger';
 export {
   createHttpClient,
@@ -56,6 +62,10 @@ export {
   // Global modules support
   clearGlobalServicesRegistry,
   getGlobalServicesRegistry,
+  // Config interface types
+  type IConfig,
+  type OneBunAppConfig,
+  NotInitializedConfig,
 } from './module';
 
 // Application
