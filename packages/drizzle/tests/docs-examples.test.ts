@@ -10,6 +10,8 @@ import {
   describe,
   it,
   expect,
+  beforeEach,
+  afterEach,
 } from 'bun:test';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
@@ -548,6 +550,229 @@ describe('Re-exports from @onebun/drizzle (docs/api/drizzle.md)', () => {
       expect(config.schema).toBe('./src/schema');
       expect(config.out).toBe('./drizzle');
       expect(config.dialect).toBe('postgresql');
+    });
+  });
+});
+
+describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
+  // From docs: DrizzleService provides direct access to Drizzle ORM query builders
+  // Methods: select(), insert(), update(), delete()
+
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleService } = require('../src/drizzle.service');
+  const { eq } = require('../src/index');
+  const { Effect } = require('effect');
+  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
+  const { LoggerService } = require('@onebun/logger');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  // Define test schema
+  const testUsers = sqliteTable('test_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  type TestUser = typeof testUsers.$inferSelect;
+  type InsertTestUser = typeof testUsers.$inferInsert;
+
+  let service: typeof DrizzleService.prototype;
+
+  beforeEach(async () => {
+    // Clear module options
+    DrizzleModule.clearOptions();
+
+    // Create service with mock logger
+    const loggerLayer = makeMockLoggerLayer();
+    const logger = Effect.runSync(
+      Effect.provide(
+        Effect.map(LoggerService, (l: unknown) => l),
+        loggerLayer,
+      ),
+    );
+
+    service = new DrizzleService();
+    service.initializeService(logger, createMockConfig());
+
+    // Initialize with in-memory SQLite
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+
+    // Create test table
+    const db = service.getDatabase();
+    db.run(`CREATE TABLE test_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL
+    )`);
+  });
+
+  afterEach(async () => {
+    if (service) {
+      await service.close();
+    }
+  });
+
+  describe('select() method', () => {
+    it('should select all rows', async () => {
+      // Insert test data first
+      const db = service.getDatabase();
+      db.run('INSERT INTO test_users (name, email) VALUES (\'John\', \'john@example.com\')');
+      db.run('INSERT INTO test_users (name, email) VALUES (\'Jane\', \'jane@example.com\')');
+
+      // From docs: Select all columns
+      const users = await service.select().from(testUsers);
+
+      expect(users).toHaveLength(2);
+      expect(users[0].name).toBe('John');
+      expect(users[1].name).toBe('Jane');
+    });
+
+    it('should select specific columns', async () => {
+      const db = service.getDatabase();
+      db.run('INSERT INTO test_users (name, email) VALUES (\'John\', \'john@example.com\')');
+
+      // From docs: Select specific columns
+      const names = await service.select({ name: testUsers.name }).from(testUsers);
+
+      expect(names).toHaveLength(1);
+      expect(names[0].name).toBe('John');
+      // Should not have other columns (type-safe)
+      expect('email' in names[0]).toBe(false);
+    });
+
+    it('should select with where condition', async () => {
+      const db = service.getDatabase();
+      db.run('INSERT INTO test_users (name, email) VALUES (\'John\', \'john@example.com\')');
+      db.run('INSERT INTO test_users (name, email) VALUES (\'Jane\', \'jane@example.com\')');
+
+      // From docs: Select with conditions
+      const users = await service.select()
+        .from(testUsers)
+        .where(eq(testUsers.name, 'John'));
+
+      expect(users).toHaveLength(1);
+      expect(users[0].name).toBe('John');
+    });
+  });
+
+  describe('insert() method', () => {
+    it('should insert single row', async () => {
+      // From docs: Insert single row
+      await service.insert(testUsers).values({ name: 'John', email: 'john@example.com' });
+
+      const users = await service.select().from(testUsers);
+      expect(users).toHaveLength(1);
+      expect(users[0].name).toBe('John');
+    });
+
+    it('should insert with returning', async () => {
+      // From docs: Insert with returning
+      const result = await service.insert(testUsers)
+        .values({ name: 'John', email: 'john@example.com' })
+        .returning();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('John');
+      expect(result[0].id).toBeDefined();
+    });
+
+    it('should insert multiple rows', async () => {
+      // From docs: Insert multiple rows
+      await service.insert(testUsers).values([
+        { name: 'John', email: 'john@example.com' },
+        { name: 'Jane', email: 'jane@example.com' },
+      ]);
+
+      const users = await service.select().from(testUsers);
+      expect(users).toHaveLength(2);
+    });
+  });
+
+  describe('update() method', () => {
+    it('should update rows', async () => {
+      // Insert test data
+      await service.insert(testUsers).values({ name: 'John', email: 'john@example.com' });
+
+      // From docs: Update rows
+      await service.update(testUsers)
+        .set({ name: 'Jane' })
+        .where(eq(testUsers.name, 'John'));
+
+      const users = await service.select().from(testUsers);
+      expect(users[0].name).toBe('Jane');
+    });
+
+    it('should update with returning', async () => {
+      await service.insert(testUsers).values({ name: 'John', email: 'john@example.com' });
+
+      // From docs: Update with returning
+      const result = await service.update(testUsers)
+        .set({ name: 'Jane' })
+        .where(eq(testUsers.name, 'John'))
+        .returning();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('Jane');
+    });
+  });
+
+  describe('delete() method', () => {
+    it('should delete rows', async () => {
+      await service.insert(testUsers).values([
+        { name: 'John', email: 'john@example.com' },
+        { name: 'Jane', email: 'jane@example.com' },
+      ]);
+
+      // From docs: Delete rows
+      await service.delete(testUsers).where(eq(testUsers.name, 'John'));
+
+      const users = await service.select().from(testUsers);
+      expect(users).toHaveLength(1);
+      expect(users[0].name).toBe('Jane');
+    });
+
+    it('should delete with returning', async () => {
+      await service.insert(testUsers).values({ name: 'John', email: 'john@example.com' });
+
+      // From docs: Delete with returning
+      const result = await service.delete(testUsers)
+        .where(eq(testUsers.name, 'John'))
+        .returning();
+
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('John');
+
+      const users = await service.select().from(testUsers);
+      expect(users).toHaveLength(0);
+    });
+  });
+
+  describe('Type-safe queries (docs example)', () => {
+    it('should provide typed results from select', async () => {
+      await service.insert(testUsers).values({ name: 'John', email: 'john@example.com' });
+
+      const users: TestUser[] = await service.select().from(testUsers);
+
+      // TypeScript knows the shape of user
+      const user = users[0];
+      expect(typeof user.id).toBe('number');
+      expect(typeof user.name).toBe('string');
+      expect(typeof user.email).toBe('string');
+    });
+
+    it('should accept typed insert data', async () => {
+      // TypeScript validates InsertTestUser type
+      const userData: InsertTestUser = {
+        name: 'John',
+        email: 'john@example.com',
+      };
+
+      const [inserted] = await service.insert(testUsers).values(userData).returning();
+
+      expect(inserted.name).toBe('John');
     });
   });
 });

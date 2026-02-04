@@ -106,6 +106,7 @@ export class UserModule {}
 // user/user.service.ts - DrizzleService is automatically available
 import { Service, BaseService } from '@onebun/core';
 import { DrizzleService } from '@onebun/drizzle';
+import { users } from './schema';
 
 @Service()
 export class UserService extends BaseService {
@@ -114,7 +115,7 @@ export class UserService extends BaseService {
   }
 
   async findAll() {
-    return this.db.query(db => db.select().from(users));
+    return this.db.select().from(users);
   }
 }
 ```
@@ -301,53 +302,81 @@ export class UserService extends BaseService {
 
 ### Query Methods
 
-#### query()
+DrizzleService provides direct access to Drizzle ORM query builders:
 
-Execute a query function with the database instance.
+#### select()
 
-```typescript
-async query<T>(
-  fn: (db: DatabaseInstance) => Promise<T> | T
-): Promise<T>
-```
+Create a SELECT query.
 
 ```typescript
-// Select all
-const users = await this.db.query(
-  db => db.select().from(users)
-);
+// Select all columns
+const allUsers = await this.db.select().from(users);
+
+// Select specific columns
+const names = await this.db.select({ name: users.name, email: users.email }).from(users);
 
 // Select with conditions
-import { eq, and, or, like } from '@onebun/drizzle';
+import { eq } from '@onebun/drizzle';
 
-const user = await this.db.query(
-  db => db.select()
-    .from(users)
-    .where(eq(users.id, id))
-    .limit(1)
-);
+const user = await this.db.select()
+  .from(users)
+  .where(eq(users.id, id))
+  .limit(1);
+```
 
-// Insert
-const newUser = await this.db.query(
-  db => db.insert(users)
-    .values({ name: 'John', email: 'john@example.com' })
-    .returning()
-);
+#### insert()
 
-// Update
-const updated = await this.db.query(
-  db => db.update(users)
-    .set({ name: 'Jane' })
-    .where(eq(users.id, id))
-    .returning()
-);
+Create an INSERT query.
 
-// Delete
-const deleted = await this.db.query(
-  db => db.delete(users)
-    .where(eq(users.id, id))
-    .returning()
-);
+```typescript
+// Insert single row
+await this.db.insert(users).values({ name: 'John', email: 'john@example.com' });
+
+// Insert with returning
+const [newUser] = await this.db.insert(users)
+  .values({ name: 'John', email: 'john@example.com' })
+  .returning();
+
+// Insert multiple rows
+await this.db.insert(users).values([
+  { name: 'John', email: 'john@example.com' },
+  { name: 'Jane', email: 'jane@example.com' },
+]);
+```
+
+#### update()
+
+Create an UPDATE query.
+
+```typescript
+import { eq } from '@onebun/drizzle';
+
+// Update rows
+await this.db.update(users)
+  .set({ name: 'Jane' })
+  .where(eq(users.id, id));
+
+// Update with returning
+const [updated] = await this.db.update(users)
+  .set({ name: 'Jane' })
+  .where(eq(users.id, id))
+  .returning();
+```
+
+#### delete()
+
+Create a DELETE query.
+
+```typescript
+import { eq } from '@onebun/drizzle';
+
+// Delete rows
+await this.db.delete(users).where(eq(users.id, id));
+
+// Delete with returning
+const [deleted] = await this.db.delete(users)
+  .where(eq(users.id, id))
+  .returning();
 ```
 
 #### transaction()
@@ -397,25 +426,11 @@ export class UserRepository extends BaseRepository<typeof users, User, InsertUse
 
   // Custom methods
   async findByEmail(email: string): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.select()
-        .from(users)
-        .where(eq(users.email, email))
-        .limit(1)
-    );
+    const result = await this.db.select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
     return result[0] || null;
-  }
-
-  async findWithPosts(id: string): Promise<UserWithPosts | null> {
-    const result = await this.db.query(
-      db => db.query.users.findFirst({
-        where: eq(users.id, id),
-        with: {
-          posts: true,
-        },
-      })
-    );
-    return result || null;
   }
 }
 ```
@@ -426,34 +441,28 @@ export class UserRepository extends BaseRepository<typeof users, User, InsertUse
 
 ```typescript
 // Select specific columns
-const names = await this.db.query(
-  db => db.select({ name: users.name, email: users.email }).from(users)
-);
+const names = await this.db.select({ name: users.name, email: users.email }).from(users);
 
 // Count
-const count = await this.db.query(
-  db => db.select({ count: sql`count(*)` }).from(users)
-);
+import { sql } from '@onebun/drizzle';
+const countResult = await this.db.select({ count: sql`count(*)` }).from(users);
 
 // Order and limit
-const recentUsers = await this.db.query(
-  db => db.select()
-    .from(users)
-    .orderBy(desc(users.createdAt))
-    .limit(10)
-);
+import { desc } from '@onebun/drizzle';
+const recentUsers = await this.db.select()
+  .from(users)
+  .orderBy(desc(users.createdAt))
+  .limit(10);
 
 // Pagination
 const page = 1;
-const limit = 10;
-const offset = (page - 1) * limit;
+const pageSize = 10;
+const offset = (page - 1) * pageSize;
 
-const users = await this.db.query(
-  db => db.select()
-    .from(users)
-    .limit(limit)
-    .offset(offset)
-);
+const pagedUsers = await this.db.select()
+  .from(users)
+  .limit(pageSize)
+  .offset(offset);
 ```
 
 ### Filtering
@@ -462,49 +471,37 @@ const users = await this.db.query(
 import { eq, ne, gt, gte, lt, lte, like, ilike, and, or, not, isNull, isNotNull, inArray, notInArray } from '@onebun/drizzle';
 
 // Equal
-const user = await this.db.query(
-  db => db.select().from(users).where(eq(users.id, '123'))
-);
+const user = await this.db.select().from(users).where(eq(users.id, '123'));
 
 // Multiple conditions (AND)
-const admins = await this.db.query(
-  db => db.select().from(users).where(
-    and(
-      eq(users.role, 'admin'),
-      eq(users.active, true)
-    )
+const admins = await this.db.select().from(users).where(
+  and(
+    eq(users.role, 'admin'),
+    eq(users.active, true)
   )
 );
 
 // OR conditions
-const filtered = await this.db.query(
-  db => db.select().from(users).where(
-    or(
-      eq(users.role, 'admin'),
-      eq(users.role, 'moderator')
-    )
+const filtered = await this.db.select().from(users).where(
+  or(
+    eq(users.role, 'admin'),
+    eq(users.role, 'moderator')
   )
 );
 
 // LIKE
-const search = await this.db.query(
-  db => db.select().from(users).where(
-    like(users.name, '%john%')
-  )
+const searchResults = await this.db.select().from(users).where(
+  like(users.name, '%john%')
 );
 
 // IN array
-const specific = await this.db.query(
-  db => db.select().from(users).where(
-    inArray(users.id, ['1', '2', '3'])
-  )
+const specific = await this.db.select().from(users).where(
+  inArray(users.id, ['1', '2', '3'])
 );
 
 // NULL checks
-const noAge = await this.db.query(
-  db => db.select().from(users).where(
-    isNull(users.age)
-  )
+const noAge = await this.db.select().from(users).where(
+  isNull(users.age)
 );
 ```
 
@@ -512,31 +509,14 @@ const noAge = await this.db.query(
 
 ```typescript
 // Inner join
-const postsWithAuthors = await this.db.query(
-  db => db.select()
-    .from(posts)
-    .innerJoin(users, eq(posts.authorId, users.id))
-);
+const postsWithAuthors = await this.db.select()
+  .from(posts)
+  .innerJoin(users, eq(posts.authorId, users.id));
 
 // Left join
-const usersWithPosts = await this.db.query(
-  db => db.select()
-    .from(users)
-    .leftJoin(posts, eq(users.id, posts.authorId))
-);
-
-// With relations (if defined)
-const userWithPosts = await this.db.query(
-  db => db.query.users.findFirst({
-    where: eq(users.id, id),
-    with: {
-      posts: {
-        orderBy: desc(posts.createdAt),
-        limit: 5,
-      },
-    },
-  })
-);
+const usersWithPosts = await this.db.select()
+  .from(users)
+  .leftJoin(posts, eq(users.id, posts.authorId));
 ```
 
 ### Aggregations
@@ -545,26 +525,20 @@ const userWithPosts = await this.db.query(
 import { sql, count, sum, avg, min, max } from '@onebun/drizzle';
 
 // Count
-const total = await this.db.query(
-  db => db.select({ count: count() }).from(users)
-);
+const total = await this.db.select({ count: count() }).from(users);
 
 // Group by
-const postsByUser = await this.db.query(
-  db => db.select({
-    authorId: posts.authorId,
-    postCount: count(),
-  })
-    .from(posts)
-    .groupBy(posts.authorId)
-);
+const postsByUser = await this.db.select({
+  authorId: posts.authorId,
+  postCount: count(),
+})
+  .from(posts)
+  .groupBy(posts.authorId);
 
 // Sum
-const totalSales = await this.db.query(
-  db => db.select({
-    total: sum(orders.amount),
-  }).from(orders)
-);
+const totalSales = await this.db.select({
+  total: sum(orders.amount),
+}).from(orders);
 ```
 
 ## Migrations
@@ -727,7 +701,7 @@ export type InsertPost = typeof posts.$inferInsert;
 
 // user.repository.ts
 import { Service, BaseService } from '@onebun/core';
-import { DrizzleService, BaseRepository, eq } from '@onebun/drizzle';
+import { DrizzleService, eq } from '@onebun/drizzle';
 import { users, type User, type InsertUser } from './schema';
 
 @Service()
@@ -737,41 +711,42 @@ export class UserRepository extends BaseService {
   }
 
   async findAll(): Promise<User[]> {
-    return this.db.query(db => db.select().from(users));
+    return this.db.select().from(users);
   }
 
-  async findById(id: string): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.select().from(users).where(eq(users.id, id)).limit(1)
-    );
+  async findById(id: number): Promise<User | null> {
+    const result = await this.db.select()
+      .from(users)
+      .where(eq(users.id, id))
+      .limit(1);
     return result[0] || null;
   }
 
   async findByEmail(email: string): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.select().from(users).where(eq(users.email, email)).limit(1)
-    );
+    const result = await this.db.select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
     return result[0] || null;
   }
 
   async create(data: InsertUser): Promise<User> {
-    const result = await this.db.query(
-      db => db.insert(users).values(data).returning()
-    );
+    const result = await this.db.insert(users).values(data).returning();
     return result[0];
   }
 
-  async update(id: string, data: Partial<InsertUser>): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.update(users).set(data).where(eq(users.id, id)).returning()
-    );
+  async update(id: number, data: Partial<InsertUser>): Promise<User | null> {
+    const result = await this.db.update(users)
+      .set(data)
+      .where(eq(users.id, id))
+      .returning();
     return result[0] || null;
   }
 
-  async delete(id: string): Promise<boolean> {
-    const result = await this.db.query(
-      db => db.delete(users).where(eq(users.id, id)).returning()
-    );
+  async delete(id: number): Promise<boolean> {
+    const result = await this.db.delete(users)
+      .where(eq(users.id, id))
+      .returning();
     return result.length > 0;
   }
 }

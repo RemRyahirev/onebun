@@ -525,4 +525,135 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return await (this.db as any).transaction(callback);
   }
+
+  // ============================================
+  // Direct database operation methods (proxies)
+  // ============================================
+
+  /**
+   * Create a SELECT query
+   * 
+   * @example
+   * ```typescript
+   * // Select all columns
+   * const users = await this.db.select().from(usersTable);
+   * 
+   * // Select specific columns
+   * const names = await this.db.select({ name: usersTable.name }).from(usersTable);
+   * ```
+   */
+  select(): ReturnType<DatabaseInstanceForType<TDbType>['select']>;
+  select<TSelection extends Record<string, unknown>>(
+    fields: TSelection,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['select']>;
+  select<TSelection extends Record<string, unknown>>(
+    fields?: TSelection,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['select']> {
+    const db = this.getDatabase();
+    if (fields) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (db as any).select(fields);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (db as any).select();
+  }
+
+  /**
+   * Create a SELECT DISTINCT query
+   * 
+   * @example
+   * ```typescript
+   * // Select distinct values
+   * const uniqueNames = await this.db.selectDistinct({ name: usersTable.name }).from(usersTable);
+   * ```
+   */
+  selectDistinct(): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']>;
+  selectDistinct<TSelection extends Record<string, unknown>>(
+    fields: TSelection,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']>;
+  selectDistinct<TSelection extends Record<string, unknown>>(
+    fields?: TSelection,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']> {
+    const db = this.getDatabase();
+    if (fields) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (db as any).selectDistinct(fields);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (db as any).selectDistinct();
+  }
+
+  /**
+   * Create an INSERT query
+   * 
+   * @example
+   * ```typescript
+   * // Insert a single row
+   * await this.db.insert(usersTable).values({ name: 'John', email: 'john@example.com' });
+   * 
+   * // Insert with returning
+   * const [newUser] = await this.db.insert(usersTable)
+   *   .values({ name: 'John', email: 'john@example.com' })
+   *   .returning();
+   * ```
+   */
+  insert<TTable extends Parameters<DatabaseInstanceForType<TDbType>['insert']>[0]>(
+    table: TTable,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['insert']> {
+    const db = this.getDatabase();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (db as any).insert(table);
+  }
+
+  /**
+   * Create an UPDATE query
+   * 
+   * @example
+   * ```typescript
+   * // Update rows
+   * await this.db.update(usersTable)
+   *   .set({ name: 'Jane' })
+   *   .where(eq(usersTable.id, 1));
+   * 
+   * // Update with returning
+   * const [updated] = await this.db.update(usersTable)
+   *   .set({ name: 'Jane' })
+   *   .where(eq(usersTable.id, 1))
+   *   .returning();
+   * ```
+   */
+  update<TTable extends Parameters<DatabaseInstanceForType<TDbType>['update']>[0]>(
+    table: TTable,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['update']> {
+    const db = this.getDatabase();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (db as any).update(table);
+  }
+
+  /**
+   * Create a DELETE query
+   * 
+   * @example
+   * ```typescript
+   * // Delete rows
+   * await this.db.delete(usersTable).where(eq(usersTable.id, 1));
+   * 
+   * // Delete with returning
+   * const [deleted] = await this.db.delete(usersTable)
+   *   .where(eq(usersTable.id, 1))
+   *   .returning();
+   * ```
+   */
+  delete<TTable extends Parameters<DatabaseInstanceForType<TDbType>['delete']>[0]>(
+    table: TTable,
+  ): ReturnType<DatabaseInstanceForType<TDbType>['delete']> {
+    const db = this.getDatabase();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (db as any).delete(table);
+  }
 }
