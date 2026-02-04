@@ -1,3 +1,4 @@
+import { type as arktype } from 'arktype';
 import {
   describe,
   test,
@@ -19,6 +20,7 @@ import {
   Param,
   Query,
   Body,
+  Header,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
 import { makeMockLoggerLayer } from '../testing/test-utils';
@@ -947,10 +949,722 @@ describe('OneBunApplication', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
 
-      expect(response).toBeDefined();
-      // Accept any successful response for now
-      expect(response).toBeTruthy();
+      expect(response.status).toBe(200);
+      expect(body.result.query).toBe('test');
+      expect(body.result.limit).toBe(5);
+      expect(body.result.results).toEqual(['item1', 'item2']);
+    });
+
+    test('should handle URL-encoded query parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(
+          @Query('name') name: string,
+          @Query('filter') filter?: string,
+        ) {
+          return { name, filter };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Test URL-encoded values: "John Doe" and "test&value"
+      const request = new Request('http://localhost:3000/api/search?name=John%20Doe&filter=test%26value', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.name).toBe('John Doe');
+      expect(body.result.filter).toBe('test&value');
+    });
+
+    test('should handle OAuth callback query string with special characters', async () => {
+      @Controller('/api/auth/google')
+      class AuthController extends BaseController {
+        @Get('/callback')
+        async callback(
+          @Query('state') state: string,
+          @Query('code') code: string,
+          @Query('scope') scope: string,
+          @Query('authuser') authuser?: string,
+          @Query('prompt') prompt?: string,
+        ) {
+          return {
+            state, code, scope, authuser, prompt, 
+          };
+        }
+      }
+
+      @Module({
+        controllers: [AuthController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Real OAuth callback URL from the user's example
+      const queryString = 'state=b6d290537858f64d894a47480c5e3edd&code=4/0ASc3gC0o5UhWEjUTslteiiSpR6_NsLYXXdfCjDq0rPFYymqB7LMofianDqC1l4NHJXvA3A&scope=email%20profile%20https://www.googleapis.com/auth/userinfo.profile%20https://www.googleapis.com/auth/userinfo.email%20openid&authuser=0&prompt=consent';
+      const request = new Request(`http://localhost:3000/api/auth/google/callback?${queryString}`, {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.state).toBe('b6d290537858f64d894a47480c5e3edd');
+      expect(body.result.code).toBe('4/0ASc3gC0o5UhWEjUTslteiiSpR6_NsLYXXdfCjDq0rPFYymqB7LMofianDqC1l4NHJXvA3A');
+      expect(body.result.scope).toBe('email profile https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email openid');
+      expect(body.result.authuser).toBe('0');
+      expect(body.result.prompt).toBe('consent');
+    });
+
+    test('should handle multiple query parameters with same key as array', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/filter')
+        async filter(@Query('tag') tag: string | string[]) {
+          return { tags: Array.isArray(tag) ? tag : [tag] };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Multiple values with same key: ?tag=a&tag=b&tag=c
+      const request = new Request('http://localhost:3000/api/filter?tag=a&tag=b&tag=c', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.tags).toEqual(['a', 'b', 'c']);
+    });
+
+    test('should handle array notation query parameters (tag[]=a&tag[]=b)', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/filter')
+        async filter(@Query('tag') tag: string[]) {
+          return { tags: tag };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Array notation: ?tag[]=a&tag[]=b&tag[]=c
+      const request = new Request('http://localhost:3000/api/filter?tag[]=a&tag[]=b&tag[]=c', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.tags).toEqual(['a', 'b', 'c']);
+    });
+
+    test('should handle single value with array notation (tag[]=a)', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/filter')
+        async filter(@Query('tag') tag: string[]) {
+          return { tags: tag, isArray: Array.isArray(tag) };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Single value with array notation should still be an array
+      const request = new Request('http://localhost:3000/api/filter?tag[]=single', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.tags).toEqual(['single']);
+      expect(body.result.isArray).toBe(true);
+    });
+
+    test('should handle empty query parameter values', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/params')
+        async params(
+          @Query('empty') empty: string,
+          @Query('other') other: string,
+        ) {
+          return { empty, other, emptyIsString: typeof empty === 'string' };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Empty value: ?empty=&other=value
+      const request = new Request('http://localhost:3000/api/params?empty=&other=value', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.empty).toBe('');
+      expect(body.result.other).toBe('value');
+      expect(body.result.emptyIsString).toBe(true);
+    });
+
+    test('should handle missing optional query parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/optional')
+        async optional(
+          @Query('required') required: string,
+          @Query('optional') optional?: string,
+        ) {
+          return { required, optional, hasOptional: optional !== undefined };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Only required parameter, optional is missing
+      const request = new Request('http://localhost:3000/api/optional?required=value', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.required).toBe('value');
+      expect(body.result.optional).toBeUndefined();
+      expect(body.result.hasOptional).toBe(false);
+    });
+
+    test('should handle multiple path parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/users/:userId/posts/:postId')
+        async getPost(
+          @Param('userId') userId: string,
+          @Param('postId') postId: string,
+        ) {
+          return { userId: parseInt(userId), postId: parseInt(postId) };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/users/42/posts/123', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.userId).toBe(42);
+      expect(body.result.postId).toBe(123);
+    });
+
+    test('should handle URL-encoded path parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/files/:filename')
+        async getFile(@Param('filename') filename: string) {
+          return { filename };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // URL-encoded filename: "my file.txt"
+      const request = new Request('http://localhost:3000/api/files/my%20file.txt', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.filename).toBe('my%20file.txt');
+    });
+
+    test('should handle path parameters with query parameters together', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/users/:id/posts')
+        async getUserPosts(
+          @Param('id') userId: string,
+          @Query('page') page?: string,
+          @Query('limit') limit?: string,
+        ) {
+          return {
+            userId: parseInt(userId),
+            page: page ? parseInt(page) : 1,
+            limit: limit ? parseInt(limit) : 10,
+          };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/users/5/posts?page=2&limit=20', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.userId).toBe(5);
+      expect(body.result.page).toBe(2);
+      expect(body.result.limit).toBe(20);
+    });
+
+    test('should handle nested JSON body', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Post('/complex')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async createComplex(@Body() data: any) {
+          return { received: data };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const complexData = {
+        user: {
+          name: 'John',
+          address: {
+            city: 'NYC',
+            zip: '10001',
+          },
+        },
+        items: [{ id: 1, name: 'Item 1' }, { id: 2, name: 'Item 2' }],
+        metadata: {
+          created: '2024-01-01',
+          tags: ['tag1', 'tag2'],
+        },
+      };
+
+      const request = new Request('http://localhost:3000/api/complex', {
+        method: 'POST',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(complexData),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.received).toEqual(complexData);
+    });
+
+    test('should handle empty body gracefully', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Post('/empty-body')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async handleEmpty(@Body() data?: any) {
+          return { hasBody: data !== undefined, data };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/empty-body', {
+        method: 'POST',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.hasBody).toBe(false);
+      expect(body.result.data).toBeUndefined();
+    });
+
+    test('should handle header parameters', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/headers')
+        async getHeaders(
+          @Header('Authorization') auth: string,
+          @Header('X-Custom-Header') custom?: string,
+        ) {
+          return { auth, custom };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/headers', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Authorization': 'Bearer token123',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'X-Custom-Header': 'custom-value',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.auth).toBe('Bearer token123');
+      expect(body.result.custom).toBe('custom-value');
+    });
+
+    test('should handle missing optional header', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/optional-header')
+        async getOptionalHeader(
+          @Header('X-Required') required: string,
+          @Header('X-Optional') optional?: string | null,
+        ) {
+          // Note: headers.get() returns null for missing headers, not undefined
+          return { required, optional, hasOptional: optional !== null };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/optional-header', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'X-Required': 'required-value',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.required).toBe('required-value');
+      // headers.get() returns null for missing headers
+      expect(body.result.optional).toBeNull();
+      expect(body.result.hasOptional).toBe(false);
+    });
+
+    test('should return 500 when required query parameter is missing', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/required-query')
+        async requiredQuery(
+          @Query('required', { required: true }) required: string,
+        ) {
+          return { required };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Missing required query parameter
+      const request = new Request('http://localhost:3000/api/required-query', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(500);
+    });
+
+    test('should pass validation with required query parameter present', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/required-query')
+        async requiredQuery(
+          @Query('required', { required: true }) required: string,
+        ) {
+          return { required };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/required-query?required=value', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.required).toBe('value');
+    });
+
+    test('should validate query parameter with arktype schema', async () => {
+      const numberSchema = arktype('string.numeric.parse');
+
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/validated')
+        async validated(
+          @Query('count', numberSchema) count: number,
+        ) {
+          return { count, typeOf: typeof count };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/validated?count=42', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.count).toBe(42);
+      expect(body.result.typeOf).toBe('number');
+    });
+
+    test('should fail validation with invalid arktype schema value', async () => {
+      const numberSchema = arktype('string.numeric.parse');
+
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/validated')
+        async validated(
+          @Query('count', numberSchema) count: number,
+        ) {
+          return { count };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Invalid value: "not-a-number" instead of numeric string
+      const request = new Request('http://localhost:3000/api/validated?count=not-a-number', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(500);
+    });
+
+    test('should validate body with arktype schema', async () => {
+      const userSchema = arktype({
+        name: 'string',
+        age: 'number',
+      });
+
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Post('/user')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async createUser(@Body(userSchema) user: any) {
+          return { user };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/user', {
+        method: 'POST',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John', age: 30 }),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.user).toEqual({ name: 'John', age: 30 });
+    });
+
+    test('should fail body validation with invalid data', async () => {
+      const userSchema = arktype({
+        name: 'string',
+        age: 'number',
+      });
+
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Post('/user')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async createUser(@Body(userSchema) user: any) {
+          return { user };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Invalid: age is string instead of number
+      const request = new Request('http://localhost:3000/api/user', {
+        method: 'POST',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'John', age: 'thirty' }),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(500);
     });
 
     test('should handle metrics endpoint', async () => {

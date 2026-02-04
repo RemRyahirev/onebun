@@ -635,6 +635,26 @@ export class OneBunApplication {
           let route = routes.get(exactRouteKey);
           const paramValues: Record<string, string | string[]> = {};
 
+          // Extract query parameters from URL
+          for (const [rawKey, value] of url.searchParams.entries()) {
+            // Handle array notation: tag[] -> tag (as array)
+            const isArrayNotation = rawKey.endsWith('[]');
+            const key = isArrayNotation ? rawKey.replace('[]', '') : rawKey;
+
+            const existing = paramValues[key];
+            if (existing !== undefined) {
+              // Handle multiple values with same key (e.g., ?tag=a&tag=b or ?tag[]=a&tag[]=b)
+              paramValues[key] = Array.isArray(existing)
+                ? [...existing, value]
+                : [existing, value];
+            } else if (isArrayNotation) {
+              // Array notation always creates an array, even with single value
+              paramValues[key] = [value];
+            } else {
+              paramValues[key] = value;
+            }
+          }
+
           // If no exact match, try pattern matching
           if (!route) {
             for (const [_routeKey, routeData] of routes) {
