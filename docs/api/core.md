@@ -32,7 +32,8 @@ const app = new OneBunApplication(AppModule, {
 - `app.start()` - starts HTTP server
 - `app.stop()` - graceful shutdown
 - `app.getLogger({ className: 'X' })` - get logger instance
-- `app.getConfigValue<T>('path.to.config')` - read config
+- `app.getConfig()` - get typed config service
+- `app.getConfigValue('path.to.config')` - read config value (fully typed with module augmentation)
 - `app.getHttpUrl()` - get listening URL
 
 **MultiServiceApplication** - for running multiple services in one process, useful for local development or monolith deployment.
@@ -121,10 +122,11 @@ class OneBunApplication {
   /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT) */
   enableGracefulShutdown(): void;
 
-  /** Get configuration service */
-  getConfig(): ConfigServiceImpl;
+  /** Get configuration service with full type inference via module augmentation */
+  getConfig(): IConfig<OneBunAppConfig>;
 
-  /** Get configuration value by path */
+  /** Get configuration value by path with full type inference via module augmentation */
+  getConfigValue<P extends DeepPaths<OneBunAppConfig>>(path: P): DeepValue<OneBunAppConfig, P>;
   getConfigValue<T = unknown>(path: string): T;
 
   /** Get logger instance */
@@ -163,12 +165,14 @@ const app = new OneBunApplication(AppModule, {
 
 await app.start();
 
-// Access configuration
-const port = app.getConfigValue<number>('server.port');
+// Access configuration - fully typed with module augmentation
+const port = app.getConfigValue('server.port');  // number (auto-inferred)
+const config = app.getConfig();
+const host = config.get('server.host');          // string (auto-inferred)
 
 // Get logger
 const logger = app.getLogger({ component: 'main' });
-logger.info('Application started', { port });
+logger.info('Application started', { port, host });
 
 // Application will automatically handle shutdown signals (SIGTERM, SIGINT)
 // Or stop manually:

@@ -164,6 +164,98 @@ describe('OneBunApplication', () => {
       // The actual value access might need the config to be fully initialized
       // which happens during runtime, not during construction
     });
+
+    test('should provide typed access to config values via getConfig()', () => {
+      @Module({})
+      class TestModule {}
+
+      // Mock config that simulates typed IConfig<OneBunAppConfig>
+      const mockConfigValues = {
+        server: { port: 9991, host: 'localhost' },
+      };
+      const mockConfig = {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        initialize: mock(async () => {}),
+        get: mock((path: string) => {
+          const parts = path.split('.');
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let value: any = mockConfigValues;
+          for (const part of parts) {
+            value = value?.[part];
+          }
+
+          return value;
+        }),
+        values: mockConfigValues,
+        getSafeConfig: mock(() => mockConfigValues),
+        isInitialized: true,
+      };
+
+      const app = createTestApp(TestModule);
+      // Inject mock config
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (app as any).config = mockConfig;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (app as any).configService = {
+        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true, 
+      };
+
+      // getConfig() returns IConfig<OneBunAppConfig> which provides typed .get() method
+      const config = app.getConfig();
+      expect(config).toBeDefined();
+      
+      // Access values through the typed interface
+      // TypeScript will infer the correct types based on module augmentation
+      const port = config.get('server.port');
+      const host = config.get('server.host');
+      
+      expect(port).toBe(9991);
+      expect(host).toBe('localhost');
+    });
+
+    test('should provide typed access via getConfigValue() convenience method', () => {
+      @Module({})
+      class TestModule {}
+
+      // Mock config that simulates typed IConfig<OneBunAppConfig>
+      const mockConfigValues = {
+        app: { name: 'test-app', debug: true },
+      };
+      const mockConfig = {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        initialize: mock(async () => {}),
+        get: mock((path: string) => {
+          const parts = path.split('.');
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let value: any = mockConfigValues;
+          for (const part of parts) {
+            value = value?.[part];
+          }
+
+          return value;
+        }),
+        values: mockConfigValues,
+        getSafeConfig: mock(() => mockConfigValues),
+        isInitialized: true,
+      };
+
+      const app = createTestApp(TestModule);
+      // Inject mock config
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (app as any).config = mockConfig;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (app as any).configService = {
+        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true, 
+      };
+
+      // getConfigValue() is a convenience method that delegates to getConfig().get()
+      // It also provides typed access based on OneBunAppConfig module augmentation
+      const appName = app.getConfigValue('app.name');
+      const debug = app.getConfigValue('app.debug');
+      
+      expect(appName).toBe('test-app');
+      expect(debug).toBe(true);
+    });
   });
 
   describe('Layer methods', () => {

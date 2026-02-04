@@ -2,6 +2,7 @@ import { Context } from 'effect';
 
 import type { IConfig, OneBunAppConfig } from './config.interface';
 
+import type { DeepPaths, DeepValue } from '@onebun/envs';
 import type { SyncLogger } from '@onebun/logger';
 
 import { BaseService, Service } from './service';
@@ -40,20 +41,35 @@ export class ConfigServiceImpl extends BaseService {
   }
 
   /**
-   * Get configuration value by path
+   * Get configuration value by path with full type inference.
+   * Uses module augmentation of OneBunAppConfig for type-safe access.
+   * 
+   * @example
+   * // With module augmentation:
+   * declare module '@onebun/core' {
+   *   interface OneBunAppConfig {
+   *     server: { port: number; host: string };
+   *   }
+   * }
+   * 
+   * const port = configService.get('server.port'); // number
+   * const host = configService.get('server.host'); // string
    */
-  get<T = unknown>(path: string): T {
+  get<P extends DeepPaths<OneBunAppConfig>>(path: P): DeepValue<OneBunAppConfig, P>;
+  /** Fallback for dynamic paths */
+  get<T = unknown>(path: string): T;
+  get(path: string): unknown {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
 
-    return this.configInstance.get(path) as T;
+    return this.configInstance.get(path);
   }
 
   /**
    * Get all configuration values
    */
-  get values(): unknown {
+  get values(): OneBunAppConfig {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -64,7 +80,7 @@ export class ConfigServiceImpl extends BaseService {
   /**
    * Get safe configuration for logging (sensitive data masked)
    */
-  getSafeConfig(): unknown {
+  getSafeConfig(): OneBunAppConfig {
     if (!this.configInstance) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }

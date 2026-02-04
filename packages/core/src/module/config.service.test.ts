@@ -141,7 +141,8 @@ describe('ConfigService', () => {
         
         const result = service.values;
         
-        expect(result).toEqual({ test: 'value' });
+        // Use unknown cast because tests use mock data that doesn't match OneBunAppConfig augmentation
+        expect(result as unknown).toEqual({ test: 'value' });
       });
 
       test('should throw error when config not initialized', () => {
@@ -159,7 +160,8 @@ describe('ConfigService', () => {
         
         const result = service.getSafeConfig();
         
-        expect(result).toEqual({ test: '***' });
+        // Use unknown cast because tests use mock data that doesn't match OneBunAppConfig augmentation
+        expect(result as unknown).toEqual({ test: '***' });
         expect(mockConfig.getSafeConfig).toHaveBeenCalled();
       });
 
@@ -344,13 +346,15 @@ describe('ConfigService', () => {
 
       expect((service as any).get('database.host')).toBe('localhost');
       expect((service as any).get('database.port')).toBe(5432);
-      expect(service.values).toEqual({
+      // Use unknown cast because tests use mock data that doesn't match OneBunAppConfig augmentation
+      expect(service.values as unknown).toEqual({
         database: { host: 'localhost', port: 5432 },
         api: { key: 'secret', timeout: 30000 },
       });
       
       const safeConfig = service.getSafeConfig();
-      expect(safeConfig).toEqual({
+      // Use unknown cast because tests use mock data that doesn't match OneBunAppConfig augmentation
+      expect(safeConfig as unknown).toEqual({
         database: { host: 'localhost', port: 5432 },
         api: { key: '***', timeout: 30000 },
       });

@@ -282,23 +282,39 @@ export class DatabaseService extends BaseService {
 
 ### From Application
 
+With module augmentation, both `getConfig()` and `getConfigValue()` provide full type inference:
+
 ```typescript
+// In config.ts - define module augmentation for type safety
+declare module '@onebun/core' {
+  interface OneBunAppConfig {
+    server: { port: number; host: string };
+    database: { url: string; maxConnections: number };
+  }
+}
+
+// In index.ts
 const app = new OneBunApplication(AppModule, { envSchema });
 await app.start();
 
-// Get config service
+// Get config service - returns IConfig<OneBunAppConfig>
 const config = app.getConfig();
 
-// Get specific value
-const port = app.getConfigValue<number>('server.port');
+// Typed access with autocomplete - no manual type annotation needed!
+const port = config.get('server.port');          // number (auto-inferred)
+const host = config.get('server.host');          // string (auto-inferred)
+const dbUrl = config.get('database.url');        // string (auto-inferred)
 
-// Get all values
+// Convenience method - also fully typed
+const maxConns = app.getConfigValue('database.maxConnections'); // number (auto-inferred)
+
+// Get all values - typed as OneBunAppConfig
 const values = config.values;
 
-// Get safe config (sensitive values masked)
+// Get safe config (sensitive values masked) - typed as OneBunAppConfig
 const safeConfig = config.getSafeConfig();
 console.log(safeConfig);
-// { server: { port: 3000 }, database: { url: '***', ... } }
+// { server: { port: 3000, host: 'localhost' }, database: { url: '***', ... } }
 ```
 
 ## Sensitive Values

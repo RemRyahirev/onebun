@@ -3,7 +3,11 @@ import { Effect, type Layer } from 'effect';
 import type { Controller } from '../module/controller';
 import type { WsClientData } from '../websocket/ws.types';
 
-import { TypedEnv } from '@onebun/envs';
+import {
+  type DeepPaths,
+  type DeepValue,
+  TypedEnv,
+} from '@onebun/envs';
 import {
   createSyncLogger,
   type Logger,
@@ -230,9 +234,21 @@ export class OneBunApplication {
   }
 
   /**
-   * Get configuration service
+   * Get configuration service with full type inference.
+   * Uses module augmentation of OneBunAppConfig for type-safe access.
+   * 
+   * @example
+   * // With module augmentation:
+   * declare module '@onebun/core' {
+   *   interface OneBunAppConfig {
+   *     server: { port: number; host: string };
+   *   }
+   * }
+   * 
+   * const config = app.getConfig();
+   * const port = config.get('server.port'); // number
    */
-  getConfig(): ConfigServiceImpl {
+  getConfig(): IConfig<OneBunAppConfig> {
     if (!this.configService) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -241,10 +257,25 @@ export class OneBunApplication {
   }
 
   /**
-   * Get configuration value by path (convenience method)
+   * Get configuration value by path (convenience method) with full type inference.
+   * Uses module augmentation of OneBunAppConfig for type-safe access.
+   * 
+   * @example
+   * // With module augmentation:
+   * declare module '@onebun/core' {
+   *   interface OneBunAppConfig {
+   *     server: { port: number; host: string };
+   *   }
+   * }
+   * 
+   * const port = app.getConfigValue('server.port'); // number
+   * const host = app.getConfigValue('server.host'); // string
    */
-  getConfigValue<T = unknown>(path: string): T {
-    return this.getConfig().get<T>(path);
+  getConfigValue<P extends DeepPaths<OneBunAppConfig>>(path: P): DeepValue<OneBunAppConfig, P>;
+  /** Fallback for dynamic paths */
+  getConfigValue<T = unknown>(path: string): T;
+  getConfigValue(path: string): unknown {
+    return this.getConfig().get(path);
   }
 
   /**
