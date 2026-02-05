@@ -63,7 +63,7 @@ describe('Migration utilities', () => {
 });
 
 describe('runMigrations integration tests', () => {
-  let service: DrizzleService<DatabaseType.SQLITE>;
+  let service: DrizzleService;
   let originalDbUrl: string | undefined;
   let originalDbType: string | undefined;
 
@@ -108,7 +108,7 @@ describe('runMigrations integration tests', () => {
         loggerLayer,
       ),
     );
-    service = new DrizzleService<DatabaseType.SQLITE>();
+    service = new DrizzleService();
     service.initializeService(logger, createMockConfig());
   });
 

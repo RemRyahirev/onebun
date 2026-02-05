@@ -26,7 +26,7 @@ import { UserService } from './integration/services/user.service';
  * Schema \> Migration \> Repository \> CRUD \> Transactions
  */
 describe('Drizzle Integration Tests - Schema-First Approach', () => {
-  let drizzleService: DrizzleService<DatabaseType.SQLITE>;
+  let drizzleService: DrizzleService;
   let userRepository: UserRepository;
   let userService: UserService;
 
@@ -39,7 +39,7 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
         loggerLayer,
       ),
     );
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
     
     await drizzleService.initialize({

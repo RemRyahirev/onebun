@@ -34,7 +34,8 @@ export class UserRepository extends BaseRepository<typeof users> {
    * Business logic: Find user by email
    */
   async findByEmail(email: string): Promise<User | null> {
-    const results = await this.db
+    // Use drizzleService methods that infer types from table
+    const results = await this.drizzleService
       .select()
       .from(this.table)
       .where(eq(this.table.email, email));
@@ -46,7 +47,7 @@ export class UserRepository extends BaseRepository<typeof users> {
    * Business logic: Find users by age range
    */
   async findByAgeRange(minAge: number, maxAge: number): Promise<User[]> {
-    const results = await this.db
+    const results = await this.drizzleService
       .select()
       .from(this.table)
       .where(between(this.table.age, minAge, maxAge));

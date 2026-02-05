@@ -25,6 +25,13 @@ export { DatabaseType } from './types';
 export { DrizzleModule } from './drizzle.module';
 export { DrizzleService } from './drizzle.service';
 
+// Universal builders for type inference
+export {
+  UniversalSelectBuilder,
+  UniversalSelectDistinctBuilder,
+  UniversalTransactionClient,
+} from './builders';
+
 // Repository
 export { BaseRepository, type QueryBuilder } from './repository';
 

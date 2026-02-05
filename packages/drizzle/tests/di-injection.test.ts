@@ -38,44 +38,40 @@ const testUsers = sqliteTable('test_di_users', {
 // Test user service that depends on DrizzleService
 @Service()
 class UserService extends BaseService {
-  constructor(private drizzleService: DrizzleService<DatabaseType.SQLITE>) {
+  constructor(private drizzleService: DrizzleService) {
     super();
   }
 
   async createUser(name: string, email: string) {
-    const db = this.drizzleService.getDatabase();
-
-    return db.insert(testUsers).values({ name, email }).returning().get();
+    // Use DrizzleService methods that infer types from table
+    return this.drizzleService.insert(testUsers).values({ name, email }).returning().get();
   }
 
   async findAllUsers() {
-    const db = this.drizzleService.getDatabase();
-
-    return db.select().from(testUsers).all();
+    return this.drizzleService.select().from(testUsers).all();
   }
 
   async findUserById(id: number) {
-    const db = this.drizzleService.getDatabase();
     const { eq } = await import('drizzle-orm');
 
-    return db.select().from(testUsers).where(eq(testUsers.id, id)).get();
+    return this.drizzleService.select().from(testUsers).where(eq(testUsers.id, id)).get();
   }
 }
 
 // Another test service for singleton test
 @Service()
 class AnotherUserService extends BaseService {
-  constructor(private drizzleService: DrizzleService<DatabaseType.SQLITE>) {
+  constructor(private drizzleService: DrizzleService) {
     super();
   }
 
-  getDrizzleServiceInstance(): DrizzleService<DatabaseType.SQLITE> {
+  getDrizzleServiceInstance(): DrizzleService {
     return this.drizzleService;
   }
 }
 
 describe('DrizzleService DI injection', () => {
-  let drizzleService: DrizzleService<DatabaseType.SQLITE>;
+  let drizzleService: DrizzleService;
 
   beforeEach(async () => {
     DrizzleModule.clearOptions();
@@ -101,7 +97,7 @@ describe('DrizzleService DI injection', () => {
       ),
     );
 
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
     await drizzleService.onAsyncInit();
 
@@ -176,8 +172,8 @@ describe('DrizzleService DI injection', () => {
     // Read all
     const allUsers = await userService.findAllUsers();
     expect(allUsers.length).toBe(2);
-    expect(allUsers.map(u => u.name)).toContain('John Doe');
-    expect(allUsers.map(u => u.name)).toContain('Jane Doe');
+    expect(allUsers.map((u: typeof testUsers.$inferSelect) => u.name)).toContain('John Doe');
+    expect(allUsers.map((u: typeof testUsers.$inferSelect) => u.name)).toContain('Jane Doe');
   });
 
   test('multiple services can inject same DrizzleService instance (singleton)', async () => {
@@ -205,8 +201,8 @@ describe('DrizzleService DI injection', () => {
     expect(allUsers.length).toBe(1);
 
     // Verify the database is actually shared (same in-memory DB)
-    const db = drizzleFromService2.getDatabase();
-    const usersFromDb2 = db.select().from(testUsers).all();
+    // Use drizzleService methods that properly infer types from table
+    const usersFromDb2 = await drizzleFromService2.select().from(testUsers).all();
     expect(usersFromDb2.length).toBe(1);
     expect(usersFromDb2[0].name).toBe('Shared User');
   });
@@ -230,7 +226,7 @@ describe('DrizzleService DI injection', () => {
       ),
     );
 
-    const newDrizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    const newDrizzleService = new DrizzleService();
     newDrizzleService.initializeService(logger, createMockConfig());
     await newDrizzleService.onAsyncInit();
 

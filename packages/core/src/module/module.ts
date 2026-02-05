@@ -229,6 +229,7 @@ export class OneBunModule implements ModuleInstance {
     // Create services in dependency order
     const pendingProviders = [...metadata.providers.filter((p) => typeof p === 'function')];
     const createdServices = new Set<string>();
+    const unresolvedDeps = new Map<string, string[]>(); // Track unresolved dependencies for error reporting
     let iterations = 0;
     const maxIterations = pendingProviders.length * 2; // Prevent infinite loops
 
@@ -245,8 +246,11 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
-      // Use autoDetectDependencies to find dependencies from constructor
-      const detectedDeps = autoDetectDependencies(provider, availableServiceClasses);
+      // Use getConstructorParamTypes first (for @Inject and TypeScript metadata),
+      // then fallback to autoDetectDependencies (for constructor source analysis)
+      const detectedDeps =
+        getConstructorParamTypes(provider) ||
+        autoDetectDependencies(provider, availableServiceClasses);
       const dependencies: unknown[] = [];
       let allDependenciesResolved = true;
 
@@ -259,6 +263,12 @@ export class OneBunModule implements ModuleInstance {
             // Check if it's a service that hasn't been created yet
             const isServiceInModule = availableServiceClasses.has(depType.name);
             if (isServiceInModule && !createdServices.has(depType.name)) {
+              // Track unresolved dependency for error reporting
+              const deps = unresolvedDeps.get(provider.name) || [];
+              if (!deps.includes(depType.name)) {
+                deps.push(depType.name);
+                unresolvedDeps.set(provider.name, deps);
+              }
               // This dependency will be created later, defer this service
               allDependenciesResolved = false;
               pendingProviders.push(provider);
@@ -317,7 +327,25 @@ export class OneBunModule implements ModuleInstance {
     }
 
     if (iterations >= maxIterations) {
-      this.logger.error('Possible circular dependency detected in services');
+      const unresolvedServices = pendingProviders
+        .filter((p) => typeof p === 'function')
+        .map((p) => p.name);
+
+      const details = unresolvedServices
+        .map((serviceName) => {
+          const deps = unresolvedDeps.get(serviceName) || [];
+
+          return `  - ${serviceName} -> needs: [${deps.join(', ')}]`;
+        })
+        .join('\n');
+
+      const dependencyChain = this.buildDependencyChain(unresolvedDeps, unresolvedServices);
+
+      this.logger.error(
+        `Circular dependency detected in module ${this.moduleClass.name}!\n` +
+          `Unresolved services:\n${details}\n` +
+          `Dependency chain: ${dependencyChain}`,
+      );
     }
   }
 
@@ -477,6 +505,52 @@ export class OneBunModule implements ModuleInstance {
     });
 
     return serviceInstance;
+  }
+
+  /**
+   * Build a human-readable dependency chain for circular dependency error reporting
+   * Traverses the dependency graph to find and display the cycle
+   */
+  private buildDependencyChain(
+    unresolvedDeps: Map<string, string[]>,
+    unresolvedServices: string[],
+  ): string {
+    // Find cycle by traversing dependencies
+    const visited = new Set<string>();
+    const chain: string[] = [];
+
+    const findCycle = (service: string): boolean => {
+      if (visited.has(service)) {
+        chain.push(service);
+
+        return true;
+      }
+      visited.add(service);
+      chain.push(service);
+
+      const deps = unresolvedDeps.get(service) || [];
+      for (const dep of deps) {
+        if (unresolvedServices.includes(dep)) {
+          if (findCycle(dep)) {
+            return true;
+          }
+        }
+      }
+      chain.pop();
+
+      return false;
+    };
+
+    for (const service of unresolvedServices) {
+      visited.clear();
+      chain.length = 0;
+      if (findCycle(service)) {
+        return chain.join(' -> ');
+      }
+    }
+
+    // If no cycle found, just show all unresolved services
+    return unresolvedServices.join(' <-> ');
   }
 
   /**

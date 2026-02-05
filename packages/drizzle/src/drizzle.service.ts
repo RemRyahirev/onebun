@@ -19,15 +19,23 @@ import {
 } from '@onebun/envs';
 
 import {
+  UniversalSelectBuilder,
+  UniversalSelectDistinctBuilder,
+  UniversalTransactionClient,
+} from './builders';
+import {
   type DatabaseConnectionOptions,
   type DatabaseInstance,
-  type DatabaseInstanceForType,
   DatabaseType,
   type DatabaseTypeLiteral,
   type DrizzleModuleOptions,
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
 } from './types';
+
+// Type helpers for insert/update/delete return types
+type SQLiteDb = BunSQLiteDatabase<Record<string, SQLiteTable>>;
+type PgDb = BunSQLDatabase<Record<string, PgTable>>;
 
 /**
  * Default environment variable prefix
@@ -170,23 +178,35 @@ interface BufferedLogEntry {
 
 /**
  * Drizzle service for database operations
- * Generic type parameter TDbType specifies the database type (SQLITE or POSTGRESQL)
+ * 
+ * The service automatically infers database types from table schemas.
+ * No generic parameter is required - just use select(), insert(), update(), delete()
+ * with your table schemas and TypeScript will infer the correct types.
  *
  * @example
  * ```typescript
- * // For SQLite
- * const drizzleService = new DrizzleService<DatabaseType.SQLITE>(...);
- * const db = drizzleService.getDatabase(); // Type: BunSQLiteDatabase
- *
- * // For PostgreSQL
- * const drizzleService = new DrizzleService<DatabaseType.POSTGRESQL>(...);
- * const db = drizzleService.getDatabase(); // Type: BunSQLDatabase
+ * // Define tables with proper types
+ * const users = sqliteTable('users', { ... });  // SQLite table
+ * const orders = pgTable('orders', { ... });    // PostgreSQL table
+ * 
+ * // Use DrizzleService without generic parameter
+ * @Service()
+ * class UserService extends BaseService {
+ *   constructor(private db: DrizzleService) {
+ *     super();
+ *   }
+ *   
+ *   async findAll() {
+ *     // TypeScript infers SQLite types from `users` table
+ *     return this.db.select().from(users);
+ *   }
+ * }
  * ```
  */
 @Service()
-export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLiteral> extends BaseService {
+export class DrizzleService extends BaseService {
   private db: DatabaseInstance | null = null;
-  private dbType: TDbType | null = null;
+  private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
@@ -412,7 +432,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
     }
 
     this.connectionOptions = options;
-    this.dbType = options.type as TDbType;
+    this.dbType = options.type;
 
     if (options.type === DatabaseType.SQLITE) {
       const sqliteOptions = options.options;
@@ -449,16 +469,20 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   }
 
   /**
-   * Get database instance with proper typing based on generic type parameter
-   * Returns correctly typed database instance based on TDbType
+   * Get raw database instance
+   * 
+   * Returns a union type - use isSQLite()/isPostgreSQL() type guards
+   * or getSQLiteDatabase()/getPostgreSQLDatabase() for specific types.
+   * 
+   * For most use cases, prefer using select(), insert(), update(), delete()
+   * methods which automatically infer types from table schemas.
    */
-  getDatabase(): DatabaseInstanceForType<TDbType> {
+  getDatabase(): DatabaseInstance {
     if (!this.db || !this.dbType) {
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    // Type assertion is safe because dbType matches TDbType
-    return this.db as DatabaseInstanceForType<TDbType>;
+    return this.db;
   }
 
   /**
@@ -595,10 +619,22 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   }
 
   /**
-   * Execute a transaction with proper typing based on TDbType
+   * Execute a transaction with universal transaction client
+   * 
+   * The transaction client provides the same API as DrizzleService
+   * with automatic type inference from table schemas.
+   * 
+   * @example
+   * ```typescript
+   * await db.transaction(async (tx) => {
+   *   const users = await tx.select().from(usersTable);
+   *   await tx.insert(usersTable).values({ name: 'John' });
+   *   await tx.update(usersTable).set({ name: 'Jane' }).where(eq(usersTable.id, 1));
+   * });
+   * ```
    */
   async transaction<R>(
-    callback: (tx: DatabaseInstanceForType<TDbType>) => Promise<R>,
+    callback: (tx: UniversalTransactionClient) => Promise<R>,
   ): Promise<R> {
     await this.waitForInit();
 
@@ -606,43 +642,42 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    // Type assertion needed because TypeScript cannot infer methods from conditional types
-    // Runtime type is correct - this is a TypeScript limitation
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return await (this.db as any).transaction(callback);
+    return await (this.db as any).transaction(async (rawTx: DatabaseInstance) => {
+      const wrappedTx = new UniversalTransactionClient(rawTx);
+
+      return await callback(wrappedTx);
+    });
   }
 
   // ============================================
-  // Direct database operation methods (proxies)
+  // Direct database operation methods
+  // These methods use universal builders that infer
+  // database type from table schemas
   // ============================================
 
   /**
    * Create a SELECT query
    * 
+   * Returns a builder with from() method that infers the correct
+   * database type from the table schema.
+   * 
    * @example
    * ```typescript
-   * // Select all columns
+   * // Select all columns - type inferred from table
    * const users = await this.db.select().from(usersTable);
    * 
    * // Select specific columns
    * const names = await this.db.select({ name: usersTable.name }).from(usersTable);
    * ```
    */
-  select(): ReturnType<DatabaseInstanceForType<TDbType>['select']>;
-  select<TSelection extends Record<string, unknown>>(
-    fields: TSelection,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['select']>;
-  select<TSelection extends Record<string, unknown>>(
-    fields?: TSelection,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['select']> {
+  select(): UniversalSelectBuilder;
+  select<TFields extends Record<string, unknown>>(fields: TFields): UniversalSelectBuilder<TFields>;
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  select<TFields extends Record<string, unknown>>(fields?: TFields) {
     const db = this.getDatabase();
-    if (fields) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (db as any).select(fields);
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (db as any).select();
+    return new UniversalSelectBuilder(db, fields);
   }
 
   /**
@@ -654,25 +689,17 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    * const uniqueNames = await this.db.selectDistinct({ name: usersTable.name }).from(usersTable);
    * ```
    */
-  selectDistinct(): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']>;
-  selectDistinct<TSelection extends Record<string, unknown>>(
-    fields: TSelection,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']>;
-  selectDistinct<TSelection extends Record<string, unknown>>(
-    fields?: TSelection,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['selectDistinct']> {
+  selectDistinct(): UniversalSelectDistinctBuilder;
+  selectDistinct<TFields extends Record<string, unknown>>(fields: TFields): UniversalSelectDistinctBuilder<TFields>;
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  selectDistinct<TFields extends Record<string, unknown>>(fields?: TFields) {
     const db = this.getDatabase();
-    if (fields) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (db as any).selectDistinct(fields);
-    }
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (db as any).selectDistinct();
+    return new UniversalSelectDistinctBuilder(db, fields);
   }
 
   /**
-   * Create an INSERT query
+   * Create an INSERT query for SQLite table
    * 
    * @example
    * ```typescript
@@ -685,9 +712,15 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    *   .returning();
    * ```
    */
-  insert<TTable extends Parameters<DatabaseInstanceForType<TDbType>['insert']>[0]>(
-    table: TTable,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['insert']> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  insert<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['insert']>;
+  /**
+   * Create an INSERT query for PostgreSQL table
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  insert<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['insert']>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
+  insert(table: SQLiteTable<any> | PgTable<any>) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -695,7 +728,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   }
 
   /**
-   * Create an UPDATE query
+   * Create an UPDATE query for SQLite table
    * 
    * @example
    * ```typescript
@@ -711,9 +744,15 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    *   .returning();
    * ```
    */
-  update<TTable extends Parameters<DatabaseInstanceForType<TDbType>['update']>[0]>(
-    table: TTable,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['update']> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  update<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['update']>;
+  /**
+   * Create an UPDATE query for PostgreSQL table
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  update<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['update']>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
+  update(table: SQLiteTable<any> | PgTable<any>) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -721,7 +760,7 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
   }
 
   /**
-   * Create a DELETE query
+   * Create a DELETE query for SQLite table
    * 
    * @example
    * ```typescript
@@ -734,9 +773,15 @@ export class DrizzleService<TDbType extends DatabaseTypeLiteral = DatabaseTypeLi
    *   .returning();
    * ```
    */
-  delete<TTable extends Parameters<DatabaseInstanceForType<TDbType>['delete']>[0]>(
-    table: TTable,
-  ): ReturnType<DatabaseInstanceForType<TDbType>['delete']> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  delete<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['delete']>;
+  /**
+   * Create a DELETE query for PostgreSQL table
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  delete<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['delete']>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
+  delete(table: SQLiteTable<any> | PgTable<any>) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

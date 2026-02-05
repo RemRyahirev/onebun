@@ -31,7 +31,7 @@ class TestRepository extends BaseRepository<typeof testEntities> {
 }
 
 describe('BaseRepository', () => {
-  let drizzleService: DrizzleService<DatabaseType.SQLITE>;
+  let drizzleService: DrizzleService;
   let repository: TestRepository;
 
   beforeEach(async () => {
@@ -46,7 +46,7 @@ describe('BaseRepository', () => {
         loggerLayer,
       ),
     );
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,

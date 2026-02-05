@@ -776,3 +776,147 @@ describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
     });
   });
 });
+
+describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
+  // This test block verifies that DrizzleService works WITHOUT generic parameter
+  // Types should be inferred from table schemas automatically
+
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleService } = require('../src/drizzle.service');
+  const { eq } = require('../src/index');
+  const { Effect } = require('effect');
+  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
+  const { LoggerService } = require('@onebun/logger');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  // Define test schema
+  const typeInferenceUsers = sqliteTable('type_inference_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  type TypeInferenceUser = typeof typeInferenceUsers.$inferSelect;
+
+  let service: typeof DrizzleService.prototype;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const loggerLayer = makeMockLoggerLayer();
+    const logger = Effect.runSync(
+      Effect.provide(
+        Effect.map(LoggerService, (l: unknown) => l),
+        loggerLayer,
+      ),
+    );
+
+    // Create DrizzleService WITHOUT generic parameter
+    service = new DrizzleService();
+    service.initializeService(logger, createMockConfig());
+
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+
+    const db = service.getDatabase();
+    db.run(`CREATE TABLE type_inference_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL
+    )`);
+  });
+
+  afterEach(async () => {
+    if (service) {
+      await service.close();
+    }
+  });
+
+  describe('Type inference without generic parameter (docs example)', () => {
+    it('should work with DrizzleService without generic - select()', async () => {
+      // From docs: DrizzleService infers types from table schemas
+      // No generic parameter needed
+      const db = service.getDatabase();
+      db.run('INSERT INTO type_inference_users (name, email) VALUES (\'John\', \'john@example.com\')');
+
+      // This should work without DrizzleService<DatabaseType.SQLITE>
+      const users = await service.select().from(typeInferenceUsers);
+
+      expect(users).toHaveLength(1);
+      expect(users[0].name).toBe('John');
+    });
+
+    it('should work with DrizzleService without generic - insert()', async () => {
+      // insert() should infer types from table
+      await service.insert(typeInferenceUsers).values({
+        name: 'Jane',
+        email: 'jane@example.com',
+      });
+
+      const users = await service.select().from(typeInferenceUsers);
+      expect(users).toHaveLength(1);
+      expect(users[0].name).toBe('Jane');
+    });
+
+    it('should work with DrizzleService without generic - update()', async () => {
+      await service.insert(typeInferenceUsers).values({
+        name: 'John',
+        email: 'john@example.com',
+      });
+
+      // update() should infer types from table
+      await service.update(typeInferenceUsers)
+        .set({ name: 'Jane' })
+        .where(eq(typeInferenceUsers.name, 'John'));
+
+      const users = await service.select().from(typeInferenceUsers);
+      expect(users[0].name).toBe('Jane');
+    });
+
+    it('should work with DrizzleService without generic - delete()', async () => {
+      await service.insert(typeInferenceUsers).values({
+        name: 'John',
+        email: 'john@example.com',
+      });
+
+      // delete() should infer types from table
+      await service.delete(typeInferenceUsers)
+        .where(eq(typeInferenceUsers.name, 'John'));
+
+      const users = await service.select().from(typeInferenceUsers);
+      expect(users).toHaveLength(0);
+    });
+
+    it('should work with DrizzleService without generic - transaction()', async () => {
+      // transaction() callback should have same methods with type inference
+      await service.transaction(async (tx: { insert: typeof service.insert; select: typeof service.select }) => {
+        await tx.insert(typeInferenceUsers).values({
+          name: 'TxUser',
+          email: 'tx@example.com',
+        });
+
+        const users = await tx.select().from(typeInferenceUsers);
+        expect(users).toHaveLength(1);
+        expect(users[0].name).toBe('TxUser');
+      });
+    });
+
+    it('should provide typed results from select without generic', async () => {
+      await service.insert(typeInferenceUsers).values({
+        name: 'Typed',
+        email: 'typed@example.com',
+      });
+
+      // Results should be properly typed
+      const users: TypeInferenceUser[] = await service.select().from(typeInferenceUsers);
+
+      const user = users[0];
+      // TypeScript should know these properties exist
+      expect(typeof user.id).toBe('number');
+      expect(typeof user.name).toBe('string');
+      expect(typeof user.email).toBe('string');
+    });
+  });
+});

@@ -4,19 +4,18 @@
 
 import { eq, type SQL } from 'drizzle-orm';
 
-import type { IRepository } from './types';
-import type { DatabaseTypeLiteral, DatabaseInstanceForType } from './types';
+import type { IRepository, DatabaseInstance } from './types';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
 
+import { UniversalTransactionClient } from './builders';
 import { DrizzleService } from './drizzle.service';
 import {
   getPrimaryKeyColumn,
   type SelectType,
   type InsertType,
 } from './schema-utils';
-import { DatabaseType } from './types';
 
 /**
  * Query builder interface for type-safe database operations
@@ -90,55 +89,13 @@ export interface QueryBuilder {
  * }
  * ```
  */
-/**
- * Infer database type from table schema
- */
-type InferDbTypeFromTable<TTable> =
-  TTable extends SQLiteTable<any>
-    ? DatabaseType.SQLITE
-    : TTable extends PgTable<any>
-      ? DatabaseType.POSTGRESQL
-      : never;
-
-/**
- * Base repository class for Drizzle ORM
- *
- * Simplified version with single generic parameter - database type is automatically inferred from table schema
- *
- * @example
- * ```typescript
- * import { sqliteTable, integer, text } from 'drizzle-orm/sqlite-core';
- * import { BaseRepository } from '@onebun/drizzle';
- *
- * const users = sqliteTable('users', {
- *   id: integer('id').primaryKey({ autoIncrement: true }),
- *   name: text('name').notNull(),
- * });
- *
- * export class UserRepository extends BaseRepository<typeof users> {
- *   constructor(drizzleService: DrizzleService) {
- *     super(drizzleService, users);
- *   }
- * }
- * ```
- *
- * Advanced version with explicit database type (for edge cases):
- * ```typescript
- * export class UserRepository extends BaseRepository<DatabaseType.SQLITE, typeof users> {
- *   constructor(drizzleService: DrizzleService<DatabaseType.SQLITE>) {
- *     super(drizzleService, users);
- *   }
- * }
- * ```
- */
 export class BaseRepository<
   TTable extends PgTable<any> | SQLiteTable<any>,
-  TDbType extends DatabaseTypeLiteral = InferDbTypeFromTable<TTable>
 > implements IRepository<SelectType<TTable>> {
   /**
-   * Database instance with proper typing based on TDbType
+   * Database instance
    */
-  protected readonly db: DatabaseInstanceForType<TDbType>;
+  protected readonly db: DatabaseInstance;
 
   /**
    * Table schema instance
@@ -146,20 +103,16 @@ export class BaseRepository<
   protected readonly table: TTable;
 
   /**
-   * DrizzleService instance (type inferred from table)
+   * DrizzleService instance
    */
-  protected readonly drizzleService: DrizzleService<TDbType>;
+  protected readonly drizzleService: DrizzleService;
 
   constructor(
-    drizzleService: DrizzleService<DatabaseTypeLiteral>,
+    drizzleService: DrizzleService,
     table: TTable,
   ) {
     this.table = table;
-    // Store drizzleService - type is inferred from table schema
-    // Type assertion is safe because TDbType is inferred from TTable
-    this.drizzleService = drizzleService as DrizzleService<TDbType>;
-    // getDatabase() returns correctly typed instance based on TDbType
-    // TDbType is automatically inferred from TTable
+    this.drizzleService = drizzleService;
     this.db = this.drizzleService.getDatabase();
   }
 
@@ -308,9 +261,17 @@ export class BaseRepository<
 
   /**
    * Execute a transaction
+   * 
+   * @example
+   * ```typescript
+   * await userRepository.transaction(async (tx) => {
+   *   const users = await tx.select().from(usersTable);
+   *   await tx.insert(usersTable).values({ name: 'John' });
+   * });
+   * ```
    */
   async transaction<R>(
-    callback: (tx: DatabaseInstanceForType<TDbType>) => Promise<R>,
+    callback: (tx: UniversalTransactionClient) => Promise<R>,
   ): Promise<R> {
     return await this.drizzleService.transaction(callback);
   }

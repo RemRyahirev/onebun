@@ -24,7 +24,6 @@
  */
 import type { DrizzleService } from './drizzle.service';
 import type { BaseRepository } from './repository';
-import type { InferDbTypeFromTable } from './types';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
@@ -32,8 +31,6 @@ import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 const ENTITY_METADATA = new Map<Function, PgTable<any> | SQLiteTable<any>>();
 
 export function Entity<TTable extends PgTable<any> | SQLiteTable<any>>(table: TTable) {
-  type TDbType = InferDbTypeFromTable<TTable>;
-  
   return <T extends new (...args: any[]) => BaseRepository<TTable>>(target: T) => {
     // Store table schema in metadata
     ENTITY_METADATA.set(target, table);
@@ -42,8 +39,8 @@ export function Entity<TTable extends PgTable<any> | SQLiteTable<any>>(table: TT
     // The wrapped class only requires DrizzleService as constructor argument
     class WrappedRepository extends target {
       constructor(...args: any[]) {
-        // First argument should be DrizzleService with correct type (inferred from table)
-        const drizzleService = args[0] as DrizzleService<TDbType>;
+        // First argument should be DrizzleService (no generic parameter needed)
+        const drizzleService = args[0] as DrizzleService;
         // Pass drizzleService and table to parent constructor
         super(drizzleService, table);
       }
@@ -57,7 +54,7 @@ export function Entity<TTable extends PgTable<any> | SQLiteTable<any>>(table: TT
     });
     
     // Return wrapped class - TypeScript will infer the correct constructor signature
-    return WrappedRepository as any as new (drizzleService: DrizzleService<TDbType>) => InstanceType<T>;
+    return WrappedRepository as any as new (drizzleService: DrizzleService) => InstanceType<T>;
   };
 }
 

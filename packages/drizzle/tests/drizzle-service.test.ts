@@ -414,7 +414,7 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const autoService = new DrizzleService<DatabaseType.SQLITE>();
+        const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
 
         // Call onAsyncInit to trigger auto-initialization (as the framework does)
@@ -447,7 +447,7 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const autoService = new DrizzleService<DatabaseType.SQLITE>();
+        const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
         await autoService.onAsyncInit();
 
@@ -474,7 +474,7 @@ describe('DrizzleService', () => {
             loggerLayer,
           ),
         );
-        const autoService = new DrizzleService<DatabaseType.SQLITE>();
+        const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
         await autoService.onAsyncInit();
 
@@ -507,7 +507,7 @@ describe('DrizzleService', () => {
               loggerLayer,
             ),
           );
-          const envService = new DrizzleService<DatabaseType.SQLITE>();
+          const envService = new DrizzleService();
           envService.initializeService(logger, createMockConfig());
           await envService.onAsyncInit();
 
@@ -545,7 +545,7 @@ describe('DrizzleService', () => {
               loggerLayer,
             ),
           );
-          const envService = new DrizzleService<DatabaseType.SQLITE>();
+          const envService = new DrizzleService();
           envService.initializeService(logger, createMockConfig());
           await envService.onAsyncInit();
 
@@ -625,7 +625,7 @@ describe('DrizzleService', () => {
               loggerLayer,
             ),
           );
-          const priorityService = new DrizzleService<DatabaseType.SQLITE>();
+          const priorityService = new DrizzleService();
           priorityService.initializeService(logger, createMockConfig());
           await priorityService.onAsyncInit();
 
@@ -681,7 +681,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const autoMigrateService = new DrizzleService<DatabaseType.SQLITE>();
+      const autoMigrateService = new DrizzleService();
       autoMigrateService.initializeService(logger, createMockConfig());
       await autoMigrateService.onAsyncInit();
 
@@ -715,7 +715,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const noMigrateService = new DrizzleService<DatabaseType.SQLITE>();
+      const noMigrateService = new DrizzleService();
       noMigrateService.initializeService(logger, createMockConfig());
       await noMigrateService.onAsyncInit();
 
@@ -749,7 +749,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const defaultService = new DrizzleService<DatabaseType.SQLITE>();
+      const defaultService = new DrizzleService();
       defaultService.initializeService(logger, createMockConfig());
       await defaultService.onAsyncInit();
 
@@ -782,7 +782,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const customFolderService = new DrizzleService<DatabaseType.SQLITE>();
+      const customFolderService = new DrizzleService();
       customFolderService.initializeService(logger, createMockConfig());
       await customFolderService.onAsyncInit();
 
@@ -815,7 +815,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const trackingService = new DrizzleService<DatabaseType.SQLITE>();
+      const trackingService = new DrizzleService();
       trackingService.initializeService(logger, createMockConfig());
       await trackingService.onAsyncInit();
 
@@ -849,7 +849,7 @@ describe('DrizzleService', () => {
           loggerLayer,
         ),
       );
-      const missingFolderService = new DrizzleService<DatabaseType.SQLITE>();
+      const missingFolderService = new DrizzleService();
       missingFolderService.initializeService(logger, createMockConfig());
 
       // Should not throw, but auto-init might fail gracefully

@@ -300,6 +300,54 @@ export class UserService extends BaseService {
 }
 ```
 
+### Type Inference
+
+DrizzleService automatically infers database types from table schemas. No generic parameter is required:
+
+```typescript
+import { sqliteTable, integer, text } from '@onebun/drizzle/sqlite';
+import { pgTable, text as pgText, integer as pgInteger } from '@onebun/drizzle/pg';
+
+// SQLite table
+const users = sqliteTable('users', {
+  id: integer('id').primaryKey(),
+  name: text('name').notNull(),
+});
+
+// PostgreSQL table
+const orders = pgTable('orders', {
+  id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+  total: pgInteger('total').notNull(),
+});
+
+@Service()
+export class MyService extends BaseService {
+  constructor(private db: DrizzleService) {
+    super();
+  }
+
+  async getUsers() {
+    // TypeScript infers SQLite types from `users` table
+    return this.db.select().from(users);
+  }
+
+  async getOrders() {
+    // TypeScript infers PostgreSQL types from `orders` table
+    return this.db.select().from(orders);
+  }
+}
+```
+
+<llms-only>
+**Technical details for AI agents:**
+- `DrizzleService` no longer has a generic type parameter
+- Types are inferred at the `from()` call site based on table type
+- `UniversalSelectBuilder` uses function overloads to return correct result types
+- For `insert()`, `update()`, `delete()` - types are inferred from the table argument
+- This approach eliminates the need for `DrizzleService<DatabaseType.SQLITE>` syntax
+- The `UniversalTransactionClient` provides the same API inside transactions
+</llms-only>
+
 ### Query Methods
 
 DrizzleService provides direct access to Drizzle ORM query builders:
@@ -381,17 +429,18 @@ const [deleted] = await this.db.delete(users)
 
 #### transaction()
 
-Execute queries in a transaction.
+Execute queries in a transaction. The transaction callback receives a `UniversalTransactionClient` with the same API as `DrizzleService`.
 
 ```typescript
 async transaction<T>(
-  fn: (tx: DatabaseInstance) => Promise<T>
+  fn: (tx: UniversalTransactionClient) => Promise<T>
 ): Promise<T>
 ```
 
 ```typescript
 const result = await this.db.transaction(async (tx) => {
   // All queries in this block are in a transaction
+  // tx has the same methods as DrizzleService: select(), insert(), update(), delete()
   const user = await tx.insert(users)
     .values({ name: 'John', email: 'john@example.com' })
     .returning();
@@ -824,7 +873,7 @@ import { LoggerService } from '@onebun/logger';
 import { DrizzleService, DrizzleModule, DatabaseType } from '@onebun/drizzle';
 
 describe('MyService', () => {
-  let drizzleService: DrizzleService<DatabaseType.SQLITE>;
+  let drizzleService: DrizzleService;
 
   beforeEach(async () => {
     // Clear any previous configuration
@@ -849,7 +898,8 @@ describe('MyService', () => {
       ),
     );
 
-    drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+    // No generic parameter needed - types are inferred from table schemas
+    drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
     // onAsyncInit() is called automatically by the framework
     // In tests, call it manually to simulate framework behavior
@@ -924,7 +974,8 @@ beforeEach(async () => {
   process.env.DB_AUTO_MIGRATE = 'false'; // Disable to avoid missing migrations folder error
 
   // Create service - will auto-initialize from env vars
-  drizzleService = new DrizzleService<DatabaseType.SQLITE>();
+  // No generic parameter needed
+  drizzleService = new DrizzleService();
   drizzleService.initializeService(logger, createMockConfig());
   await drizzleService.onAsyncInit();
 });
@@ -945,3 +996,4 @@ afterEach(() => {
 4. **Use `:memory:`** SQLite URL for in-memory databases that are faster and don't leave files
 5. **autoMigrate defaults to `true`** - set to `false` explicitly if you don't have migrations
 6. **Database is ready after `onAsyncInit()`** - no need to call `waitForInit()` in client code
+7. **No generic parameter needed** - `DrizzleService` infers types from table schemas automatically

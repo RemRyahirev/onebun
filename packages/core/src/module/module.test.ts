@@ -154,6 +154,94 @@ describe('OneBunModule', () => {
 
       expect(() => new OneBunModule(TestClass, mockLoggerLayer)).toThrow();
     });
+
+    test('should detect circular dependencies and provide detailed error message', () => {
+      const { registerDependencies } = require('../decorators/decorators');
+      const { Effect, Layer } = require('effect');
+      const { LoggerService } = require('@onebun/logger');
+
+      // Collect error messages
+      const errorMessages: string[] = [];
+
+      // Create mock logger that captures error messages
+      // Using Effect.sync to ensure the message is captured synchronously when Effect.runSync is called
+      const captureLogger = {
+        trace: () => Effect.sync(() => undefined),
+        debug: () => Effect.sync(() => undefined),
+        info: () => Effect.sync(() => undefined),
+        warn: () => Effect.sync(() => undefined),
+        error: (msg: string) =>
+          Effect.sync(() => {
+            errorMessages.push(msg);
+          }),
+        fatal: () => Effect.sync(() => undefined),
+        child: () => captureLogger,
+      };
+      const captureLoggerLayer = Layer.succeed(LoggerService, captureLogger);
+
+      // Create services - define all classes first
+      @Service()
+      class CircularServiceA {
+        getValue() {
+          return 'A';
+        }
+      }
+
+      @Service()
+      class CircularServiceB {
+        getValue() {
+          return 'B';
+        }
+      }
+
+      @Service()
+      class CircularServiceC {
+        getValue() {
+          return 'C';
+        }
+      }
+
+      // Now register circular dependencies manually: A -> B -> C -> A
+      registerDependencies(CircularServiceA, [CircularServiceC]);
+      registerDependencies(CircularServiceB, [CircularServiceA]);
+      registerDependencies(CircularServiceC, [CircularServiceB]);
+
+      @Module({
+        providers: [CircularServiceA, CircularServiceB, CircularServiceC],
+      })
+      class CircularModule {}
+
+      // Initialize module - should detect circular dependency
+      new OneBunModule(CircularModule, captureLoggerLayer);
+
+      // Verify error message was logged
+      expect(errorMessages.length).toBeGreaterThan(0);
+
+      // Find the circular dependency error message
+      const circularError = errorMessages.find((msg) =>
+        msg.includes('Circular dependency detected'),
+      );
+      expect(circularError).toBeDefined();
+
+      // Should contain module name
+      expect(circularError).toContain('CircularModule');
+
+      // Should contain "Unresolved services" section
+      expect(circularError).toContain('Unresolved services');
+
+      // Should contain at least one of the service names with their dependencies
+      const hasServiceInfo =
+        circularError!.includes('CircularServiceA') ||
+        circularError!.includes('CircularServiceB') ||
+        circularError!.includes('CircularServiceC');
+      expect(hasServiceInfo).toBe(true);
+
+      // Should contain "needs:" showing what dependencies are required
+      expect(circularError).toContain('needs:');
+
+      // Should contain "Dependency chain" showing the cycle
+      expect(circularError).toContain('Dependency chain');
+    });
   });
 
   describe('Module instance methods', () => {
