@@ -42,6 +42,10 @@ export {
   type WebSocketApplicationOptions,
   // Docs types
   type DocsApplicationOptions,
+  // SSE types
+  type SseEvent,
+  type SseOptions,
+  type SseGenerator,
 } from './types';
 
 // Decorators and Metadata (exports Controller decorator, Module decorator, etc.)

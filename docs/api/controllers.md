@@ -515,3 +515,202 @@ export class UserController extends BaseController {
   }
 }
 ```
+
+## Server-Sent Events (SSE)
+
+Server-Sent Events provide a way to push data from the server to the client over HTTP. OneBun provides the `@Sse()` decorator and `sse()` method for creating SSE endpoints.
+
+### SseEvent Type
+
+```typescript
+interface SseEvent {
+  /** Event name (optional, defaults to 'message') */
+  event?: string;
+  /** Event data (will be JSON serialized) */
+  data: unknown;
+  /** Event ID for reconnection (Last-Event-ID header) */
+  id?: string;
+  /** Reconnection interval in milliseconds */
+  retry?: number;
+}
+```
+
+### SseOptions
+
+```typescript
+interface SseOptions {
+  /**
+   * Heartbeat interval in milliseconds.
+   * When set, the server will send a comment (": heartbeat\n\n")
+   * at this interval to keep the connection alive.
+   */
+  heartbeat?: number;
+}
+```
+
+### @Sse() Decorator
+
+The `@Sse()` decorator marks a method as an SSE endpoint. The method should be an async generator that yields `SseEvent` objects.
+
+```typescript
+import {
+  Controller,
+  BaseController,
+  Get,
+  Sse,
+  type SseGenerator,
+} from '@onebun/core';
+
+@Controller('/events')
+export class EventsController extends BaseController {
+  /**
+   * Simple SSE endpoint
+   * Client: new EventSource('/events/stream')
+   */
+  @Get('/stream')
+  @Sse()
+  async *stream(): SseGenerator {
+    for (let i = 0; i < 10; i++) {
+      await Bun.sleep(1000);
+      yield { event: 'tick', data: { count: i, timestamp: Date.now() } };
+    }
+    // Stream closes automatically when generator completes
+  }
+
+  /**
+   * SSE with heartbeat for long-lived connections
+   * Sends ": heartbeat\n\n" every 15 seconds to keep connection alive
+   */
+  @Get('/live')
+  @Sse({ heartbeat: 15000 })
+  async *live(): SseGenerator {
+    // Initial connection event
+    yield { event: 'connected', data: { clientId: crypto.randomUUID() } };
+
+    // Infinite stream - client can disconnect anytime
+    while (true) {
+      const update = await this.getService(DataService).waitForUpdate();
+      yield { event: 'update', data: update };
+    }
+  }
+
+  /**
+   * SSE with event IDs for reconnection support
+   */
+  @Get('/notifications')
+  @Sse({ heartbeat: 30000 })
+  async *notifications(): SseGenerator {
+    let eventId = 0;
+
+    while (true) {
+      const notification = await this.getService(NotificationService).poll();
+      eventId++;
+      yield {
+        event: 'notification',
+        data: notification,
+        id: String(eventId),
+        retry: 5000,  // Client should retry after 5 seconds on disconnect
+      };
+    }
+  }
+}
+```
+
+### sse() Method
+
+The `sse()` method provides an alternative way to create SSE responses programmatically:
+
+```typescript
+@Controller('/events')
+export class EventsController extends BaseController {
+  /**
+   * Using sse() method instead of @Sse() decorator
+   */
+  @Get('/manual')
+  events(): Response {
+    return this.sse(async function* () {
+      yield { event: 'start', data: { timestamp: Date.now() } };
+
+      for (let i = 0; i < 5; i++) {
+        await Bun.sleep(1000);
+        yield { event: 'progress', data: { percent: (i + 1) * 20 } };
+      }
+
+      yield { event: 'complete', data: { success: true } };
+    }());
+  }
+
+  /**
+   * Using sse() with heartbeat option
+   */
+  @Get('/with-heartbeat')
+  eventsWithHeartbeat(): Response {
+    const generator = async function* () {
+      while (true) {
+        await Bun.sleep(5000);
+        yield { data: { ping: true } };
+      }
+    };
+
+    return this.sse(generator(), { heartbeat: 10000 });
+  }
+}
+```
+
+### SSE Wire Format
+
+OneBun automatically formats events according to the SSE specification:
+
+```
+event: tick
+id: 123
+retry: 5000
+data: {"count":1,"timestamp":1699999999999}
+
+```
+
+For multi-line data:
+
+```
+data: {"line1":"value1",
+data: "line2":"value2"}
+
+```
+
+### Client-Side Usage
+
+```typescript
+// Browser JavaScript
+const eventSource = new EventSource('/events/stream');
+
+eventSource.addEventListener('tick', (event) => {
+  const data = JSON.parse(event.data);
+  console.log('Tick:', data.count);
+});
+
+eventSource.addEventListener('error', (event) => {
+  console.error('SSE error:', event);
+});
+
+// Close connection when done
+eventSource.close();
+```
+
+### Comparison: @Sse() vs sse()
+
+| Feature | @Sse() Decorator | sse() Method |
+|---------|------------------|--------------|
+| Use case | Dedicated SSE endpoints | Programmatic/conditional SSE |
+| Syntax | `async *method()` generator | Return `this.sse(generator)` |
+| Heartbeat | `@Sse({ heartbeat: ms })` | `this.sse(gen, { heartbeat: ms })` |
+| Response type | Auto-wrapped | Explicit Response return |
+
+**Use `@Sse()` when:**
+- The endpoint is always an SSE stream
+- You want cleaner async generator syntax
+- You need built-in heartbeat support
+
+**Use `sse()` when:**
+- You need conditional SSE (sometimes SSE, sometimes JSON)
+- You're composing generators from multiple sources
+- You want more control over the Response object

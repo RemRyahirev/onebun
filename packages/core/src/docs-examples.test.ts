@@ -26,62 +26,9 @@ import type {
   WsExecutionContext,
   WsServerType,
 } from './';
+import type { SseEvent, SseGenerator } from './types';
 import type { ServerWebSocket } from 'bun';
 
-import {
-  Controller,
-  Get,
-  Post,
-  Put,
-  Delete,
-  Patch,
-  Param,
-  Query,
-  Body,
-  Header,
-  Req,
-  Module,
-  Service,
-  BaseService,
-  BaseController,
-  UseMiddleware,
-  getServiceTag,
-  HttpStatusCode,
-  NotFoundError,
-  InternalServerError,
-  OneBunBaseError,
-  Env,
-  validate,
-  validateOrThrow,
-  MultiServiceApplication,
-  OneBunApplication,
-  createServiceDefinition,
-  createServiceClient,
-  WebSocketGateway,
-  BaseWebSocketGateway,
-  OnConnect,
-  OnDisconnect,
-  OnJoinRoom,
-  OnLeaveRoom,
-  OnMessage,
-  Client,
-  Socket,
-  MessageData,
-  RoomName,
-  PatternParams,
-  WsServer,
-  UseWsGuards,
-  WsAuthGuard,
-  WsPermissionGuard,
-  WsAnyPermissionGuard,
-  createGuard,
-  createInMemoryWsStorage,
-  SharedRedisProvider,
-  createWsServiceDefinition,
-  createWsClient,
-  matchPattern,
-  makeMockLoggerLayer,
-} from './';
 
 /**
  * @source docs/index.md#minimal-working-example
@@ -2925,6 +2872,412 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
 
       // Gateway access
       expect(client.ChatGateway).toBeDefined();
+    });
+  });
+});
+
+// ============================================================================
+// SSE (Server-Sent Events) Documentation Tests
+// ============================================================================
+
+import { Sse, getSseMetadata } from './decorators/decorators';
+import { formatSseEvent, createSseStream } from './module/controller';
+
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Patch,
+  Param,
+  Query,
+  Body,
+  Header,
+  Req,
+  Module,
+  Service,
+  BaseService,
+  BaseController,
+  UseMiddleware,
+  getServiceTag,
+  HttpStatusCode,
+  NotFoundError,
+  InternalServerError,
+  OneBunBaseError,
+  Env,
+  validate,
+  validateOrThrow,
+  MultiServiceApplication,
+  OneBunApplication,
+  createServiceDefinition,
+  createServiceClient,
+  WebSocketGateway,
+  BaseWebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnJoinRoom,
+  OnLeaveRoom,
+  OnMessage,
+  Client,
+  Socket,
+  MessageData,
+  RoomName,
+  PatternParams,
+  WsServer,
+  UseWsGuards,
+  WsAuthGuard,
+  WsPermissionGuard,
+  WsAnyPermissionGuard,
+  createGuard,
+  createInMemoryWsStorage,
+  SharedRedisProvider,
+  createWsServiceDefinition,
+  createWsClient,
+  matchPattern,
+  makeMockLoggerLayer,
+} from './';
+
+describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)', () => {
+  describe('SseEvent Type (docs/api/controllers.md)', () => {
+    /**
+     * @source docs/api/controllers.md#sseevent-type
+     */
+    it('should define SseEvent interface', () => {
+      // From docs: SseEvent interface
+      const event: SseEvent = {
+        event: 'update',
+        data: { count: 1 },
+        id: '123',
+        retry: 5000,
+      };
+
+      expect(event.event).toBe('update');
+      expect(event.data).toEqual({ count: 1 });
+      expect(event.id).toBe('123');
+      expect(event.retry).toBe(5000);
+    });
+
+    it('should allow minimal SseEvent with only data', () => {
+      const event: SseEvent = {
+        data: { message: 'Hello' },
+      };
+
+      expect(event.data).toEqual({ message: 'Hello' });
+      expect(event.event).toBeUndefined();
+    });
+  });
+
+  describe('@Sse() Decorator (docs/api/controllers.md)', () => {
+    /**
+     * @source docs/api/controllers.md#sse-decorator
+     */
+    it('should mark method as SSE endpoint', () => {
+      // Test @Sse decorator independently (without @Controller wrapping)
+      class TestClass {
+        @Sse()
+        async *stream(): SseGenerator {
+          yield { event: 'start', data: { timestamp: Date.now() } };
+        }
+      }
+
+      expect(TestClass).toBeDefined();
+
+      // Verify SSE metadata is set on the prototype
+      const metadata = getSseMetadata(TestClass.prototype, 'stream');
+      expect(metadata).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/controllers.md#sse-with-heartbeat
+     */
+    it('should support heartbeat option', () => {
+      // Test @Sse decorator with options independently
+      class TestClass {
+        @Sse({ heartbeat: 15000 })
+        async *live(): SseGenerator {
+          yield { event: 'connected', data: { clientId: 'test' } };
+        }
+      }
+
+      expect(TestClass).toBeDefined();
+
+      // Verify heartbeat option is set
+      const metadata = getSseMetadata(TestClass.prototype, 'live');
+      expect(metadata).toBeDefined();
+      expect(metadata?.heartbeat).toBe(15000);
+    });
+
+    /**
+     * @source docs/api/controllers.md#sse-decorator-with-controller
+     */
+    it('should work with @Controller decorator', () => {
+      // From docs: @Sse() decorator example with full controller
+      @Controller('/events')
+      class EventsController extends BaseController {
+        @Get('/stream')
+        @Sse()
+        async *stream(): SseGenerator {
+          yield { event: 'start', data: { timestamp: Date.now() } };
+        }
+
+        @Get('/live')
+        @Sse({ heartbeat: 15000 })
+        async *live(): SseGenerator {
+          yield { event: 'connected', data: { clientId: 'test' } };
+        }
+      }
+
+      expect(EventsController).toBeDefined();
+    });
+  });
+
+  describe('formatSseEvent Function', () => {
+    /**
+     * @source docs/api/controllers.md#sse-wire-format
+     */
+    it('should format event with all fields', () => {
+      const event: SseEvent = {
+        event: 'update',
+        data: { count: 1 },
+        id: '123',
+        retry: 5000,
+      };
+
+      const formatted = formatSseEvent(event);
+
+      expect(formatted).toContain('event: update\n');
+      expect(formatted).toContain('id: 123\n');
+      expect(formatted).toContain('retry: 5000\n');
+      expect(formatted).toContain('data: {"count":1}\n');
+      expect(formatted).toEndWith('\n\n');
+    });
+
+    it('should format event with only data', () => {
+      const event: SseEvent = {
+        data: { message: 'Hello' },
+      };
+
+      const formatted = formatSseEvent(event);
+
+      expect(formatted).toBe('data: {"message":"Hello"}\n\n');
+      expect(formatted).not.toContain('event:');
+      expect(formatted).not.toContain('id:');
+    });
+
+    it('should format raw data as default event', () => {
+      const rawData = { count: 42 };
+
+      const formatted = formatSseEvent(rawData);
+
+      expect(formatted).toBe('data: {"count":42}\n\n');
+    });
+
+    it('should handle multi-line data', () => {
+      const event: SseEvent = {
+        data: 'line1\nline2\nline3',
+      };
+
+      const formatted = formatSseEvent(event);
+
+      expect(formatted).toContain('data: line1\n');
+      expect(formatted).toContain('data: line2\n');
+      expect(formatted).toContain('data: line3\n');
+    });
+
+    it('should handle string data', () => {
+      const event: SseEvent = {
+        event: 'message',
+        data: 'Simple string message',
+      };
+
+      const formatted = formatSseEvent(event);
+
+      expect(formatted).toContain('event: message\n');
+      expect(formatted).toContain('data: Simple string message\n');
+    });
+  });
+
+  describe('createSseStream Function', () => {
+    /**
+     * @source docs/api/controllers.md#sse-method
+     */
+    it('should create ReadableStream from async generator', async () => {
+      async function* testGenerator(): SseGenerator {
+        yield { event: 'start', data: { count: 0 } };
+        yield { event: 'tick', data: { count: 1 } };
+        yield { event: 'end', data: { count: 2 } };
+      }
+
+      const stream = createSseStream(testGenerator());
+
+      expect(stream).toBeInstanceOf(ReadableStream);
+
+      // Read all chunks from stream
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      const chunks: string[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+        chunks.push(decoder.decode(value));
+      }
+
+      const output = chunks.join('');
+      expect(output).toContain('event: start\n');
+      expect(output).toContain('event: tick\n');
+      expect(output).toContain('event: end\n');
+    });
+
+    it('should handle heartbeat option', async () => {
+      // Use a very short heartbeat for testing
+      const heartbeatInterval = 50;
+
+      async function* slowGenerator(): SseGenerator {
+        await Bun.sleep(150);
+        yield { data: 'done' };
+      }
+
+      const stream = createSseStream(slowGenerator(), { heartbeat: heartbeatInterval });
+      const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      const chunks: string[] = [];
+
+      // Read chunks with timeout
+      const startTime = Date.now();
+      while (Date.now() - startTime < 300) {
+        const result = await Promise.race([
+          reader.read(),
+          Bun.sleep(50).then(() => ({ done: false, value: undefined, timeout: true })),
+        ]);
+
+        if ('timeout' in result) {
+          continue;
+        }
+        if (result.done) {
+          break;
+        }
+        if (result.value) {
+          chunks.push(decoder.decode(result.value));
+        }
+      }
+
+      const output = chunks.join('');
+
+      // Should have heartbeat comments
+      expect(output).toContain(': heartbeat\n\n');
+      // Should have the actual event (string data is not wrapped in extra quotes)
+      expect(output).toContain('data: done');
+    });
+  });
+
+  describe('Controller.sse() Method', () => {
+    /**
+     * @source docs/api/controllers.md#sse-method
+     */
+    it('should have sse() method on BaseController', () => {
+      const controller = new BaseController();
+
+      // Access protected method via type assertion
+      expect(typeof (controller as unknown as { sse: Function }).sse).toBe('function');
+    });
+
+    /**
+     * @source docs/api/controllers.md#sse-method-example
+     */
+    it('should define controller using sse() method', () => {
+      // From docs: Using sse() method example
+      @Controller('/events')
+      class EventsController extends BaseController {
+        @Get('/manual')
+        events(): Response {
+          return this.sse(async function* () {
+            yield { event: 'start', data: { timestamp: Date.now() } };
+            yield { event: 'complete', data: { success: true } };
+          }());
+        }
+      }
+
+      expect(EventsController).toBeDefined();
+    });
+  });
+
+  describe('Complete SSE Controller Example (docs/api/controllers.md)', () => {
+    /**
+     * @source docs/api/controllers.md#server-sent-events-sse
+     */
+    it('should define complete SSE controller', () => {
+      // From docs: Complete SSE Controller example
+      @Service()
+      class DataService extends BaseService {
+        async waitForUpdate(): Promise<unknown> {
+          return { updated: true };
+        }
+      }
+
+      @Service()
+      class NotificationService extends BaseService {
+        async poll(): Promise<unknown> {
+          return { type: 'notification', message: 'New message' };
+        }
+      }
+
+      @Controller('/events')
+      class EventsController extends BaseController {
+        constructor(
+          private dataService: DataService,
+          private notificationService: NotificationService,
+        ) {
+          super();
+        }
+
+        // Simple SSE endpoint
+        @Get('/stream')
+        @Sse()
+        async *stream(): SseGenerator {
+          for (let i = 0; i < 10; i++) {
+            yield { event: 'tick', data: { count: i, timestamp: Date.now() } };
+          }
+        }
+
+        // SSE with heartbeat
+        @Get('/live')
+        @Sse({ heartbeat: 15000 })
+        async *live(): SseGenerator {
+          yield { event: 'connected', data: { clientId: crypto.randomUUID() } };
+        }
+
+        // SSE with event IDs for reconnection
+        @Get('/notifications')
+        @Sse({ heartbeat: 30000 })
+        async *notifications(): SseGenerator {
+          let eventId = 0;
+          const notification = await this.notificationService.poll();
+          eventId++;
+          yield {
+            event: 'notification',
+            data: notification,
+            id: String(eventId),
+            retry: 5000,
+          };
+        }
+
+        // Using sse() method
+        @Get('/manual')
+        events(): Response {
+          return this.sse(async function* () {
+            yield { event: 'start', data: { timestamp: Date.now() } };
+            yield { event: 'complete', data: { success: true } };
+          }());
+        }
+      }
+
+      expect(EventsController).toBeDefined();
+      expect(DataService).toBeDefined();
+      expect(NotificationService).toBeDefined();
     });
   });
 });

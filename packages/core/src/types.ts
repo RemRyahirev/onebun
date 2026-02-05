@@ -511,3 +511,79 @@ export interface ControllerMetadata {
   path: string;
   routes: RouteMetadata[];
 }
+
+// ============================================================================
+// SSE (Server-Sent Events) Types
+// ============================================================================
+
+/**
+ * SSE event structure
+ *
+ * Represents a single Server-Sent Event that can be sent to the client.
+ *
+ * @example
+ * ```typescript
+ * // Simple event with data
+ * yield { data: { message: 'Hello' } };
+ *
+ * // Named event with ID
+ * yield { event: 'update', data: { count: 42 }, id: '123' };
+ *
+ * // Event with retry interval
+ * yield { event: 'status', data: { online: true }, retry: 5000 };
+ * ```
+ */
+export interface SseEvent {
+  /** Event name (optional, defaults to 'message') */
+  event?: string;
+  /** Event data (will be JSON serialized) */
+  data: unknown;
+  /** Event ID for reconnection (Last-Event-ID header) */
+  id?: string;
+  /** Reconnection interval in milliseconds */
+  retry?: number;
+}
+
+/**
+ * SSE decorator options
+ *
+ * @example
+ * ```typescript
+ * @Sse({ heartbeat: 15000 })  // Send heartbeat every 15 seconds
+ * async *events(): SseGenerator {
+ *   // ...
+ * }
+ * ```
+ */
+export interface SseOptions {
+  /**
+   * Heartbeat interval in milliseconds.
+   * When set, the server will send a comment (": heartbeat\n\n")
+   * at this interval to keep the connection alive.
+   */
+  heartbeat?: number;
+}
+
+/**
+ * SSE generator type
+ *
+ * An async generator that yields SSE events or raw data.
+ * When raw data is yielded, it will be wrapped in a default event.
+ *
+ * @example
+ * ```typescript
+ * @Get('/events')
+ * @Sse()
+ * async *events(): SseGenerator {
+ *   yield { event: 'start', data: { timestamp: Date.now() } };
+ *
+ *   for (let i = 0; i < 10; i++) {
+ *     await Bun.sleep(1000);
+ *     yield { event: 'tick', data: { count: i } };
+ *   }
+ *
+ *   yield { event: 'end', data: { total: 10 } };
+ * }
+ * ```
+ */
+export type SseGenerator = AsyncGenerator<SseEvent | unknown, void, unknown>;

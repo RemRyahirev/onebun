@@ -24,13 +24,18 @@ import {
 } from '@onebun/requests';
 import { makeTraceService, TraceService } from '@onebun/trace';
 
-import { getControllerMetadata } from '../decorators/decorators';
+import {
+  getControllerMetadata,
+  getSseMetadata,
+  type SseDecoratorOptions,
+} from '../decorators/decorators';
 import {
   NotInitializedConfig,
   type IConfig,
   type OneBunAppConfig,
 } from '../module/config.interface';
 import { ConfigServiceImpl } from '../module/config.service';
+import { createSseStream } from '../module/controller';
 import { OneBunModule } from '../module/module';
 import { QueueService, type QueueAdapter } from '../queue';
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
@@ -371,6 +376,7 @@ export class OneBunApplication {
         {
           method: string;
           handler: Function;
+          handlerName: string;
           controller: Controller;
           params?: ParamMetadata[];
           middleware?: Function[];
@@ -436,6 +442,7 @@ export class OneBunApplication {
           routes.set(_routeKey, {
             method,
             handler,
+            handlerName: route.handler,
             controller,
             params: route.params,
             middleware: route.middleware,
@@ -899,6 +906,7 @@ export class OneBunApplication {
     async function executeHandler(
       route: {
         handler: Function;
+        handlerName?: string;
         controller: Controller;
         params?: ParamMetadata[];
         responseSchemas?: RouteMetadata['responseSchemas'];
@@ -906,9 +914,22 @@ export class OneBunApplication {
       req: Request,
       paramValues: Record<string, string | string[]>,
     ): Promise<Response> {
+      // Check if this is an SSE endpoint
+      let sseOptions: SseDecoratorOptions | undefined;
+      if (route.handlerName) {
+        sseOptions = getSseMetadata(Object.getPrototypeOf(route.controller), route.handlerName);
+      }
+
       // If no parameter metadata, just call the handler with the request
       if (!route.params || route.params.length === 0) {
-        return await route.handler(req);
+        const result = await route.handler(req);
+
+        // Handle SSE response
+        if (sseOptions !== undefined) {
+          return createSseResponseFromResult(result, sseOptions);
+        }
+
+        return result;
       }
 
       // Prepare arguments array based on parameter metadata
@@ -974,6 +995,11 @@ export class OneBunApplication {
       try {
         // Call handler with injected parameters
         const result = await route.handler(...args);
+
+        // Handle SSE response - wrap async generator in SSE Response
+        if (sseOptions !== undefined) {
+          return createSseResponseFromResult(result, sseOptions);
+        }
 
         // Initialize variables for response validation
         let validatedResult = result;
@@ -1106,6 +1132,46 @@ export class OneBunApplication {
           },
         });
       }
+    }
+
+    /**
+     * Create SSE Response from handler result
+     * Handles both async generators and already-created Responses
+     */
+    function createSseResponseFromResult(
+      result: unknown,
+      options: SseDecoratorOptions,
+    ): Response {
+      // If result is already a Response (e.g., from controller.sse()), return it
+      if (result instanceof Response) {
+        return result;
+      }
+
+      // Check if result is an async iterable (generator)
+      if (result && typeof result === 'object' && Symbol.asyncIterator in result) {
+        const stream = createSseStream(
+          result as AsyncIterable<unknown>,
+          options,
+        );
+
+        return new Response(stream, {
+          status: HttpStatusCode.OK,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'text/event-stream',
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Cache-Control': 'no-cache',
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Connection': 'keep-alive',
+          },
+        });
+      }
+
+      // Fallback: return error if result is not valid for SSE
+      throw new Error(
+        'SSE endpoint must return an async generator or a Response object. ' +
+        'Use "async *methodName()" or return this.sse(generator).',
+      );
     }
   }
 

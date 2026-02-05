@@ -575,6 +575,82 @@ export const Head = createRouteDecorator(HttpMethod.HEAD);
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const All = createRouteDecorator(HttpMethod.ALL);
 
+// ============================================================================
+// SSE (Server-Sent Events) Decorator
+// ============================================================================
+
+/**
+ * Metadata key for SSE handler configuration
+ */
+export const SSE_METADATA = 'onebun:sse';
+
+/**
+ * SSE decorator options
+ */
+export interface SseDecoratorOptions {
+  /**
+   * Heartbeat interval in milliseconds.
+   * When set, the server will send a comment (": heartbeat\n\n")
+   * at this interval to keep the connection alive.
+   */
+  heartbeat?: number;
+}
+
+/**
+ * SSE (Server-Sent Events) method decorator
+ *
+ * Marks a controller method as an SSE endpoint. The method should be an async generator
+ * that yields SseEvent objects or raw data.
+ *
+ * @param options - SSE configuration options
+ * @returns Method decorator
+ *
+ * @example Simple SSE endpoint
+ * ```typescript
+ * @Get('/events')
+ * @Sse()
+ * async *events(): SseGenerator {
+ *   for (let i = 0; i < 10; i++) {
+ *     await Bun.sleep(1000);
+ *     yield { event: 'tick', data: { count: i } };
+ *   }
+ * }
+ * ```
+ *
+ * @example SSE with heartbeat for long-lived connections
+ * ```typescript
+ * @Get('/live')
+ * @Sse({ heartbeat: 15000 })  // Send heartbeat every 15 seconds
+ * async *liveUpdates(): SseGenerator {
+ *   while (true) {
+ *     const data = await this.dataService.waitForUpdate();
+ *     yield { event: 'update', data };
+ *   }
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function Sse(options?: SseDecoratorOptions): MethodDecorator {
+  return (target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
+    Reflect.defineMetadata(SSE_METADATA, options ?? {}, target, propertyKey as string);
+
+    return descriptor;
+  };
+}
+
+/**
+ * Check if a method is marked as SSE endpoint
+ * @param target - Controller instance or prototype
+ * @param methodName - Method name
+ * @returns SSE options if method is SSE endpoint, undefined otherwise
+ */
+export function getSseMetadata(
+  target: object,
+  methodName: string,
+): SseDecoratorOptions | undefined {
+  return Reflect.getMetadata(SSE_METADATA, target, methodName);
+}
+
 /**
  * Module decorator metadata
  */

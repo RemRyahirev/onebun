@@ -29,6 +29,7 @@ A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows
 | [@onebun/cache](packages/cache) | [![npm](https://img.shields.io/npm/v/@onebun/cache?color=blue)](https://www.npmjs.com/package/@onebun/cache) | Caching with in-memory and Redis support |
 | [@onebun/docs](packages/docs) | [![npm](https://img.shields.io/npm/v/@onebun/docs?color=blue)](https://www.npmjs.com/package/@onebun/docs) | OpenAPI documentation generation |
 | [@onebun/drizzle](packages/drizzle) | [![npm](https://img.shields.io/npm/v/@onebun/drizzle?color=blue)](https://www.npmjs.com/package/@onebun/drizzle) | Drizzle ORM integration |
+| [@onebun/nats](packages/nats) | [![npm](https://img.shields.io/npm/v/@onebun/nats?color=blue)](https://www.npmjs.com/package/@onebun/nats) | NATS integration |
 | [@onebun/envs](packages/envs) | [![npm](https://img.shields.io/npm/v/@onebun/envs?color=blue)](https://www.npmjs.com/package/@onebun/envs) | Environment variables management |
 | [@onebun/logger](packages/logger) | [![npm](https://img.shields.io/npm/v/@onebun/logger?color=blue)](https://www.npmjs.com/package/@onebun/logger) | Structured logging |
 | [@onebun/metrics](packages/metrics) | [![npm](https://img.shields.io/npm/v/@onebun/metrics?color=blue)](https://www.npmjs.com/package/@onebun/metrics) | Prometheus-compatible metrics |

@@ -1,4 +1,5 @@
 import type { IConfig, OneBunAppConfig } from './config.interface';
+import type { SseEvent, SseOptions } from '../types';
 import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -173,4 +174,202 @@ export class Controller {
       },
     });
   }
+
+  // ===========================================================================
+  // SSE (Server-Sent Events) Methods
+  // ===========================================================================
+
+  /**
+   * Create an SSE (Server-Sent Events) response from an async iterable
+   *
+   * This method provides an alternative to the @Sse() decorator for creating
+   * SSE responses programmatically.
+   *
+   * @param source - Async iterable that yields SseEvent objects or raw data
+   * @param options - SSE options (heartbeat interval, etc.)
+   * @returns A Response object with SSE content type
+   *
+   * @example Basic usage
+   * ```typescript
+   * @Get('/events')
+   * events(): Response {
+   *   return this.sse(async function* () {
+   *     for (let i = 0; i < 10; i++) {
+   *       await Bun.sleep(1000);
+   *       yield { event: 'tick', data: { count: i } };
+   *     }
+   *   }());
+   * }
+   * ```
+   *
+   * @example With heartbeat
+   * ```typescript
+   * @Get('/live')
+   * live(): Response {
+   *   const updates = this.dataService.getUpdateStream();
+   *   return this.sse(updates, { heartbeat: 15000 });
+   * }
+   * ```
+   */
+  protected sse(
+    source: AsyncIterable<SseEvent | unknown>,
+    options: SseOptions = {},
+  ): Response {
+    const stream = createSseStream(source, options);
+
+    return new Response(stream, {
+      status: HttpStatusCode.OK,
+      headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Content-Type': 'text/event-stream',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Cache-Control': 'no-cache',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Connection': 'keep-alive',
+      },
+    });
+  }
+}
+
+// =============================================================================
+// SSE Helper Functions (used by both Controller.sse() and executeHandler)
+// =============================================================================
+
+/**
+ * Format an event object into SSE wire format
+ *
+ * @param event - Event object or raw data
+ * @returns Formatted SSE string
+ *
+ * @example
+ * ```typescript
+ * formatSseEvent({ event: 'update', data: { count: 1 }, id: '123' })
+ * // Returns: "event: update\nid: 123\ndata: {"count":1}\n\n"
+ *
+ * formatSseEvent({ count: 1 })
+ * // Returns: "data: {"count":1}\n\n"
+ * ```
+ */
+export function formatSseEvent(event: SseEvent | unknown): string {
+  let result = '';
+
+  // Check if this is an SseEvent object or raw data
+  const isSseEvent =
+    typeof event === 'object' &&
+    event !== null &&
+    'data' in event &&
+    (('event' in event && typeof (event as SseEvent).event === 'string') ||
+      ('id' in event && typeof (event as SseEvent).id === 'string') ||
+      ('retry' in event && typeof (event as SseEvent).retry === 'number') ||
+      Object.keys(event).every((k) => ['event', 'data', 'id', 'retry'].includes(k)));
+
+  if (isSseEvent) {
+    const sseEvent = event as SseEvent;
+
+    // Add event name if specified
+    if (sseEvent.event) {
+      result += `event: ${sseEvent.event}\n`;
+    }
+
+    // Add event ID if specified
+    if (sseEvent.id) {
+      result += `id: ${sseEvent.id}\n`;
+    }
+
+    // Add retry interval if specified
+    if (sseEvent.retry !== undefined) {
+      result += `retry: ${sseEvent.retry}\n`;
+    }
+
+    // Add data (JSON serialized)
+    const dataStr =
+      typeof sseEvent.data === 'string' ? sseEvent.data : JSON.stringify(sseEvent.data);
+
+    // Handle multi-line data by prefixing each line with "data: "
+    const dataLines = dataStr.split('\n');
+    for (const line of dataLines) {
+      result += `data: ${line}\n`;
+    }
+  } else {
+    // Raw data - serialize as JSON
+    const dataStr = typeof event === 'string' ? event : JSON.stringify(event);
+    const dataLines = dataStr.split('\n');
+    for (const line of dataLines) {
+      result += `data: ${line}\n`;
+    }
+  }
+
+  // Add final newline to complete the event
+  result += '\n';
+
+  return result;
+}
+
+/**
+ * Create a ReadableStream for SSE from an async iterable
+ *
+ * @param source - Async iterable that yields events
+ * @param options - SSE options
+ * @returns ReadableStream for Response body
+ */
+export function createSseStream(
+  source: AsyncIterable<SseEvent | unknown>,
+  options: SseOptions = {},
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let heartbeatTimer: Timer | null = null;
+  let isCancelled = false;
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      // Set up heartbeat timer if specified
+      if (options.heartbeat && options.heartbeat > 0) {
+        heartbeatTimer = setInterval(() => {
+          if (!isCancelled) {
+            try {
+              controller.enqueue(encoder.encode(': heartbeat\n\n'));
+            } catch {
+              // Controller might be closed, ignore
+            }
+          }
+        }, options.heartbeat);
+      }
+
+      try {
+        for await (const event of source) {
+          if (isCancelled) {
+            break;
+          }
+          const formatted = formatSseEvent(event);
+          controller.enqueue(encoder.encode(formatted));
+        }
+      } catch (error) {
+        // Log error but don't throw - stream should close gracefully
+        // eslint-disable-next-line no-console
+        console.error('[SSE] Stream error:', error);
+      } finally {
+        // Clean up heartbeat timer
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+        // Close the stream
+        if (!isCancelled) {
+          try {
+            controller.close();
+          } catch {
+            // Controller might already be closed
+          }
+        }
+      }
+    },
+
+    cancel() {
+      isCancelled = true;
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+    },
+  });
 }
