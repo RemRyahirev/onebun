@@ -113,16 +113,47 @@ function normalizePath(path: string): string {
 }
 
 /**
+ * Resolve port from options, environment variable, or default.
+ * Priority: explicit option > PORT env > default (3000)
+ */
+function resolvePort(explicitPort: number | undefined): number {
+  if (explicitPort !== undefined) {
+    return explicitPort;
+  }
+  const envPort = process.env.PORT;
+  if (envPort !== undefined && envPort !== '') {
+    const parsed = parseInt(envPort, 10);
+    if (!isNaN(parsed) && parsed > 0) {
+      return parsed;
+    }
+  }
+
+  return 3000;
+}
+
+/**
+ * Resolve host from options, environment variable, or default.
+ * Priority: explicit option > HOST env > default ('0.0.0.0')
+ */
+function resolveHost(explicitHost: string | undefined): string {
+  if (explicitHost !== undefined) {
+    return explicitHost;
+  }
+  const envHost = process.env.HOST;
+  if (envHost !== undefined && envHost !== '') {
+    return envHost;
+  }
+
+  return '0.0.0.0';
+}
+
+/**
  * OneBun Application
  */
 export class OneBunApplication {
   private rootModule: ModuleInstance;
   private server: ReturnType<typeof Bun.serve> | null = null;
-  private options: ApplicationOptions = {
-    port: 3000,
-    host: '0.0.0.0',
-    development: process.env.NODE_ENV !== 'production',
-  };
+  private options: ApplicationOptions;
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
   private configService: ConfigServiceImpl | null = null;
@@ -144,9 +175,13 @@ export class OneBunApplication {
     moduleClass: new (...args: unknown[]) => object,
     options?: Partial<ApplicationOptions>,
   ) {
-    if (options) {
-      this.options = { ...this.options, ...options };
-    }
+    // Resolve port and host with priority: explicit > env > default
+    this.options = {
+      port: resolvePort(options?.port),
+      host: resolveHost(options?.host),
+      development: options?.development ?? process.env.NODE_ENV !== 'production',
+      ...options,
+    };
 
     // Initialize configuration - TypedEnv if schema provided, otherwise NotInitializedConfig
     if (this.options.envSchema) {

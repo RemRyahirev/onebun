@@ -11,15 +11,24 @@ description: OneBunApplication, MultiServiceApplication classes. Bootstrap optio
 import { OneBunApplication } from '@onebun/core';
 import { AppModule } from './app.module';
 
-const app = new OneBunApplication(AppModule, { port: 3000 });
+// Uses PORT/HOST env vars if set, otherwise defaults (3000 / '0.0.0.0')
+const app = new OneBunApplication(AppModule);
 await app.start();
+
+// Or with explicit port (overrides PORT env var)
+const app2 = new OneBunApplication(AppModule, { port: 3000 });
 ```
+
+**Port/Host Resolution Priority**:
+1. Explicit option passed to constructor
+2. Environment variable (PORT / HOST)
+3. Default value (3000 / '0.0.0.0')
 
 **With Full Options**:
 ```typescript
 const app = new OneBunApplication(AppModule, {
-  port: 3000,
-  host: '0.0.0.0',
+  port: 3000,          // overrides PORT env var
+  host: '0.0.0.0',     // overrides HOST env var
   basePath: '/api/v1',
   envSchema,  // from @onebun/envs
   metrics: { enabled: true, path: '/metrics', prefix: 'myapp_' },
@@ -64,10 +73,14 @@ interface ApplicationOptions {
   /** Application name for metrics/tracing labels */
   name?: string;
 
-  /** Port to listen on (default: 3000) */
+  /** Port to listen on
+   * Priority: explicit option > PORT env variable > default (3000)
+   */
   port?: number;
 
-  /** Host to listen on (default: '0.0.0.0') */
+  /** Host to listen on
+   * Priority: explicit option > HOST env variable > default ('0.0.0.0')
+   */
   host?: string;
 
   /** Base path prefix for all routes (e.g., '/api/v1') */

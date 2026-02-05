@@ -432,6 +432,236 @@ describe('OneBunApplication', () => {
       expect(prodApp).toBeInstanceOf(OneBunApplication);
     });
 
+    test('should use PORT env variable when port is not explicitly provided', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        process.env.PORT = '4567';
+        delete process.env.HOST; // Clear HOST to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:4567');
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should use HOST env variable when host is not explicitly provided', () => {
+      const originalHost = process.env.HOST;
+      const originalPort = process.env.PORT;
+      try {
+        process.env.HOST = '192.168.1.100';
+        delete process.env.PORT; // Clear PORT to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://192.168.1.100:3000');
+      } finally {
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+      }
+    });
+
+    test('should use both PORT and HOST env variables when not explicitly provided', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        process.env.PORT = '8888';
+        process.env.HOST = '10.0.0.1';
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://10.0.0.1:8888');
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should prefer explicit port over PORT env variable', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        process.env.PORT = '9999';
+        delete process.env.HOST; // Clear HOST to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule, { port: 5555 });
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:5555');
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should prefer explicit host over HOST env variable', () => {
+      const originalHost = process.env.HOST;
+      const originalPort = process.env.PORT;
+      try {
+        process.env.HOST = '192.168.1.100';
+        delete process.env.PORT; // Clear PORT to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule, { host: 'localhost' });
+        expect(app.getHttpUrl()).toBe('http://localhost:3000');
+      } finally {
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+      }
+    });
+
+    test('should use defaults when env variables are not set', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        delete process.env.PORT;
+        delete process.env.HOST;
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:3000');
+      } finally {
+        if (originalPort !== undefined) {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost !== undefined) {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should ignore invalid PORT env variable and use default', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        process.env.PORT = 'invalid';
+        delete process.env.HOST; // Clear HOST to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:3000');
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should ignore empty PORT env variable and use default', () => {
+      const originalPort = process.env.PORT;
+      const originalHost = process.env.HOST;
+      try {
+        process.env.PORT = '';
+        delete process.env.HOST; // Clear HOST to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:3000');
+      } finally {
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+      }
+    });
+
+    test('should ignore empty HOST env variable and use default', () => {
+      const originalHost = process.env.HOST;
+      const originalPort = process.env.PORT;
+      try {
+        process.env.HOST = '';
+        delete process.env.PORT; // Clear PORT to get default
+
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        expect(app.getHttpUrl()).toBe('http://0.0.0.0:3000');
+      } finally {
+        if (originalHost === undefined) {
+          delete process.env.HOST;
+        } else {
+          process.env.HOST = originalHost;
+        }
+        if (originalPort === undefined) {
+          delete process.env.PORT;
+        } else {
+          process.env.PORT = originalPort;
+        }
+      }
+    });
+
     test('should handle complex envSchema configuration', () => {
       @Module({})
       class TestModule {}

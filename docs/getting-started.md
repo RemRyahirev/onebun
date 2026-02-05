@@ -269,8 +269,9 @@ import { AppModule } from './app.module';
 import { envSchema } from './config';
 
 const app = new OneBunApplication(AppModule, {
-  port: 3000,
-  host: '0.0.0.0',
+  // port and host can be omitted - they'll use PORT/HOST env vars or defaults (3000/'0.0.0.0')
+  // port: 3000,
+  // host: '0.0.0.0',
   development: true,
   envSchema,
   envOptions: {
