@@ -344,7 +344,7 @@ export class MyService extends BaseService {
 - Types are inferred at the `from()` call site based on table type
 - `UniversalSelectBuilder` uses function overloads to return correct result types
 - For `insert()`, `update()`, `delete()` - types are inferred from the table argument
-- This approach eliminates the need for `DrizzleService<DatabaseType.SQLITE>` syntax
+- This approach eliminates the need for generic syntax like `DrizzleService&lt;DatabaseType.SQLITE&gt;`
 - The `UniversalTransactionClient` provides the same API inside transactions
 </llms-only>
 
