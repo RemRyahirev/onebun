@@ -326,11 +326,12 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
-    if (iterations >= maxIterations) {
-      const unresolvedServices = pendingProviders
-        .filter((p) => typeof p === 'function')
-        .map((p) => p.name);
+    // Only report circular dependency if there are still unresolved services
+    const unresolvedServices = pendingProviders
+      .filter((p) => typeof p === 'function')
+      .map((p) => p.name);
 
+    if (iterations >= maxIterations && unresolvedServices.length > 0) {
       const details = unresolvedServices
         .map((serviceName) => {
           const deps = unresolvedDeps.get(serviceName) || [];
