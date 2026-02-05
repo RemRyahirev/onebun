@@ -181,7 +181,7 @@ export class AppModule {}
 export class UserModule {}
 ```
 
-<llms-only>
+<llm-only>
 **Technical details for AI agents:**
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
 - `isGlobal: true` (default) - singleton DrizzleService, one DB connection for entire app
@@ -189,7 +189,7 @@ export class UserModule {}
 - `forFeature()` simply returns the DrizzleModule class for explicit imports in feature modules
 - Global services are stored in a registry and automatically injected into all modules
 - When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`
-</llms-only>
+</llm-only>
 
 ## Schema Definition
 
@@ -338,7 +338,7 @@ export class MyService extends BaseService {
 }
 ```
 
-<llms-only>
+<llm-only>
 **Technical details for AI agents:**
 - `DrizzleService` no longer has a generic type parameter
 - Types are inferred at the `from()` call site based on table type
@@ -346,7 +346,7 @@ export class MyService extends BaseService {
 - For `insert()`, `update()`, `delete()` - types are inferred from the table argument
 - This approach eliminates the need for generic syntax like `DrizzleService&lt;DatabaseType.SQLITE&gt;`
 - The `UniversalTransactionClient` provides the same API inside transactions
-</llms-only>
+</llm-only>
 
 ### Query Methods
 
@@ -700,14 +700,14 @@ Drizzle automatically tracks applied migrations in the `__drizzle_migrations` ta
 - Running `runMigrations()` multiple times is safe
 - No duplicate table creation errors
 
-<llms-only>
+<llm-only>
 **Technical details for AI agents:**
 - `generateMigrations()` creates a temporary `drizzle.config.temp.ts` file and runs `bunx drizzle-kit generate`
 - `pushSchema()` runs `bunx drizzle-kit push:sqlite` or `push:pg` depending on dialect
 - `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
 - Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
 - The `__drizzle_migrations` table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
-</llms-only>
+</llm-only>
 
 ## Complete Example
 

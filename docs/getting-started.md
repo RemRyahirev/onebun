@@ -2,7 +2,7 @@
 description: Installation and basic setup guide for OneBun framework. Prerequisites, project structure, modules, controllers, services.
 ---
 
-<llms-only>
+<llm-only>
 
 ## Technical Context for AI Agents
 
@@ -34,7 +34,7 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 - Using Effect.gen instead of Effect.pipe
 - Not registering services in @Module providers array
 
-</llms-only>
+</llm-only>
 
 # Getting Started with OneBun
 

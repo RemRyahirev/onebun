@@ -2,7 +2,7 @@
 description: System architecture overview. Module hierarchy, DI container, request lifecycle, Effect.js integration patterns.
 ---
 
-<llms-only>
+<llm-only>
 
 ## Internal Architecture Notes
 
@@ -34,7 +34,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 - METHOD_METADATA_KEY for HTTP methods
 - PARAM_METADATA_KEY for parameter extraction
 
-</llms-only>
+</llm-only>
 
 # OneBun Architecture
 

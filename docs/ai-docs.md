@@ -65,7 +65,7 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 - Code examples and patterns
 - Type signatures and interfaces
 - Common errors and solutions
-- Technical notes in `<llms-only>` blocks (visible only to AI)
+- Technical notes in `<llm-only>` blocks (visible only to AI)
 
 ### Key Packages
 

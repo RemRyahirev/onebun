@@ -2,7 +2,7 @@
 description: OneBunApplication, MultiServiceApplication classes. Bootstrap options, graceful shutdown, metrics and tracing configuration.
 ---
 
-<llms-only>
+<llm-only>
 
 ## Quick Reference for AI
 
@@ -38,7 +38,7 @@ const app = new OneBunApplication(AppModule, {
 
 **MultiServiceApplication** - for running multiple services in one process, useful for local development or monolith deployment.
 
-</llms-only>
+</llm-only>
 
 # Core Package API
 

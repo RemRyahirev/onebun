@@ -2,7 +2,7 @@
 description: "@Module, @Controller, @Service decorators. HTTP method decorators (@Get, @Post, etc). Parameter decorators (@Param, @Query, @Body)."
 ---
 
-<llms-only>
+<llm-only>
 
 ## Decorator Quick Reference
 
@@ -62,7 +62,7 @@ export class UserService extends BaseService {
 }
 ```
 
-</llms-only>
+</llm-only>
 
 # Decorators API
 
@@ -152,13 +152,13 @@ function isGlobalModule(target: Function): boolean;
 function removeFromGlobalModules(target: Function): void;
 ```
 
-<llms-only>
+<llm-only>
 **Technical details for AI agents:**
 - Global modules are stored in a Set and checked during module initialization
 - Global services are registered in a separate registry and automatically injected into all modules
 - To opt out of global behavior dynamically, use `removeFromGlobalModules()` (e.g., for multi-DB scenarios)
 - The `@Global()` decorator only runs once at module definition time
-</llms-only>
+</llm-only>
 
 ## Controller Decorators
 
