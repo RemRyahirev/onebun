@@ -1,6 +1,6 @@
 {
   "name": "@onebun/drizzle",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Drizzle ORM module for OneBun framework - SQLite and PostgreSQL support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",

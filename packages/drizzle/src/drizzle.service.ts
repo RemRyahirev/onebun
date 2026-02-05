@@ -7,9 +7,20 @@ import { migrate } from 'drizzle-orm/bun-sqlite/migrator';
 import { Effect } from 'effect';
 
 import type { BunSQLDatabase } from 'drizzle-orm/bun-sql';
+import type { BunSQLQueryResultHKT } from 'drizzle-orm/bun-sql/session';
 import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
-import type { PgTable } from 'drizzle-orm/pg-core';
-import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import type {
+  PgDeleteBase,
+  PgInsertBuilder,
+  PgTable,
+  PgUpdateBuilder,
+} from 'drizzle-orm/pg-core';
+import type {
+  SQLiteDeleteBase,
+  SQLiteInsertBuilder,
+  SQLiteTable,
+  SQLiteUpdateBuilder,
+} from 'drizzle-orm/sqlite-core';
 
 import { BaseService, Service } from '@onebun/core';
 import {
@@ -32,10 +43,6 @@ import {
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
 } from './types';
-
-// Type helpers for insert/update/delete return types
-type SQLiteDb = BunSQLiteDatabase<Record<string, SQLiteTable>>;
-type PgDb = BunSQLDatabase<Record<string, PgTable>>;
 
 /**
  * Default environment variable prefix
@@ -712,15 +719,13 @@ export class DrizzleService extends BaseService {
    *   .returning();
    * ```
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  insert<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['insert']>;
+  insert<TTable extends SQLiteTable>(table: TTable): SQLiteInsertBuilder<TTable, 'sync', void>;
   /**
    * Create an INSERT query for PostgreSQL table
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  insert<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['insert']>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
-  insert(table: SQLiteTable<any> | PgTable<any>) {
+  insert<TTable extends PgTable>(table: TTable): PgInsertBuilder<TTable, BunSQLQueryResultHKT>;
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  insert(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -744,15 +749,13 @@ export class DrizzleService extends BaseService {
    *   .returning();
    * ```
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  update<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['update']>;
+  update<TTable extends SQLiteTable>(table: TTable): SQLiteUpdateBuilder<TTable, 'sync', void>;
   /**
    * Create an UPDATE query for PostgreSQL table
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  update<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['update']>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
-  update(table: SQLiteTable<any> | PgTable<any>) {
+  update<TTable extends PgTable>(table: TTable): PgUpdateBuilder<TTable, BunSQLQueryResultHKT>;
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  update(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -773,15 +776,13 @@ export class DrizzleService extends BaseService {
    *   .returning();
    * ```
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete<TTable extends SQLiteTable<any>>(table: TTable): ReturnType<SQLiteDb['delete']>;
+  delete<TTable extends SQLiteTable>(table: TTable): SQLiteDeleteBase<TTable, 'sync', void>;
   /**
    * Create a DELETE query for PostgreSQL table
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  delete<TTable extends PgTable<any>>(table: TTable): ReturnType<PgDb['delete']>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
-  delete(table: SQLiteTable<any> | PgTable<any>) {
+  delete<TTable extends PgTable>(table: TTable): PgDeleteBase<TTable, BunSQLQueryResultHKT>;
+  // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
+  delete(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

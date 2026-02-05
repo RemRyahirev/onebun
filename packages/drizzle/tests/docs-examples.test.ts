@@ -777,6 +777,308 @@ describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
   });
 });
 
+describe('DrizzleService returning() Type Inference', () => {
+  // This test block verifies that returning() returns properly typed results
+  // These tests catch the bug where returning() returned { [x: string]: any }
+  // instead of the proper table type
+
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleService } = require('../src/drizzle.service');
+  const { eq } = require('../src/index');
+  const { Effect } = require('effect');
+  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
+  const { LoggerService } = require('@onebun/logger');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  // Define test schema with multiple columns to ensure proper type inference
+  const returningTestUsers = sqliteTable('returning_test_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+    age: integer('age'),
+  });
+
+  // These types are used for compile-time type checking
+  // If returning() types are wrong, TypeScript will fail to compile these assignments
+  type ReturningTestUser = typeof returningTestUsers.$inferSelect;
+  type InsertReturningTestUser = typeof returningTestUsers.$inferInsert;
+
+  let service: typeof DrizzleService.prototype;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const loggerLayer = makeMockLoggerLayer();
+    const logger = Effect.runSync(
+      Effect.provide(
+        Effect.map(LoggerService, (l: unknown) => l),
+        loggerLayer,
+      ),
+    );
+
+    service = new DrizzleService();
+    service.initializeService(logger, createMockConfig());
+
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+
+    const db = service.getDatabase();
+    db.run(`CREATE TABLE returning_test_users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL,
+      age INTEGER
+    )`);
+  });
+
+  afterEach(async () => {
+    if (service) {
+      await service.close();
+    }
+  });
+
+  describe('select().from() type inference', () => {
+    it('should return properly typed result from select().from()', async () => {
+      // Insert test data
+      const db = service.getDatabase();
+      db.run("INSERT INTO returning_test_users (name, email, age) VALUES ('John', 'john@example.com', 30)");
+
+      const result = await service.select().from(returningTestUsers);
+
+      // COMPILE-TIME TYPE CHECK:
+      // This assignment would fail if result[0] is not properly typed
+      const selectedUser: ReturningTestUser = result[0];
+
+      // Runtime assertions
+      expect(selectedUser.id).toBeDefined();
+      expect(selectedUser.name).toBe('John');
+      expect(selectedUser.email).toBe('john@example.com');
+      expect(selectedUser.age).toBe(30);
+    });
+
+    it('should allow accessing typed properties from select() without type assertion', async () => {
+      const db = service.getDatabase();
+      db.run("INSERT INTO returning_test_users (name, email) VALUES ('Jane', 'jane@example.com')");
+
+      const [user] = await service.select().from(returningTestUsers);
+
+      // COMPILE-TIME TYPE CHECK:
+      // These property accesses would fail if user is not properly typed
+      const id: number = user.id;
+      const name: string = user.name;
+      const email: string = user.email;
+      const age: number | null = user.age;
+
+      expect(typeof id).toBe('number');
+      expect(typeof name).toBe('string');
+      expect(typeof email).toBe('string');
+      expect(age).toBeNull();
+    });
+
+    it('should return properly typed result from select() with specific columns', async () => {
+      const db = service.getDatabase();
+      db.run("INSERT INTO returning_test_users (name, email, age) VALUES ('Bob', 'bob@example.com', 25)");
+
+      const result = await service.select({
+        userName: returningTestUsers.name,
+        userEmail: returningTestUsers.email,
+      }).from(returningTestUsers);
+
+      // COMPILE-TIME TYPE CHECK:
+      // The result should have the custom field names with correct types
+      const selectedFields: { userName: string; userEmail: string } = result[0];
+
+      expect(selectedFields.userName).toBe('Bob');
+      expect(selectedFields.userEmail).toBe('bob@example.com');
+      // Should NOT have other properties (type-safe)
+      expect('id' in result[0]).toBe(false);
+      expect('age' in result[0]).toBe(false);
+    });
+
+    it('should return properly typed result from selectDistinct()', async () => {
+      const db = service.getDatabase();
+      db.run("INSERT INTO returning_test_users (name, email) VALUES ('Alice', 'alice@example.com')");
+      db.run("INSERT INTO returning_test_users (name, email) VALUES ('Alice', 'alice2@example.com')");
+
+      const result = await service.selectDistinct({ name: returningTestUsers.name })
+        .from(returningTestUsers);
+
+      // COMPILE-TIME TYPE CHECK:
+      const distinctName: { name: string } = result[0];
+
+      expect(distinctName.name).toBe('Alice');
+    });
+  });
+
+  describe('insert().returning() type inference', () => {
+    it('should return properly typed result from insert().returning()', async () => {
+      const insertData: InsertReturningTestUser = {
+        name: 'John',
+        email: 'john@example.com',
+        age: 30,
+      };
+
+      const result = await service.insert(returningTestUsers)
+        .values(insertData)
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      // This assignment would fail if result[0] is { [x: string]: any }
+      // because it wouldn't be assignable to ReturningTestUser
+      const insertedUser: ReturningTestUser = result[0];
+
+      // Runtime assertions
+      expect(insertedUser.id).toBeDefined();
+      expect(insertedUser.name).toBe('John');
+      expect(insertedUser.email).toBe('john@example.com');
+      expect(insertedUser.age).toBe(30);
+    });
+
+    it('should allow accessing typed properties without type assertion', async () => {
+      const [user] = await service.insert(returningTestUsers)
+        .values({ name: 'Jane', email: 'jane@example.com' })
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      // These property accesses would fail if user is { [x: string]: any }
+      // because TypeScript wouldn't know these properties exist
+      const id: number = user.id;
+      const name: string = user.name;
+      const email: string = user.email;
+      const age: number | null = user.age;
+
+      expect(typeof id).toBe('number');
+      expect(typeof name).toBe('string');
+      expect(typeof email).toBe('string');
+      expect(age).toBeNull();
+    });
+  });
+
+  describe('update().returning() type inference', () => {
+    it('should return properly typed result from update().returning()', async () => {
+      // Insert test data
+      await service.insert(returningTestUsers)
+        .values({ name: 'Original', email: 'original@example.com', age: 25 });
+
+      const result = await service.update(returningTestUsers)
+        .set({ name: 'Updated' })
+        .where(eq(returningTestUsers.email, 'original@example.com'))
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      // This assignment would fail if result[0] is { [x: string]: any }
+      const updatedUser: ReturningTestUser = result[0];
+
+      expect(updatedUser.id).toBeDefined();
+      expect(updatedUser.name).toBe('Updated');
+      expect(updatedUser.email).toBe('original@example.com');
+      expect(updatedUser.age).toBe(25);
+    });
+
+    it('should allow accessing typed properties from update().returning()', async () => {
+      await service.insert(returningTestUsers)
+        .values({ name: 'Test', email: 'test@example.com', age: 20 });
+
+      const [user] = await service.update(returningTestUsers)
+        .set({ age: 21 })
+        .where(eq(returningTestUsers.name, 'Test'))
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      // Direct property access with explicit types
+      const id: number = user.id;
+      const name: string = user.name;
+      const email: string = user.email;
+      const age: number | null = user.age;
+
+      expect(id).toBeGreaterThan(0);
+      expect(name).toBe('Test');
+      expect(email).toBe('test@example.com');
+      expect(age).toBe(21);
+    });
+  });
+
+  describe('delete().returning() type inference', () => {
+    it('should return properly typed result from delete().returning()', async () => {
+      await service.insert(returningTestUsers)
+        .values({ name: 'ToDelete', email: 'delete@example.com', age: 40 });
+
+      const result = await service.delete(returningTestUsers)
+        .where(eq(returningTestUsers.name, 'ToDelete'))
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      // This assignment would fail if result[0] is { [x: string]: any }
+      const deletedUser: ReturningTestUser = result[0];
+
+      expect(deletedUser.id).toBeDefined();
+      expect(deletedUser.name).toBe('ToDelete');
+      expect(deletedUser.email).toBe('delete@example.com');
+      expect(deletedUser.age).toBe(40);
+    });
+
+    it('should allow accessing typed properties from delete().returning()', async () => {
+      await service.insert(returningTestUsers)
+        .values({ name: 'Remove', email: 'remove@example.com' });
+
+      const [user] = await service.delete(returningTestUsers)
+        .where(eq(returningTestUsers.email, 'remove@example.com'))
+        .returning();
+
+      // COMPILE-TIME TYPE CHECK:
+      const id: number = user.id;
+      const name: string = user.name;
+      const email: string = user.email;
+      const age: number | null = user.age;
+
+      expect(typeof id).toBe('number');
+      expect(name).toBe('Remove');
+      expect(email).toBe('remove@example.com');
+      expect(age).toBeNull();
+    });
+  });
+
+  describe('transaction returning() type inference', () => {
+    it('should return properly typed results from transaction operations', async () => {
+      await service.transaction(async (tx: {
+        insert: typeof service.insert;
+        update: typeof service.update;
+        delete: typeof service.delete;
+      }) => {
+        // Insert with returning in transaction
+        const [inserted] = await tx.insert(returningTestUsers)
+          .values({ name: 'TxUser', email: 'tx@example.com', age: 35 })
+          .returning();
+
+        // COMPILE-TIME TYPE CHECK:
+        const insertedUser: ReturningTestUser = inserted;
+        expect(insertedUser.name).toBe('TxUser');
+
+        // Update with returning in transaction
+        const [updated] = await tx.update(returningTestUsers)
+          .set({ age: 36 })
+          .where(eq(returningTestUsers.id, inserted.id))
+          .returning();
+
+        // COMPILE-TIME TYPE CHECK:
+        const updatedUser: ReturningTestUser = updated;
+        expect(updatedUser.age).toBe(36);
+
+        // Delete with returning in transaction
+        const [deleted] = await tx.delete(returningTestUsers)
+          .where(eq(returningTestUsers.id, inserted.id))
+          .returning();
+
+        // COMPILE-TIME TYPE CHECK:
+        const deletedUser: ReturningTestUser = deleted;
+        expect(deletedUser.name).toBe('TxUser');
+      });
+    });
+  });
+});
+
 describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
   // This test block verifies that DrizzleService works WITHOUT generic parameter
   // Types should be inferred from table schemas automatically

@@ -5,16 +5,21 @@
 // Method overloads define return types, so explicit return type on implementation is not needed
 
 import type { DatabaseInstance } from '../types';
-import type { BunSQLDatabase } from 'drizzle-orm/bun-sql';
-import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
-import type { PgTable } from 'drizzle-orm/pg-core';
-import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
+import type { BunSQLQueryResultHKT } from 'drizzle-orm/bun-sql/session';
+import type {
+  PgDeleteBase,
+  PgInsertBuilder,
+  PgTable,
+  PgUpdateBuilder,
+} from 'drizzle-orm/pg-core';
+import type {
+  SQLiteDeleteBase,
+  SQLiteInsertBuilder,
+  SQLiteTable,
+  SQLiteUpdateBuilder,
+} from 'drizzle-orm/sqlite-core';
 
 import { UniversalSelectBuilder, UniversalSelectDistinctBuilder } from './select-builder';
-
-// Type helpers for insert/update/delete return types
-type SQLiteDb = BunSQLiteDatabase<Record<string, SQLiteTable>>;
-type PgDb = BunSQLDatabase<Record<string, PgTable>>;
 
 /**
  * Universal Transaction Client
@@ -55,54 +60,42 @@ export class UniversalTransactionClient {
   /**
    * Create an INSERT query for SQLite table
    */
-  insert<TTable extends SQLiteTable<any>>(
-    table: TTable,
-  ): ReturnType<SQLiteDb['insert']>;
+  insert<TTable extends SQLiteTable>(table: TTable): SQLiteInsertBuilder<TTable, 'sync', void>;
 
   /**
    * Create an INSERT query for PostgreSQL table
    */
-  insert<TTable extends PgTable<any>>(
-    table: TTable,
-  ): ReturnType<PgDb['insert']>;
+  insert<TTable extends PgTable>(table: TTable): PgInsertBuilder<TTable, BunSQLQueryResultHKT>;
 
-  insert(table: SQLiteTable<any> | PgTable<any>) {
+  insert(table: SQLiteTable | PgTable) {
     return (this.tx as any).insert(table);
   }
 
   /**
    * Create an UPDATE query for SQLite table
    */
-  update<TTable extends SQLiteTable<any>>(
-    table: TTable,
-  ): ReturnType<SQLiteDb['update']>;
+  update<TTable extends SQLiteTable>(table: TTable): SQLiteUpdateBuilder<TTable, 'sync', void>;
 
   /**
    * Create an UPDATE query for PostgreSQL table
    */
-  update<TTable extends PgTable<any>>(
-    table: TTable,
-  ): ReturnType<PgDb['update']>;
+  update<TTable extends PgTable>(table: TTable): PgUpdateBuilder<TTable, BunSQLQueryResultHKT>;
 
-  update(table: SQLiteTable<any> | PgTable<any>) {
+  update(table: SQLiteTable | PgTable) {
     return (this.tx as any).update(table);
   }
 
   /**
    * Create a DELETE query for SQLite table
    */
-  delete<TTable extends SQLiteTable<any>>(
-    table: TTable,
-  ): ReturnType<SQLiteDb['delete']>;
+  delete<TTable extends SQLiteTable>(table: TTable): SQLiteDeleteBase<TTable, 'sync', void>;
 
   /**
    * Create a DELETE query for PostgreSQL table
    */
-  delete<TTable extends PgTable<any>>(
-    table: TTable,
-  ): ReturnType<PgDb['delete']>;
+  delete<TTable extends PgTable>(table: TTable): PgDeleteBase<TTable, BunSQLQueryResultHKT>;
 
-  delete(table: SQLiteTable<any> | PgTable<any>) {
+  delete(table: SQLiteTable | PgTable) {
     return (this.tx as any).delete(table);
   }
 
