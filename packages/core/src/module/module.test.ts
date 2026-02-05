@@ -10,7 +10,11 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
-import { Context } from 'effect';
+import {
+  Context,
+  Effect,
+  Layer,
+} from 'effect';
 
 import { Module } from '../decorators/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
@@ -157,7 +161,6 @@ describe('OneBunModule', () => {
 
     test('should detect circular dependencies and provide detailed error message', () => {
       const { registerDependencies } = require('../decorators/decorators');
-      const { Effect, Layer } = require('effect');
       const { LoggerService } = require('@onebun/logger');
 
       // Collect error messages
@@ -847,6 +850,147 @@ describe('OneBunModule', () => {
 
       expect(apiService).toBeDefined();
       expect((apiService as ApiService).getConnectionTimeout()).toBe(5000);
+    });
+  });
+
+  describe('Module DI scoping (exports only for cross-module)', () => {
+    const {
+      Controller: ControllerDecorator,
+      Get,
+      Inject,
+      clearGlobalModules,
+    } = require('../decorators/decorators');
+    const { Controller: BaseController } = require('./controller');
+    const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleClass } = require('./module');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    test('controller can inject provider from same module without exports', async () => {
+      @Service()
+      class CounterService {
+        private count = 0;
+        getCount() {
+          return this.count;
+        }
+        increment() {
+          this.count += 1;
+        }
+      }
+
+      class CounterController extends BaseController {
+        constructor(@Inject(CounterService) private readonly counterService: CounterService) {
+          super();
+        }
+        getCount() {
+          return this.counterService.getCount();
+        }
+      }
+      const CounterControllerDecorated = ControllerDecorator('/counter')(CounterController);
+      Get('/')(CounterControllerDecorated.prototype, 'getCount', Object.getOwnPropertyDescriptor(CounterControllerDecorated.prototype, 'getCount')!);
+
+      @Module({
+        providers: [CounterService],
+        controllers: [CounterControllerDecorated],
+        // No exports - CounterService is only used inside this module
+      })
+      class FeatureModule {}
+
+      const module = new ModuleClass(FeatureModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const controller = module.getControllerInstance(CounterControllerDecorated) as CounterController;
+      expect(controller).toBeDefined();
+      expect(controller.getCount()).toBe(0);
+    });
+
+    test('child module controller injects own provider; root can resolve controller', async () => {
+      @Service()
+      class ChildService {
+        getValue() {
+          return 'child';
+        }
+      }
+
+      class ChildController extends BaseController {
+        constructor(@Inject(ChildService) private readonly childService: ChildService) {
+          super();
+        }
+        getValue() {
+          return this.childService.getValue();
+        }
+      }
+      const ChildControllerDecorated = ControllerDecorator('/child')(ChildController);
+      Get('/')(ChildControllerDecorated.prototype, 'getValue', Object.getOwnPropertyDescriptor(ChildControllerDecorated.prototype, 'getValue')!);
+
+      @Module({
+        providers: [ChildService],
+        controllers: [ChildControllerDecorated],
+      })
+      class ChildModule {}
+
+      @Module({
+        imports: [ChildModule],
+      })
+      class RootModule {}
+
+      const rootModule = new ModuleClass(RootModule, mockLoggerLayer);
+      rootModule.getLayer();
+      await Effect.runPromise(rootModule.setup() as Effect.Effect<unknown, never, never>);
+
+      const allControllers = rootModule.getControllers();
+      expect(allControllers).toContain(ChildControllerDecorated);
+      const controller = rootModule.getControllerInstance(ChildControllerDecorated) as ChildController;
+      expect(controller).toBeDefined();
+      expect(controller.getValue()).toBe('child');
+    });
+
+    test('exported service from imported module is injectable in importing module', async () => {
+      @Service()
+      class SharedService {
+        getLabel() {
+          return 'shared';
+        }
+      }
+
+      @Module({
+        providers: [SharedService],
+        exports: [SharedService],
+      })
+      class SharedModule {}
+
+      class AppController extends BaseController {
+        constructor(@Inject(SharedService) private readonly sharedService: SharedService) {
+          super();
+        }
+        getLabel() {
+          return this.sharedService.getLabel();
+        }
+      }
+      const AppControllerDecorated = ControllerDecorator('/app')(AppController);
+      Get('/')(AppControllerDecorated.prototype, 'getLabel', Object.getOwnPropertyDescriptor(AppControllerDecorated.prototype, 'getLabel')!);
+
+      @Module({
+        imports: [SharedModule],
+        controllers: [AppControllerDecorated],
+      })
+      class AppModule {}
+
+      const module = new ModuleClass(AppModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const controller = module.getControllerInstance(AppControllerDecorated) as AppController;
+      expect(controller).toBeDefined();
+      expect(controller.getLabel()).toBe('shared');
     });
   });
 });

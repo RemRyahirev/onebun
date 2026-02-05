@@ -1,6 +1,6 @@
 {
   "name": "@onebun/logger",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Structured logging for OneBun framework - JSON and pretty output with trace support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",

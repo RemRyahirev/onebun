@@ -113,6 +113,28 @@ function formatValue(value: unknown, depth = 0): string {
 }
 
 /**
+ * Format context fields without outer braces, with leading indent on each line
+ */
+function formatContextFields(context: Record<string, unknown>): string {
+  const entries = Object.entries(context);
+  if (entries.length === 0) {
+    return '';
+  }
+
+  const indent = '  ';
+
+  const formattedEntries = entries.map(([key, val]) => {
+    const formattedKey = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key)
+      ? `\x1b[34m${key}\x1b[0m`
+      : `\x1b[32m"${key}"\x1b[0m`;
+
+    return `${indent}${formattedKey}: ${formatValue(val, 1)}`;
+  });
+
+  return formattedEntries.join('\n');
+}
+
+/**
  * Pretty console formatter with colors
  */
 export class PrettyFormatter implements LogFormatter {
@@ -159,7 +181,7 @@ export class PrettyFormatter implements LogFormatter {
       delete contextWithoutSpecialFields.SHOW_CONTEXT;
 
       if (Object.keys(contextWithoutSpecialFields).length > 0) {
-        message += `\n${COLORS.DIM}Context:${COLORS.RESET} ${formatValue(contextWithoutSpecialFields)}`;
+        message += `\n${formatContextFields(contextWithoutSpecialFields)}`;
       }
     }
 

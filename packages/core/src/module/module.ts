@@ -169,9 +169,6 @@ export class OneBunModule implements ModuleInstance {
         // Merge layers
         layer = Layer.merge(layer, childModule.getLayer());
 
-        // Add controllers from child module
-        controllers.push(...childModule.getControllers());
-
         // Get exported services from child module and register them for DI
         const exportedServices = childModule.getExportedServices();
         for (const [tag, instance] of exportedServices) {
@@ -386,48 +383,20 @@ export class OneBunModule implements ModuleInstance {
    */
   createControllerInstances(): Effect.Effect<unknown, never, void> {
     return Effect.sync(() => {
-      // Services are already created in initModule via createServicesWithDI
-      // Just need to set up controllers with DI
-
-      // Get module metadata to access providers for controller dependency registration
-      const moduleMetadata = getModuleMetadata(this.moduleClass);
-      if (moduleMetadata && moduleMetadata.providers) {
-        // Create map of available services for dependency resolution
-        const availableServices = new Map<string, Function>();
-
-        // For each provider that is a class constructor, add to available services map
-        for (const provider of moduleMetadata.providers) {
-          if (typeof provider === 'function') {
-            availableServices.set(provider.name, provider);
-          }
-        }
-
-        // Also add services from imported modules
-        for (const childModule of this.childModules) {
-          const childMetadata = getModuleMetadata(childModule.moduleClass);
-          if (childMetadata?.exports) {
-            for (const exported of childMetadata.exports) {
-              if (typeof exported === 'function') {
-                availableServices.set(exported.name, exported);
-              }
-            }
-          }
-        }
-
-        // Add global services to available services for dependency resolution
-        for (const [, instance] of globalServicesRegistry) {
-          if (instance && typeof instance === 'object') {
-            availableServices.set(instance.constructor.name, instance.constructor);
-          }
-        }
-
-        // Automatically analyze and register dependencies for all controllers
-        for (const controllerClass of this.controllers) {
-          registerControllerDependencies(controllerClass, availableServices);
+      // Build map of available services from this module's DI scope (own providers + imported exports + global)
+      const availableServices = new Map<string, Function>();
+      for (const [, instance] of this.serviceInstances) {
+        if (instance && typeof instance === 'object') {
+          availableServices.set(instance.constructor.name, instance.constructor);
         }
       }
 
-      // Now create controller instances with automatic dependency injection
+      // Automatically analyze and register dependencies for all controllers of this module
+      for (const controllerClass of this.controllers) {
+        registerControllerDependencies(controllerClass, availableServices);
+      }
+
+      // Create controller instances with automatic dependency injection
       this.createControllersWithDI();
     }).pipe(Effect.provide(this.rootLayer));
   }
@@ -567,7 +536,12 @@ export class OneBunModule implements ModuleInstance {
           discard: true,
         }),
       ),
-      // Then create controller instances
+      // Create controller instances in child modules first, then this module (each uses its own DI scope)
+      Effect.flatMap(() =>
+        Effect.forEach(this.childModules, (childModule) => childModule.createControllerInstances(), {
+          discard: true,
+        }),
+      ),
       Effect.flatMap(() => this.createControllerInstances()),
       // Then call onModuleInit for controllers
       Effect.flatMap(() => this.callControllersOnModuleInit()),
@@ -780,30 +754,46 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Get all controllers from this module
+   * Get all controllers from this module and child modules (recursive).
+   * Used by the application layer for routing and lifecycle.
    */
   getControllers(): Function[] {
-    return this.controllers;
+    const fromChildren = this.childModules.flatMap((child) => child.getControllers());
+
+    return [...this.controllers, ...fromChildren];
   }
 
   /**
-   * Get controller instance
+   * Get controller instance (searches this module then child modules recursively).
    */
   getControllerInstance(controllerClass: Function): Controller | undefined {
     const instance = this.controllerInstances.get(controllerClass);
-
-    if (!instance) {
-      this.logger.warn(`No instance found for controller ${controllerClass.name}`);
+    if (instance) {
+      return instance;
     }
+    for (const childModule of this.childModules) {
+      const childInstance = childModule.getControllerInstance(controllerClass);
+      if (childInstance) {
+        return childInstance;
+      }
+    }
+    this.logger.warn(`No instance found for controller ${controllerClass.name}`);
 
-    return instance;
+    return undefined;
   }
 
   /**
-   * Get all controller instances
+   * Get all controller instances from this module and child modules (recursive).
    */
   getControllerInstances(): Map<Function, Controller> {
-    return this.controllerInstances;
+    const merged = new Map<Function, Controller>(this.controllerInstances);
+    for (const childModule of this.childModules) {
+      for (const [cls, instance] of childModule.getControllerInstances()) {
+        merged.set(cls, instance);
+      }
+    }
+
+    return merged;
   }
 
   /**

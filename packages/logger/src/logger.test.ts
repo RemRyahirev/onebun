@@ -59,8 +59,9 @@ describe('PrettyFormatter', () => {
       context: { a: 1, SHOW_CONTEXT: true },
     };
     const out = formatter.format(entry);
-    expect(out).toContain('Context:');
-    expect(out).toContain('a');
+    // Context fields are shown with indent, without "Context:" header
+    // The key 'a' is colored with ANSI codes, so we check for the presence of indented line
+    expect(out).toMatch(/\n {2}.*a.*:/);
     expect(out).not.toContain('SHOW_CONTEXT');
   });
 
@@ -218,7 +219,8 @@ describe('Logger + SyncLogger basic flow', () => {
 
     expect(outputs.length).toBe(1);
     expect(outputs[0]).toContain('hello');
-    expect(outputs[0]).toContain('Context');
+    // Context fields are shown with indent (no "Context:" header anymore)
+    expect(outputs[0]).toMatch(/\n {2}.*a.*:/);
   });
 
   it('child adds context and uses global trace context in SyncLogger', () => {

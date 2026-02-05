@@ -11,8 +11,8 @@ description: "@Module, @Controller, @Service decorators. HTTP method decorators 
 @Module({
   imports: [OtherModule],      // import modules
   controllers: [MyController], // register controllers
-  providers: [MyService],      // register services
-  exports: [MyService],        // export for other modules
+  providers: [MyService],      // register services (auto-available in this module)
+  exports: [MyService],        // only needed for other modules that import this one
 })
 export class MyModule {}
 

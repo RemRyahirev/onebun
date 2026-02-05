@@ -110,6 +110,8 @@ Services must be:
 1. Decorated with `@Service()`
 2. Listed in module's `providers` array
 
+Within a module, all providers are automatically available to that module's controllers and to other providers in the same module. The `exports` array is only required when you want to use a provider in **another** module that imports this one (cross-module injection).
+
 ```typescript
 import { Module } from '@onebun/core';
 import { CacheModule } from '@onebun/cache';
@@ -122,7 +124,7 @@ import { UserRepository } from './user.repository';
     UserService,
     UserRepository,  // Also a service
   ],
-  exports: [UserService],  // Export for use in other modules
+  exports: [UserService],  // Only needed for use in other modules that import this one
 })
 export class UserModule {}
 ```

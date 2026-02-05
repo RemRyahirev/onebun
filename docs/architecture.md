@@ -9,8 +9,8 @@ description: System architecture overview. Module hierarchy, DI container, reque
 **DI Resolution Order**:
 1. Module imports resolved first (depth-first)
 2. Providers instantiated in declaration order
-3. Controllers receive injected services via constructor
-4. Exported services available to importing modules
+3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
+4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
 1. Services created → `onModuleInit()` called on each service
@@ -352,8 +352,10 @@ export class DatabaseService extends BaseService implements OnModuleInit, OnModu
 
 ### Service Export/Import
 
+**Exports are only needed when a module is imported by another.** Within a module, all of its providers are automatically available to its controllers and to other providers in the same module; you do not need to list them in `exports`.
+
 ```typescript
-// CacheModule exports CacheService
+// CacheModule exports CacheService so that importing modules can use it
 @Module({
   providers: [CacheService],
   exports: [CacheService],
@@ -363,10 +365,12 @@ export class CacheModule {}
 // UserModule imports and uses CacheService
 @Module({
   imports: [CacheModule],
-  providers: [UserService],  // can inject CacheService
+  providers: [UserService],  // can inject CacheService (imported)
 })
 export class UserModule {}
 ```
+
+Example without exports (same-module only): a module with `providers: [MyService]` and `controllers: [MyController]` can inject `MyService` into `MyController` without listing `MyService` in `exports`.
 
 ## Controller Architecture
 

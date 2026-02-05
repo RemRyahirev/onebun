@@ -2327,6 +2327,49 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       expect(SharedModule).toBeDefined();
       expect(ApiModule).toBeDefined();
     });
+
+    /**
+     * Exports are only required for cross-module injection.
+     * Within a module, any provider can be injected into controllers without being in exports.
+     */
+    it('should allow controller to inject same-module provider without exports', async () => {
+      const effectLib = await import('effect');
+      const moduleMod = await import('./module/module');
+      const testUtils = await import('./testing/test-utils');
+      const decorators = await import('./decorators/decorators');
+
+      @Service()
+      class InternalService extends BaseService {
+        getData(): string {
+          return 'internal';
+        }
+      }
+
+      @Controller('/local')
+      class LocalController extends BaseController {
+        constructor(@decorators.Inject(InternalService) private readonly internal: InternalService) {
+          super();
+        }
+        getData(): string {
+          return this.internal.getData();
+        }
+      }
+
+      @Module({
+        providers: [InternalService],
+        controllers: [LocalController],
+        // No exports - InternalService is only used inside this module
+      })
+      class LocalModule {}
+
+      const mod = new moduleMod.OneBunModule(LocalModule, testUtils.makeMockLoggerLayer());
+      mod.getLayer();
+      await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
+
+      const controller = mod.getControllerInstance(LocalController) as LocalController;
+      expect(controller).toBeDefined();
+      expect(controller.getData()).toBe('internal');
+    });
   });
 });
 
