@@ -9,6 +9,7 @@ import { JsonFormatter, PrettyFormatter } from './formatter';
 import { ConsoleTransport } from './transport';
 import {
   type LoggerConfig,
+  type LoggerOptions,
   LogLevel,
   type TraceInfo,
 } from './types';
@@ -50,6 +51,35 @@ export const LoggerService = Context.GenericTag<Logger>('LoggerService');
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const CurrentLoggerTraceContext = FiberRef.unsafeMake<TraceInfo | null>(null);
+
+/**
+ * Parse string log level to LogLevel enum.
+ * Returns LogLevel.Info for unknown values.
+ * 
+ * @param level - String log level (case insensitive)
+ * @returns LogLevel enum value
+ * 
+ * @example
+ * ```typescript
+ * parseLogLevel('debug') // LogLevel.Debug
+ * parseLogLevel('INFO')  // LogLevel.Info
+ * parseLogLevel('warn')  // LogLevel.Warning
+ * ```
+ */
+export function parseLogLevel(level: string): LogLevel {
+  const levelMap: Record<string, LogLevel> = {
+    trace: LogLevel.Trace,
+    debug: LogLevel.Debug,
+    info: LogLevel.Info,
+    warn: LogLevel.Warning,
+    warning: LogLevel.Warning,
+    error: LogLevel.Error,
+    fatal: LogLevel.Fatal,
+    none: LogLevel.None,
+  };
+
+  return levelMap[level.toLowerCase()] ?? LogLevel.Info;
+}
 
 /**
  * Parse arguments to extract error, context and additional data
@@ -299,10 +329,93 @@ export const createSyncLogger = (logger: Logger): SyncLogger => {
 };
 
 /**
- * Create a logger based on NODE_ENV
+ * Create a logger layer from LoggerOptions.
+ * Provides a simple declarative API for configuring logging.
+ * 
+ * Priority: options > env variables > NODE_ENV defaults
+ * 
+ * @param options - Logger configuration options
+ * @returns Layer providing Logger service
+ * 
+ * @example
+ * ```typescript
+ * const loggerLayer = makeLoggerFromOptions({
+ *   minLevel: 'info',
+ *   format: 'json',
+ *   defaultContext: { service: 'my-service' },
+ * });
+ * ```
+ */
+export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logger> => {
+  const isDev = process.env.NODE_ENV !== 'production';
+
+  // Resolve minLevel: options > LOG_LEVEL env > NODE_ENV default
+  let minLevel: LogLevel;
+  if (options?.minLevel !== undefined) {
+    minLevel = typeof options.minLevel === 'string'
+      ? parseLogLevel(options.minLevel)
+      : options.minLevel;
+  } else {
+    const logLevelEnv = process.env.LOG_LEVEL?.toLowerCase();
+    minLevel = logLevelEnv ? parseLogLevel(logLevelEnv) : (isDev ? LogLevel.Debug : LogLevel.Info);
+  }
+
+  // Resolve format: options > LOG_FORMAT env > NODE_ENV default
+  let formatter;
+  if (options?.format !== undefined) {
+    formatter = options.format === 'json' ? new JsonFormatter() : new PrettyFormatter();
+  } else {
+    const formatEnv = process.env.LOG_FORMAT?.toLowerCase();
+    formatter = formatEnv === 'json' ? new JsonFormatter()
+      : formatEnv === 'pretty' ? new PrettyFormatter()
+        : (isDev ? new PrettyFormatter() : new JsonFormatter());
+  }
+
+  return Layer.succeed(
+    LoggerService,
+    new LoggerImpl({
+      minLevel,
+      formatter,
+      transport: new ConsoleTransport(),
+      defaultContext: options?.defaultContext ?? {},
+    }),
+  );
+};
+
+/**
+ * Create a logger based on NODE_ENV and environment variables.
+ * 
+ * Priority: config > env variables > NODE_ENV defaults
+ * 
+ * Environment variables:
+ * - LOG_LEVEL: trace, debug, info, warn/warning, error, fatal, none
+ * - LOG_FORMAT: json, pretty
+ * 
+ * @param config - Optional partial logger configuration
+ * @returns Layer providing Logger service
  */
 export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> => {
   const isDev = process.env.NODE_ENV !== 'production';
 
-  return isDev ? makeDevLogger(config) : makeProdLogger(config);
+  // Read LOG_LEVEL from env (overrides default based on NODE_ENV)
+  const logLevelEnv = process.env.LOG_LEVEL?.toLowerCase();
+  const minLevel = config?.minLevel
+    ?? (logLevelEnv ? parseLogLevel(logLevelEnv) : (isDev ? LogLevel.Debug : LogLevel.Info));
+
+  // Read LOG_FORMAT from env (overrides default based on NODE_ENV)
+  const formatEnv = process.env.LOG_FORMAT?.toLowerCase();
+  const formatter = config?.formatter
+    ?? (formatEnv === 'json' ? new JsonFormatter()
+      : formatEnv === 'pretty' ? new PrettyFormatter()
+        : (isDev ? new PrettyFormatter() : new JsonFormatter()));
+
+  return Layer.succeed(
+    LoggerService,
+    new LoggerImpl({
+      minLevel,
+      formatter,
+      transport: config?.transport ?? new ConsoleTransport(),
+      defaultContext: config?.defaultContext ?? {},
+    }),
+  );
 };

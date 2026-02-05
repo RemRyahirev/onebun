@@ -13,6 +13,7 @@ import {
   type Logger,
   LoggerService,
   makeLogger,
+  makeLoggerFromOptions,
   type SyncLogger,
 } from '@onebun/logger';
 import {
@@ -191,8 +192,12 @@ export class OneBunApplication {
       this.config = new NotInitializedConfig();
     }
 
-    // Use provided logger layer or create a default one
-    const loggerLayer = this.options.loggerLayer || makeLogger();
+    // Use provided logger layer, or create from options, or use default
+    // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
+    const loggerLayer = this.options.loggerLayer
+      ?? (this.options.loggerOptions
+        ? makeLoggerFromOptions(this.options.loggerOptions)
+        : makeLogger());
 
     // Initialize logger with application class name as context
     const effectLogger = Effect.runSync(
@@ -500,6 +505,12 @@ export class OneBunApplication {
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }
+      }
+
+      // Call onApplicationInit lifecycle hook for all services and controllers
+      if (this.rootModule.callOnApplicationInit) {
+        await this.rootModule.callOnApplicationInit();
+        this.logger.debug('Application initialization hooks completed');
       }
 
       // Get metrics path
@@ -1214,10 +1225,17 @@ export class OneBunApplication {
    * Stop the application with graceful shutdown
    * @param options - Shutdown options
    */
-  async stop(options?: { closeSharedRedis?: boolean }): Promise<void> {
+  async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
     const closeRedis = options?.closeSharedRedis ?? true;
+    const signal = options?.signal;
 
     this.logger.info('Stopping OneBun application...');
+
+    // Call beforeApplicationDestroy lifecycle hook
+    if (this.rootModule.callBeforeApplicationDestroy) {
+      this.logger.debug('Calling beforeApplicationDestroy hooks');
+      await this.rootModule.callBeforeApplicationDestroy(signal);
+    }
 
     // Cleanup WebSocket resources
     if (this.wsHandler) {
@@ -1247,10 +1265,22 @@ export class OneBunApplication {
       this.logger.debug('HTTP server stopped');
     }
 
+    // Call onModuleDestroy lifecycle hook
+    if (this.rootModule.callOnModuleDestroy) {
+      this.logger.debug('Calling onModuleDestroy hooks');
+      await this.rootModule.callOnModuleDestroy();
+    }
+
     // Close shared Redis connection if configured and requested
     if (closeRedis && SharedRedisProvider.isConnected()) {
       this.logger.debug('Disconnecting shared Redis');
       await SharedRedisProvider.disconnect();
+    }
+
+    // Call onApplicationDestroy lifecycle hook
+    if (this.rootModule.callOnApplicationDestroy) {
+      this.logger.debug('Calling onApplicationDestroy hooks');
+      await this.rootModule.callOnApplicationDestroy(signal);
     }
 
     this.logger.info('OneBun application stopped');
@@ -1440,7 +1470,7 @@ export class OneBunApplication {
   enableGracefulShutdown(): void {
     const shutdown = async (signal: string) => {
       this.logger.info(`Received ${signal}, initiating graceful shutdown...`);
-      await this.stop();
+      await this.stop({ signal });
       process.exit(0);
     };
 
@@ -1468,5 +1498,37 @@ export class OneBunApplication {
    */
   getHttpUrl(): string {
     return `http://${this.options.host}:${this.options.port}`;
+  }
+
+  /**
+   * Get a service instance by class from the module container.
+   * Useful for accessing services outside of the request context.
+   * 
+   * @param serviceClass - The service class to get
+   * @returns The service instance
+   * @throws Error if service is not found
+   * 
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, options);
+   * await app.start();
+   * 
+   * const userService = app.getService(UserService);
+   * await userService.performBackgroundTask();
+   * ```
+   */
+  getService<T>(serviceClass: new (...args: unknown[]) => T): T {
+    if (!this.rootModule.getServiceByClass) {
+      throw new Error('Module does not support getServiceByClass');
+    }
+
+    const service = this.rootModule.getServiceByClass(serviceClass);
+    if (!service) {
+      throw new Error(
+        `Service ${serviceClass.name} not found. Make sure it's registered in the module's providers.`,
+      );
+    }
+
+    return service;
   }
 }

@@ -1,3 +1,7 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
 import { SQL } from 'bun';
 import { Database } from 'bun:sqlite';
 import { drizzle as drizzlePostgres } from 'drizzle-orm/bun-sql';
@@ -22,7 +26,11 @@ import type {
   SQLiteUpdateBuilder,
 } from 'drizzle-orm/sqlite-core';
 
-import { BaseService, Service } from '@onebun/core';
+import {
+  BaseService,
+  Service,
+  type OnModuleInit,
+} from '@onebun/core';
 import {
   Env,
   EnvLoader,
@@ -211,7 +219,7 @@ interface BufferedLogEntry {
  * ```
  */
 @Service()
-export class DrizzleService extends BaseService {
+export class DrizzleService extends BaseService implements OnModuleInit {
   private db: DatabaseInstance | null = null;
   private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
@@ -298,10 +306,10 @@ export class DrizzleService extends BaseService {
   }
 
   /**
-   * Async initialization hook - called by the framework after initializeService()
+   * Module initialization hook - called by the framework after initializeService()
    * This ensures the database is fully ready before client code runs
    */
-  override async onAsyncInit(): Promise<void> {
+  async onModuleInit(): Promise<void> {
     // Flush any buffered logs now that logger is available
     this.flushLogBuffer();
 
@@ -554,11 +562,99 @@ export class DrizzleService extends BaseService {
   }
 
   /**
+   * Read migration journal and compute hashes for each migration file
+   * Returns a map of hash -> migration filename
+   */
+  private readMigrationJournal(migrationsFolder: string): Map<string, string> {
+    const hashToFilename = new Map<string, string>();
+    const journalPath = path.join(migrationsFolder, 'meta', '_journal.json');
+
+    if (!fs.existsSync(journalPath)) {
+      // No journal file - return empty map
+      return hashToFilename;
+    }
+
+    try {
+      const journalContent = fs.readFileSync(journalPath, 'utf-8');
+      const journal = JSON.parse(journalContent) as {
+        entries: Array<{ idx: number; when: number; tag: string; breakpoints: boolean }>;
+      };
+
+      for (const entry of journal.entries) {
+        const migrationPath = path.join(migrationsFolder, `${entry.tag}.sql`);
+
+        if (fs.existsSync(migrationPath)) {
+          const sqlContent = fs.readFileSync(migrationPath, 'utf-8');
+          const hash = crypto.createHash('sha256').update(sqlContent).digest('hex');
+          hashToFilename.set(hash, entry.tag);
+        }
+      }
+    } catch {
+      // If journal parsing fails, return empty map
+      this.safeLog('warn', 'Failed to read migration journal', { journalPath });
+    }
+
+    return hashToFilename;
+  }
+
+  /**
+   * Get set of applied migration hashes from __drizzle_migrations table
+   */
+  private getAppliedMigrationHashes(): Set<string> {
+    const hashes = new Set<string>();
+
+    try {
+      if (this.connectionOptions?.type === DatabaseType.SQLITE && this.sqliteClient) {
+        // Check if table exists
+        const tableExists = this.sqliteClient.query(`
+          SELECT name FROM sqlite_master 
+          WHERE type='table' AND name='__drizzle_migrations'
+        `).all();
+
+        if (tableExists.length > 0) {
+          const migrations = this.sqliteClient.query(`
+            SELECT hash FROM __drizzle_migrations
+          `).all() as Array<{ hash: string }>;
+
+          for (const m of migrations) {
+            hashes.add(m.hash);
+          }
+        }
+      } else if (this.connectionOptions?.type === DatabaseType.POSTGRESQL && this.postgresClient) {
+        // Check if table exists using Bun.SQL template literal syntax
+        // Cast through unknown as Bun.SQL types don't fully reflect runtime behavior
+        const tableExistsResult = this.postgresClient`
+          SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = '__drizzle_migrations'
+          ) as exists
+        ` as unknown as Array<{ exists: boolean }>;
+
+        if (tableExistsResult.length > 0 && tableExistsResult[0]?.exists) {
+          const migrationsResult = this.postgresClient`
+            SELECT hash FROM __drizzle_migrations
+          ` as unknown as Array<{ hash: string }>;
+
+          for (const m of migrationsResult) {
+            hashes.add(m.hash);
+          }
+        }
+      }
+    } catch {
+      // If query fails, return empty set (table might not exist yet)
+    }
+
+    return hashes;
+  }
+
+  /**
    * Run migrations
    *
    * Drizzle-kit automatically tracks applied migrations in the `__drizzle_migrations` table
    * and prevents double application of migrations. This method uses drizzle's built-in
    * migration system which ensures idempotency.
+   *
+   * Logs the names of each migration file that was applied during this run.
    *
    * @param options - Migration options
    * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
@@ -576,6 +672,12 @@ export class DrizzleService extends BaseService {
 
     const migrationsFolder = options?.migrationsFolder ?? './drizzle';
 
+    // Read migration journal to get hash -> filename mapping
+    const hashToFilename = this.readMigrationJournal(migrationsFolder);
+
+    // Get already applied migrations before running
+    const appliedBefore = this.getAppliedMigrationHashes();
+
     if (this.connectionOptions.type === DatabaseType.SQLITE) {
       if (!this.db) {
         throw new Error('Database not initialized');
@@ -583,7 +685,6 @@ export class DrizzleService extends BaseService {
       await migrate(this.db as BunSQLiteDatabase<Record<string, SQLiteTable>>, {
         migrationsFolder,
       });
-      this.safeLog('info', 'SQLite migrations applied', { migrationsFolder });
     } else if (this.connectionOptions.type === DatabaseType.POSTGRESQL) {
       if (!this.db) {
         throw new Error('Database not initialized');
@@ -591,8 +692,35 @@ export class DrizzleService extends BaseService {
       await migratePostgres(this.db as BunSQLDatabase<Record<string, PgTable>>, {
         migrationsFolder,
       });
-      this.safeLog('info', 'PostgreSQL migrations applied', { migrationsFolder });
     }
+
+    // Get applied migrations after running
+    const appliedAfter = this.getAppliedMigrationHashes();
+
+    // Find newly applied migrations
+    const newlyApplied: string[] = [];
+    for (const hash of appliedAfter) {
+      if (!appliedBefore.has(hash)) {
+        const filename = hashToFilename.get(hash);
+        if (filename) {
+          newlyApplied.push(filename);
+        }
+      }
+    }
+
+    // Log each applied migration
+    for (const filename of newlyApplied) {
+      this.safeLog('info', `Applied migration: ${filename}`);
+    }
+
+    // Log summary
+    const dbTypeName = this.connectionOptions.type === DatabaseType.SQLITE ? 'SQLite' : 'PostgreSQL';
+
+    this.safeLog('info', `${dbTypeName} migrations applied`, { 
+      migrationsFolder, 
+      newMigrations: newlyApplied.length,
+      appliedFiles: newlyApplied,
+    });
   }
 
   /**

@@ -228,6 +228,48 @@ export class UserController extends BaseController {
 }
 ```
 
+## Lifecycle Hooks
+
+Controllers can implement lifecycle hooks, just like services.
+
+### Available Hooks
+
+| Interface | Method | When Called |
+|-----------|--------|-------------|
+| `OnModuleInit` | `onModuleInit()` | After controller instantiation |
+| `OnApplicationInit` | `onApplicationInit()` | After all modules initialized |
+| `OnModuleDestroy` | `onModuleDestroy()` | During shutdown |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown |
+| `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown |
+
+### Usage
+
+```typescript
+import { 
+  Controller, 
+  BaseController, 
+  OnModuleInit, 
+  OnModuleDestroy 
+} from '@onebun/core';
+
+@Controller('/api')
+export class ApiController extends BaseController implements OnModuleInit, OnModuleDestroy {
+  private connections: WebSocket[] = [];
+
+  async onModuleInit(): Promise<void> {
+    this.logger.info('API controller initialized');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    // Cleanup any resources
+    for (const ws of this.connections) {
+      ws.close();
+    }
+    this.logger.info('API controller destroyed');
+  }
+}
+```
+
 ## Accessing Logger
 
 ```typescript

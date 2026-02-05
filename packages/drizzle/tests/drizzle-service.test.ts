@@ -247,8 +247,8 @@ describe('DrizzleService', () => {
         );
         const newService = new DrizzleService();
         newService.initializeService(logger, createMockConfig());
-        // Call onAsyncInit to trigger auto-init attempt
-        await newService.onAsyncInit();
+        // Call onModuleInit to trigger auto-init attempt
+        await newService.onModuleInit();
         // Verify database is not initialized (no DB_URL set)
         expect(() => newService.getDatabase()).toThrow('Database not initialized');
         // Now test migrations
@@ -330,8 +330,8 @@ describe('DrizzleService', () => {
         );
         const newService = new DrizzleService();
         newService.initializeService(logger, createMockConfig());
-        // Call onAsyncInit to trigger auto-init attempt
-        await newService.onAsyncInit();
+        // Call onModuleInit to trigger auto-init attempt
+        await newService.onModuleInit();
         // Verify database is not initialized (no DB_URL set)
         expect(() => newService.getDatabase()).toThrow('Database not initialized');
         // Now test transaction
@@ -350,7 +350,7 @@ describe('DrizzleService', () => {
     });
   });
 
-  describe('onAsyncInit behavior', () => {
+  describe('onModuleInit behavior', () => {
     test('should complete without error when no DB config', async () => {
       // Save original env vars
       const savedDbUrl = process.env.DB_URL;
@@ -370,8 +370,8 @@ describe('DrizzleService', () => {
         );
         const newService = new DrizzleService();
         newService.initializeService(logger, createMockConfig());
-        // onAsyncInit should complete without error even if no DB_URL is set
-        await newService.onAsyncInit();
+        // onModuleInit should complete without error even if no DB_URL is set
+        await newService.onModuleInit();
         // But database should not be initialized
         expect(() => newService.getDatabase()).toThrow('Database not initialized');
       } finally {
@@ -417,8 +417,8 @@ describe('DrizzleService', () => {
         const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
 
-        // Call onAsyncInit to trigger auto-initialization (as the framework does)
-        await autoService.onAsyncInit();
+        // Call onModuleInit to trigger auto-initialization (as the framework does)
+        await autoService.onModuleInit();
 
         // Database should be initialized
         const db = autoService.getDatabase();
@@ -449,7 +449,7 @@ describe('DrizzleService', () => {
         );
         const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
-        await autoService.onAsyncInit();
+        await autoService.onModuleInit();
 
         // Should be able to use the database immediately
         const db = autoService.getDatabase();
@@ -476,7 +476,7 @@ describe('DrizzleService', () => {
         );
         const autoService = new DrizzleService();
         autoService.initializeService(logger, createMockConfig());
-        await autoService.onAsyncInit();
+        await autoService.onModuleInit();
 
         expect(autoService.isSQLite()).toBe(true);
         expect(autoService.isPostgreSQL()).toBe(false);
@@ -509,7 +509,7 @@ describe('DrizzleService', () => {
           );
           const envService = new DrizzleService();
           envService.initializeService(logger, createMockConfig());
-          await envService.onAsyncInit();
+          await envService.onModuleInit();
 
           // Database should be initialized from env vars
           const db = envService.getDatabase();
@@ -547,7 +547,7 @@ describe('DrizzleService', () => {
           );
           const envService = new DrizzleService();
           envService.initializeService(logger, createMockConfig());
-          await envService.onAsyncInit();
+          await envService.onModuleInit();
 
           expect(envService.isSQLite()).toBe(true);
           expect(envService.getConnectionOptions()?.type).toBe(DatabaseType.SQLITE);
@@ -574,7 +574,7 @@ describe('DrizzleService', () => {
         );
         const noEnvService = new DrizzleService();
         noEnvService.initializeService(logger, createMockConfig());
-        await noEnvService.onAsyncInit();
+        await noEnvService.onModuleInit();
 
         // Database should NOT be initialized
         expect(() => noEnvService.getDatabase()).toThrow('Database not initialized');
@@ -594,7 +594,7 @@ describe('DrizzleService', () => {
           );
           const emptyEnvService = new DrizzleService();
           emptyEnvService.initializeService(logger, createMockConfig());
-          await emptyEnvService.onAsyncInit();
+          await emptyEnvService.onModuleInit();
 
           // Database should NOT be initialized with empty string
           expect(() => emptyEnvService.getDatabase()).toThrow('Database not initialized');
@@ -627,7 +627,7 @@ describe('DrizzleService', () => {
           );
           const priorityService = new DrizzleService();
           priorityService.initializeService(logger, createMockConfig());
-          await priorityService.onAsyncInit();
+          await priorityService.onModuleInit();
 
           // Module options should win - url should be :memory: not ./env-database.db
           const options = priorityService.getConnectionOptions();
@@ -683,7 +683,7 @@ describe('DrizzleService', () => {
       );
       const autoMigrateService = new DrizzleService();
       autoMigrateService.initializeService(logger, createMockConfig());
-      await autoMigrateService.onAsyncInit();
+      await autoMigrateService.onModuleInit();
 
       // Verify migrations were applied - test_users table should exist
       const sqliteClient = autoMigrateService.getSQLiteClient();
@@ -717,7 +717,7 @@ describe('DrizzleService', () => {
       );
       const noMigrateService = new DrizzleService();
       noMigrateService.initializeService(logger, createMockConfig());
-      await noMigrateService.onAsyncInit();
+      await noMigrateService.onModuleInit();
 
       // Verify migrations were NOT applied - test_users table should NOT exist
       const sqliteClient = noMigrateService.getSQLiteClient();
@@ -751,7 +751,7 @@ describe('DrizzleService', () => {
       );
       const defaultService = new DrizzleService();
       defaultService.initializeService(logger, createMockConfig());
-      await defaultService.onAsyncInit();
+      await defaultService.onModuleInit();
 
       // Verify migrations WERE applied (default is now true)
       const sqliteClient = defaultService.getSQLiteClient();
@@ -784,7 +784,7 @@ describe('DrizzleService', () => {
       );
       const customFolderService = new DrizzleService();
       customFolderService.initializeService(logger, createMockConfig());
-      await customFolderService.onAsyncInit();
+      await customFolderService.onModuleInit();
 
       // Verify migrations from custom folder were applied
       const sqliteClient = customFolderService.getSQLiteClient();
@@ -817,7 +817,7 @@ describe('DrizzleService', () => {
       );
       const trackingService = new DrizzleService();
       trackingService.initializeService(logger, createMockConfig());
-      await trackingService.onAsyncInit();
+      await trackingService.onModuleInit();
 
       // Verify __drizzle_migrations table was created and has entries
       const sqliteClient = trackingService.getSQLiteClient();
@@ -853,7 +853,7 @@ describe('DrizzleService', () => {
       missingFolderService.initializeService(logger, createMockConfig());
 
       // Should not throw, but auto-init might fail gracefully
-      await missingFolderService.onAsyncInit();
+      await missingFolderService.onModuleInit();
 
       // The service should still be partially usable (DB initialized but migrations failed)
       // The actual behavior depends on implementation - either:

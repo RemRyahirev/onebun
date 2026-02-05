@@ -142,6 +142,49 @@ export class OrderService extends BaseService {
 
 ## Logger Configuration
 
+### Using loggerOptions (Recommended)
+
+Configure logging declaratively using `loggerOptions`:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    minLevel: 'info',        // 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'none'
+    format: 'json',          // 'json' | 'pretty'
+    defaultContext: {
+      service: 'user-service',
+      version: '1.0.0',
+    },
+  },
+});
+```
+
+### Environment Variables
+
+Logger configuration can be controlled via environment variables:
+
+- `LOG_LEVEL` - Set minimum log level: `trace`, `debug`, `info`, `warn`/`warning`, `error`, `fatal`, `none`
+- `LOG_FORMAT` - Output format: `json` or `pretty`
+
+```bash
+# Example: Set log level to info and format to JSON
+LOG_LEVEL=info LOG_FORMAT=json bun run start
+```
+
+### Configuration Priority
+
+Configuration is resolved in this order (first wins):
+
+1. `loggerLayer` (advanced, full control via Effect.js)
+2. `loggerOptions` (declarative configuration)
+3. Environment variables (`LOG_LEVEL`, `LOG_FORMAT`)
+4. `NODE_ENV` defaults
+
+| NODE_ENV | Default LOG_LEVEL | Default LOG_FORMAT |
+|----------|-------------------|-------------------|
+| production | info | json |
+| other | debug | pretty |
+
 ### Development vs Production
 
 Logger format is automatically selected based on `NODE_ENV`:
@@ -150,7 +193,15 @@ Logger format is automatically selected based on `NODE_ENV`:
 // NODE_ENV !== 'production' → Pretty console output
 // NODE_ENV === 'production' → JSON output
 
-// Manual override
+// Manual override using loggerOptions
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    minLevel: 'debug',
+    format: 'pretty',
+  },
+});
+
+// Or using loggerLayer (advanced)
 import { makeDevLogger, makeProdLogger } from '@onebun/logger';
 
 const app = new OneBunApplication(AppModule, {
@@ -163,11 +214,19 @@ const app = new OneBunApplication(AppModule, {
 ### Log Levels
 
 ```typescript
-import { LogLevel } from '@onebun/logger';
+// Using loggerOptions (recommended)
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    minLevel: 'info',  // Ignore trace and debug
+  },
+});
+
+// Or using loggerLayer with LogLevel enum
+import { LogLevel, makeLogger } from '@onebun/logger';
 
 const app = new OneBunApplication(AppModule, {
   loggerLayer: makeLogger({
-    minLevel: LogLevel.Info,  // Ignore trace and debug
+    minLevel: LogLevel.Info,
   }),
 });
 ```
@@ -175,6 +234,18 @@ const app = new OneBunApplication(AppModule, {
 ### Custom Context
 
 ```typescript
+// Using loggerOptions
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    defaultContext: {
+      serviceName: 'user-service',
+      version: '1.0.0',
+      environment: process.env.NODE_ENV,
+    },
+  },
+});
+
+// Or using makeLogger
 import { makeLogger } from '@onebun/logger';
 
 const app = new OneBunApplication(AppModule, {

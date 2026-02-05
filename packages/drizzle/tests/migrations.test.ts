@@ -248,11 +248,156 @@ describe('runMigrations integration tests', () => {
     );
     const uninitializedService = new DrizzleService();
     uninitializedService.initializeService(logger, createMockConfig());
-    // Call onAsyncInit but there's no config, so service won't be initialized
-    await uninitializedService.onAsyncInit();
+    // Call onModuleInit but there's no config, so service won't be initialized
+    await uninitializedService.onModuleInit();
 
     await expect(
       uninitializedService.runMigrations({ migrationsFolder: testMigrationsFolder }),
     ).rejects.toThrow('Database not initialized');
+  });
+
+  test('should log applied migration filenames', async () => {
+    // Create a capturing logger to verify log output
+    interface LogEntry {
+      level: string;
+      message: string;
+      meta?: { appliedFiles?: string[]; newMigrations?: number };
+    }
+    const logEntries: LogEntry[] = [];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const capturingLogger: any = {
+      debug(msg: string, meta?: object) {
+        logEntries.push({ level: 'debug', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      info(msg: string, meta?: object) {
+        logEntries.push({ level: 'info', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      warn(msg: string, meta?: object) {
+        logEntries.push({ level: 'warn', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      error(msg: string, meta?: object) {
+        logEntries.push({ level: 'error', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      trace: () => Effect.succeed(undefined),
+      child: () => capturingLogger,
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      setGlobalContext() {},
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      clearGlobalContext() {},
+    };
+
+    const testService = new DrizzleService();
+    testService.initializeService(capturingLogger, createMockConfig());
+
+    await testService.initialize({
+      type: DatabaseType.SQLITE,
+      options: {
+        url: ':memory:',
+      },
+    });
+
+    // Run migrations
+    await testService.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    // Verify that migration filename was logged
+    const migrationLog = logEntries.find(
+      (entry) => entry.level === 'info' && entry.message.includes('Applied migration:'),
+    );
+    expect(migrationLog).toBeDefined();
+    expect(migrationLog!.message).toContain('0000_test_migration');
+
+    // Verify summary log includes applied files
+    const summaryLog = logEntries.find(
+      (entry) => entry.level === 'info' && entry.message.includes('SQLite migrations applied'),
+    );
+    expect(summaryLog).toBeDefined();
+    expect(summaryLog!.meta).toHaveProperty('appliedFiles');
+    expect(summaryLog!.meta!.appliedFiles).toContain('0000_test_migration');
+
+    await testService.close();
+  });
+
+  test('should not log migration names when no new migrations applied', async () => {
+    // Create a capturing logger
+    interface LogEntry {
+      level: string;
+      message: string;
+      meta?: { appliedFiles?: string[]; newMigrations?: number };
+    }
+    const logEntries: LogEntry[] = [];
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const capturingLogger: any = {
+      debug(msg: string, meta?: object) {
+        logEntries.push({ level: 'debug', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      info(msg: string, meta?: object) {
+        logEntries.push({ level: 'info', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      warn(msg: string, meta?: object) {
+        logEntries.push({ level: 'warn', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      error(msg: string, meta?: object) {
+        logEntries.push({ level: 'error', message: msg, meta });
+
+        return Effect.succeed(undefined);
+      },
+      trace: () => Effect.succeed(undefined),
+      child: () => capturingLogger,
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      setGlobalContext() {},
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      clearGlobalContext() {},
+    };
+
+    const testService = new DrizzleService();
+    testService.initializeService(capturingLogger, createMockConfig());
+
+    await testService.initialize({
+      type: DatabaseType.SQLITE,
+      options: {
+        url: ':memory:',
+      },
+    });
+
+    // Run migrations first time
+    await testService.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    // Clear log entries
+    logEntries.length = 0;
+
+    // Run migrations second time - no new migrations should be applied
+    await testService.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    // Verify that no "Applied migration:" log was emitted
+    const migrationLogs = logEntries.filter(
+      (entry) => entry.level === 'info' && entry.message.includes('Applied migration:'),
+    );
+    expect(migrationLogs.length).toBe(0);
+
+    // Verify summary shows 0 new migrations
+    const summaryLog = logEntries.find(
+      (entry) => entry.level === 'info' && entry.message.includes('SQLite migrations applied'),
+    );
+    expect(summaryLog).toBeDefined();
+    expect(summaryLog!.meta!.newMigrations).toBe(0);
+    expect(summaryLog!.meta!.appliedFiles).toEqual([]);
+
+    await testService.close();
   });
 });

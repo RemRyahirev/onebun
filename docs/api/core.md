@@ -39,11 +39,19 @@ const app = new OneBunApplication(AppModule, {
 
 **Important Methods**:
 - `app.start()` - starts HTTP server
-- `app.stop()` - graceful shutdown
+- `app.stop()` - graceful shutdown (calls lifecycle hooks)
+- `app.getService(ServiceClass)` - get service instance by class
 - `app.getLogger({ className: 'X' })` - get logger instance
 - `app.getConfig()` - get typed config service
 - `app.getConfigValue('path.to.config')` - read config value (fully typed with module augmentation)
 - `app.getHttpUrl()` - get listening URL
+
+**Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
+- `onModuleInit()` - after service/controller created
+- `onApplicationInit()` - after all modules, before HTTP starts
+- `onModuleDestroy()` - during shutdown
+- `beforeApplicationDestroy(signal?)` - start of shutdown
+- `onApplicationDestroy(signal?)` - end of shutdown
 
 **MultiServiceApplication** - for running multiple services in one process, useful for local development or monolith deployment.
 
@@ -130,7 +138,10 @@ class OneBunApplication {
   async start(): Promise<void>;
 
   /** Stop the HTTP server with optional cleanup options */
-  async stop(options?: { closeSharedRedis?: boolean }): Promise<void>;
+  async stop(options?: { 
+    closeSharedRedis?: boolean; 
+    signal?: string;  // e.g., 'SIGTERM', 'SIGINT'
+  }): Promise<void>;
 
   /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT) */
   enableGracefulShutdown(): void;
@@ -150,6 +161,9 @@ class OneBunApplication {
 
   /** Get root module layer */
   getLayer(): Layer.Layer<never, never, unknown>;
+
+  /** Get a service instance by class from the module container */
+  getService<T>(serviceClass: new (...args: unknown[]) => T): T;
 }
 ```
 
@@ -192,12 +206,31 @@ logger.info('Application started', { port, host });
 await app.stop();
 ```
 
+### Accessing Services Outside of Requests
+
+Use `getService()` to access services outside of the request context, for example in background tasks or scripts:
+
+```typescript
+const app = new OneBunApplication(AppModule, options);
+await app.start();
+
+// Get a service instance
+const userService = app.getService(UserService);
+
+// Use the service
+await userService.performBackgroundTask();
+await userService.sendScheduledEmails();
+```
+
 ### Graceful Shutdown
 
 OneBun enables graceful shutdown **by default**. When the application receives SIGTERM or SIGINT signals, it automatically:
-1. Stops the HTTP server
-2. Closes all WebSocket connections
-3. Disconnects shared Redis connection
+1. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
+2. Stops the HTTP server
+3. Closes all WebSocket connections
+4. Calls `onModuleDestroy()` hooks on all services and controllers
+5. Disconnects shared Redis connection
+6. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
 
 ```typescript
 // Default: graceful shutdown is enabled
@@ -217,7 +250,24 @@ await app.stop(); // Closes server, WebSocket, and shared Redis
 
 // Keep shared Redis open for other consumers
 await app.stop({ closeSharedRedis: false });
+
+// Pass signal for lifecycle hooks
+await app.stop({ signal: 'SIGTERM' });
 ```
+
+### Lifecycle Hooks
+
+Services and controllers can implement lifecycle hooks to execute code at specific points:
+
+| Interface | Method | When Called |
+|-----------|--------|-------------|
+| `OnModuleInit` | `onModuleInit()` | After instantiation and DI |
+| `OnApplicationInit` | `onApplicationInit()` | After all modules, before HTTP server |
+| `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown |
+| `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown |
+
+See [Services API](./services.md#lifecycle-hooks) for detailed usage examples.
 
 ## MultiServiceApplication
 

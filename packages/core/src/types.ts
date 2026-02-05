@@ -1,7 +1,7 @@
 import type { Type } from 'arktype';
 import type { Effect, Layer } from 'effect';
 
-import type { Logger } from '@onebun/logger';
+import type { Logger, LoggerOptions } from '@onebun/logger';
 
 /**
  * Base interface for all OneBun services
@@ -58,6 +58,31 @@ export interface ModuleInstance {
    * Get controller instance
    */
   getControllerInstance?(controllerClass: Function): unknown;
+
+  /**
+   * Call onApplicationInit lifecycle hook for all services and controllers
+   */
+  callOnApplicationInit?(): Promise<void>;
+
+  /**
+   * Call beforeApplicationDestroy lifecycle hook for all services and controllers
+   */
+  callBeforeApplicationDestroy?(signal?: string): Promise<void>;
+
+  /**
+   * Call onModuleDestroy lifecycle hook for controllers first, then services
+   */
+  callOnModuleDestroy?(): Promise<void>;
+
+  /**
+   * Call onApplicationDestroy lifecycle hook for all services and controllers
+   */
+  callOnApplicationDestroy?(signal?: string): Promise<void>;
+
+  /**
+   * Get service instance by class
+   */
+  getServiceByClass?<T>(serviceClass: new (...args: unknown[]) => T): T | undefined;
 }
 
 /**
@@ -107,8 +132,28 @@ export interface ApplicationOptions {
   development?: boolean;
 
   /**
-   * Logger layer to use
-   * If not provided, a default logger will be created
+   * Logger configuration options.
+   * Provides a declarative way to configure logging.
+   * 
+   * Priority: loggerLayer > loggerOptions > LOG_LEVEL/LOG_FORMAT env > NODE_ENV defaults
+   * 
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   loggerOptions: {
+   *     minLevel: 'info',
+   *     format: 'json',
+   *     defaultContext: { service: 'user-service' },
+   *   },
+   * });
+   * ```
+   */
+  loggerOptions?: LoggerOptions;
+
+  /**
+   * Logger layer to use (advanced).
+   * If provided, takes precedence over loggerOptions.
+   * Use loggerOptions for simpler configuration.
    */
   loggerLayer?: Layer.Layer<Logger>;
 

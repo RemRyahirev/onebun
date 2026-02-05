@@ -26,6 +26,13 @@ import type {
   WsExecutionContext,
   WsServerType,
 } from './';
+import type {
+  OnModuleInit,
+  OnApplicationInit,
+  OnModuleDestroy,
+  BeforeApplicationDestroy,
+  OnApplicationDestroy,
+} from './';
 import type { SseEvent, SseGenerator } from './types';
 import type { ServerWebSocket } from 'bun';
 
@@ -874,6 +881,345 @@ describe('Services API Documentation Examples', () => {
 
       expect(EmailService).toBeDefined();
     });
+  });
+});
+
+describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', () => {
+  describe('OnModuleInit Interface', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement OnModuleInit interface', () => {
+      // From docs: OnModuleInit example
+      @Service()
+      class DatabaseService extends BaseService implements OnModuleInit {
+        private connection: unknown = null;
+
+        async onModuleInit(): Promise<void> {
+          // Called after service instantiation and DI
+          this.connection = { connected: true };
+          this.logger.info('Database connected');
+        }
+
+        isConnected(): boolean {
+          return this.connection !== null;
+        }
+      }
+
+      expect(DatabaseService).toBeDefined();
+      // Verify method exists
+      const service = new DatabaseService();
+      expect(typeof service.onModuleInit).toBe('function');
+    });
+  });
+
+  describe('OnApplicationInit Interface', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement OnApplicationInit interface', () => {
+      // From docs: OnApplicationInit example
+      @Service()
+      class CacheService extends BaseService implements OnApplicationInit {
+        async onApplicationInit(): Promise<void> {
+          // Called after all modules initialized, before HTTP server starts
+          this.logger.info('Warming up cache');
+        }
+      }
+
+      expect(CacheService).toBeDefined();
+      const service = new CacheService();
+      expect(typeof service.onApplicationInit).toBe('function');
+    });
+  });
+
+  describe('OnModuleDestroy Interface', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement OnModuleDestroy interface', () => {
+      // From docs: OnModuleDestroy example
+      @Service()
+      class ConnectionService extends BaseService implements OnModuleDestroy {
+        async onModuleDestroy(): Promise<void> {
+          // Called during shutdown, after HTTP server stops
+          this.logger.info('Closing connections');
+        }
+      }
+
+      expect(ConnectionService).toBeDefined();
+      const service = new ConnectionService();
+      expect(typeof service.onModuleDestroy).toBe('function');
+    });
+  });
+
+  describe('BeforeApplicationDestroy Interface', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement BeforeApplicationDestroy interface', () => {
+      // From docs: BeforeApplicationDestroy example
+      @Service()
+      class GracefulService extends BaseService implements BeforeApplicationDestroy {
+        beforeApplicationDestroy(signal?: string): void {
+          // Called at the very start of shutdown
+          this.logger.info(`Shutdown initiated by signal: ${signal || 'unknown'}`);
+        }
+      }
+
+      expect(GracefulService).toBeDefined();
+      const service = new GracefulService();
+      expect(typeof service.beforeApplicationDestroy).toBe('function');
+    });
+  });
+
+  describe('OnApplicationDestroy Interface', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement OnApplicationDestroy interface', () => {
+      // From docs: OnApplicationDestroy example
+      @Service()
+      class CleanupService extends BaseService implements OnApplicationDestroy {
+        async onApplicationDestroy(signal?: string): Promise<void> {
+          // Called at the very end of shutdown
+          this.logger.info(`Final cleanup, signal: ${signal || 'unknown'}`);
+        }
+      }
+
+      expect(CleanupService).toBeDefined();
+      const service = new CleanupService();
+      expect(typeof service.onApplicationDestroy).toBe('function');
+    });
+  });
+
+  describe('Multiple Lifecycle Hooks', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     */
+    it('should implement multiple lifecycle interfaces', () => {
+      // From docs: Complete lifecycle example
+      @Service()
+      class FullLifecycleService extends BaseService 
+        implements OnModuleInit, OnApplicationInit, OnModuleDestroy, BeforeApplicationDestroy, OnApplicationDestroy {
+        
+        async onModuleInit(): Promise<void> {
+          this.logger.info('Service initialized');
+        }
+
+        async onApplicationInit(): Promise<void> {
+          this.logger.info('Application initialized');
+        }
+
+        beforeApplicationDestroy(signal?: string): void {
+          this.logger.info(`Shutdown starting: ${signal}`);
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          this.logger.info('Module destroying');
+        }
+
+        async onApplicationDestroy(signal?: string): Promise<void> {
+          this.logger.info(`Application destroyed: ${signal}`);
+        }
+      }
+
+      expect(FullLifecycleService).toBeDefined();
+      const service = new FullLifecycleService();
+      expect(typeof service.onModuleInit).toBe('function');
+      expect(typeof service.onApplicationInit).toBe('function');
+      expect(typeof service.beforeApplicationDestroy).toBe('function');
+      expect(typeof service.onModuleDestroy).toBe('function');
+      expect(typeof service.onApplicationDestroy).toBe('function');
+    });
+  });
+
+  describe('Controller Lifecycle Hooks', () => {
+    /**
+     * @source docs/api/controllers.md#lifecycle-hooks
+     */
+    it('should implement lifecycle hooks in controllers', () => {
+      // From docs: Controller lifecycle hooks example
+      @Controller('/api')
+      class ApiController extends BaseController implements OnModuleInit, OnModuleDestroy {
+        async onModuleInit(): Promise<void> {
+          this.logger.info('Controller initialized');
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          this.logger.info('Controller destroying');
+        }
+
+        @Get('/test')
+        test(): Response {
+          return this.success({ message: 'test' });
+        }
+      }
+
+      expect(ApiController).toBeDefined();
+      const controller = new ApiController();
+      expect(typeof controller.onModuleInit).toBe('function');
+      expect(typeof controller.onModuleDestroy).toBe('function');
+    });
+  });
+
+  describe('Lifecycle Helper Functions', () => {
+    /**
+     * Tests for lifecycle helper functions
+     */
+    it('should detect hasOnModuleInit correctly', () => {
+      const withHook = { onModuleInit: () => Promise.resolve() };
+      const withoutHook = { someOtherMethod: () => 'nothing' };
+
+      expect(hasOnModuleInit(withHook)).toBe(true);
+      expect(hasOnModuleInit(withoutHook)).toBe(false);
+      expect(hasOnModuleInit(null)).toBe(false);
+      expect(hasOnModuleInit(undefined)).toBe(false);
+    });
+
+    it('should detect hasOnApplicationInit correctly', () => {
+      const withHook = { onApplicationInit: () => Promise.resolve() };
+      const withoutHook = {};
+
+      expect(hasOnApplicationInit(withHook)).toBe(true);
+      expect(hasOnApplicationInit(withoutHook)).toBe(false);
+    });
+
+    it('should detect hasOnModuleDestroy correctly', () => {
+      const withHook = { onModuleDestroy: () => Promise.resolve() };
+      const withoutHook = {};
+
+      expect(hasOnModuleDestroy(withHook)).toBe(true);
+      expect(hasOnModuleDestroy(withoutHook)).toBe(false);
+    });
+
+    it('should detect hasBeforeApplicationDestroy correctly', () => {
+      const withHook = { beforeApplicationDestroy: () => undefined };
+      const withoutHook = {};
+
+      expect(hasBeforeApplicationDestroy(withHook)).toBe(true);
+      expect(hasBeforeApplicationDestroy(withoutHook)).toBe(false);
+    });
+
+    it('should detect hasOnApplicationDestroy correctly', () => {
+      const withHook = { onApplicationDestroy: () => Promise.resolve() };
+      const withoutHook = {};
+
+      expect(hasOnApplicationDestroy(withHook)).toBe(true);
+      expect(hasOnApplicationDestroy(withoutHook)).toBe(false);
+    });
+
+    it('should call lifecycle hooks safely', async () => {
+      const results: string[] = [];
+      
+      const service = {
+        async onModuleInit() {
+          results.push('init'); 
+        },
+        async onApplicationInit() {
+          results.push('appInit'); 
+        },
+        beforeApplicationDestroy(signal?: string) {
+          results.push(`before:${signal}`); 
+        },
+        async onModuleDestroy() {
+          results.push('destroy'); 
+        },
+        async onApplicationDestroy(signal?: string) {
+          results.push(`appDestroy:${signal}`); 
+        },
+      };
+
+      await callOnModuleInit(service);
+      await callOnApplicationInit(service);
+      await callBeforeApplicationDestroy(service, 'SIGTERM');
+      await callOnModuleDestroy(service);
+      await callOnApplicationDestroy(service, 'SIGTERM');
+
+      expect(results).toEqual(['init', 'appInit', 'before:SIGTERM', 'destroy', 'appDestroy:SIGTERM']);
+    });
+
+    it('should not throw when calling hooks on objects without them', async () => {
+      const emptyObj = {};
+
+      // These should not throw
+      await callOnModuleInit(emptyObj);
+      await callOnApplicationInit(emptyObj);
+      await callBeforeApplicationDestroy(emptyObj, 'SIGTERM');
+      await callOnModuleDestroy(emptyObj);
+      await callOnApplicationDestroy(emptyObj, 'SIGTERM');
+    });
+  });
+});
+
+describe('getService API Documentation Examples (docs/api/core.md)', () => {
+  /**
+   * @source docs/api/core.md#accessing-services-outside-of-requests
+   */
+  it('should have getService method on OneBunApplication', () => {
+    @Module({ controllers: [] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      loggerLayer: makeMockLoggerLayer(),
+    });
+
+    expect(typeof app.getService).toBe('function');
+  });
+
+  /**
+   * @source docs/api/core.md#accessing-services-outside-of-requests
+   */
+  it('should get service instance by class', async () => {
+    @Service()
+    class TaskService extends BaseService {
+      performTask(): string {
+        return 'task completed';
+      }
+    }
+
+    @Module({
+      providers: [TaskService],
+      controllers: [],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      loggerLayer: makeMockLoggerLayer(),
+    });
+
+    await app.start();
+
+    // From docs: getService usage example
+    const taskService = app.getService(TaskService);
+    expect(taskService).toBeDefined();
+    expect(taskService.performTask()).toBe('task completed');
+
+    await app.stop();
+  });
+
+  /**
+   * @source docs/api/core.md#accessing-services-outside-of-requests
+   */
+  it('should throw error for non-existent service', async () => {
+    @Service()
+    class NonExistentService extends BaseService {}
+
+    @Module({
+      controllers: [],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      loggerLayer: makeMockLoggerLayer(),
+    });
+
+    await app.start();
+
+    // getService throws when service is not found
+    expect(() => app.getService(NonExistentService)).toThrow();
+
+    await app.stop();
   });
 });
 
@@ -2936,7 +3282,18 @@ import {
   createWsClient,
   matchPattern,
   makeMockLoggerLayer,
+  hasOnModuleInit,
+  hasOnApplicationInit,
+  hasOnModuleDestroy,
+  hasBeforeApplicationDestroy,
+  hasOnApplicationDestroy,
+  callOnModuleInit,
+  callOnApplicationInit,
+  callOnModuleDestroy,
+  callBeforeApplicationDestroy,
+  callOnApplicationDestroy,
 } from './';
+
 
 describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)', () => {
   describe('SseEvent Type (docs/api/controllers.md)', () => {

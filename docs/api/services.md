@@ -127,6 +127,104 @@ import { UserRepository } from './user.repository';
 export class UserModule {}
 ```
 
+## Lifecycle Hooks
+
+Services can implement lifecycle hooks to execute code at specific points in the application lifecycle.
+
+### Available Hooks
+
+| Interface | Method | When Called |
+|-----------|--------|-------------|
+| `OnModuleInit` | `onModuleInit()` | After service instantiation and DI |
+| `OnApplicationInit` | `onApplicationInit()` | After all modules initialized, before HTTP server starts |
+| `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | At the very start of shutdown |
+| `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | At the very end of shutdown |
+
+### Usage
+
+Implement lifecycle interfaces to hook into the application lifecycle:
+
+```typescript
+import { 
+  Service, 
+  BaseService, 
+  OnModuleInit, 
+  OnModuleDestroy 
+} from '@onebun/core';
+
+@Service()
+export class DatabaseService extends BaseService implements OnModuleInit, OnModuleDestroy {
+  private pool: ConnectionPool | null = null;
+
+  async onModuleInit(): Promise<void> {
+    // Called after DI, before application starts
+    this.pool = await createPool(this.config.get('database.url'));
+    this.logger.info('Database pool initialized');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    // Called during graceful shutdown
+    if (this.pool) {
+      await this.pool.end();
+      this.logger.info('Database pool closed');
+    }
+  }
+
+  async query<T>(sql: string): Promise<T[]> {
+    if (!this.pool) {
+      throw new Error('Database not initialized');
+    }
+    return this.pool.query(sql);
+  }
+}
+```
+
+### Shutdown Hooks with Signal
+
+The shutdown hooks receive the signal that triggered the shutdown (e.g., `SIGTERM`, `SIGINT`):
+
+```typescript
+import { 
+  Service, 
+  BaseService, 
+  BeforeApplicationDestroy, 
+  OnApplicationDestroy 
+} from '@onebun/core';
+
+@Service()
+export class CleanupService extends BaseService 
+  implements BeforeApplicationDestroy, OnApplicationDestroy {
+
+  async beforeApplicationDestroy(signal?: string): Promise<void> {
+    this.logger.info(`Shutdown initiated by ${signal || 'unknown'}`);
+    // Notify external services, flush buffers, etc.
+  }
+
+  async onApplicationDestroy(signal?: string): Promise<void> {
+    this.logger.info('Final cleanup completed');
+    // Last chance to do cleanup
+  }
+}
+```
+
+### Lifecycle Order
+
+```
+STARTUP:
+1. Service instantiation → constructor()
+2. Framework initialization → initializeService()
+3. Module init hook → onModuleInit()
+4. Application init hook → onApplicationInit()
+5. HTTP server starts
+
+SHUTDOWN:
+1. Before destroy hook → beforeApplicationDestroy(signal)
+2. HTTP server stops
+3. Module destroy hook → onModuleDestroy()
+4. Application destroy hook → onApplicationDestroy(signal)
+```
+
 ## Accessing Logger
 
 ```typescript

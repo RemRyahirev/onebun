@@ -99,7 +99,7 @@ describe('DrizzleService DI injection', () => {
 
     drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
-    await drizzleService.onAsyncInit();
+    await drizzleService.onModuleInit();
 
     // Create test table manually
     const sqliteClient = drizzleService.getSQLiteClient();
@@ -228,7 +228,7 @@ describe('DrizzleService DI injection', () => {
 
     const newDrizzleService = new DrizzleService();
     newDrizzleService.initializeService(logger, createMockConfig());
-    await newDrizzleService.onAsyncInit();
+    await newDrizzleService.onModuleInit();
 
     // Module options should be used
     const connectionOptions = newDrizzleService.getConnectionOptions();
@@ -242,7 +242,7 @@ describe('DrizzleService DI injection', () => {
     await newDrizzleService.close();
   });
 
-  test('injected DrizzleService database is ready immediately after onAsyncInit', async () => {
+  test('injected DrizzleService database is ready immediately after onModuleInit', async () => {
     const loggerLayer = makeMockLoggerLayer();
     const logger = Effect.runSync(
       Effect.provide(

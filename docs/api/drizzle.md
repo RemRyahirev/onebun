@@ -700,6 +700,22 @@ Drizzle automatically tracks applied migrations in the `__drizzle_migrations` ta
 - Running `runMigrations()` multiple times is safe
 - No duplicate table creation errors
 
+### Migration Logging
+
+When migrations are applied, the service logs each migration filename:
+
+```
+info: Applied migration: 0001_initial_schema
+info: Applied migration: 0002_add_users_table
+info: SQLite migrations applied { migrationsFolder: './drizzle', newMigrations: 2, appliedFiles: ['0001_initial_schema', '0002_add_users_table'] }
+```
+
+If no new migrations need to be applied:
+
+```
+info: SQLite migrations applied { migrationsFolder: './drizzle', newMigrations: 0, appliedFiles: [] }
+```
+
 <llm-only>
 **Technical details for AI agents:**
 - `generateMigrations()` creates a temporary `drizzle.config.temp.ts` file and runs `bunx drizzle-kit generate`
@@ -707,6 +723,9 @@ Drizzle automatically tracks applied migrations in the `__drizzle_migrations` ta
 - `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
 - Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
 - The `__drizzle_migrations` table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
+- Migration hash is SHA-256 of the SQL file content, used to match applied migrations with journal entries
+- `readMigrationJournal()` reads `meta/_journal.json` and computes hashes for each migration file
+- `getAppliedMigrationHashes()` queries `__drizzle_migrations` table before and after running migrations to determine which were newly applied
 </llm-only>
 
 ## Complete Example

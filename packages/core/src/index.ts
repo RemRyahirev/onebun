@@ -70,6 +70,23 @@ export {
   type IConfig,
   type OneBunAppConfig,
   NotInitializedConfig,
+  // Lifecycle hooks interfaces
+  type OnModuleInit,
+  type OnApplicationInit,
+  type OnModuleDestroy,
+  type BeforeApplicationDestroy,
+  type OnApplicationDestroy,
+  // Lifecycle hooks helper functions
+  hasOnModuleInit,
+  hasOnApplicationInit,
+  hasOnModuleDestroy,
+  hasBeforeApplicationDestroy,
+  hasOnApplicationDestroy,
+  callOnModuleInit,
+  callOnApplicationInit,
+  callOnModuleDestroy,
+  callBeforeApplicationDestroy,
+  callOnApplicationDestroy,
 } from './module';
 
 // Application

@@ -13,6 +13,8 @@ import {
   LoggerService,
   createSyncLogger,
   makeDevLogger,
+  makeLoggerFromOptions,
+  parseLogLevel,
 } from './logger';
 import { makeLogger } from './logger';
 import { ConsoleTransport } from './transport';
@@ -335,8 +337,11 @@ describe('LoggerImpl methods and makeLogger env selection', () => {
   });
 
   it('makeLogger picks prod logger when NODE_ENV=production', () => {
-    const prev = process.env.NODE_ENV;
+    const prevNodeEnv = process.env.NODE_ENV;
+    const prevLogLevel = process.env.LOG_LEVEL;
     process.env.NODE_ENV = 'production';
+    // Clear LOG_LEVEL to test NODE_ENV default behavior
+    delete process.env.LOG_LEVEL;
     const seen: LogEntry[] = [];
     const transport = new (class extends ConsoleTransport {
       override log(_formatted: string, e: LogEntry) {
@@ -353,7 +358,10 @@ describe('LoggerImpl methods and makeLogger env selection', () => {
     sync.info('ok');
     expect(seen.length).toBe(1);
     expect(seen[0].level).toBe(LogLevel.Info);
-    process.env.NODE_ENV = prev;
+    process.env.NODE_ENV = prevNodeEnv;
+    if (prevLogLevel !== undefined) {
+      process.env.LOG_LEVEL = prevLogLevel;
+    }
   });
 });
 
@@ -584,5 +592,274 @@ describe('Formatter edge cases and additional coverage', () => {
     expect(out).toContain('level1');
     expect(out).toContain('level2');
     expect(out).toContain('level3');
+  });
+});
+
+describe('parseLogLevel', () => {
+  it('parses all valid log levels', () => {
+    expect(parseLogLevel('trace')).toBe(LogLevel.Trace);
+    expect(parseLogLevel('debug')).toBe(LogLevel.Debug);
+    expect(parseLogLevel('info')).toBe(LogLevel.Info);
+    expect(parseLogLevel('warn')).toBe(LogLevel.Warning);
+    expect(parseLogLevel('warning')).toBe(LogLevel.Warning);
+    expect(parseLogLevel('error')).toBe(LogLevel.Error);
+    expect(parseLogLevel('fatal')).toBe(LogLevel.Fatal);
+    expect(parseLogLevel('none')).toBe(LogLevel.None);
+  });
+
+  it('returns Info for unknown levels', () => {
+    expect(parseLogLevel('unknown')).toBe(LogLevel.Info);
+    expect(parseLogLevel('invalid')).toBe(LogLevel.Info);
+    expect(parseLogLevel('')).toBe(LogLevel.Info);
+  });
+
+  it('is case insensitive', () => {
+    expect(parseLogLevel('DEBUG')).toBe(LogLevel.Debug);
+    expect(parseLogLevel('Info')).toBe(LogLevel.Info);
+    expect(parseLogLevel('WARNING')).toBe(LogLevel.Warning);
+    expect(parseLogLevel('ErRoR')).toBe(LogLevel.Error);
+  });
+});
+
+describe('makeLoggerFromOptions', () => {
+  it('respects minLevel option as string', () => {
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    // Test that makeLoggerFromOptions creates a valid logger
+    const layer = makeLoggerFromOptions({ minLevel: 'info' });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
+    expect(typeof logger.debug).toBe('function');
+
+    // Test filtering using makeDevLogger with custom transport (more controllable)
+    const customLayer = makeDevLogger({ minLevel: LogLevel.Info, transport });
+    const customLogger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), customLayer));
+    const customSync = createSyncLogger(customLogger);
+
+    customSync.debug('should be filtered');
+    customSync.info('should pass');
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].level).toBe(LogLevel.Info);
+  });
+
+  it('respects minLevel option as LogLevel enum', () => {
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    const layer = makeDevLogger({ minLevel: LogLevel.Warning, transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.debug('filtered');
+    sync.info('filtered');
+    sync.warn('passes');
+    sync.error('passes');
+
+    expect(seen.length).toBe(2);
+    expect(seen[0].level).toBe(LogLevel.Warning);
+    expect(seen[1].level).toBe(LogLevel.Error);
+  });
+
+  it('uses defaultContext from options', () => {
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    const layer = makeDevLogger({
+      transport,
+      defaultContext: { service: 'test-service', version: '1.0.0' },
+    });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.info('test message');
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].context?.service).toBe('test-service');
+    expect(seen[0].context?.version).toBe('1.0.0');
+  });
+});
+
+describe('makeLogger with LOG_LEVEL env', () => {
+  const originalLogLevel = process.env.LOG_LEVEL;
+  const originalLogFormat = process.env.LOG_FORMAT;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    // Restore original env values
+    if (originalLogLevel === undefined) {
+      delete process.env.LOG_LEVEL;
+    } else {
+      process.env.LOG_LEVEL = originalLogLevel;
+    }
+    if (originalLogFormat === undefined) {
+      delete process.env.LOG_FORMAT;
+    } else {
+      process.env.LOG_FORMAT = originalLogFormat;
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
+  it('respects LOG_LEVEL=info and filters debug logs', () => {
+    process.env.LOG_LEVEL = 'info';
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    const layer = makeLogger({ transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.debug('should be filtered');
+    sync.info('should pass');
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].level).toBe(LogLevel.Info);
+  });
+
+  it('respects LOG_LEVEL=debug and allows debug logs', () => {
+    process.env.LOG_LEVEL = 'debug';
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    const layer = makeLogger({ transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.debug('should pass');
+    sync.trace('should be filtered');
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].level).toBe(LogLevel.Debug);
+  });
+
+  it('config minLevel takes precedence over LOG_LEVEL env', () => {
+    process.env.LOG_LEVEL = 'debug';
+    const seen: LogEntry[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(_formatted: string, e: LogEntry) {
+        return Effect.sync(() => {
+          seen.push(e);
+        });
+      }
+    })();
+
+    // Config sets minLevel to Error, should override LOG_LEVEL=debug
+    const layer = makeLogger({ minLevel: LogLevel.Error, transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.debug('filtered');
+    sync.info('filtered');
+    sync.warn('filtered');
+    sync.error('passes');
+
+    expect(seen.length).toBe(1);
+    expect(seen[0].level).toBe(LogLevel.Error);
+  });
+});
+
+describe('makeLogger with LOG_FORMAT env', () => {
+  const originalLogFormat = process.env.LOG_FORMAT;
+  const originalNodeEnv = process.env.NODE_ENV;
+
+  afterEach(() => {
+    if (originalLogFormat === undefined) {
+      delete process.env.LOG_FORMAT;
+    } else {
+      process.env.LOG_FORMAT = originalLogFormat;
+    }
+    if (originalNodeEnv === undefined) {
+      delete process.env.NODE_ENV;
+    } else {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
+  });
+
+  it('uses JSON formatter when LOG_FORMAT=json in dev mode', () => {
+    process.env.NODE_ENV = 'development';
+    process.env.LOG_FORMAT = 'json';
+
+    const outputs: string[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(formatted: string, _e: LogEntry) {
+        return Effect.sync(() => {
+          outputs.push(formatted);
+        });
+      }
+    })();
+
+    const layer = makeLogger({ transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.info('test json format');
+
+    expect(outputs.length).toBe(1);
+    // JSON format should be valid JSON
+    expect(() => JSON.parse(outputs[0])).not.toThrow();
+    const parsed = JSON.parse(outputs[0]);
+    expect(parsed.level).toBe('info');
+    expect(parsed.message).toBe('test json format');
+  });
+
+  it('uses Pretty formatter when LOG_FORMAT=pretty in prod mode', () => {
+    process.env.NODE_ENV = 'production';
+    process.env.LOG_FORMAT = 'pretty';
+
+    const outputs: string[] = [];
+    const transport = new (class extends ConsoleTransport {
+      override log(formatted: string, _e: LogEntry) {
+        return Effect.sync(() => {
+          outputs.push(formatted);
+        });
+      }
+    })();
+
+    const layer = makeLogger({ transport });
+    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
+    const sync = createSyncLogger(logger);
+
+    sync.info('test pretty format');
+
+    expect(outputs.length).toBe(1);
+    // Pretty format should contain [INFO] marker, not valid JSON
+    expect(outputs[0]).toContain('[INFO');
+    expect(() => JSON.parse(outputs[0])).toThrow();
   });
 });

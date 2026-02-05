@@ -12,6 +12,7 @@ import {
   type Logger,
   LoggerService,
   makeLogger,
+  parseLogLevel,
   type SyncLogger,
 } from '@onebun/logger';
 
@@ -201,9 +202,9 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
           ...this.options.envOptions,
           valueOverrides: resolvedOverrides,
         },
-        // Logger configuration - use minLevel if provided
-        loggerLayer: mergedOptions.logger?.minLevel
-          ? makeLogger({ minLevel: this.getLogLevel(mergedOptions.logger.minLevel) })
+        // Logger configuration - use loggerOptions if minLevel provided
+        loggerOptions: mergedOptions.logger?.minLevel
+          ? { minLevel: parseLogLevel(mergedOptions.logger.minLevel) }
           : undefined,
         metrics: {
           ...mergedOptions.metrics,
@@ -315,25 +316,5 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
    */
   getLogger(): SyncLogger {
     return this.logger;
-  }
-
-  /**
-   * Convert log level string to numeric LogLevel value.
-   * LogLevel values: Fatal=60, Error=50, Warning=40, Info=30, Debug=20, Trace=10
-   */
-  private getLogLevel(level: string): number {
-    /* eslint-disable @typescript-eslint/no-magic-numbers */
-    const LOG_LEVEL_INFO = 30;
-    const levelMap: Record<string, number> = {
-      fatal: 60,
-      error: 50,
-      warning: 40,
-      info: LOG_LEVEL_INFO,
-      debug: 20,
-      trace: 10,
-    };
-
-    return levelMap[level.toLowerCase()] ?? LOG_LEVEL_INFO;
-    /* eslint-enable @typescript-eslint/no-magic-numbers */
   }
 }

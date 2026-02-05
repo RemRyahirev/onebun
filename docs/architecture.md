@@ -12,6 +12,17 @@ description: System architecture overview. Module hierarchy, DI container, reque
 3. Controllers receive injected services via constructor
 4. Exported services available to importing modules
 
+**Lifecycle Hooks Order**:
+1. Services created → `onModuleInit()` called on each service
+2. Controllers created → `onModuleInit()` called on each controller
+3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
+4. Shutdown signal → `beforeApplicationDestroy(signal?)` called
+5. HTTP server stops → `onModuleDestroy()` called
+6. Cleanup complete → `onApplicationDestroy(signal?)` called
+
+**Accessing Services Outside Requests**:
+- `app.getService(ServiceClass)` - returns service instance by class
+
 **Effect.js Usage**:
 - Framework internals use Effect.pipe for composition
 - Services can use Effect for complex async flows
@@ -268,6 +279,8 @@ HTTP Request
 
 ### Module Lifecycle
 
+**Initialization Phase:**
+
 ```typescript
 // Phase 1: Import child modules and collect exported services
 if (metadata.imports) {
@@ -280,8 +293,61 @@ if (metadata.imports) {
 // Phase 2: Create this module's services with DI
 this.createServicesWithDI(metadata);
 
-// Phase 3: Create controllers with injected services
+// Phase 3: Call onModuleInit() on services that implement it
+await this.callServicesOnModuleInit();
+
+// Phase 4: Create controllers with injected services
 this.createControllersWithDI();
+
+// Phase 5: Call onModuleInit() on controllers that implement it
+await this.callControllersOnModuleInit();
+
+// Phase 6: After all modules ready, call onApplicationInit() (before HTTP server)
+await this.callOnApplicationInit();
+```
+
+**Shutdown Phase:**
+
+```typescript
+// Phase 1: Call beforeApplicationDestroy(signal) on all services and controllers
+await this.callBeforeApplicationDestroy(signal);
+
+// Phase 2: HTTP server stops (handled by application)
+
+// Phase 3: Call onModuleDestroy() on all services and controllers
+await this.callOnModuleDestroy();
+
+// Phase 4: Call onApplicationDestroy(signal) on all services and controllers
+await this.callOnApplicationDestroy(signal);
+```
+
+### Lifecycle Hooks
+
+Services and controllers can implement lifecycle hooks by importing the interfaces:
+
+```typescript
+import { 
+  OnModuleInit, 
+  OnApplicationInit, 
+  OnModuleDestroy,
+  BeforeApplicationDestroy,
+  OnApplicationDestroy 
+} from '@onebun/core';
+
+@Service()
+export class DatabaseService extends BaseService implements OnModuleInit, OnModuleDestroy {
+  private connection: Connection | null = null;
+
+  async onModuleInit(): Promise<void> {
+    this.connection = await createConnection(this.config.database.url);
+    this.logger.info('Database connected');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.connection?.close();
+    this.logger.info('Database disconnected');
+  }
+}
 ```
 
 ### Service Export/Import
@@ -352,6 +418,14 @@ export class BaseService {
 
   // Logger and config are injected by the framework after construction
   // via the initializeService(logger, config) method
+}
+
+// Lifecycle hooks are optional - implement the interface to use:
+@Service()
+class MyService extends BaseService implements OnModuleInit {
+  async onModuleInit(): Promise<void> {
+    // Called after construction and DI injection
+  }
 }
 ```
 

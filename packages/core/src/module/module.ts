@@ -29,6 +29,13 @@ import {
   type IConfig,
   type OneBunAppConfig,
 } from './config.interface';
+import {
+  hasOnModuleInit,
+  hasOnApplicationInit,
+  hasOnModuleDestroy,
+  hasBeforeApplicationDestroy,
+  hasOnApplicationDestroy,
+} from './lifecycle';
 import { getServiceMetadata, getServiceTag } from './service';
 
 /**
@@ -68,7 +75,7 @@ export class OneBunModule implements ModuleInstance {
   private controllers: Function[] = [];
   private controllerInstances: Map<Function, Controller> = new Map();
   private serviceInstances: Map<Context.Tag<unknown, unknown>, unknown> = new Map();
-  private pendingAsyncInits: Array<{ name: string; init: () => Promise<void> }> = [];
+  private pendingServiceInits: Array<{ name: string; instance: unknown }> = [];
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
 
@@ -303,16 +310,11 @@ export class OneBunModule implements ModuleInstance {
             .initializeService(this.logger, this.config);
         }
 
-        // Track services that need async initialization
-        if (
-          serviceInstance &&
-          typeof serviceInstance === 'object' &&
-          'onAsyncInit' in serviceInstance &&
-          typeof (serviceInstance as { onAsyncInit: unknown }).onAsyncInit === 'function'
-        ) {
-          this.pendingAsyncInits.push({
+        // Track services that need lifecycle hooks (onModuleInit)
+        if (hasOnModuleInit(serviceInstance)) {
+          this.pendingServiceInits.push({
             name: provider.name,
-            init: () => (serviceInstance as { onAsyncInit: () => Promise<void> }).onAsyncInit(),
+            instance: serviceInstance,
           });
         }
 
@@ -558,35 +560,45 @@ export class OneBunModule implements ModuleInstance {
    * Setup the module and its dependencies
    */
   setup(): Effect.Effect<unknown, never, void> {
-    return this.runAsyncServiceInit().pipe(
-      // Also run async init for child modules
+    return this.callServicesOnModuleInit().pipe(
+      // Also run onModuleInit for child modules' services
       Effect.flatMap(() =>
-        Effect.forEach(this.childModules, (childModule) => childModule.runAsyncServiceInit(), {
+        Effect.forEach(this.childModules, (childModule) => childModule.callServicesOnModuleInit(), {
           discard: true,
         }),
       ),
       // Then create controller instances
       Effect.flatMap(() => this.createControllerInstances()),
+      // Then call onModuleInit for controllers
+      Effect.flatMap(() => this.callControllersOnModuleInit()),
+      // Also run onModuleInit for child modules' controllers
+      Effect.flatMap(() =>
+        Effect.forEach(this.childModules, (childModule) => childModule.callControllersOnModuleInit(), {
+          discard: true,
+        }),
+      ),
     );
   }
 
   /**
-   * Run async initialization for all services that need it
+   * Call onModuleInit lifecycle hook for all services that implement it
    */
-  runAsyncServiceInit(): Effect.Effect<unknown, never, void> {
-    if (this.pendingAsyncInits.length === 0) {
+  callServicesOnModuleInit(): Effect.Effect<unknown, never, void> {
+    if (this.pendingServiceInits.length === 0) {
       return Effect.void;
     }
 
-    this.logger.debug(`Running async initialization for ${this.pendingAsyncInits.length} service(s)`);
+    this.logger.debug(`Calling onModuleInit for ${this.pendingServiceInits.length} service(s)`);
 
-    // Run all async inits in parallel
-    const initPromises = this.pendingAsyncInits.map(async ({ name, init }) => {
+    // Run all service onModuleInit hooks sequentially
+    const initPromises = this.pendingServiceInits.map(async ({ name, instance }) => {
       try {
-        await init();
-        this.logger.debug(`Service ${name} async initialization completed`);
+        if (hasOnModuleInit(instance)) {
+          await instance.onModuleInit();
+        }
+        this.logger.debug(`Service ${name} onModuleInit completed`);
       } catch (error) {
-        this.logger.error(`Service ${name} async initialization failed: ${error}`);
+        this.logger.error(`Service ${name} onModuleInit failed: ${error}`);
         throw error;
       }
     });
@@ -594,9 +606,177 @@ export class OneBunModule implements ModuleInstance {
     return Effect.promise(() => Promise.all(initPromises)).pipe(
       Effect.map(() => {
         // Clear the list after initialization
-        this.pendingAsyncInits = [];
+        this.pendingServiceInits = [];
       }),
     );
+  }
+
+  /**
+   * Call onModuleInit lifecycle hook for all controllers that implement it
+   */
+  callControllersOnModuleInit(): Effect.Effect<unknown, never, void> {
+    const controllers = Array.from(this.controllerInstances.values());
+    const controllersWithInit = controllers.filter((c): c is Controller & { onModuleInit(): Promise<void> | void } => 
+      hasOnModuleInit(c),
+    );
+
+    if (controllersWithInit.length === 0) {
+      return Effect.void;
+    }
+
+    this.logger.debug(`Calling onModuleInit for ${controllersWithInit.length} controller(s)`);
+
+    const initPromises = controllersWithInit.map(async (controller) => {
+      try {
+        await controller.onModuleInit();
+        this.logger.debug(`Controller ${controller.constructor.name} onModuleInit completed`);
+      } catch (error) {
+        this.logger.error(`Controller ${controller.constructor.name} onModuleInit failed: ${error}`);
+        throw error;
+      }
+    });
+
+    return Effect.promise(() => Promise.all(initPromises));
+  }
+
+  /**
+   * Call onApplicationInit lifecycle hook for all services and controllers
+   */
+  async callOnApplicationInit(): Promise<void> {
+    // Call for services
+    for (const [, instance] of this.serviceInstances) {
+      if (hasOnApplicationInit(instance)) {
+        try {
+          await instance.onApplicationInit();
+          this.logger.debug(`Service ${(instance as object).constructor.name} onApplicationInit completed`);
+        } catch (error) {
+          this.logger.error(`Service ${(instance as object).constructor.name} onApplicationInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    // Call for controllers
+    for (const [, controller] of this.controllerInstances) {
+      if (hasOnApplicationInit(controller)) {
+        try {
+          await controller.onApplicationInit();
+          this.logger.debug(`Controller ${controller.constructor.name} onApplicationInit completed`);
+        } catch (error) {
+          this.logger.error(`Controller ${controller.constructor.name} onApplicationInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    // Call for child modules
+    for (const childModule of this.childModules) {
+      await childModule.callOnApplicationInit();
+    }
+  }
+
+  /**
+   * Call beforeApplicationDestroy lifecycle hook for all services and controllers
+   */
+  async callBeforeApplicationDestroy(signal?: string): Promise<void> {
+    // Call for services
+    for (const [, instance] of this.serviceInstances) {
+      if (hasBeforeApplicationDestroy(instance)) {
+        try {
+          await instance.beforeApplicationDestroy(signal);
+          this.logger.debug(`Service ${(instance as object).constructor.name} beforeApplicationDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Service ${(instance as object).constructor.name} beforeApplicationDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for controllers
+    for (const [, controller] of this.controllerInstances) {
+      if (hasBeforeApplicationDestroy(controller)) {
+        try {
+          await controller.beforeApplicationDestroy(signal);
+          this.logger.debug(`Controller ${controller.constructor.name} beforeApplicationDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Controller ${controller.constructor.name} beforeApplicationDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for child modules
+    for (const childModule of this.childModules) {
+      await childModule.callBeforeApplicationDestroy(signal);
+    }
+  }
+
+  /**
+   * Call onModuleDestroy lifecycle hook for controllers first, then services
+   */
+  async callOnModuleDestroy(): Promise<void> {
+    // Call for controllers first (reverse order of creation)
+    const controllers = Array.from(this.controllerInstances.values()).reverse();
+    for (const controller of controllers) {
+      if (hasOnModuleDestroy(controller)) {
+        try {
+          await controller.onModuleDestroy();
+          this.logger.debug(`Controller ${controller.constructor.name} onModuleDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Controller ${controller.constructor.name} onModuleDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for services (reverse order of creation)
+    const services = Array.from(this.serviceInstances.values()).reverse();
+    for (const instance of services) {
+      if (hasOnModuleDestroy(instance)) {
+        try {
+          await instance.onModuleDestroy();
+          this.logger.debug(`Service ${(instance as object).constructor.name} onModuleDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Service ${(instance as object).constructor.name} onModuleDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for child modules
+    for (const childModule of this.childModules) {
+      await childModule.callOnModuleDestroy();
+    }
+  }
+
+  /**
+   * Call onApplicationDestroy lifecycle hook for all services and controllers
+   */
+  async callOnApplicationDestroy(signal?: string): Promise<void> {
+    // Call for services
+    for (const [, instance] of this.serviceInstances) {
+      if (hasOnApplicationDestroy(instance)) {
+        try {
+          await instance.onApplicationDestroy(signal);
+          this.logger.debug(`Service ${(instance as object).constructor.name} onApplicationDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Service ${(instance as object).constructor.name} onApplicationDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for controllers
+    for (const [, controller] of this.controllerInstances) {
+      if (hasOnApplicationDestroy(controller)) {
+        try {
+          await controller.onApplicationDestroy(signal);
+          this.logger.debug(`Controller ${controller.constructor.name} onApplicationDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Controller ${controller.constructor.name} onApplicationDestroy failed: ${error}`);
+        }
+      }
+    }
+
+    // Call for child modules
+    for (const childModule of this.childModules) {
+      await childModule.callOnApplicationDestroy(signal);
+    }
   }
 
   /**
@@ -627,10 +807,31 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Get service instance
+   * Get service instance by tag
    */
   getServiceInstance<T>(tag: Context.Tag<T, T>): T | undefined {
     return this.serviceInstances.get(tag as Context.Tag<unknown, unknown>) as T | undefined;
+  }
+
+  /**
+   * Get service instance by class
+   */
+  getServiceByClass<T>(serviceClass: new (...args: unknown[]) => T): T | undefined {
+    try {
+      const tag = getServiceTag(serviceClass);
+
+      return this.getServiceInstance(tag);
+    } catch {
+      // Service doesn't have @Service decorator or not found
+      return undefined;
+    }
+  }
+
+  /**
+   * Get all service instances
+   */
+  getAllServiceInstances(): Map<Context.Tag<unknown, unknown>, unknown> {
+    return new Map(this.serviceInstances);
   }
 
   /**

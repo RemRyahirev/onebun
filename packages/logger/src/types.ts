@@ -57,3 +57,30 @@ export interface LoggerConfig {
   transport: LogTransport;
   defaultContext?: Record<string, unknown>;
 }
+
+/**
+ * Logger configuration options for OneBunApplication.
+ * Provides a declarative way to configure logging without Effect.js knowledge.
+ */
+export interface LoggerOptions {
+  /**
+   * Minimum log level. Messages below this level will be filtered out.
+   * Can be a LogLevel enum value or a string ('trace', 'debug', 'info', 'warn', 'error', 'fatal', 'none').
+   * @defaultValue 'debug' in development, 'info' in production
+   */
+  minLevel?: LogLevel | string;
+
+  /**
+   * Output format for log messages.
+   * - 'pretty': Human-readable colored output (best for development)
+   * - 'json': Structured JSON output (best for production/log aggregation)
+   * @defaultValue 'pretty' in development, 'json' in production
+   */
+  format?: 'json' | 'pretty';
+
+  /**
+   * Default context to include in all log messages.
+   * Useful for adding service name, version, environment, etc.
+   */
+  defaultContext?: Record<string, unknown>;
+}

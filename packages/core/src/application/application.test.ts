@@ -826,7 +826,7 @@ describe('OneBunApplication', () => {
       await expect(app.start()).resolves.toBeUndefined();
     });
 
-    test('should stop server when running', () => {
+    test('should stop server when running', async () => {
       @Module({})
       class TestModule {}
 
@@ -838,20 +838,20 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).server = mockServer;
 
-      app.stop();
+      await app.stop();
 
       expect(mockServer.stop).toHaveBeenCalled();
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       expect((app as any).server).toBeNull();
     });
 
-    test('should handle stop when server is not running', () => {
+    test('should handle stop when server is not running', async () => {
       @Module({})
       class TestModule {}
 
       const app = createTestApp(TestModule);
 
-      expect(() => app.stop()).not.toThrow();
+      await expect(app.stop()).resolves.toBeUndefined();
     });
   });
 
