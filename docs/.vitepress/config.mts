@@ -10,8 +10,8 @@ export default defineConfig({
   title: 'OneBun Framework',
   description: 'A bun.js framework inspired by nest.js with effect.ts',
 
-  // Base path for GitHub Pages (repo name)
-  base: '/onebun/',
+  // Base path for GitHub Pages (custom domain onebun.dev serves from root)
+  base: '/',
 
   // Clean URLs without .html extension
   cleanUrls: true,
@@ -144,7 +144,7 @@ export default defineConfig({
 
   // Head tags
   head: [
-    ['link', { rel: 'icon', type: 'image/png', href: '/onebun/logo.png' }],
+    ['link', { rel: 'icon', type: 'image/png', href: '/logo.png' }],
     ['meta', { name: 'theme-color', content: '#646cff' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:title', content: 'OneBun Framework' }],
