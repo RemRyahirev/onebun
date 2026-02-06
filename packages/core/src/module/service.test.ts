@@ -165,6 +165,111 @@ describe('BaseService', () => {
     });
   });
 
+  describe('Initialization via static init context (constructor)', () => {
+    test('should initialize service via static init context in constructor', () => {
+      class TestService extends BaseService {
+        configAvailableInConstructor = false;
+        loggerAvailableInConstructor = false;
+
+        constructor() {
+          super();
+          this.configAvailableInConstructor = this.config !== undefined;
+          this.loggerAvailableInConstructor = this.logger !== undefined;
+        }
+      }
+
+      // Set init context before construction (as the framework does)
+      BaseService.setInitContext(mockLogger, mockConfig);
+      let service: TestService;
+      try {
+        service = new TestService();
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      expect(service.isInitialized).toBe(true);
+      expect(service.configAvailableInConstructor).toBe(true);
+      expect(service.loggerAvailableInConstructor).toBe(true);
+      expect((service as any).config).toBe(mockConfig);
+    });
+
+    test('should allow using config.get() in constructor when init context is set', () => {
+      class TestService extends BaseService {
+        readonly dbHost: string;
+
+        constructor() {
+          super();
+          this.dbHost = this.config.get('database.host') as string;
+        }
+      }
+
+      BaseService.setInitContext(mockLogger, mockConfig);
+      let service: TestService;
+      try {
+        service = new TestService();
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      expect(service.dbHost).toBe('localhost');
+    });
+
+    test('should create child logger with correct className in constructor', () => {
+      class MyCustomService extends BaseService {}
+
+      BaseService.setInitContext(mockLogger, mockConfig);
+      try {
+        new MyCustomService();
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'MyCustomService' });
+    });
+
+    test('should not initialize if no init context is set', () => {
+      // Ensure context is clear
+      BaseService.clearInitContext();
+
+      class TestService extends BaseService {}
+      const service = new TestService();
+
+      expect(service.isInitialized).toBe(false);
+    });
+
+    test('initializeService should be a no-op if already initialized via init context', () => {
+      class TestService extends BaseService {}
+
+      BaseService.setInitContext(mockLogger, mockConfig);
+      let service: TestService;
+      try {
+        service = new TestService();
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      expect(service.isInitialized).toBe(true);
+
+      // Call initializeService again — should be a no-op
+      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      const otherConfig = createMockConfig({ other: 'config' });
+      service.initializeService(otherLogger, otherConfig);
+
+      // Should still have original config (no reinit)
+      expect((service as any).config).toBe(mockConfig);
+    });
+
+    test('clearInitContext should prevent subsequent constructors from picking up context', () => {
+      BaseService.setInitContext(mockLogger, mockConfig);
+      BaseService.clearInitContext();
+
+      class TestService extends BaseService {}
+      const service = new TestService();
+
+      expect(service.isInitialized).toBe(false);
+    });
+  });
+
   describe('Error handling edge cases', () => {
     test('should handle complex effect scenarios', async () => {
       class TestService extends BaseService {

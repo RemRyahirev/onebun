@@ -14,10 +14,16 @@ Base class for all application services. Provides logger and configuration acces
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;  // Auto-injected by framework
-  protected config: unknown;     // Auto-injected by framework
+  protected logger: SyncLogger;  // Available after super() in constructor
+  protected config: unknown;     // Available after super() in constructor
 
-  /** Initialize service with logger and config (called by framework) */
+  /** Set ambient init context (called by framework before construction) */
+  static setInitContext(logger: SyncLogger, config: unknown): void;
+
+  /** Clear ambient init context (called by framework after construction) */
+  static clearInitContext(): void;
+
+  /** Initialize service with logger and config (fallback, called by framework) */
   initializeService(logger: SyncLogger, config: unknown): void;
 
   /** Check if service is initialized */
@@ -33,8 +39,8 @@ export class BaseService {
 
 ## Creating a Service
 
-::: tip Automatic Logger Injection
-The framework automatically injects `logger` and `config` into services extending `BaseService` via the `initializeService()` method. You don't need to manually pass them in the constructor.
+::: tip Automatic Logger and Config Injection
+The framework automatically injects `logger` and `config` into services extending `BaseService`. Both are available **immediately after `super()`** in the constructor — you can use `this.config` and `this.logger` directly in the constructor body. The framework uses an ambient init context set before service construction.
 :::
 
 ### Basic Service
@@ -65,7 +71,7 @@ export class CounterService extends BaseService {
 
 ### Service with Dependencies
 
-Dependencies are automatically injected via constructor. Logger and config are available after framework initialization:
+Dependencies are automatically injected via constructor. Logger and config are available immediately after `super()`:
 
 ```typescript
 import { Service, BaseService } from '@onebun/core';
@@ -74,7 +80,7 @@ import { CacheService } from '@onebun/cache';
 @Service()
 export class UserService extends BaseService {
   // Dependencies are auto-injected via constructor
-  // Logger and config are auto-injected via initializeService()
+  // Logger and config are available immediately after super()
   constructor(
     private cacheService: CacheService,
     private repository: UserRepository,
@@ -261,11 +267,15 @@ export class CleanupService extends BaseService
 
 ```
 STARTUP:
-1. Service instantiation → constructor()
-2. Framework initialization → initializeService()
-3. Module init hook → onModuleInit()  (sequential, in dependency order)
-4. Application init hook → onApplicationInit()
-5. HTTP server starts
+1. Framework sets ambient init context (logger + config)
+2. Service instantiation → constructor()
+   └─ super() picks up logger and config from init context
+   └─ this.config and this.logger are available after super()
+3. Framework clears init context
+4. Framework calls initializeService() (no-op if already initialized via constructor)
+5. Module init hook → onModuleInit()  (sequential, in dependency order)
+6. Application init hook → onApplicationInit()
+7. HTTP server starts
 
 SHUTDOWN:
 1. Before destroy hook → beforeApplicationDestroy(signal)
@@ -331,22 +341,20 @@ this.logger.debug('Processing', data, { step: 1 }, 'extra info');
 ```typescript
 @Service()
 export class DatabaseService extends BaseService {
-  private connectionUrl: string;
-  private maxConnections: number;
+  private readonly connectionUrl: string;
+  private readonly maxConnections: number;
 
   constructor() {
     super();
 
-    // Access after initialization
-    // Note: config is available after module setup
+    // Config is available immediately after super()
+    this.connectionUrl = this.config.get('database.url') as string;
+    this.maxConnections = this.config.get('database.maxConnections') as number;
   }
 
   async connect(): Promise<void> {
-    // Access typed config (with module augmentation, no cast needed)
-    const url = this.config.get('database.url');              // string
-    const maxConn = this.config.get('database.maxConnections'); // number
-
-    this.logger.info('Connecting to database', { maxConnections: maxConn });
+    // Config is also available in regular methods
+    this.logger.info('Connecting to database', { maxConnections: this.maxConnections });
     // ...
   }
 }

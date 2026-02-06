@@ -36,7 +36,11 @@ import {
   hasBeforeApplicationDestroy,
   hasOnApplicationDestroy,
 } from './lifecycle';
-import { getServiceMetadata, getServiceTag } from './service';
+import {
+  BaseService,
+  getServiceMetadata,
+  getServiceTag,
+} from './service';
 
 /**
  * Global services registry
@@ -290,13 +294,23 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
-      // Create service instance with resolved dependencies (without logger/config in constructor)
+      // Create service instance with resolved dependencies.
+      // Set ambient init context so BaseService constructor can pick up logger/config,
+      // making them available immediately after super() in subclass constructors.
       try {
         const serviceConstructor = provider as new (...args: unknown[]) => unknown;
-        const serviceInstance = new serviceConstructor(...dependencies);
 
-        // Initialize service with logger and config if it has initializeService method
-        // This is the pattern used by BaseService
+        BaseService.setInitContext(this.logger, this.config);
+        let serviceInstance: unknown;
+        try {
+          serviceInstance = new serviceConstructor(...dependencies);
+        } finally {
+          BaseService.clearInitContext();
+        }
+
+        // Fallback: call initializeService for services that have it but were not
+        // initialized via the constructor (e.g., services not extending BaseService
+        // but implementing initializeService manually, or for backwards compatibility).
         if (
           serviceInstance &&
           typeof serviceInstance === 'object' &&

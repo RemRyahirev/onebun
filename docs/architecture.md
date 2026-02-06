@@ -13,7 +13,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
-1. Services created → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
+1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
 2. Controllers created → `onModuleInit()` called on each controller
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
 4. Shutdown signal → `beforeApplicationDestroy(signal?)` called
@@ -106,9 +106,11 @@ export class UserModule {}
 
 // 3. At startup, framework:
 //    a. Creates CacheService first (from imported module)
-//    b. Creates UserService with CacheService injected
-//    c. Calls initializeService() to inject logger and config
-//    d. Creates UserController with UserService injected
+//    b. Sets ambient init context (logger + config)
+//    c. Creates UserService with CacheService injected
+//       (config and logger available in constructor after super())
+//    d. Clears init context
+//    e. Creates UserController with UserService injected
 ```
 
 ### Auto-Detection Algorithm
@@ -418,11 +420,12 @@ const metadata: ControllerMetadata = {
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;  // Auto-injected via initializeService()
-  protected config: unknown;     // Auto-injected via initializeService()
+  protected logger: SyncLogger;  // Available after super() in constructor
+  protected config: unknown;     // Available after super() in constructor
 
-  // Logger and config are injected by the framework after construction
-  // via the initializeService(logger, config) method
+  // Logger and config are injected via ambient init context,
+  // making them available immediately after super() in subclass constructors.
+  // initializeService() is kept as a fallback for manual/test usage.
 }
 
 // Lifecycle hooks are optional - implement the interface to use:
@@ -443,12 +446,13 @@ class MyService extends BaseService implements OnModuleInit {
 @Service()
 export class UserService extends BaseService {
   // Dependencies injected via constructor
-  // Logger and config auto-injected via initializeService()
+  // Logger and config available immediately after super()
   constructor(
     private repository: UserRepository,  // Data access
     private cacheService: CacheService,  // Cross-cutting
   ) {
     super();
+    // this.config and this.logger are available here
   }
 
   async findById(id: string): Promise<User | null> {

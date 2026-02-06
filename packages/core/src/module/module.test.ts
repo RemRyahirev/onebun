@@ -851,6 +851,106 @@ describe('OneBunModule', () => {
       expect(apiService).toBeDefined();
       expect((apiService as ApiService).getConnectionTimeout()).toBe(5000);
     });
+
+    /**
+     * Test that this.config and this.logger are available in the service constructor
+     * when the service is created through the DI system (via ambient init context).
+     */
+    test('should have this.config and this.logger available in constructor via DI', () => {
+      let configInConstructor: unknown = undefined;
+      let loggerInConstructor: unknown = undefined;
+
+      @Service()
+      class ConfigAwareService extends BaseServiceClass {
+        constructor() {
+          super();
+          configInConstructor = this.config;
+          loggerInConstructor = this.logger;
+        }
+      }
+
+      @ModuleDecorator({
+        providers: [ConfigAwareService],
+      })
+      class TestModule {}
+
+      // Initialize module — this triggers DI and service creation
+      new ModuleInstance(TestModule, mockLoggerLayer);
+
+      // config and logger should have been available in the constructor
+      expect(configInConstructor).toBeDefined();
+      expect(loggerInConstructor).toBeDefined();
+    });
+
+    /**
+     * Test that this.config.get() works in the constructor for services created via DI
+     */
+    test('should allow config.get() in service constructor via DI', () => {
+      @Service()
+      class ServiceWithConfigInConstructor extends BaseServiceClass {
+        readonly configValue: unknown;
+
+        constructor() {
+          super();
+          // Config should be available here via init context
+          this.configValue = this.config;
+        }
+
+        getConfigValue() {
+          return this.configValue;
+        }
+      }
+
+      @ModuleDecorator({
+        providers: [ServiceWithConfigInConstructor],
+      })
+      class TestModule {}
+
+      const module = new ModuleInstance(TestModule, mockLoggerLayer);
+
+      const { getServiceTag } = require('./service');
+      const tag = getServiceTag(ServiceWithConfigInConstructor);
+      const service = module.getServiceInstance(tag) as ServiceWithConfigInConstructor;
+
+      expect(service).toBeDefined();
+      // configValue was captured in constructor — should not be undefined
+      expect(service.getConfigValue()).toBeDefined();
+    });
+
+    /**
+     * Test that this.config is available in constructor of a service with dependencies
+     */
+    test('should have this.config in constructor of service with dependencies', () => {
+      let configAvailable = false;
+
+      @Service()
+      class DependencyService {
+        getValue() {
+          return 42;
+        }
+      }
+
+      @Service()
+      class MainService extends BaseServiceClass {
+        constructor(private dep: DependencyService) {
+          super();
+          configAvailable = this.config !== undefined;
+        }
+
+        getDep() {
+          return this.dep.getValue();
+        }
+      }
+
+      @ModuleDecorator({
+        providers: [DependencyService, MainService],
+      })
+      class TestModule {}
+
+      new ModuleInstance(TestModule, mockLoggerLayer);
+
+      expect(configAvailable).toBe(true);
+    });
   });
 
   describe('Lifecycle hooks', () => {
