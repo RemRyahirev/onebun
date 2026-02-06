@@ -853,6 +853,188 @@ describe('OneBunModule', () => {
     });
   });
 
+  describe('Lifecycle hooks', () => {
+    const { clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleClass } = require('./module');
+    const { OnModuleInit } = require('./lifecycle');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    test('should call onModuleInit for a service that is not injected anywhere', async () => {
+      let initCalled = false;
+
+      @Service()
+      class StandaloneService {
+        async onModuleInit(): Promise<void> {
+          initCalled = true;
+        }
+      }
+
+      @Module({
+        providers: [StandaloneService],
+        // No controllers, no exports — this service is not injected anywhere
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(initCalled).toBe(true);
+    });
+
+    test('should call onModuleInit for multiple standalone services', async () => {
+      const initLog: string[] = [];
+
+      @Service()
+      class WorkerServiceA {
+        async onModuleInit(): Promise<void> {
+          initLog.push('A');
+        }
+      }
+
+      @Service()
+      class WorkerServiceB {
+        async onModuleInit(): Promise<void> {
+          initLog.push('B');
+        }
+      }
+
+      @Service()
+      class WorkerServiceC {
+        async onModuleInit(): Promise<void> {
+          initLog.push('C');
+        }
+      }
+
+      @Module({
+        providers: [WorkerServiceA, WorkerServiceB, WorkerServiceC],
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(initLog).toContain('A');
+      expect(initLog).toContain('B');
+      expect(initLog).toContain('C');
+      expect(initLog.length).toBe(3);
+    });
+
+    test('should call onModuleInit for standalone service in a child module', async () => {
+      let childInitCalled = false;
+
+      @Service()
+      class ChildStandaloneService {
+        async onModuleInit(): Promise<void> {
+          childInitCalled = true;
+        }
+      }
+
+      @Module({
+        providers: [ChildStandaloneService],
+      })
+      class ChildModule {}
+
+      @Module({
+        imports: [ChildModule],
+      })
+      class RootModule {}
+
+      const module = new ModuleClass(RootModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(childInitCalled).toBe(true);
+    });
+
+    test('should call onModuleInit sequentially in dependency order', async () => {
+      const initLog: string[] = [];
+      const { registerDependencies } = require('../decorators/decorators');
+
+      @Service()
+      class DependencyService {
+        async onModuleInit(): Promise<void> {
+          // Simulate async work to make ordering matter
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 5);
+          });
+          initLog.push('dependency-completed');
+        }
+
+        getValue() {
+          return 42;
+        }
+      }
+
+      @Service()
+      class DependentService {
+        async onModuleInit(): Promise<void> {
+          initLog.push('dependent-started');
+        }
+      }
+
+      // Register DependentService -> DependencyService dependency
+      registerDependencies(DependentService, [DependencyService]);
+
+      @Module({
+        providers: [DependencyService, DependentService],
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // DependencyService.onModuleInit must complete BEFORE DependentService.onModuleInit starts
+      expect(initLog).toEqual(['dependency-completed', 'dependent-started']);
+    });
+
+    test('should have dependencies already injected when onModuleInit is called', async () => {
+      let depValueInInit: number | null = null;
+      const { registerDependencies } = require('../decorators/decorators');
+
+      @Service()
+      class ConfigService {
+        getPort() {
+          return 8080;
+        }
+      }
+
+      @Service()
+      class ServerService {
+        private configService: ConfigService;
+
+        constructor(configService: ConfigService) {
+          this.configService = configService;
+        }
+
+        async onModuleInit(): Promise<void> {
+          // At this point configService should already be injected
+          depValueInInit = this.configService.getPort();
+        }
+      }
+
+      registerDependencies(ServerService, [ConfigService]);
+
+      @Module({
+        providers: [ConfigService, ServerService],
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(depValueInInit).not.toBeNull();
+      expect(depValueInInit as unknown as number).toBe(8080);
+    });
+  });
+
   describe('Module DI scoping (exports only for cross-module)', () => {
     const {
       Controller: ControllerDecorator,

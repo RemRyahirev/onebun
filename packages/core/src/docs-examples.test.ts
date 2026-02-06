@@ -1150,6 +1150,100 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
       await callOnApplicationDestroy(emptyObj, 'SIGTERM');
     });
   });
+
+  describe('Standalone Service Pattern (docs/api/services.md)', () => {
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     * Standalone services (not injected anywhere) still have their
+     * onModuleInit called. This is useful for background workers,
+     * cron jobs, event listeners, etc.
+     */
+    it('should call onModuleInit for standalone services not injected anywhere', async () => {
+      const moduleMod = await import('./module/module');
+      const testUtils = await import('./testing/test-utils');
+      const effectLib = await import('effect');
+
+      let schedulerStarted = false;
+
+      // From docs: Standalone service pattern
+      @Service()
+      class TaskSchedulerService extends BaseService implements OnModuleInit {
+        async onModuleInit(): Promise<void> {
+          // Main work happens here — no need to be injected anywhere
+          schedulerStarted = true;
+          this.logger.info('Task scheduler started');
+        }
+      }
+
+      @Module({
+        providers: [TaskSchedulerService],
+        // No controllers use this service — it works on its own
+      })
+      class SchedulerModule {}
+
+      const mod = new moduleMod.OneBunModule(SchedulerModule, testUtils.makeMockLoggerLayer());
+      await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
+
+      // Scheduler was started even though nothing injected it
+      expect(schedulerStarted).toBe(true);
+    });
+
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     * onModuleInit is called sequentially in dependency order:
+     * dependencies complete their init before dependents start theirs.
+     */
+    it('should call onModuleInit in dependency order so dependencies are fully initialized', async () => {
+      const moduleMod = await import('./module/module');
+      const testUtils = await import('./testing/test-utils');
+      const effectLib = await import('effect');
+      const decorators = await import('./decorators/decorators');
+
+      const initOrder: string[] = [];
+
+      @Service()
+      class DatabaseService extends BaseService implements OnModuleInit {
+        private ready = false;
+
+        async onModuleInit(): Promise<void> {
+          this.ready = true;
+          initOrder.push('database');
+        }
+
+        isReady(): boolean {
+          return this.ready;
+        }
+      }
+
+      @Service()
+      class CacheService extends BaseService implements OnModuleInit {
+        private db: DatabaseService;
+
+        constructor(db: DatabaseService) {
+          super();
+          this.db = db;
+        }
+
+        async onModuleInit(): Promise<void> {
+          // At this point, DatabaseService.onModuleInit has already completed
+          initOrder.push(`cache:db-ready=${this.db.isReady()}`);
+        }
+      }
+
+      decorators.registerDependencies(CacheService, [DatabaseService]);
+
+      @Module({
+        providers: [DatabaseService, CacheService],
+      })
+      class AppModule {}
+
+      const mod = new moduleMod.OneBunModule(AppModule, testUtils.makeMockLoggerLayer());
+      await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
+
+      // Database initialized first, then cache saw database was ready
+      expect(initOrder).toEqual(['database', 'cache:db-ready=true']);
+    });
+  });
 });
 
 describe('getService API Documentation Examples (docs/api/core.md)', () => {

@@ -47,7 +47,7 @@ const app = new OneBunApplication(AppModule, {
 - `app.getHttpUrl()` - get listening URL
 
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
-- `onModuleInit()` - after service/controller created
+- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services)
 - `onApplicationInit()` - after all modules, before HTTP starts
 - `onModuleDestroy()` - during shutdown
 - `beforeApplicationDestroy(signal?)` - start of shutdown

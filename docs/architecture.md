@@ -13,7 +13,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
-1. Services created → `onModuleInit()` called on each service
+1. Services created → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
 2. Controllers created → `onModuleInit()` called on each controller
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
 4. Shutdown signal → `beforeApplicationDestroy(signal?)` called
@@ -294,6 +294,7 @@ if (metadata.imports) {
 this.createServicesWithDI(metadata);
 
 // Phase 3: Call onModuleInit() on services that implement it
+// (sequentially in dependency order — dependencies complete before dependents)
 await this.callServicesOnModuleInit();
 
 // Phase 4: Create controllers with injected services
@@ -425,10 +426,13 @@ export class BaseService {
 }
 
 // Lifecycle hooks are optional - implement the interface to use:
+// onModuleInit is called for ALL providers, even standalone services
+// not injected anywhere. Hooks run sequentially in dependency order.
 @Service()
 class MyService extends BaseService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     // Called after construction and DI injection
+    // All dependencies' onModuleInit have already completed
   }
 }
 ```

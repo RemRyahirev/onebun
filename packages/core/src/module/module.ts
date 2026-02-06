@@ -555,7 +555,10 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Call onModuleInit lifecycle hook for all services that implement it
+   * Call onModuleInit lifecycle hook for all services that implement it.
+   * Hooks are called sequentially in dependency order (dependencies first),
+   * so each service's onModuleInit completes before its dependents' onModuleInit starts.
+   * This is called for ALL services in providers, even if they are not injected anywhere.
    */
   callServicesOnModuleInit(): Effect.Effect<unknown, never, void> {
     if (this.pendingServiceInits.length === 0) {
@@ -564,25 +567,23 @@ export class OneBunModule implements ModuleInstance {
 
     this.logger.debug(`Calling onModuleInit for ${this.pendingServiceInits.length} service(s)`);
 
-    // Run all service onModuleInit hooks sequentially
-    const initPromises = this.pendingServiceInits.map(async ({ name, instance }) => {
-      try {
-        if (hasOnModuleInit(instance)) {
-          await instance.onModuleInit();
+    return Effect.promise(async () => {
+      // Run onModuleInit hooks sequentially in dependency order
+      // (pendingServiceInits is already ordered: dependencies first)
+      for (const { name, instance } of this.pendingServiceInits) {
+        try {
+          if (hasOnModuleInit(instance)) {
+            await instance.onModuleInit();
+          }
+          this.logger.debug(`Service ${name} onModuleInit completed`);
+        } catch (error) {
+          this.logger.error(`Service ${name} onModuleInit failed: ${error}`);
+          throw error;
         }
-        this.logger.debug(`Service ${name} onModuleInit completed`);
-      } catch (error) {
-        this.logger.error(`Service ${name} onModuleInit failed: ${error}`);
-        throw error;
       }
+      // Clear the list after initialization
+      this.pendingServiceInits = [];
     });
-
-    return Effect.promise(() => Promise.all(initPromises)).pipe(
-      Effect.map(() => {
-        // Clear the list after initialization
-        this.pendingServiceInits = [];
-      }),
-    );
   }
 
   /**

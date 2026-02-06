@@ -239,7 +239,7 @@ describe('OpenAPI Generation', () => {
       expect(spec.paths).toBeDefined();
       // Controller path + route path = /users + / = /users/
       expect(spec.paths['/users/']).toBeDefined();
-      expect(spec.paths['/users/:id']).toBeDefined();
+      expect(spec.paths['/users/{id}']).toBeDefined();
     });
 
     it('should include tags from @ApiTags', () => {
@@ -321,7 +321,7 @@ describe('OpenAPI Generation', () => {
         version: '1.0.0',
       });
 
-      const responses = spec.paths['/products/:id']?.get?.responses;
+      const responses = spec.paths['/products/{id}']?.get?.responses;
       expect(responses?.['200']).toBeDefined();
       expect(responses?.['200']?.description).toBe('Product found');
       expect(responses?.['404']).toBeDefined();

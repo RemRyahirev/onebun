@@ -143,6 +143,16 @@ Services can implement lifecycle hooks to execute code at specific points in the
 | `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | At the very start of shutdown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | At the very end of shutdown |
 
+::: tip Eager Instantiation & Standalone Services
+All services listed in `providers` are instantiated **eagerly** during module initialization — not lazily on first use. `onModuleInit` is called for **every** service that implements the interface, even if the service is not injected into any controller or other service.
+
+This makes it safe to use "standalone" services whose main work happens inside `onModuleInit` — for example, cron schedulers, event listeners, or background workers.
+:::
+
+::: info Initialization Order
+`onModuleInit` hooks are called **sequentially in dependency order**: if service A depends on service B, then B's `onModuleInit` will complete **before** A's `onModuleInit` starts. This guarantees that when your `onModuleInit` runs, all injected dependencies are already fully initialized.
+:::
+
 ### Usage
 
 Implement lifecycle interfaces to hook into the application lifecycle:
@@ -182,6 +192,43 @@ export class DatabaseService extends BaseService implements OnModuleInit, OnModu
 }
 ```
 
+### Standalone Service Example
+
+A service that is not injected anywhere but performs useful work via `onModuleInit`:
+
+```typescript
+import { Service, BaseService, OnModuleInit, OnModuleDestroy } from '@onebun/core';
+
+@Service()
+export class TaskSchedulerService extends BaseService implements OnModuleInit, OnModuleDestroy {
+  private intervalId: Timer | null = null;
+
+  async onModuleInit(): Promise<void> {
+    // Start background work — no injection needed
+    this.intervalId = setInterval(() => {
+      this.logger.debug('Running scheduled task...');
+    }, 60_000);
+    this.logger.info('Task scheduler started');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    if (this.intervalId) {
+      clearInterval(this.intervalId);
+    }
+  }
+}
+```
+
+Then simply register it in a module's `providers`:
+
+```typescript
+@Module({
+  providers: [TaskSchedulerService],
+  // No controllers or other services reference it — it works on its own
+})
+export class SchedulerModule {}
+```
+
 ### Shutdown Hooks with Signal
 
 The shutdown hooks receive the signal that triggered the shutdown (e.g., `SIGTERM`, `SIGINT`):
@@ -216,7 +263,7 @@ export class CleanupService extends BaseService
 STARTUP:
 1. Service instantiation → constructor()
 2. Framework initialization → initializeService()
-3. Module init hook → onModuleInit()
+3. Module init hook → onModuleInit()  (sequential, in dependency order)
 4. Application init hook → onApplicationInit()
 5. HTTP server starts
 

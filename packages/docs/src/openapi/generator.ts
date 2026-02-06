@@ -43,7 +43,8 @@ export function generateOpenApiSpec(
     }
 
     for (const route of metadata.routes) {
-      const path = `${metadata.path}${route.path}`;
+      const rawPath = `${metadata.path}${route.path}`;
+      const path = rawPath.replace(/:([^/]+)/g, '{$1}');
       const method = route.method.toLowerCase() as Lowercase<HttpMethod>;
 
       if (!spec.paths[path]) {
