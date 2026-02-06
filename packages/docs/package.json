@@ -1,6 +1,6 @@
 {
   "name": "@onebun/docs",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Documentation generation for OneBun framework - OpenAPI, Swagger UI",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",
