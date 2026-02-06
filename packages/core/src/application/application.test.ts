@@ -145,7 +145,7 @@ describe('OneBunApplication', () => {
       expect(config).toBeDefined();
     });
 
-    test('should create config service when envSchema provided', () => {
+    test('should create config service when envSchema provided (duplicate check)', () => {
       @Module({})
       class TestModule {}
 
@@ -159,12 +159,9 @@ describe('OneBunApplication', () => {
 
       const app = createTestApp(TestModule, { envSchema });
 
-      // Just check that config service was created
+      // Config service is created eagerly in the constructor
       const config = app.getConfig();
       expect(config).toBeDefined();
-
-      // The actual value access might need the config to be fully initialized
-      // which happens during runtime, not during construction
     });
 
     test('should provide typed access to config values via getConfig()', () => {
@@ -261,17 +258,34 @@ describe('OneBunApplication', () => {
   });
 
   describe('Layer methods', () => {
-    test('should return layer from root module', () => {
+    let originalServe: typeof Bun.serve;
+
+    beforeEach(() => {
+      originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = mock(() => ({
+        stop: mock(),
+        port: 3000,
+      }));
+    });
+
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = originalServe;
+    });
+
+    test('should return layer from root module', async () => {
       @Module({})
       class TestModule {}
 
       const app = createTestApp(TestModule);
+      await app.start();
 
       const layer = app.getLayer();
       expect(layer).toBeDefined();
     });
 
-    test('should return layer for complex module structure', () => {
+    test('should return layer for complex module structure', async () => {
       class TestController {}
       class TestService {}
 
@@ -282,6 +296,7 @@ describe('OneBunApplication', () => {
       class TestModule {}
 
       const app = createTestApp(TestModule);
+      await app.start();
 
       const layer = app.getLayer();
       expect(layer).toBeDefined();
@@ -394,14 +409,13 @@ describe('OneBunApplication', () => {
   });
 
   describe('Module class handling', () => {
-    test('should throw error for plain class without decorator', () => {
+    test('should throw error for plain class without decorator', async () => {
       class PlainModule {}
 
-      // This should throw error without @Module decorator
-      expect(() => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        createTestApp(PlainModule as any);
-      }).toThrow('Module PlainModule does not have @Module decorator');
+      // Module creation now happens in start(), so the error is thrown there
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const app = createTestApp(PlainModule as any);
+      await expect(app.start()).rejects.toThrow('Module PlainModule does not have @Module decorator');
     });
 
     test('should handle class with constructor parameters', () => {

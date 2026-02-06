@@ -152,12 +152,14 @@ function resolveHost(explicitHost: string | undefined): string {
  * OneBun Application
  */
 export class OneBunApplication {
-  private rootModule: ModuleInstance;
+  private rootModule: ModuleInstance | null = null;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private options: ApplicationOptions;
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
   private configService: ConfigServiceImpl | null = null;
+  private moduleClass: new (...args: unknown[]) => object;
+  private loggerLayer: Layer.Layer<never, never, unknown>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -176,6 +178,8 @@ export class OneBunApplication {
     moduleClass: new (...args: unknown[]) => object,
     options?: Partial<ApplicationOptions>,
   ) {
+    this.moduleClass = moduleClass;
+
     // Resolve port and host with priority: explicit > env > default
     this.options = {
       port: resolvePort(options?.port),
@@ -194,7 +198,7 @@ export class OneBunApplication {
 
     // Use provided logger layer, or create from options, or use default
     // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
-    const loggerLayer = this.options.loggerLayer
+    this.loggerLayer = this.options.loggerLayer
       ?? (this.options.loggerOptions
         ? makeLoggerFromOptions(this.options.loggerOptions)
         : makeLogger());
@@ -205,13 +209,14 @@ export class OneBunApplication {
         Effect.map(LoggerService, (logger: Logger) =>
           logger.child({ className: 'OneBunApplication' }),
         ),
-        loggerLayer,
-      ),
+        this.loggerLayer,
+      ) as Effect.Effect<Logger, never, never>,
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
 
-    // Create configuration service if config is initialized
-    if (this.config.isInitialized || !(this.config instanceof NotInitializedConfig)) {
+    // Create configuration service eagerly if config exists (it stores a reference,
+    // doesn't call config.get(), so safe before initialization)
+    if (!(this.config instanceof NotInitializedConfig)) {
       this.configService = new ConfigServiceImpl(this.logger, this.config);
     }
 
@@ -274,8 +279,8 @@ export class OneBunApplication {
       }
     }
 
-    // Create the root module with logger layer and config
-    this.rootModule = OneBunModule.create(moduleClass, loggerLayer, this.config);
+    // Note: root module creation is deferred to start() to ensure
+    // config is fully initialized before services are created.
   }
 
   /**
@@ -324,10 +329,22 @@ export class OneBunApplication {
   }
 
   /**
+   * Ensure root module is created (i.e., start() has been called).
+   * Throws if called before start().
+   */
+  private ensureModule(): ModuleInstance {
+    if (!this.rootModule) {
+      throw new Error('Application not started. Call start() before accessing the module.');
+    }
+
+    return this.rootModule;
+  }
+
+  /**
    * Get root module layer
    */
   getLayer(): Layer.Layer<never, never, unknown> {
-    return this.rootModule.getLayer();
+    return this.ensureModule().getLayer();
   }
 
   /**
@@ -377,6 +394,10 @@ export class OneBunApplication {
         this.logger.info('Application configuration initialized');
       }
 
+      // Create the root module AFTER config is initialized,
+      // so services can safely use this.config.get() in their constructors
+      this.rootModule = OneBunModule.create(this.moduleClass, this.loggerLayer, this.config);
+
       // Start metrics collection if enabled
       if (this.metricsService && this.metricsService.startSystemMetricsCollection) {
         this.metricsService.startSystemMetricsCollection();
@@ -384,10 +405,10 @@ export class OneBunApplication {
       }
 
       // Setup the module and create controller instances
-      await Effect.runPromise(this.rootModule.setup() as Effect.Effect<unknown, never, never>);
+      await Effect.runPromise(this.ensureModule().setup() as Effect.Effect<unknown, never, never>);
 
       // Get all controllers from the root module
-      const controllers = this.rootModule.getControllers();
+      const controllers = this.ensureModule().getControllers();
       this.logger.debug(`Loaded ${controllers.length} controllers`);
 
       // Initialize WebSocket handler and detect gateways
@@ -396,7 +417,7 @@ export class OneBunApplication {
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
       for (const controllerClass of controllers) {
         if (isWebSocketGateway(controllerClass)) {
-          const instance = this.rootModule.getControllerInstance?.(controllerClass);
+          const instance = this.ensureModule().getControllerInstance?.(controllerClass);
           if (instance) {
             this.wsHandler.registerGateway(controllerClass, instance as import('../websocket/ws-base-gateway').BaseWebSocketGateway);
             this.logger.info(`Registered WebSocket gateway: ${controllerClass.name}`);
@@ -438,14 +459,14 @@ export class OneBunApplication {
         }
 
         // Get controller instance from module
-        if (!this.rootModule.getControllerInstance) {
+        if (!this.ensureModule().getControllerInstance) {
           this.logger.warn(
             `Module does not support getControllerInstance for ${controllerClass.name}`,
           );
           continue;
         }
 
-        const controller = this.rootModule.getControllerInstance(controllerClass) as Controller;
+        const controller = this.ensureModule().getControllerInstance!(controllerClass) as Controller;
         if (!controller) {
           this.logger.warn(`Controller instance not found for ${controllerClass.name}`);
           continue;
@@ -508,8 +529,8 @@ export class OneBunApplication {
       }
 
       // Call onApplicationInit lifecycle hook for all services and controllers
-      if (this.rootModule.callOnApplicationInit) {
-        await this.rootModule.callOnApplicationInit();
+      if (this.ensureModule().callOnApplicationInit) {
+        await this.ensureModule().callOnApplicationInit!();
         this.logger.debug('Application initialization hooks completed');
       }
 
@@ -1242,7 +1263,7 @@ export class OneBunApplication {
     this.logger.info('Stopping OneBun application...');
 
     // Call beforeApplicationDestroy lifecycle hook
-    if (this.rootModule.callBeforeApplicationDestroy) {
+    if (this.rootModule?.callBeforeApplicationDestroy) {
       this.logger.debug('Calling beforeApplicationDestroy hooks');
       await this.rootModule.callBeforeApplicationDestroy(signal);
     }
@@ -1276,7 +1297,7 @@ export class OneBunApplication {
     }
 
     // Call onModuleDestroy lifecycle hook
-    if (this.rootModule.callOnModuleDestroy) {
+    if (this.rootModule?.callOnModuleDestroy) {
       this.logger.debug('Calling onModuleDestroy hooks');
       await this.rootModule.callOnModuleDestroy();
     }
@@ -1288,7 +1309,7 @@ export class OneBunApplication {
     }
 
     // Call onApplicationDestroy lifecycle hook
-    if (this.rootModule.callOnApplicationDestroy) {
+    if (this.rootModule?.callOnApplicationDestroy) {
       this.logger.debug('Calling onApplicationDestroy hooks');
       await this.rootModule.callOnApplicationDestroy(signal);
     }
@@ -1304,7 +1325,7 @@ export class OneBunApplication {
     
     // Check if any controller has queue-related decorators
     const hasQueueHandlers = controllers.some(controller => {
-      const instance = this.rootModule.getControllerInstance?.(controller);
+      const instance = this.ensureModule().getControllerInstance?.(controller);
       if (!instance) {
         return false;
       }
@@ -1364,7 +1385,7 @@ export class OneBunApplication {
 
     // Register handlers from controllers using registerService
     for (const controllerClass of controllers) {
-      const instance = this.rootModule.getControllerInstance?.(controllerClass);
+      const instance = this.ensureModule().getControllerInstance?.(controllerClass);
       if (!instance) {
         continue;
       }
@@ -1528,11 +1549,11 @@ export class OneBunApplication {
    * ```
    */
   getService<T>(serviceClass: new (...args: unknown[]) => T): T {
-    if (!this.rootModule.getServiceByClass) {
+    if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');
     }
 
-    const service = this.rootModule.getServiceByClass(serviceClass);
+    const service = this.ensureModule().getServiceByClass!(serviceClass);
     if (!service) {
       throw new Error(
         `Service ${serviceClass.name} not found. Make sure it's registered in the module's providers.`,

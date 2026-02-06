@@ -11,6 +11,7 @@ import {
   expect,
   beforeEach,
   afterEach,
+  mock,
 } from 'bun:test';
 
 import { OneBunApplication } from '../application';
@@ -817,50 +818,63 @@ describe('decorators', () => {
     });
 
     test('should properly inject module service into controller without @Inject', async () => {
-      @Service()
-      class TestService extends BaseService {
-        getValue() {
-          return 'injected-value';
+      // Mock Bun.serve to avoid starting a real server
+      const originalServe = Bun.serve;
+       
+      (Bun as any).serve = mock(() => ({
+        stop: mock(),
+        port: 3000,
+      }));
+
+      try {
+        @Service()
+        class TestService extends BaseService {
+          getValue() {
+            return 'injected-value';
+          }
         }
+
+        // No @Inject needed - automatic DI via emitDecoratorMetadata
+        @Controller('')
+        class TestController extends BaseController {
+          constructor(private service: TestService) {
+            super();
+          }
+
+          getServiceValue() {
+            return this.service.getValue();
+          }
+        }
+
+        @Module({
+          controllers: [TestController],
+          providers: [TestService],
+        })
+        class TestModule {}
+
+        const app = new OneBunApplication(TestModule, {
+          loggerLayer: makeMockLoggerLayer(),
+        });
+
+        // start() creates rootModule and calls setup, triggering dependency injection
+        await app.start();
+
+        // Access rootModule after start to verify DI
+         
+        const rootModule = (app as any).rootModule;
+
+        // Get controller instance and verify service was injected
+        const controllerInstance = rootModule.getControllerInstance(TestController) as TestController;
+
+        expect(controllerInstance).toBeDefined();
+        expect(controllerInstance).toBeInstanceOf(TestController);
+
+        // Verify the injected service works correctly
+        expect(controllerInstance.getServiceValue()).toBe('injected-value');
+      } finally {
+         
+        (Bun as any).serve = originalServe;
       }
-
-      // No @Inject needed - automatic DI via emitDecoratorMetadata
-      @Controller('')
-      class TestController extends BaseController {
-        constructor(private service: TestService) {
-          super();
-        }
-
-        getServiceValue() {
-          return this.service.getValue();
-        }
-      }
-
-      @Module({
-        controllers: [TestController],
-        providers: [TestService],
-      })
-      class TestModule {}
-
-      const app = new OneBunApplication(TestModule, {
-        loggerLayer: makeMockLoggerLayer(),
-      });
-
-      // Access rootModule to setup and verify DI
-      const rootModule = (app as any).rootModule;
-
-      // Setup module to trigger dependency injection
-      const { Effect } = await import('effect');
-      await Effect.runPromise(rootModule.setup());
-
-      // Get controller instance and verify service was injected
-      const controllerInstance = rootModule.getControllerInstance(TestController) as TestController;
-
-      expect(controllerInstance).toBeDefined();
-      expect(controllerInstance).toBeInstanceOf(TestController);
-
-      // Verify the injected service works correctly
-      expect(controllerInstance.getServiceValue()).toBe('injected-value');
     });
   });
 
