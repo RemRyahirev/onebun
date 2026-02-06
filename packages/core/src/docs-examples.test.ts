@@ -2905,6 +2905,52 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       expect(typeof client.disconnect).toBe('function');
       expect(typeof client.on).toBe('function');
     });
+
+    it('should create client with protocol native (default)', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class WsGateway extends BaseWebSocketGateway {}
+
+      @Module({ controllers: [WsGateway] })
+      class AppModule {}
+
+      const definition = createWsServiceDefinition(AppModule);
+      const client = createWsClient(definition, {
+        url: 'ws://localhost:3000/ws',
+        protocol: 'native',
+      });
+      expect(client).toBeDefined();
+    });
+
+    it('should create client with protocol socketio', () => {
+      @WebSocketGateway({ path: '/ws' })
+      class WsGateway extends BaseWebSocketGateway {}
+
+      @Module({ controllers: [WsGateway] })
+      class AppModule {}
+
+      const definition = createWsServiceDefinition(AppModule);
+      const client = createWsClient(definition, {
+        url: 'ws://localhost:3000/socket.io',
+        protocol: 'socketio',
+      });
+      expect(client).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/websocket.md#standalone-client-no-definition
+     */
+    it('should create standalone client without definition', () => {
+      const client = createNativeWsClient({
+        url: 'ws://localhost:3000/chat',
+        protocol: 'native',
+        auth: { token: 'xxx' },
+      });
+      expect(client).toBeDefined();
+      expect(typeof client.connect).toBe('function');
+      expect(typeof client.emit).toBe('function');
+      expect(typeof client.send).toBe('function');
+      expect(typeof client.on).toBe('function');
+    });
   });
 
   describe('Application Configuration', () => {
@@ -2918,7 +2964,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       @Module({ controllers: [TestGateway] })
       class AppModule {}
 
-      // From docs: Application Options example
+      // From docs: Application Options example (native + optional Socket.IO)
       const app = new OneBunApplication(AppModule, {
         port: 3000,
         websocket: {
@@ -2926,8 +2972,12 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
           storage: {
             type: 'memory',
           },
-          pingInterval: 25000,
-          pingTimeout: 20000,
+          socketio: {
+            enabled: true,
+            path: '/socket.io',
+            pingInterval: 25000,
+            pingTimeout: 20000,
+          },
           maxPayload: 1048576,
         },
         loggerLayer: makeMockLoggerLayer(),
@@ -3204,8 +3254,10 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
       const app = new OneBunApplication(ChatModule, {
         port: 3000,
         websocket: {
-          pingInterval: 25000,
-          pingTimeout: 20000,
+          socketio: {
+            pingInterval: 25000,
+            pingTimeout: 20000,
+          },
         },
         loggerLayer: makeMockLoggerLayer(),
       });
@@ -3240,10 +3292,11 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
       })
       class ChatModule {}
 
-      // From docs: Typed Client example
+      // From docs: Typed Client (native) example
       const definition = createWsServiceDefinition(ChatModule);
       const client = createWsClient(definition, {
         url: 'ws://localhost:3000/chat',
+        protocol: 'native',
         auth: {
           token: 'user-jwt-token',
         },
@@ -3323,6 +3376,7 @@ import {
   SharedRedisProvider,
   createWsServiceDefinition,
   createWsClient,
+  createNativeWsClient,
   matchPattern,
   makeMockLoggerLayer,
   hasOnModuleInit,

@@ -27,6 +27,11 @@ export interface WsAuthData {
 }
 
 /**
+ * WebSocket protocol used by the client
+ */
+export type WsProtocol = 'native' | 'socketio';
+
+/**
  * WebSocket client data (fixed fields)
  */
 export interface WsClientData {
@@ -40,6 +45,8 @@ export interface WsClientData {
   auth: WsAuthData | null;
   /** Custom metadata */
   metadata: Record<string, unknown>;
+  /** Protocol used by the client */
+  protocol: WsProtocol;
 }
 
 /**
@@ -179,17 +186,29 @@ export interface WsStorageOptions {
 }
 
 /**
+ * Socket.IO-specific options (optional; when enabled, Socket.IO runs on its own path)
+ */
+export interface WebSocketSocketIOOptions {
+  /** Enable Socket.IO protocol (default: false) */
+  enabled?: boolean;
+  /** Path for Socket.IO connections (default: '/socket.io') */
+  path?: string;
+  /** Ping interval in milliseconds (default: 25000) */
+  pingInterval?: number;
+  /** Ping timeout in milliseconds (default: 20000) */
+  pingTimeout?: number;
+}
+
+/**
  * WebSocket configuration for OneBunApplication
  */
 export interface WebSocketApplicationOptions {
   /** Enable/disable WebSocket (default: auto - enabled if gateways exist) */
   enabled?: boolean;
+  /** Socket.IO options; when enabled, Socket.IO is served on socketio.path */
+  socketio?: WebSocketSocketIOOptions;
   /** Storage options */
   storage?: WsStorageOptions;
-  /** Ping interval in milliseconds for heartbeat (socket.io) */
-  pingInterval?: number;
-  /** Ping timeout in milliseconds (socket.io) */
-  pingTimeout?: number;
   /** Maximum payload size in bytes */
   maxPayload?: number;
 }
@@ -315,15 +334,19 @@ export function isWsHandlerResponse(value: unknown): value is WsHandlerResponse 
  * Check if value is a valid WsClientData
  */
 export function isWsClientData(value: unknown): value is WsClientData {
+  const v = value as WsClientData;
+
   return (
     typeof value === 'object' &&
     value !== null &&
     'id' in value &&
-    typeof (value as WsClientData).id === 'string' &&
+    typeof v.id === 'string' &&
     'rooms' in value &&
-    Array.isArray((value as WsClientData).rooms) &&
+    Array.isArray(v.rooms) &&
     'connectedAt' in value &&
-    typeof (value as WsClientData).connectedAt === 'number'
+    typeof v.connectedAt === 'number' &&
+    'protocol' in value &&
+    (v.protocol === 'native' || v.protocol === 'socketio')
   );
 }
 

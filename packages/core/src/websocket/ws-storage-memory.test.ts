@@ -28,6 +28,7 @@ describe('InMemoryWsStorage', () => {
       connectedAt: Date.now(),
       auth: null,
       metadata: {},
+      protocol: 'native',
     });
 
     it('should add and retrieve a client', async () => {
@@ -135,6 +136,7 @@ describe('InMemoryWsStorage', () => {
       connectedAt: Date.now(),
       auth: null,
       metadata: {},
+      protocol: 'native',
     });
 
     it('should add client to room', async () => {
@@ -227,6 +229,7 @@ describe('InMemoryWsStorage', () => {
         connectedAt: Date.now(),
         auth: null,
         metadata: {},
+        protocol: 'native',
       };
       await storage.addClient(client);
       await storage.createRoom({ name: 'test-room', clientIds: [] });

@@ -6,27 +6,49 @@
  */
 
 /* eslint-disable @typescript-eslint/no-magic-numbers */
+/* eslint-disable import/order -- type vs value from same path; keep single mixed import */
 
-import type {
-  WsClientOptions,
-  WsClient,
-  WsGatewayClient,
-  WsEventListener,
-  WsClientEvent,
-  WsClientEventListeners,
-  PendingRequest,
-  TypedWsClient,
+import {
+  type NativeWsClient,
+  type PendingRequest,
+  type TypedWsClient,
+  type WsClient,
+  type WsClientEventListeners,
+  type WsClientEvent,
+  type WsClientOptions,
+  type WsEventListener,
+  type WsGatewayClient,
+  WsConnectionState,
 } from './ws-client.types';
 import type { WsServiceDefinition } from './ws-service-definition';
 
-import { WsConnectionState } from './ws-client.types';
+/** Client lifecycle event names (subscriptions go to client, not server events) */
+const WS_CLIENT_EVENTS: WsClientEvent[] = [
+  'connect',
+  'disconnect',
+  'error',
+  'reconnect',
+  'reconnect_attempt',
+  'reconnect_failed',
+];
+
+function isClientEvent(event: string): event is WsClientEvent {
+  return WS_CLIENT_EVENTS.includes(event as WsClientEvent);
+}
+
+/** Dummy definition for standalone client (single logical gateway) */
+const NATIVE_WS_DUMMY_DEFINITION: WsServiceDefinition = {
+  _module: null,
+  _endpoints: [],
+  _gateways: new Map([['default', { name: 'default', path: '/', events: new Map() }]]),
+};
 import { matchPattern, isPattern } from './ws-pattern-matcher';
 import {
   parseMessage,
   createPongPacket,
+  createFullEventMessage,
   EngineIOPacketType,
   SocketIOPacketType,
-  isNativeMessage,
   parseNativeMessage,
   createNativeMessage,
 } from './ws-socketio-protocol';
@@ -35,6 +57,7 @@ import {
  * Default client options
  */
 const DEFAULT_OPTIONS: Partial<WsClientOptions> = {
+  protocol: 'native',
   reconnect: true,
   reconnectInterval: 1000,
   maxReconnectAttempts: 10,
@@ -85,23 +108,22 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
         let url = this.options.url;
         const params = new URLSearchParams();
 
-        // Add Socket.IO parameters
-        params.set('EIO', '4');
-        params.set('transport', 'websocket');
+        const protocol = this.options.protocol ?? 'native';
+        if (protocol === 'socketio') {
+          params.set('EIO', '4');
+          params.set('transport', 'websocket');
+        }
 
-        // Add auth token
         if (this.options.auth?.token) {
           params.set('token', this.options.auth.token);
         }
 
-        // Add namespace
         if (this.options.namespace) {
           params.set('namespace', this.options.namespace);
         }
 
-        // Append params to URL
         const separator = url.includes('?') ? '&' : '?';
-        url = `${url}${separator}${params.toString()}`;
+        url = params.toString() ? `${url}${separator}${params.toString()}` : url;
 
         // Create WebSocket connection
         // Use globalThis.WebSocket for browser compatibility
@@ -204,23 +226,22 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
    * Handle incoming message
    */
   private handleMessage(data: string): void {
-    // Try native format first
-    if (isNativeMessage(data)) {
+    const protocol = this.options.protocol ?? 'native';
+
+    if (protocol === 'native') {
       const native = parseNativeMessage(data);
       if (native) {
         this.handleEvent(native.event, native.data, native.ack);
-
-        return;
       }
+
+      return;
     }
 
-    // Parse Socket.IO format
+    // Socket.IO format
     const { engineIO, socketIO } = parseMessage(data);
 
-    // Handle Engine.IO packets
     switch (engineIO.type) {
       case EngineIOPacketType.OPEN:
-        // Handle handshake
         if (engineIO.data) {
           try {
             const handshake = JSON.parse(engineIO.data as string);
@@ -239,7 +260,6 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
         return;
 
       case EngineIOPacketType.PONG:
-        // Server responded to our ping
         return;
 
       case EngineIOPacketType.CLOSE:
@@ -248,7 +268,6 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
         return;
 
       case EngineIOPacketType.MESSAGE:
-        // Socket.IO packet
         if (socketIO) {
           this.handleSocketIOPacket(socketIO);
         }
@@ -468,8 +487,11 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
       throw new Error('Not connected');
     }
 
-    // Use native format (simpler)
-    const message = createNativeMessage(event, data, ackId);
+    const protocol = this.options.protocol ?? 'native';
+    const message =
+      protocol === 'socketio'
+        ? createFullEventMessage(event, data ?? {}, '/', ackId)
+        : createNativeMessage(event, data, ackId);
     this.ws.send(message);
   }
 
@@ -625,4 +647,65 @@ export function createWsClient<TDef extends WsServiceDefinition>(
       return (target as unknown as Record<string | symbol, unknown>)[prop];
     },
   });
+}
+
+/**
+ * Create a standalone WebSocket client without a service definition.
+ * Uses the same native message format and API (emit, send, on, off) as the typed client.
+ * Use in frontend or when you do not want to depend on backend modules.
+ *
+ * @param options - Client options (url, protocol, auth, reconnect, etc.)
+ * @returns Standalone client with connect, disconnect, on, off, emit, send
+ *
+ * @example
+ * ```typescript
+ * import { createNativeWsClient } from '@onebun/core';
+ *
+ * const client = createNativeWsClient({
+ *   url: 'ws://localhost:3000/chat',
+ *   protocol: 'native',
+ *   auth: { token: 'xxx' },
+ * });
+ *
+ * await client.connect();
+ * client.on('welcome', (data) => console.log(data));
+ * client.on('connect', () => console.log('Connected'));
+ *
+ * await client.emit('chat:message', { text: 'Hello' });
+ * client.send('typing', {});
+ * client.disconnect();
+ * ```
+ */
+export function createNativeWsClient(options: WsClientOptions): NativeWsClient {
+  const typed = createWsClient(NATIVE_WS_DUMMY_DEFINITION, options);
+  const gateway = (typed as unknown as Record<string, WsGatewayClient>).default;
+
+  return {
+    connect: () => typed.connect(),
+    disconnect: () => typed.disconnect(),
+    isConnected: () => typed.isConnected(),
+    getState: () => typed.getState(),
+
+    on(event: string, listener: WsEventListener | WsClientEventListeners[WsClientEvent]): void {
+      if (isClientEvent(event)) {
+        typed.on(event, listener as WsClientEventListeners[typeof event]);
+      } else {
+        gateway.on(event, listener as WsEventListener);
+      }
+    },
+
+    off(
+      event: string,
+      listener?: WsEventListener | WsClientEventListeners[WsClientEvent],
+    ): void {
+      if (isClientEvent(event)) {
+        typed.off(event, listener as WsClientEventListeners[typeof event]);
+      } else {
+        gateway.off(event, listener as WsEventListener);
+      }
+    },
+
+    emit: <T = unknown>(event: string, data?: unknown) => gateway.emit<T>(event, data),
+    send: (event: string, data?: unknown) => gateway.send(event, data),
+  };
 }

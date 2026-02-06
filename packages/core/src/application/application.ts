@@ -554,15 +554,16 @@ export class OneBunApplication {
           // Handle WebSocket upgrade if gateways exist
           if (hasWebSocketGateways && app.wsHandler) {
             const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();
-            
-            // Check for WebSocket upgrade or Socket.IO polling
-            if (upgradeHeader === 'websocket' || path.startsWith('/socket.io')) {
+            const socketioEnabled = app.options.websocket?.socketio?.enabled ?? false;
+            const socketioPath = app.options.websocket?.socketio?.path ?? '/socket.io';
+
+            const isSocketIoPath = socketioEnabled && path.startsWith(socketioPath);
+            if (upgradeHeader === 'websocket' || isSocketIoPath) {
               const response = await app.wsHandler.handleUpgrade(req, server);
               if (response === undefined) {
                 return undefined; // Successfully upgraded
               }
 
-              // Return response if upgrade failed
               return response;
             }
           }
@@ -920,7 +921,16 @@ export class OneBunApplication {
       // Initialize WebSocket gateways with server
       if (hasWebSocketGateways && this.wsHandler && this.server) {
         this.wsHandler.initializeGateways(this.server);
-        this.logger.info(`WebSocket server enabled at ws://${this.options.host}:${this.options.port}`);
+        this.logger.info(
+          `WebSocket server (native) enabled at ws://${this.options.host}:${this.options.port}`,
+        );
+        const socketioEnabled = this.options.websocket?.socketio?.enabled ?? false;
+        if (socketioEnabled) {
+          const sioPath = this.options.websocket?.socketio?.path ?? '/socket.io';
+          this.logger.info(
+            `WebSocket server (Socket.IO) enabled at ws://${this.options.host}:${this.options.port}${sioPath}`,
+          );
+        }
       }
 
       this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);

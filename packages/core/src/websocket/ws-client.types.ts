@@ -7,11 +7,18 @@
 import type { WsServiceDefinition, WsGatewayDefinition } from './ws-service-definition';
 
 /**
+ * WebSocket protocol to use when connecting
+ */
+export type WsClientProtocol = 'native' | 'socketio';
+
+/**
  * Options for WebSocket client
  */
 export interface WsClientOptions {
-  /** WebSocket server URL */
+  /** WebSocket server URL (for Socket.IO use the server root or socketio path, e.g. ws://host/socket.io) */
   url: string;
+  /** Protocol to use (default: 'native') */
+  protocol?: WsClientProtocol;
   /** Authentication options */
   auth?: {
     /** Bearer token */
@@ -126,4 +133,26 @@ export interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Standalone WebSocket client (no service definition).
+ * Same message format and API as the typed client, but without gateway proxies.
+ * Use in frontend or when you do not want to depend on backend module/definitions.
+ */
+export interface NativeWsClient {
+  connect(): Promise<void>;
+  disconnect(): void;
+  isConnected(): boolean;
+  getState(): WsConnectionState;
+  /** Lifecycle events: connect, disconnect, error, reconnect, reconnect_attempt, reconnect_failed */
+  on<E extends WsClientEvent>(event: E, listener: WsClientEventListeners[E]): void;
+  /** Server events (event names from your gateway) */
+  on<T = unknown>(event: string, listener: WsEventListener<T>): void;
+  off<E extends WsClientEvent>(event: E, listener?: WsClientEventListeners[E]): void;
+  off(event: string, listener?: WsEventListener): void;
+  /** Send event and wait for acknowledgement */
+  emit<T = unknown>(event: string, data?: unknown): Promise<T>;
+  /** Send event without waiting for response */
+  send(event: string, data?: unknown): void;
 }

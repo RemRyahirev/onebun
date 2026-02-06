@@ -764,22 +764,33 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Get controller instance (searches this module then child modules recursively).
+   * Find controller instance (searches this module then child modules recursively, no logging).
    */
-  getControllerInstance(controllerClass: Function): Controller | undefined {
+  private findControllerInstance(controllerClass: Function): Controller | undefined {
     const instance = this.controllerInstances.get(controllerClass);
     if (instance) {
       return instance;
     }
     for (const childModule of this.childModules) {
-      const childInstance = childModule.getControllerInstance(controllerClass);
+      const childInstance = childModule.findControllerInstance(controllerClass);
       if (childInstance) {
         return childInstance;
       }
     }
-    this.logger.warn(`No instance found for controller ${controllerClass.name}`);
 
     return undefined;
+  }
+
+  /**
+   * Get controller instance (searches this module then child modules recursively).
+   */
+  getControllerInstance(controllerClass: Function): Controller | undefined {
+    const instance = this.findControllerInstance(controllerClass);
+    if (!instance) {
+      this.logger.warn(`No instance found for controller ${controllerClass.name}`);
+    }
+
+    return instance;
   }
 
   /**

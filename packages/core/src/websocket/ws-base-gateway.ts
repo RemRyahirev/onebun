@@ -9,11 +9,11 @@ import type { WsStorageAdapter, WsPubSubStorageAdapter } from './ws-storage';
 import type {
   WsClientData,
   WsRoom,
-  WsMessage,
   WsServer,
 } from './ws.types';
 import type { Server, ServerWebSocket } from 'bun';
 
+import { createFullEventMessage, createNativeMessage } from './ws-socketio-protocol';
 import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
 
 /**
@@ -248,14 +248,23 @@ export abstract class BaseWebSocketGateway {
   }
 
   /**
+   * Encode message for client's protocol
+   * @internal
+   */
+  private _encodeMessage(protocol: WsClientData['protocol'], event: string, data: unknown): string {
+    return protocol === 'socketio'
+      ? createFullEventMessage(event, data ?? {})
+      : createNativeMessage(event, data);
+  }
+
+  /**
    * Send to local client only
    * @internal
    */
   private _localEmit(clientId: string, event: string, data: unknown): void {
     const socket = clientSockets.get(clientId);
     if (socket) {
-      const message: WsMessage = { event, data };
-      socket.send(JSON.stringify(message));
+      socket.send(this._encodeMessage(socket.data.protocol, event, data));
     }
   }
 
@@ -280,12 +289,11 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   private _localBroadcast(event: string, data: unknown, excludeClientIds?: string[]): void {
-    const message = JSON.stringify({ event, data } as WsMessage);
     const excludeSet = new Set(excludeClientIds || []);
 
     for (const [clientId, socket] of clientSockets) {
       if (!excludeSet.has(clientId)) {
-        socket.send(message);
+        socket.send(this._encodeMessage(socket.data.protocol, event, data));
       }
     }
   }
@@ -323,14 +331,13 @@ export abstract class BaseWebSocketGateway {
     }
 
     const clientIds = await this.storage.getClientsInRoom(roomName);
-    const message = JSON.stringify({ event, data } as WsMessage);
     const excludeSet = new Set(excludeClientIds || []);
 
     for (const clientId of clientIds) {
       if (!excludeSet.has(clientId)) {
         const socket = clientSockets.get(clientId);
         if (socket) {
-          socket.send(message);
+          socket.send(this._encodeMessage(socket.data.protocol, event, data));
         }
       }
     }
@@ -355,15 +362,13 @@ export abstract class BaseWebSocketGateway {
       }
     }
 
-    // Send to each unique client
-    const message = JSON.stringify({ event, data } as WsMessage);
     const excludeSet = new Set(excludeClientIds || []);
 
     for (const clientId of clientIdsSet) {
       if (!excludeSet.has(clientId)) {
         const socket = clientSockets.get(clientId);
         if (socket) {
-          socket.send(message);
+          socket.send(this._encodeMessage(socket.data.protocol, event, data));
         }
       }
     }

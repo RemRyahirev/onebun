@@ -4,7 +4,7 @@ description: Real-time chat application with WebSocket Gateway. Rooms, message b
 
 # WebSocket Chat Application
 
-This example demonstrates how to build a real-time chat application using OneBun WebSocket Gateway.
+This example shows how to build a real-time chat application with OneBun WebSocket Gateway: gateway, module, application config, and two client options (native and Socket.IO).
 
 ## Overview
 
@@ -14,7 +14,7 @@ We'll create a chat application with:
 - Message broadcasting
 - Room management
 
-## Project Structure
+## Project structure
 
 ```
 src/
@@ -25,9 +25,9 @@ src/
 └── index.ts             # Application entry
 ```
 
-## Server Implementation
+## Step 1: Create the gateway
 
-### Chat Gateway
+Define the WebSocket gateway with connection and room handlers. Use `@WebSocketGateway({ path: '/chat' })` so clients connect to `/chat`.
 
 ```typescript
 // src/chat.gateway.ts
@@ -188,7 +188,9 @@ export class ChatGateway extends BaseWebSocketGateway {
 }
 ```
 
-### Chat Service
+## Step 2: Chat service
+
+Business logic for messages and history.
 
 ```typescript
 // src/chat.service.ts
@@ -231,7 +233,9 @@ export class ChatService {
 }
 ```
 
-### Auth Guard
+## Step 3: Auth guard
+
+Optional guard to require authentication on message handlers.
 
 ```typescript
 // src/auth.guard.ts
@@ -252,7 +256,9 @@ export const ChatAuthGuard = createGuard((context: WsExecutionContext) => {
 });
 ```
 
-### Module Setup
+## Step 4: Register the gateway in the module
+
+**A WebSocket gateway is a controller.** Add `ChatGateway` to the module's `controllers` array so the framework discovers it. Do not add it to `providers`.
 
 ```typescript
 // src/chat.module.ts
@@ -261,13 +267,15 @@ import { ChatGateway } from './chat.gateway';
 import { ChatService } from './chat.service';
 
 @Module({
-  controllers: [ChatGateway], // Gateways go in controllers
+  controllers: [ChatGateway],  // Gateways are controllers — register here
   providers: [ChatService],
 })
 export class ChatModule {}
 ```
 
-### Application Entry
+## Step 5: Application entry and WebSocket config
+
+Create the application and pass `websocket` in the options. You can optionally enable Socket.IO on a separate path.
 
 ```typescript
 // src/index.ts
@@ -277,33 +285,36 @@ import { ChatModule } from './chat.module';
 const app = new OneBunApplication(ChatModule, {
   port: 3000,
   websocket: {
-    pingInterval: 25000,
-    pingTimeout: 20000,
+    // Optional: enable Socket.IO on /socket.io for socket.io-client
+    // socketio: { enabled: true, path: '/socket.io' },
   },
 });
 
 await app.start();
 
 console.log('Chat server running on http://localhost:3000');
-console.log('WebSocket available at ws://localhost:3000/chat');
+console.log('Native WebSocket: ws://localhost:3000/chat');
+// If socketio.enabled: Socket.IO at ws://localhost:3000/socket.io
 ```
 
-## Client Implementation
+## Client implementation
 
-### Typed Client
+You can use: **typed client** (with definition), **standalone client** (no definition, same API), or **Socket.IO** (enable `socketio` in app config).
+
+### Option A: Typed client (native WebSocket, with definition)
+
+Connect to the gateway path. Default `protocol` is `'native'`.
 
 ```typescript
-// client.ts
+// client-native.ts
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
 import { ChatModule } from './chat.module';
 
-// Create typed client
 const definition = createWsServiceDefinition(ChatModule);
 const client = createWsClient(definition, {
   url: 'ws://localhost:3000/chat',
-  auth: {
-    token: 'user-jwt-token',
-  },
+  protocol: 'native',
+  auth: { token: 'user-jwt-token' },
   reconnect: true,
   reconnectInterval: 2000,
   maxReconnectAttempts: 5,
@@ -370,16 +381,51 @@ client.ChatGateway.send('leave', 'room:general');
 client.disconnect();
 ```
 
-### Using socket.io-client
+### Option B: Standalone client (no definition)
+
+Use when the frontend does not depend on the backend module (e.g. in a monorepo). Same message format and API as the typed client.
 
 ```typescript
-// socket-io-client.ts
+// client-standalone.ts
+import { createNativeWsClient } from '@onebun/core';
+
+const client = createNativeWsClient({
+  url: 'ws://localhost:3000/chat',
+  protocol: 'native',
+  auth: { token: 'user-jwt-token' },
+  reconnect: true,
+});
+
+client.on('connect', () => console.log('Connected to chat'));
+client.on('welcome', (data) => console.log('Welcome:', data.message));
+client.on('chat:message', (msg) => console.log(`[${msg.userId}]: ${msg.text}`));
+client.on('user:joined', (data) => console.log(`User ${data.userId} joined`));
+client.on('user:left', (data) => console.log(`User ${data.userId} left`));
+
+await client.connect();
+
+// Join room (server expects event 'join' with room name as data)
+const roomInfo = await client.emit('join', 'room:general');
+console.log('Joined room:', roomInfo);
+
+await client.emit('chat:general:message', { text: 'Hello everyone!' });
+client.send('typing:general', {});
+
+client.send('leave', 'room:general');
+client.disconnect();
+```
+
+### Option C: socket.io-client (Socket.IO protocol)
+
+Enable Socket.IO in the application config (`websocket.socketio.enabled: true`), then connect to the server origin with `path: '/socket.io'`.
+
+```typescript
+// client-socketio.ts
 import { io } from 'socket.io-client';
 
-const socket = io('ws://localhost:3000/chat', {
-  auth: {
-    token: 'user-jwt-token',
-  },
+const socket = io('http://localhost:3000', {
+  path: '/socket.io',
+  auth: { token: 'user-jwt-token' },
   transports: ['websocket'],
 });
 
@@ -405,8 +451,21 @@ socket.emit('chat:general:message', { text: 'Hello!' }, (ack) => {
   console.log('Message acknowledged:', ack);
 });
 
-// Disconnect
 socket.disconnect();
+```
+
+### Option D: Typed client with Socket.IO
+
+If Socket.IO is enabled on the server, you can use the typed client with `protocol: 'socketio'` and the Socket.IO path:
+
+```typescript
+const client = createWsClient(definition, {
+  url: 'ws://localhost:3000/socket.io',
+  protocol: 'socketio',
+  auth: { token: 'user-jwt-token' },
+});
+await client.connect();
+// Same API: client.ChatGateway.emit(...), client.ChatGateway.on(...)
 ```
 
 ## Authentication

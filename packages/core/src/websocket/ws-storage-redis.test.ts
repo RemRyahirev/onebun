@@ -78,6 +78,7 @@ describe('RedisWsStorage', () => {
     connectedAt: Date.now(),
     auth: null,
     metadata: {},
+    protocol: 'native',
     ...options,
   });
 

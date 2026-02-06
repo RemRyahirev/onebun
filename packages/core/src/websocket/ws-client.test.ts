@@ -15,7 +15,7 @@ import type { WsServiceDefinition } from './ws-service-definition';
 
 import { useFakeTimers } from '../testing/test-utils';
 
-import { createWsClient } from './ws-client';
+import { createWsClient, createNativeWsClient } from './ws-client';
 import { WsConnectionState } from './ws-client.types';
 import { WsHandlerType } from './ws.types';
 
@@ -114,12 +114,46 @@ describe('WsClient', () => {
     it('should create client with default options', () => {
       const definition = createMockDefinition();
       const client = createWsClient(definition, { url: 'ws://localhost:3000' });
-      
+
       expect(client).toBeDefined();
       expect(typeof client.connect).toBe('function');
       expect(typeof client.disconnect).toBe('function');
       expect(typeof client.isConnected).toBe('function');
       expect(typeof client.getState).toBe('function');
+    });
+  });
+
+  describe('createNativeWsClient', () => {
+    it('should create standalone client without definition', () => {
+      const client = createNativeWsClient({ url: 'ws://localhost:3000/chat' });
+
+      expect(client).toBeDefined();
+      expect(typeof client.connect).toBe('function');
+      expect(typeof client.disconnect).toBe('function');
+      expect(typeof client.isConnected).toBe('function');
+      expect(typeof client.getState).toBe('function');
+      expect(typeof client.on).toBe('function');
+      expect(typeof client.off).toBe('function');
+      expect(typeof client.emit).toBe('function');
+      expect(typeof client.send).toBe('function');
+    });
+
+    it('should connect and use emit/send/on like typed client', async () => {
+      const client = createNativeWsClient({ url: 'ws://localhost:3000/chat' });
+      await client.connect();
+
+      const ws = MockWebSocket.getLastInstance();
+      expect(ws).toBeDefined();
+      expect(client.isConnected()).toBe(true);
+
+      client.on('welcome', (data) => expect(data).toBeDefined());
+      ws?.receiveMessage(JSON.stringify({ event: 'welcome', data: { msg: 'hi' } }));
+
+      client.send('ping', {});
+      expect(ws?.sentMessages.some((m) => m.includes('ping'))).toBe(true);
+
+      client.disconnect();
+      expect(client.isConnected()).toBe(false);
     });
   });
 
@@ -312,20 +346,23 @@ describe('WsClient', () => {
       expect(handler).toHaveBeenCalled();
     });
 
-    it('should handle Engine.IO PING packet', async () => {
+    it('should handle Engine.IO PING packet when using Socket.IO protocol', async () => {
       const definition = createMockDefinition();
-      const client = createWsClient(definition, { url: 'ws://localhost:3000' });
-      
+      const client = createWsClient(definition, {
+        url: 'ws://localhost:3000/socket.io',
+        protocol: 'socketio',
+      });
+
       await client.connect();
-      
+
       const ws = MockWebSocket.getLastInstance();
       if (ws) {
-        ws.sentMessages.length = 0; // Clear previous messages
-        
+        ws.sentMessages.length = 0;
+
         // Send PING (Engine.IO packet type 2)
         ws.receiveMessage('2');
       }
-      
+
       // Should respond with PONG (Engine.IO packet type 3)
       expect(ws?.sentMessages).toContain('3');
     });

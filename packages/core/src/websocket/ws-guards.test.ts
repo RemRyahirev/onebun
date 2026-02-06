@@ -32,6 +32,7 @@ describe('ws-guards', () => {
     connectedAt: Date.now(),
     auth: null,
     metadata: {},
+    protocol: 'native',
     ...overrides,
   });
 

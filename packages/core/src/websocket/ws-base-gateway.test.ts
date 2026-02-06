@@ -41,6 +41,7 @@ function createClientData(id: string, rooms: string[] = []): WsClientData {
     connectedAt: Date.now(),
     auth: null,
     metadata: {},
+    protocol: 'native',
   };
 }
 

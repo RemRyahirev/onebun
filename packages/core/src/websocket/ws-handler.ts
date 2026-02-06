@@ -13,6 +13,7 @@ import type {
   WsHandlerMetadata,
   WebSocketApplicationOptions,
 } from './ws.types';
+import type { WsHandlerResponse } from './ws.types';
 import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -30,7 +31,6 @@ import {
   createFullEventMessage,
   EngineIOPacketType,
   SocketIOPacketType,
-  isNativeMessage,
   parseNativeMessage,
   createNativeMessage,
   DEFAULT_PING_INTERVAL,
@@ -68,14 +68,19 @@ export class WsHandler {
   private pingTimeoutMs: number;
   private maxPayload: number;
   private pingIntervals: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private socketioEnabled: boolean;
+  private socketioPath: string;
 
   constructor(
     private logger: SyncLogger,
     private options: WebSocketApplicationOptions = {},
   ) {
     this.storage = new InMemoryWsStorage();
-    this.pingIntervalMs = options.pingInterval ?? DEFAULT_PING_INTERVAL;
-    this.pingTimeoutMs = options.pingTimeout ?? DEFAULT_PING_TIMEOUT;
+    const socketio = options.socketio;
+    this.socketioEnabled = socketio?.enabled ?? false;
+    this.socketioPath = socketio?.path ?? '/socket.io';
+    this.pingIntervalMs = socketio?.pingInterval ?? DEFAULT_PING_INTERVAL;
+    this.pingTimeoutMs = socketio?.pingTimeout ?? DEFAULT_PING_TIMEOUT;
     this.maxPayload = options.maxPayload ?? DEFAULT_MAX_PAYLOAD;
   }
 
@@ -183,15 +188,20 @@ export class WsHandler {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // Find matching gateway
-    const gateway = this.getGatewayForPath(path);
-    if (!gateway) {
-      return new Response('Not Found', { status: 404 });
+    let protocol: WsClientData['protocol'] = 'native';
+
+    if (this.socketioEnabled && path.startsWith(this.socketioPath)) {
+      protocol = 'socketio';
+    } else {
+      const gateway = this.getGatewayForPath(path);
+      if (!gateway) {
+        return new Response('Not Found', { status: 404 });
+      }
     }
 
     // Extract auth from query or headers
-    const token = url.searchParams.get('token') || 
-                  req.headers.get('Authorization')?.replace('Bearer ', '');
+    const token = url.searchParams.get('token') ||
+      req.headers.get('Authorization')?.replace('Bearer ', '');
 
     // Create client ID
     const clientId = crypto.randomUUID();
@@ -201,11 +211,14 @@ export class WsHandler {
       id: clientId,
       rooms: [],
       connectedAt: Date.now(),
-      auth: token ? {
-        authenticated: false,
-        token,
-      } : null,
+      auth: token
+        ? {
+          authenticated: false,
+          token,
+        }
+        : null,
       metadata: {},
+      protocol,
     };
 
     // Try to upgrade
@@ -225,7 +238,7 @@ export class WsHandler {
    */
   private async handleOpen(ws: ServerWebSocket<WsClientData>): Promise<void> {
     const client = ws.data;
-    this.logger.debug(`WebSocket client connected: ${client.id}`);
+    this.logger.debug(`WebSocket client connected: ${client.id} (${client.protocol})`);
 
     // Store client
     await this.storage.addClient(client);
@@ -235,16 +248,16 @@ export class WsHandler {
       gateway.instance._registerSocket(client.id, ws);
     }
 
-    // Send Socket.IO handshake
-    const handshake = createHandshake(client.id, {
-      pingInterval: this.pingIntervalMs,
-      pingTimeout: this.pingTimeoutMs,
-      maxPayload: this.maxPayload,
-    });
-    ws.send(createOpenPacket(handshake));
-
-    // Start ping interval
-    this.startPingInterval(client.id, ws);
+    if (client.protocol === 'socketio') {
+      // Send Socket.IO handshake
+      const handshake = createHandshake(client.id, {
+        pingInterval: this.pingIntervalMs,
+        pingTimeout: this.pingTimeoutMs,
+        maxPayload: this.maxPayload,
+      });
+      ws.send(createOpenPacket(handshake));
+      this.startPingInterval(client.id, ws);
+    }
 
     // Call OnConnect handlers
     for (const [_, gateway] of this.gateways) {
@@ -253,13 +266,32 @@ export class WsHandler {
         try {
           const result = await this.executeHandler(gateway, handler, ws, undefined, {});
           if (result && isWsHandlerResponse(result)) {
-            ws.send(createNativeMessage(result.event, result.data));
+            ws.send(this.encodeResponse(client.protocol, result));
           }
         } catch (error) {
           this.logger.error(`Error in OnConnect handler: ${error}`);
         }
       }
     }
+  }
+
+  /**
+   * Encode handler response for the client's protocol
+   */
+  private encodeResponse(
+    protocol: WsClientData['protocol'],
+    result: WsHandlerResponse,
+    ackId?: number,
+  ): string {
+    if (protocol === 'socketio') {
+      if (ackId !== undefined) {
+        return createFullAckMessage(ackId, result);
+      }
+
+      return createFullEventMessage(result.event, result.data);
+    }
+
+    return createNativeMessage(result.event, result.data, ackId);
   }
 
   /**
@@ -270,21 +302,20 @@ export class WsHandler {
     message: string | Buffer,
   ): Promise<void> {
     const messageStr = typeof message === 'string' ? message : message.toString();
+    const protocol = ws.data.protocol;
 
-    // Try native format first
-    if (isNativeMessage(messageStr)) {
+    if (protocol === 'native') {
       const native = parseNativeMessage(messageStr);
       if (native) {
         await this.routeMessage(ws, native.event, native.data, native.ack);
-
-        return;
       }
+
+      return;
     }
 
-    // Parse Socket.IO format
+    // Socket.IO format
     const { engineIO, socketIO } = parseMessage(messageStr);
 
-    // Handle Engine.IO packets
     switch (engineIO.type) {
       case EngineIOPacketType.PING:
         ws.send(createPongPacket(engineIO.data as string | undefined));
@@ -292,7 +323,6 @@ export class WsHandler {
         return;
 
       case EngineIOPacketType.PONG:
-        // Client responded to ping - connection is alive
         return;
 
       case EngineIOPacketType.CLOSE:
@@ -301,7 +331,6 @@ export class WsHandler {
         return;
 
       case EngineIOPacketType.MESSAGE:
-        // Socket.IO packet
         if (socketIO) {
           await this.handleSocketIOPacket(ws, socketIO);
         }
@@ -378,14 +407,10 @@ export class WsHandler {
         if (match.matched) {
           try {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params);
-            
+
             // Send response
-            if (result !== undefined) {
-              if (ackId !== undefined) {
-                ws.send(createFullAckMessage(ackId, result));
-              } else if (isWsHandlerResponse(result)) {
-                ws.send(createNativeMessage(result.event, result.data));
-              }
+            if (result !== undefined && isWsHandlerResponse(result)) {
+              ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
             }
           } catch (error) {
             this.logger.error(`Error in message handler: ${error}`);
@@ -430,12 +455,8 @@ export class WsHandler {
         if (match.matched) {
           try {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params, roomName);
-            if (result !== undefined) {
-              if (ackId !== undefined) {
-                ws.send(createFullAckMessage(ackId, result));
-              } else if (isWsHandlerResponse(result)) {
-                ws.send(createNativeMessage(result.event, result.data));
-              }
+            if (result !== undefined && isWsHandlerResponse(result)) {
+              ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
             }
           } catch (error) {
             this.logger.error(`Error in OnJoinRoom handler: ${error}`);
@@ -478,12 +499,8 @@ export class WsHandler {
         if (match.matched) {
           try {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params, roomName);
-            if (result !== undefined) {
-              if (ackId !== undefined) {
-                ws.send(createFullAckMessage(ackId, result));
-              } else if (isWsHandlerResponse(result)) {
-                ws.send(createNativeMessage(result.event, result.data));
-              }
+            if (result !== undefined && isWsHandlerResponse(result)) {
+              ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
             }
           } catch (error) {
             this.logger.error(`Error in OnLeaveRoom handler: ${error}`);
