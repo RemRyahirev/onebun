@@ -6,33 +6,46 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 
 ## Technical Context for AI Agents
 
-**Framework Version**: 0.1.0  
-**Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)  
+**Framework Version**: 0.1.0
+**Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)
 **TypeScript**: strict mode required
 
-**Key Patterns**:
-- Always extend BaseController for HTTP controllers
-- Always extend BaseService for services
-- Use @Module decorator for DI container registration
-- Prefer Promise API over Effect API in application code
-- Effect.pipe is used internally, not Effect.gen
+**Framework Scope**: OneBun is a batteries-included backend framework.
+It is NOT a minimal router — it provides the full stack:
+DI, REST, WebSocket (Socket.IO + typed client), database (Drizzle ORM),
+cache (memory + Redis), queues (memory/Redis/NATS/JetStream), scheduler,
+Prometheus metrics, OpenTelemetry tracing, typed HTTP clients with inter-service
+HMAC auth, auto-generated OpenAPI docs, ArkType validation (schema = types = docs),
+microservice orchestration (MultiServiceApplication), and graceful shutdown.
 
 **Package Structure**:
-- @onebun/core - main framework (decorators, app, controllers, services)
-- @onebun/cache - caching module
-- @onebun/drizzle - database integration
-- @onebun/envs - environment configuration
-- @onebun/logger - logging
-- @onebun/metrics - Prometheus metrics
-- @onebun/trace - distributed tracing
-- @onebun/requests - HTTP client
-- @onebun/nats - NATS/JetStream integration
+* @onebun/core - DI, modules, controllers, services, guards, middleware,
+  WebSocket gateway, queue system, MultiServiceApplication, graceful shutdown
+* @onebun/cache - in-memory + Redis caching with DI, shared Redis connection
+* @onebun/drizzle - Drizzle ORM (PostgreSQL, SQLite), schema-first, auto-migrations, BaseRepository
+* @onebun/docs - auto-generated OpenAPI 3.1 from ArkType schemas and decorators
+* @onebun/envs - type-safe env config with validation, sensitive masking, .env loading
+* @onebun/logger - structured logging (JSON/pretty), child loggers, trace context
+* @onebun/metrics - Prometheus metrics, @Timed/@Counted, auto HTTP/system metrics
+* @onebun/trace - OpenTelemetry, @Span decorator, configurable sampling/export
+* @onebun/requests - HTTP client with retries, auth schemes, typed inter-service clients
+* @onebun/nats - NATS/JetStream queue backends
+
+**Key Patterns**:
+* Always extend BaseController for HTTP controllers
+* Always extend BaseService for services
+* Use @Module decorator for DI container registration
+* ArkType schema in @Body(schema) provides: TS type inference + runtime validation + OpenAPI schema
+* Prefer Promise API over Effect API in application code
+* Effect.pipe is used internally, not Effect.gen
 
 **Common Mistakes**:
-- Forgetting super() call in controller/service constructors
-- Using Node.js APIs instead of Bun.js
-- Using Effect.gen instead of Effect.pipe
-- Not registering services in @Module providers array
+* Forgetting super() call in controller/service constructors
+* Using Node.js APIs instead of Bun.js
+* Using Effect.gen instead of Effect.pipe
+* Not registering services in @Module providers array
+* Placing @ApiResponse above route decorator (must be below)
+* Placing @ApiTags below @Controller (must be above)
 
 </llm-only>
 
@@ -396,12 +409,30 @@ my-onebun-app/
 └── tsconfig.json
 ```
 
-## Next Steps
+## What's Next
 
-1. **Add More Features**: See [CRUD API Example](./examples/crud-api.md)
-2. **Add Database**: See [Drizzle Integration](./api/drizzle.md)
-3. **Add Caching**: See [Cache Module](./api/cache.md)
-4. **Multi-Service**: See [Multi-Service Example](./examples/multi-service.md)
+You've built a basic OneBun application. Here's what else the framework offers:
+
+### Add Features to Your App
+- **[Validation](/api/validation)** — ArkType schemas: one definition = TS types + runtime validation + OpenAPI 3.1 docs
+- **[Database](/api/drizzle)** — Drizzle ORM with PostgreSQL/SQLite, schema-first types, auto-migrations
+- **[Caching](/api/cache)** — In-memory and Redis with DI integration
+- **[Queue & Scheduler](/api/queue)** — Background jobs with in-memory, Redis, NATS, JetStream backends
+- **[WebSocket](/api/websocket)** — Real-time communication with Socket.IO support and typed clients
+
+### Production Readiness
+- **[Metrics](/api/metrics)** — Prometheus-compatible: auto HTTP/system metrics, @Timed/@Counted decorators
+- **[Tracing](/api/trace)** — OpenTelemetry with @Span decorator, trace context in logs
+- **[HTTP Client](/api/requests)** — Typed clients with retries, auth schemes, inter-service HMAC
+
+### Scale to Microservices
+- **[Multi-Service](/examples/multi-service)** — Run multiple services from one codebase with MultiServiceApplication
+- **[OpenAPI Docs](/api/decorators#documentation-decorators)** — Auto-generated API documentation from schemas
+
+### Complete Examples
+- **[CRUD API](/examples/crud-api)** — Full CRUD with validation, error handling, repository pattern
+- **[WebSocket Chat](/examples/websocket-chat)** — Real-time chat application
+- **[Multi-Service](/examples/multi-service)** — Microservices with inter-service communication
 
 ## Common Issues
 

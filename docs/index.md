@@ -1,11 +1,11 @@
 ---
 layout: home
-description: OneBun framework overview - Bun.js framework with Effect.ts, NestJS-inspired DI, and one default solution per problem.
+description: "A complete, batteries-included TypeScript backend framework for Bun.js. NestJS-style architecture, full ecosystem: WebSocket, Drizzle, queues, cache, metrics, tracing, ArkType validation, typed clients."
 
 hero:
   name: OneBun Framework
-  text: Bun.js Framework with Effect.ts
-  tagline: NestJS-inspired framework with one default solution per problem. Promise-based API for client code, Effect.js internally.
+  text: A complete, batteries-included TypeScript backend framework for Bun.js
+  tagline: One framework. One runtime. Everything you need for production backend services.
   image:
     src: /logo.png
     alt: OneBun Framework
@@ -34,6 +34,12 @@ features:
     title: WebSocket Gateway
     details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and type-safe clients.
 ---
+
+**A complete, batteries-included TypeScript backend framework for Bun.js.**
+
+OneBun brings NestJS-style architecture — modules, dependency injection, decorators — to the Bun.js runtime, with a full ecosystem of built-in packages: WebSocket (+ Socket.IO + typed client), microservices with single-image deployment, database integration (Drizzle ORM), message queues (Redis, NATS, JetStream), caching, Prometheus metrics, OpenTelemetry tracing, ArkType validation with auto-generated OpenAPI documentation, and typed inter-service HTTP clients.
+
+One framework. One runtime. Everything you need for production backend services.
 
 ## Quick Reference
 

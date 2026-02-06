@@ -71,15 +71,16 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 
 | Package | Description |
 |---------|-------------|
-| `@onebun/core` | Decorators, modules, controllers, services, websockets, queues |
-| `@onebun/drizzle` | Database ORM with SQLite/PostgreSQL, migrations, repositories |
-| `@onebun/cache` | Caching with memory and Redis backends |
-| `@onebun/envs` | Type-safe environment variables |
-| `@onebun/logger` | Structured logging with context |
-| `@onebun/metrics` | Prometheus-compatible metrics |
-| `@onebun/trace` | Request tracing and correlation |
-| `@onebun/requests` | HTTP client for external APIs |
-| `@onebun/docs` | OpenAPI/Swagger documentation generation |
+| `@onebun/core` | Framework core: Modules & DI, Controllers with decorator routing, Services, WebSocket Gateway (+ Socket.IO + typed client), Queue & Scheduler (in-memory, Redis, NATS, JetStream backends), Guards, Middleware, MultiServiceApplication for microservices, Graceful Shutdown |
+| `@onebun/docs` | Automatic OpenAPI 3.1 generation from decorators and ArkType schemas, Swagger UI, @ApiTags, @ApiOperation decorators |
+| `@onebun/drizzle` | Drizzle ORM integration: PostgreSQL + SQLite (bun:sqlite), schema-first types, CLI & programmatic migrations, auto-migrate on startup, BaseRepository pattern |
+| `@onebun/cache` | CacheModule with in-memory (TTL, max size) and Redis backends, shared Redis connection pool, batch operations (getMany/setMany/deleteMany) |
+| `@onebun/envs` | Type-safe environment configuration: schema with Env.string/number/boolean/array, validation, defaults, transforms, sensitive value masking, .env file support |
+| `@onebun/logger` | Structured logging: JSON (production) and pretty (development) output, 6 log levels, child loggers with context inheritance, automatic trace context integration |
+| `@onebun/metrics` | Prometheus-compatible metrics: automatic HTTP/system/GC collection, @Timed/@Counted decorators, custom Counter/Gauge/Histogram, /metrics endpoint |
+| `@onebun/trace` | OpenTelemetry distributed tracing: automatic HTTP tracing, @Span decorator, configurable sampling rate, export to external collectors |
+| `@onebun/requests` | HTTP client: Bearer/API Key/Basic/HMAC auth, retry strategies (fixed/linear/exponential), typed ApiResponse, typed service clients via createServiceDefinition for inter-service communication |
+| `@onebun/nats` | NATS and JetStream integration for distributed queues and messaging with at-least-once delivery |
 
 ### Database Migrations (@onebun/drizzle)
 

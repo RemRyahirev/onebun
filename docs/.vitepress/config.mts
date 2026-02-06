@@ -35,6 +35,7 @@ export default defineConfig({
     // Navigation bar
     nav: [
       { text: 'Home', link: '/' },
+      { text: 'Features', link: '/features' },
       { text: 'Getting Started', link: '/getting-started' },
       { text: 'API', link: '/api/core' },
       { text: 'Examples', link: '/examples/basic-app' },
@@ -48,30 +49,52 @@ export default defineConfig({
           text: 'Introduction',
           items: [
             { text: 'Home', link: '/' },
+            { text: 'Features Overview', link: '/features' },
             { text: 'Getting Started', link: '/getting-started' },
             { text: 'Architecture', link: '/architecture' },
-            { text: 'AI Documentation', link: '/ai-docs' },
           ],
         },
         {
-          text: 'API Reference',
+          text: 'Core Framework',
           collapsed: false,
           items: [
             { text: 'Core', link: '/api/core' },
             { text: 'Decorators', link: '/api/decorators' },
             { text: 'Controllers', link: '/api/controllers' },
             { text: 'Services', link: '/api/services' },
-            { text: 'WebSocket Gateway', link: '/api/websocket' },
-            { text: 'Queue', link: '/api/queue' },
             { text: 'Validation', link: '/api/validation' },
-            { text: 'Environment', link: '/api/envs' },
-            { text: 'Logger', link: '/api/logger' },
+          ],
+        },
+        {
+          text: 'Communication',
+          collapsed: false,
+          items: [
+            { text: 'WebSocket Gateway', link: '/api/websocket' },
             { text: 'HTTP Client', link: '/api/requests' },
-            { text: 'Cache', link: '/api/cache' },
+          ],
+        },
+        {
+          text: 'Data & State',
+          collapsed: false,
+          items: [
             { text: 'Database (Drizzle)', link: '/api/drizzle' },
+            { text: 'Cache', link: '/api/cache' },
+            { text: 'Queue & Scheduler', link: '/api/queue' },
+          ],
+        },
+        {
+          text: 'Observability',
+          collapsed: false,
+          items: [
+            { text: 'Logger', link: '/api/logger' },
             { text: 'Metrics', link: '/api/metrics' },
             { text: 'Tracing', link: '/api/trace' },
           ],
+        },
+        {
+          text: 'Configuration',
+          collapsed: false,
+          items: [{ text: 'Environment', link: '/api/envs' }],
         },
         {
           text: 'Examples',
@@ -82,6 +105,11 @@ export default defineConfig({
             { text: 'Multi-Service', link: '/examples/multi-service' },
             { text: 'WebSocket Chat', link: '/examples/websocket-chat' },
           ],
+        },
+        {
+          text: 'AI Documentation',
+          collapsed: false,
+          items: [{ text: 'AI Documentation', link: '/ai-docs' }],
         },
       ],
     },
