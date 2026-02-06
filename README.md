@@ -6,7 +6,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.2+-black?logo=bun&logoColor=white)](https://bun.sh/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
-[![Documentation](https://img.shields.io/badge/docs-online-blue?logo=gitbook&logoColor=white)](https://remryahirev.github.io/onebun/)
+[![Documentation](https://img.shields.io/badge/docs-online-blue?logo=gitbook&logoColor=white)](https://onebun.dev/)
 
 A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows the principle of "exactly one default way to solve each problem" - trading flexibility for development speed and performance.
 
@@ -73,12 +73,12 @@ await Effect.runPromise(app.start());
 
 ## Documentation
 
-📚 **[Full Documentation](https://remryahirev.github.io/onebun/)**
+📚 **[Full Documentation](https://onebun.dev/)**
 
-- [Getting Started](https://remryahirev.github.io/onebun/getting-started)
-- [Architecture](https://remryahirev.github.io/onebun/architecture)
-- [API Reference](https://remryahirev.github.io/onebun/api/core)
-- [Examples](https://remryahirev.github.io/onebun/examples/basic-app)
+- [Getting Started](https://onebun.dev/getting-started)
+- [Architecture](https://onebun.dev/architecture)
+- [API Reference](https://onebun.dev/api/core)
+- [Examples](https://onebun.dev/examples/basic-app)
 
 ## Development
 

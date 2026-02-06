@@ -21,7 +21,7 @@ Add to project rules (`.cursor/rules/` or similar):
 
 ```
 When working with OneBun framework, fetch documentation from:
-https://remryahirev.github.io/onebun/llms-full.txt
+https://onebun.dev/llms-full.txt
 ```
 
 Or reference Context7 with library ID `onebun`.
@@ -38,10 +38,10 @@ Or reference Context7 with library ID `onebun`.
 import requests
 
 # Fetch documentation index
-docs = requests.get("https://remryahirev.github.io/onebun/llms.txt").text
+docs = requests.get("https://onebun.dev/llms.txt").text
 
 # Or full documentation
-full_docs = requests.get("https://remryahirev.github.io/onebun/llms-full.txt").text
+full_docs = requests.get("https://onebun.dev/llms-full.txt").text
 ```
 
 ### MCP Context7
