@@ -49,7 +49,7 @@ export abstract class BaseWebSocketGateway {
   protected storage: WsStorageAdapter | null = null;
 
   /** Bun server reference */
-  protected server: Server | null = null;
+  protected server: Server<WsClientData> | null = null;
 
   /** Unique instance ID (for multi-instance setups) */
   protected instanceId: string = crypto.randomUUID();
@@ -63,7 +63,7 @@ export abstract class BaseWebSocketGateway {
    * Called internally by the framework
    * @internal
    */
-  _initialize(storage: WsStorageAdapter, server: Server): void {
+  _initialize(storage: WsStorageAdapter, server: Server<WsClientData>): void {
     this.storage = storage;
     this.server = server;
 

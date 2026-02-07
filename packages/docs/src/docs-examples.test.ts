@@ -400,6 +400,146 @@ describe('OpenAPI Generation', () => {
   });
 });
 
+describe('docs/api/docs.md Examples', () => {
+  describe('Complete Example with full documentation decorators', () => {
+    it('should generate spec for controller with @ApiTags, @ApiOperation, @ApiResponse', () => {
+      const userSchema = type({
+        id: 'string',
+        name: 'string',
+        email: 'string.email',
+      });
+
+      const createUserSchema = type({
+        name: 'string',
+        email: 'string.email',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'age?': 'number > 0',
+      });
+
+      // From docs/api/docs.md: Complete Example
+      @ApiTags('Users')
+      @Controller('/api/users')
+      class UserController extends BaseController {
+        @ApiOperation({ summary: 'List all users', description: 'Returns all users. Supports pagination via query params.' })
+        @Get('/')
+        @ApiResponse(200, { schema: userSchema.array(), description: 'List of users' })
+        async findAll(): Promise<Response> {
+          return this.success([]);
+        }
+
+        @ApiOperation({ summary: 'Get user by ID' })
+        @Get('/:id')
+        @ApiResponse(200, { schema: userSchema, description: 'User found' })
+        @ApiResponse(404, { description: 'User not found' })
+        async findOne(@Param('id') id: string): Promise<Response> {
+          return this.success({ id, name: 'John', email: 'john@example.com' });
+        }
+
+        @ApiOperation({ summary: 'Create a new user' })
+        @Post('/')
+        @ApiResponse(201, { schema: userSchema, description: 'User created' })
+        @ApiResponse(400, { description: 'Invalid input' })
+        async create(
+          @Body(createUserSchema) body: typeof createUserSchema.infer,
+        ): Promise<Response> {
+          return this.success(body);
+        }
+      }
+
+      const spec = generateOpenApiSpec([UserController], {
+        title: 'User Management API',
+        version: '1.0.0',
+        description: 'API for managing users',
+      });
+
+      // Verify spec structure
+      expect(spec.openapi).toBe('3.1.0');
+      expect(spec.info.title).toBe('User Management API');
+      expect(spec.info.version).toBe('1.0.0');
+      expect(spec.info.description).toBe('API for managing users');
+
+      // Verify paths exist
+      expect(spec.paths['/api/users/']).toBeDefined();
+      expect(spec.paths['/api/users/{id}']).toBeDefined();
+
+      // Verify tags on list endpoint
+      const listOp = spec.paths['/api/users/']?.get;
+      expect(listOp).toBeDefined();
+      expect(listOp?.tags).toContain('Users');
+      expect(listOp?.summary).toBe('List all users');
+
+      // Verify response schemas
+      const getOp = spec.paths['/api/users/{id}']?.get;
+      expect(getOp).toBeDefined();
+      expect(getOp?.responses?.['200']?.description).toBe('User found');
+      expect(getOp?.responses?.['404']?.description).toBe('User not found');
+
+      // Verify request body on POST
+      const postOp = spec.paths['/api/users/']?.post;
+      expect(postOp).toBeDefined();
+      expect(postOp?.requestBody).toBeDefined();
+    });
+  });
+
+  describe('DocsApplicationOptions validation', () => {
+    it('should accept all configuration options from docs/api/docs.md', () => {
+      // From docs/api/docs.md: Configuration section
+      const docsOptions = {
+        enabled: true,
+        path: '/docs',
+        jsonPath: '/openapi.json',
+        title: 'My API',
+        version: '2.0.0',
+        description: 'My awesome OneBun API',
+        contact: {
+          name: 'API Support',
+          email: 'support@example.com',
+          url: 'https://example.com',
+        },
+        license: {
+          name: 'MIT',
+          url: 'https://opensource.org/licenses/MIT',
+        },
+        servers: [
+          { url: 'https://api.example.com', description: 'Production' },
+          { url: 'http://localhost:3000', description: 'Development' },
+        ],
+      };
+
+      expect(docsOptions.enabled).toBe(true);
+      expect(docsOptions.path).toBe('/docs');
+      expect(docsOptions.jsonPath).toBe('/openapi.json');
+      expect(docsOptions.title).toBe('My API');
+      expect(docsOptions.version).toBe('2.0.0');
+      expect(docsOptions.contact.name).toBe('API Support');
+      expect(docsOptions.license.name).toBe('MIT');
+      expect(docsOptions.servers).toHaveLength(2);
+    });
+  });
+
+  describe('Programmatic usage from docs/api/docs.md', () => {
+    it('should convert ArkType schema to JSON Schema', () => {
+      // From docs/api/docs.md: Programmatic Usage section
+      const schema = type({ name: 'string', age: 'number' });
+      const jsonSchema = arktypeToJsonSchema(schema);
+
+      expect(jsonSchema.type).toBe('object');
+      expect(jsonSchema.properties).toBeDefined();
+      expect((jsonSchema.properties as Record<string, unknown>).name).toBeDefined();
+      expect((jsonSchema.properties as Record<string, unknown>).age).toBeDefined();
+    });
+
+    it('should generate Swagger UI HTML with custom spec URL', () => {
+      // From docs/api/docs.md: Programmatic Usage section
+      const html = generateSwaggerUiHtml('/openapi.json');
+
+      expect(html).toContain('<!DOCTYPE html>');
+      expect(html).toContain('swagger-ui');
+      expect(html).toContain('url: "/openapi.json"');
+    });
+  });
+});
+
 describe('Best Practices (README)', () => {
   it('should use @ApiOperation for all endpoints', () => {
     @Controller('/resources')

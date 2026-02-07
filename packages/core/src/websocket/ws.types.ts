@@ -294,7 +294,7 @@ export interface WsGuard {
  */
 export interface WsServer {
   /** Bun server instance */
-  server: Server;
+  server: Server<WsClientData>;
   /** Publish message to a topic */
   publish(topic: string, message: string | Buffer): void;
   /** Get subscriber count for a topic */

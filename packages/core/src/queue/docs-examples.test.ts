@@ -51,6 +51,65 @@ import {
 } from './index';
 
 /**
+ * @source docs/api/queue.md#setup
+ */
+describe('Setup Section Examples (docs/api/queue.md)', () => {
+  it('should register controller with queue decorators in module controllers', () => {
+    // From docs/api/queue.md: Registering Controllers with Queue Decorators
+    class OrderProcessor {
+      @Subscribe('orders.created')
+      async handleOrderCreated(message: Message<{ orderId: string }>) {
+        expect(message.data.orderId).toBeDefined();
+      }
+
+      @Cron(CronExpression.EVERY_HOUR, { pattern: 'cleanup.expired' })
+      getCleanupData() {
+        return { timestamp: Date.now() };
+      }
+    }
+
+    // Verify decorators are registered and auto-discoverable
+    expect(hasQueueDecorators(OrderProcessor)).toBe(true);
+
+    const subscriptions = getSubscribeMetadata(OrderProcessor);
+    expect(subscriptions.length).toBe(1);
+    expect(subscriptions[0].pattern).toBe('orders.created');
+
+    const cronJobs = getCronMetadata(OrderProcessor);
+    expect(cronJobs.length).toBe(1);
+  });
+
+  it('should support error handling with manual ack mode', () => {
+    // From docs/api/queue.md: Error Handling in Handlers
+    class ErrorHandlingProcessor {
+      @Subscribe('orders.created', {
+        ackMode: 'manual',
+        retry: { attempts: 3, backoff: 'exponential', delay: 1000 },
+      })
+      async handleOrder(message: Message<{ orderId: string }>) {
+        try {
+          // process order
+          await message.ack();
+        } catch {
+          if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
+            await message.ack();
+          } else {
+            await message.nack(true);
+          }
+        }
+      }
+    }
+
+    const subscriptions = getSubscribeMetadata(ErrorHandlingProcessor);
+    expect(subscriptions.length).toBe(1);
+    expect(subscriptions[0].options?.ackMode).toBe('manual');
+    expect(subscriptions[0].options?.retry?.attempts).toBe(3);
+    expect(subscriptions[0].options?.retry?.backoff).toBe('exponential');
+    expect(subscriptions[0].options?.retry?.delay).toBe(1000);
+  });
+});
+
+/**
  * @source docs/api/queue.md#quick-start
  */
 describe('Quick Start Example (docs/api/queue.md)', () => {
@@ -85,6 +144,33 @@ describe('Quick Start Example (docs/api/queue.md)', () => {
     expect(cronJobs.length).toBe(1);
     expect(cronJobs[0].expression).toBe(CronExpression.EVERY_HOUR);
     expect(cronJobs[0].options.pattern).toBe('cleanup.expired');
+  });
+
+  it('should define service with interval decorator', () => {
+    // From docs/api/queue.md: Quick Start - Interval example
+    class EventProcessor {
+      @Subscribe('orders.created')
+      async handleOrderCreated(message: Message<{ orderId: number }>) {
+        expect(message.data.orderId).toBeDefined();
+      }
+
+      @Cron(CronExpression.EVERY_HOUR, { pattern: 'cleanup.expired' })
+      getCleanupData() {
+        return { timestamp: Date.now() };
+      }
+
+      @Interval(30000, { pattern: 'metrics.collect' })
+      getMetricsData() {
+        return { cpu: process.cpuUsage() };
+      }
+    }
+
+    expect(hasQueueDecorators(EventProcessor)).toBe(true);
+
+    const intervals = getIntervalMetadata(EventProcessor);
+    expect(intervals.length).toBe(1);
+    expect(intervals[0].milliseconds).toBe(30000);
+    expect(intervals[0].options.pattern).toBe('metrics.collect');
   });
 });
 

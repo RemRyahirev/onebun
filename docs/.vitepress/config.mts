@@ -71,6 +71,7 @@ export default defineConfig({
           items: [
             { text: 'WebSocket Gateway', link: '/api/websocket' },
             { text: 'HTTP Client', link: '/api/requests' },
+            { text: 'API Documentation (OpenAPI)', link: '/api/docs' },
           ],
         },
         {

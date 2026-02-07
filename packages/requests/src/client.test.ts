@@ -458,7 +458,7 @@ describe('HttpClient additional methods', () => {
   const mockFetch = mock();
   
   beforeEach(() => {
-    globalThis.fetch = mockFetch;
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
   });
 
   afterEach(() => {

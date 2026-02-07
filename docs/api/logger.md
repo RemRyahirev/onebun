@@ -301,6 +301,87 @@ bootstrapLogger.info('Bootstrapping complete');
 }
 ```
 
+## Enabling JSON Logging with Trace Context
+
+To get structured JSON logs with trace context for production observability, you need to:
+
+1. Enable JSON output format
+2. Enable tracing in the application
+
+### Option 1: Via Application Options (Recommended)
+
+```typescript
+import { OneBunApplication } from '@onebun/core';
+import { AppModule } from './app.module';
+
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  // Enable JSON logging
+  loggerOptions: {
+    minLevel: 'info',
+    format: 'json',
+  },
+  // Enable tracing — trace context will appear in all logs
+  tracing: {
+    enabled: true,
+    serviceName: 'user-service',
+    traceHttpRequests: true,
+  },
+});
+
+await app.start();
+```
+
+### Option 2: Via Environment Variables
+
+```bash
+# Set log format and level
+LOG_LEVEL=info
+LOG_FORMAT=json
+
+# Run the application
+bun run src/index.ts
+```
+
+Tracing is enabled by default when `tracing.enabled` is set in app options or when the application detects `@onebun/trace` is installed.
+
+### Combined JSON + Trace Output
+
+With both JSON logging and tracing enabled, every log entry during an HTTP request automatically includes the trace context:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:45.123Z",
+  "level": "info",
+  "message": "User created",
+  "trace": {
+    "traceId": "abc123def456789012345678",
+    "spanId": "span123456789",
+    "parentSpanId": "parent456789"
+  },
+  "context": {
+    "className": "UserController",
+    "userId": "usr_123",
+    "email": "user@example.com"
+  }
+}
+```
+
+The `trace` field is automatically injected by the logger when a span is active. No code changes needed in your controllers or services — just use `this.logger` as usual.
+
+<llm-only>
+
+**Technical details for AI agents:**
+- `makeLogger()` selects formatter based on: `config.formatter` > `LOG_FORMAT` env > `NODE_ENV` (production=JSON, other=pretty)
+- `JsonFormatter.format()` checks `entry.trace` and adds `{ traceId, spanId, parentSpanId }` to output
+- Trace context is injected into log entries by the trace middleware when a span is active
+- `makeDevLogger()` forces pretty format + debug level
+- `makeProdLogger()` forces JSON format + info level
+- `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext }` and creates the appropriate layer
+- Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
+
+</llm-only>
+
 ## Trace Context Integration
 
 When tracing is enabled, logs automatically include trace context:

@@ -21,6 +21,8 @@ import {
   Query,
   Body,
   Header,
+  Cookie,
+  Req,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
 import { makeMockLoggerLayer } from '../testing/test-utils';
@@ -35,6 +37,99 @@ function createTestApp(
   return new OneBunApplication(moduleClass, {
     ...options,
     loggerLayer: makeMockLoggerLayer(),
+  });
+}
+
+/**
+ * Match a request path against a route pattern with :param support.
+ * Returns extracted params or null if no match.
+ */
+function matchRoutePattern(pattern: string, path: string): Record<string, string> | null {
+  if (pattern === path) {
+    return {};
+  }
+  if (!pattern.includes(':')) {
+    return null;
+  }
+
+  const patternParts = pattern.split('/');
+  const pathParts = path.split('/');
+
+  if (patternParts.length !== pathParts.length) {
+    return null;
+  }
+
+  const params: Record<string, string> = {};
+  for (let i = 0; i < patternParts.length; i++) {
+    if (patternParts[i].startsWith(':')) {
+      params[patternParts[i].slice(1)] = pathParts[i];
+    } else if (patternParts[i] !== pathParts[i]) {
+      return null;
+    }
+  }
+
+  return params;
+}
+
+/**
+ * Create a mock Bun.serve that captures routes and emulates Bun route matching.
+ * The mock's fetchHandler resolves routes by pattern matching and creates
+ * BunRequest-like objects with params and cookies.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function createRoutesAwareMock(mockServer: any) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return mock((options: any) => {
+    const routes = options.routes || {};
+    const fetchFallback = options.fetch;
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mockServer as any).fetchHandler = async (request: Request) => {
+      const url = new URL(request.url);
+      const path = url.pathname;
+      const method = request.method;
+
+      // Try to find matching route (iterate all registered patterns)
+      for (const [pattern, handlers] of Object.entries(routes)) {
+        const params = matchRoutePattern(pattern, path);
+        if (params !== null) {
+          const routeHandlers = typeof handlers === 'function'
+            ? { [method]: handlers as Function }
+            : handlers as Record<string, Function>;
+          const handler = routeHandlers[method];
+          if (handler) {
+            // Create BunRequest-like object with params and cookies
+            // Parse Cookie header into a Map to emulate CookieMap
+            const cookieHeader = request.headers.get('cookie') || '';
+            const cookieMap = new Map<string, string>();
+            if (cookieHeader) {
+              for (const pair of cookieHeader.split(';')) {
+                const [key, ...rest] = pair.split('=');
+                if (key) {
+                  cookieMap.set(key.trim(), rest.join('=').trim());
+                }
+              }
+            }
+
+            const bunReq = Object.assign(request, {
+              params,
+              cookies: cookieMap,
+            });
+
+            return handler(bunReq, mockServer);
+          }
+        }
+      }
+
+      // Fall through to fetch handler
+      if (fetchFallback) {
+        return fetchFallback(request, mockServer);
+      }
+
+      return new Response('Not Found', { status: 404 });
+    };
+
+    return mockServer;
   });
 }
 
@@ -985,12 +1080,7 @@ describe('OneBunApplication', () => {
 
       originalServe = Bun.serve;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (Bun as any).serve = mock((options: any) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (mockServer as any).fetchHandler = options.fetch;
-
-        return mockServer;
-      });
+      (Bun as any).serve = createRoutesAwareMock(mockServer);
     });
 
     afterEach(() => {
@@ -1052,13 +1142,7 @@ describe('OneBunApplication', () => {
 
       originalServe = Bun.serve;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (Bun as any).serve = mock((options: any) => {
-        // Store the fetch handler for testing
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (mockServer as any).fetchHandler = options.fetch;
-
-        return mockServer;
-      });
+      (Bun as any).serve = createRoutesAwareMock(mockServer);
     });
 
     afterEach(() => {
@@ -2460,12 +2544,7 @@ describe('OneBunApplication', () => {
 
       originalServe = Bun.serve;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (Bun as any).serve = mock((options: any) => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (mockServer as any).fetchHandler = options.fetch;
-
-        return mockServer;
-      });
+      (Bun as any).serve = createRoutesAwareMock(mockServer);
     });
 
     afterEach(() => {
@@ -2543,6 +2622,400 @@ describe('OneBunApplication', () => {
       await (mockServer as any).fetchHandler(request);
 
       expect(mockTraceService.extractFromHeaders).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Cookies, Headers, and @Req()', () => {
+    let originalServe: typeof Bun.serve;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let mockServer: any;
+
+    beforeEach(() => {
+      register.clear();
+
+      mockServer = {
+        stop: mock(),
+        hostname: 'localhost',
+        port: 3000,
+      };
+
+      originalServe = Bun.serve;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = createRoutesAwareMock(mockServer);
+    });
+
+    afterEach(() => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Bun as any).serve = originalServe;
+    });
+
+    test('should extract cookie value with @Cookie decorator', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/me')
+        async getMe(@Cookie('session') session?: string) {
+          return { session };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/me', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Cookie': 'session=abc123; theme=dark',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.session).toBe('abc123');
+    });
+
+    test('should return undefined for missing cookie with @Cookie decorator', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/me')
+        async getMe(@Cookie('missing_cookie') value?: string) {
+          return { value, isUndefined: value === undefined };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/me', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.value).toBeUndefined();
+      expect(body.result.isUndefined).toBe(true);
+    });
+
+    test('should return 500 when required cookie is missing', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/auth')
+        async auth(@Cookie('token', { required: true }) token: string) {
+          return { token };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // No cookies sent
+      const request = new Request('http://localhost:3000/api/auth', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(500);
+    });
+
+    test('should extract multiple cookies with @Cookie decorator', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/prefs')
+        async prefs(
+          @Cookie('theme') theme?: string,
+          @Cookie('lang') lang?: string,
+          @Cookie('session') session?: string,
+        ) {
+          return { theme, lang, session };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/prefs', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Cookie': 'theme=dark; lang=en; session=xyz789',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.theme).toBe('dark');
+      expect(body.result.lang).toBe('en');
+      expect(body.result.session).toBe('xyz789');
+    });
+
+    test('should inject BunRequest-like object with @Req() that has cookies and params', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/users/:id')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async getUser(@Req() req: any) {
+          return {
+            hasCookies: typeof req.cookies?.get === 'function',
+            hasParams: req.params !== undefined,
+            paramId: req.params?.id,
+            cookieSession: req.cookies?.get('session') ?? null,
+          };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/users/42', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Cookie': 'session=test-session',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.hasCookies).toBe(true);
+      expect(body.result.hasParams).toBe(true);
+      expect(body.result.paramId).toBe('42');
+      expect(body.result.cookieSession).toBe('test-session');
+    });
+
+    test('should preserve custom headers in Response returned from handler', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/custom-headers')
+        async customHeaders() {
+          return new Response(JSON.stringify({ message: 'ok' }), {
+            status: 200,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/json',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'X-Custom-Header': 'custom-value',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'X-Request-ID': 'req-123',
+            },
+          });
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/custom-headers', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('X-Custom-Header')).toBe('custom-value');
+      expect(response.headers.get('X-Request-ID')).toBe('req-123');
+    });
+
+    test('should preserve single Set-Cookie header in Response', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/login')
+        async login() {
+          return new Response(JSON.stringify({ loggedIn: true }), {
+            status: 200,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/json',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Set-Cookie': 'session=abc123; Path=/; HttpOnly',
+            },
+          });
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/login', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(200);
+      const setCookies = response.headers.getSetCookie();
+      expect(setCookies.length).toBeGreaterThanOrEqual(1);
+      expect(setCookies[0]).toContain('session=abc123');
+    });
+
+    test('should preserve multiple Set-Cookie headers in Response', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/multi-cookie')
+        async multiCookie() {
+          const headers = new Headers();
+          headers.append('Content-Type', 'application/json');
+          headers.append('Set-Cookie', 'session=abc; Path=/; HttpOnly');
+          headers.append('Set-Cookie', 'theme=dark; Path=/');
+          headers.append('Set-Cookie', 'lang=en; Path=/');
+
+          return new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers,
+          });
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/multi-cookie', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+
+      expect(response.status).toBe(200);
+      const setCookies = response.headers.getSetCookie();
+      expect(setCookies.length).toBe(3);
+      expect(setCookies).toContainEqual(expect.stringContaining('session=abc'));
+      expect(setCookies).toContainEqual(expect.stringContaining('theme=dark'));
+      expect(setCookies).toContainEqual(expect.stringContaining('lang=en'));
+    });
+
+    test('should handle route params via req.params in @Req()', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/items/:category/:id')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async getItem(@Req() req: any) {
+          return {
+            category: req.params?.category,
+            id: req.params?.id,
+          };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/items/electronics/42', {
+        method: 'GET',
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.category).toBe('electronics');
+      expect(body.result.id).toBe('42');
+    });
+
+    test('should combine @Cookie, @Param, @Query, and @Header in same handler', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/combined/:id')
+        async combined(
+          @Param('id') id: string,
+          @Query('sort') sort: string,
+          @Header('Authorization') auth: string,
+          @Cookie('session') session?: string,
+        ) {
+          return {
+            id: parseInt(id), sort, auth, session, 
+          };
+        }
+      }
+
+      @Module({
+        controllers: [ApiController],
+      })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/combined/99?sort=name', {
+        method: 'GET',
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Authorization': 'Bearer token456',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Cookie': 'session=sess789',
+        },
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const response = await (mockServer as any).fetchHandler(request);
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.result.id).toBe(99);
+      expect(body.result.sort).toBe('name');
+      expect(body.result.auth).toBe('Bearer token456');
+      expect(body.result.session).toBe('sess789');
     });
   });
 

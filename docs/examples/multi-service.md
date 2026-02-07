@@ -465,6 +465,99 @@ curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
   -d '{"status": "completed"}'
 ```
 
+## Graceful Shutdown
+
+`MultiServiceApplication` supports graceful shutdown out of the box. When the process receives SIGTERM or SIGINT, it calls `stop()` on each running service, which triggers lifecycle hooks in order.
+
+### Shutdown Sequence
+
+1. `beforeApplicationDestroy(signal)` — called on all services/controllers with the signal name
+2. WebSocket connections closed
+3. Queue service stopped, queue adapter disconnected
+4. HTTP servers stopped
+5. `onModuleDestroy()` — called on all services/controllers
+6. Shared Redis disconnected (if configured)
+7. `onApplicationDestroy(signal)` — final cleanup hook
+
+### Implementing Lifecycle Hooks
+
+Services and controllers can implement lifecycle hooks to clean up resources:
+
+```typescript
+import { Service, BaseService } from '@onebun/core';
+import type { OnModuleInit, OnModuleDestroy, BeforeApplicationDestroy } from '@onebun/core';
+
+@Service()
+export class OrderService extends BaseService
+  implements OnModuleInit, OnModuleDestroy, BeforeApplicationDestroy {
+
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
+
+  // Called after DI resolution — set up resources
+  async onModuleInit(): Promise<void> {
+    this.logger.info('OrderService initialized');
+
+    // Start a periodic cleanup task
+    this.cleanupInterval = setInterval(() => {
+      this.cleanupExpiredOrders();
+    }, 60000);
+  }
+
+  // Called at the start of shutdown — stop accepting new work
+  async beforeApplicationDestroy(signal?: string): Promise<void> {
+    this.logger.info('Shutdown signal received, stopping new order processing', { signal });
+    // Stop accepting new orders, finish in-progress work
+  }
+
+  // Called during shutdown — clean up resources
+  async onModuleDestroy(): Promise<void> {
+    this.logger.info('Cleaning up OrderService');
+
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+      this.cleanupInterval = null;
+    }
+
+    // Close database connections, flush buffers, etc.
+  }
+
+  private cleanupExpiredOrders(): void {
+    // periodic cleanup logic
+  }
+}
+```
+
+### Programmatic Shutdown
+
+```typescript
+const app = new MultiServiceApplication({
+  services: {
+    users: { module: UserModule, port: 3001 },
+    orders: { module: OrderModule, port: 3002 },
+  },
+  envSchema,
+});
+
+await app.start();
+
+// Programmatic stop — all services shut down gracefully
+await app.stop();
+```
+
+::: tip
+`MultiServiceApplication.stop()` calls `stop()` on each `OneBunApplication` instance. Individual `OneBunApplication.stop()` accepts `{ closeSharedRedis?: boolean; signal?: string }` if you need more control when stopping services directly.
+:::
+
+### Lifecycle Hook Reference
+
+| Interface | Method | When Called |
+|-----------|--------|------------|
+| `OnModuleInit` | `onModuleInit()` | After DI resolution, before HTTP server starts |
+| `OnApplicationInit` | `onApplicationInit()` | After all modules initialized, before HTTP server starts |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown (stop accepting work) |
+| `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
+| `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown (final cleanup) |
+
 ## Key Patterns
 
 1. **MultiServiceApplication**: Run multiple services in one process
@@ -474,6 +567,7 @@ curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
 5. **Shared Configuration**: Common settings via `envSchema`
 6. **Trace Propagation**: Traces automatically flow between services
 7. **Metrics Aggregation**: All services expose metrics on their respective ports
+8. **Graceful Shutdown**: Lifecycle hooks for clean resource management
 
 ## Production: Service Selection via Environment
 

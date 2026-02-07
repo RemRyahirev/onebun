@@ -382,6 +382,133 @@ config.get('allowedHosts');
 // ['example.com', 'api.example.com', 'localhost']
 ```
 
+## Startup Validation
+
+Environment variables are validated **at application startup** during the `TypedEnv.create()` / `initialize()` phase. If any validation fails, the application throws an `EnvValidationError` and does not start.
+
+### When Validation Runs
+
+1. `OneBunApplication` constructor calls `TypedEnv.create(envSchema, options)` 
+2. `TypedEnv.create()` iterates over the schema and parses each variable
+3. For each variable: load value → parse type → run custom validation → apply transform
+4. If any step fails, an `EnvValidationError` is thrown immediately
+
+### Validation Failures
+
+**Missing required variable** (no default, `required: true` or implicit):
+
+```typescript
+const envSchema = {
+  database: {
+    url: Env.string({ env: 'DATABASE_URL', required: true }),
+  },
+};
+
+// If DATABASE_URL is not set in environment or .env file:
+// Throws: EnvValidationError: Environment variable validation failed for "DATABASE_URL":
+//         Required variable is not set. Got: undefined
+```
+
+**Custom validation function failure:**
+
+```typescript
+import { Effect } from 'effect';
+import { EnvValidationError } from '@onebun/envs';
+
+const envSchema = {
+  server: {
+    port: Env.number({
+      default: 3000,
+      // validate returns Effect.Effect<T, EnvValidationError>
+      validate: (value) =>
+        value > 0 && value < 65536
+          ? Effect.succeed(value)
+          : Effect.fail(new EnvValidationError('', value, 'Port must be between 1 and 65535')),
+    }),
+  },
+};
+
+// If PORT=99999:
+// Throws: EnvValidationError: Environment variable validation failed for "SERVER_PORT":
+//         Port must be between 1 and 65535. Got: 99999
+```
+
+::: tip
+For common range validation, use `min`/`max` options instead of a custom `validate` function:
+```typescript
+Env.number({ default: 3000, min: 1, max: 65535 })
+```
+Or use built-in validators like `Env.port()`:
+```typescript
+Env.number({ default: 3000, validate: Env.port() })
+```
+:::
+
+### Catching Startup Errors
+
+```typescript
+import { OneBunApplication, EnvValidationError } from '@onebun/core';
+import { AppModule } from './app.module';
+import { envSchema } from './config';
+
+try {
+  const app = new OneBunApplication(AppModule, {
+    envSchema,
+    envOptions: {
+      strict: true,  // Throw on any missing required variable
+    },
+  });
+
+  await app.start();
+} catch (error) {
+  if (error instanceof EnvValidationError) {
+    console.error(`Configuration error: ${error.message}`);
+    console.error(`Variable: ${error.variable}`);
+    console.error(`Value: ${error.value}`);
+    process.exit(1);
+  }
+  throw error;
+}
+```
+
+### Strict Mode
+
+By default, all environment variables (including ones not in the schema) are loaded from `process.env`. Enable `strict: true` to only load variables explicitly defined in the schema:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  envSchema,
+  envOptions: {
+    strict: true,  // Only load variables defined in envSchema
+  },
+});
+```
+
+To make individual variables required (throw if missing), set `required: true` on each variable:
+
+```typescript
+const envSchema = {
+  database: {
+    url: Env.string({ env: 'DATABASE_URL', required: true }),
+  },
+};
+```
+
+<llm-only>
+
+**Technical details for AI agents:**
+- `EnvParser.parse()` returns `Effect.Effect<T, EnvValidationError>` — parsing is Effect-based internally
+- `TypedEnv.parseNestedSchema()` runs `Effect.runSync()` on each variable — errors are thrown synchronously
+- `EnvValidationError` has properties: `variable` (env var name), `value` (raw value), `reason` (description)
+- Error message format: `Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`
+- Variables without `env` option get auto-generated names: `server.port` → `SERVER_PORT`
+- `required` must be explicitly set to `true` — if not set and no `default` is provided, a type-default is used (empty string, 0, false, [])
+- Parsing order: resolve value → parse by type → validate (validate function must return `Effect.Effect<T, EnvValidationError>`)
+- `strict` option in `EnvLoadOptions` means "only load variables defined in schema" (default: false), NOT "make all variables required"
+- `validate` function signature: `(value: T) => Effect.Effect<T, EnvValidationError>` — use `Effect.succeed(value)` for valid, `Effect.fail(new EnvValidationError(...))` for invalid
+
+</llm-only>
+
 ## Validation
 
 ### Built-in Validation

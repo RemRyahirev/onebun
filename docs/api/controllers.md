@@ -28,10 +28,10 @@ export class Controller {
   setService<T>(tag: Context.Tag<T, T>, instance: T): void;
 
   /** Check if request has JSON content type */
-  protected isJson(req: Request): boolean;
+  protected isJson(req: OneBunRequest | Request): boolean;
 
   /** Parse JSON from request body */
-  protected async parseJson<T = unknown>(req: Request): Promise<T>;
+  protected async parseJson<T = unknown>(req: OneBunRequest | Request): Promise<T>;
 
   /** Create standardized success response */
   protected success<T = unknown>(result: T, status?: number): Response;
@@ -313,6 +313,127 @@ export class UserController extends BaseController {
 }
 ```
 
+## Working with Cookies
+
+OneBun uses Bun's native `CookieMap` (available on `BunRequest`) for cookie management. There are two ways to work with cookies:
+
+### Reading Cookies via `@Cookie()` Decorator
+
+The simplest way to read a cookie value — extract it directly as a handler parameter:
+
+```typescript
+import { Controller, BaseController, Get, Cookie } from '@onebun/core';
+
+@Controller('/api')
+export class PrefsController extends BaseController {
+  @Get('/preferences')
+  async getPrefs(
+    @Cookie('theme') theme?: string,    // Optional by default
+    @Cookie('lang') lang?: string,
+  ) {
+    return {
+      theme: theme ?? 'light',
+      lang: lang ?? 'en',
+    };
+  }
+}
+```
+
+### Reading Cookies via `req.cookies`
+
+For more control, use `@Req()` to access the full `CookieMap`:
+
+```typescript
+import { Controller, BaseController, Get, Req, type OneBunRequest } from '@onebun/core';
+
+@Controller('/api')
+export class ApiController extends BaseController {
+  @Get('/session')
+  async session(@Req() req: OneBunRequest) {
+    const session = req.cookies.get('session');
+    return { session };
+  }
+}
+```
+
+### Setting Cookies via `req.cookies`
+
+```typescript
+import { Controller, BaseController, Post, Req, Body, type OneBunRequest } from '@onebun/core';
+
+@Controller('/api')
+export class AuthController extends BaseController {
+  @Post('/login')
+  async login(@Req() req: OneBunRequest, @Body() body: unknown) {
+    // Set cookie via CookieMap
+    req.cookies.set('session', 'new-session-id', {
+      httpOnly: true,
+      path: '/',
+      maxAge: 3600,
+    });
+
+    return { loggedIn: true };
+  }
+}
+```
+
+### Deleting Cookies
+
+```typescript
+@Post('/logout')
+async logout(@Req() req: OneBunRequest) {
+  req.cookies.delete('session');
+  return { loggedOut: true };
+}
+```
+
+## Custom Response Headers
+
+To return custom headers, return a `Response` object directly from your handler:
+
+```typescript
+@Controller('/api')
+export class DownloadController extends BaseController {
+  @Get('/download')
+  async download() {
+    return new Response(JSON.stringify({ data: 'file content' }), {
+      status: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Custom-Header': 'custom-value',
+        'Cache-Control': 'no-store',
+      },
+    });
+  }
+}
+```
+
+### Setting Cookies via Set-Cookie Header
+
+For multiple `Set-Cookie` headers, use the `Headers` API with `append()`:
+
+```typescript
+@Controller('/api')
+export class AuthController extends BaseController {
+  @Post('/login')
+  async login(@Body() body: unknown) {
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    headers.append('Set-Cookie', 'session=abc123; Path=/; HttpOnly');
+    headers.append('Set-Cookie', 'theme=dark; Path=/');
+
+    return new Response(JSON.stringify({ loggedIn: true }), {
+      status: 200,
+      headers,
+    });
+  }
+}
+```
+
+::: tip Multiple Set-Cookie Headers
+OneBun correctly preserves multiple `Set-Cookie` headers. Use `Headers.append()` (not `set()`) to add multiple cookies without overwriting previous ones.
+:::
+
 ## Request Helpers
 
 ### isJson()
@@ -321,7 +442,7 @@ Check if request has JSON content type.
 
 ```typescript
 @Post('/')
-async create(@Req() req: Request): Promise<Response> {
+async create(@Req() req: OneBunRequest): Promise<Response> {
   if (!this.isJson(req)) {
     return this.error('Content-Type must be application/json', 400, 400);
   }
@@ -335,7 +456,7 @@ Parse JSON from request body (when not using @Body decorator).
 
 ```typescript
 @Post('/')
-async create(@Req() req: Request): Promise<Response> {
+async create(@Req() req: OneBunRequest): Promise<Response> {
   const body = await this.parseJson<CreateUserDto>(req);
   // body is typed as CreateUserDto
 }
@@ -402,8 +523,11 @@ import {
   Body,
   Query,
   Header,
+  Cookie,
+  Req,
   UseMiddleware,
   HttpStatusCode,
+  type OneBunRequest,
 } from '@onebun/core';
 import { type } from 'arktype';
 

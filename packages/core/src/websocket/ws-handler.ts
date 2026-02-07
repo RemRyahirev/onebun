@@ -14,6 +14,7 @@ import type {
   WebSocketApplicationOptions,
 } from './ws.types';
 import type { WsHandlerResponse } from './ws.types';
+import type { OneBunRequest } from '../types';
 import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -121,7 +122,7 @@ export class WsHandler {
   /**
    * Initialize gateways with server
    */
-  initializeGateways(server: Server): void {
+  initializeGateways(server: Server<WsClientData>): void {
     for (const [_, gateway] of this.gateways) {
       gateway.instance._initialize(this.storage, server);
     }
@@ -182,8 +183,8 @@ export class WsHandler {
    * Handle WebSocket upgrade request
    */
   async handleUpgrade(
-    req: Request,
-    server: Server,
+    req: OneBunRequest | Request,
+    server: Server<WsClientData>,
   ): Promise<Response | undefined> {
     const url = new URL(req.url);
     const path = url.pathname;

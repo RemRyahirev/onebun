@@ -47,7 +47,7 @@ describe('RequestsService', () => {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
       });
-    });
+    }) as unknown as typeof fetch;
 
     // Reset mocks
     mockExecuteRequest.mockClear();
@@ -444,7 +444,7 @@ describe('RequestsService', () => {
           status: 400,
           headers: { 'Content-Type': 'application/json' },
         });
-      });
+      }) as unknown as typeof fetch;
     });
 
     test('should handle promise rejections in request methods', async () => {

@@ -26,6 +26,8 @@ export { Effect, Layer } from 'effect';
 export {
   HttpMethod,
   ParamType,
+  type OneBunRequest,
+  type OneBunResponse,
   type ServiceInterface,
   type ModuleProviders,
   type ModuleInstance,

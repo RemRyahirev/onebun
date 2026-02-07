@@ -4,6 +4,21 @@ import type { Effect, Layer } from 'effect';
 import type { Logger, LoggerOptions } from '@onebun/logger';
 
 /**
+ * HTTP Request type used in OneBun controllers.
+ * Extends standard Web API Request with:
+ * - `.cookies` (CookieMap) for reading/setting cookies
+ * - `.params` for accessing route parameters
+ * @see https://bun.sh/docs/api/http#bunsrequest
+ */
+export type OneBunRequest = import('bun').BunRequest;
+
+/**
+ * HTTP Response type used in OneBun controllers.
+ * Standard Web API Response.
+ */
+export type OneBunResponse = Response;
+
+/**
  * Base interface for all OneBun services
  */
 export interface ServiceInterface {
@@ -505,18 +520,19 @@ export enum ParamType {
   QUERY = 'query',
   BODY = 'body',
   HEADER = 'header',
+  COOKIE = 'cookie',
   REQUEST = 'request',
   RESPONSE = 'response',
 }
 
 /**
- * Options for parameter decorators (@Query, @Header, @Body, etc.)
+ * Options for parameter decorators (@Query, @Header, @Cookie, @Body, etc.)
  */
 export interface ParamDecoratorOptions {
   /**
    * Whether the parameter is required
    * - @Param: always true (OpenAPI spec requirement)
-   * - @Query, @Header: false by default
+   * - @Query, @Header, @Cookie: false by default
    * - @Body: determined from schema (accepts undefined = optional)
    */
   required?: boolean;

@@ -494,6 +494,18 @@ export const Body = createParamDecorator(ParamType.BODY);
 export const Header = createParamDecorator(ParamType.HEADER);
 
 /**
+ * Cookie parameter decorator.
+ * Extracts a cookie value by name using BunRequest.cookies (CookieMap).
+ * Optional by default, use { required: true } for required cookies.
+ * @example \@Cookie('session_id') - optional
+ * @example \@Cookie('session_id', { required: true }) - required
+ * @example \@Cookie('session_id', schema) - optional with validation
+ * @example \@Cookie('session_id', schema, { required: true }) - required with validation
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const Cookie = createParamDecorator(ParamType.COOKIE);
+
+/**
  * Request object decorator
  * @example \@Req()
  */

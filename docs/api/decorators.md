@@ -49,9 +49,38 @@ async getUser(
   @Body(schema) body: CreateUserDto,            // required based on schema
   @Header('x-api-key') key?: string,            // optional by default
   @Header('Authorization', { required: true }) auth: string, // explicitly required
+  @Cookie('session') session?: string,          // optional by default
+  @Cookie('token', { required: true }) token: string, // explicitly required
 ): Promise<Response> {
   return this.success({ id, page, limit });
 }
+
+// Access raw request (OneBunRequest = BunRequest with .cookies and .params)
+@Get('/raw')
+async raw(@Req() req: OneBunRequest) {
+  const session = req.cookies.get('session');
+  const userId = req.params.id;
+}
+```
+
+**@Cookie & @Req**:
+```typescript
+// Read cookie by name (optional by default)
+@Cookie('session') session?: string
+@Cookie('session', { required: true }) session: string
+
+// Access full request (OneBunRequest = BunRequest with .cookies/.params)
+@Req() req: OneBunRequest
+
+// Read/set/delete cookies via CookieMap
+req.cookies.get('session')
+req.cookies.set('session', 'value', { httpOnly: true, path: '/' })
+req.cookies.delete('session')
+
+// Custom response headers / Set-Cookie
+return new Response(body, { headers: { 'X-Custom': 'value' } })
+
+// @Res() is deprecated — always return Response from handler
 ```
 
 **Service Definition**:
@@ -357,9 +386,38 @@ async api(
 ) {}
 ```
 
+### @Cookie()
+
+Extract cookie value from request. Uses `BunRequest.cookies` (CookieMap) under the hood. **Optional by default.**
+
+```typescript
+@Cookie(name: string, options?: ParamDecoratorOptions)
+@Cookie(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
+```
+
+**Example:**
+
+```typescript
+// GET /api/me (with Cookie: session=abc123; theme=dark)
+@Get('/me')
+async getMe(
+  @Cookie('session') session?: string,                       // Optional (default)
+  @Cookie('session', { required: true }) session: string,    // Explicitly required
+) {}
+
+// With validation schema
+@Get('/prefs')
+async prefs(
+  @Cookie('theme', type('"light" | "dark"')) theme?: string,  // Optional with validation
+) {}
+```
+
 ### @Req()
 
-Inject the raw Request object.
+Inject the raw request object. The type is `OneBunRequest` (alias for `BunRequest`), which extends the standard Web API `Request` with:
+
+- `.cookies` — a `CookieMap` for reading and setting cookies
+- `.params` — route parameters extracted by Bun's routes API
 
 ```typescript
 @Req()
@@ -368,17 +426,26 @@ Inject the raw Request object.
 **Example:**
 
 ```typescript
+import type { OneBunRequest } from '@onebun/core';
+
 @Get('/raw')
-async handleRaw(@Req() request: Request) {
-  const url = new URL(request.url);
-  const headers = Object.fromEntries(request.headers);
-  // ...
+async handleRaw(@Req() req: OneBunRequest) {
+  const url = new URL(req.url);
+  const headers = Object.fromEntries(req.headers);
+
+  // Access cookies via CookieMap
+  const session = req.cookies.get('session');
+
+  // Access route params (populated by Bun routes API)
+  // For route '/users/:id', req.params.id is available
 }
 ```
 
-### @Res()
+### @Res() (deprecated)
 
-Inject response context (limited support).
+::: warning Deprecated
+`@Res()` is deprecated and currently injects `undefined`. Use `return new Response(...)` from your handler instead. Direct response manipulation is not supported — return a `Response` object to set custom headers, status codes, and cookies.
+:::
 
 ```typescript
 @Res()
@@ -778,9 +845,12 @@ import {
   Body,
   Query,
   Header,
+  Cookie,
+  Req,
   UseMiddleware,
   ApiResponse,
   Inject,
+  type OneBunRequest,
 } from '@onebun/core';
 import { Span } from '@onebun/trace';
 import { type } from 'arktype';

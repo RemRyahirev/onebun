@@ -47,6 +47,7 @@ import {
   type ApplicationOptions,
   type HttpMethod,
   type ModuleInstance,
+  type OneBunRequest,
   type ParamMetadata,
   ParamType,
   type RouteMetadata,
@@ -111,6 +112,41 @@ function normalizePath(path: string): string {
   }
 
   return path.endsWith('/') ? path.slice(0, -1) : path;
+}
+
+/**
+ * Extract query parameters from URL, handling array notation and repeated keys.
+ *
+ * @param url - The URL to extract query parameters from
+ * @returns Record of parameter names to values (string for single, string[] for repeated/array notation)
+ * @example
+ * extractQueryParams(new URL('http://x.com/?a=1&b=2'))     // { a: '1', b: '2' }
+ * extractQueryParams(new URL('http://x.com/?tag=a&tag=b')) // { tag: ['a', 'b'] }
+ * extractQueryParams(new URL('http://x.com/?tag[]=a'))     // { tag: ['a'] }
+ */
+function extractQueryParams(url: URL): Record<string, string | string[]> {
+  const queryParams: Record<string, string | string[]> = {};
+
+  for (const [rawKey, value] of url.searchParams.entries()) {
+    // Handle array notation: tag[] -> tag (as array)
+    const isArrayNotation = rawKey.endsWith('[]');
+    const key = isArrayNotation ? rawKey.replace('[]', '') : rawKey;
+
+    const existing = queryParams[key];
+    if (existing !== undefined) {
+      // Handle multiple values with same key (e.g., ?tag=a&tag=b or ?tag[]=a&tag[]=b)
+      queryParams[key] = Array.isArray(existing)
+        ? [...existing, value]
+        : [existing, value];
+    } else if (isArrayNotation) {
+      // Array notation always creates an array, even with single value
+      queryParams[key] = [value];
+    } else {
+      queryParams[key] = value;
+    }
+  }
+
+  return queryParams;
 }
 
 /**
@@ -431,163 +467,34 @@ export class OneBunApplication {
       // Initialize Docs (OpenAPI/Swagger) if enabled and available
       await this.initializeDocs(controllers);
 
-      // Create a map of routes with metadata
-      const routes = new Map<
-        string,
-        {
-          method: string;
-          handler: Function;
-          handlerName: string;
-          controller: Controller;
-          params?: ParamMetadata[];
-          middleware?: Function[];
-          pathPattern?: RegExp;
-          pathParams?: string[];
-          responseSchemas?: RouteMetadata['responseSchemas'];
-        }
-      >();
+      // Create server context binding (used by route handlers and executeHandler)
+      const app = this;
+
+      // Path constants for framework endpoints
+      const metricsPath = this.options.metrics?.path || '/metrics';
+      const docsPath = this.options.docs?.path || '/docs';
+      const openApiPath = this.options.docs?.jsonPath || '/openapi.json';
 
       // Build application-level path prefix from options
       const appPrefix = this.buildPathPrefix();
 
-      // Add routes from controllers
-      for (const controllerClass of controllers) {
-        const controllerMetadata = getControllerMetadata(controllerClass);
-        if (!controllerMetadata) {
-          this.logger.warn(`No metadata found for controller: ${controllerClass.name}`);
-          continue;
-        }
+      // Build Bun routes object: { "/path": { GET: handler, POST: handler } }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const bunRoutes: Record<string, any> = {};
 
-        // Get controller instance from module
-        if (!this.ensureModule().getControllerInstance) {
-          this.logger.warn(
-            `Module does not support getControllerInstance for ${controllerClass.name}`,
-          );
-          continue;
-        }
-
-        const controller = this.ensureModule().getControllerInstance!(controllerClass) as Controller;
-        if (!controller) {
-          this.logger.warn(`Controller instance not found for ${controllerClass.name}`);
-          continue;
-        }
-
-        const controllerPath = controllerMetadata.path;
-
-        for (const route of controllerMetadata.routes) {
-          // Combine: appPrefix + controllerPath + routePath
-          // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
-          const fullPath = normalizePath(`${appPrefix}${controllerPath}${route.path}`);
-          const method = this.mapHttpMethod(route.method);
-          const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
-            controller,
-          );
-
-          // Process path parameters
-          const pathParams: string[] = [];
-          let pathPattern: RegExp | undefined;
-
-          // Check if path contains parameters like :id
-          if (fullPath.includes(':')) {
-            // Convert path to regex pattern
-            const pattern = fullPath.replace(/:([^/]+)/g, (_, paramName) => {
-              pathParams.push(paramName);
-
-              return '([^/]+)';
-            });
-            pathPattern = new RegExp(`^${pattern}$`);
-          }
-
-          // Use method and path as key to avoid conflicts between different HTTP methods
-          const _routeKey = `${method}:${fullPath}`;
-          routes.set(_routeKey, {
-            method,
-            handler,
-            handlerName: route.handler,
-            controller,
-            params: route.params,
-            middleware: route.middleware,
-            pathPattern,
-            pathParams,
-            responseSchemas: route.responseSchemas,
-          });
-        }
-      }
-
-      // Log all routes
-      for (const controllerClass of controllers) {
-        const metadata = getControllerMetadata(controllerClass);
-        if (!metadata) {
-          continue;
-        }
-
-        for (const route of metadata.routes) {
-          const fullPath = normalizePath(`${appPrefix}${metadata.path}${route.path}`);
-          const method = this.mapHttpMethod(route.method);
-          this.logger.info(`Mapped {${method}} route: ${fullPath}`);
-        }
-      }
-
-      // Call onApplicationInit lifecycle hook for all services and controllers
-      if (this.ensureModule().callOnApplicationInit) {
-        await this.ensureModule().callOnApplicationInit!();
-        this.logger.debug('Application initialization hooks completed');
-      }
-
-      // Get metrics path
-      const metricsPath = this.options.metrics?.path || '/metrics';
-
-      // Get docs paths
-      const docsPath = this.options.docs?.path || '/docs';
-      const openApiPath = this.options.docs?.jsonPath || '/openapi.json';
-
-      // Create server with proper context binding
-      const app = this;
-      const hasWebSocketGateways = this.wsHandler?.hasGateways() ?? false;
-      
-      // Prepare WebSocket handlers if gateways exist
-      // When no gateways, use no-op handlers (required by Bun.serve)
-      const wsHandlers = hasWebSocketGateways ? this.wsHandler!.createWebSocketHandlers() : {
-         
-        open() { /* no-op */ },
-         
-        message() { /* no-op */ },
-         
-        close() { /* no-op */ },
-         
-        drain() { /* no-op */ },
-      };
-      
-      this.server = Bun.serve<WsClientData>({
-        port: this.options.port,
-        hostname: this.options.host,
-        // WebSocket handlers
-        websocket: wsHandlers,
-        async fetch(req, server) {
-          const url = new URL(req.url);
-          const rawPath = url.pathname;
-          // Normalize path to ensure consistent routing and metrics
-          // (removes trailing slash except for root path)
-          const path = normalizePath(rawPath);
-          const method = req.method;
+      /**
+       * Create a route handler with the full OneBun request lifecycle:
+       * tracing setup → middleware chain → executeHandler → metrics → tracing end
+       */
+      function createRouteHandler(
+        routeMeta: RouteMetadata,
+        boundHandler: Function,
+        controller: Controller,
+        fullPath: string,
+        method: string,
+      ): (req: OneBunRequest) => Promise<Response> {
+        return async (req) => {
           const startTime = Date.now();
-
-          // Handle WebSocket upgrade if gateways exist
-          if (hasWebSocketGateways && app.wsHandler) {
-            const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();
-            const socketioEnabled = app.options.websocket?.socketio?.enabled ?? false;
-            const socketioPath = app.options.websocket?.socketio?.path ?? '/socket.io';
-
-            const isSocketIoPath = socketioEnabled && path.startsWith(socketioPath);
-            if (upgradeHeader === 'websocket' || isSocketIoPath) {
-              const response = await app.wsHandler.handleUpgrade(req, server);
-              if (response === undefined) {
-                return undefined; // Successfully upgraded
-              }
-
-              return response;
-            }
-          }
 
           // Setup tracing context if available and enabled
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -626,7 +533,7 @@ export class OneBunApplication {
               const httpData = {
                 method,
                 url: req.url,
-                route: path,
+                route: fullPath,
                 userAgent: headers['user-agent'],
                 remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
                 requestSize: headers['content-length']
@@ -648,9 +555,6 @@ export class OneBunApplication {
                 (globalThis as Record<string, unknown>).__onebunCurrentTraceContext =
                   globalCurrentTraceContext;
               }
-
-              // Propagate trace context to logger
-              // Note: FiberRef.set should be used within Effect context
             } catch (error) {
               app.logger.error(
                 'Failed to setup tracing:',
@@ -659,232 +563,89 @@ export class OneBunApplication {
             }
           }
 
-          // Handle docs endpoints (OpenAPI/Swagger)
-          if (app.options.docs?.enabled !== false && app.openApiSpec) {
-            // Serve Swagger UI HTML
-            if (path === docsPath && method === 'GET' && app.swaggerHtml) {
-              return new Response(app.swaggerHtml, {
-                headers: {
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'Content-Type': 'text/html; charset=utf-8',
-                },
-              });
-            }
-
-            // Serve OpenAPI JSON spec
-            if (path === openApiPath && method === 'GET') {
-              return new Response(JSON.stringify(app.openApiSpec, null, 2), {
-                headers: {
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'Content-Type': 'application/json',
-                },
-              });
-            }
-          }
-
-          // Handle metrics endpoint
-          if (path === metricsPath && method === 'GET' && app.metricsService) {
-            try {
-              const metrics = await app.metricsService.getMetrics();
-
-              return new Response(metrics, {
-                headers: {
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'Content-Type': app.metricsService.getContentType(),
-                },
-              });
-            } catch (error) {
-              app.logger.error(
-                'Failed to get metrics:',
-                error instanceof Error ? error : new Error(String(error)),
-              );
-
-              return new Response('Internal Server Error', {
-                status: HttpStatusCode.INTERNAL_SERVER_ERROR,
-              });
-            }
-          }
-
-          // Find exact match first using method and path
-          const exactRouteKey = `${method}:${path}`;
-          let route = routes.get(exactRouteKey);
-          const paramValues: Record<string, string | string[]> = {};
-
           // Extract query parameters from URL
-          for (const [rawKey, value] of url.searchParams.entries()) {
-            // Handle array notation: tag[] -> tag (as array)
-            const isArrayNotation = rawKey.endsWith('[]');
-            const key = isArrayNotation ? rawKey.replace('[]', '') : rawKey;
+          const url = new URL(req.url);
+          const queryParams = extractQueryParams(url);
 
-            const existing = paramValues[key];
-            if (existing !== undefined) {
-              // Handle multiple values with same key (e.g., ?tag=a&tag=b or ?tag[]=a&tag[]=b)
-              paramValues[key] = Array.isArray(existing)
-                ? [...existing, value]
-                : [existing, value];
-            } else if (isArrayNotation) {
-              // Array notation always creates an array, even with single value
-              paramValues[key] = [value];
-            } else {
-              paramValues[key] = value;
-            }
-          }
+          try {
+            let response: Response;
 
-          // If no exact match, try pattern matching
-          if (!route) {
-            for (const [_routeKey, routeData] of routes) {
-              // Check if this route matches the method and has a pattern
-              if (routeData.pathPattern && routeData.method === method) {
-                const match = path.match(routeData.pathPattern);
-                if (match) {
-                  route = routeData;
-                  // Extract parameter values
-                  for (let i = 0; i < routeData.pathParams!.length; i++) {
-                    paramValues[routeData.pathParams![i]] = match[i + 1];
-                  }
-                  break;
+            // Execute middleware chain if any, then handler
+            if (routeMeta.middleware && routeMeta.middleware.length > 0) {
+              const next = async (index: number): Promise<Response> => {
+                if (index >= routeMeta.middleware!.length) {
+                  return await executeHandler(
+                    {
+                      handler: boundHandler,
+                      handlerName: routeMeta.handler,
+                      controller,
+                      params: routeMeta.params,
+                      responseSchemas: routeMeta.responseSchemas,
+                    },
+                    req,
+                    queryParams,
+                  );
                 }
-              }
-            }
-          }
 
-          if (!route) {
-            const response = new Response('Not Found', {
-              status: HttpStatusCode.NOT_FOUND,
-            });
+                const middleware = routeMeta.middleware![index];
+
+                return await middleware(req, () => next(index + 1));
+              };
+
+              response = await next(0);
+            } else {
+              response = await executeHandler(
+                {
+                  handler: boundHandler,
+                  handlerName: routeMeta.handler,
+                  controller,
+                  params: routeMeta.params,
+                  responseSchemas: routeMeta.responseSchemas,
+                },
+                req,
+                queryParams,
+              );
+            }
+
             const duration = Date.now() - startTime;
 
-            // Record metrics for 404
+            // Record metrics
             if (app.metricsService && app.metricsService.recordHttpRequest) {
               const durationSeconds = duration / 1000;
               app.metricsService.recordHttpRequest({
                 method,
-                route: path,
-                statusCode: HttpStatusCode.NOT_FOUND,
+                route: fullPath,
+                statusCode: response?.status || HttpStatusCode.OK,
                 duration: durationSeconds,
-                controller: 'unknown',
+                controller: controller.constructor.name,
                 action: 'unknown',
               });
             }
 
-            // End trace for 404
+            // End trace
             if (traceSpan && app.traceService) {
               try {
                 await Effect.runPromise(
                   app.traceService.endHttpTrace(traceSpan, {
-                    statusCode: HttpStatusCode.NOT_FOUND,
+                    statusCode: response?.status || HttpStatusCode.OK,
+                    responseSize: response?.headers?.get('content-length')
+                      ? parseInt(response.headers.get('content-length')!, 10)
+                      : undefined,
                     duration,
                   }),
                 );
               } catch (traceError) {
                 app.logger.error(
-                  'Failed to end trace for 404:',
+                  'Failed to end trace:',
                   traceError instanceof Error ? traceError : new Error(String(traceError)),
                 );
               }
             }
 
-            // Clear trace context after 404
+            // Clear trace context after request
             clearGlobalTraceContext();
 
             return response;
-          }
-
-          try {
-            // Execute middleware if any
-            if (route.middleware && route.middleware.length > 0) {
-              const next = async (index: number): Promise<Response> => {
-                if (index >= route!.middleware!.length) {
-                  return await executeHandler(route!, req, paramValues);
-                }
-
-                const middleware = route!.middleware![index];
-
-                return await middleware(req, () => next(index + 1));
-              };
-
-              const response = await next(0);
-              const duration = Date.now() - startTime;
-
-              // Record metrics
-              if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const durationSeconds = duration / 1000;
-                app.metricsService.recordHttpRequest({
-                  method,
-                  route: path,
-                  statusCode: response?.status || HttpStatusCode.OK,
-                  duration: durationSeconds,
-                  controller: route.controller.constructor.name,
-                  action: 'unknown',
-                });
-              }
-
-              // End trace
-              if (traceSpan && app.traceService) {
-                try {
-                  await Effect.runPromise(
-                    app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: response?.status || HttpStatusCode.OK,
-                      responseSize: response?.headers?.get('content-length')
-                        ? parseInt(response.headers.get('content-length')!, 10)
-                        : undefined,
-                      duration,
-                    }),
-                  );
-                } catch (traceError) {
-                  app.logger.error(
-                    'Failed to end trace:',
-                    traceError instanceof Error ? traceError : new Error(String(traceError)),
-                  );
-                }
-              }
-
-              // Clear trace context after request
-              clearGlobalTraceContext();
-
-              return response;
-            } else {
-              const response = await executeHandler(route, req, paramValues);
-              const duration = Date.now() - startTime;
-
-              // Record metrics
-              if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const durationSeconds = duration / 1000;
-                app.metricsService.recordHttpRequest({
-                  method,
-                  route: path,
-                  statusCode: response?.status || HttpStatusCode.OK,
-                  duration: durationSeconds,
-                  controller: route.controller.constructor.name,
-                  action: 'unknown',
-                });
-              }
-
-              // End trace
-              if (traceSpan && app.traceService) {
-                try {
-                  await Effect.runPromise(
-                    app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: response?.status || HttpStatusCode.OK,
-                      responseSize: response?.headers?.get('content-length')
-                        ? parseInt(response.headers.get('content-length')!, 10)
-                        : undefined,
-                      duration,
-                    }),
-                  );
-                } catch (traceError) {
-                  app.logger.error(
-                    'Failed to end trace:',
-                    traceError instanceof Error ? traceError : new Error(String(traceError)),
-                  );
-                }
-              }
-
-              // Clear trace context after request
-              clearGlobalTraceContext();
-
-              return response;
-            }
           } catch (error) {
             app.logger.error(
               'Request handling error:',
@@ -900,10 +661,10 @@ export class OneBunApplication {
               const durationSeconds = duration / 1000;
               app.metricsService.recordHttpRequest({
                 method,
-                route: path,
+                route: fullPath,
                 statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
                 duration: durationSeconds,
-                controller: route?.controller.constructor.name || 'unknown',
+                controller: controller.constructor.name,
                 action: 'unknown',
               });
             }
@@ -936,6 +697,179 @@ export class OneBunApplication {
 
             return response;
           }
+        };
+      }
+
+      // Add routes from controllers
+      for (const controllerClass of controllers) {
+        const controllerMetadata = getControllerMetadata(controllerClass);
+        if (!controllerMetadata) {
+          this.logger.warn(`No metadata found for controller: ${controllerClass.name}`);
+          continue;
+        }
+
+        // Get controller instance from module
+        if (!this.ensureModule().getControllerInstance) {
+          this.logger.warn(
+            `Module does not support getControllerInstance for ${controllerClass.name}`,
+          );
+          continue;
+        }
+
+        const controller = this.ensureModule().getControllerInstance!(controllerClass) as Controller;
+        if (!controller) {
+          this.logger.warn(`Controller instance not found for ${controllerClass.name}`);
+          continue;
+        }
+
+        const controllerPath = controllerMetadata.path;
+
+        for (const route of controllerMetadata.routes) {
+          // Combine: appPrefix + controllerPath + routePath
+          // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
+          const fullPath = normalizePath(`${appPrefix}${controllerPath}${route.path}`);
+          const method = this.mapHttpMethod(route.method);
+          const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
+            controller,
+          );
+
+          // Create wrapped handler with full OneBun lifecycle (tracing, metrics, middleware)
+          const wrappedHandler = createRouteHandler(route, handler, controller, fullPath, method);
+
+          // Add to bunRoutes grouped by path and method
+          if (!bunRoutes[fullPath]) {
+            bunRoutes[fullPath] = {};
+          }
+          bunRoutes[fullPath][method] = wrappedHandler;
+
+          // Register trailing slash variant for consistent matching
+          // (e.g., /api/users and /api/users/ both map to the same handler)
+          if (fullPath.length > 1 && !fullPath.endsWith('/')) {
+            const trailingPath = fullPath + '/';
+            if (!bunRoutes[trailingPath]) {
+              bunRoutes[trailingPath] = {};
+            }
+            bunRoutes[trailingPath][method] = wrappedHandler;
+          }
+        }
+      }
+
+      // Add framework endpoints to routes (docs, metrics)
+      if (app.options.docs?.enabled !== false && app.openApiSpec) {
+        if (app.swaggerHtml) {
+          bunRoutes[docsPath] = {
+             
+            GET: () => new Response(app.swaggerHtml!, {
+              headers: {
+                // eslint-disable-next-line @typescript-eslint/naming-convention
+                'Content-Type': 'text/html; charset=utf-8',
+              },
+            }),
+          };
+        }
+        bunRoutes[openApiPath] = {
+           
+          GET: () => new Response(JSON.stringify(app.openApiSpec, null, 2), {
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/json',
+            },
+          }),
+        };
+      }
+
+      if (app.metricsService) {
+        bunRoutes[metricsPath] = {
+           
+          async GET() {
+            try {
+              const metrics = await app.metricsService.getMetrics();
+
+              return new Response(metrics, {
+                headers: {
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'Content-Type': app.metricsService.getContentType(),
+                },
+              });
+            } catch (error) {
+              app.logger.error(
+                'Failed to get metrics:',
+                error instanceof Error ? error : new Error(String(error)),
+              );
+
+              return new Response('Internal Server Error', {
+                status: HttpStatusCode.INTERNAL_SERVER_ERROR,
+              });
+            }
+          },
+        };
+      }
+
+      // Log all routes
+      for (const controllerClass of controllers) {
+        const metadata = getControllerMetadata(controllerClass);
+        if (!metadata) {
+          continue;
+        }
+
+        for (const route of metadata.routes) {
+          const fullPath = normalizePath(`${appPrefix}${metadata.path}${route.path}`);
+          const method = this.mapHttpMethod(route.method);
+          this.logger.info(`Mapped {${method}} route: ${fullPath}`);
+        }
+      }
+
+      // Call onApplicationInit lifecycle hook for all services and controllers
+      if (this.ensureModule().callOnApplicationInit) {
+        await this.ensureModule().callOnApplicationInit!();
+        this.logger.debug('Application initialization hooks completed');
+      }
+
+      const hasWebSocketGateways = this.wsHandler?.hasGateways() ?? false;
+      
+      // Prepare WebSocket handlers if gateways exist
+      // When no gateways, use no-op handlers (required by Bun.serve)
+      const wsHandlers = hasWebSocketGateways ? this.wsHandler!.createWebSocketHandlers() : {
+         
+        open() { /* no-op */ },
+         
+        message() { /* no-op */ },
+         
+        close() { /* no-op */ },
+         
+        drain() { /* no-op */ },
+      };
+      
+      this.server = Bun.serve<WsClientData>({
+        port: this.options.port,
+        hostname: this.options.host,
+        // WebSocket handlers
+        websocket: wsHandlers,
+        // Bun routes API: all endpoints are handled here
+        routes: bunRoutes,
+        // Fallback: only WebSocket upgrade and 404
+        async fetch(req, server) {
+          // Handle WebSocket upgrade if gateways exist
+          if (hasWebSocketGateways && app.wsHandler) {
+            const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();
+            const socketioEnabled = app.options.websocket?.socketio?.enabled ?? false;
+            const socketioPath = app.options.websocket?.socketio?.path ?? '/socket.io';
+
+            const url = new URL(req.url);
+            const path = normalizePath(url.pathname);
+            const isSocketIoPath = socketioEnabled && path.startsWith(socketioPath);
+            if (upgradeHeader === 'websocket' || isSocketIoPath) {
+              const response = await app.wsHandler.handleUpgrade(req, server);
+              if (response === undefined) {
+                return undefined; // Successfully upgraded
+              }
+
+              return response;
+            }
+          }
+
+          // 404 for everything not matched by routes
+          return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
         },
       });
 
@@ -978,7 +912,9 @@ export class OneBunApplication {
     }
 
     /**
-     * Execute route handler with parameter injection and validation
+     * Execute route handler with parameter injection and validation.
+     * Path parameters come from BunRequest.params (populated by Bun routes API).
+     * Query parameters are extracted separately from the URL.
      */
     async function executeHandler(
       route: {
@@ -988,8 +924,8 @@ export class OneBunApplication {
         params?: ParamMetadata[];
         responseSchemas?: RouteMetadata['responseSchemas'];
       },
-      req: Request,
-      paramValues: Record<string, string | string[]>,
+      req: OneBunRequest,
+      queryParams: Record<string, string | string[]>,
     ): Promise<Response> {
       // Check if this is an SSE endpoint
       let sseOptions: SseDecoratorOptions | undefined;
@@ -1018,11 +954,14 @@ export class OneBunApplication {
       for (const param of sortedParams) {
         switch (param.type) {
           case ParamType.PATH:
-            args[param.index] = param.name ? paramValues[param.name] : undefined;
+            // Use req.params from BunRequest (natively populated by Bun routes API)
+            args[param.index] = param.name
+              ? (req.params as Record<string, string>)[param.name]
+              : undefined;
             break;
 
           case ParamType.QUERY:
-            args[param.index] = param.name ? paramValues[param.name] : undefined;
+            args[param.index] = param.name ? queryParams[param.name] : undefined;
             break;
 
           case ParamType.BODY:
@@ -1035,6 +974,10 @@ export class OneBunApplication {
 
           case ParamType.HEADER:
             args[param.index] = param.name ? req.headers.get(param.name) : undefined;
+            break;
+
+          case ParamType.COOKIE:
+            args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
             break;
 
           case ParamType.REQUEST:
@@ -1085,7 +1028,6 @@ export class OneBunApplication {
         // If the result is already a Response object, extract body and validate it
         if (result instanceof Response) {
           responseStatusCode = result.status;
-          const responseHeaders = Object.fromEntries(result.headers.entries());
 
           // Extract and parse response body for validation
           const contentType = result.headers.get('content-type') || '';
@@ -1119,14 +1061,16 @@ export class OneBunApplication {
                 validatedResult = bodyData;
               }
 
+              // Preserve all original headers (including multiple Set-Cookie)
+              // using new Headers() constructor instead of Object.fromEntries()
+              // which would lose duplicate header keys
+              const newHeaders = new Headers(result.headers);
+              newHeaders.set('Content-Type', 'application/json');
+
               // Create new Response with validated data
               return new Response(JSON.stringify(validatedResult), {
                 status: responseStatusCode,
-                headers: {
-                  ...responseHeaders,
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'Content-Type': 'application/json',
-                },
+                headers: newHeaders,
               });
             } catch {
               // If parsing fails, return original response

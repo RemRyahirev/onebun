@@ -138,7 +138,7 @@ describe('createServiceClient', () => {
           }),
         ),
       );
-      globalThis.fetch = mockFetch;
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
     });
 
     afterEach(() => {

@@ -33,7 +33,12 @@ import type {
   BeforeApplicationDestroy,
   OnApplicationDestroy,
 } from './';
-import type { SseEvent, SseGenerator } from './types';
+import type {
+  SseEvent,
+  SseGenerator,
+  OneBunRequest,
+  OneBunResponse,
+} from './types';
 import type { ServerWebSocket } from 'bun';
 
 
@@ -3431,13 +3436,16 @@ import {
   Body,
   Header,
   Req,
+  Cookie,
   Module,
   Service,
   BaseService,
   BaseController,
   UseMiddleware,
   getServiceTag,
+  getControllerMetadata,
   HttpStatusCode,
+  ParamType,
   NotFoundError,
   InternalServerError,
   OneBunBaseError,
@@ -3827,5 +3835,296 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
       expect(DataService).toBeDefined();
       expect(NotificationService).toBeDefined();
     });
+  });
+});
+
+// ============================================================================
+// Cookie, Headers, @Req with OneBunRequest
+// ============================================================================
+
+describe('@Cookie Decorator (docs/api/decorators.md)', () => {
+  /**
+   * @source docs/api/decorators.md#cookie
+   */
+  it('should define @Cookie decorator with optional parameter', () => {
+    // From docs: @Cookie('session_id') - optional
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/me')
+      async getMe(@Cookie('session_id') sessionId?: string) {
+        return { sessionId };
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+    const metadata = getControllerMetadata(ApiController);
+    expect(metadata).toBeDefined();
+    expect(metadata!.routes.length).toBe(1);
+    expect(metadata!.routes[0].params!.length).toBe(1);
+    expect(metadata!.routes[0].params![0].type).toBe(ParamType.COOKIE);
+    expect(metadata!.routes[0].params![0].name).toBe('session_id');
+    expect(metadata!.routes[0].params![0].isRequired).toBe(false);
+  });
+
+  /**
+   * @source docs/api/decorators.md#cookie-required
+   */
+  it('should define @Cookie decorator with required option', () => {
+    // From docs: @Cookie('session_id', { required: true }) - required
+    @Controller('/api')
+    class AuthController extends BaseController {
+      @Get('/protected')
+      async protectedRoute(@Cookie('session_id', { required: true }) sessionId: string) {
+        return { sessionId };
+      }
+    }
+
+    expect(AuthController).toBeDefined();
+    const metadata = getControllerMetadata(AuthController);
+    expect(metadata!.routes[0].params![0].isRequired).toBe(true);
+  });
+
+  /**
+   * @source docs/api/decorators.md#cookie-with-validation
+   */
+  it('should define @Cookie decorator with validation schema', () => {
+    // From docs: @Cookie('session_id', schema) - optional with validation
+    const uuidSchema = type('string');
+
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/session')
+      async getSession(@Cookie('session_id', uuidSchema) sessionId?: string) {
+        return { sessionId };
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+    const metadata = getControllerMetadata(ApiController);
+    expect(metadata!.routes[0].params![0].schema).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/decorators.md#cookie-combined-example
+   */
+  it('should combine @Cookie with other parameter decorators', () => {
+    // From docs: combining @Cookie, @Param, @Header, @Query
+    @Controller('/api')
+    class CombinedController extends BaseController {
+      @Get('/users/:id')
+      async getUser(
+        @Param('id') id: string,
+        @Query('fields') fields?: string,
+        @Header('Authorization') auth?: string,
+        @Cookie('session') session?: string,
+      ) {
+        return {
+          id, fields, auth, session, 
+        };
+      }
+    }
+
+    expect(CombinedController).toBeDefined();
+    const metadata = getControllerMetadata(CombinedController);
+    expect(metadata!.routes[0].params!.length).toBe(4);
+  });
+});
+
+describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
+  /**
+   * @source docs/api/decorators.md#req-onebunrequest
+   */
+  it('should define @Req() handler with OneBunRequest type', () => {
+    // From docs: @Req() with OneBunRequest type
+    // OneBunRequest extends Request with .cookies (CookieMap) and .params
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/raw')
+      async handleRaw(@Req() req: OneBunRequest) {
+        const url = new URL(req.url);
+
+        // req.cookies is CookieMap, req.params is available from routes API
+        return { url: url.pathname };
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+    const metadata = getControllerMetadata(ApiController);
+    expect(metadata!.routes[0].params![0].type).toBe(ParamType.REQUEST);
+  });
+
+  /**
+   * @source docs/api/decorators.md#req-cookies-access
+   */
+  it('should define handler accessing cookies via req.cookies', () => {
+    // From docs: reading cookies through @Req()
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/session')
+      async session(@Req() req: OneBunRequest) {
+        // Access cookies via CookieMap
+        const session = req.cookies.get('session');
+
+        return { session };
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+  });
+});
+
+describe('OneBunRequest and OneBunResponse Types (docs/api/decorators.md)', () => {
+  /**
+   * @source docs/api/decorators.md#onebunrequest-type
+   */
+  it('should use OneBunRequest as type alias for BunRequest', () => {
+    // OneBunRequest is an alias for BunRequest
+    // It extends standard Request with .cookies and .params
+    const _check: OneBunRequest extends Request ? true : false = true;
+    expect(_check).toBe(true);
+  });
+
+  /**
+   * @source docs/api/decorators.md#onebunresponse-type
+   */
+  it('should use OneBunResponse as type alias for Response', () => {
+    // OneBunResponse is an alias for Response
+    const response: OneBunResponse = new Response('ok');
+    expect(response).toBeInstanceOf(Response);
+  });
+});
+
+describe('Custom Response Headers (docs/api/controllers.md)', () => {
+  /**
+   * @source docs/api/controllers.md#custom-response-headers
+   */
+  it('should define handler returning Response with custom headers', () => {
+    // From docs: returning Response with custom headers
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/download')
+      async download() {
+        return new Response(JSON.stringify({ data: 'file content' }), {
+          status: 200,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/json',
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'X-Custom-Header': 'custom-value',
+          },
+        });
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#set-cookie-header
+   */
+  it('should define handler returning Response with Set-Cookie header', () => {
+    // From docs: setting cookies via Set-Cookie header
+    @Controller('/api')
+    class AuthController extends BaseController {
+      @Post('/login')
+       
+      async login(@Body() _body: unknown) {
+        const headers = new Headers();
+        headers.set('Content-Type', 'application/json');
+        headers.append('Set-Cookie', 'session=abc123; Path=/; HttpOnly');
+        headers.append('Set-Cookie', 'theme=dark; Path=/');
+
+        return new Response(JSON.stringify({ loggedIn: true }), {
+          status: 200,
+          headers,
+        });
+      }
+    }
+
+    expect(AuthController).toBeDefined();
+  });
+});
+
+describe('Working with Cookies (docs/api/controllers.md)', () => {
+  /**
+   * @source docs/api/controllers.md#reading-cookies-via-decorator
+   */
+  it('should define handler reading cookies via @Cookie decorator', () => {
+    // From docs: reading cookies via @Cookie('name')
+    @Controller('/api')
+    class PrefsController extends BaseController {
+      @Get('/preferences')
+      async getPrefs(
+        @Cookie('theme') theme?: string,
+        @Cookie('lang') lang?: string,
+      ) {
+        return {
+          theme: theme ?? 'light',
+          lang: lang ?? 'en',
+        };
+      }
+    }
+
+    expect(PrefsController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#reading-cookies-via-req
+   */
+  it('should define handler reading cookies via req.cookies', () => {
+    // From docs: reading cookies through @Req() with req.cookies.get()
+    @Controller('/api')
+    class ApiController extends BaseController {
+      @Get('/session')
+      async session(@Req() req: OneBunRequest) {
+        const session = req.cookies.get('session');
+
+        return { session };
+      }
+    }
+
+    expect(ApiController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#setting-cookies-via-req
+   */
+  it('should define handler setting cookies via req.cookies', () => {
+    // From docs: setting cookies using req.cookies.set()
+    @Controller('/api')
+    class AuthController extends BaseController {
+      @Post('/login')
+       
+      async login(@Req() req: OneBunRequest, @Body() _body: unknown) {
+        // Set cookie via CookieMap
+        req.cookies.set('session', 'new-session-id', {
+          httpOnly: true,
+          path: '/',
+          maxAge: 3600,
+        });
+
+        return { loggedIn: true };
+      }
+    }
+
+    expect(AuthController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#deleting-cookies-via-req
+   */
+  it('should define handler deleting cookies via req.cookies', () => {
+    // From docs: deleting cookies using req.cookies.delete()
+    @Controller('/api')
+    class AuthController extends BaseController {
+      @Post('/logout')
+      async logout(@Req() req: OneBunRequest) {
+        req.cookies.delete('session');
+
+        return { loggedOut: true };
+      }
+    }
+
+    expect(AuthController).toBeDefined();
   });
 });

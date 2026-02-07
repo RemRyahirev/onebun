@@ -13,26 +13,76 @@ OneBun provides a unified queue system for message-based communication. It suppo
 - Message guards for authorization
 - Auto and manual acknowledgment modes
 
-## Quick Start
+## Setup
+
+The queue system **auto-enables** when any controller in your application uses queue decorators (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`). No explicit configuration is required for basic usage with the in-memory adapter.
+
+### Application Configuration
+
+Configure the queue backend via the `queue` option in `OneBunApplication`:
 
 ```typescript
-import { 
-  Subscribe, 
-  Cron, 
-  Message, 
-  CronExpression,
-  OnQueueReady 
-} from '@onebun/core';
+import { OneBunApplication } from '@onebun/core';
+import { AppModule } from './app.module';
 
-class OrderService {
-  @OnQueueReady()
-  onReady() {
-    console.log('Queue connected');
-  }
+// Default: in-memory adapter, auto-detected
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+});
 
+// Explicit: Redis adapter
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  queue: {
+    adapter: 'redis',
+    redis: {
+      useSharedProvider: true,   // Use shared Redis connection (recommended)
+      prefix: 'myapp:queue:',   // Key prefix for Redis keys
+    },
+  },
+});
+
+// Explicit: Redis with dedicated connection
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  queue: {
+    adapter: 'redis',
+    redis: {
+      useSharedProvider: false,
+      url: 'redis://localhost:6379',
+      prefix: 'myapp:queue:',
+    },
+  },
+});
+```
+
+For NATS/JetStream, pass a custom adapter instance (see [Queue Adapters](#queue-adapters) below).
+
+### QueueApplicationOptions
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | `boolean` | auto | Enable queue system (auto-enabled if handlers detected) |
+| `adapter` | `'memory' \| 'redis'` | `'memory'` | Queue adapter type |
+| `redis.useSharedProvider` | `boolean` | `true` | Use shared Redis connection pool |
+| `redis.url` | `string` | - | Redis URL (required if `useSharedProvider: false`) |
+| `redis.prefix` | `string` | `'onebun:queue:'` | Key prefix for Redis keys |
+
+### Registering Controllers with Queue Decorators
+
+Classes that use `@Subscribe`, `@Cron`, `@Interval`, or `@Timeout` must be registered in a module's `controllers` array. The framework automatically discovers and registers queue handlers from all controllers during startup via `initializeQueue()`.
+
+```typescript
+import { Module, Controller, BaseController } from '@onebun/core';
+import { Subscribe, Cron, CronExpression, Message } from '@onebun/core';
+
+// Controller with queue decorators
+@Controller('/orders')
+class OrderProcessor extends BaseController {
   @Subscribe('orders.created')
-  async handleOrderCreated(message: Message<{ orderId: number }>) {
-    console.log('New order:', message.data.orderId);
+  async handleOrderCreated(message: Message<{ orderId: string }>) {
+    this.logger.info('Processing order', { orderId: message.data.orderId });
+    // Process the order...
   }
 
   @Cron(CronExpression.EVERY_HOUR, { pattern: 'cleanup.expired' })
@@ -40,6 +90,138 @@ class OrderService {
     return { timestamp: Date.now() };
   }
 }
+
+// Register in module's controllers array
+@Module({
+  controllers: [OrderProcessor],
+})
+class OrderModule {}
+```
+
+::: warning
+Queue handlers are only discovered in classes registered in the `controllers` array of a `@Module`. Classes in `providers` will **not** be scanned for queue decorators.
+:::
+
+<llm-only>
+
+**Technical details for AI agents:**
+- Queue auto-enables by checking all **controllers** (not providers) for `hasQueueDecorators()` which inspects `@Subscribe`, `@Cron`, `@Interval`, `@Timeout` metadata
+- `initializeQueue(controllers)` is called during `app.start()` after `ensureModule().setup()` — it receives `getControllers()` result
+- The adapter is created, connected, then `QueueService` is initialized and handlers are registered via `registerService(instance, class)` for each controller with queue decorators
+- `registerService()` processes: subscribe handlers → cron jobs → interval jobs → timeout jobs → lifecycle handlers
+- Message guards (`@UseMessageGuards`) are applied as wrappers around the actual handler
+- The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `SKIP`, `QUEUE`, `REPLACE`
+- Queue shutdown sequence: `queueService.stop()` → `queueAdapter.disconnect()`
+
+**QueueApplicationOptions interface:**
+```typescript
+interface QueueApplicationOptions {
+  enabled?: boolean;
+  adapter?: 'memory' | 'redis';
+  redis?: {
+    useSharedProvider?: boolean;
+    url?: string;
+    prefix?: string;
+  };
+}
+```
+
+</llm-only>
+
+### Error Handling in Handlers
+
+```typescript
+@Controller('/orders')
+class OrderProcessor extends BaseController {
+  @Subscribe('orders.created', {
+    ackMode: 'manual',
+    retry: { attempts: 3, backoff: 'exponential', delay: 1000 },
+  })
+  async handleOrder(message: Message<{ orderId: string }>) {
+    try {
+      await this.processOrder(message.data);
+      await message.ack();  // Acknowledge success
+    } catch (error) {
+      this.logger.error('Order processing failed', error);
+
+      if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
+        this.logger.error('Max retries reached, moving to DLQ', {
+          orderId: message.data.orderId,
+        });
+        await message.ack();  // Remove from queue
+      } else {
+        await message.nack(true);  // Requeue for retry
+      }
+    }
+  }
+}
+```
+
+## Quick Start
+
+```typescript
+import {
+  Module,
+  Service,
+  BaseService,
+  OneBunApplication,
+  Subscribe,
+  Cron,
+  Interval,
+  Message,
+  CronExpression,
+  OnQueueReady,
+  QueueService,
+} from '@onebun/core';
+
+// Service with queue handlers
+@Service()
+class EventProcessor extends BaseService {
+  constructor(private queueService: QueueService) {
+    super();
+  }
+
+  @OnQueueReady()
+  onReady() {
+    this.logger.info('Queue connected and ready');
+  }
+
+  // Subscribe to messages
+  @Subscribe('orders.created')
+  async handleOrderCreated(message: Message<{ orderId: number }>) {
+    this.logger.info('New order:', { orderId: message.data.orderId });
+  }
+
+  // Scheduled job: every hour
+  @Cron(CronExpression.EVERY_HOUR, { pattern: 'cleanup.expired' })
+  getCleanupData() {
+    return { timestamp: Date.now() };
+  }
+
+  // Interval job: every 30 seconds
+  @Interval(30000, { pattern: 'metrics.collect' })
+  getMetricsData() {
+    return { cpu: process.cpuUsage() };
+  }
+
+  // Publish messages programmatically
+  async createOrder(data: { userId: string }) {
+    await this.queueService.publish('orders.created', {
+      orderId: Date.now(),
+      userId: data.userId,
+    });
+  }
+}
+
+// Module
+@Module({
+  providers: [EventProcessor],
+})
+class AppModule {}
+
+// Application
+const app = new OneBunApplication(AppModule, { port: 3000 });
+await app.start();
 ```
 
 ## Subscribe Decorator

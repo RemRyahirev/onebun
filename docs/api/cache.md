@@ -51,9 +51,101 @@ CacheModule.forRoot({
     port: parseInt(process.env.REDIS_PORT || '6379'),
     password: process.env.REDIS_PASSWORD,
     database: 0,
+    connectTimeout: 5000,     // Connection timeout in ms
+    keyPrefix: 'myapp:cache:', // Key prefix for all cache keys
   },
 })
 ```
+
+### Environment Variable Configuration
+
+CacheService auto-initializes from environment variables. When you import `CacheModule` **without** `.forRoot()`, it reads all configuration from env vars — no explicit options needed.
+
+```bash
+# Cache type: 'memory' or 'redis'
+CACHE_TYPE=redis
+
+# Common options
+CACHE_DEFAULT_TTL=300000        # Default TTL in ms (default: 0 = no expiry)
+CACHE_MAX_SIZE=1000             # Max items for in-memory cache
+CACHE_CLEANUP_INTERVAL=60000   # Cleanup interval in ms
+
+# Redis options (only used when CACHE_TYPE=redis)
+CACHE_REDIS_HOST=localhost
+CACHE_REDIS_PORT=6379
+CACHE_REDIS_PASSWORD=secret
+CACHE_REDIS_DATABASE=0
+CACHE_REDIS_CONNECT_TIMEOUT=5000
+CACHE_REDIS_KEY_PREFIX=myapp:cache:
+```
+
+Import `CacheModule` without `.forRoot()` — configuration comes entirely from env vars:
+
+```typescript
+import { Module, Service, BaseService } from '@onebun/core';
+import { CacheModule, CacheService } from '@onebun/cache';
+
+// CacheModule without .forRoot() — auto-configures from env vars
+@Module({
+  imports: [CacheModule],
+  providers: [MyService],
+})
+class AppModule {}
+
+@Service()
+class MyService extends BaseService {
+  constructor(private cacheService: CacheService) {
+    super();
+  }
+}
+```
+
+::: tip
+`CacheModule` must always be imported — it registers `CacheService` in the DI container. The difference is only whether you use `.forRoot(options)` (explicit config) or plain `CacheModule` (env-only config).
+:::
+
+### Configuration Priority
+
+Configuration is resolved in this order (first wins):
+
+1. `CacheModule.forRoot()` options (explicit module configuration)
+2. Environment variables (`CACHE_*`)
+3. Default values (in-memory, no TTL)
+
+### Custom Environment Prefix
+
+Use `envPrefix` to avoid collisions when running multiple cache instances:
+
+```typescript
+CacheModule.forRoot({
+  type: CacheType.REDIS,
+  envPrefix: 'ORDERS_CACHE',  // Uses ORDERS_CACHE_REDIS_HOST, etc.
+})
+```
+
+### Redis Error Handling
+
+If Redis connection fails during auto-initialization, CacheService **automatically falls back to in-memory cache** and logs a warning:
+
+```typescript
+// If CACHE_TYPE=redis but Redis is unreachable:
+// WARN: Failed to auto-initialize cache from environment
+// INFO: In-memory cache initialized (fallback)
+```
+
+<llm-only>
+
+**Technical details for AI agents:**
+- `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`)
+- `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)
+- Auto-init flow: check `CacheModule.forRoot()` options → load env vars → merge (module > env > defaults) → create cache instance
+- If Redis init fails, catches error and falls back to `createInMemoryCache()` — the service always initializes
+- Redis cache uses `createRedisCache(options)` which creates a Bun-native Redis client
+- In-memory cache uses `InMemoryCache` with LRU eviction, TTL, and periodic cleanup
+- `CacheService` implements `getStats()` returning `{ hits, misses, entries, hitRate }`
+- Shared Redis via `useSharedClient: true` in `createRedisCache()` reuses `SharedRedisProvider`
+
+</llm-only>
 
 ### Memory Configuration
 
@@ -558,3 +650,130 @@ export class ProductController extends BaseController {
 })
 export class ProductModule {}
 ```
+
+## Advanced Patterns
+
+<llm-only>
+
+### Cache Failover (Redis → In-Memory)
+
+OneBun does not have built-in automatic failover between cache backends at runtime. However, you can implement a wrapper service that catches Redis errors and falls back to an in-memory cache:
+
+```typescript
+import { Service, BaseService } from '@onebun/core';
+import {
+  CacheService,
+  createInMemoryCache,
+  createRedisCache,
+  type InMemoryCache,
+  type RedisCache,
+  type CacheSetOptions,
+} from '@onebun/cache';
+
+@Service()
+export class ResilientCacheService extends BaseService {
+  private primaryCache: RedisCache | null = null;
+  private fallbackCache: InMemoryCache;
+  private usingFallback = false;
+
+  constructor() {
+    super();
+    // Always have an in-memory fallback ready
+    this.fallbackCache = createInMemoryCache({
+      defaultTtl: 300000,
+      maxSize: 10000,
+    });
+  }
+
+  async onModuleInit(): Promise<void> {
+    try {
+      this.primaryCache = createRedisCache({
+        host: process.env.REDIS_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_PORT || '6379'),
+        defaultTtl: 300000,
+      });
+      await this.primaryCache.connect();
+      this.logger.info('Redis cache connected (primary)');
+    } catch (error) {
+      this.logger.warn('Redis unavailable, using in-memory fallback', error);
+      this.usingFallback = true;
+    }
+  }
+
+  async get<T>(key: string): Promise<T | undefined> {
+    if (this.usingFallback || !this.primaryCache) {
+      return this.fallbackCache.get<T>(key);
+    }
+
+    try {
+      return await this.primaryCache.get<T>(key);
+    } catch (error) {
+      this.logger.warn('Redis get failed, falling back to memory', { key });
+      this.switchToFallback();
+      return this.fallbackCache.get<T>(key);
+    }
+  }
+
+  async set<T>(key: string, value: T, options?: CacheSetOptions): Promise<void> {
+    // Always set in fallback for immediate availability
+    await this.fallbackCache.set(key, value, options);
+
+    if (!this.usingFallback && this.primaryCache) {
+      try {
+        await this.primaryCache.set(key, value, options);
+      } catch (error) {
+        this.logger.warn('Redis set failed, using memory only', { key });
+        this.switchToFallback();
+      }
+    }
+  }
+
+  async delete(key: string): Promise<boolean> {
+    this.fallbackCache.delete(key);
+
+    if (!this.usingFallback && this.primaryCache) {
+      try {
+        return await this.primaryCache.delete(key);
+      } catch {
+        this.switchToFallback();
+      }
+    }
+
+    return true;
+  }
+
+  private switchToFallback(): void {
+    if (!this.usingFallback) {
+      this.usingFallback = true;
+      this.logger.warn('Switched to in-memory cache fallback');
+
+      // Try to reconnect periodically
+      setTimeout(() => this.tryReconnect(), 30000);
+    }
+  }
+
+  private async tryReconnect(): Promise<void> {
+    try {
+      this.primaryCache = createRedisCache({
+        host: process.env.REDIS_HOST || 'localhost',
+        port: parseInt(process.env.REDIS_PORT || '6379'),
+        defaultTtl: 300000,
+      });
+      await this.primaryCache.connect();
+      this.usingFallback = false;
+      this.logger.info('Redis cache reconnected');
+    } catch {
+      this.logger.warn('Redis reconnection failed, retrying in 30s');
+      setTimeout(() => this.tryReconnect(), 30000);
+    }
+  }
+}
+```
+
+**Important considerations:**
+- This pattern provides availability over consistency — the in-memory cache is local to each process instance
+- When running multiple service instances, in-memory fallback means each instance has its own cache (no sharing)
+- After Redis recovery, the in-memory cache data is NOT synchronized back to Redis
+- Consider using a health check to detect Redis availability and alert operations teams
+
+</llm-only>

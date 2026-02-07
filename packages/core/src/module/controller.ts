@@ -1,5 +1,9 @@
 import type { IConfig, OneBunAppConfig } from './config.interface';
-import type { SseEvent, SseOptions } from '../types';
+import type {
+  OneBunRequest,
+  SseEvent,
+  SseOptions,
+} from '../types';
 import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -101,14 +105,14 @@ export class Controller {
   /**
    * Check if request has JSON content type
    */
-  protected isJson(req: Request): boolean {
+  protected isJson(req: OneBunRequest | Request): boolean {
     return req.headers.get('content-type')?.includes('application/json') ?? false;
   }
 
   /**
    * Parse JSON from request body
    */
-  protected async parseJson<T = unknown>(req: Request): Promise<T> {
+  protected async parseJson<T = unknown>(req: OneBunRequest | Request): Promise<T> {
     return (await req.json()) as T;
   }
 

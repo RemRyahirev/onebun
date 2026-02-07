@@ -47,7 +47,6 @@ describe('Validation Schemas', () => {
     test('should create an optional schema that accepts undefined', () => {
       const schema = optionalSchema(stringSchema());
       expect(schema('test')).toBe('test');
-      // @ts-expect-error - Testing that optional schema accepts undefined
       expect(schema(undefined)).toBe(undefined);
       const invalidResult = schema(123);
       expect(invalidResult instanceof type.errors).toBe(true);
@@ -56,7 +55,6 @@ describe('Validation Schemas', () => {
     test('should work with number schema', () => {
       const schema = optionalSchema(numberSchema());
       expect(schema(42)).toBe(42);
-      // @ts-expect-error - Testing that optional schema accepts undefined
       expect(schema(undefined)).toBe(undefined);
       const invalidResult = schema('test');
       expect(invalidResult instanceof type.errors).toBe(true);
