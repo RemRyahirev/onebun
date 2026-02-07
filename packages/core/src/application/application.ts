@@ -30,6 +30,7 @@ import {
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
+import { OneBunFile, validateFile } from '../file/onebun-file';
 import {
   NotInitializedConfig,
   type IConfig,
@@ -912,6 +913,43 @@ export class OneBunApplication {
     }
 
     /**
+     * Extract an OneBunFile from a JSON value.
+     * Supports two formats:
+     * - String: raw base64 data
+     * - Object: { data: string, filename?: string, mimeType?: string }
+     */
+    function extractFileFromJsonValue(value: unknown): OneBunFile | undefined {
+      if (typeof value === 'string' && value.length > 0) {
+        return OneBunFile.fromBase64(value);
+      }
+
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const obj = value as Record<string, unknown>;
+        if (typeof obj.data === 'string' && obj.data.length > 0) {
+          return OneBunFile.fromBase64(
+            obj.data,
+            typeof obj.filename === 'string' ? obj.filename : undefined,
+            typeof obj.mimeType === 'string' ? obj.mimeType : undefined,
+          );
+        }
+      }
+
+      return undefined;
+    }
+
+    /**
+     * Extract a file from a JSON body by field name
+     */
+    function extractFileFromJson(
+      jsonBody: Record<string, unknown>,
+      fieldName: string,
+    ): OneBunFile | undefined {
+      const fieldValue = jsonBody[fieldName];
+
+      return extractFileFromJsonValue(fieldValue);
+    }
+
+    /**
      * Execute route handler with parameter injection and validation.
      * Path parameters come from BunRequest.params (populated by Bun routes API).
      * Query parameters are extracted separately from the URL.
@@ -951,6 +989,52 @@ export class OneBunApplication {
       // Sort params by index to ensure correct order
       const sortedParams = [...(route.params || [])].sort((a, b) => a.index - b.index);
 
+      // Pre-parse body for file upload params (FormData or JSON, cached for all params)
+      const needsFileData = sortedParams.some(
+        (p) =>
+          p.type === ParamType.FILE ||
+          p.type === ParamType.FILES ||
+          p.type === ParamType.FORM_FIELD,
+      );
+
+      // Validate that @Body and file decorators are not used on the same method
+      if (needsFileData) {
+        const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
+        if (hasBody) {
+          throw new Error(
+            'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
+            'Both consume the request body. Use file decorators for multipart/base64 uploads.',
+          );
+        }
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let formData: any = null;
+      let jsonBody: Record<string, unknown> | null = null;
+      let isMultipart = false;
+
+      if (needsFileData) {
+        const contentType = req.headers.get('content-type') || '';
+
+        if (contentType.includes('multipart/form-data')) {
+          isMultipart = true;
+          try {
+            formData = await req.formData();
+          } catch {
+            formData = null;
+          }
+        } else if (contentType.includes('application/json')) {
+          try {
+            const parsed = await req.json();
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              jsonBody = parsed as Record<string, unknown>;
+            }
+          } catch {
+            jsonBody = null;
+          }
+        }
+      }
+
       for (const param of sortedParams) {
         switch (param.type) {
           case ParamType.PATH:
@@ -989,12 +1073,116 @@ export class OneBunApplication {
             args[param.index] = undefined;
             break;
 
+          case ParamType.FILE: {
+            let file: OneBunFile | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (entry instanceof File) {
+                file = new OneBunFile(entry);
+              }
+            } else if (jsonBody && param.name) {
+              file = extractFileFromJson(jsonBody, param.name);
+            }
+
+            if (file && param.fileOptions) {
+              validateFile(file, param.fileOptions, param.name);
+            }
+
+            args[param.index] = file;
+            break;
+          }
+
+          case ParamType.FILES: {
+            let files: OneBunFile[] = [];
+
+            if (isMultipart && formData) {
+              if (param.name) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const entries: any[] = formData.getAll(param.name);
+                files = entries
+                  .filter((entry: unknown): entry is File => entry instanceof File)
+                  .map((f: File) => new OneBunFile(f));
+              } else {
+                // Get all files from all fields
+                for (const [, value] of formData.entries()) {
+                  if (value instanceof File) {
+                    files.push(new OneBunFile(value));
+                  }
+                }
+              }
+            } else if (jsonBody) {
+              if (param.name) {
+                const fieldValue = jsonBody[param.name];
+                if (Array.isArray(fieldValue)) {
+                  files = fieldValue
+                    .map((item) => extractFileFromJsonValue(item))
+                    .filter((f): f is OneBunFile => f !== undefined);
+                }
+              } else {
+                // Extract all file-like values from JSON
+                for (const [, value] of Object.entries(jsonBody)) {
+                  const file = extractFileFromJsonValue(value);
+                  if (file) {
+                    files.push(file);
+                  }
+                }
+              }
+            }
+
+            // Validate maxCount
+            if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
+              throw new Error(
+                `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
+              );
+            }
+
+            // Validate each file
+            if (param.fileOptions) {
+              for (const file of files) {
+                validateFile(file, param.fileOptions, param.name);
+              }
+            }
+
+            args[param.index] = files;
+            break;
+          }
+
+          case ParamType.FORM_FIELD: {
+            let value: string | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (typeof entry === 'string') {
+                value = entry;
+              }
+            } else if (jsonBody && param.name) {
+              const jsonValue = jsonBody[param.name];
+              if (jsonValue !== undefined && jsonValue !== null) {
+                value = String(jsonValue);
+              }
+            }
+
+            args[param.index] = value;
+            break;
+          }
+
           default:
             args[param.index] = undefined;
         }
 
         // Validate parameter if required
         if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
+          throw new Error(`Required parameter ${param.name || param.index} is missing`);
+        }
+
+        // For FILES type, also check for empty array when required
+        if (
+          param.isRequired &&
+          param.type === ParamType.FILES &&
+          Array.isArray(args[param.index]) &&
+          (args[param.index] as unknown[]).length === 0
+        ) {
           throw new Error(`Required parameter ${param.name || param.index} is missing`);
         }
 

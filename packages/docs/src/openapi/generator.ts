@@ -96,6 +96,12 @@ function routeToOperation(
 
   // Process parameters
   if (route.params) {
+    // Check if any file upload params exist (for multipart/form-data schema)
+    const fileParams = route.params.filter(
+      (p) => p.type === 'file' || p.type === 'files' || p.type === 'formField',
+    );
+    const hasFileParams = fileParams.length > 0;
+
     for (const param of route.params) {
       if (param.type === 'path' || param.type === 'query' || param.type === 'header') {
         const parameter: Parameter = {
@@ -120,6 +126,50 @@ function routeToOperation(
           },
         };
       }
+    }
+
+    // Generate multipart/form-data schema for file upload endpoints
+    if (hasFileParams) {
+      const properties: Record<string, Record<string, unknown>> = {};
+      const required: string[] = [];
+
+      for (const param of fileParams) {
+        const fieldName = param.name || 'file';
+
+        if (param.type === 'file') {
+          properties[fieldName] = { type: 'string', format: 'binary' };
+        } else if (param.type === 'files') {
+          properties[fieldName] = {
+            type: 'array',
+            items: { type: 'string', format: 'binary' },
+          };
+        } else if (param.type === 'formField') {
+          properties[fieldName] = { type: 'string' };
+        }
+
+        if (param.isRequired) {
+          required.push(fieldName);
+        }
+      }
+
+      const schema: Record<string, unknown> = {
+        type: 'object',
+        properties,
+      };
+
+      if (required.length > 0) {
+        schema.required = required;
+      }
+
+      operation.requestBody = {
+        required: required.length > 0,
+        content: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'multipart/form-data': {
+            schema,
+          },
+        },
+      };
     }
   }
 

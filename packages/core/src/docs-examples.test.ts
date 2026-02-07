@@ -41,6 +41,85 @@ import type {
 } from './types';
 import type { ServerWebSocket } from 'bun';
 
+import {
+  Controller,
+  Get,
+  Post,
+  Put,
+  Delete,
+  Patch,
+  Param,
+  Query,
+  Body,
+  Header,
+  Req,
+  Cookie,
+  Module,
+  Service,
+  BaseService,
+  BaseController,
+  UseMiddleware,
+  getServiceTag,
+  getControllerMetadata,
+  HttpStatusCode,
+  ParamType,
+  NotFoundError,
+  InternalServerError,
+  OneBunBaseError,
+  Env,
+  validate,
+  validateOrThrow,
+  MultiServiceApplication,
+  OneBunApplication,
+  createServiceDefinition,
+  createServiceClient,
+  WebSocketGateway,
+  BaseWebSocketGateway,
+  OnConnect,
+  OnDisconnect,
+  OnJoinRoom,
+  OnLeaveRoom,
+  OnMessage,
+  Client,
+  Socket,
+  MessageData,
+  RoomName,
+  PatternParams,
+  WsServer,
+  UseWsGuards,
+  WsAuthGuard,
+  WsPermissionGuard,
+  WsAnyPermissionGuard,
+  createGuard,
+  createInMemoryWsStorage,
+  SharedRedisProvider,
+  Sse,
+  getSseMetadata,
+  formatSseEvent,
+  createSseStream,
+  createWsServiceDefinition,
+  createWsClient,
+  createNativeWsClient,
+  matchPattern,
+  makeMockLoggerLayer,
+  hasOnModuleInit,
+  hasOnApplicationInit,
+  hasOnModuleDestroy,
+  hasBeforeApplicationDestroy,
+  hasOnApplicationDestroy,
+  callOnModuleInit,
+  callOnApplicationInit,
+  callOnModuleDestroy,
+  callBeforeApplicationDestroy,
+  callOnApplicationDestroy,
+  UploadedFile,
+  UploadedFiles,
+  FormField,
+  OneBunFile,
+  MimeType,
+  matchMimeType,
+} from './';
+
 
 /**
  * @source docs/index.md#minimal-working-example
@@ -3421,79 +3500,6 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
 // SSE (Server-Sent Events) Documentation Tests
 // ============================================================================
 
-import { Sse, getSseMetadata } from './decorators/decorators';
-import { formatSseEvent, createSseStream } from './module/controller';
-
-import {
-  Controller,
-  Get,
-  Post,
-  Put,
-  Delete,
-  Patch,
-  Param,
-  Query,
-  Body,
-  Header,
-  Req,
-  Cookie,
-  Module,
-  Service,
-  BaseService,
-  BaseController,
-  UseMiddleware,
-  getServiceTag,
-  getControllerMetadata,
-  HttpStatusCode,
-  ParamType,
-  NotFoundError,
-  InternalServerError,
-  OneBunBaseError,
-  Env,
-  validate,
-  validateOrThrow,
-  MultiServiceApplication,
-  OneBunApplication,
-  createServiceDefinition,
-  createServiceClient,
-  WebSocketGateway,
-  BaseWebSocketGateway,
-  OnConnect,
-  OnDisconnect,
-  OnJoinRoom,
-  OnLeaveRoom,
-  OnMessage,
-  Client,
-  Socket,
-  MessageData,
-  RoomName,
-  PatternParams,
-  WsServer,
-  UseWsGuards,
-  WsAuthGuard,
-  WsPermissionGuard,
-  WsAnyPermissionGuard,
-  createGuard,
-  createInMemoryWsStorage,
-  SharedRedisProvider,
-  createWsServiceDefinition,
-  createWsClient,
-  createNativeWsClient,
-  matchPattern,
-  makeMockLoggerLayer,
-  hasOnModuleInit,
-  hasOnApplicationInit,
-  hasOnModuleDestroy,
-  hasBeforeApplicationDestroy,
-  hasOnApplicationDestroy,
-  callOnModuleInit,
-  callOnApplicationInit,
-  callOnModuleDestroy,
-  callBeforeApplicationDestroy,
-  callOnApplicationDestroy,
-} from './';
-
-
 describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)', () => {
   describe('SseEvent Type (docs/api/controllers.md)', () => {
     /**
@@ -4126,5 +4132,299 @@ describe('Working with Cookies (docs/api/controllers.md)', () => {
     }
 
     expect(AuthController).toBeDefined();
+  });
+});
+
+// ============================================================================
+// File Upload Documentation Tests
+// ============================================================================
+
+describe('File Upload API Documentation (docs/api/decorators.md)', () => {
+  /**
+   * @source docs/api/decorators.md#uploadedfile
+   */
+  describe('Single File Upload (docs/api/decorators.md#uploadedfile)', () => {
+    it('should define controller with @UploadedFile decorator', () => {
+      @Controller('/api/files')
+      class FileController extends BaseController {
+        @Post('/avatar')
+        async uploadAvatar(
+          @UploadedFile('avatar', {
+            maxSize: 5 * 1024 * 1024,
+            mimeTypes: [MimeType.ANY_IMAGE],
+          }) file: OneBunFile,
+        ): Promise<Response> {
+          await file.writeTo(`./uploads/${file.name}`);
+
+          return this.success({ filename: file.name, size: file.size });
+        }
+      }
+
+      expect(FileController).toBeDefined();
+      const metadata = getControllerMetadata(FileController);
+      expect(metadata).toBeDefined();
+      expect(metadata!.routes).toHaveLength(1);
+
+      const route = metadata!.routes[0];
+      expect(route.params).toBeDefined();
+      expect(route.params!.length).toBe(1);
+      expect(route.params![0].type).toBe(ParamType.FILE);
+      expect(route.params![0].name).toBe('avatar');
+      expect(route.params![0].isRequired).toBe(true);
+      expect(route.params![0].fileOptions).toBeDefined();
+      expect(route.params![0].fileOptions!.maxSize).toBe(5 * 1024 * 1024);
+      expect(route.params![0].fileOptions!.mimeTypes).toEqual([MimeType.ANY_IMAGE]);
+    });
+  });
+
+  /**
+   * @source docs/api/decorators.md#uploadedfiles
+   */
+  describe('Multiple File Upload (docs/api/decorators.md#uploadedfiles)', () => {
+    it('should define controller with @UploadedFiles decorator', () => {
+      @Controller('/api/files')
+      class FileController extends BaseController {
+        @Post('/documents')
+        async uploadDocs(
+          @UploadedFiles('docs', { maxCount: 10 }) files: OneBunFile[],
+        ): Promise<Response> {
+          for (const file of files) {
+            await file.writeTo(`./uploads/${file.name}`);
+          }
+
+          return this.success({ count: files.length });
+        }
+      }
+
+      expect(FileController).toBeDefined();
+      const metadata = getControllerMetadata(FileController);
+      expect(metadata).toBeDefined();
+
+      const route = metadata!.routes[0];
+      expect(route.params).toBeDefined();
+      expect(route.params![0].type).toBe(ParamType.FILES);
+      expect(route.params![0].name).toBe('docs');
+      expect(route.params![0].fileOptions!.maxCount).toBe(10);
+    });
+
+    it('should support @UploadedFiles without field name (all files)', () => {
+      @Controller('/api/files')
+      class FileController extends BaseController {
+        @Post('/batch')
+        async uploadBatch(
+          @UploadedFiles(undefined, { maxCount: 20 }) files: OneBunFile[],
+        ): Promise<Response> {
+          return this.success({ count: files.length });
+        }
+      }
+
+      expect(FileController).toBeDefined();
+      const metadata = getControllerMetadata(FileController);
+      const route = metadata!.routes[0];
+      expect(route.params![0].type).toBe(ParamType.FILES);
+      expect(route.params![0].name).toBe('');
+    });
+  });
+
+  /**
+   * @source docs/api/decorators.md#formfield
+   */
+  describe('Form Field (docs/api/decorators.md#formfield)', () => {
+    it('should define controller with @FormField decorator', () => {
+      @Controller('/api/files')
+      class FileController extends BaseController {
+        @Post('/profile')
+        async createProfile(
+          @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
+          @FormField('name', { required: true }) name: string,
+          @FormField('email') email: string,
+        ): Promise<Response> {
+          await avatar.writeTo(`./uploads/${avatar.name}`);
+
+          return this.success({ name, email, avatar: avatar.name });
+        }
+      }
+
+      expect(FileController).toBeDefined();
+      const metadata = getControllerMetadata(FileController);
+      const route = metadata!.routes[0];
+      expect(route.params).toBeDefined();
+      expect(route.params!.length).toBe(3);
+
+      // @UploadedFile
+      const fileParam = route.params!.find((p) => p.type === ParamType.FILE);
+      expect(fileParam).toBeDefined();
+      expect(fileParam!.name).toBe('avatar');
+
+      // @FormField (required)
+      const nameParam = route.params!.find((p) => p.name === 'name');
+      expect(nameParam).toBeDefined();
+      expect(nameParam!.type).toBe(ParamType.FORM_FIELD);
+      expect(nameParam!.isRequired).toBe(true);
+
+      // @FormField (optional)
+      const emailParam = route.params!.find((p) => p.name === 'email');
+      expect(emailParam).toBeDefined();
+      expect(emailParam!.type).toBe(ParamType.FORM_FIELD);
+      expect(emailParam!.isRequired).toBe(false);
+    });
+  });
+
+  /**
+   * @source docs/api/decorators.md#onebunfile
+   */
+  describe('OneBunFile Class (docs/api/decorators.md#onebunfile)', () => {
+    it('should create OneBunFile from File and support all methods', async () => {
+      const content = 'test file content';
+      const file = new File([content], 'test.txt', { type: 'text/plain' });
+      const oneBunFile = new OneBunFile(file);
+
+      expect(oneBunFile.name).toBe('test.txt');
+      expect(oneBunFile.size).toBe(content.length);
+      expect(oneBunFile.type).toStartWith('text/plain');
+
+      const base64 = await oneBunFile.toBase64();
+      expect(base64).toBe(btoa(content));
+
+      const buffer = await oneBunFile.toBuffer();
+      expect(buffer.toString()).toBe(content);
+
+      const blob = oneBunFile.toBlob();
+      expect(blob.size).toBe(content.length);
+    });
+
+    it('should create OneBunFile from base64', async () => {
+      const content = 'base64 content';
+      const base64 = btoa(content);
+      const file = OneBunFile.fromBase64(base64, 'decoded.txt', 'text/plain');
+
+      expect(file.name).toBe('decoded.txt');
+      expect(file.type).toStartWith('text/plain');
+
+      const roundTripped = await file.toBase64();
+      expect(roundTripped).toBe(base64);
+    });
+  });
+
+  /**
+   * @source docs/api/decorators.md#mimetype-enum
+   */
+  describe('MimeType Enum (docs/api/decorators.md#mimetype-enum)', () => {
+    it('should provide common MIME type constants', () => {
+      // Wildcards
+      expect(String(MimeType.ANY)).toBe('*/*');
+      expect(String(MimeType.ANY_IMAGE)).toBe('image/*');
+      expect(String(MimeType.ANY_VIDEO)).toBe('video/*');
+      expect(String(MimeType.ANY_AUDIO)).toBe('audio/*');
+
+      // Specific types
+      expect(String(MimeType.PNG)).toBe('image/png');
+      expect(String(MimeType.PDF)).toBe('application/pdf');
+      expect(String(MimeType.MP4)).toBe('video/mp4');
+
+      // Wildcard matching
+      expect(matchMimeType('image/png', MimeType.ANY_IMAGE)).toBe(true);
+      expect(matchMimeType('video/mp4', MimeType.ANY_IMAGE)).toBe(false);
+    });
+  });
+
+  /**
+   * @source docs/api/decorators.md#json-base64-upload-format
+   */
+  describe('JSON Base64 Upload (docs/api/decorators.md#json-base64-upload-format)', () => {
+    it('should parse full JSON base64 format', () => {
+      const base64 = btoa('png image data');
+      const file = OneBunFile.fromBase64(base64, 'photo.png', 'image/png');
+
+      expect(file.name).toBe('photo.png');
+      expect(file.type).toBe('image/png');
+    });
+
+    it('should parse data URI format', () => {
+      const base64 = btoa('svg data');
+      const dataUri = `data:image/svg+xml;base64,${base64}`;
+      const file = OneBunFile.fromBase64(dataUri, 'icon.svg');
+
+      expect(file.type).toBe('image/svg+xml');
+      expect(file.name).toBe('icon.svg');
+    });
+  });
+});
+
+describe('File Upload API Documentation (docs/api/controllers.md)', () => {
+  /**
+   * @source docs/api/controllers.md#single-file-upload
+   */
+  it('should define single file upload controller', () => {
+    @Controller('/api/files')
+    class FileController extends BaseController {
+      @Post('/avatar')
+      async uploadAvatar(
+        @UploadedFile('avatar', {
+          maxSize: 5 * 1024 * 1024,
+          mimeTypes: [MimeType.ANY_IMAGE],
+        }) file: OneBunFile,
+      ): Promise<Response> {
+        await file.writeTo(`./uploads/${file.name}`);
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const _base64 = await file.toBase64();
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const _buffer = await file.toBuffer();
+
+        return this.success({
+          filename: file.name,
+          size: file.size,
+          type: file.type,
+        });
+      }
+    }
+
+    expect(FileController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#multiple-file-upload
+   */
+  it('should define multiple file upload controller', () => {
+    @Controller('/api/files')
+    class FileController extends BaseController {
+      @Post('/documents')
+      async uploadDocuments(
+        @UploadedFiles('docs', {
+          maxCount: 10,
+          maxSize: 10 * 1024 * 1024,
+          mimeTypes: [MimeType.PDF, MimeType.DOCX],
+        }) files: OneBunFile[],
+      ): Promise<Response> {
+        for (const file of files) {
+          await file.writeTo(`./uploads/${file.name}`);
+        }
+
+        return this.success({ uploaded: files.length });
+      }
+    }
+
+    expect(FileController).toBeDefined();
+  });
+
+  /**
+   * @source docs/api/controllers.md#file-with-form-fields
+   */
+  it('should define file with form fields controller', () => {
+    @Controller('/api/files')
+    class FileController extends BaseController {
+      @Post('/profile')
+      async createProfile(
+        @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
+        @FormField('name', { required: true }) name: string,
+        @FormField('email') email: string,
+      ): Promise<Response> {
+        await avatar.writeTo(`./uploads/${avatar.name}`);
+
+        return this.success({ name, email, avatar: avatar.name });
+      }
+    }
+
+    expect(FileController).toBeDefined();
   });
 });

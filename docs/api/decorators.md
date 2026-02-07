@@ -83,6 +83,27 @@ return new Response(body, { headers: { 'X-Custom': 'value' } })
 // @Res() is deprecated — always return Response from handler
 ```
 
+**File Upload** (multipart/form-data or JSON+base64, auto-detected):
+```typescript
+import { UploadedFile, UploadedFiles, FormField, OneBunFile, MimeType } from '@onebun/core';
+
+@Post('/upload')
+async upload(
+  @UploadedFile('avatar', { maxSize: 5_000_000, mimeTypes: [MimeType.ANY_IMAGE] }) file: OneBunFile,
+  @UploadedFiles('docs', { maxCount: 10 }) docs: OneBunFile[],
+  @FormField('name', { required: true }) name: string,
+  @FormField('email') email?: string,
+): Promise<Response> {
+  await file.writeTo(`./uploads/${file.name}`);
+  const base64 = await file.toBase64();
+  const buffer = await file.toBuffer();
+  return this.success({ name: file.name, size: file.size });
+}
+
+// JSON base64 format: { "avatar": "base64..." } or { "avatar": { "data": "base64...", "filename": "photo.png", "mimeType": "image/png" } }
+// WARNING: @Body() cannot be used with file decorators on same method
+```
+
 **Service Definition**:
 ```typescript
 @Service()
@@ -450,6 +471,180 @@ async handleRaw(@Req() req: OneBunRequest) {
 ```typescript
 @Res()
 ```
+
+## File Upload Decorators
+
+Decorators for handling file uploads via `multipart/form-data` or JSON with base64-encoded data. The framework auto-detects the content type and provides a unified `OneBunFile` object.
+
+### @UploadedFile()
+
+Extracts a single file from the request. Required by default.
+
+```typescript
+@UploadedFile(fieldName?: string, options?: FileUploadOptions)
+```
+
+**FileUploadOptions:**
+
+```typescript
+interface FileUploadOptions {
+  /** Maximum file size in bytes */
+  maxSize?: number;
+  /** Allowed MIME types, supports wildcards like 'image/*'. Use MimeType enum. */
+  mimeTypes?: string[];
+  /** Whether the file is required (default: true) */
+  required?: boolean;
+}
+```
+
+**Example:**
+
+```typescript
+import { Controller, Post, UploadedFile, MimeType, OneBunFile, BaseController } from '@onebun/core';
+
+@Controller('/api/files')
+export class FileController extends BaseController {
+  @Post('/avatar')
+  async uploadAvatar(
+    @UploadedFile('avatar', {
+      maxSize: 5 * 1024 * 1024,
+      mimeTypes: [MimeType.ANY_IMAGE],
+    }) file: OneBunFile,
+  ): Promise<Response> {
+    await file.writeTo(`./uploads/${file.name}`);
+    return this.success({ filename: file.name, size: file.size });
+  }
+}
+```
+
+### @UploadedFiles()
+
+Extracts multiple files from the request. Required by default (at least one file expected).
+
+```typescript
+@UploadedFiles(fieldName?: string, options?: FilesUploadOptions)
+```
+
+**FilesUploadOptions:**
+
+```typescript
+interface FilesUploadOptions extends FileUploadOptions {
+  /** Maximum number of files allowed */
+  maxCount?: number;
+}
+```
+
+**Example:**
+
+```typescript
+@Post('/documents')
+async uploadDocs(
+  @UploadedFiles('docs', { maxCount: 10 }) files: OneBunFile[],
+): Promise<Response> {
+  for (const file of files) {
+    await file.writeTo(`./uploads/${file.name}`);
+  }
+  return this.success({ count: files.length });
+}
+
+// All files from request (no field name filter)
+@Post('/batch')
+async uploadBatch(
+  @UploadedFiles(undefined, { maxCount: 20 }) files: OneBunFile[],
+): Promise<Response> {
+  return this.success({ count: files.length });
+}
+```
+
+### @FormField()
+
+Extracts a non-file form field from the request. Optional by default.
+
+```typescript
+@FormField(fieldName: string, options?: ParamDecoratorOptions)
+```
+
+**Example:**
+
+```typescript
+@Post('/profile')
+async createProfile(
+  @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
+  @FormField('name', { required: true }) name: string,
+  @FormField('email') email: string,
+): Promise<Response> {
+  await avatar.writeTo(`./uploads/${avatar.name}`);
+  return this.success({ name, email, avatar: avatar.name });
+}
+```
+
+### OneBunFile
+
+Unified file wrapper returned by `@UploadedFile` and `@UploadedFiles`. Works the same regardless of upload method (multipart or JSON+base64).
+
+```typescript
+class OneBunFile {
+  readonly name: string;          // File name
+  readonly size: number;          // File size in bytes
+  readonly type: string;          // MIME type
+  readonly lastModified: number;  // Last modified timestamp
+
+  async toBase64(): Promise<string>;        // Convert to base64 string
+  async toBuffer(): Promise<Buffer>;        // Convert to Buffer
+  async toArrayBuffer(): Promise<ArrayBuffer>; // Convert to ArrayBuffer
+  toBlob(): Blob;                           // Get underlying Blob
+  async writeTo(path: string): Promise<void>; // Write to disk
+
+  static fromBase64(data: string, filename?: string, mimeType?: string): OneBunFile;
+}
+```
+
+### MimeType Enum
+
+Common MIME types for use with file upload options:
+
+```typescript
+import { MimeType } from '@onebun/core';
+
+// Wildcards
+MimeType.ANY           // '*/*'
+MimeType.ANY_IMAGE     // 'image/*'
+MimeType.ANY_VIDEO     // 'video/*'
+MimeType.ANY_AUDIO     // 'audio/*'
+
+// Images
+MimeType.PNG, MimeType.JPEG, MimeType.GIF, MimeType.WEBP, MimeType.SVG
+
+// Documents
+MimeType.PDF, MimeType.JSON, MimeType.XML, MimeType.ZIP, MimeType.CSV, MimeType.XLSX, MimeType.DOCX
+
+// Video/Audio
+MimeType.MP4, MimeType.WEBM, MimeType.MP3, MimeType.WAV
+
+// Text
+MimeType.PLAIN, MimeType.HTML, MimeType.CSS, MimeType.JAVASCRIPT
+
+// Binary
+MimeType.OCTET_STREAM
+```
+
+### JSON Base64 Upload Format
+
+When sending files via `application/json`, the framework accepts two formats:
+
+```typescript
+// Full format with metadata
+{ "avatar": { "data": "iVBORw0KGgo...", "filename": "photo.png", "mimeType": "image/png" } }
+
+// Simplified format (raw base64 string)
+{ "avatar": "iVBORw0KGgo..." }
+```
+
+The same `@UploadedFile` decorator works for both multipart and JSON uploads.
+
+::: warning
+`@Body()` cannot be used together with `@UploadedFile`, `@UploadedFiles`, or `@FormField` on the same method, since both consume the request body.
+:::
 
 ## Service Decorators
 

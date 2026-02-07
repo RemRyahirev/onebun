@@ -880,3 +880,99 @@ eventSource.close();
 - You need conditional SSE (sometimes SSE, sometimes JSON)
 - You're composing generators from multiple sources
 - You want more control over the Response object
+
+## File Uploads
+
+OneBun supports file uploads via `multipart/form-data` and JSON with base64-encoded data. The framework auto-detects the content type and provides a unified `OneBunFile` object regardless of the upload method.
+
+### Single File Upload
+
+```typescript
+import { Controller, Post, UploadedFile, MimeType, OneBunFile, BaseController } from '@onebun/core';
+
+@Controller('/api/files')
+export class FileController extends BaseController {
+  @Post('/avatar')
+  async uploadAvatar(
+    @UploadedFile('avatar', {
+      maxSize: 5 * 1024 * 1024,        // 5 MB
+      mimeTypes: [MimeType.ANY_IMAGE],  // Any image type
+    }) file: OneBunFile,
+  ): Promise<Response> {
+    // Write to disk
+    await file.writeTo(`./uploads/${file.name}`);
+
+    // Or convert to base64
+    const base64 = await file.toBase64();
+
+    // Or get as Buffer
+    const buffer = await file.toBuffer();
+
+    return this.success({
+      filename: file.name,
+      size: file.size,
+      type: file.type,
+    });
+  }
+}
+```
+
+### Multiple File Upload
+
+```typescript
+@Post('/documents')
+async uploadDocuments(
+  @UploadedFiles('docs', {
+    maxCount: 10,
+    maxSize: 10 * 1024 * 1024,
+    mimeTypes: [MimeType.PDF, MimeType.DOCX],
+  }) files: OneBunFile[],
+): Promise<Response> {
+  for (const file of files) {
+    await file.writeTo(`./uploads/${file.name}`);
+  }
+  return this.success({ uploaded: files.length });
+}
+```
+
+### File with Form Fields
+
+```typescript
+@Post('/profile')
+async createProfile(
+  @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
+  @FormField('name', { required: true }) name: string,
+  @FormField('email') email: string,
+): Promise<Response> {
+  await avatar.writeTo(`./uploads/${avatar.name}`);
+  return this.success({ name, email, avatar: avatar.name });
+}
+```
+
+### JSON Base64 Upload
+
+The same decorators work for JSON bodies with base64-encoded files. The client can send:
+
+```json
+{
+  "avatar": {
+    "data": "iVBORw0KGgo...",
+    "filename": "photo.png",
+    "mimeType": "image/png"
+  }
+}
+```
+
+Or a simplified format:
+
+```json
+{
+  "avatar": "iVBORw0KGgo..."
+}
+```
+
+The controller code is identical — `@UploadedFile('avatar')` will work for both `multipart/form-data` and `application/json` content types.
+
+::: warning
+`@Body()` cannot be used on the same method as `@UploadedFile`, `@UploadedFiles`, or `@FormField`. Both consume the request body.
+:::

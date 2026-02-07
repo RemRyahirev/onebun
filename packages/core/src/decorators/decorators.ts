@@ -3,6 +3,8 @@ import { type, type Type } from 'arktype';
 
 import {
   type ControllerMetadata,
+  type FileUploadOptions,
+  type FilesUploadOptions,
   HttpMethod,
   type ParamDecoratorOptions,
   type ParamMetadata,
@@ -518,6 +520,119 @@ export const Req = createParamDecorator(ParamType.REQUEST);
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Res = createParamDecorator(ParamType.RESPONSE);
+
+// =============================================================================
+// File Upload Decorators
+// =============================================================================
+
+/**
+ * Single file upload decorator.
+ * Extracts a single file from the request (multipart/form-data or JSON base64).
+ * Required by default.
+ *
+ * @param fieldName - Form field name to extract file from
+ * @param options - File upload options (maxSize, mimeTypes, required)
+ *
+ * @example \@UploadedFile('avatar')
+ * @example \@UploadedFile('avatar', { maxSize: 5 * 1024 * 1024 })
+ * @example \@UploadedFile('avatar', { mimeTypes: [MimeType.PNG, MimeType.JPEG] })
+ * @example \@UploadedFile('avatar', { maxSize: 5 * 1024 * 1024, mimeTypes: [MimeType.ANY_IMAGE] })
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function UploadedFile(fieldName?: string, options?: FileUploadOptions): ParameterDecorator {
+  return (target: object, propertyKey: string | symbol | undefined, parameterIndex: number) => {
+    const params: ParamMetadata[] =
+      Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
+
+    const isRequired = options?.required ?? true;
+
+    const metadata: ParamMetadata = {
+      type: ParamType.FILE,
+      name: fieldName || '',
+      index: parameterIndex,
+      isRequired,
+      fileOptions: options ? {
+        maxSize: options.maxSize,
+        mimeTypes: options.mimeTypes,
+        required: options.required,
+      } : undefined,
+    };
+
+    params.push(metadata);
+    Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey as string);
+  };
+}
+
+/**
+ * Multiple file upload decorator.
+ * Extracts multiple files from the request (multipart/form-data or JSON base64).
+ * Required by default (at least one file expected).
+ *
+ * @param fieldName - Form field name to extract files from. If omitted, extracts all files.
+ * @param options - File upload options (maxSize, mimeTypes, maxCount, required)
+ *
+ * @example \@UploadedFiles('documents')
+ * @example \@UploadedFiles('documents', { maxCount: 5 })
+ * @example \@UploadedFiles(undefined, { maxCount: 10 }) - all files
+ * @example \@UploadedFiles('images', { mimeTypes: [MimeType.ANY_IMAGE], maxSize: 10 * 1024 * 1024 })
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function UploadedFiles(fieldName?: string, options?: FilesUploadOptions): ParameterDecorator {
+  return (target: object, propertyKey: string | symbol | undefined, parameterIndex: number) => {
+    const params: ParamMetadata[] =
+      Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
+
+    const isRequired = options?.required ?? true;
+
+    const metadata: ParamMetadata = {
+      type: ParamType.FILES,
+      name: fieldName || '',
+      index: parameterIndex,
+      isRequired,
+      fileOptions: options ? {
+        maxSize: options.maxSize,
+        mimeTypes: options.mimeTypes,
+        required: options.required,
+        maxCount: options.maxCount,
+      } : undefined,
+    };
+
+    params.push(metadata);
+    Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey as string);
+  };
+}
+
+/**
+ * Form field decorator.
+ * Extracts a non-file field from the request (multipart/form-data or JSON body).
+ * Optional by default.
+ *
+ * @param fieldName - Form field name to extract
+ * @param options - Options (required)
+ *
+ * @example \@FormField('name')
+ * @example \@FormField('name', { required: true })
+ * @example \@FormField('email')
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function FormField(fieldName: string, options?: ParamDecoratorOptions): ParameterDecorator {
+  return (target: object, propertyKey: string | symbol | undefined, parameterIndex: number) => {
+    const params: ParamMetadata[] =
+      Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
+
+    const isRequired = options?.required ?? false;
+
+    const metadata: ParamMetadata = {
+      type: ParamType.FORM_FIELD,
+      name: fieldName,
+      index: parameterIndex,
+      isRequired,
+    };
+
+    params.push(metadata);
+    Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey as string);
+  };
+}
 
 /**
  * Middleware decorator

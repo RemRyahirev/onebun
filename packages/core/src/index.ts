@@ -38,6 +38,9 @@ export {
   type ResponseSchemaMetadata,
   type RouteMetadata,
   type ControllerMetadata,
+  // File upload types
+  type FileUploadOptions,
+  type FilesUploadOptions,
   // WebSocket types are exported from ./websocket
   type WsStorageType,
   type WsStorageOptions,
@@ -52,6 +55,11 @@ export {
 
 // Decorators and Metadata (exports Controller decorator, Module decorator, etc.)
 export * from './decorators';
+
+// File Upload (OneBunFile class, MimeType enum, helpers)
+export {
+  OneBunFile, MimeType, matchMimeType, validateFile, 
+} from './file';
 
 // Module System - explicitly re-export to avoid Controller conflict
 export {
@@ -89,6 +97,9 @@ export {
   callOnModuleDestroy,
   callBeforeApplicationDestroy,
   callOnApplicationDestroy,
+  // SSE helpers
+  formatSseEvent,
+  createSseStream,
 } from './module';
 
 // Application

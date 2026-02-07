@@ -49,6 +49,9 @@ import {
   Module,
   getModuleMetadata,
   ApiResponse,
+  UploadedFile,
+  UploadedFiles,
+  FormField,
 } from './decorators';
 
 describe('decorators', () => {
@@ -1075,6 +1078,142 @@ describe('decorators', () => {
       expect(isGlobalModule(GlobalModuleA)).toBe(true);
       expect(isGlobalModule(GlobalModuleB)).toBe(true);
       expect(isGlobalModule(NonGlobalModuleC)).toBe(false);
+    });
+  });
+
+  // ============================================================================
+  // File Upload Decorators
+  // ============================================================================
+
+  describe('File Upload Decorators', () => {
+    test('@UploadedFile should store FILE param metadata', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@UploadedFile('avatar') _file: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      expect(metadata).toBeDefined();
+      const route = metadata!.routes[0];
+      expect(route.params).toBeDefined();
+      expect(route.params!.length).toBe(1);
+      expect(route.params![0].type).toBe(ParamType.FILE);
+      expect(route.params![0].name).toBe('avatar');
+      expect(route.params![0].index).toBe(0);
+      expect(route.params![0].isRequired).toBe(true);
+    });
+
+    test('@UploadedFile should store file options', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(
+          @UploadedFile('avatar', { maxSize: 1024, mimeTypes: ['image/*'], required: false }) _file: unknown,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.isRequired).toBe(false);
+      expect(param.fileOptions).toBeDefined();
+      expect(param.fileOptions!.maxSize).toBe(1024);
+      expect(param.fileOptions!.mimeTypes).toEqual(['image/*']);
+    });
+
+    test('@UploadedFile without options should be required by default', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@UploadedFile('file') _file: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.isRequired).toBe(true);
+      expect(param.fileOptions).toBeUndefined();
+    });
+
+    test('@UploadedFiles should store FILES param metadata', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@UploadedFiles('docs', { maxCount: 5, maxSize: 2048 }) _files: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.type).toBe(ParamType.FILES);
+      expect(param.name).toBe('docs');
+      expect(param.isRequired).toBe(true);
+      expect(param.fileOptions!.maxCount).toBe(5);
+      expect(param.fileOptions!.maxSize).toBe(2048);
+    });
+
+    test('@UploadedFiles without field name should have empty name', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@UploadedFiles() _files: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.type).toBe(ParamType.FILES);
+      expect(param.name).toBe('');
+    });
+
+    test('@FormField should store FORM_FIELD param metadata', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@FormField('name') _name: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.type).toBe(ParamType.FORM_FIELD);
+      expect(param.name).toBe('name');
+      expect(param.isRequired).toBe(false);
+    });
+
+    test('@FormField with required option', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/upload')
+        upload(@FormField('name', { required: true }) _name: unknown) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const param = metadata!.routes[0].params![0];
+      expect(param.isRequired).toBe(true);
+    });
+
+    test('should support mixing file and form field decorators', () => {
+      @Controller('/test')
+      class TestController extends BaseController {
+        @Post('/profile')
+        createProfile(
+          @UploadedFile('avatar') _avatar: unknown,
+          @FormField('name', { required: true }) _name: unknown,
+          @FormField('email') _email: unknown,
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const params = metadata!.routes[0].params!;
+      expect(params.length).toBe(3);
+
+      const fileParam = params.find((p) => p.type === ParamType.FILE);
+      const nameParam = params.find((p) => p.name === 'name');
+      const emailParam = params.find((p) => p.name === 'email');
+
+      expect(fileParam).toBeDefined();
+      expect(nameParam).toBeDefined();
+      expect(nameParam!.type).toBe(ParamType.FORM_FIELD);
+      expect(nameParam!.isRequired).toBe(true);
+      expect(emailParam).toBeDefined();
+      expect(emailParam!.isRequired).toBe(false);
     });
   });
 });

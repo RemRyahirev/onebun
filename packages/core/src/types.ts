@@ -523,6 +523,9 @@ export enum ParamType {
   COOKIE = 'cookie',
   REQUEST = 'request',
   RESPONSE = 'response',
+  FILE = 'file',
+  FILES = 'files',
+  FORM_FIELD = 'formField',
 }
 
 /**
@@ -539,6 +542,26 @@ export interface ParamDecoratorOptions {
 }
 
 /**
+ * Options for file upload decorators (@UploadedFile, @UploadedFiles)
+ */
+export interface FileUploadOptions {
+  /** Maximum file size in bytes */
+  maxSize?: number;
+  /** Allowed MIME types, supports wildcards like 'image/*'. Use MimeType enum for convenience. */
+  mimeTypes?: string[];
+  /** Whether the file is required (default: true for @UploadedFile/@UploadedFiles) */
+  required?: boolean;
+}
+
+/**
+ * Options for multiple file upload decorator (@UploadedFiles)
+ */
+export interface FilesUploadOptions extends FileUploadOptions {
+  /** Maximum number of files allowed */
+  maxCount?: number;
+}
+
+/**
  * Parameter metadata
  */
 export interface ParamMetadata {
@@ -550,6 +573,10 @@ export interface ParamMetadata {
    * ArkType schema for validation
    */
   schema?: Type<unknown>;
+  /**
+   * File upload options (only for FILE/FILES param types)
+   */
+  fileOptions?: FileUploadOptions & { maxCount?: number };
 }
 
 /**

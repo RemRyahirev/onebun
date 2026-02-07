@@ -43,7 +43,11 @@ export interface RequestBody {
   required?: boolean;
   content: {
     // eslint-disable-next-line @typescript-eslint/naming-convention
-    'application/json': {
+    'application/json'?: {
+      schema: Record<string, unknown>;
+    };
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    'multipart/form-data'?: {
       schema: Record<string, unknown>;
     };
   };
