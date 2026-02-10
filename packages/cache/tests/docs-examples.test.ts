@@ -482,3 +482,52 @@ describe('CacheModule.forRoot Examples', () => {
     expect(module).toBeDefined();
   });
 });
+
+describe('CacheModule Global Mode Examples (docs/api/cache.md)', () => {
+  it('should be global by default - CacheService available everywhere', () => {
+    // From docs: CacheModule is global by default
+    // Import once in root module, CacheService available in all submodules
+    const module = CacheModule.forRoot({
+      type: CacheType.MEMORY,
+      cacheOptions: {
+        defaultTtl: 300000,
+      },
+    });
+
+    expect(module).toBe(CacheModule);
+    // isGlobal is undefined (treated as true by default)
+    // or can be explicitly set to true
+  });
+
+  it('should support non-global mode with isGlobal: false', () => {
+    // From docs: Non-Global Mode section
+    // For multi-cache scenarios, disable global mode
+    const module = CacheModule.forRoot({
+      type: CacheType.REDIS,
+      isGlobal: false, // Each import creates new instance
+    });
+
+    expect(module).toBe(CacheModule);
+    expect(CacheModule.getOptions()?.isGlobal).toBe(false);
+  });
+
+  it('should support forFeature for explicit import in submodules', () => {
+    // From docs: Feature modules must explicitly import CacheModule
+    // when using non-global mode
+    const featureModule = CacheModule.forFeature();
+
+    expect(featureModule).toBe(CacheModule);
+  });
+
+  it('should support explicit isGlobal: true', () => {
+    // From docs: Global mode (default) can be explicitly set
+    const module = CacheModule.forRoot({
+      type: CacheType.MEMORY,
+      cacheOptions: { defaultTtl: 60000 },
+      isGlobal: true,
+    });
+
+    expect(module).toBe(CacheModule);
+    expect(CacheModule.getOptions()?.isGlobal).toBe(true);
+  });
+});

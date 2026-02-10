@@ -281,4 +281,12 @@ export interface CacheModuleOptions {
    * @defaultValue 'CACHE'
    */
   envPrefix?: string;
+
+  /**
+   * Whether the module should be global (available in all modules without explicit import).
+   * When true (default), CacheService is available everywhere after a single import in root module.
+   * When false, each module that needs CacheService must explicitly import CacheModule.
+   * @defaultValue true
+   */
+  isGlobal?: boolean;
 }

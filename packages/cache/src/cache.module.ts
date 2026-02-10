@@ -1,6 +1,10 @@
 import type { CacheModuleOptions } from './types';
 
-import { Module } from '@onebun/core';
+import {
+  Global,
+  Module,
+  removeFromGlobalModules,
+} from '@onebun/core';
 
 
 import { CacheService } from './cache.service';
@@ -11,6 +15,9 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
 /**
  * Cache module that can be imported in other modules
  * Provides CacheService that can be injected into controllers and services
+ * 
+ * By default, CacheModule is global - CacheService is available in all modules
+ * without explicit import. Use `isGlobal: false` to disable this behavior.
  * 
  * Configuration is loaded from environment variables by default,
  * but can be overridden with module options.
@@ -27,7 +34,7 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  * - CACHE_REDIS_CONNECT_TIMEOUT: Redis connection timeout (default: 5000)
  * - CACHE_REDIS_KEY_PREFIX: Redis key prefix (default: 'onebun:cache:')
  * 
- * @example Basic usage with environment variables
+ * @example Basic usage with environment variables (global by default)
  * ```typescript
  * import { Module } from '@onebun/core';
  * import { CacheModule } from '@onebun/cache';
@@ -37,6 +44,13 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  *   controllers: [MyController],
  * })
  * export class AppModule {}
+ * 
+ * // CacheService is automatically available in all submodules
+ * @Module({
+ *   controllers: [UserController],
+ *   providers: [UserService], // UserService can inject CacheService
+ * })
+ * export class UserModule {}
  * ```
  * 
  * @example With module options (overrides environment variables)
@@ -58,6 +72,22 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  * export class AppModule {}
  * ```
  * 
+ * @example Non-global mode (for multi-cache scenarios)
+ * ```typescript
+ * // Each import creates a new CacheService instance
+ * CacheModule.forRoot({
+ *   type: CacheType.REDIS,
+ *   isGlobal: false,
+ * })
+ * 
+ * // Submodules must explicitly import CacheModule.forFeature()
+ * @Module({
+ *   imports: [CacheModule.forFeature()],
+ *   providers: [UserService],
+ * })
+ * export class UserModule {}
+ * ```
+ * 
  * Then inject CacheService in your controller:
  * ```typescript
  * import { Controller, Get } from '@onebun/core';
@@ -75,6 +105,7 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  * }
  * ```
  */
+@Global()
 @Module({
   providers: [CacheService],
   exports: [CacheService],
@@ -84,10 +115,14 @@ export class CacheModule {
    * Configure cache module with custom options
    * Options will override environment variables
    * 
+   * By default, isGlobal is true - CacheService is available in all modules.
+   * Set isGlobal: false for multi-cache scenarios where each import
+   * should create a new CacheService instance.
+   * 
    * @param options - Cache module configuration options
    * @returns Module class with configuration
    * 
-   * @example
+   * @example Global mode (default)
    * ```typescript
    * CacheModule.forRoot({
    *   type: CacheType.MEMORY,
@@ -97,12 +132,64 @@ export class CacheModule {
    *   },
    * })
    * ```
+   * 
+   * @example Non-global mode
+   * ```typescript
+   * CacheModule.forRoot({
+   *   type: CacheType.REDIS,
+   *   isGlobal: false, // Each import creates new instance
+   * })
+   * ```
    */
   static forRoot(options: CacheModuleOptions): typeof CacheModule {
     // Store options in a static property that CacheService can access
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (CacheModule as any)[CACHE_MODULE_OPTIONS] = options;
 
+    // If isGlobal is explicitly set to false, remove from global modules registry
+    // This allows creating separate CacheService instances for multi-cache scenarios
+    if (options.isGlobal === false) {
+      removeFromGlobalModules(CacheModule);
+    }
+
+    return CacheModule;
+  }
+
+  /**
+   * Import CacheModule into a feature module
+   * 
+   * Use this method when CacheModule is not global (isGlobal: false)
+   * and you need to explicitly import CacheService in a submodule.
+   * 
+   * When CacheModule is global (default), you don't need to use forFeature() -
+   * CacheService is automatically available in all modules.
+   * 
+   * @returns Module class that exports CacheService
+   * 
+   * @example
+   * ```typescript
+   * // In root module: non-global CacheModule
+   * @Module({
+   *   imports: [
+   *     CacheModule.forRoot({
+   *       type: CacheType.MEMORY,
+   *       isGlobal: false,
+   *     }),
+   *   ],
+   * })
+   * export class AppModule {}
+   * 
+   * // In feature module: explicitly import CacheService
+   * @Module({
+   *   imports: [CacheModule.forFeature()],
+   *   providers: [UserService],
+   * })
+   * export class UserModule {}
+   * ```
+   */
+  static forFeature(): typeof CacheModule {
+    // Simply return the module class - it already exports CacheService
+    // The module system will handle service instance resolution
     return CacheModule;
   }
 

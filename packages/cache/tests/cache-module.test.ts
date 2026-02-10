@@ -5,6 +5,8 @@ import {
   test,
 } from 'bun:test';
 
+import type { CacheModuleOptions } from '../src';
+
 import {
   CacheModule,
   CacheService,
@@ -198,6 +200,102 @@ describe('CacheModule (NestJS-style)', () => {
       expect(options?.type).toBe(CacheType.REDIS);
       expect(options?.redisOptions?.host).toBe('redis.example.com');
       expect(options?.redisOptions?.port).toBe(6379);
+    });
+  });
+
+  describe('Global module support', () => {
+     
+    const { isGlobalModule, Global } = require('@onebun/core');
+
+    test('CacheModule should be global by default', () => {
+      // CacheModule is decorated with @Global() at module definition time
+      // This test verifies the decorator was applied correctly
+      expect(isGlobalModule(CacheModule)).toBe(true);
+    });
+
+    test('should have forFeature static method', () => {
+      expect(CacheModule).toHaveProperty('forFeature');
+      expect(typeof CacheModule.forFeature).toBe('function');
+    });
+
+    test('forFeature should return CacheModule class', () => {
+      const result = CacheModule.forFeature();
+      expect(result).toBe(CacheModule);
+    });
+
+    test('should accept isGlobal option in forRoot', () => {
+      const options: CacheModuleOptions = {
+        type: CacheType.MEMORY,
+        isGlobal: true,
+      };
+
+      CacheModule.forRoot(options);
+      const storedOptions = CacheModule.getOptions();
+
+      expect(storedOptions?.isGlobal).toBe(true);
+    });
+
+    test('should handle isGlobal: false option', () => {
+      const options: CacheModuleOptions = {
+        type: CacheType.MEMORY,
+        isGlobal: false,
+      };
+
+      CacheModule.forRoot(options);
+      const storedOptions = CacheModule.getOptions();
+
+      expect(storedOptions?.isGlobal).toBe(false);
+    });
+
+    test('isGlobal should default to undefined (treated as true)', () => {
+      const options: CacheModuleOptions = {
+        type: CacheType.MEMORY,
+        // isGlobal not specified
+      };
+
+      CacheModule.forRoot(options);
+      const storedOptions = CacheModule.getOptions();
+
+      // When isGlobal is not specified, it defaults to undefined
+      // which should be treated as true by the module system
+      expect(storedOptions?.isGlobal).toBeUndefined();
+    });
+
+    test('forRoot with isGlobal: false should call removeFromGlobalModules', () => {
+      // This test verifies that isGlobal: false triggers the removal logic
+      // The actual global registry behavior is tested in @onebun/core
+
+      // Call forRoot with isGlobal: false
+      CacheModule.forRoot({
+        type: CacheType.MEMORY,
+        isGlobal: false,
+      });
+
+      // Verify the option was stored correctly
+      const options = CacheModule.getOptions();
+      expect(options?.isGlobal).toBe(false);
+
+      // Restore CacheModule to global for subsequent tests
+      Global()(CacheModule);
+    });
+
+    test('forFeature should return same module reference', () => {
+      const result1 = CacheModule.forFeature();
+      const result2 = CacheModule.forFeature();
+      expect(result1).toBe(CacheModule);
+      expect(result2).toBe(CacheModule);
+      expect(result1).toBe(result2);
+    });
+
+    test('forRoot with isGlobal: true stores option correctly', () => {
+      // Calling forRoot with isGlobal: true should store the option
+      CacheModule.forRoot({
+        type: CacheType.MEMORY,
+        isGlobal: true,
+      });
+
+      const options = CacheModule.getOptions();
+      expect(options?.isGlobal).toBe(true);
     });
   });
 

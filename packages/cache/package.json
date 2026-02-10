@@ -1,6 +1,6 @@
 {
   "name": "@onebun/cache",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Caching module for OneBun framework - in-memory and Redis support",
   "license": "LGPL-3.0",
   "author": "RemRyahirev",

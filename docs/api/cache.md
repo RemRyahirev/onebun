@@ -15,6 +15,8 @@ OneBun provides a caching module with support for:
 
 ## CacheModule
 
+CacheModule is **global by default** — once imported in the root module, `CacheService` is automatically available in all submodules without explicit import. Use `isGlobal: false` to disable this behavior.
+
 ### Basic Setup
 
 ```typescript
@@ -23,6 +25,7 @@ import { CacheModule, CacheType } from '@onebun/cache';
 import { UserController } from './user.controller';
 import { UserService } from './user.service';
 
+// CacheModule imported once in root — CacheService available everywhere
 @Module({
   imports: [
     CacheModule.forRoot({
@@ -35,7 +38,38 @@ import { UserService } from './user.service';
   controllers: [UserController],
   providers: [UserService],
 })
+export class AppModule {}
+
+// CacheService is automatically available in all submodules
+@Module({
+  controllers: [UserController],
+  providers: [UserService], // UserService can inject CacheService
+})
 export class UserModule {}
+```
+
+### Non-Global Mode
+
+For multi-cache scenarios, disable global mode so each module can have its own CacheService instance:
+
+```typescript
+// Root module: non-global cache
+@Module({
+  imports: [
+    CacheModule.forRoot({
+      type: CacheType.REDIS,
+      isGlobal: false, // Each import creates new instance
+    }),
+  ],
+})
+export class AppModule {}
+
+// Feature modules must explicitly import CacheModule
+@Module({
+  imports: [CacheModule.forFeature()],
+  providers: [OrderService],
+})
+export class OrderModule {}
 ```
 
 ### Redis Configuration
@@ -101,7 +135,7 @@ class MyService extends BaseService {
 ```
 
 ::: tip
-`CacheModule` must always be imported — it registers `CacheService` in the DI container. The difference is only whether you use `.forRoot(options)` (explicit config) or plain `CacheModule` (env-only config).
+`CacheModule` must be imported at least once (in the root module) — it registers `CacheService` in the DI container. Since it's global by default, submodules get `CacheService` automatically. The difference is only whether you use `.forRoot(options)` (explicit config) or plain `CacheModule` (env-only config).
 :::
 
 ### Configuration Priority
@@ -136,6 +170,9 @@ If Redis connection fails during auto-initialization, CacheService **automatical
 <llm-only>
 
 **Technical details for AI agents:**
+- `CacheModule` is decorated with `@Global()` — by default `CacheService` is available in all modules without explicit import
+- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule
+- `CacheModule.forFeature()` returns the module class for explicit import in submodules when non-global mode is used
 - `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`)
 - `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)
 - Auto-init flow: check `CacheModule.forRoot()` options → load env vars → merge (module > env > defaults) → create cache instance
