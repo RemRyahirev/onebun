@@ -238,14 +238,38 @@ export class UserController extends BaseController {
 Define HTTP endpoints on controller methods.
 
 ```typescript
-@Get(path?: string)
-@Post(path?: string)
-@Put(path?: string)
-@Delete(path?: string)
-@Patch(path?: string)
-@Options(path?: string)
-@Head(path?: string)
-@All(path?: string)  // Matches all HTTP methods
+@Get(path?: string, options?: RouteOptions)
+@Post(path?: string, options?: RouteOptions)
+@Put(path?: string, options?: RouteOptions)
+@Delete(path?: string, options?: RouteOptions)
+@Patch(path?: string, options?: RouteOptions)
+@Options(path?: string, options?: RouteOptions)
+@Head(path?: string, options?: RouteOptions)
+@All(path?: string, options?: RouteOptions)
+
+interface RouteOptions {
+  /** Per-request idle timeout in seconds. Set to 0 to disable. */
+  timeout?: number;
+}
+```
+
+**Per-request timeout:**
+
+Override the global `idleTimeout` for individual routes. Useful for long-running endpoints:
+
+```typescript
+@Controller('/tasks')
+export class TaskController extends BaseController {
+  @Post('/process', { timeout: 300 }) // 5 minutes for this endpoint
+  async processTask(@Body() body: unknown) {
+    // long-running task...
+  }
+
+  @Get('/export', { timeout: 0 }) // no timeout
+  async exportAll() {
+    // very long export...
+  }
+}
 ```
 
 **Path Parameters:**
@@ -719,43 +743,76 @@ export class UserController extends BaseController {
 
 ### @UseMiddleware()
 
-Apply middleware to a route handler.
+Apply middleware to a route handler or to all routes in a controller. Works as both a **method decorator** and a **class decorator**. Pass **class constructors** extending `BaseMiddleware` (not instances).
 
 ```typescript
-@UseMiddleware(...middleware: Function[])
+// Method decorator — applies to a single route
+@UseMiddleware(...middleware: MiddlewareClass[])
+
+// Class decorator — applies to every route in the controller
+@UseMiddleware(...middleware: MiddlewareClass[])
 ```
 
-**Example:**
+**Method-level example:**
 
 ```typescript
-const authMiddleware = async (req: Request, next: () => Promise<Response>) => {
-  const token = req.headers.get('Authorization');
-  if (!token) {
-    return new Response('Unauthorized', { status: 401 });
-  }
-  return next();
-};
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
 
-const logMiddleware = async (req: Request, next: () => Promise<Response>) => {
-  console.log(`${req.method} ${req.url}`);
-  return next();
-};
+class AuthMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    const token = req.headers.get('Authorization');
+    if (!token) {
+      return new Response('Unauthorized', { status: 401 });
+    }
+    return next();
+  }
+}
+
+class LogMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    this.logger.info(`${req.method} ${req.url}`);
+    return next();
+  }
+}
 
 @Controller('/users')
 export class UserController extends BaseController {
   @Get('/protected')
-  @UseMiddleware(authMiddleware)
+  @UseMiddleware(AuthMiddleware)
   async protectedRoute() {
     return this.success({ message: 'Secret data' });
   }
 
   @Post('/action')
-  @UseMiddleware(logMiddleware, authMiddleware)  // Multiple middleware
+  @UseMiddleware(LogMiddleware, AuthMiddleware)  // Multiple middleware
   async action() {
     return this.success({ message: 'Action performed' });
   }
 }
 ```
+
+**Class-level example:**
+
+```typescript
+@Controller('/admin')
+@UseMiddleware(AuthMiddleware)  // Applied to ALL routes in this controller
+export class AdminController extends BaseController {
+  @Get('/dashboard')
+  getDashboard() {
+    return this.success({ stats: {} });
+  }
+
+  @Put('/settings')
+  @UseMiddleware(AuditLogMiddleware)  // Additional middleware for this route
+  updateSettings() {
+    return this.success({ updated: true });
+  }
+}
+```
+
+When both class-level and method-level middleware are present, execution order is: **controller-level -> route-level -> handler**.
+
+Middleware classes support full DI through the constructor. See [Controllers API — Middleware](./controllers.md#middleware) for details and examples.
 
 ## Response Decorators
 
@@ -1086,16 +1143,18 @@ export class UserService extends BaseService {
 }
 
 // Middleware
-const authMiddleware = async (req: Request, next: () => Promise<Response>) => {
-  const token = req.headers.get('Authorization');
-  if (!token?.startsWith('Bearer ')) {
-    return new Response(JSON.stringify({ success: false, message: 'Unauthorized' }), {
-      status: 401,
-      headers: { 'Content-Type': 'application/json' },
-    });
+class AuthMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    const token = req.headers.get('Authorization');
+    if (!token?.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ success: false, message: 'Unauthorized' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return next();
   }
-  return next();
-};
+}
 
 // Controller
 @Controller('/users')
@@ -1126,7 +1185,7 @@ export class UserController extends BaseController {
   }
 
   @Post('/')
-  @UseMiddleware(authMiddleware)
+  @UseMiddleware(AuthMiddleware)
   @ApiResponse(201, { schema: userSchema })
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,

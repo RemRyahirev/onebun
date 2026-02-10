@@ -9,6 +9,7 @@ import {
   type ParamDecoratorOptions,
   type ParamMetadata,
   ParamType,
+  type RouteOptions,
 } from '../types';
 
 import { getConstructorParamTypes as getDesignParamTypes, Reflect } from './metadata';
@@ -200,6 +201,18 @@ export function controllerDecorator(basePath: string = '') {
       META_CONSTRUCTOR_PARAMS.set(WrappedController, existingDeps);
     }
 
+    // Copy controller-level middleware from original class to wrapped class
+    // This ensures @UseMiddleware works regardless of decorator order
+    const existingControllerMiddleware: Function[] | undefined =
+      Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target);
+    if (existingControllerMiddleware) {
+      Reflect.defineMetadata(
+        CONTROLLER_MIDDLEWARE_METADATA,
+        existingControllerMiddleware,
+        WrappedController,
+      );
+    }
+
     return WrappedController as T;
   };
 }
@@ -266,7 +279,7 @@ const RESPONSE_SCHEMAS_METADATA = 'onebun:responseSchemas';
  * Base route decorator factory
  */
 function createRouteDecorator(method: HttpMethod) {
-  return (path: string = '') =>
+  return (path: string = '', options?: RouteOptions) =>
     (target: object, propertyKey: string, descriptor: PropertyDescriptor) => {
       const controllerClass = target.constructor as Function;
 
@@ -309,6 +322,7 @@ function createRouteDecorator(method: HttpMethod) {
           schema: rs.schema,
           description: rs.description,
         })),
+        ...(options?.timeout !== undefined ? { timeout: options.timeout } : {}),
       });
 
       META_CONTROLLERS.set(controllerClass, metadata);
@@ -635,12 +649,72 @@ export function FormField(fieldName: string, options?: ParamDecoratorOptions): P
 }
 
 /**
- * Middleware decorator
- * @example \@UseMiddleware(authMiddleware)
+ * Metadata key for controller-level middleware
  */
+const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 
-export function UseMiddleware(...middleware: Function[]): MethodDecorator {
-  return (target: object, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
+/**
+ * Middleware decorator — can be applied to both controllers (class) and individual routes (method).
+ *
+ * Pass middleware **class constructors** (extending `BaseMiddleware`), not instances.
+ * The framework instantiates them once at startup with full DI support.
+ *
+ * When applied to a class, the middleware is added to **every** route in that controller
+ * and runs after global and module-level middleware but before route-level middleware.
+ *
+ * When applied to a method, the middleware runs after controller-level middleware.
+ *
+ * Execution order: global → controller → route → handler
+ *
+ * @example Class-level (all routes)
+ * ```typescript
+ * \@Controller('/admin')
+ * \@UseMiddleware(AuthMiddleware)
+ * class AdminController extends BaseController { ... }
+ * ```
+ *
+ * @example Method-level (single route)
+ * ```typescript
+ * \@Post('/action')
+ * \@UseMiddleware(LogMiddleware)
+ * action() { ... }
+ * ```
+ *
+ * @example Combined
+ * ```typescript
+ * \@Controller('/admin')
+ * \@UseMiddleware(AuthMiddleware)       // runs on every route
+ * class AdminController extends BaseController {
+ *   \@Get('/dashboard')
+ *   \@UseMiddleware(CacheMiddleware)    // runs only on this route, after auth
+ *   getDashboard() { ... }
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function UseMiddleware(...middleware: Function[]): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return function useMiddlewareDecorator(...args: any[]): any {
+    // ---- Class decorator: target is a constructor function ----
+    if (args.length === 1 && typeof args[0] === 'function') {
+      const target = args[0] as Function;
+      const existing: Function[] =
+        Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target) || [];
+      Reflect.defineMetadata(
+        CONTROLLER_MIDDLEWARE_METADATA,
+        [...existing, ...middleware],
+        target,
+      );
+
+      return target;
+    }
+
+    // ---- Method decorator: (target, propertyKey, descriptor) ----
+    const [target, propertyKey, descriptor] = args as [
+      object,
+      string | symbol,
+      PropertyDescriptor,
+    ];
     const existingMiddleware: Function[] =
       Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
     Reflect.defineMetadata(
@@ -652,6 +726,17 @@ export function UseMiddleware(...middleware: Function[]): MethodDecorator {
 
     return descriptor;
   };
+}
+
+/**
+ * Get controller-level middleware class constructors for a controller class.
+ * Returns middleware registered via @UseMiddleware() applied to the class.
+ *
+ * @param target - Controller class (constructor)
+ * @returns Array of middleware class constructors
+ */
+export function getControllerMiddleware(target: Function): Function[] {
+  return Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target) || [];
 }
 
 /**
@@ -719,8 +804,17 @@ export interface SseDecoratorOptions {
    * Heartbeat interval in milliseconds.
    * When set, the server will send a comment (": heartbeat\n\n")
    * at this interval to keep the connection alive.
+   * @defaultValue 30000 (30 seconds) when using @Sse() decorator
    */
   heartbeat?: number;
+
+  /**
+   * Per-request idle timeout in seconds for this SSE connection.
+   * Overrides the global `idleTimeout` from `ApplicationOptions`.
+   * Set to 0 to disable the timeout entirely.
+   * @defaultValue 600 (10 minutes) for SSE endpoints
+   */
+  timeout?: number;
 }
 
 /**
@@ -766,7 +860,10 @@ export function Sse(options?: SseDecoratorOptions): MethodDecorator {
 }
 
 /**
- * Check if a method is marked as SSE endpoint
+ * Check if a method is marked as SSE endpoint.
+ * Traverses the prototype chain so that metadata stored on the original class
+ * prototype is found even when `@Controller` wraps the class.
+ *
  * @param target - Controller instance or prototype
  * @param methodName - Method name
  * @returns SSE options if method is SSE endpoint, undefined otherwise
@@ -775,7 +872,16 @@ export function getSseMetadata(
   target: object,
   methodName: string,
 ): SseDecoratorOptions | undefined {
-  return Reflect.getMetadata(SSE_METADATA, target, methodName);
+  let proto: object | null = target;
+  while (proto) {
+    const metadata = Reflect.getMetadata(SSE_METADATA, proto, methodName);
+    if (metadata !== undefined) {
+      return metadata;
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  return undefined;
 }
 
 /**

@@ -143,6 +143,7 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
       envOverrides: { ...appOptions.envOverrides, ...serviceOptions.envOverrides },
       envSchemaExtend: serviceOptions.envSchemaExtend,
       logger: { ...appOptions.logger, ...serviceOptions.logger },
+      middleware: serviceOptions.middleware ?? appOptions.middleware,
       metrics: { ...appOptions.metrics, ...serviceOptions.metrics },
       tracing: { ...appOptions.tracing, ...serviceOptions.tracing },
     };
@@ -197,6 +198,7 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
         basePath: mergedOptions.basePath,
         // When routePrefix is true, use service name as prefix
         routePrefix: mergedOptions.routePrefix ? name : undefined,
+        middleware: mergedOptions.middleware,
         envSchema: mergedEnvSchema,
         envOptions: {
           ...this.options.envOptions,

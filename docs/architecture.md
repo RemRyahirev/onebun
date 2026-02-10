@@ -32,11 +32,11 @@ description: System architecture overview. Module hierarchy, DI container, reque
 **Request Flow**:
 1. Bun.serve receives HTTP request
 2. TraceMiddleware adds trace context
-3. MetricsMiddleware records metrics
-4. Router matches path to controller method
-5. Parameter decorators extract @Param, @Query, @Body
-6. Controller method executes with injected services
-7. Response serialized (this.success/this.error or direct return)
+3. Middleware chain executes (global → module → controller → route)
+4. Parameter decorators extract @Param, @Query, @Body
+5. Controller method executes with injected services
+6. Response serialized (this.success/this.error or direct return)
+7. MetricsMiddleware records metrics
 
 **Module Metadata Storage**:
 - Reflect.metadata stores decorator info
@@ -241,8 +241,11 @@ HTTP Request
     │
     ▼
 ┌─────────────────────────────────────────────┐
-│ Middleware Chain (if any)                   │
-│  └── Execute middleware functions           │
+│ Middleware Chain                            │
+│  ├── Global middleware (ApplicationOptions) │
+│  ├── Module middleware (OnModuleConfigure)  │
+│  ├── Controller middleware (@UseMiddleware) │
+│  └── Route middleware (@UseMiddleware)      │
 └─────────────────────────────────────────────┘
     │
     ▼

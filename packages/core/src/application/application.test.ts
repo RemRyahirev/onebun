@@ -906,6 +906,42 @@ describe('OneBunApplication', () => {
       expect(Bun.serve).toHaveBeenCalled();
     });
 
+    test('should pass default idleTimeout (120s) to Bun.serve', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serveCall = (Bun.serve as any).mock.calls[0];
+      expect(serveCall[0].idleTimeout).toBe(120);
+    });
+
+    test('should pass custom idleTimeout to Bun.serve', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { idleTimeout: 60 });
+      await app.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serveCall = (Bun.serve as any).mock.calls[0];
+      expect(serveCall[0].idleTimeout).toBe(60);
+    });
+
+    test('should pass idleTimeout: 0 to disable timeout', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { idleTimeout: 0 });
+      await app.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serveCall = (Bun.serve as any).mock.calls[0];
+      expect(serveCall[0].idleTimeout).toBe(0);
+    });
+
     test('should start application with config initialization', async () => {
       @Module({})
       class TestModule {}

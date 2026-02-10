@@ -83,6 +83,11 @@ export interface OnApplicationDestroy {
   onApplicationDestroy(signal?: string): Promise<void> | void;
 }
 
+/**
+ * Interface for modules that configure middleware.
+ * Re-exported from types for convenience. Use the canonical import from types.ts.
+ */
+
 // =============================================================================
 // Helper functions for checking if an object implements lifecycle hooks
 // =============================================================================
@@ -145,6 +150,14 @@ export function hasOnApplicationDestroy(obj: unknown): obj is OnApplicationDestr
     'onApplicationDestroy' in obj &&
     typeof (obj as OnApplicationDestroy).onApplicationDestroy === 'function'
   );
+}
+
+/**
+ * Check if a class (constructor) has a configureMiddleware method on its prototype.
+ * Used to detect modules that implement OnModuleConfigure.
+ */
+export function hasConfigureMiddleware(cls: Function): boolean {
+  return typeof cls.prototype?.configureMiddleware === 'function';
 }
 
 // =============================================================================

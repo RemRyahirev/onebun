@@ -16,9 +16,19 @@ import {
   Layer,
 } from 'effect';
 
-import { Module } from '../decorators/decorators';
+import type {
+  MiddlewareClass,
+  OneBunRequest,
+  OneBunResponse,
+  OnModuleConfigure,
+} from '../types';
+
+
+import { Controller as CtrlDeco, Module } from '../decorators/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 
+import { Controller as CtrlBase } from './controller';
+import { BaseMiddleware } from './middleware';
 import { OneBunModule } from './module';
 import { Service } from './service';
 
@@ -1273,6 +1283,133 @@ describe('OneBunModule', () => {
       const controller = module.getControllerInstance(AppControllerDecorated) as AppController;
       expect(controller).toBeDefined();
       expect(controller.getLabel()).toBe('shared');
+    });
+  });
+
+  describe('Module-level middleware (OnModuleConfigure)', () => {
+    class Mw1 extends BaseMiddleware {
+      async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+        return await next(); 
+      }
+    }
+
+    class Mw2 extends BaseMiddleware {
+      async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+        return await next(); 
+      }
+    }
+
+    class Mw3 extends BaseMiddleware {
+      async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+        return await next(); 
+      }
+    }
+
+    test('should collect middleware from module implementing OnModuleConfigure', async () => {
+      @CtrlDeco('/test')
+      class TestController extends CtrlBase {}
+
+      @Module({ controllers: [TestController] })
+      class TestModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw1, Mw2];
+        }
+      }
+
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const middleware = module.getModuleMiddleware(TestController);
+      expect(middleware).toHaveLength(2);
+      // Resolved middleware are bound use() functions
+      expect(typeof middleware[0]).toBe('function');
+      expect(typeof middleware[1]).toBe('function');
+    });
+
+    test('should return empty middleware for modules without OnModuleConfigure', async () => {
+      @CtrlDeco('/test')
+      class TestController extends CtrlBase {}
+
+      @Module({ controllers: [TestController] })
+      class PlainModule {}
+
+      const module = new OneBunModule(PlainModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const middleware = module.getModuleMiddleware(TestController);
+      expect(middleware).toHaveLength(0);
+    });
+
+    test('should accumulate middleware from parent to child modules', async () => {
+      @CtrlDeco('/child')
+      class ChildController extends CtrlBase {}
+
+      @Module({ controllers: [ChildController] })
+      class ChildModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw2];
+        }
+      }
+
+      @CtrlDeco('/root')
+      class RootController extends CtrlBase {}
+
+      @Module({ imports: [ChildModule], controllers: [RootController] })
+      class RootModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw1];
+        }
+      }
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // ChildController should have accumulated: [Mw1 (root), Mw2 (child)]
+      const childMw = module.getModuleMiddleware(ChildController);
+      expect(childMw).toHaveLength(2);
+      expect(typeof childMw[0]).toBe('function');
+      expect(typeof childMw[1]).toBe('function');
+
+      // RootController should have only root middleware: [Mw1]
+      const rootMw = module.getModuleMiddleware(RootController);
+      expect(rootMw).toHaveLength(1);
+      expect(typeof rootMw[0]).toBe('function');
+    });
+
+    test('should handle deeply nested module middleware', async () => {
+      @CtrlDeco('/deep')
+      class DeepController extends CtrlBase {}
+
+      @Module({ controllers: [DeepController] })
+      class DeepModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw3];
+        }
+      }
+
+      @Module({ imports: [DeepModule] })
+      class MiddleModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw2];
+        }
+      }
+
+      @Module({ imports: [MiddleModule] })
+      class TopModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [Mw1];
+        }
+      }
+
+      const module = new OneBunModule(TopModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // DeepController should get: [Mw1 (top), Mw2 (middle), Mw3 (deep)]
+      const middleware = module.getModuleMiddleware(DeepController);
+      expect(middleware).toHaveLength(3);
+      expect(typeof middleware[0]).toBe('function');
+      expect(typeof middleware[1]).toBe('function');
+      expect(typeof middleware[2]).toBe('function');
     });
   });
 });

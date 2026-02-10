@@ -20,8 +20,14 @@ import {
   BaseService,
   Service,
 } from '../module';
+import { BaseMiddleware } from '../module/middleware';
 import { makeMockLoggerLayer } from '../testing';
-import { HttpMethod, ParamType } from '../types';
+import {
+  HttpMethod,
+  ParamType,
+  type OneBunRequest,
+  type OneBunResponse,
+} from '../types';
 
 import {
   injectable,
@@ -52,6 +58,7 @@ import {
   UploadedFile,
   UploadedFiles,
   FormField,
+  getControllerMiddleware,
 } from './decorators';
 
 describe('decorators', () => {
@@ -678,48 +685,92 @@ describe('decorators', () => {
   });
 
   describe('UseMiddleware decorator', () => {
-    const middleware1 = () => {};
-    const middleware2 = () => {};
+    class Middleware1 extends BaseMiddleware {
+      async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+        return await next(); 
+      }
+    }
 
-    test('should register middleware for method', () => {
+    class Middleware2 extends BaseMiddleware {
+      async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+        return await next(); 
+      }
+    }
+
+    test('should register middleware class for method', () => {
       @Controller()
       class TestController {
         @Get()
-        @UseMiddleware(middleware1)
+        @UseMiddleware(Middleware1)
         test() {}
       }
 
       const metadata = getControllerMetadata(TestController);
       const route = metadata?.routes[0];
-      expect(route?.middleware).toContain(middleware1);
+      expect(route?.middleware).toContain(Middleware1);
     });
 
-    test('should register multiple middleware functions', () => {
+    test('should register multiple middleware classes', () => {
       @Controller()
       class TestController {
         @Get()
-        @UseMiddleware(middleware1, middleware2)
+        @UseMiddleware(Middleware1, Middleware2)
         test() {}
       }
 
       const metadata = getControllerMetadata(TestController);
       const route = metadata?.routes[0];
-      expect(route?.middleware).toContain(middleware1);
-      expect(route?.middleware).toContain(middleware2);
+      expect(route?.middleware).toContain(Middleware1);
+      expect(route?.middleware).toContain(Middleware2);
     });
 
     test('should append to existing middleware', () => {
       @Controller()
       class TestController {
         @Get()
-        @UseMiddleware(middleware1)
-        @UseMiddleware(middleware2)
+        @UseMiddleware(Middleware1)
+        @UseMiddleware(Middleware2)
         test() {}
       }
 
       const metadata = getControllerMetadata(TestController);
       const route = metadata?.routes[0];
       expect(route?.middleware).toHaveLength(2);
+    });
+
+    test('should register middleware as class decorator', () => {
+      @Controller()
+      @UseMiddleware(Middleware1, Middleware2)
+      class TestController {
+        @Get()
+        test() {}
+      }
+
+      const controllerMw = getControllerMiddleware(TestController);
+      expect(controllerMw).toHaveLength(2);
+      expect(controllerMw).toContain(Middleware1);
+      expect(controllerMw).toContain(Middleware2);
+    });
+
+    test('should keep class and method middleware separate', () => {
+      @Controller()
+      @UseMiddleware(Middleware1)
+      class TestController {
+        @Get()
+        @UseMiddleware(Middleware2)
+        test() {}
+      }
+
+      // Class-level
+      const controllerMw = getControllerMiddleware(TestController);
+      expect(controllerMw).toHaveLength(1);
+      expect(controllerMw[0]).toBe(Middleware1);
+
+      // Route-level
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      expect(route?.middleware).toHaveLength(1);
+      expect(route?.middleware?.[0]).toBe(Middleware2);
     });
   });
 

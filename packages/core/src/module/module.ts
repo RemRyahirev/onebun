@@ -35,7 +35,9 @@ import {
   hasOnModuleDestroy,
   hasBeforeApplicationDestroy,
   hasOnApplicationDestroy,
+  hasConfigureMiddleware,
 } from './lifecycle';
+import { BaseMiddleware } from './middleware';
 import {
   BaseService,
   getServiceMetadata,
@@ -83,10 +85,34 @@ export class OneBunModule implements ModuleInstance {
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
 
+  /**
+   * Middleware class constructors defined by this module via OnModuleConfigure.configureMiddleware()
+   */
+  private ownMiddlewareClasses: Function[] = [];
+
+  /**
+   * Accumulated middleware class constructors from ancestor modules (parent → child).
+   * Does NOT include this module's own middleware.
+   */
+  private ancestorMiddlewareClasses: Function[] = [];
+
+  /**
+   * Resolved middleware functions (bound use() methods) for this module's own middleware.
+   * Populated during setup() after services are created.
+   */
+  private resolvedOwnMiddleware: Function[] = [];
+
+  /**
+   * Resolved middleware functions from ancestor modules.
+   * Populated during setup() after services are created.
+   */
+  private resolvedAncestorMiddleware: Function[] = [];
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: IConfig<OneBunAppConfig>,
+    ancestorMiddleware?: Function[],
   ) {
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
@@ -99,6 +125,23 @@ export class OneBunModule implements ModuleInstance {
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
     this.config = config ?? new NotInitializedConfig();
+    this.ancestorMiddlewareClasses = ancestorMiddleware ?? [];
+
+    // Read module-level middleware from OnModuleConfigure interface
+    if (hasConfigureMiddleware(moduleClass)) {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const moduleInstance = new (moduleClass as new () => any)();
+        this.ownMiddlewareClasses = moduleInstance.configureMiddleware();
+        this.logger.debug(
+          `Module ${moduleClass.name} configured ${this.ownMiddlewareClasses.length} middleware class(es)`,
+        );
+      } catch (error) {
+        this.logger.error(
+          `Failed to call configureMiddleware() on module ${moduleClass.name}: ${error}`,
+        );
+      }
+    }
 
     this.logger.debug(`Initializing OneBunModule for ${moduleClass.name}`);
     const { layer, controllers } = this.initModule();
@@ -166,8 +209,9 @@ export class OneBunModule implements ModuleInstance {
           continue;
         }
 
-        // Pass the logger layer and config to child modules
-        const childModule = new OneBunModule(importModule, this.loggerLayer, this.config);
+        // Pass the logger layer, config, and accumulated middleware class refs to child modules
+        const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
+        const childModule = new OneBunModule(importModule, this.loggerLayer, this.config, accumulatedMiddleware);
         this.childModules.push(childModule);
 
         // Merge layers
@@ -393,6 +437,57 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
+   * Instantiate middleware classes with DI from this module's service scope.
+   * Resolves constructor dependencies, calls initializeMiddleware(), and
+   * returns bound use() functions ready for the execution pipeline.
+   */
+  resolveMiddleware(classes: Function[]): Function[] {
+    return classes.map((cls) => {
+      // Resolve constructor dependencies (same logic as for controllers)
+      const paramTypes = getConstructorParamTypes(cls);
+      const deps: unknown[] = [];
+
+      if (paramTypes && paramTypes.length > 0) {
+        for (const paramType of paramTypes) {
+          const dep = this.resolveDependencyByType(paramType);
+          if (dep) {
+            deps.push(dep);
+          } else {
+            this.logger.warn(
+              `Could not resolve dependency ${paramType.name} for middleware ${cls.name}`,
+            );
+          }
+        }
+      }
+
+      const middlewareConstructor = cls as new (...args: unknown[]) => BaseMiddleware;
+      const instance = new middlewareConstructor(...deps);
+      instance.initializeMiddleware(this.logger, this.config);
+
+      return instance.use.bind(instance);
+    });
+  }
+
+  /**
+   * Resolve own and ancestor middleware classes into bound functions.
+   * Recursively resolves middleware for all child modules too.
+   * Must be called after services are created (DI scope is complete).
+   * @internal
+   */
+  private resolveModuleMiddleware(): void {
+    if (this.ancestorMiddlewareClasses.length > 0) {
+      this.resolvedAncestorMiddleware = this.resolveMiddleware(this.ancestorMiddlewareClasses);
+    }
+    if (this.ownMiddlewareClasses.length > 0) {
+      this.resolvedOwnMiddleware = this.resolveMiddleware(this.ownMiddlewareClasses);
+    }
+    // Recursively resolve for all descendant modules
+    for (const childModule of this.childModules) {
+      childModule.resolveModuleMiddleware();
+    }
+  }
+
+  /**
    * Create controller instances and inject services
    */
   createControllerInstances(): Effect.Effect<unknown, never, void> {
@@ -548,6 +643,13 @@ export class OneBunModule implements ModuleInstance {
       Effect.flatMap(() =>
         Effect.forEach(this.childModules, (childModule) => childModule.callServicesOnModuleInit(), {
           discard: true,
+        }),
+      ),
+      // Resolve module-level middleware with DI (services are now available)
+      // resolveModuleMiddleware is recursive and handles all descendants
+      Effect.flatMap(() =>
+        Effect.sync(() => {
+          this.resolveModuleMiddleware();
         }),
       ),
       // Create controller instances in child modules first, then this module (each uses its own DI scope)
@@ -806,6 +908,29 @@ export class OneBunModule implements ModuleInstance {
     }
 
     return instance;
+  }
+
+  /**
+   * Get accumulated module-level middleware (resolved bound functions)
+   * for a controller class. Returns [...ancestorResolved, ...ownResolved]
+   * for controllers that belong to this module, or delegates to child modules.
+   */
+  getModuleMiddleware(controllerClass: Function): Function[] {
+    // Check if this module directly owns the controller
+    if (this.controllers.includes(controllerClass)) {
+      return [...this.resolvedAncestorMiddleware, ...this.resolvedOwnMiddleware];
+    }
+
+    // Delegate to child modules
+    for (const childModule of this.childModules) {
+      const middleware = childModule.getModuleMiddleware(controllerClass);
+      if (middleware.length > 0) {
+        return middleware;
+      }
+    }
+
+    // Controller not found in this module tree (return empty — no module middleware)
+    return [];
   }
 
   /**

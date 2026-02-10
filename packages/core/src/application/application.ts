@@ -27,6 +27,7 @@ import { makeTraceService, TraceService } from '@onebun/trace';
 
 import {
   getControllerMetadata,
+  getControllerMiddleware,
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
@@ -37,7 +38,12 @@ import {
   type OneBunAppConfig,
 } from '../module/config.interface';
 import { ConfigServiceImpl } from '../module/config.service';
-import { createSseStream } from '../module/controller';
+import {
+  createSseStream,
+  DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_SSE_HEARTBEAT_MS,
+  DEFAULT_SSE_TIMEOUT,
+} from '../module/controller';
 import { OneBunModule } from '../module/module';
 import { QueueService, type QueueAdapter } from '../queue';
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
@@ -485,7 +491,7 @@ export class OneBunApplication {
 
       /**
        * Create a route handler with the full OneBun request lifecycle:
-       * tracing setup → middleware chain → executeHandler → metrics → tracing end
+       * tracing setup → per-request timeout → middleware chain → executeHandler → metrics → tracing end
        */
       function createRouteHandler(
         routeMeta: RouteMetadata,
@@ -493,9 +499,27 @@ export class OneBunApplication {
         controller: Controller,
         fullPath: string,
         method: string,
-      ): (req: OneBunRequest) => Promise<Response> {
-        return async (req) => {
+      ): (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => Promise<Response> {
+        // Determine the effective timeout for this route:
+        // SSE endpoints check @Sse({ timeout }) first, then route-level, then DEFAULT_SSE_TIMEOUT
+        // Normal endpoints use route-level timeout only (undefined = use global idleTimeout)
+        const isSse = routeMeta.handler
+          ? getSseMetadata(Object.getPrototypeOf(controller), routeMeta.handler) !== undefined
+          : false;
+        const sseDecoratorOptions = routeMeta.handler
+          ? getSseMetadata(Object.getPrototypeOf(controller), routeMeta.handler)
+          : undefined;
+        const effectiveTimeout: number | undefined = isSse
+          ? (sseDecoratorOptions?.timeout ?? routeMeta.timeout ?? DEFAULT_SSE_TIMEOUT)
+          : routeMeta.timeout;
+
+        return async (req, server) => {
           const startTime = Date.now();
+
+          // Apply per-request idle timeout if configured
+          if (effectiveTimeout !== undefined) {
+            server.timeout(req, effectiveTimeout);
+          }
 
           // Setup tracing context if available and enabled
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -701,6 +725,12 @@ export class OneBunApplication {
         };
       }
 
+      // Application-wide middleware — resolve class constructors via root module DI
+      const globalMiddlewareClasses = (this.options.middleware as Function[] | undefined) ?? [];
+      const globalMiddleware: Function[] = globalMiddlewareClasses.length > 0
+        ? (this.ensureModule().resolveMiddleware?.(globalMiddlewareClasses) ?? [])
+        : [];
+
       // Add routes from controllers
       for (const controllerClass of controllers) {
         const controllerMetadata = getControllerMetadata(controllerClass);
@@ -725,6 +755,15 @@ export class OneBunApplication {
 
         const controllerPath = controllerMetadata.path;
 
+        // Module-level middleware (already resolved bound functions)
+        const moduleMiddleware = this.ensureModule().getModuleMiddleware?.(controllerClass) ?? [];
+
+        // Controller-level middleware — resolve class constructors via root module DI
+        const ctrlMiddlewareClasses = getControllerMiddleware(controllerClass);
+        const ctrlMiddleware: Function[] = ctrlMiddlewareClasses.length > 0
+          ? (this.ensureModule().resolveMiddleware?.(ctrlMiddlewareClasses) ?? [])
+          : [];
+
         for (const route of controllerMetadata.routes) {
           // Combine: appPrefix + controllerPath + routePath
           // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
@@ -734,8 +773,26 @@ export class OneBunApplication {
             controller,
           );
 
+          // Route-level middleware — resolve class constructors via root module DI
+          const routeMiddlewareClasses = route.middleware ?? [];
+          const routeMiddleware: Function[] = routeMiddlewareClasses.length > 0
+            ? (this.ensureModule().resolveMiddleware?.(routeMiddlewareClasses) ?? [])
+            : [];
+
+          // Merge middleware: global → module → controller → route
+          const mergedMiddleware = [
+            ...globalMiddleware,
+            ...moduleMiddleware,
+            ...ctrlMiddleware,
+            ...routeMiddleware,
+          ];
+          const routeWithMergedMiddleware: RouteMetadata = {
+            ...route,
+            middleware: mergedMiddleware.length > 0 ? mergedMiddleware : undefined,
+          };
+
           // Create wrapped handler with full OneBun lifecycle (tracing, metrics, middleware)
-          const wrappedHandler = createRouteHandler(route, handler, controller, fullPath, method);
+          const wrappedHandler = createRouteHandler(routeWithMergedMiddleware, handler, controller, fullPath, method);
 
           // Add to bunRoutes grouped by path and method
           if (!bunRoutes[fullPath]) {
@@ -844,6 +901,8 @@ export class OneBunApplication {
       this.server = Bun.serve<WsClientData>({
         port: this.options.port,
         hostname: this.options.host,
+        // Idle timeout (seconds) — default 120s to support SSE and long-running requests
+        idleTimeout: this.options.idleTimeout ?? DEFAULT_IDLE_TIMEOUT,
         // WebSocket handlers
         websocket: wsHandlers,
         // Bun routes API: all endpoints are handled here
@@ -1358,9 +1417,14 @@ export class OneBunApplication {
 
       // Check if result is an async iterable (generator)
       if (result && typeof result === 'object' && Symbol.asyncIterator in result) {
+        // Apply default heartbeat if none specified to keep the connection alive
+        const effectiveOptions = {
+          ...options,
+          heartbeat: options.heartbeat ?? DEFAULT_SSE_HEARTBEAT_MS,
+        };
         const stream = createSseStream(
           result as AsyncIterable<unknown>,
-          options,
+          effectiveOptions,
         );
 
         return new Response(stream, {

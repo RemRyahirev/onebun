@@ -434,6 +434,384 @@ export class AuthController extends BaseController {
 OneBun correctly preserves multiple `Set-Cookie` headers. Use `Headers.append()` (not `set()`) to add multiple cookies without overwriting previous ones.
 :::
 
+## Middleware
+
+OneBun provides a class-based middleware system that operates at four levels: **application-wide**, **module-level**, **controller-level**, and **route-level**. All middleware extends `BaseMiddleware`, giving automatic access to a scoped logger, configuration, and full DI support through the constructor.
+
+### BaseMiddleware
+
+Every middleware class extends `BaseMiddleware` and implements the `use()` method:
+
+```typescript
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+
+class RequestLogMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    // Pre-processing: run before the handler
+    // this.logger is scoped to the class name automatically
+    this.logger.info(`${req.method} ${new URL(req.url).pathname}`);
+
+    // Call next() to continue the chain (other middleware or the handler)
+    const response = await next();
+
+    // Post-processing: run after the handler (optional)
+    response.headers.set('X-Request-Duration', String(Date.now()));
+
+    return response;
+  }
+}
+```
+
+- `this.logger` — `SyncLogger` scoped to the middleware class name (e.g., `RequestLogMiddleware`)
+- `this.config` — `IConfig` for reading environment variables
+- `req` — the incoming `OneBunRequest` (extends `Request` with `.cookies` and `.params`)
+- `next()` — calls the next middleware or the route handler; returns `OneBunResponse`
+- Return an `OneBunResponse` directly to short-circuit the chain (e.g., for auth failures)
+
+### Middleware with Dependency Injection
+
+Middleware supports full constructor-based DI, just like controllers. Inject any service available in the module's DI scope:
+
+```typescript
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+import { AuthService } from './auth.service';
+
+class AuthMiddleware extends BaseMiddleware {
+  constructor(private authService: AuthService) {
+    super();
+  }
+
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    const token = req.headers.get('Authorization');
+    const secret = this.config.get('auth.jwtSecret');
+
+    if (!this.authService.verify(token, secret)) {
+      this.logger.warn('Authentication failed');
+      return new Response(JSON.stringify({
+        success: false, code: 401, message: 'Unauthorized',
+      }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    return next();
+  }
+}
+```
+
+Middleware is instantiated **once** at application startup and reused for every request.
+
+### Route-Level Middleware
+
+Apply middleware to a single route handler using `@UseMiddleware()` as a method decorator. Pass **class constructors** (not instances):
+
+```typescript
+import { Controller, BaseController, Get, Post, UseMiddleware } from '@onebun/core';
+
+@Controller('/api')
+export class ApiController extends BaseController {
+  @Get('/public')
+  publicEndpoint() {
+    return { message: 'Anyone can see this' };
+  }
+
+  @Post('/protected')
+  @UseMiddleware(AuthMiddleware)
+  protectedEndpoint() {
+    return { message: 'Auth required' };
+  }
+}
+```
+
+You can pass multiple middleware to a single `@UseMiddleware()` — they execute left to right:
+
+```typescript
+@Post('/action')
+@UseMiddleware(LogMiddleware, AuthMiddleware, RateLimitMiddleware)
+action() {
+  return { ok: true };
+}
+```
+
+### Controller-Level Middleware
+
+Apply middleware to **every route** in a controller by using `@UseMiddleware()` as a class decorator:
+
+```typescript
+import { Controller, BaseController, Get, Put, UseMiddleware } from '@onebun/core';
+
+@Controller('/admin')
+@UseMiddleware(AuthMiddleware)
+export class AdminController extends BaseController {
+  // AuthMiddleware runs before every handler in this controller
+
+  @Get('/dashboard')
+  getDashboard() {
+    return { stats: { users: 100 } };
+  }
+
+  @Put('/settings')
+  updateSettings() {
+    return { updated: true };
+  }
+}
+```
+
+Controller-level middleware can be combined with route-level middleware. The execution order is always **controller -> route**:
+
+```typescript
+@Controller('/admin')
+@UseMiddleware(AuthMiddleware)       // Runs first on all routes
+export class AdminController extends BaseController {
+  @Get('/dashboard')
+  getDashboard() {
+    // Only AuthMiddleware runs
+    return { stats: {} };
+  }
+
+  @Put('/settings')
+  @UseMiddleware(AuditLogMiddleware) // Runs second, only on this route
+  updateSettings() {
+    // AuthMiddleware, then AuditLogMiddleware
+    return { updated: true };
+  }
+}
+```
+
+### Module-Level Middleware
+
+Apply middleware to **all controllers within a module** (including controllers in imported child modules) by implementing the `OnModuleConfigure` interface:
+
+```typescript
+import {
+  Module,
+  type OnModuleConfigure,
+  type MiddlewareClass,
+} from '@onebun/core';
+import { UserController } from './user.controller';
+import { ProfileController } from './profile.controller';
+
+@Module({
+  controllers: [UserController, ProfileController],
+})
+export class UserModule implements OnModuleConfigure {
+  configureMiddleware(): MiddlewareClass[] {
+    return [TenantMiddleware];
+  }
+}
+```
+
+Module middleware is **inherited by child modules**. If `RootModule` imports `UserModule`, and both configure middleware, the execution order is: root module middleware -> user module middleware:
+
+```typescript
+@Module({
+  imports: [UserModule, OrderModule],
+  controllers: [HealthController],
+})
+export class AppModule implements OnModuleConfigure {
+  configureMiddleware(): MiddlewareClass[] {
+    return [RequestIdMiddleware]; // Applied to ALL controllers in AppModule + UserModule + OrderModule
+  }
+}
+```
+
+In this setup:
+- `HealthController` gets: `[RequestIdMiddleware]`
+- Controllers in `UserModule` get: `[RequestIdMiddleware, TenantMiddleware]`
+- Controllers in `OrderModule` get: `[RequestIdMiddleware]` (if OrderModule has no own middleware)
+
+### Application-Wide Middleware
+
+Apply middleware to **every route in every controller** by passing the `middleware` option to `OneBunApplication`:
+
+```typescript
+import { OneBunApplication } from '@onebun/core';
+import { AppModule } from './app.module';
+import { RequestIdMiddleware, CorsMiddleware } from './middleware';
+
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  middleware: [RequestIdMiddleware, CorsMiddleware],
+});
+
+await app.start();
+```
+
+Application-wide middleware runs **before** any module-level, controller-level or route-level middleware.
+
+### Application-Wide Middleware with MultiServiceApplication
+
+For multi-service setups, middleware can be defined at the application level (shared by all services) or per service:
+
+```typescript
+import { MultiServiceApplication } from '@onebun/core';
+
+const app = new MultiServiceApplication({
+  services: {
+    users: { module: UsersModule, port: 3001 },
+    orders: {
+      module: OrdersModule,
+      port: 3002,
+      middleware: [OrderSpecificMiddleware], // Overrides app-level middleware
+    },
+  },
+  middleware: [RequestIdMiddleware, CorsMiddleware], // Shared middleware for all services
+});
+```
+
+### Middleware Execution Order
+
+When all four levels are used, middleware executes in this order:
+
+```
+HTTP Request
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 1. Application-wide middleware              │
+│    (ApplicationOptions.middleware)           │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 2. Module-level middleware                  │
+│    (OnModuleConfigure.configureMiddleware()) │
+│    Root module -> ... -> owner module       │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 3. Controller-level middleware              │
+│    (@UseMiddleware on the class)            │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 4. Route-level middleware                   │
+│    (@UseMiddleware on the method)           │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 5. Controller Handler                       │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+  Response (flows back through the chain)
+```
+
+Each middleware can perform **pre-processing** (before `next()`) and **post-processing** (after `next()`) — similar to the "onion model."
+
+### Real-World Examples
+
+#### Custom Authentication Middleware
+
+```typescript
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+
+export class JwtAuthMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      this.logger.warn('Missing or invalid Authorization header');
+      return new Response(JSON.stringify({
+        success: false,
+        code: 401,
+        message: 'Missing or invalid Authorization header',
+      }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+
+    // Validate the token (your logic here)
+    const token = authHeader.slice(7);
+    this.logger.debug('Validating JWT token');
+    // ... verify token, attach user info, etc.
+
+    return next();
+  }
+}
+```
+
+#### Request Validation Middleware
+
+```typescript
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+
+export class JsonOnlyMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    if (req.method !== 'GET' && req.method !== 'DELETE') {
+      const contentType = req.headers.get('Content-Type');
+      if (!contentType?.includes('application/json')) {
+        this.logger.warn(`Invalid Content-Type: ${contentType}`);
+        return new Response(JSON.stringify({
+          success: false,
+          code: 415,
+          message: 'Content-Type must be application/json',
+        }), {
+          status: 415,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+    }
+    return next();
+  }
+}
+```
+
+#### Timing / Logging Middleware
+
+```typescript
+import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+
+export class TimingMiddleware extends BaseMiddleware {
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+    const start = performance.now();
+    const response = await next();
+    const duration = (performance.now() - start).toFixed(2);
+    response.headers.set('X-Response-Time', `${duration}ms`);
+    this.logger.info(`${req.method} ${new URL(req.url).pathname} — ${duration}ms`);
+    return response;
+  }
+}
+```
+
+#### Combining All Levels
+
+```typescript
+// Global: runs on every request in the application
+const app = new OneBunApplication(AppModule, {
+  middleware: [RequestIdMiddleware, TimingMiddleware],
+});
+
+// Controller: runs on every route in AdminController
+@Controller('/admin')
+@UseMiddleware(JwtAuthMiddleware)
+class AdminController extends BaseController {
+  @Get('/stats')
+  getStats() { /* ... */ }
+
+  // Route: runs only on POST /admin/users, after JwtAuth
+  @Post('/users')
+  @UseMiddleware(JsonOnlyMiddleware)
+  createUser() { /* ... */ }
+}
+```
+
+For `GET /admin/stats`, the execution order is:
+1. `RequestIdMiddleware` (global)
+2. `TimingMiddleware` (global)
+3. `JwtAuthMiddleware` (controller)
+4. `getStats()` handler
+
+For `POST /admin/users`, the execution order is:
+1. `RequestIdMiddleware` (global)
+2. `TimingMiddleware` (global)
+3. `JwtAuthMiddleware` (controller)
+4. `JsonOnlyMiddleware` (route)
+5. `createUser()` handler
+
+<!-- llm-only: Middleware is class-based, extending BaseMiddleware. All middleware classes have this.logger (SyncLogger scoped to class name) and this.config (IConfig). Full constructor DI is supported — inject any service from the module's DI scope. Middleware is instantiated once at startup. Pass class constructors (not instances) everywhere: @UseMiddleware(AuthMiddleware), ApplicationOptions.middleware: [CorsMiddleware], OnModuleConfigure.configureMiddleware(): [TenantMiddleware]. Middleware precedence is global → module → controller → route → handler. -->
+
 ## Request Helpers
 
 ### isJson()
@@ -686,6 +1064,13 @@ export class UserController extends BaseController {
 
 Server-Sent Events provide a way to push data from the server to the client over HTTP. OneBun provides the `@Sse()` decorator and `sse()` method for creating SSE endpoints.
 
+> **Connection keep-alive:** SSE endpoints automatically get:
+> - **Per-request timeout**: 600 seconds (10 minutes) by default, configurable via `@Sse({ timeout: seconds })` or `@Get('/path', { timeout: seconds })`. Set to `0` to disable.
+> - **Heartbeat**: a comment (`: heartbeat\n\n`) sent every 30 seconds by default via the `@Sse()` decorator. Override with `@Sse({ heartbeat: ms })` or disable with `@Sse({ heartbeat: 0 })`.
+> - The global `idleTimeout` (default: 120 seconds) applies to all other connections.
+>
+> For regular (non-SSE) endpoints that run long, use `@Get('/path', { timeout: 300 })` or `{ timeout: 0 }` to disable.
+
 ### SseEvent Type
 
 ```typescript
@@ -709,6 +1094,8 @@ interface SseOptions {
    * Heartbeat interval in milliseconds.
    * When set, the server will send a comment (": heartbeat\n\n")
    * at this interval to keep the connection alive.
+   * Default for @Sse() decorator: 30000 (30 seconds).
+   * For sse() method: no default — set explicitly if needed.
    */
   heartbeat?: number;
 }
@@ -716,7 +1103,14 @@ interface SseOptions {
 
 ### @Sse() Decorator
 
-The `@Sse()` decorator marks a method as an SSE endpoint. The method should be an async generator that yields `SseEvent` objects.
+The `@Sse()` decorator marks a method as an SSE endpoint. The method should be an async generator that yields `SseEvent` objects. By default, a heartbeat is sent every 30 seconds and the per-request timeout is 600 seconds (10 minutes).
+
+```typescript
+@Sse()                           // defaults: heartbeat=30s, timeout=600s
+@Sse({ heartbeat: 15000 })      // custom heartbeat, default timeout
+@Sse({ timeout: 0 })            // no timeout, default heartbeat
+@Sse({ heartbeat: 5000, timeout: 3600 })  // custom both
+```
 
 ```typescript
 import {
@@ -862,24 +1256,133 @@ eventSource.addEventListener('error', (event) => {
 eventSource.close();
 ```
 
+### Handling Client Disconnect (Abort)
+
+When a client disconnects (via `AbortController`, `EventSource.close()`, or browser navigation), OneBun properly terminates the async generator by calling `iterator.return()`. This triggers the generator's `finally` block, providing a natural cleanup hook.
+
+#### `try/finally` Cleanup (Idiomatic for `@Sse()`)
+
+Use `try/finally` inside the generator to run cleanup logic on client disconnect. This is the recommended approach for `@Sse()` decorator endpoints:
+
+```typescript
+@Controller('/events')
+export class EventsController extends BaseController {
+  @Get('/stream')
+  @Sse({ heartbeat: 15000 })
+  async *stream(): SseGenerator {
+    const subscription = this.eventService.subscribe();
+    try {
+      for await (const event of subscription) {
+        yield { event: 'update', data: event };
+      }
+    } finally {
+      // Runs when client disconnects -- cleanup resources
+      subscription.unsubscribe();
+    }
+  }
+}
+```
+
+#### SSE Proxy Pattern with `try/finally`
+
+When proxying a 3rd party SSE stream, use `try/finally` to abort the upstream connection on client disconnect:
+
+```typescript
+@Controller('/proxy')
+export class ProxyController extends BaseController {
+  @Get('/events')
+  @Sse()
+  async *proxyEvents(): SseGenerator {
+    const ac = new AbortController();
+    try {
+      const response = await fetch('https://api.example.com/events', {
+        signal: ac.signal,
+      });
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value);
+        yield { event: 'proxied', data: text };
+      }
+    } finally {
+      // Client disconnected -- abort the upstream SSE connection
+      ac.abort();
+    }
+  }
+}
+```
+
+#### `onAbort` Callback (for `sse()` helper)
+
+The `sse()` method accepts an `onAbort` callback that fires when the client disconnects. This is useful when you have cleanup logic that doesn't fit in a `try/finally`:
+
+```typescript
+@Controller('/events')
+export class EventsController extends BaseController {
+  @Get('/live')
+  live(): Response {
+    const subscription = this.eventService.subscribe();
+
+    return this.sse(subscription, {
+      heartbeat: 15000,
+      onAbort: () => subscription.unsubscribe(),
+    });
+  }
+}
+```
+
+#### Factory Function with `AbortSignal` (SSE proxy via `sse()`)
+
+The `sse()` method also accepts a factory function `(signal: AbortSignal) => AsyncIterable`. The framework creates an `AbortController` internally and aborts it on client disconnect. This is the cleanest approach for SSE proxying with the `sse()` helper:
+
+```typescript
+@Controller('/proxy')
+export class ProxyController extends BaseController {
+  @Get('/events')
+  proxy(): Response {
+    return this.sse((signal) => this.proxyUpstream(signal));
+  }
+
+  private async *proxyUpstream(signal: AbortSignal): SseGenerator {
+    const response = await fetch('https://api.example.com/events', { signal });
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      yield { event: 'proxied', data: decoder.decode(value) };
+    }
+    // When client disconnects -> signal aborted -> fetch aborted automatically
+  }
+}
+```
+
 ### Comparison: @Sse() vs sse()
 
 | Feature | @Sse() Decorator | sse() Method |
 |---------|------------------|--------------|
 | Use case | Dedicated SSE endpoints | Programmatic/conditional SSE |
 | Syntax | `async *method()` generator | Return `this.sse(generator)` |
-| Heartbeat | `@Sse({ heartbeat: ms })` | `this.sse(gen, { heartbeat: ms })` |
+| Heartbeat | `@Sse({ heartbeat: ms })` (default: 30s) | `this.sse(gen, { heartbeat: ms })` (no default) |
+| Timeout | `@Sse({ timeout: s })` (default: 600s) | Use `@Get('/path', { timeout: s })` |
 | Response type | Auto-wrapped | Explicit Response return |
+| Disconnect cleanup | `try/finally` in generator | `onAbort` callback or `try/finally` |
+| SSE proxy | `try/finally` + `AbortController` | Factory function with `AbortSignal` |
 
 **Use `@Sse()` when:**
 - The endpoint is always an SSE stream
 - You want cleaner async generator syntax
-- You need built-in heartbeat support
+- You need built-in heartbeat and timeout defaults
 
 **Use `sse()` when:**
 - You need conditional SSE (sometimes SSE, sometimes JSON)
 - You're composing generators from multiple sources
 - You want more control over the Response object
+- You need the factory function pattern with `AbortSignal`
 
 ## File Uploads
 

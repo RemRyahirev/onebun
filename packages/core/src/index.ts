@@ -36,8 +36,11 @@ export {
   type ParamDecoratorOptions,
   type ParamMetadata,
   type ResponseSchemaMetadata,
+  type RouteOptions,
   type RouteMetadata,
   type ControllerMetadata,
+  type MiddlewareClass,
+  type OnModuleConfigure,
   // File upload types
   type FileUploadOptions,
   type FilesUploadOptions,
@@ -86,6 +89,8 @@ export {
   type OnModuleDestroy,
   type BeforeApplicationDestroy,
   type OnApplicationDestroy,
+  // Middleware
+  BaseMiddleware,
   // Lifecycle hooks helper functions
   hasOnModuleInit,
   hasOnApplicationInit,
@@ -100,6 +105,10 @@ export {
   // SSE helpers
   formatSseEvent,
   createSseStream,
+  // Server & SSE default constants
+  DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_SSE_HEARTBEAT_MS,
+  DEFAULT_SSE_TIMEOUT,
 } from './module';
 
 // Application

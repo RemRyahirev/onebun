@@ -1,3 +1,4 @@
+import type { BaseMiddleware } from './module/middleware';
 import type { Type } from 'arktype';
 import type { Effect, Layer } from 'effect';
 
@@ -11,6 +12,31 @@ import type { Logger, LoggerOptions } from '@onebun/logger';
  * @see https://bun.sh/docs/api/http#bunsrequest
  */
 export type OneBunRequest = import('bun').BunRequest;
+
+/**
+ * A middleware class constructor.
+ *
+ * Pass class references (not instances) to `@UseMiddleware()`,
+ * `ApplicationOptions.middleware`, and `OnModuleConfigure.configureMiddleware()`.
+ * The framework will instantiate them once at startup with DI support.
+ *
+ * @example
+ * ```typescript
+ * @UseMiddleware(AuthMiddleware)
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type MiddlewareClass = new (...args: any[]) => BaseMiddleware;
+
+/**
+ * Resolved middleware function — a bound `use()` method of an instantiated
+ * `BaseMiddleware`. Used internally by the execution pipeline.
+ * @internal
+ */
+export type ResolvedMiddleware = (
+  req: OneBunRequest,
+  next: () => Promise<OneBunResponse>,
+) => Promise<OneBunResponse> | OneBunResponse;
 
 /**
  * HTTP Response type used in OneBun controllers.
@@ -48,6 +74,37 @@ export interface ModuleProviders {
    * Services to export to parent modules
    */
   exports?: Function[];
+}
+
+/**
+ * Interface for modules that configure middleware.
+ * Implement this interface on your `@Module()` class to apply middleware
+ * to all controllers within the module (including imported child modules).
+ *
+ * Module-level middleware runs after global middleware but before
+ * controller-level and route-level middleware.
+ *
+ * Execution order: global → module → controller → route → handler
+ *
+ * @example
+ * ```typescript
+ * @Module({
+ *   controllers: [UserController],
+ *   imports: [AuthModule],
+ * })
+ * export class UserModule implements OnModuleConfigure {
+ *   configureMiddleware(): MiddlewareClass[] {
+ *     return [TenantMiddleware, AuditMiddleware];
+ *   }
+ * }
+ * ```
+ */
+export interface OnModuleConfigure {
+  /**
+   * Return an array of middleware class constructors to apply to all controllers
+   * in this module and its imported child modules.
+   */
+  configureMiddleware(): MiddlewareClass[];
 }
 
 /**
@@ -98,6 +155,19 @@ export interface ModuleInstance {
    * Get service instance by class
    */
   getServiceByClass?<T>(serviceClass: new (...args: unknown[]) => T): T | undefined;
+
+  /**
+   * Get accumulated module-level middleware (resolved bound functions)
+   * for a given controller class.
+   * Includes middleware from ancestor modules (root → child → … → owner module).
+   */
+  getModuleMiddleware?(controllerClass: Function): Function[];
+
+  /**
+   * Resolve middleware class constructors into bound `use()` functions
+   * using this module's DI scope (services + logger + config).
+   */
+  resolveMiddleware?(classes: Function[]): Function[];
 }
 
 /**
@@ -127,6 +197,14 @@ export interface ApplicationOptions {
    * @defaultValue "0.0.0.0"
    */
   host?: string;
+
+  /**
+   * Maximum idle time (in seconds) before the server closes a connection.
+   * A connection is idle when no data is sent or received.
+   * Set to 0 to disable the timeout entirely.
+   * @defaultValue 120
+   */
+  idleTimeout?: number;
 
   /**
    * Base path prefix for all routes
@@ -341,6 +419,25 @@ export interface ApplicationOptions {
    * Documentation configuration (OpenAPI/Swagger)
    */
   docs?: DocsApplicationOptions;
+
+  /**
+   * Application-wide middleware applied to every route before module-level,
+   * controller-level and route-level middleware. Useful for cross-cutting
+   * concerns like request logging, authentication, CORS, or request validation.
+   *
+   * Pass class constructors (not instances). The framework will instantiate
+   * them once at startup with full DI support from the root module.
+   *
+   * Execution order: global → module → controller → route → handler
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   middleware: [CorsMiddleware, RequestIdMiddleware],
+   * });
+   * ```
+   */
+  middleware?: MiddlewareClass[];
 
   /**
    * Enable graceful shutdown on SIGTERM/SIGINT
@@ -589,6 +686,26 @@ export interface ResponseSchemaMetadata {
 }
 
 /**
+ * Options for HTTP method decorators (@Get, @Post, @Put, @Delete, @Patch, etc.)
+ */
+export interface RouteOptions {
+  /**
+   * Per-request idle timeout in seconds.
+   * Overrides the global `idleTimeout` from `ApplicationOptions` for this route.
+   * Set to 0 to disable the timeout entirely (useful for long-running requests).
+   * @example
+   * ```typescript
+   * @Get('/long-task', { timeout: 300 }) // 5 minutes
+   * async longTask() { ... }
+   *
+   * @Get('/stream', { timeout: 0 }) // no timeout
+   * async stream() { ... }
+   * ```
+   */
+  timeout?: number;
+}
+
+/**
  * Route metadata
  */
 export interface RouteMetadata {
@@ -602,6 +719,11 @@ export interface RouteMetadata {
    * Key is HTTP status code (e.g., 200, 201, 404)
    */
   responseSchemas?: ResponseSchemaMetadata[];
+  /**
+   * Per-request idle timeout in seconds.
+   * When set, calls `server.timeout(req, seconds)` for this route.
+   */
+  timeout?: number;
 }
 
 /**
@@ -610,6 +732,11 @@ export interface RouteMetadata {
 export interface ControllerMetadata {
   path: string;
   routes: RouteMetadata[];
+  /**
+   * Controller-level middleware class constructors applied to all routes.
+   * Set by applying @UseMiddleware() as a class decorator.
+   */
+  middleware?: MiddlewareClass[];
 }
 
 // ============================================================================
@@ -662,6 +789,21 @@ export interface SseOptions {
    * at this interval to keep the connection alive.
    */
   heartbeat?: number;
+
+  /**
+   * Callback invoked when the client disconnects or aborts the SSE connection.
+   * Useful for cleanup logic when using `controller.sse()` programmatically.
+   *
+   * For `@Sse()` decorator usage, prefer `try/finally` in the generator instead.
+   *
+   * @example
+   * ```typescript
+   * return this.sse(this.generateEvents(), {
+   *   onAbort: () => this.eventService.unsubscribe(),
+   * });
+   * ```
+   */
+  onAbort?: () => void;
 }
 
 /**

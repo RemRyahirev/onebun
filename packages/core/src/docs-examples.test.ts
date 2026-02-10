@@ -38,6 +38,8 @@ import type {
   SseGenerator,
   OneBunRequest,
   OneBunResponse,
+  MiddlewareClass,
+  OnModuleConfigure,
 } from './types';
 import type { ServerWebSocket } from 'bun';
 
@@ -59,6 +61,7 @@ import {
   BaseService,
   BaseController,
   UseMiddleware,
+  getControllerMiddleware,
   getServiceTag,
   getControllerMetadata,
   HttpStatusCode,
@@ -118,6 +121,10 @@ import {
   OneBunFile,
   MimeType,
   matchMimeType,
+  BaseMiddleware,
+  DEFAULT_IDLE_TIMEOUT,
+  DEFAULT_SSE_HEARTBEAT_MS,
+  DEFAULT_SSE_TIMEOUT,
 } from './';
 
 
@@ -320,8 +327,8 @@ describe('Core README Examples', () => {
     it('should use middleware decorator', () => {
       // From README: Middleware example
       function loggerMiddleware(
-        _req: Request,
-        next: () => Promise<Response>,
+        _req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
       ): Promise<Response> {
         // eslint-disable-next-line no-console
         console.log('Request received');
@@ -330,8 +337,8 @@ describe('Core README Examples', () => {
       }
 
       function authMiddleware(
-        req: Request,
-        next: () => Promise<Response>,
+        req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
       ): Promise<Response> {
         const token = req.headers.get('Authorization');
         if (!token) {
@@ -564,8 +571,8 @@ describe('Decorators API Documentation Examples', () => {
     it('should apply middleware to route handler', () => {
       // From docs: @UseMiddleware() example
       const authMiddleware = async (
-        req: Request,
-        next: () => Promise<Response>,
+        req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
       ) => {
         const token = req.headers.get('Authorization');
         if (!token) {
@@ -576,8 +583,8 @@ describe('Decorators API Documentation Examples', () => {
       };
 
       const logMiddleware = async (
-        _req: Request,
-        next: () => Promise<Response>,
+        _req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
       ) => {
         // eslint-disable-next-line no-console
         console.log('Request logged');
@@ -601,6 +608,60 @@ describe('Decorators API Documentation Examples', () => {
       }
 
       expect(UserController).toBeDefined();
+    });
+
+    it('should apply middleware to all routes when used as class decorator (docs/api/decorators.md)', () => {
+      // From docs: @UseMiddleware() class-level example
+      const authMiddleware = async (
+        req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
+      ) => {
+        const token = req.headers.get('Authorization');
+        if (!token) {
+          return new Response('Unauthorized', { status: 401 });
+        }
+
+        return await next();
+      };
+
+      const auditLogMiddleware = async (
+        _req: OneBunRequest,
+        next: () => Promise<OneBunResponse>,
+      ) => await next();
+
+      @Controller('/admin')
+      @UseMiddleware(authMiddleware) // Applied to ALL routes in this controller
+      class AdminController extends BaseController {
+        @Get('/dashboard')
+        getDashboard() {
+          return this.success({ stats: {} });
+        }
+
+        @Put('/settings')
+        @UseMiddleware(auditLogMiddleware) // Additional middleware for this route
+        updateSettings() {
+          return this.success({ updated: true });
+        }
+      }
+
+      expect(AdminController).toBeDefined();
+
+      // Verify controller-level middleware is stored
+      const ctrlMiddleware = getControllerMiddleware(AdminController);
+      expect(ctrlMiddleware).toHaveLength(1);
+      expect(ctrlMiddleware[0]).toBe(authMiddleware);
+
+      // Verify route-level middleware is stored on the method
+      const metadata = getControllerMetadata(AdminController);
+      expect(metadata).toBeDefined();
+
+      const settingsRoute = metadata!.routes.find((r) => r.path === '/settings');
+      expect(settingsRoute?.middleware).toHaveLength(1);
+      expect(settingsRoute!.middleware![0]).toBe(auditLogMiddleware);
+
+      // The dashboard route should have no route-level middleware (only controller-level)
+      const dashboardRoute = metadata!.routes.find((r) => r.path === '/dashboard');
+      expect(dashboardRoute?.middleware?.length ?? 0).toBe(0);
     });
   });
 });
@@ -859,6 +920,430 @@ describe('Controllers API Documentation Examples', () => {
       expect(HttpStatusCode.NOT_FOUND).toBe(404);
       expect(HttpStatusCode.CONFLICT).toBe(409);
       expect(HttpStatusCode.INTERNAL_SERVER_ERROR).toBe(500);
+    });
+  });
+});
+
+describe('Middleware API Documentation Examples (docs/api/controllers.md)', () => {
+  describe('BaseMiddleware (docs/api/controllers.md#basemiddleware)', () => {
+    it('should define a middleware class extending BaseMiddleware', () => {
+      // From docs: BaseMiddleware example
+      class RequestLogMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          this.logger.info(`${req.method} ${new URL(req.url).pathname}`);
+          const response = await next();
+          response.headers.set('X-Request-Duration', String(Date.now()));
+
+          return response;
+        }
+      }
+
+      expect(RequestLogMiddleware.prototype).toBeInstanceOf(BaseMiddleware);
+      // eslint-disable-next-line jest/unbound-method
+      expect(RequestLogMiddleware.prototype.use).toBeInstanceOf(Function);
+    });
+  });
+
+  describe('Route-Level Middleware (docs/api/controllers.md#route-level-middleware)', () => {
+    it('should apply middleware to individual routes', () => {
+      // From docs: Route-Level Middleware example
+      class AuthMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const token = req.headers.get('Authorization');
+          if (!token) {
+            return new Response('Unauthorized', { status: 401 });
+          }
+
+          return await next();
+        }
+      }
+
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/public')
+        publicEndpoint() {
+          return { message: 'Anyone can see this' };
+        }
+
+        @Post('/protected')
+        @UseMiddleware(AuthMiddleware)
+        protectedEndpoint() {
+          return { message: 'Auth required' };
+        }
+      }
+
+      const metadata = getControllerMetadata(ApiController);
+      expect(metadata).toBeDefined();
+
+      const publicRoute = metadata!.routes.find((r) => r.path === '/public');
+      expect(publicRoute?.middleware?.length ?? 0).toBe(0);
+
+      const protectedRoute = metadata!.routes.find((r) => r.path === '/protected');
+      expect(protectedRoute?.middleware).toHaveLength(1);
+      expect(protectedRoute!.middleware![0]).toBe(AuthMiddleware);
+    });
+  });
+
+  describe('Controller-Level Middleware (docs/api/controllers.md#controller-level-middleware)', () => {
+    it('should apply middleware to all routes via class decorator', () => {
+      // From docs: Controller-Level Middleware example
+      class AuthMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const token = req.headers.get('Authorization');
+          if (!token) {
+            return new Response('Unauthorized', { status: 401 });
+          }
+
+          return await next();
+        }
+      }
+
+      @Controller('/admin')
+      @UseMiddleware(AuthMiddleware)
+      class AdminController extends BaseController {
+        @Get('/dashboard')
+        getDashboard() {
+          return { stats: { users: 100 } };
+        }
+
+        @Put('/settings')
+        updateSettings() {
+          return { updated: true };
+        }
+      }
+
+      // Controller-level middleware is stored separately
+      const ctrlMiddleware = getControllerMiddleware(AdminController);
+      expect(ctrlMiddleware).toHaveLength(1);
+      expect(ctrlMiddleware[0]).toBe(AuthMiddleware);
+    });
+
+    it('should combine controller-level and route-level middleware', () => {
+      // From docs: Combined controller + route middleware example
+      class AuthMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next();
+        }
+      }
+
+      class AuditLogMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next();
+        }
+      }
+
+      @Controller('/admin')
+      @UseMiddleware(AuthMiddleware) // Runs first on all routes
+      class AdminController extends BaseController {
+        @Get('/dashboard')
+        getDashboard() {
+          return { stats: {} };
+        }
+
+        @Put('/settings')
+        @UseMiddleware(AuditLogMiddleware) // Runs second, only on this route
+        updateSettings() {
+          return { updated: true };
+        }
+      }
+
+      // Controller-level middleware
+      const ctrlMiddleware = getControllerMiddleware(AdminController);
+      expect(ctrlMiddleware).toHaveLength(1);
+      expect(ctrlMiddleware[0]).toBe(AuthMiddleware);
+
+      // Route-level middleware only on /settings
+      const metadata = getControllerMetadata(AdminController);
+      const settingsRoute = metadata!.routes.find((r) => r.path === '/settings');
+      expect(settingsRoute?.middleware).toHaveLength(1);
+      expect(settingsRoute!.middleware![0]).toBe(AuditLogMiddleware);
+
+      const dashboardRoute = metadata!.routes.find((r) => r.path === '/dashboard');
+      expect(dashboardRoute?.middleware?.length ?? 0).toBe(0);
+    });
+  });
+
+  describe('Application-Wide Middleware (docs/api/controllers.md#application-wide-middleware)', () => {
+    it('should accept middleware classes in ApplicationOptions', () => {
+      // From docs: Application-Wide Middleware example
+      class RequestIdMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const response = await next();
+          response.headers.set('X-Request-ID', crypto.randomUUID());
+
+          return response;
+        }
+      }
+
+      class CorsMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const response = await next();
+          response.headers.set('Access-Control-Allow-Origin', '*');
+
+          return response;
+        }
+      }
+
+      // Verify that middleware option is accepted by OneBunApplication
+      // (We don't start the app, just verify the type/constructor accepts it)
+      @Module({
+        controllers: [],
+        providers: [],
+      })
+      class AppModule {}
+
+      const app = new OneBunApplication(AppModule, {
+        port: 0,
+        middleware: [RequestIdMiddleware, CorsMiddleware],
+      });
+
+      expect(app).toBeDefined();
+    });
+  });
+
+  describe('Middleware Execution Order (docs/api/controllers.md#middleware-execution-order)', () => {
+    it('should support all four middleware levels together', () => {
+      // From docs: Combining All Levels example
+      class RequestIdMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next(); 
+        }
+      }
+
+      class TimingMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next(); 
+        }
+      }
+
+      class JwtAuthMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next(); 
+        }
+      }
+
+      class JsonOnlyMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next(); 
+        }
+      }
+
+      @Controller('/admin')
+      @UseMiddleware(JwtAuthMiddleware)
+      class AdminController extends BaseController {
+        @Get('/stats')
+        getStats() {
+          return { stats: {} };
+        }
+
+        @Post('/users')
+        @UseMiddleware(JsonOnlyMiddleware)
+        createUser() {
+          return { created: true };
+        }
+      }
+
+      // Verify controller middleware
+      const ctrlMiddleware = getControllerMiddleware(AdminController);
+      expect(ctrlMiddleware).toHaveLength(1);
+      expect(ctrlMiddleware[0]).toBe(JwtAuthMiddleware);
+
+      // Verify route-level middleware on /users only
+      const metadata = getControllerMetadata(AdminController);
+      const statsRoute = metadata!.routes.find((r) => r.path === '/stats');
+      expect(statsRoute?.middleware?.length ?? 0).toBe(0);
+
+      const usersRoute = metadata!.routes.find((r) => r.path === '/users');
+      expect(usersRoute?.middleware).toHaveLength(1);
+      expect(usersRoute!.middleware![0]).toBe(JsonOnlyMiddleware);
+
+      // Global middleware would be set via ApplicationOptions.middleware
+      @Module({
+        controllers: [AdminController],
+        providers: [],
+      })
+      class AppModule {}
+
+      const app = new OneBunApplication(AppModule, {
+        port: 0,
+        middleware: [RequestIdMiddleware, TimingMiddleware],
+      });
+
+      expect(app).toBeDefined();
+    });
+  });
+
+  describe('Real-World Middleware Examples (docs/api/controllers.md#real-world-examples)', () => {
+    it('should define custom authentication middleware', () => {
+      // From docs: Custom Authentication Middleware example
+      class JwtAuthMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const authHeader = req.headers.get('Authorization');
+          if (!authHeader?.startsWith('Bearer ')) {
+            this.logger.warn('Missing or invalid Authorization header');
+
+            return new Response(JSON.stringify({
+              success: false,
+              code: 401,
+              message: 'Missing or invalid Authorization header',
+            }), {
+              status: 401,
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              headers: { 'Content-Type': 'application/json' },
+            });
+          }
+
+          // Validate the token (your logic here)
+          this.logger.debug(`Validating JWT token: ${authHeader.slice(7).substring(0, 8)}...`);
+
+          return await next();
+        }
+      }
+
+      expect(JwtAuthMiddleware.prototype).toBeInstanceOf(BaseMiddleware);
+    });
+
+    it('should define request validation middleware', () => {
+      // From docs: Request Validation Middleware example
+      class JsonOnlyMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          if (req.method !== 'GET' && req.method !== 'DELETE') {
+            const contentType = req.headers.get('Content-Type');
+            if (!contentType?.includes('application/json')) {
+              this.logger.warn(`Invalid Content-Type: ${contentType}`);
+
+              return new Response(JSON.stringify({
+                success: false,
+                code: 415,
+                message: 'Content-Type must be application/json',
+              }), {
+                status: 415,
+                // eslint-disable-next-line @typescript-eslint/naming-convention
+                headers: { 'Content-Type': 'application/json' },
+              });
+            }
+          }
+
+          return await next();
+        }
+      }
+
+      expect(JsonOnlyMiddleware.prototype).toBeInstanceOf(BaseMiddleware);
+    });
+
+    it('should define timing/logging middleware', () => {
+      // From docs: Timing / Logging Middleware example
+      class TimingMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const start = performance.now();
+          const response = await next();
+          const duration = (performance.now() - start).toFixed(2);
+          response.headers.set('X-Response-Time', `${duration}ms`);
+          this.logger.info(`${req.method} ${new URL(req.url).pathname} — ${duration}ms`);
+
+          return response;
+        }
+      }
+
+      expect(TimingMiddleware.prototype).toBeInstanceOf(BaseMiddleware);
+    });
+  });
+
+  describe('Module-Level Middleware (docs/api/controllers.md#module-level-middleware)', () => {
+    it('should define module-level middleware via OnModuleConfigure interface', () => {
+      // From docs: Module-Level Middleware example
+      class TenantMiddleware extends BaseMiddleware {
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          const tenantId = req.headers.get('X-Tenant-ID');
+          if (!tenantId) {
+            return new Response('Missing X-Tenant-ID', { status: 400 });
+          }
+
+          return await next();
+        }
+      }
+
+      @Controller('/users')
+      class UserController extends BaseController {
+        @Get('/')
+        getUsers() {
+          return [];
+        }
+      }
+
+      @Module({
+        controllers: [UserController],
+      })
+      class UserModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [TenantMiddleware];
+        }
+      }
+
+      // Verify the module class has configureMiddleware
+      const instance = new UserModule();
+      const middleware = instance.configureMiddleware();
+      expect(middleware).toHaveLength(1);
+      expect(middleware[0]).toBe(TenantMiddleware);
+    });
+
+    it('should inherit module middleware in child modules', () => {
+      // From docs: Module middleware inheritance example
+      class RequestIdMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next();
+        }
+      }
+
+      class TenantMiddleware extends BaseMiddleware {
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next();
+        }
+      }
+
+      @Controller('/users')
+      class UserController extends BaseController {
+        @Get('/')
+        getUsers() {
+          return [];
+        }
+      }
+
+      @Module({
+        controllers: [UserController],
+      })
+      class UserModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [TenantMiddleware];
+        }
+      }
+
+      @Controller('/health')
+      class HealthController extends BaseController {
+        @Get('/')
+        health() {
+          return { ok: true };
+        }
+      }
+
+      @Module({
+        imports: [UserModule],
+        controllers: [HealthController],
+      })
+      class AppModule implements OnModuleConfigure {
+        configureMiddleware(): MiddlewareClass[] {
+          return [RequestIdMiddleware];
+        }
+      }
+
+      // Verify both modules have configureMiddleware
+      const appInstance = new AppModule();
+      expect(appInstance.configureMiddleware()).toHaveLength(1);
+      expect(appInstance.configureMiddleware()[0]).toBe(RequestIdMiddleware);
+
+      const userInstance = new UserModule();
+      expect(userInstance.configureMiddleware()).toHaveLength(1);
+      expect(userInstance.configureMiddleware()[0]).toBe(TenantMiddleware);
     });
   });
 });
@@ -3734,6 +4219,91 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
       // Should have the actual event (string data is not wrapped in extra quotes)
       expect(output).toContain('data: done');
     });
+
+    it('should call iterator.return() on cancel, triggering generator finally block', async () => {
+      let finallyCalled = false;
+
+      async function* testGenerator(): SseGenerator {
+        try {
+          yield { event: 'start', data: { count: 0 } };
+          // Simulate a long-running generator
+          yield { event: 'tick', data: { count: 1 } };
+          yield { event: 'tick', data: { count: 2 } };
+        } finally {
+          finallyCalled = true;
+        }
+      }
+
+      const stream = createSseStream(testGenerator());
+      const reader = stream.getReader();
+
+      // Read first chunk
+      const first = await reader.read();
+      expect(first.done).toBe(false);
+
+      // Cancel the stream (simulates client disconnect)
+      await reader.cancel();
+
+      // The generator's finally block should have been triggered
+      // Give a tick for the async return to settle
+      await Bun.sleep(10);
+      expect(finallyCalled).toBe(true);
+    });
+
+    it('should fire onAbort callback on cancel', async () => {
+      let abortCalled = false;
+
+      async function* testGenerator(): SseGenerator {
+        yield { event: 'start', data: { count: 0 } };
+        yield { event: 'tick', data: { count: 1 } };
+      }
+
+      const stream = createSseStream(testGenerator(), {
+        onAbort() {
+          abortCalled = true; 
+        },
+      });
+      const reader = stream.getReader();
+
+      // Read first chunk
+      await reader.read();
+
+      // Cancel the stream
+      await reader.cancel();
+
+      expect(abortCalled).toBe(true);
+    });
+
+    it('should abort upstream fetch via try/finally when client disconnects (SSE proxy pattern)', async () => {
+      let upstreamAborted = false;
+      const ac = new AbortController();
+
+      async function* proxyGenerator(): SseGenerator {
+        try {
+          ac.signal.addEventListener('abort', () => {
+            upstreamAborted = true;
+          });
+          yield { event: 'proxied', data: { from: 'upstream' } };
+          // Simulate waiting for more upstream data
+          yield { event: 'proxied', data: { from: 'upstream-2' } };
+        } finally {
+          // This is the idiomatic pattern: abort the upstream connection in finally
+          ac.abort();
+        }
+      }
+
+      const stream = createSseStream(proxyGenerator());
+      const reader = stream.getReader();
+
+      // Read first event
+      await reader.read();
+
+      // Client disconnects
+      await reader.cancel();
+
+      await Bun.sleep(10);
+      expect(upstreamAborted).toBe(true);
+    });
   });
 
   describe('Controller.sse() Method', () => {
@@ -3764,6 +4334,79 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
       }
 
       expect(EventsController).toBeDefined();
+    });
+
+    it('should accept factory function with AbortSignal for SSE proxy pattern', async () => {
+      let signalAborted = false;
+
+      @Controller('/events')
+      class ProxyController extends BaseController {
+        @Get('/proxy')
+        proxy(): Response {
+          return this.sse((signal) => this.proxyUpstream(signal));
+        }
+
+        private async *proxyUpstream(signal: AbortSignal): SseGenerator {
+          signal.addEventListener('abort', () => {
+            signalAborted = true; 
+          });
+          yield { event: 'proxied', data: { from: 'upstream' } };
+          yield { event: 'proxied', data: { from: 'upstream-2' } };
+        }
+      }
+
+      const controller = new ProxyController();
+      // Access protected method via type assertion
+      const sseMethod = (controller as unknown as {
+        sse: (source: (signal: AbortSignal) => AsyncIterable<unknown>, options?: unknown) => Response;
+      }).sse.bind(controller);
+
+      const response = sseMethod((signal) => (async function* () {
+        signal.addEventListener('abort', () => {
+          signalAborted = true; 
+        });
+        yield { event: 'proxied', data: { from: 'upstream' } };
+      })());
+
+      expect(response).toBeInstanceOf(Response);
+      expect(response.headers.get('Content-Type')).toBe('text/event-stream');
+
+      const reader = response.body!.getReader();
+
+      // Read first event
+      await reader.read();
+
+      // Client disconnects
+      await reader.cancel();
+
+      await Bun.sleep(10);
+      expect(signalAborted).toBe(true);
+    });
+
+    it('should support onAbort callback with sse() helper', async () => {
+      let abortCalled = false;
+
+      const controller = new BaseController();
+      const sseMethod = (controller as unknown as {
+        sse: (source: AsyncIterable<unknown>, options?: { onAbort?: () => void }) => Response;
+      }).sse.bind(controller);
+
+      const response = sseMethod(
+        (async function* () {
+          yield { event: 'tick', data: { count: 0 } };
+        })(),
+        {
+          onAbort() {
+            abortCalled = true; 
+          }, 
+        },
+      );
+
+      const reader = response.body!.getReader();
+      await reader.read();
+      await reader.cancel();
+
+      expect(abortCalled).toBe(true);
     });
   });
 
@@ -3841,6 +4484,148 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
       expect(DataService).toBeDefined();
       expect(NotificationService).toBeDefined();
     });
+  });
+});
+
+// ============================================================================
+// Server & SSE Default Constants
+// ============================================================================
+
+describe('Server & SSE Default Constants (docs/api/core.md, docs/api/controllers.md)', () => {
+  it('should export DEFAULT_IDLE_TIMEOUT as 120 seconds', () => {
+    expect(DEFAULT_IDLE_TIMEOUT).toBe(120);
+  });
+
+  it('should export DEFAULT_SSE_HEARTBEAT_MS as 30000 milliseconds', () => {
+    expect(DEFAULT_SSE_HEARTBEAT_MS).toBe(30_000);
+  });
+
+  it('should export DEFAULT_SSE_TIMEOUT as 600 seconds (10 minutes)', () => {
+    expect(DEFAULT_SSE_TIMEOUT).toBe(600);
+  });
+});
+
+// ============================================================================
+// Per-request timeout via route decorators (docs/api/decorators.md)
+// ============================================================================
+
+describe('Per-request timeout via route decorators (docs/api/decorators.md)', () => {
+  it('should store timeout in route metadata when specified via @Get options', () => {
+    @Controller('/tasks')
+    class TaskController extends BaseController {
+      @Get('/process', { timeout: 300 })
+      async process() {
+        return new Response('OK');
+      }
+    }
+
+    const metadata = getControllerMetadata(TaskController);
+    expect(metadata).toBeDefined();
+    const route = metadata!.routes.find((r) => r.handler === 'process');
+    expect(route).toBeDefined();
+    expect(route!.timeout).toBe(300);
+  });
+
+  it('should store timeout: 0 (disable) in route metadata', () => {
+    @Controller('/export')
+    class ExportController extends BaseController {
+      @Get('/all', { timeout: 0 })
+      async exportAll() {
+        return new Response('OK');
+      }
+    }
+
+    const metadata = getControllerMetadata(ExportController);
+    expect(metadata).toBeDefined();
+    const route = metadata!.routes.find((r) => r.handler === 'exportAll');
+    expect(route).toBeDefined();
+    expect(route!.timeout).toBe(0);
+  });
+
+  it('should not include timeout in metadata when not specified', () => {
+    @Controller('/simple')
+    class SimpleController extends BaseController {
+      @Get('/hello')
+      async hello() {
+        return new Response('OK');
+      }
+    }
+
+    const metadata = getControllerMetadata(SimpleController);
+    expect(metadata).toBeDefined();
+    const route = metadata!.routes.find((r) => r.handler === 'hello');
+    expect(route).toBeDefined();
+    expect(route!.timeout).toBeUndefined();
+  });
+
+  it('should support timeout on @Post, @Put, @Delete, @Patch', () => {
+    @Controller('/api')
+    class CrudController extends BaseController {
+      @Post('/create', { timeout: 60 })
+      async create() {
+        return new Response('OK'); 
+      }
+
+      @Put('/update', { timeout: 120 })
+      async update() {
+        return new Response('OK'); 
+      }
+
+      @Delete('/remove', { timeout: 30 })
+      async remove() {
+        return new Response('OK'); 
+      }
+
+      @Patch('/patch', { timeout: 45 })
+      async patch() {
+        return new Response('OK'); 
+      }
+    }
+
+    const metadata = getControllerMetadata(CrudController);
+    expect(metadata).toBeDefined();
+
+    expect(metadata!.routes.find((r) => r.handler === 'create')!.timeout).toBe(60);
+    expect(metadata!.routes.find((r) => r.handler === 'update')!.timeout).toBe(120);
+    expect(metadata!.routes.find((r) => r.handler === 'remove')!.timeout).toBe(30);
+    expect(metadata!.routes.find((r) => r.handler === 'patch')!.timeout).toBe(45);
+  });
+
+  it('should store timeout in SSE decorator options', () => {
+    @Controller('/events')
+    class SseTimeoutController extends BaseController {
+      @Get('/stream')
+      @Sse({ timeout: 3600, heartbeat: 10000 })
+      async *stream(): SseGenerator {
+        yield { event: 'tick', data: { count: 0 } };
+      }
+    }
+
+    const sseOptions = getSseMetadata(
+      SseTimeoutController.prototype,
+      'stream',
+    );
+    expect(sseOptions).toBeDefined();
+    expect(sseOptions!.timeout).toBe(3600);
+    expect(sseOptions!.heartbeat).toBe(10000);
+  });
+
+  it('should support timeout: 0 in @Sse to disable timeout', () => {
+    @Controller('/events')
+    class InfiniteSseController extends BaseController {
+      @Get('/infinite')
+      @Sse({ timeout: 0 })
+      async *infinite(): SseGenerator {
+        yield { event: 'start', data: {} };
+      }
+    }
+
+    const sseOptions = getSseMetadata(
+      InfiniteSseController.prototype,
+      'infinite',
+    );
+    expect(sseOptions).toBeDefined();
+    expect(sseOptions!.timeout).toBe(0);
   });
 });
 

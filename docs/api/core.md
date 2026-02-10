@@ -91,6 +91,12 @@ interface ApplicationOptions {
    */
   host?: string;
 
+  /** Maximum idle time (seconds) before the server closes a connection.
+   * A connection is idle when no data is sent or received.
+   * Set to 0 to disable. Default: 120.
+   */
+  idleTimeout?: number;
+
   /** Base path prefix for all routes (e.g., '/api/v1') */
   basePath?: string;
 
@@ -124,6 +130,15 @@ interface ApplicationOptions {
 
   /** WebSocket configuration */
   websocket?: WebSocketApplicationOptions;
+
+  /**
+   * Application-wide middleware class constructors applied to every route
+   * before module-level, controller-level and route-level middleware.
+   * Classes must extend BaseMiddleware. DI is fully supported.
+   * Execution order: global → module → controller → route → handler.
+   * See Controllers API — Middleware for details.
+   */
+  middleware?: MiddlewareClass[];
 
   /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
   gracefulShutdown?: boolean;

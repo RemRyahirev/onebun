@@ -10,6 +10,27 @@ import type { SyncLogger } from '@onebun/logger';
 import { HttpStatusCode } from '@onebun/requests';
 
 /**
+ * Default idle timeout for HTTP connections (in seconds).
+ * Bun.serve closes idle connections after this period.
+ * @defaultValue 120
+ */
+export const DEFAULT_IDLE_TIMEOUT = 120;
+
+/**
+ * Default heartbeat interval for SSE connections (in milliseconds).
+ * Sends a comment (`: heartbeat\n\n`) to keep the connection alive.
+ * @defaultValue 30000 (30 seconds)
+ */
+export const DEFAULT_SSE_HEARTBEAT_MS = 30_000;
+
+/**
+ * Default per-request idle timeout for SSE connections (in seconds).
+ * SSE connections are long-lived by nature, so they get a longer timeout.
+ * @defaultValue 600 (10 minutes)
+ */
+export const DEFAULT_SSE_TIMEOUT = 600;
+
+/**
  * Base controller class that can be extended to add common functionality
  */
 export class Controller {
@@ -189,8 +210,11 @@ export class Controller {
    * This method provides an alternative to the @Sse() decorator for creating
    * SSE responses programmatically.
    *
-   * @param source - Async iterable that yields SseEvent objects or raw data
-   * @param options - SSE options (heartbeat interval, etc.)
+   * @param source - Async iterable that yields SseEvent objects or raw data,
+   *   or a factory function that receives an AbortSignal and returns an async iterable.
+   *   The factory pattern is useful for SSE proxying -- pass the signal to `fetch()`
+   *   to automatically abort upstream connections when the client disconnects.
+   * @param options - SSE options (heartbeat interval, onAbort callback, etc.)
    * @returns A Response object with SSE content type
    *
    * @example Basic usage
@@ -206,20 +230,51 @@ export class Controller {
    * }
    * ```
    *
-   * @example With heartbeat
+   * @example With heartbeat and onAbort callback
    * ```typescript
    * @Get('/live')
    * live(): Response {
    *   const updates = this.dataService.getUpdateStream();
-   *   return this.sse(updates, { heartbeat: 15000 });
+   *   return this.sse(updates, {
+   *     heartbeat: 15000,
+   *     onAbort: () => this.dataService.unsubscribe(),
+   *   });
+   * }
+   * ```
+   *
+   * @example Factory function with AbortSignal (SSE proxy)
+   * ```typescript
+   * @Get('/proxy')
+   * proxy(): Response {
+   *   return this.sse((signal) => this.proxyUpstream(signal));
+   * }
+   *
+   * private async *proxyUpstream(signal: AbortSignal): SseGenerator {
+   *   const response = await fetch('https://api.example.com/events', { signal });
+   *   // parse and yield SSE events from upstream...
+   *   // When client disconnects -> signal aborted -> fetch aborted automatically
    * }
    * ```
    */
   protected sse(
-    source: AsyncIterable<SseEvent | unknown>,
+    source:
+      | AsyncIterable<SseEvent | unknown>
+      | ((signal: AbortSignal) => AsyncIterable<SseEvent | unknown>),
     options: SseOptions = {},
   ): Response {
-    const stream = createSseStream(source, options);
+    let iterable: AsyncIterable<SseEvent | unknown>;
+    let onCancel: (() => void) | undefined;
+
+    if (typeof source === 'function') {
+      // Factory pattern: create an AbortController and pass its signal to the factory
+      const ac = new AbortController();
+      iterable = source(ac.signal);
+      onCancel = () => ac.abort();
+    } else {
+      iterable = source;
+    }
+
+    const stream = createSseStream(iterable, { ...options, _onCancel: onCancel });
 
     return new Response(stream, {
       status: HttpStatusCode.OK,
@@ -310,19 +365,39 @@ export function formatSseEvent(event: SseEvent | unknown): string {
 }
 
 /**
+ * Internal options for createSseStream, extending public SseOptions
+ * with private hooks used by controller.sse()
+ */
+interface CreateSseStreamOptions extends SseOptions {
+  /**
+   * Internal cancel hook used by controller.sse() to abort
+   * the AbortController for factory-pattern SSE sources.
+   * @internal
+   */
+  _onCancel?: () => void;
+}
+
+/**
  * Create a ReadableStream for SSE from an async iterable
  *
+ * Uses a manual async iterator so that `iterator.return()` can be called
+ * on stream cancellation, triggering the generator's `finally` blocks
+ * for proper cleanup (e.g., aborting upstream SSE connections).
+ *
  * @param source - Async iterable that yields events
- * @param options - SSE options
+ * @param options - SSE options (heartbeat, onAbort, etc.)
  * @returns ReadableStream for Response body
  */
 export function createSseStream(
   source: AsyncIterable<SseEvent | unknown>,
-  options: SseOptions = {},
+  options: CreateSseStreamOptions = {},
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   let heartbeatTimer: Timer | null = null;
   let isCancelled = false;
+
+  // Obtain manual iterator handle so we can call return() on cancel
+  const iterator = source[Symbol.asyncIterator]();
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -340,11 +415,15 @@ export function createSseStream(
       }
 
       try {
-        for await (const event of source) {
+        while (true) {
           if (isCancelled) {
             break;
           }
-          const formatted = formatSseEvent(event);
+          const { value, done } = await iterator.next();
+          if (done || isCancelled) {
+            break;
+          }
+          const formatted = formatSseEvent(value);
           controller.enqueue(encoder.encode(formatted));
         }
       } catch (error) {
@@ -374,6 +453,13 @@ export function createSseStream(
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
       }
+      // Force-terminate the generator, triggering its finally blocks
+      // This enables cleanup on client disconnect (e.g., aborting upstream SSE)
+      iterator.return?.(undefined);
+      // Fire user-provided onAbort callback
+      options.onAbort?.();
+      // Fire internal cancel hook (used by controller.sse() factory pattern)
+      options._onCancel?.();
     },
   });
 }
