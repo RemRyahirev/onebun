@@ -61,7 +61,7 @@ export class ChatGateway extends BaseWebSocketGateway {
 
   @OnConnect()
   async handleConnect(@Client() client: WsClientData) {
-    console.log(`Client ${client.id} connected`);
+    this.logger.info(`Client ${client.id} connected`);
     
     // Send welcome message
     return {
@@ -76,7 +76,7 @@ export class ChatGateway extends BaseWebSocketGateway {
 
   @OnDisconnect()
   async handleDisconnect(@Client() client: WsClientData) {
-    console.log(`Client ${client.id} disconnected`);
+    this.logger.info(`Client ${client.id} disconnected`);
     
     // Notify all rooms the client was in
     for (const room of client.rooms) {
@@ -93,7 +93,7 @@ export class ChatGateway extends BaseWebSocketGateway {
     @RoomName() room: string,
     @PatternParams() params: { roomId: string },
   ) {
-    console.log(`Client ${client.id} joining room ${params.roomId}`);
+    this.logger.info(`Client ${client.id} joining room ${params.roomId}`);
     
     // Add to room
     await this.joinRoom(client.id, room);

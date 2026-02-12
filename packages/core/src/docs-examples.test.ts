@@ -3234,8 +3234,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       class TestGateway extends BaseWebSocketGateway {
         @OnConnect()
         handleConnect(@Client() client: WsClientData) {
-          // eslint-disable-next-line no-console
-          console.log(`Client ${client.id} connected`);
+          this.logger.info(`Client ${client.id} connected`);
 
           return { event: 'welcome', data: { message: 'Welcome!' } };
         }
@@ -3252,8 +3251,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       class TestGateway extends BaseWebSocketGateway {
         @OnDisconnect()
         handleDisconnect(@Client() client: WsClientData) {
-          // eslint-disable-next-line no-console
-          console.log(`Client ${client.id} disconnected`);
+          this.logger.info(`Client ${client.id} disconnected`);
         }
       }
 
@@ -3682,8 +3680,7 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
 
         @OnConnect()
         async handleConnect(@Client() client: WsClientData) {
-          // eslint-disable-next-line no-console
-          console.log(`Client ${client.id} connected`);
+          this.logger.info(`Client ${client.id} connected`);
 
           return {
             event: 'welcome',
@@ -3697,8 +3694,7 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
 
         @OnDisconnect()
         async handleDisconnect(@Client() client: WsClientData) {
-          // eslint-disable-next-line no-console
-          console.log(`Client ${client.id} disconnected`);
+          this.logger.info(`Client ${client.id} disconnected`);
 
           for (const room of client.rooms) {
             this.emitToRoom(room, 'user:left', {
@@ -3714,8 +3710,7 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
           @RoomName() room: string,
           @PatternParams() params: { roomId: string },
         ) {
-          // eslint-disable-next-line no-console
-          console.log(`Client ${client.id} joining room ${params.roomId}`);
+          this.logger.info(`Client ${client.id} joining room ${params.roomId}`);
 
           await this.joinRoom(client.id, room);
 
@@ -3978,6 +3973,52 @@ describe('WebSocket Chat Example (docs/examples/websocket-chat.md)', () => {
       // Gateway access
       expect(client.ChatGateway).toBeDefined();
     });
+  });
+});
+
+describe('WebSocket Gateway DI (docs/api/websocket.md#basewebsocketgateway)', () => {
+  /**
+   * @source docs/api/websocket.md#basewebsocketgateway
+   * Gateways receive this.logger and this.config just like controllers.
+   */
+  it('should inject logger and config into WebSocket gateway via module DI', async () => {
+    const effectLib = await import('effect');
+    const moduleMod = await import('./module/module');
+    const testUtils = await import('./testing/test-utils');
+
+    @WebSocketGateway({ path: '/ws' })
+    class TestGateway extends BaseWebSocketGateway {
+      @OnConnect()
+      handleConnect(@Client() client: WsClientData) {
+        this.logger.info(`Client ${client.id} connected`);
+
+        return { event: 'welcome', data: { id: client.id } };
+      }
+
+      getLoggerForTest() {
+        return this.logger;
+      }
+
+      getConfigForTest() {
+        return this.config;
+      }
+    }
+
+    @Module({ controllers: [TestGateway] })
+    class TestModule {}
+
+    const mod = new moduleMod.OneBunModule(TestModule, testUtils.makeMockLoggerLayer());
+    mod.getLayer();
+    await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
+
+    const gateway = mod.getControllerInstance(TestGateway) as unknown as TestGateway;
+    expect(gateway).toBeDefined();
+    expect(gateway.getLoggerForTest()).toBeDefined();
+    expect(typeof gateway.getLoggerForTest().info).toBe('function');
+    expect(typeof gateway.getLoggerForTest().warn).toBe('function');
+    expect(typeof gateway.getLoggerForTest().error).toBe('function');
+    expect(gateway.getConfigForTest()).toBeDefined();
+    expect(typeof gateway.getConfigForTest().get).toBe('function');
   });
 });
 

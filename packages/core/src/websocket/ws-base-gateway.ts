@@ -11,7 +11,10 @@ import type {
   WsRoom,
   WsServer,
 } from './ws.types';
+import type { IConfig, OneBunAppConfig } from '../module/config.interface';
 import type { Server, ServerWebSocket } from 'bun';
+
+import type { SyncLogger } from '@onebun/logger';
 
 import { createFullEventMessage, createNativeMessage } from './ws-socketio-protocol';
 import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
@@ -45,6 +48,12 @@ export function _resetClientSocketsForTesting(): void {
  * ```
  */
 export abstract class BaseWebSocketGateway {
+  /** Logger instance with gateway class name as context */
+  protected logger!: SyncLogger;
+
+  /** Configuration instance for accessing environment variables */
+  protected config!: IConfig<OneBunAppConfig>;
+
   /** Storage adapter for persisting client/room data */
   protected storage: WsStorageAdapter | null = null;
 
@@ -57,6 +66,17 @@ export abstract class BaseWebSocketGateway {
   // ============================================================================
   // Initialization
   // ============================================================================
+
+  /**
+   * Initialize the gateway with logger and config
+   * Called internally by the framework during DI
+   * @internal
+   */
+  _initializeBase(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+    const className = this.constructor.name;
+    this.logger = logger.child({ className });
+    this.config = config;
+  }
 
   /**
    * Initialize the gateway with storage and server

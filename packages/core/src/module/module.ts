@@ -6,6 +6,7 @@ import {
 
 import type { Controller } from './controller';
 import type { ModuleInstance } from '../types';
+import type { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 
 import {
   createSyncLogger,
@@ -540,8 +541,14 @@ export class OneBunModule implements ModuleInstance {
       const controllerConstructor = controllerClass as new (...args: unknown[]) => Controller;
       const controller = new controllerConstructor(...dependencies);
 
-      // Initialize controller with logger and config (skip for WebSocket gateways)
-      if (!isWebSocketGateway(controllerClass) && typeof controller.initializeController === 'function') {
+      // Initialize controller with logger and config
+      if (isWebSocketGateway(controllerClass)) {
+        // Initialize WebSocket gateway with logger and config
+        const gateway = controller as unknown as BaseWebSocketGateway;
+        if (typeof gateway._initializeBase === 'function') {
+          gateway._initializeBase(this.logger, this.config);
+        }
+      } else if (typeof controller.initializeController === 'function') {
         controller.initializeController(this.logger, this.config);
       }
 

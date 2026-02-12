@@ -254,7 +254,7 @@ Handles client connection events.
 ```typescript
 @OnConnect()
 handleConnect(@Client() client: WsClientData) {
-  console.log(`Client ${client.id} connected`);
+  this.logger.info(`Client ${client.id} connected`);
   return { event: 'welcome', data: { message: 'Welcome!' } };
 }
 ```
@@ -266,7 +266,7 @@ Handles client disconnection events.
 ```typescript
 @OnDisconnect()
 handleDisconnect(@Client() client: WsClientData) {
-  console.log(`Client ${client.id} disconnected`);
+  this.logger.info(`Client ${client.id} disconnected`);
 }
 ```
 
@@ -345,6 +345,8 @@ Injects the WebSocket server reference.
 ## BaseWebSocketGateway
 
 Base class providing client/room management and messaging. Messages are encoded per client protocol (native or Socket.IO).
+
+Every gateway automatically receives `this.logger` (a child logger scoped to the gateway class name) and `this.config` (the application configuration) — the same DI that regular controllers get. Use them instead of `console.log`.
 
 ### Emit methods
 
