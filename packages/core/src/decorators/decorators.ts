@@ -886,8 +886,10 @@ export function getSseMetadata(
 
 /**
  * Module decorator metadata
+ * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
+ * When multiple copies of @onebun/core exist, they share the same metadata storage.
  */
-const META_MODULES = new Map<
+const META_MODULES: Map<
   Function,
   {
     imports?: Function[];
@@ -895,7 +897,8 @@ const META_MODULES = new Map<
     providers?: unknown[];
     exports?: unknown[];
   }
->();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+> = ((globalThis as any)[Symbol.for('onebun:meta_modules')] ??= new Map());
 
 /**
  * Module decorator
@@ -932,9 +935,11 @@ export function getModuleMetadata(target: Function):
 
 /**
  * Storage for global modules
- * Global modules export their providers to all modules automatically
+ * Global modules export their providers to all modules automatically.
+ * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
  */
-const globalModules = new Set<Function>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const globalModules: Set<Function> = ((globalThis as any)[Symbol.for('onebun:global_modules')] ??= new Set());
 
 /**
  * @Global() decorator - marks module as global

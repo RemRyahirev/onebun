@@ -40,20 +40,23 @@
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
-        "@onebun/core": "workspace:^",
         "@onebun/envs": "workspace:^",
         "effect": "^3.13.10",
       },
       "devDependencies": {
+        "@onebun/core": "workspace:^",
         "bun-types": "^1.3.8",
         "testcontainers": "^11.7.1",
+      },
+      "peerDependencies": {
+        "@onebun/core": ">=0.2.0",
       },
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.2.0",
+      "version": "0.2.4",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -70,14 +73,17 @@
     },
     "packages/docs": {
       "name": "@onebun/docs",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
-        "@onebun/core": "workspace:^",
         "swagger-ui-dist": "^5.17.14",
       },
       "devDependencies": {
+        "@onebun/core": "workspace:^",
         "arktype": "^2.0.0",
         "bun-types": "^1.3.8",
+      },
+      "peerDependencies": {
+        "@onebun/core": ">=0.2.0",
       },
     },
     "packages/drizzle": {
@@ -87,7 +93,6 @@
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
       "dependencies": {
-        "@onebun/core": "workspace:^",
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
         "arktype": "^2.0.0",
@@ -97,8 +102,12 @@
         "effect": "^3.13.10",
       },
       "devDependencies": {
+        "@onebun/core": "workspace:^",
         "bun-types": "^1.3.8",
         "testcontainers": "^11.7.1",
+      },
+      "peerDependencies": {
+        "@onebun/core": ">=0.2.0",
       },
     },
     "packages/envs": {
@@ -140,12 +149,15 @@
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",
-        "@onebun/core": "workspace:^",
         "effect": "^3.13.10",
       },
       "devDependencies": {
+        "@onebun/core": "workspace:^",
         "bun-types": "^1.3.8",
         "testcontainers": "^11.7.1",
+      },
+      "peerDependencies": {
+        "@onebun/core": ">=0.2.0",
       },
     },
     "packages/requests": {

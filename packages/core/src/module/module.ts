@@ -49,14 +49,18 @@ import {
 /**
  * Global services registry
  * Stores services from modules marked with @Global() decorator
- * These services are automatically available in all modules without explicit import
+ * These services are automatically available in all modules without explicit import.
+ * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
  */
-const globalServicesRegistry = new Map<Context.Tag<unknown, unknown>, unknown>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const globalServicesRegistry: Map<Context.Tag<unknown, unknown>, unknown> = ((globalThis as any)[Symbol.for('onebun:global_services_registry')] ??= new Map());
 
 /**
- * Registry of processed global modules to avoid duplicate initialization
+ * Registry of processed global modules to avoid duplicate initialization.
+ * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
  */
-const processedGlobalModules = new Set<Function>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const processedGlobalModules: Set<Function> = ((globalThis as any)[Symbol.for('onebun:processed_global_modules')] ??= new Set());
 
 /**
  * Clear global services registry (useful for testing)
