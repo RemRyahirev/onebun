@@ -693,6 +693,27 @@ describe('Controllers API Documentation Examples', () => {
 
       expect(UserController).toBeDefined();
     });
+
+    /**
+     * @source docs/api/controllers.md#constructor-access
+     * Controllers have this.config and this.logger available immediately after super()
+     */
+    it('should have config and logger available in controller constructor after super()', () => {
+      @Service()
+      class UserService extends BaseService {}
+
+      // From docs: Controller with constructor access to config and logger
+      @Controller('/users')
+      class UserController extends BaseController {
+        constructor(private userService: UserService) {
+          super();
+          // config and logger are available immediately after super()
+          // e.g. this.config.get('api.prefix'), this.logger.info('...')
+        }
+      }
+
+      expect(UserController).toBeDefined();
+    });
   });
 
   describe('Response Methods (docs/api/controllers.md)', () => {
@@ -1392,6 +1413,28 @@ describe('Services API Documentation Examples', () => {
       }
 
       expect(UserService).toBeDefined();
+    });
+
+    /**
+     * @source docs/api/services.md#constructor-access
+     * Services have this.config and this.logger available immediately after super()
+     */
+    it('should have config and logger available in service constructor after super()', () => {
+      @Service()
+      class ConfiguredService extends BaseService {
+        readonly configAvailable: boolean;
+        readonly loggerAvailable: boolean;
+
+        constructor() {
+          super();
+          // config and logger are available immediately after super()
+          this.configAvailable = this.config !== undefined;
+          this.loggerAvailable = this.logger !== undefined;
+        }
+      }
+
+      // Verify the class is well-formed — actual DI test is in module.test.ts
+      expect(ConfiguredService).toBeDefined();
     });
   });
 
@@ -4019,6 +4062,31 @@ describe('WebSocket Gateway DI (docs/api/websocket.md#basewebsocketgateway)', ()
     expect(typeof gateway.getLoggerForTest().error).toBe('function');
     expect(gateway.getConfigForTest()).toBeDefined();
     expect(typeof gateway.getConfigForTest().get).toBe('function');
+  });
+
+  /**
+   * @source docs/api/websocket.md#constructor-access
+   * Gateways have this.config and this.logger available immediately after super()
+   */
+  it('should have config and logger available in WS gateway constructor after super()', () => {
+    // From docs: Gateway with constructor access to config and logger
+    @WebSocketGateway({ path: '/ws' })
+    class ChatGateway extends BaseWebSocketGateway {
+      readonly configAvailable: boolean;
+
+      constructor() {
+        super();
+        // config and logger are available immediately after super()
+        this.configAvailable = this.config !== undefined;
+      }
+
+      @OnMessage('chat:message')
+      handleMessage(@Client() client: WsClientData, @MessageData() data: unknown) {
+        this.broadcast('chat:message', { userId: client.id, data });
+      }
+    }
+
+    expect(ChatGateway).toBeDefined();
   });
 });
 

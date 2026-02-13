@@ -34,12 +34,22 @@ export function _resetClientSocketsForTesting(): void {
 }
 
 /**
- * Base class for WebSocket gateways
+ * Base class for WebSocket gateways.
+ *
+ * Gateways extending this class have `this.config` and `this.logger` available
+ * immediately after `super()` in the constructor when created through the framework DI.
+ * The framework sets an ambient init context before calling the constructor, and
+ * BaseWebSocketGateway reads from it in its constructor.
  *
  * @example
  * ```typescript
  * @WebSocketGateway({ path: '/ws' })
  * export class ChatGateway extends BaseWebSocketGateway {
+ *   constructor() {
+ *     super();
+ *     // this.config and this.logger are available here!
+ *   }
+ *
  *   @OnMessage('chat:message')
  *   handleMessage(@Client() client: WsClientData, @MessageData() data: any) {
  *     this.broadcast('chat:message', { userId: client.id, ...data });
@@ -63,19 +73,70 @@ export abstract class BaseWebSocketGateway {
   /** Unique instance ID (for multi-instance setups) */
   protected instanceId: string = crypto.randomUUID();
 
+  /** Flag to track initialization status */
+  private _initialized = false;
+
+  /**
+   * Ambient init context set by the framework before gateway construction.
+   * This allows the BaseWebSocketGateway constructor to pick up logger and config
+   * so they are available immediately after super() in subclass constructors.
+   * @internal
+   */
+  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
+    null;
+
+  /**
+   * Set the ambient init context before constructing a gateway.
+   * Called by the framework (OneBunModule) before `new GatewayClass(...)`.
+   * @internal
+   */
+  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+    BaseWebSocketGateway._initContext = { logger, config };
+  }
+
+  /**
+   * Clear the ambient init context after gateway construction.
+   * Called by the framework (OneBunModule) after `new GatewayClass(...)`.
+   * @internal
+   */
+  static clearInitContext(): void {
+    BaseWebSocketGateway._initContext = null;
+  }
+
+  constructor() {
+    // Pick up logger and config from ambient init context if available.
+    // This makes this.config and this.logger available immediately after super()
+    // in subclass constructors.
+    if (BaseWebSocketGateway._initContext) {
+      const { logger, config } = BaseWebSocketGateway._initContext;
+      const className = this.constructor.name;
+      this.logger = logger.child({ className });
+      this.config = config;
+      this._initialized = true;
+    }
+  }
+
   // ============================================================================
   // Initialization
   // ============================================================================
 
   /**
-   * Initialize the gateway with logger and config
-   * Called internally by the framework during DI
+   * Initialize the gateway with logger and config.
+   * This is a fallback for gateways not constructed through the DI system
+   * (e.g., in tests or when created manually). If the gateway was already
+   * initialized via the constructor init context, this is a no-op.
+   * Called internally by the framework during DI.
    * @internal
    */
   _initializeBase(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+    if (this._initialized) {
+      return; // Already initialized (via constructor or previous call)
+    }
+
     const className = this.constructor.name;
     this.logger = logger.child({ className });
     this.config = config;
+    this._initialized = true;
   }
 
   /**

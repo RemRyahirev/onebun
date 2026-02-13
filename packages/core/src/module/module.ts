@@ -4,9 +4,8 @@ import {
   Layer,
 } from 'effect';
 
-import type { Controller } from './controller';
 import type { ModuleInstance } from '../types';
-import type { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
+
 
 import {
   createSyncLogger,
@@ -23,6 +22,7 @@ import {
   isGlobalModule,
   registerControllerDependencies,
 } from '../decorators/decorators';
+import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
 
 import {
@@ -30,6 +30,7 @@ import {
   type IConfig,
   type OneBunAppConfig,
 } from './config.interface';
+import { Controller } from './controller';
 import {
   hasOnModuleInit,
   hasOnApplicationInit,
@@ -462,7 +463,19 @@ export class OneBunModule implements ModuleInstance {
       }
 
       const middlewareConstructor = cls as new (...args: unknown[]) => BaseMiddleware;
-      const instance = new middlewareConstructor(...deps);
+
+      // Set ambient init context so BaseMiddleware constructor can pick up logger/config,
+      // making them available immediately after super() in subclass constructors.
+      BaseMiddleware.setInitContext(this.logger, this.config);
+      let instance: BaseMiddleware;
+      try {
+        instance = new middlewareConstructor(...deps);
+      } finally {
+        BaseMiddleware.clearInitContext();
+      }
+
+      // Fallback: call initializeMiddleware for middleware not initialized via
+      // the constructor (e.g., not extending BaseMiddleware, or for backwards compatibility).
       instance.initializeMiddleware(this.logger, this.config);
 
       return instance.use.bind(instance);
@@ -534,16 +547,33 @@ export class OneBunModule implements ModuleInstance {
         }
       }
 
-      // Logger and config are now injected separately via initializeController
-      // No need to add them to constructor dependencies
-
-      // Create controller with resolved dependencies
+      // Create controller with resolved dependencies.
+      // Set ambient init context so the base class constructor can pick up logger/config,
+      // making them available immediately after super() in subclass constructors.
       const controllerConstructor = controllerClass as new (...args: unknown[]) => Controller;
-      const controller = new controllerConstructor(...dependencies);
+      const isGateway = isWebSocketGateway(controllerClass);
+      let controller: Controller;
 
-      // Initialize controller with logger and config
-      if (isWebSocketGateway(controllerClass)) {
-        // Initialize WebSocket gateway with logger and config
+      if (isGateway) {
+        BaseWebSocketGateway.setInitContext(this.logger, this.config);
+      } else {
+        Controller.setInitContext(this.logger, this.config);
+      }
+
+      try {
+        controller = new controllerConstructor(...dependencies);
+      } finally {
+        if (isGateway) {
+          BaseWebSocketGateway.clearInitContext();
+        } else {
+          Controller.clearInitContext();
+        }
+      }
+
+      // Fallback: call initializeController / _initializeBase for controllers/gateways
+      // that were not initialized via the constructor (e.g., not extending the base class,
+      // or for backwards compatibility).
+      if (isGateway) {
         const gateway = controller as unknown as BaseWebSocketGateway;
         if (typeof gateway._initializeBase === 'function') {
           gateway._initializeBase(this.logger, this.config);

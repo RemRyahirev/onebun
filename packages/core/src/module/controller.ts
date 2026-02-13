@@ -31,7 +31,26 @@ export const DEFAULT_SSE_HEARTBEAT_MS = 30_000;
 export const DEFAULT_SSE_TIMEOUT = 600;
 
 /**
- * Base controller class that can be extended to add common functionality
+ * Base controller class that can be extended to add common functionality.
+ *
+ * Controllers extending this class have `this.config` and `this.logger` available
+ * immediately after `super()` in the constructor when created through the framework DI.
+ * The framework sets an ambient init context before calling the constructor, and
+ * the Controller base class reads from it in its constructor.
+ *
+ * @example
+ * ```typescript
+ * @Controller('/users')
+ * class UserController extends BaseController {
+ *   private readonly prefix: string;
+ *
+ *   constructor(private userService: UserService) {
+ *     super();
+ *     // this.config and this.logger are available here!
+ *     this.prefix = this.config.get('api.prefix');
+ *   }
+ * }
+ * ```
  */
 export class Controller {
   // Store service instances
@@ -42,12 +61,61 @@ export class Controller {
   protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
   protected config!: IConfig<OneBunAppConfig>;
+  // Flag to track initialization status
+  private _initialized = false;
 
   /**
-   * Initialize controller with logger and config (called by the framework)
+   * Ambient init context set by the framework before controller construction.
+   * This allows the Controller constructor to pick up logger and config
+   * so they are available immediately after super() in subclass constructors.
+   * @internal
+   */
+  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
+    null;
+
+  /**
+   * Set the ambient init context before constructing a controller.
+   * Called by the framework (OneBunModule) before `new ControllerClass(...)`.
+   * @internal
+   */
+  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+    Controller._initContext = { logger, config };
+  }
+
+  /**
+   * Clear the ambient init context after controller construction.
+   * Called by the framework (OneBunModule) after `new ControllerClass(...)`.
+   * @internal
+   */
+  static clearInitContext(): void {
+    Controller._initContext = null;
+  }
+
+  constructor() {
+    // Pick up logger and config from ambient init context if available.
+    // This makes this.config and this.logger available immediately after super()
+    // in subclass constructors.
+    if (Controller._initContext) {
+      const { logger, config } = Controller._initContext;
+      const className = this.constructor.name;
+      this.logger = logger.child({ className });
+      this.config = config;
+      this._initialized = true;
+    }
+  }
+
+  /**
+   * Initialize controller with logger and config (called by the framework).
+   * This is a fallback for controllers not constructed through the DI system
+   * (e.g., in tests or when created manually). If the controller was already
+   * initialized via the constructor init context, this is a no-op.
    * @internal
    */
   initializeController(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+    if (this._initialized) {
+      return; // Already initialized (via constructor or previous call)
+    }
+
     const className = this.constructor.name;
 
     if (logger) {
@@ -61,6 +129,7 @@ export class Controller {
 
     // Set configuration instance
     this.config = config;
+    this._initialized = true;
 
     this.logger.debug(`Controller ${className} initialized`);
   }

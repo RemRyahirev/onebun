@@ -1,3 +1,7 @@
+/* eslint-disable
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   @typescript-eslint/no-empty-function */
 /**
  * Unit tests for ws-base-gateway.ts
  */
@@ -49,22 +53,22 @@ function createClientData(id: string, rooms: string[] = []): WsClientData {
 class TestGateway extends BaseWebSocketGateway {
   // Expose internal methods for testing
   public exposeRegisterSocket(clientId: string, socket: MockWebSocket): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (this as any)._registerSocket(clientId, socket);
   }
 
   public exposeUnregisterSocket(clientId: string): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (this as any)._unregisterSocket(clientId);
   }
 
   public exposeInitialize(storage: InMemoryWsStorage, server: unknown): void {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     (this as any)._initialize(storage, server);
   }
 
   public exposeGetSocket(clientId: string): MockWebSocket | undefined {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     return (this as any).getSocket(clientId);
   }
 }
@@ -475,6 +479,148 @@ describe('BaseWebSocketGateway', () => {
       const wsServer = gateway.getWsServer();
       expect(wsServer).not.toBeNull();
       expect(typeof wsServer?.publish).toBe('function');
+    });
+  });
+
+  describe('Initialization via static init context (constructor)', () => {
+    let mockLogger: ReturnType<typeof createMockLogger>;
+    let mockConfig: ReturnType<typeof createMockConfig>;
+
+    function createMockLogger() {
+      const logger = {
+        debug: mock(() => {}),
+        info: mock(() => {}),
+        warn: mock(() => {}),
+        error: mock(() => {}),
+        fatal: mock(() => {}),
+        trace: mock(() => {}),
+        child: mock(() => logger),
+      };
+
+      return logger;
+    }
+
+    function createMockConfig(data: Record<string, unknown> = {}) {
+      return {
+        get: mock((key: string) => data[key]),
+        getOrThrow: mock((key: string) => {
+          if (key in data) {
+            return data[key];
+          }
+          throw new Error(`Missing config: ${key}`);
+        }),
+        has: mock((key: string) => key in data),
+        set: mock(() => {}),
+        entries: mock(() => Object.entries(data)),
+      } as any;
+    }
+
+    beforeEach(() => {
+      mockLogger = createMockLogger();
+      mockConfig = createMockConfig({
+        'ws.port': 8080,
+        'ws.path': '/ws',
+      });
+    });
+
+    it('should initialize gateway via static init context in constructor', () => {
+      class ContextTestGateway extends BaseWebSocketGateway {
+        configAvailableInConstructor = false;
+        loggerAvailableInConstructor = false;
+
+        constructor() {
+          super();
+          this.configAvailableInConstructor = this.config !== undefined;
+          this.loggerAvailableInConstructor = this.logger !== undefined;
+        }
+      }
+
+      BaseWebSocketGateway.setInitContext(mockLogger as any, mockConfig);
+      let gw: ContextTestGateway;
+      try {
+        gw = new ContextTestGateway();
+      } finally {
+        BaseWebSocketGateway.clearInitContext();
+      }
+
+      expect(gw.configAvailableInConstructor).toBe(true);
+      expect(gw.loggerAvailableInConstructor).toBe(true);
+      expect((gw as any).config).toBe(mockConfig);
+    });
+
+    it('should allow using config.get() in constructor when init context is set', () => {
+      class ContextTestGateway extends BaseWebSocketGateway {
+        readonly wsPort: number;
+
+        constructor() {
+          super();
+          this.wsPort = this.config.get('ws.port') as number;
+        }
+      }
+
+      BaseWebSocketGateway.setInitContext(mockLogger as any, mockConfig);
+      let gw: ContextTestGateway;
+      try {
+        gw = new ContextTestGateway();
+      } finally {
+        BaseWebSocketGateway.clearInitContext();
+      }
+
+      expect(gw.wsPort).toBe(8080);
+    });
+
+    it('should create child logger with correct className in constructor', () => {
+      class MyCustomGateway extends BaseWebSocketGateway {}
+
+      BaseWebSocketGateway.setInitContext(mockLogger as any, mockConfig);
+      try {
+        new MyCustomGateway();
+      } finally {
+        BaseWebSocketGateway.clearInitContext();
+      }
+
+      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'MyCustomGateway' });
+    });
+
+    it('should not initialize if no init context is set', () => {
+      BaseWebSocketGateway.clearInitContext();
+
+      class ContextTestGateway extends BaseWebSocketGateway {}
+      const gw = new ContextTestGateway();
+
+      expect((gw as any)._initialized).toBe(false);
+      expect((gw as any).logger).toBeUndefined();
+      expect((gw as any).config).toBeUndefined();
+    });
+
+    it('_initializeBase should be a no-op if already initialized via init context', () => {
+      class ContextTestGateway extends BaseWebSocketGateway {}
+
+      BaseWebSocketGateway.setInitContext(mockLogger as any, mockConfig);
+      let gw: ContextTestGateway;
+      try {
+        gw = new ContextTestGateway();
+      } finally {
+        BaseWebSocketGateway.clearInitContext();
+      }
+
+      // Call _initializeBase again — should be a no-op
+      const otherLogger = createMockLogger();
+      const otherConfig = createMockConfig({ other: 'config' });
+      (gw as any)._initializeBase(otherLogger, otherConfig);
+
+      // Should still have original config (no reinit)
+      expect((gw as any).config).toBe(mockConfig);
+    });
+
+    it('clearInitContext should prevent subsequent constructors from picking up context', () => {
+      BaseWebSocketGateway.setInitContext(mockLogger as any, mockConfig);
+      BaseWebSocketGateway.clearInitContext();
+
+      class ContextTestGateway extends BaseWebSocketGateway {}
+      const gw = new ContextTestGateway();
+
+      expect((gw as any)._initialized).toBe(false);
     });
   });
 });

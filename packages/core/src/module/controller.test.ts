@@ -229,7 +229,7 @@ describe('Controller', () => {
       expect(mockLogger.child).toHaveBeenCalledWith({ className: 'EmptyController' });
     });
 
-    test('should handle re-initialization attempts', () => {
+    test('should handle re-initialization attempts (no-op after first init)', () => {
       class TestController extends Controller {
         testMethod() {
           return 'test';
@@ -242,7 +242,7 @@ describe('Controller', () => {
       controller.initializeController(mockLogger, mockConfig);
       expect(mockLogger.debug).toHaveBeenCalledWith('Controller TestController initialized');
 
-      // Second initialization (should work but replace values)
+      // Second initialization — should be a no-op (already initialized)
       const newMockLogger = {
         ...mockLogger,
         child: mock(() => newMockLogger),
@@ -251,7 +251,11 @@ describe('Controller', () => {
 
       const newConfig = createMockConfig({ 'newConfig': true });
       controller.initializeController(newMockLogger, newConfig);
-      expect(newMockLogger.debug).toHaveBeenCalledWith('Controller TestController initialized');
+
+      // Should NOT have been called — initializeController is a no-op after first init
+      expect(newMockLogger.debug).not.toHaveBeenCalled();
+      // Should still have original config
+      expect((controller as any).config).toBe(mockConfig);
     });
   });
 
@@ -577,6 +581,110 @@ describe('Controller', () => {
       
       const text = await result.text();
       expect(text).toBe('');
+    });
+  });
+
+  describe('Initialization via static init context (constructor)', () => {
+    test('should initialize controller via static init context in constructor', () => {
+      class TestController extends Controller {
+        configAvailableInConstructor = false;
+        loggerAvailableInConstructor = false;
+
+        constructor() {
+          super();
+          this.configAvailableInConstructor = this.config !== undefined;
+          this.loggerAvailableInConstructor = this.logger !== undefined;
+        }
+      }
+
+      // Set init context before construction (as the framework does)
+      Controller.setInitContext(mockLogger, mockConfig);
+      let controller: TestController;
+      try {
+        controller = new TestController();
+      } finally {
+        Controller.clearInitContext();
+      }
+
+      expect(controller.configAvailableInConstructor).toBe(true);
+      expect(controller.loggerAvailableInConstructor).toBe(true);
+      expect((controller as any).config).toBe(mockConfig);
+    });
+
+    test('should allow using config.get() in constructor when init context is set', () => {
+      class TestController extends Controller {
+        readonly dbHost: string;
+
+        constructor() {
+          super();
+          this.dbHost = this.config.get('database.host') as string;
+        }
+      }
+
+      Controller.setInitContext(mockLogger, mockConfig);
+      let controller: TestController;
+      try {
+        controller = new TestController();
+      } finally {
+        Controller.clearInitContext();
+      }
+
+      expect(controller.dbHost).toBe('localhost');
+    });
+
+    test('should create child logger with correct className in constructor', () => {
+      class MyCustomController extends Controller {}
+
+      Controller.setInitContext(mockLogger, mockConfig);
+      try {
+        new MyCustomController();
+      } finally {
+        Controller.clearInitContext();
+      }
+
+      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'MyCustomController' });
+    });
+
+    test('should not initialize if no init context is set', () => {
+      // Ensure context is clear
+      Controller.clearInitContext();
+
+      class TestController extends Controller {}
+      const controller = new TestController();
+
+      expect((controller as any)._initialized).toBe(false);
+      expect((controller as any).logger).toBeUndefined();
+      expect((controller as any).config).toBeUndefined();
+    });
+
+    test('initializeController should be a no-op if already initialized via init context', () => {
+      class TestController extends Controller {}
+
+      Controller.setInitContext(mockLogger, mockConfig);
+      let controller: TestController;
+      try {
+        controller = new TestController();
+      } finally {
+        Controller.clearInitContext();
+      }
+
+      // Call initializeController again — should be a no-op
+      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      const otherConfig = createMockConfig({ other: 'config' });
+      controller.initializeController(otherLogger, otherConfig);
+
+      // Should still have original config (no reinit)
+      expect((controller as any).config).toBe(mockConfig);
+    });
+
+    test('clearInitContext should prevent subsequent constructors from picking up context', () => {
+      Controller.setInitContext(mockLogger, mockConfig);
+      Controller.clearInitContext();
+
+      class TestController extends Controller {}
+      const controller = new TestController();
+
+      expect((controller as any)._initialized).toBe(false);
     });
   });
 });

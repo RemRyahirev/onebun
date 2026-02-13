@@ -26,6 +26,8 @@ import type {
 
 import { Controller as CtrlDeco, Module } from '../decorators/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
+import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
+import { WebSocketGateway } from '../websocket/ws-decorators';
 
 import { Controller as CtrlBase } from './controller';
 import { BaseMiddleware } from './middleware';
@@ -960,6 +962,230 @@ describe('OneBunModule', () => {
       new ModuleInstance(TestModule, mockLoggerLayer);
 
       expect(configAvailable).toBe(true);
+    });
+  });
+
+  describe('Controller with ambient init context (config/logger in constructor)', () => {
+    const { Module: ModuleDecorator, Controller: ControllerDecorator, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleClass } = require('./module');
+    const { Controller: BaseController } = require('./controller');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    /**
+     * Test that this.config and this.logger are available in the controller constructor
+     * when the controller is created through the DI system (via ambient init context).
+     */
+    test('should have this.config and this.logger available in controller constructor via DI', async () => {
+      let configInConstructor: unknown = undefined;
+      let loggerInConstructor: unknown = undefined;
+
+      @ControllerDecorator('/test')
+      class TestCtrl extends BaseController {
+        constructor() {
+          super();
+          configInConstructor = this.config;
+          loggerInConstructor = this.logger;
+        }
+      }
+
+      @ModuleDecorator({
+        controllers: [TestCtrl],
+      })
+      class TestModule {}
+
+      // Initialize module and run setup — this triggers DI and controller creation
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // config and logger should have been available in the constructor
+      expect(configInConstructor).toBeDefined();
+      expect(loggerInConstructor).toBeDefined();
+    });
+
+    /**
+     * Test that this.config and this.logger are available in the controller constructor
+     * when the controller has injected service dependencies.
+     */
+    test('should have this.config and this.logger in constructor of controller with dependencies', async () => {
+      let configAvailable = false;
+      let loggerAvailable = false;
+
+      @Service()
+      class SomeService {
+        getValue() {
+          return 42;
+        }
+      }
+
+      @ControllerDecorator('/test')
+      class TestCtrl extends BaseController {
+        constructor(private svc: SomeService) {
+          super();
+          configAvailable = this.config !== undefined;
+          loggerAvailable = this.logger !== undefined;
+        }
+      }
+
+      @ModuleDecorator({
+        providers: [SomeService],
+        controllers: [TestCtrl],
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(configAvailable).toBe(true);
+      expect(loggerAvailable).toBe(true);
+    });
+  });
+
+  describe('WebSocket gateway with ambient init context (config/logger in constructor)', () => {
+    const { Module: ModuleDecorator, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleClass } = require('./module');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    /**
+     * Test that this.config and this.logger are available in the WS gateway constructor
+     * when the gateway is created through the DI system (via ambient init context).
+     */
+    test('should have this.config and this.logger available in WS gateway constructor via DI', async () => {
+      let configInConstructor: unknown = undefined;
+      let loggerInConstructor: unknown = undefined;
+
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        constructor() {
+          super();
+          configInConstructor = this.config;
+          loggerInConstructor = this.logger;
+        }
+      }
+
+      @ModuleDecorator({
+        controllers: [TestGateway],
+      })
+      class TestModule {}
+
+      // Initialize module and run setup — this triggers DI and gateway creation
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // config and logger should have been available in the constructor
+      expect(configInConstructor).toBeDefined();
+      expect(loggerInConstructor).toBeDefined();
+    });
+
+    /**
+     * Test that this.config and this.logger are available in the WS gateway constructor
+     * when the gateway has injected service dependencies.
+     */
+    test('should have this.config and this.logger in constructor of WS gateway with dependencies', async () => {
+      let configAvailable = false;
+      let loggerAvailable = false;
+
+      @Service()
+      class WsAuthService {
+        verify() {
+          return true;
+        }
+      }
+
+      @WebSocketGateway({ path: '/ws' })
+      class TestGateway extends BaseWebSocketGateway {
+        constructor(private auth: WsAuthService) {
+          super();
+          configAvailable = this.config !== undefined;
+          loggerAvailable = this.logger !== undefined;
+        }
+      }
+
+      @ModuleDecorator({
+        providers: [WsAuthService],
+        controllers: [TestGateway],
+      })
+      class TestModule {}
+
+      const module = new ModuleClass(TestModule, mockLoggerLayer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      expect(configAvailable).toBe(true);
+      expect(loggerAvailable).toBe(true);
+    });
+  });
+
+  describe('Middleware with ambient init context (config/logger in constructor)', () => {
+    const { Module: ModuleDecorator, Controller: ControllerDecorator, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleInstance } = require('./module');
+    const { Controller: BaseController } = require('./controller');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearRegistry();
+    });
+
+    /**
+     * Test that this.config and this.logger are available in the middleware constructor
+     * when the middleware is created through the DI system (via ambient init context).
+     */
+    test('should have this.config and this.logger available in middleware constructor via DI', () => {
+      let configInConstructor: unknown = undefined;
+      let loggerInConstructor: unknown = undefined;
+
+      class TestMiddleware extends BaseMiddleware {
+        constructor() {
+          super();
+          configInConstructor = this.config;
+          loggerInConstructor = this.logger;
+        }
+
+        async use(req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          return await next();
+        }
+      }
+
+      @ControllerDecorator('/test')
+      class TestCtrl extends BaseController {}
+
+      @ModuleDecorator({
+        controllers: [TestCtrl],
+      })
+      class TestModule {}
+
+      // Initialize module and resolve middleware (as the framework does)
+      const module = new ModuleInstance(TestModule, mockLoggerLayer);
+      module.resolveMiddleware([TestMiddleware]);
+
+      // config and logger should have been available in the constructor
+      expect(configInConstructor).toBeDefined();
+      expect(loggerInConstructor).toBeDefined();
     });
   });
 
