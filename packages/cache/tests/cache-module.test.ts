@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import {
+  beforeAll,
   describe,
   expect,
   test,
@@ -206,6 +207,15 @@ describe('CacheModule (NestJS-style)', () => {
   describe('Global module support', () => {
      
     const { isGlobalModule, Global } = require('@onebun/core');
+
+    // Re-apply @Global() because other test suites (e.g. core/module.test.ts,
+    // core/decorators.test.ts) call clearGlobalModules() in their beforeEach/afterEach
+    // hooks, which clears the shared global registry. The @Global() decorator on
+    // CacheModule only runs once at module evaluation time and won't be re-applied
+    // on subsequent imports due to module caching.
+    beforeAll(() => {
+      Global()(CacheModule);
+    });
 
     test('CacheModule should be global by default', () => {
       // CacheModule is decorated with @Global() at module definition time

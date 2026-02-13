@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import {
+  beforeAll,
   describe,
   expect,
   test,
@@ -239,9 +240,14 @@ describe('DrizzleModule', () => {
     // eslint-disable-next-line @typescript-eslint/naming-convention
     const { isGlobalModule, clearGlobalModules, Global } = require('@onebun/core');
 
-    // Note: We don't clear global modules in beforeEach because @Global() decorator
-    // only runs once when the module is first imported. Clearing would break the test
-    // for "DrizzleModule should be global by default".
+    // Re-apply @Global() because other test suites (e.g. core/module.test.ts,
+    // core/decorators.test.ts) call clearGlobalModules() in their beforeEach/afterEach
+    // hooks, which clears the shared global registry. The @Global() decorator on
+    // DrizzleModule only runs once at module evaluation time and won't be re-applied
+    // on subsequent imports due to module caching.
+    beforeAll(() => {
+      Global()(DrizzleModule);
+    });
     
     afterEach(() => {
       // Clear module options after each test
