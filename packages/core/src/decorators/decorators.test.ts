@@ -52,6 +52,7 @@ import {
   Req,
   Res,
   UseMiddleware,
+  Middleware,
   Module,
   getModuleMetadata,
   ApiResponse,
@@ -298,6 +299,33 @@ describe('decorators', () => {
       registerDependencies(TestController, [ServiceA, ServiceB]);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toEqual([ServiceA, ServiceB]);
+    });
+  });
+
+  describe('Middleware decorator', () => {
+    test('should emit design:paramtypes for automatic DI', () => {
+      @Service()
+      class HelperService {
+        getValue() {
+          return 'ok';
+        }
+      }
+
+      @Middleware()
+      class TestMiddleware extends BaseMiddleware {
+        constructor(private readonly helper: HelperService) {
+          super();
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+          return await next();
+        }
+      }
+
+      const deps = getConstructorParamTypes(TestMiddleware);
+      expect(deps).toBeDefined();
+      expect(deps).toHaveLength(1);
+      expect(deps?.[0]).toBe(HelperService);
     });
   });
 

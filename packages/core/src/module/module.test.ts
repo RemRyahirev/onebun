@@ -24,7 +24,11 @@ import type {
 } from '../types';
 
 
-import { Controller as CtrlDeco, Module } from '../decorators/decorators';
+import {
+  Controller as CtrlDeco,
+  Middleware,
+  Module,
+} from '../decorators/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { WebSocketGateway } from '../websocket/ws-decorators';
@@ -685,7 +689,7 @@ describe('OneBunModule', () => {
 
   describe('Controller DI with @Inject decorator', () => {
     const {
-      Inject, getConstructorParamTypes, Controller: ControllerDecorator, clearGlobalModules,
+      Inject: InjectDecorator, getConstructorParamTypes, Controller: ControllerDecorator, clearGlobalModules,
     } = require('../decorators/decorators');
     const { Controller: BaseController } = require('./controller');
     const { clearGlobalServicesRegistry: clearRegistry } = require('./module');
@@ -716,7 +720,7 @@ describe('OneBunModule', () => {
 
       // Define controller with @Inject BEFORE @Controller
       class OriginalController extends BaseController {
-        constructor(@Inject(SimpleService) private svc: SimpleService) {
+        constructor(@InjectDecorator(SimpleService) private svc: SimpleService) {
           super();
         }
       }
@@ -1189,6 +1193,55 @@ describe('OneBunModule', () => {
     });
   });
 
+  describe('Middleware with service injection', () => {
+    test('should resolve middleware with injected service and use it in use()', async () => {
+      @Service()
+      class HelperService {
+        getValue(): string {
+          return 'injected';
+        }
+      }
+
+      @Middleware()
+      class MiddlewareWithService extends BaseMiddleware {
+        constructor(private readonly helper: HelperService) {
+          super();
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          const res = await next();
+          res.headers.set('X-Injected-Value', this.helper.getValue());
+
+          return res;
+        }
+      }
+
+      @CtrlDeco('/test')
+      class TestCtrl extends CtrlBase {}
+
+      @Module({
+        controllers: [TestCtrl],
+        providers: [HelperService],
+      })
+      class TestModule {}
+
+      const module = new OneBunModule(TestModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const resolved = module.resolveMiddleware([MiddlewareWithService]);
+      expect(resolved).toHaveLength(1);
+
+      const mockReq = Object.assign(new Request('http://localhost/'), {
+        params: {},
+        cookies: new Map(),
+      }) as unknown as OneBunRequest;
+      const next = async (): Promise<OneBunResponse> => new Response('ok');
+      const response = await resolved[0](mockReq, next);
+
+      expect(response.headers.get('X-Injected-Value')).toBe('injected');
+    });
+  });
+
   describe('Lifecycle hooks', () => {
     const { clearGlobalModules } = require('../decorators/decorators');
     const { clearGlobalServicesRegistry: clearRegistry, OneBunModule: ModuleClass } = require('./module');
@@ -1375,7 +1428,7 @@ describe('OneBunModule', () => {
     const {
       Controller: ControllerDecorator,
       Get,
-      Inject,
+      Inject: InjectDecorator,
       clearGlobalModules,
     } = require('../decorators/decorators');
     const { Controller: BaseController } = require('./controller');
@@ -1404,7 +1457,7 @@ describe('OneBunModule', () => {
       }
 
       class CounterController extends BaseController {
-        constructor(@Inject(CounterService) private readonly counterService: CounterService) {
+        constructor(@InjectDecorator(CounterService) private readonly counterService: CounterService) {
           super();
         }
         getCount() {
@@ -1439,7 +1492,7 @@ describe('OneBunModule', () => {
       }
 
       class ChildController extends BaseController {
-        constructor(@Inject(ChildService) private readonly childService: ChildService) {
+        constructor(@InjectDecorator(ChildService) private readonly childService: ChildService) {
           super();
         }
         getValue() {
@@ -1486,7 +1539,7 @@ describe('OneBunModule', () => {
       class SharedModule {}
 
       class AppController extends BaseController {
-        constructor(@Inject(SharedService) private readonly sharedService: SharedService) {
+        constructor(@InjectDecorator(SharedService) private readonly sharedService: SharedService) {
           super();
         }
         getLabel() {

@@ -241,6 +241,32 @@ export function Inject<T>(serviceType: new (...args: any[]) => T) {
 }
 
 /**
+ * Class decorator for middleware. Apply to classes that extend BaseMiddleware so that
+ * TypeScript emits design:paramtypes and constructor dependencies are resolved automatically
+ * by the framework (no need for @Inject on each parameter). You can still use @Inject when needed.
+ *
+ * @example
+ * ```ts
+ * @Middleware()
+ * class AuthMiddleware extends BaseMiddleware {
+ *   constructor(private authService: AuthService) {
+ *     super();
+ *   }
+ *   async use(req, next) { ... }
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function Middleware(): ClassDecorator {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (target: any): any => {
+    injectable()(target);
+
+    return target;
+  };
+}
+
+/**
  * Register dependencies manually (fallback method)
  */
 export function registerDependencies(target: Function, dependencies: Function[]): void {

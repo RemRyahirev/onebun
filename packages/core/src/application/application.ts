@@ -758,10 +758,14 @@ export class OneBunApplication {
         // Module-level middleware (already resolved bound functions)
         const moduleMiddleware = this.ensureModule().getModuleMiddleware?.(controllerClass) ?? [];
 
-        // Controller-level middleware — resolve class constructors via root module DI
+        // Resolve controller-level and route-level middleware with the owner module's DI
+        const ownerModule =
+          this.ensureModule().getOwnerModuleForController?.(controllerClass) ?? this.ensureModule();
+
+        // Controller-level middleware — resolve via owner module DI
         const ctrlMiddlewareClasses = getControllerMiddleware(controllerClass);
         const ctrlMiddleware: Function[] = ctrlMiddlewareClasses.length > 0
-          ? (this.ensureModule().resolveMiddleware?.(ctrlMiddlewareClasses) ?? [])
+          ? (ownerModule.resolveMiddleware?.(ctrlMiddlewareClasses) ?? [])
           : [];
 
         for (const route of controllerMetadata.routes) {
@@ -773,10 +777,10 @@ export class OneBunApplication {
             controller,
           );
 
-          // Route-level middleware — resolve class constructors via root module DI
+          // Route-level middleware — resolve via owner module DI
           const routeMiddlewareClasses = route.middleware ?? [];
           const routeMiddleware: Function[] = routeMiddlewareClasses.length > 0
-            ? (this.ensureModule().resolveMiddleware?.(routeMiddlewareClasses) ?? [])
+            ? (ownerModule.resolveMiddleware?.(routeMiddlewareClasses) ?? [])
             : [];
 
           // Merge middleware: global → module → controller → route

@@ -164,6 +164,13 @@ export interface ModuleInstance {
   getModuleMiddleware?(controllerClass: Function): Function[];
 
   /**
+   * Get the module instance that owns the given controller (the module in whose
+   * `controllers` array the controller is declared). Returns this module or a
+   * child module, or undefined if the controller is not in this module tree.
+   */
+  getOwnerModuleForController?(controllerClass: Function): ModuleInstance | undefined;
+
+  /**
    * Resolve middleware class constructors into bound `use()` functions
    * using this module's DI scope (services + logger + config).
    */

@@ -11,6 +11,12 @@ import {
 import { register } from 'prom-client';
 
 import type { ApplicationOptions } from '../types';
+import type {
+  MiddlewareClass,
+  OneBunRequest,
+  OneBunResponse,
+} from '../types';
+import type { OnModuleConfigure } from '../types';
 
 import {
   Module,
@@ -23,8 +29,12 @@ import {
   Header,
   Cookie,
   Req,
+  UseMiddleware,
+  Middleware,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { BaseMiddleware } from '../module/middleware';
+import { Service } from '../module/service';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 
 import { OneBunApplication } from './application';
@@ -2561,6 +2571,517 @@ describe('OneBunApplication', () => {
       expect(recordedMetrics[1].route).toBe('/api/data');
       // Verify they are the same (no duplication due to trailing slash)
       expect(recordedMetrics[0].route).toBe(recordedMetrics[1].route);
+    });
+
+    describe('Middleware composition (docs: controllers.md#middleware-execution-order)', () => {
+      test('should run route-level middlewares left-to-right then handler', async () => {
+        const order: string[] = [];
+
+        class MwA extends BaseMiddleware {
+          async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('MwA');
+            const res = await next();
+            order.push('MwA-after');
+
+            return res;
+          }
+        }
+
+        class MwB extends BaseMiddleware {
+          async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('MwB');
+            const res = await next();
+            order.push('MwB-after');
+
+            return res;
+          }
+        }
+
+        @Controller('/api')
+        class ApiController extends BaseController {
+          @Get('/chain')
+          @UseMiddleware(MwA, MwB)
+          getChain() {
+            order.push('handler');
+
+            return this.success({ ok: true });
+          }
+        }
+
+        @Module({ controllers: [ApiController] })
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/api/chain', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body.result).toEqual({ ok: true });
+        expect(order).toEqual(['MwA', 'MwB', 'handler', 'MwB-after', 'MwA-after']);
+      });
+
+      test('should run controller-level then route-level middleware', async () => {
+        const order: string[] = [];
+
+        class CtrlMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('CtrlMw');
+
+            return await next();
+          }
+        }
+
+        class RouteMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('RouteMw');
+
+            return await next();
+          }
+        }
+
+        @Controller('/api')
+        @UseMiddleware(CtrlMw)
+        class ApiController extends BaseController {
+          @Get('/dashboard')
+          getDashboard() {
+            order.push('handler');
+
+            return this.success({ stats: {} });
+          }
+
+          @Get('/settings')
+          @UseMiddleware(RouteMw)
+          getSettings() {
+            order.push('handler-settings');
+
+            return this.success({ updated: false });
+          }
+        }
+
+        @Module({ controllers: [ApiController] })
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        order.length = 0;
+        const req1 = new Request('http://localhost:3000/api/dashboard', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const res1 = await (mockServer as any).fetchHandler(req1);
+        expect(res1.status).toBe(200);
+        expect(order).toEqual(['CtrlMw', 'handler']);
+
+        order.length = 0;
+        const req2 = new Request('http://localhost:3000/api/settings', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const res2 = await (mockServer as any).fetchHandler(req2);
+        expect(res2.status).toBe(200);
+        expect(order).toEqual(['CtrlMw', 'RouteMw', 'handler-settings']);
+      });
+
+      test('should run module-level then controller-level then route-level middleware', async () => {
+        const order: string[] = [];
+
+        class ModuleMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('ModuleMw');
+
+            return await next();
+          }
+        }
+
+        class CtrlMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('CtrlMw');
+
+            return await next();
+          }
+        }
+
+        class RouteMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('RouteMw');
+
+            return await next();
+          }
+        }
+
+        @Controller('/admin')
+        @UseMiddleware(CtrlMw)
+        class AdminController extends BaseController {
+          @Get('/users')
+          @UseMiddleware(RouteMw)
+          getUsers() {
+            order.push('handler');
+
+            return this.success({ users: [] });
+          }
+        }
+
+        @Module({ controllers: [AdminController] })
+        class TestModule implements OnModuleConfigure {
+          configureMiddleware(): MiddlewareClass[] {
+            return [ModuleMw];
+          }
+        }
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/admin/users', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body.result).toEqual({ users: [] });
+        expect(order).toEqual(['ModuleMw', 'CtrlMw', 'RouteMw', 'handler']);
+      });
+
+      test('should run application-wide then module then controller then route middleware', async () => {
+        const order: string[] = [];
+
+        class GlobalMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('GlobalMw');
+
+            return await next();
+          }
+        }
+
+        class ModuleMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('ModuleMw');
+
+            return await next();
+          }
+        }
+
+        class CtrlMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('CtrlMw');
+
+            return await next();
+          }
+        }
+
+        class RouteMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('RouteMw');
+
+            return await next();
+          }
+        }
+
+        @Controller('/admin')
+        @UseMiddleware(CtrlMw)
+        class AdminController extends BaseController {
+          @Get('/stats')
+          @UseMiddleware(RouteMw)
+          getStats() {
+            order.push('handler');
+
+            return this.success({ stats: {} });
+          }
+        }
+
+        @Module({ controllers: [AdminController] })
+        class TestModule implements OnModuleConfigure {
+          configureMiddleware(): MiddlewareClass[] {
+            return [ModuleMw];
+          }
+        }
+
+        const app = createTestApp(TestModule, { middleware: [GlobalMw] });
+        await app.start();
+
+        const request = new Request('http://localhost:3000/admin/stats', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body.result).toEqual({ stats: {} });
+        expect(order).toEqual(['GlobalMw', 'ModuleMw', 'CtrlMw', 'RouteMw', 'handler']);
+      });
+
+      test('should short-circuit when middleware returns without calling next()', async () => {
+        const order: string[] = [];
+
+        class AuthMw extends BaseMiddleware {
+          async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            order.push('AuthMw');
+            const token = req.headers.get('X-Test-Token');
+            if (token !== 'secret') {
+              return new Response(JSON.stringify({ error: 'Unauthorized' }), {
+                status: 403,
+                // eslint-disable-next-line @typescript-eslint/naming-convention
+                headers: { 'Content-Type': 'application/json' },
+              });
+            }
+
+            return await next();
+          }
+        }
+
+        @Controller('/api')
+        class ApiController extends BaseController {
+          @Get('/protected')
+          @UseMiddleware(AuthMw)
+          getProtected() {
+            order.push('handler');
+
+            return { data: 'secret' };
+          }
+        }
+
+        @Module({ controllers: [ApiController] })
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/api/protected', {
+          method: 'GET',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'X-Test-Token': 'wrong' },
+        });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        const body = await response.json();
+
+        expect(response.status).toBe(403);
+        expect(body.error).toBe('Unauthorized');
+        expect(order).toEqual(['AuthMw']);
+      });
+
+      test('should allow middleware to modify response after next() (onion model)', async () => {
+        class AddHeaderAfterNextMw extends BaseMiddleware {
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            const res = await next();
+            res.headers.set('X-After-Next', 'true');
+
+            return res;
+          }
+        }
+
+        @Controller('/api')
+        class ApiController extends BaseController {
+          @Get('/onion')
+          @UseMiddleware(AddHeaderAfterNextMw)
+          getOnion() {
+            return this.success({ value: 1 });
+          }
+        }
+
+        @Module({ controllers: [ApiController] })
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/api/onion', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body.result).toEqual({ value: 1 });
+        expect(response.headers.get('X-After-Next')).toBe('true');
+      });
+    });
+
+    describe('Middleware DI (service injection)', () => {
+      test('should inject service into application-wide middleware', async () => {
+        @Service()
+        class RootService {
+          getValue(): string {
+            return 'global';
+          }
+        }
+
+        @Middleware()
+        class GlobalMw extends BaseMiddleware {
+          constructor(private readonly svc: RootService) {
+            super();
+          }
+
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            const res = await next();
+            res.headers.set('X-Injected-Value', this.svc.getValue());
+
+            return res;
+          }
+        }
+
+        @Controller('/api')
+        class ApiController extends BaseController {
+          @Get('/ping')
+          ping() {
+            return this.success({ pong: true });
+          }
+        }
+
+        @Module({ controllers: [ApiController], providers: [RootService] })
+        class TestModule {}
+
+        const app = createTestApp(TestModule, { middleware: [GlobalMw] });
+        await app.start();
+
+        const request = new Request('http://localhost:3000/api/ping', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('X-Injected-Value')).toBe('global');
+      });
+
+      test('should inject service into module-level middleware', async () => {
+        @Service()
+        class FeatureService {
+          getValue(): string {
+            return 'module';
+          }
+        }
+
+        @Middleware()
+        class FeatureModuleMw extends BaseMiddleware {
+          constructor(private readonly svc: FeatureService) {
+            super();
+          }
+
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            const res = await next();
+            res.headers.set('X-Injected-Value', this.svc.getValue());
+
+            return res;
+          }
+        }
+
+        @Controller('/feature')
+        class FeatureController extends BaseController {
+          @Get('/data')
+          getData() {
+            return this.success({ data: true });
+          }
+        }
+
+        @Module({ controllers: [FeatureController], providers: [FeatureService] })
+        class FeatureModule implements OnModuleConfigure {
+          configureMiddleware(): MiddlewareClass[] {
+            return [FeatureModuleMw];
+          }
+        }
+
+        @Module({ imports: [FeatureModule], controllers: [] })
+        class RootModule {}
+
+        const app = createTestApp(RootModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/feature/data', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('X-Injected-Value')).toBe('module');
+      });
+
+      test('should inject service into controller-level middleware from owner module', async () => {
+        @Service()
+        class FeatureService {
+          getValue(): string {
+            return 'controller';
+          }
+        }
+
+        @Middleware()
+        class FeatureCtrlMw extends BaseMiddleware {
+          constructor(private readonly svc: FeatureService) {
+            super();
+          }
+
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            const res = await next();
+            res.headers.set('X-Injected-Value', this.svc.getValue());
+
+            return res;
+          }
+        }
+
+        @Controller('/feature')
+        @UseMiddleware(FeatureCtrlMw)
+        class FeatureController extends BaseController {
+          @Get('/ctrl')
+          getCtrl() {
+            return this.success({ ok: true });
+          }
+        }
+
+        @Module({ controllers: [FeatureController], providers: [FeatureService] })
+        class FeatureModule {}
+
+        @Module({ imports: [FeatureModule], controllers: [] })
+        class RootModule {}
+
+        const app = createTestApp(RootModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/feature/ctrl', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('X-Injected-Value')).toBe('controller');
+      });
+
+      test('should inject service into route-level middleware from owner module', async () => {
+        @Service()
+        class FeatureService {
+          getValue(): string {
+            return 'route';
+          }
+        }
+
+        @Middleware()
+        class FeatureRouteMw extends BaseMiddleware {
+          constructor(private readonly svc: FeatureService) {
+            super();
+          }
+
+          async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
+            const res = await next();
+            res.headers.set('X-Injected-Value', this.svc.getValue());
+
+            return res;
+          }
+        }
+
+        @Controller('/feature')
+        class FeatureController extends BaseController {
+          @Get('/route')
+          @UseMiddleware(FeatureRouteMw)
+          getRoute() {
+            return this.success({ ok: true });
+          }
+        }
+
+        @Module({ controllers: [FeatureController], providers: [FeatureService] })
+        class FeatureModule {}
+
+        @Module({ imports: [FeatureModule], controllers: [] })
+        class RootModule {}
+
+        const app = createTestApp(RootModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/feature/route', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+        expect(response.status).toBe(200);
+        expect(response.headers.get('X-Injected-Value')).toBe('route');
+      });
     });
   });
 

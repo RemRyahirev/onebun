@@ -741,6 +741,20 @@ export class UserController extends BaseController {
 
 ## Middleware Decorators
 
+### @Middleware()
+
+Class decorator for middleware. Apply it to classes that extend `BaseMiddleware` so that the framework can resolve constructor dependencies automatically (TypeScript emits `design:paramtypes` when the class has a decorator). Without `@Middleware()`, you would need `@Inject()` on each constructor parameter for DI to work.
+
+```typescript
+@Middleware()
+class AuthMiddleware extends BaseMiddleware {
+  constructor(private authService: AuthService) {
+    super();
+  }
+  async use(req, next) { ... }
+}
+```
+
 ### @UseMiddleware()
 
 Apply middleware to a route handler or to all routes in a controller. Works as both a **method decorator** and a **class decorator**. Pass **class constructors** extending `BaseMiddleware` (not instances).
@@ -812,7 +826,7 @@ export class AdminController extends BaseController {
 
 When both class-level and method-level middleware are present, execution order is: **controller-level -> route-level -> handler**.
 
-Middleware classes support full DI through the constructor. See [Controllers API — Middleware](./controllers.md#middleware) for details and examples.
+Middleware classes support full DI through the constructor. Use `@Middleware()` on the class for automatic dependency resolution. See [Controllers API — Middleware](./controllers.md#middleware) for details and examples.
 
 ## Response Decorators
 

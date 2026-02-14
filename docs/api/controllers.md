@@ -436,15 +436,16 @@ OneBun correctly preserves multiple `Set-Cookie` headers. Use `Headers.append()`
 
 ## Middleware
 
-OneBun provides a class-based middleware system that operates at four levels: **application-wide**, **module-level**, **controller-level**, and **route-level**. All middleware extends `BaseMiddleware`, giving automatic access to a scoped logger, configuration, and full DI support through the constructor.
+OneBun provides a class-based middleware system that operates at four levels: **application-wide**, **module-level**, **controller-level**, and **route-level**. All middleware extends `BaseMiddleware`, giving automatic access to a scoped logger, configuration, and full DI support through the constructor. Use the `@Middleware()` class decorator so that constructor dependencies are resolved automatically.
 
 ### BaseMiddleware
 
-Every middleware class extends `BaseMiddleware` and implements the `use()` method:
+Every middleware class extends `BaseMiddleware` and implements the `use()` method. Use the `@Middleware()` decorator on the class so that constructor dependencies (if any) are resolved automatically:
 
 ```typescript
-import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+import { BaseMiddleware, Middleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
 
+@Middleware()
 class RequestLogMiddleware extends BaseMiddleware {
   async use(req: OneBunRequest, next: () => Promise<OneBunResponse>) {
     // Pre-processing: run before the handler
@@ -470,12 +471,13 @@ class RequestLogMiddleware extends BaseMiddleware {
 
 ### Middleware with Dependency Injection
 
-Middleware supports full constructor-based DI, just like controllers. Inject any service available in the module's DI scope:
+Middleware supports full constructor-based DI, just like controllers. Decorate the middleware class with `@Middleware()` so that the framework can resolve constructor dependencies automatically (TypeScript emits `design:paramtypes` when a class has a decorator). Inject any service available in the module's DI scope. You can still use `@Inject()` on parameters when needed.
 
 ```typescript
-import { BaseMiddleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
+import { BaseMiddleware, Middleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
 import { AuthService } from './auth.service';
 
+@Middleware()
 class AuthMiddleware extends BaseMiddleware {
   constructor(private authService: AuthService) {
     super();

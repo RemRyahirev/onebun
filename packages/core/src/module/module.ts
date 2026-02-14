@@ -975,6 +975,24 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
+   * Get the module instance that owns the given controller.
+   * Used to resolve controller-level and route-level middleware with the owner module's DI.
+   */
+  getOwnerModuleForController(controllerClass: Function): ModuleInstance | undefined {
+    if (this.controllers.includes(controllerClass)) {
+      return this;
+    }
+    for (const childModule of this.childModules) {
+      const owner = childModule.getOwnerModuleForController(controllerClass);
+      if (owner) {
+        return owner;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
    * Get all controller instances from this module and child modules (recursive).
    */
   getControllerInstances(): Map<Function, Controller> {
