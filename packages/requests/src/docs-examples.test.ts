@@ -2,7 +2,6 @@
  * Documentation Examples Tests for @onebun/requests
  *
  * This file tests code examples from:
- * - packages/requests/README.md
  * - docs/api/requests.md
  */
 

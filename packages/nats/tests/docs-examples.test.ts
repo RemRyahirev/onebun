@@ -2,7 +2,6 @@
  * Documentation Examples Tests for @onebun/nats
  *
  * This file tests code examples from:
- * - packages/nats/README.md
  * - docs/api/queue.md (NATS/JetStream sections)
  *
  * Each test case corresponds to a code block in the documentation.
@@ -28,7 +27,7 @@ import {
 
 
 /**
- * @source packages/nats/README.md#basic-nats-pubsub
+ * @source docs/api/queue.md#natsqueueadapter
  */
 describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
   it('should create NatsQueueAdapter with options', () => {
@@ -45,7 +44,7 @@ describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
 });
 
 /**
- * @source packages/nats/README.md#jetstream-persistent
+ * @source docs/api/queue.md#jetstreamqueueadapter
  */
 describe('JetStream (Persistent) Example (README.md)', () => {
   it('should create JetStreamQueueAdapter with stream configuration', () => {
@@ -69,7 +68,7 @@ describe('JetStream (Persistent) Example (README.md)', () => {
 });
 
 /**
- * @source packages/nats/README.md#feature-comparison
+ * @source docs/api/queue.md#feature-support-matrix
  */
 describe('Feature Comparison (README.md)', () => {
   it('should report correct NatsQueueAdapter features', () => {
@@ -109,7 +108,7 @@ describe('Feature Comparison (README.md)', () => {
 });
 
 /**
- * @source packages/nats/README.md#configuration-options
+ * @source docs/api/queue.md#configuration-options
  */
 describe('Configuration Options (README.md)', () => {
   it('should accept NatsConnectionOptions', () => {
@@ -195,7 +194,7 @@ describe('JetStreamQueueAdapter (docs/api/queue.md)', () => {
 });
 
 /**
- * @source packages/nats/README.md (NatsClient usage)
+ * @source docs/api/queue.md#natsclient
  */
 describe('NatsClient', () => {
   it('should create client instance', () => {

@@ -122,7 +122,7 @@ Package: `@onebun/core`
 
 ### @Module()
 
-Defines a module that groups controllers, services, and imports.
+Defines a module that groups controllers, services, and imports. See [Architecture — Module System](/architecture#module-system) for concepts and lifecycle details.
 
 ```typescript
 @Module(options: ModuleOptions)
@@ -708,7 +708,7 @@ export class CustomService extends BaseService {
 
 ### @Inject()
 
-Explicit dependency injection for edge cases. **In most cases, automatic DI works without this decorator.**
+Explicit dependency injection for edge cases. **In most cases, automatic DI works without this decorator.** See [Architecture — Dependency Injection](/architecture#dependency-injection-system) for how DI resolution works.
 
 ```typescript
 @Inject(type: new (...args: any[]) => T)

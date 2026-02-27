@@ -1648,7 +1648,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('Controller Lifecycle Hooks', () => {
     /**
-     * @source docs/api/controllers.md#lifecycle-hooks
+     * @source docs/api/services.md#lifecycle-hooks (controllers support the same hooks)
      */
     it('should implement lifecycle hooks in controllers', () => {
       // From docs: Controller lifecycle hooks example

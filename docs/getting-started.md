@@ -6,7 +6,7 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 
 ## Technical Context for AI Agents
 
-**Framework Version**: 0.1.0
+**Framework Version**: 0.2.6
 **Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)
 **TypeScript**: strict mode required
 
@@ -246,7 +246,7 @@ export class HelloController extends BaseController {
 - `BaseController` provides `this.success()`, `this.error()`, `this.logger`
 - `@Param('name')` extracts path parameters
 - `@Body(schema)` validates and injects request body
-- Constructor DI is automatic (just declare private property)
+- Constructor DI is automatic (just declare private property) — see [Architecture — DI](/architecture#dependency-injection-system) for details
 
 ## Step 6: Create the Module
 

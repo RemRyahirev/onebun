@@ -2,7 +2,6 @@
  * Documentation Examples Tests for @onebun/trace
  *
  * This file tests code examples from:
- * - packages/trace/README.md
  * - docs/api/trace.md
  */
 
@@ -17,7 +16,7 @@ import { Span, Trace } from '../src';
 describe('Trace README Examples', () => {
   describe('Decorators (README)', () => {
     /**
-     * @source packages/trace/README.md#decorators
+     * @source docs/api/trace.md#decorators
      */
     it('should have @Trace decorator available', () => {
       // From README: @Trace decorator
@@ -27,7 +26,7 @@ describe('Trace README Examples', () => {
     });
 
     /**
-     * @source packages/trace/README.md#decorators
+     * @source docs/api/trace.md#decorators
      */
     it('should have @Span decorator available', () => {
       // From README: @Span decorator

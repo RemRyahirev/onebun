@@ -249,14 +249,14 @@ bun lint              # Check lint errors
 ```json
 {
   "dependencies": {
-    "@onebun/core": "^0.1.0",
-    "@onebun/logger": "^0.1.0",
-    "@onebun/envs": "^0.1.0",
-    "@onebun/requests": "^0.1.0",
-    "@onebun/metrics": "^0.1.0",
-    "@onebun/trace": "^0.1.0",
-    "@onebun/cache": "^0.1.0",
-    "@onebun/drizzle": "^0.1.0",
+    "@onebun/core": "^0.2.6",
+    "@onebun/logger": "^0.2.0",
+    "@onebun/envs": "^0.2.0",
+    "@onebun/requests": "^0.2.0",
+    "@onebun/metrics": "^0.2.0",
+    "@onebun/trace": "^0.2.0",
+    "@onebun/cache": "^0.2.2",
+    "@onebun/drizzle": "^0.2.1",
     "effect": "^3.x",
     "arktype": "^2.x"
   }

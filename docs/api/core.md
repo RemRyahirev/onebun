@@ -33,6 +33,7 @@ const app = new OneBunApplication(AppModule, {
   envSchema,  // from @onebun/envs
   metrics: { enabled: true, path: '/metrics', prefix: 'myapp_' },
   tracing: { enabled: true, serviceName: 'my-service' },
+  loggerOptions: { minLevel: 'info', format: 'json' },
   gracefulShutdown: true,  // default
 });
 ```
@@ -115,7 +116,13 @@ interface ApplicationOptions {
   /** Enable development mode (default: NODE_ENV !== 'production') */
   development?: boolean;
 
-  /** Custom logger layer */
+  /** Logger configuration options.
+   * Provides a declarative way to configure logging.
+   * Priority: loggerLayer > loggerOptions > LOG_LEVEL/LOG_FORMAT env > NODE_ENV defaults
+   */
+  loggerOptions?: LoggerOptions;
+
+  /** Custom logger layer (advanced, takes precedence over loggerOptions) */
   loggerLayer?: Layer.Layer<Logger>;
 
   /** Environment configuration schema */

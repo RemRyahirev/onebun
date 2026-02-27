@@ -33,9 +33,9 @@ basic-app/
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
-    "@onebun/core": "^0.1.0",
-    "@onebun/logger": "^0.1.0",
-    "@onebun/envs": "^0.1.0",
+    "@onebun/core": "^0.2.6",
+    "@onebun/logger": "^0.2.0",
+    "@onebun/envs": "^0.2.0",
     "effect": "^3.0.0"
   },
   "devDependencies": {

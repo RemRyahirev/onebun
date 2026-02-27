@@ -329,7 +329,7 @@ await this.callOnApplicationDestroy(signal);
 
 ### Lifecycle Hooks
 
-Services and controllers can implement lifecycle hooks by importing the interfaces:
+Services and controllers can implement lifecycle hooks by importing the interfaces. See [Services API — Lifecycle Hooks](/api/services#lifecycle-hooks) for the full reference, execution order, and standalone service patterns.
 
 ```typescript
 import { 
@@ -543,28 +543,7 @@ async myOperation(): Promise<void> {
 
 ## Error Handling
 
-### Standard Error Types
-
-```typescript
-import { OneBunBaseError, NotFoundError, InternalServerError } from '@onebun/core';
-
-// Throw typed errors
-throw new NotFoundError('User', userId);
-
-// Caught and converted to standard response:
-// { success: false, code: 404, message: "User not found" }
-```
-
-### Error Response Format
-
-```typescript
-interface ErrorResponse {
-  success: false;
-  code: number;      // HTTP-like error code
-  message: string;   // Human-readable message
-  details?: unknown; // Additional error details
-}
-```
+OneBun provides standardized error responses via `this.error()` on controllers and typed error classes (`NotFoundError`, `InternalServerError`, etc.). See [Controllers API — error()](/api/controllers#error) for the response format and usage examples.
 
 ## Multi-Service Architecture
 

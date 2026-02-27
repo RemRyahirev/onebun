@@ -2,7 +2,6 @@
  * Documentation Examples Tests for @onebun/metrics
  *
  * This file tests code examples from:
- * - packages/metrics/README.md
  * - docs/api/metrics.md
  */
 
@@ -115,6 +114,9 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('MetricsService (docs/api/metrics.md)', () => {
+    /**
+     * @source docs/api/metrics.md#metricsservice
+     */
     it('should create metrics service instance', () => {
       // From docs: MetricsService usage
       // Use createMetricsService() to get an Effect that yields the service
@@ -128,6 +130,9 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('Counter (docs/api/metrics.md)', () => {
+    /**
+     * @source docs/api/metrics.md#counter
+     */
     it('should create and use counter', async () => {
       // From docs: Counter example
       // createCounter returns a prom-client Counter object
@@ -146,6 +151,9 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('Gauge (docs/api/metrics.md)', () => {
+    /**
+     * @source docs/api/metrics.md#gauge
+     */
     it('should create and use gauge', async () => {
       // From docs: Gauge example
       // createGauge returns a prom-client Gauge object
@@ -165,6 +173,9 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('Histogram (docs/api/metrics.md)', () => {
+    /**
+     * @source docs/api/metrics.md#histogram
+     */
     it('should create and use histogram', async () => {
       // From docs: Histogram example
       // createHistogram returns a prom-client Histogram object
@@ -208,6 +219,9 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('Service Metrics Pattern (docs/api/metrics.md)', () => {
+    /**
+     * @source docs/api/metrics.md#service-metrics-pattern
+     */
     it('should implement payment service metrics pattern', async () => {
       // From docs: Service Metrics Pattern
       // Register custom metrics on service init

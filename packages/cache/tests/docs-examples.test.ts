@@ -2,7 +2,6 @@
  * Documentation Examples Tests for @onebun/cache
  *
  * This file tests code examples from:
- * - packages/cache/README.md
  * - docs/api/cache.md
  */
 
@@ -89,7 +88,7 @@ describe('Cache README Examples', () => {
 
   describe('TTL Examples (README)', () => {
     /**
-     * @source packages/cache/README.md#ttl-management
+     * @source docs/api/cache.md#ttl-management
      */
     it('should set with default TTL', async () => {
       const cache = createInMemoryCache({
@@ -105,7 +104,7 @@ describe('Cache README Examples', () => {
     });
 
     /**
-     * @source packages/cache/README.md#ttl-management
+     * @source docs/api/cache.md#ttl-management
      */
     it('should set with custom TTL', async () => {
       const cache = createInMemoryCache({
@@ -121,7 +120,7 @@ describe('Cache README Examples', () => {
     });
 
     /**
-     * @source packages/cache/README.md#ttl-management
+     * @source docs/api/cache.md#ttl-management
      */
     it('should set without expiration', async () => {
       const cache = createInMemoryCache({
@@ -139,7 +138,7 @@ describe('Cache README Examples', () => {
 
   describe('Batch Operations (README)', () => {
     /**
-     * @source packages/cache/README.md#batch-operations
+     * @source docs/api/cache.md#batch-operations
      */
     it('should get multiple values', async () => {
       const cache = createInMemoryCache({
@@ -158,7 +157,7 @@ describe('Cache README Examples', () => {
     });
 
     /**
-     * @source packages/cache/README.md#batch-operations
+     * @source docs/api/cache.md#batch-operations
      */
     it('should set multiple values', async () => {
       const cache = createInMemoryCache({
