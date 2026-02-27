@@ -1,8 +1,14 @@
 import type { BaseMiddleware } from './module/middleware';
+import type { QueueAdapterConstructor } from './queue/types';
 import type { Type } from 'arktype';
-import type { Effect, Layer } from 'effect';
+import type {
+  Context,
+  Effect,
+  Layer,
+} from 'effect';
 
 import type { Logger, LoggerOptions } from '@onebun/logger';
+
 
 /**
  * HTTP Request type used in OneBun controllers.
@@ -175,6 +181,11 @@ export interface ModuleInstance {
    * using this module's DI scope (services + logger + config).
    */
   resolveMiddleware?(classes: Function[]): Function[];
+
+  /**
+   * Register a service instance by tag (e.g. before setup() for application-provided services like QueueService proxy).
+   */
+  registerService?<T>(tag: Context.Tag<unknown, T>, instance: T): void;
 }
 
 /**
@@ -423,6 +434,12 @@ export interface ApplicationOptions {
   queue?: QueueApplicationOptions;
 
   /**
+   * Static file serving: serve files from a directory for requests not matched by API routes.
+   * Optional path prefix and fallback file (e.g. index.html) for SPA-style routing.
+   */
+  static?: StaticApplicationOptions;
+
+  /**
    * Documentation configuration (OpenAPI/Swagger)
    */
   docs?: DocsApplicationOptions;
@@ -467,8 +484,10 @@ export type QueueAdapterType = 'memory' | 'redis';
 export interface QueueApplicationOptions {
   /** Enable/disable queue (default: auto - enabled if handlers exist) */
   enabled?: boolean;
-  /** Adapter type or custom adapter instance */
-  adapter?: QueueAdapterType;
+  /** Adapter type, or custom adapter constructor (e.g. for NATS JetStream) */
+  adapter?: QueueAdapterType | QueueAdapterConstructor;
+  /** Options passed to the custom adapter constructor when adapter is a class */
+  options?: unknown;
   /** Redis-specific options (only used when adapter is 'redis') */
   redis?: {
     /** Use shared Redis provider instead of dedicated connection */
@@ -526,6 +545,39 @@ export interface WebSocketApplicationOptions {
   storage?: WsStorageOptions;
   /** Maximum payload size in bytes */
   maxPayload?: number;
+}
+
+/**
+ * Static file serving configuration for OneBunApplication.
+ * Serves files from a directory for requests not matched by API/ws/docs/metrics routes.
+ */
+export interface StaticApplicationOptions {
+  /**
+   * Filesystem path to the directory to serve (static root).
+   * Can be absolute or relative to the process cwd.
+   */
+  root: string;
+
+  /**
+   * URL path prefix under which static files are served.
+   * Empty or '/' means "everything not matched by API routes".
+   * Example: '/app' — only paths starting with /app are served from static root
+   * (the prefix is stripped when resolving the file path).
+   */
+  pathPrefix?: string;
+
+  /**
+   * Fallback file name (e.g. 'index.html') for SPA-style client-side routing.
+   * When the requested file is not found, this file under static root is returned instead.
+   */
+  fallbackFile?: string;
+
+  /**
+   * TTL in milliseconds for caching file existence checks.
+   * Reduces disk I/O for repeated requests. Use 0 to disable caching.
+   * @defaultValue 60000
+   */
+  fileExistenceCacheTtlMs?: number;
 }
 
 /**

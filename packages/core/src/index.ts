@@ -48,6 +48,7 @@ export {
   type WsStorageType,
   type WsStorageOptions,
   type WebSocketApplicationOptions,
+  type StaticApplicationOptions,
   // Docs types
   type DocsApplicationOptions,
   // SSE types

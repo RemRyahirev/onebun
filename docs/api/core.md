@@ -37,6 +37,15 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
+**Static files (SPA on same host)**:
+```typescript
+const app = new OneBunApplication(AppModule, {
+  static: { root: './dist', fallbackFile: 'index.html' },
+});
+await app.start();
+// API at /api, docs at /docs; all other GET requests serve from ./dist or index.html for SPA routing
+```
+
 **Important Methods**:
 - `app.start()` - starts HTTP server
 - `app.stop()` - graceful shutdown (calls lifecycle hooks)
@@ -131,6 +140,9 @@ interface ApplicationOptions {
   /** WebSocket configuration */
   websocket?: WebSocketApplicationOptions;
 
+  /** Static file serving: serve files from a directory for requests not matched by API routes */
+  static?: StaticApplicationOptions;
+
   /**
    * Application-wide middleware class constructors applied to every route
    * before module-level, controller-level and route-level middleware.
@@ -143,6 +155,61 @@ interface ApplicationOptions {
   /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
   gracefulShutdown?: boolean;
 }
+```
+
+#### StaticApplicationOptions
+
+When `static` is set, the same HTTP server serves API routes (and `/docs`, `/metrics`, WebSocket) as usual; any request that does not match those routes is served from a filesystem directory.
+
+```typescript
+interface StaticApplicationOptions {
+  /** Filesystem path to the directory to serve (static root). Absolute or relative to cwd. */
+  root: string;
+
+  /**
+   * URL path prefix under which static files are served.
+   * Omit or '/' = serve static for all paths not matched by API.
+   * Example: '/app' = only paths starting with /app are served (prefix stripped when resolving file).
+   */
+  pathPrefix?: string;
+
+  /**
+   * Fallback file name (e.g. 'index.html') for SPA-style client-side routing.
+   * When the requested file is not found, this file under static root is returned.
+   */
+  fallbackFile?: string;
+
+  /**
+   * TTL in ms for caching file existence checks. Use 0 to disable. Default: 60000.
+   * Uses @onebun/cache CacheService when available, otherwise in-memory cache.
+   */
+  fileExistenceCacheTtlMs?: number;
+}
+```
+
+**Example: SPA on same host**
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  static: {
+    root: './dist',
+    fallbackFile: 'index.html',
+  },
+});
+await app.start();
+// GET /api/*, /docs, /metrics, /ws handled by framework; GET /, /dashboard, etc. serve dist/ or index.html
+```
+
+**Example: static under a path prefix**
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  static: {
+    root: './public',
+    pathPrefix: '/assets',
+  },
+});
+// Only GET /assets/* are served from ./public; e.g. /assets/logo.png -> public/logo.png
 ```
 
 ### Methods
@@ -303,6 +370,7 @@ interface MultiServiceApplicationOptions {
   envOptions?: EnvLoadOptions;
   metrics?: MetricsOptions;
   tracing?: TracingOptions;
+  queue?: QueueApplicationOptions;  // applied to all services
   enabledServices?: string[];
   excludedServices?: string[];
   externalServiceUrls?: Record<string, string>;

@@ -121,6 +121,11 @@ Request/response middleware with @UseMiddleware decorator.
 Supports middleware chaining on individual routes.
 → [API Reference](/api/decorators)
 
+### Static file serving
+Serve a static directory (e.g. SPA build) from the same host and port as the API.
+Configure `static.root`, optional `pathPrefix` and `fallbackFile` (e.g. `index.html`) for client-side routing.
+→ [API Reference](/api/core#staticapplicationoptions)
+
 ## WebSocket (@onebun/core)
 
 ### WebSocket Gateway

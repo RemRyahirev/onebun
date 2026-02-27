@@ -1,4 +1,10 @@
-import { Effect, type Layer } from 'effect';
+import path from 'node:path';
+
+import {
+  type Context,
+  Effect,
+  type Layer,
+} from 'effect';
 
 import type { Controller } from '../module/controller';
 import type { WsClientData } from '../websocket/ws.types';
@@ -45,7 +51,13 @@ import {
   DEFAULT_SSE_TIMEOUT,
 } from '../module/controller';
 import { OneBunModule } from '../module/module';
-import { QueueService, type QueueAdapter } from '../queue';
+import {
+  QueueService,
+  QueueServiceProxy,
+  QueueServiceTag,
+  type QueueAdapter,
+  type QueueConfig,
+} from '../queue';
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { hasQueueDecorators } from '../queue/decorators';
@@ -88,6 +100,17 @@ try {
   // Docs module not available - this is optional
 }
 
+// Optional CacheService for static file existence caching
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let cacheServiceClass: new (...args: unknown[]) => any = null as any;
+try {
+  // eslint-disable-next-line import/no-extraneous-dependencies
+  const cacheModule = require('@onebun/cache');
+  cacheServiceClass = cacheModule.CacheService;
+} catch {
+  // @onebun/cache not available - use in-memory Map fallback
+}
+
 // Import tracing modules directly
 
 // Global trace context for current request
@@ -113,12 +136,12 @@ function clearGlobalTraceContext(): void {
  * normalizePath('/')       // => '/'
  * normalizePath('/api/v1/') // => '/api/v1'
  */
-function normalizePath(path: string): string {
-  if (path === '/' || path.length <= 1) {
-    return path;
+function normalizePath(pathStr: string): string {
+  if (pathStr === '/' || pathStr.length <= 1) {
+    return pathStr;
   }
 
-  return path.endsWith('/') ? path.slice(0, -1) : path;
+  return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
 }
 
 /**
@@ -191,6 +214,29 @@ function resolveHost(explicitHost: string | undefined): string {
   return '0.0.0.0';
 }
 
+/** Default TTL for static file existence cache (ms) when not specified */
+const DEFAULT_STATIC_FILE_EXISTENCE_CACHE_TTL_MS = 60_000;
+
+/** Cache key prefix for static file existence in CacheService */
+const STATIC_EXISTS_CACHE_PREFIX = 'onebun:static:exists:';
+
+/**
+ * Resolve a relative path under a root directory and ensure the result stays inside the root (path traversal protection).
+ * @param rootDir - Absolute path to the static root directory
+ * @param relativePath - URL path segment (e.g. from request path after prefix); must not contain '..' that escapes root
+ * @returns Absolute path if under root, otherwise null
+ */
+function resolvePathUnderRoot(rootDir: string, relativePath: string): string | null {
+  const normalized = path.join(rootDir, relativePath.startsWith('/') ? relativePath.slice(1) : relativePath);
+  const resolved = path.resolve(normalized);
+  const rootResolved = path.resolve(rootDir);
+  if (resolved === rootResolved || resolved.startsWith(rootResolved + path.sep)) {
+    return resolved;
+  }
+
+  return null;
+}
+
 /**
  * OneBun Application
  */
@@ -210,6 +256,7 @@ export class OneBunApplication {
   private wsHandler: WsHandler | null = null;
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
+  private queueServiceProxy: QueueServiceProxy | null = null;
   // Docs (OpenAPI/Swagger) - generated on start()
   private openApiSpec: Record<string, unknown> | null = null;
   private swaggerHtml: string | null = null;
@@ -364,11 +411,11 @@ export class OneBunApplication {
    * const port = app.getConfigValue('server.port'); // number
    * const host = app.getConfigValue('server.host'); // string
    */
-  getConfigValue<P extends DeepPaths<OneBunAppConfig>>(path: P): DeepValue<OneBunAppConfig, P>;
+  getConfigValue<P extends DeepPaths<OneBunAppConfig>>(pathKey: P): DeepValue<OneBunAppConfig, P>;
   /** Fallback for dynamic paths */
-  getConfigValue<T = unknown>(path: string): T;
-  getConfigValue(path: string): unknown {
-    return this.getConfig().get(path);
+  getConfigValue<T = unknown>(pathKey: string): T;
+  getConfigValue(pathKey: string): unknown {
+    return this.getConfig().get(pathKey);
   }
 
   /**
@@ -440,6 +487,16 @@ export class OneBunApplication {
       // Create the root module AFTER config is initialized,
       // so services can safely use this.config.get() in their constructors
       this.rootModule = OneBunModule.create(this.moduleClass, this.loggerLayer, this.config);
+
+      // Register QueueService proxy in DI so controllers/providers/middleware can inject QueueService.
+      // After initializeQueue(), setDelegate(real) is called when queue is enabled.
+      this.queueServiceProxy = new QueueServiceProxy();
+      if (this.ensureModule().registerService) {
+        this.ensureModule().registerService!(
+          QueueServiceTag as Context.Tag<unknown, QueueService>,
+          this.queueServiceProxy as unknown as QueueService,
+        );
+      }
 
       // Start metrics collection if enabled
       if (this.metricsService && this.metricsService.startSystemMetricsCollection) {
@@ -901,6 +958,69 @@ export class OneBunApplication {
          
         drain() { /* no-op */ },
       };
+
+      // Static file serving: resolve root and setup existence cache (CacheService or in-memory Map)
+      const staticOpts = this.options.static;
+      let staticRootResolved: string | null = null;
+      let staticPathPrefix: string | undefined;
+      let staticFallbackFile: string | undefined;
+      let staticCacheTtlMs = 0;
+      // Cache interface: get(key) => value | undefined, set(key, value, ttlMs)
+      type StaticExistsCache = {
+        get(key: string): Promise<boolean | undefined>;
+        set(key: string, value: boolean, ttlMs: number): Promise<void>;
+      };
+      let staticExistsCache: StaticExistsCache | null = null;
+
+      if (staticOpts?.root) {
+        staticRootResolved = path.resolve(staticOpts.root);
+        staticPathPrefix = staticOpts.pathPrefix;
+        staticFallbackFile = staticOpts.fallbackFile;
+        staticCacheTtlMs = staticOpts.fileExistenceCacheTtlMs ?? DEFAULT_STATIC_FILE_EXISTENCE_CACHE_TTL_MS;
+
+        if (staticCacheTtlMs > 0) {
+          if (cacheServiceClass) {
+            try {
+              const cacheService = this.ensureModule().getServiceByClass?.(cacheServiceClass);
+              if (cacheService && typeof cacheService.get === 'function' && typeof cacheService.set === 'function') {
+                staticExistsCache = {
+                  get: (key: string) => cacheService.get(STATIC_EXISTS_CACHE_PREFIX + key),
+                  set: (key: string, value: boolean, ttlMs: number) =>
+                    cacheService.set(STATIC_EXISTS_CACHE_PREFIX + key, value, { ttl: ttlMs }),
+                };
+                this.logger.debug('Static file existence cache using CacheService');
+              }
+            } catch {
+              // CacheService not in module, use fallback
+            }
+          }
+          if (!staticExistsCache) {
+            const map = new Map<string, { exists: boolean; expiresAt: number }>();
+            staticExistsCache = {
+              async get(key: string): Promise<boolean | undefined> {
+                const entry = map.get(key);
+                if (!entry) {
+                  return undefined;
+                }
+                if (staticCacheTtlMs > 0 && Date.now() > entry.expiresAt) {
+                  map.delete(key);
+
+                  return undefined;
+                }
+
+                return entry.exists;
+              },
+              async set(key: string, value: boolean, ttlMs: number): Promise<void> {
+                map.set(key, {
+                  exists: value,
+                  expiresAt: ttlMs > 0 ? Date.now() + ttlMs : Number.MAX_SAFE_INTEGER,
+                });
+              },
+            };
+            this.logger.debug('Static file existence cache using in-memory Map');
+          }
+        }
+      }
       
       this.server = Bun.serve<WsClientData>({
         port: this.options.port,
@@ -920,8 +1040,8 @@ export class OneBunApplication {
             const socketioPath = app.options.websocket?.socketio?.path ?? '/socket.io';
 
             const url = new URL(req.url);
-            const path = normalizePath(url.pathname);
-            const isSocketIoPath = socketioEnabled && path.startsWith(socketioPath);
+            const requestPath = normalizePath(url.pathname);
+            const isSocketIoPath = socketioEnabled && requestPath.startsWith(socketioPath);
             if (upgradeHeader === 'websocket' || isSocketIoPath) {
               const response = await app.wsHandler.handleUpgrade(req, server);
               if (response === undefined) {
@@ -930,6 +1050,60 @@ export class OneBunApplication {
 
               return response;
             }
+          }
+
+          // Static file serving (GET/HEAD only)
+          if (staticRootResolved && (req.method === 'GET' || req.method === 'HEAD')) {
+            const requestPath = normalizePath(new URL(req.url).pathname);
+            const prefix = staticPathPrefix ?? '/';
+            const hasPrefix = prefix !== '' && prefix !== '/';
+            if (hasPrefix && !requestPath.startsWith(prefix)) {
+              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+            }
+            const relativePath = hasPrefix ? requestPath.slice(prefix.length) || '/' : requestPath;
+            const resolvedPath = resolvePathUnderRoot(staticRootResolved, relativePath);
+            if (resolvedPath === null) {
+              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+            }
+
+            const cache = staticCacheTtlMs > 0 ? staticExistsCache : null;
+            const cacheKey = resolvedPath;
+            if (cache) {
+              const cached = await cache.get(cacheKey);
+              if (cached === true) {
+                return new Response(Bun.file(resolvedPath));
+              }
+              if (cached === false) {
+                if (staticFallbackFile) {
+                  const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+                  if (fallbackResolved !== null) {
+                    return new Response(Bun.file(fallbackResolved));
+                  }
+                }
+
+                return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+              }
+            }
+
+            const file = Bun.file(resolvedPath);
+            const exists = await file.exists();
+            if (cache && staticCacheTtlMs > 0) {
+              await cache.set(cacheKey, exists, staticCacheTtlMs);
+            }
+            if (exists) {
+              return new Response(file);
+            }
+            if (staticFallbackFile) {
+              const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+              if (fallbackResolved !== null) {
+                const fallbackFile = Bun.file(fallbackResolved);
+                if (await fallbackFile.exists()) {
+                  return new Response(fallbackFile);
+                }
+              }
+            }
+
+            return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
           }
 
           // 404 for everything not matched by routes
@@ -953,6 +1127,9 @@ export class OneBunApplication {
       }
 
       this.logger.info(`Server started on http://${this.options.host}:${this.options.port}`);
+      if (staticRootResolved) {
+        this.logger.info(`Static files served from ${staticRootResolved}`);
+      }
       if (this.metricsService) {
         this.logger.info(
           `Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`,
@@ -1481,6 +1658,7 @@ export class OneBunApplication {
       await this.queueService.stop();
       this.queueService = null;
     }
+    this.queueServiceProxy?.setDelegate(null);
 
     // Disconnect queue adapter
     if (this.queueAdapter) {
@@ -1542,43 +1720,57 @@ export class OneBunApplication {
     }
 
     // Create the appropriate adapter
-    const adapterType = queueOptions?.adapter ?? 'memory';
-    
-    if (adapterType === 'memory') {
-      this.queueAdapter = new InMemoryQueueAdapter();
-      this.logger.info('Queue system initialized with in-memory adapter');
-    } else if (adapterType === 'redis') {
-      const redisOptions = queueOptions?.redis ?? {};
-      if (redisOptions.useSharedProvider !== false) {
-        // Use shared Redis provider
-        this.queueAdapter = new RedisQueueAdapter({
-          useSharedClient: true,
-          keyPrefix: redisOptions.prefix ?? 'onebun:queue:',
-        });
-        this.logger.info('Queue system initialized with Redis adapter (shared provider)');
-      } else if (redisOptions.url) {
-        // Create dedicated Redis connection
-        this.queueAdapter = new RedisQueueAdapter({
-          useSharedClient: false,
-          url: redisOptions.url,
-          keyPrefix: redisOptions.prefix ?? 'onebun:queue:',
-        });
-        this.logger.info('Queue system initialized with Redis adapter (dedicated connection)');
-      } else {
-        throw new Error('Redis queue adapter requires either useSharedProvider: true or a url');
-      }
+    const adapterOpt = queueOptions?.adapter ?? 'memory';
+
+    if (typeof adapterOpt === 'function') {
+      // Custom adapter constructor (e.g. NATS JetStream)
+      const adapterCtor = adapterOpt;
+      this.queueAdapter = new adapterCtor(queueOptions?.options);
+      await this.queueAdapter.connect();
+      this.logger.info(`Queue system initialized with custom adapter: ${this.queueAdapter.name}`);
     } else {
-      throw new Error(`Unknown queue adapter type: ${adapterType}`);
+      const adapterType = adapterOpt;
+      if (adapterType === 'memory') {
+        this.queueAdapter = new InMemoryQueueAdapter();
+        this.logger.info('Queue system initialized with in-memory adapter');
+      } else if (adapterType === 'redis') {
+        const redisOptions = queueOptions?.redis ?? {};
+        if (redisOptions.useSharedProvider !== false) {
+          // Use shared Redis provider
+          this.queueAdapter = new RedisQueueAdapter({
+            useSharedClient: true,
+            keyPrefix: redisOptions.prefix ?? 'onebun:queue:',
+          });
+          this.logger.info('Queue system initialized with Redis adapter (shared provider)');
+        } else if (redisOptions.url) {
+          // Create dedicated Redis connection
+          this.queueAdapter = new RedisQueueAdapter({
+            useSharedClient: false,
+            url: redisOptions.url,
+            keyPrefix: redisOptions.prefix ?? 'onebun:queue:',
+          });
+          this.logger.info('Queue system initialized with Redis adapter (dedicated connection)');
+        } else {
+          throw new Error('Redis queue adapter requires either useSharedProvider: true or a url');
+        }
+      } else {
+        throw new Error(`Unknown queue adapter type: ${adapterType}`);
+      }
+
+      // Connect the adapter
+      await this.queueAdapter.connect();
     }
 
-    // Connect the adapter
-    await this.queueAdapter.connect();
-
     // Create queue service with config
-    this.queueService = new QueueService({
-      adapter: adapterType,
-      options: queueOptions?.redis,
-    });
+    const queueServiceConfig: QueueConfig = {
+      adapter:
+        typeof adapterOpt === 'function' ? this.queueAdapter.type : adapterOpt,
+      options:
+        typeof adapterOpt === 'function'
+          ? (queueOptions?.options as Record<string, unknown> | undefined)
+          : queueOptions?.redis,
+    };
+    this.queueService = new QueueService(queueServiceConfig);
     
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);
@@ -1603,6 +1795,9 @@ export class OneBunApplication {
     // Start the queue service
     await this.queueService.start();
     this.logger.info('Queue service started');
+
+    // Wire the real QueueService into the DI proxy so injected consumers use it
+    this.queueServiceProxy?.setDelegate(this.queueService);
   }
 
   /**

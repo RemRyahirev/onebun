@@ -22,6 +22,7 @@ import {
   isGlobalModule,
   registerControllerDependencies,
 } from '../decorators/decorators';
+import { QueueService, QueueServiceTag } from '../queue';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
 
@@ -616,6 +617,16 @@ export class OneBunModule implements ModuleInstance {
    * Resolve dependency by type (constructor function)
    */
   private resolveDependencyByType(type: Function): unknown {
+    // QueueService is registered by tag (QueueServiceTag) before setup(); resolve by tag
+    if (type === QueueService) {
+      const byTag = this.serviceInstances.get(
+        QueueServiceTag as Context.Tag<unknown, unknown>,
+      );
+      if (byTag !== undefined) {
+        return byTag;
+      }
+    }
+
     // Find service instance that matches the type
     const serviceInstance = Array.from(this.serviceInstances.values()).find((instance) => {
       if (!instance) {
@@ -1039,6 +1050,13 @@ export class OneBunModule implements ModuleInstance {
    */
   getLayer(): Layer.Layer<never, never, unknown> {
     return this.rootLayer;
+  }
+
+  /**
+   * Register a service instance by tag (e.g. before setup() for application-provided services like QueueService proxy).
+   */
+  registerService<T>(tag: Context.Tag<unknown, T>, instance: T): void {
+    this.serviceInstances.set(tag as Context.Tag<unknown, unknown>, instance);
   }
 
   /**

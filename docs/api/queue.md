@@ -56,14 +56,15 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-For NATS/JetStream, pass a custom adapter instance (see [Queue Adapters](#queue-adapters) below).
+For NATS/JetStream or other backends, use a custom adapter constructor (see [Custom adapter: NATS JetStream](#custom-adapter-nats-jetstream) below).
 
 ### QueueApplicationOptions
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `enabled` | `boolean` | auto | Enable queue system (auto-enabled if handlers detected) |
-| `adapter` | `'memory' \| 'redis'` | `'memory'` | Queue adapter type |
+| `adapter` | `'memory' \| 'redis'` or adapter class | `'memory'` | Built-in type or custom adapter constructor (e.g. for NATS JetStream) |
+| `options` | `unknown` | - | Options passed to the custom adapter constructor when `adapter` is a class |
 | `redis.useSharedProvider` | `boolean` | `true` | Use shared Redis connection pool |
 | `redis.url` | `string` | - | Redis URL (required if `useSharedProvider: false`) |
 | `redis.prefix` | `string` | `'onebun:queue:'` | Key prefix for Redis keys |
@@ -117,7 +118,8 @@ Queue handlers are only discovered in classes registered in the `controllers` ar
 ```typescript
 interface QueueApplicationOptions {
   enabled?: boolean;
-  adapter?: 'memory' | 'redis';
+  adapter?: 'memory' | 'redis' | QueueAdapterConstructor;
+  options?: unknown;  // passed to custom adapter constructor
   redis?: {
     useSharedProvider?: boolean;
     url?: string;
@@ -159,11 +161,13 @@ class OrderProcessor extends BaseController {
 
 ## Quick Start
 
+Queue handlers (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`) are only discovered in classes registered in a module's **controllers** array. Use a controller (not a provider) for queue handlers.
+
 ```typescript
 import {
   Module,
-  Service,
-  BaseService,
+  Controller,
+  BaseController,
   OneBunApplication,
   Subscribe,
   Cron,
@@ -174,9 +178,9 @@ import {
   QueueService,
 } from '@onebun/core';
 
-// Service with queue handlers
-@Service()
-class EventProcessor extends BaseService {
+// Controller with queue handlers (must be in controllers array)
+@Controller('/events')
+class EventProcessor extends BaseController {
   constructor(private queueService: QueueService) {
     super();
   }
@@ -213,9 +217,9 @@ class EventProcessor extends BaseService {
   }
 }
 
-// Module
+// Module: register in controllers so queue handlers are discovered
 @Module({
-  providers: [EventProcessor],
+  controllers: [EventProcessor],
 })
 class AppModule {}
 
@@ -430,8 +434,12 @@ async handleCustom(message: Message) {}
 
 ## Lifecycle Decorators
 
+Lifecycle handlers run only when the class is registered as a **controller** (in a module's `controllers` array).
+
 ```typescript
 import {
+  Controller,
+  BaseController,
   OnQueueReady,
   OnQueueError,
   OnMessageReceived,
@@ -439,30 +447,31 @@ import {
   OnMessageFailed,
 } from '@onebun/core';
 
-class EventService {
+@Controller('/events')
+class EventProcessor extends BaseController {
   @OnQueueReady()
   handleReady() {
-    console.log('Queue connected');
+    this.logger.info('Queue connected');
   }
 
   @OnQueueError()
   handleError(error: Error) {
-    console.error('Queue error:', error);
+    this.logger.error('Queue error', error);
   }
 
   @OnMessageReceived()
   handleReceived(message: Message) {
-    console.log(`Received: ${message.id}`);
+    this.logger.info('Received', { id: message.id });
   }
 
   @OnMessageProcessed()
   handleProcessed(message: Message) {
-    console.log(`Processed: ${message.id}`);
+    this.logger.info('Processed', { id: message.id });
   }
 
   @OnMessageFailed()
   handleFailed(message: Message, error: Error) {
-    console.error(`Failed: ${message.id}`, error);
+    this.logger.error('Failed', { id: message.id, error });
   }
 }
 ```
@@ -514,6 +523,57 @@ await adapter.connect();
 
 **Supported Features:**
 - All features (pattern subscriptions, delayed messages, priority, consumer groups, DLQ, retry, scheduled jobs)
+
+### Custom adapter: NATS JetStream
+
+To use a custom backend (e.g. NATS JetStream), pass the adapter **constructor** and **options** in `queue`:
+
+```typescript
+import { OneBunApplication, type QueueAdapter } from '@onebun/core';
+import { Module, Controller, BaseController, Subscribe, Message } from '@onebun/core';
+import { AppModule } from './app.module';
+
+// If you have an adapter class (e.g. from @onebun/nats or your own):
+class NatsJetStreamAdapter implements QueueAdapter {
+  readonly name = 'nats-jetstream';
+  readonly type = 'jetstream';
+  constructor(private opts: { servers: string; stream?: string }) {}
+  async connect() { /* connect to NATS */ }
+  async disconnect() { /* disconnect */ }
+  isConnected() { return true; }
+  async publish() { return ''; }
+  async publishBatch() { return []; }
+  async subscribe() { return { unsubscribe: async () => {}, pause: () => {}, resume: () => {}, pattern: '', isActive: true }; }
+  async addScheduledJob() {}
+  async removeScheduledJob() { return false; }
+  async getScheduledJobs() { return []; }
+  supports() { return false; }
+  on() {}
+  off() {}
+}
+
+@Controller('/jobs')
+class JobHandler extends BaseController {
+  @Subscribe('jobs.created')
+  async handle(message: Message<{ id: string }>) {
+    this.logger.info('Job', { id: message.data.id });
+  }
+}
+
+@Module({ controllers: [JobHandler] })
+class AppModule {}
+
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  queue: {
+    adapter: NatsJetStreamAdapter,
+    options: { servers: 'nats://localhost:4222', stream: 'EVENTS' },
+  },
+});
+await app.start();
+```
+
+The framework instantiates the adapter with `new Adapter(queue.options)` and uses it as the queue backend. For a ready-made NATS/JetStream adapter, use the `@onebun/nats` package if available and pass its adapter class and options the same way.
 
 ### NatsQueueAdapter
 
@@ -575,7 +635,22 @@ await adapter.connect();
 
 ## Publishing Messages
 
+### QueueService: availability and injection
+
+**QueueService is available via DI.** You can inject it in the constructor of controllers, providers, WebSocket gateways, and middleware (e.g. `constructor(private queueService: QueueService)`). The framework registers a proxy in the module before creating controllers; when the queue is enabled during `app.start()`, the proxy delegates to the real `QueueService`. No wrapper or `getQueueService()` is required for normal DI-based code.
+
+**When is the real QueueService created?**  
+The queue system is initialized during `app.start()`, after the module is set up, inside `initializeQueue()`. It is only created when the queue is enabled: either at least one controller has queue decorators (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`) or `queue.enabled` is set to `true` in application options.
+
+**If the queue is not enabled but you injected QueueService:**  
+The injected instance is a proxy. Any call to a method (e.g. `publish()`, `subscribe()`) will throw an error with a message explaining how to enable the queue (`queue.enabled: true` or register a controller with queue decorators).
+
+**Getting QueueService without DI:**  
+Use `app.getQueueService()` when you do not have DI (e.g. bootstrap scripts or code that only has the app reference). It returns `QueueService | null` when the queue is not enabled.
+
 ### QueueService
+
+Inject `QueueService` in your controller, provider, middleware, or gateway constructor:
 
 ```typescript
 import { QueueService } from '@onebun/core';

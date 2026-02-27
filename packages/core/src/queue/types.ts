@@ -395,8 +395,8 @@ export interface QueueAdapterConstructor {
  * Queue configuration options
  */
 export interface QueueConfig {
-  /** Adapter type or custom adapter class */
-  adapter: BuiltInAdapterType | QueueAdapterConstructor;
+  /** Adapter type (built-in or custom, e.g. 'jetstream') or custom adapter class */
+  adapter: QueueAdapterType | QueueAdapterConstructor;
 
   /** Adapter-specific options */
   options?: Record<string, unknown>;

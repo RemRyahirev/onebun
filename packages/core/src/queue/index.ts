@@ -113,6 +113,10 @@ export {
   createQueueService,
   resolveAdapterType,
 } from './queue.service';
+export {
+  QueueServiceProxy,
+  QUEUE_NOT_ENABLED_ERROR_MESSAGE,
+} from './queue-service-proxy';
 
 // Adapters (re-export from adapters folder)
 export * from './adapters';

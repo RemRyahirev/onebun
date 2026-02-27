@@ -219,6 +219,8 @@ export class MultiServiceApplication<TServices extends ServicesMap = ServicesMap
           ...mergedOptions.tracing,
           serviceName: name,
         },
+        queue: this.options.queue,
+        static: mergedOptions.static ?? serviceConfig.static,
       });
 
       this.applications.set(name, app);

@@ -1,3 +1,6 @@
+import fs from 'node:fs';
+import os from 'node:os';
+
 import { type as arktype } from 'arktype';
 import {
   describe,
@@ -10,7 +13,8 @@ import {
 // eslint-disable-next-line import/no-extraneous-dependencies
 import { register } from 'prom-client';
 
-import type { ApplicationOptions } from '../types';
+import type { QueueAdapter, Subscription } from '../queue/types';
+import type { ApplicationOptions, ModuleInstance } from '../types';
 import type {
   MiddlewareClass,
   OneBunRequest,
@@ -35,7 +39,10 @@ import {
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
 import { Service } from '../module/service';
+import { QueueService, QUEUE_NOT_ENABLED_ERROR_MESSAGE } from '../queue';
+import { Subscribe } from '../queue/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
+
 
 import { OneBunApplication } from './application';
 
@@ -2089,6 +2096,179 @@ describe('OneBunApplication', () => {
       expect(response.status).toBe(404);
     });
 
+    describe('Static file serving', () => {
+      test('should serve file from static root when static.root is set', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          const indexPath = pathMod.join(tmpDir, 'index.html');
+          fs.writeFileSync(indexPath, '<html>Hello</html>', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, {
+            static: { root: tmpDir },
+          });
+          await app.start();
+
+          const request = new Request('http://localhost:3000/index.html', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response = await (mockServer as any).fetchHandler(request);
+
+          expect(response.status).toBe(200);
+          expect(await response.text()).toBe('<html>Hello</html>');
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      test('should return 404 when static is not configured', async () => {
+        @Module({})
+        class TestModule {}
+
+        const app = createTestApp(TestModule);
+        await app.start();
+
+        const request = new Request('http://localhost:3000/', { method: 'GET' });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const response = await (mockServer as any).fetchHandler(request);
+
+        expect(response.status).toBe(404);
+      });
+
+      test('should respect pathPrefix and serve only under prefix', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          fs.writeFileSync(pathMod.join(tmpDir, 'foo.html'), '<html>Foo</html>', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, {
+            static: { root: tmpDir, pathPrefix: '/app' },
+          });
+          await app.start();
+
+          const reqUnderPrefix = new Request('http://localhost:3000/app/foo.html', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const resUnder = await (mockServer as any).fetchHandler(reqUnderPrefix);
+          expect(resUnder.status).toBe(200);
+          expect(await resUnder.text()).toBe('<html>Foo</html>');
+
+          const reqOutsidePrefix = new Request('http://localhost:3000/foo.html', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const resOutside = await (mockServer as any).fetchHandler(reqOutsidePrefix);
+          expect(resOutside.status).toBe(404);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      test('should return fallbackFile for missing path when fallbackFile is set', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          fs.writeFileSync(pathMod.join(tmpDir, 'index.html'), '<html>SPA</html>', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, {
+            static: { root: tmpDir, fallbackFile: 'index.html' },
+          });
+          await app.start();
+
+          const request = new Request('http://localhost:3000/any/client/route', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response = await (mockServer as any).fetchHandler(request);
+
+          expect(response.status).toBe(200);
+          expect(await response.text()).toBe('<html>SPA</html>');
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      test('should reject path traversal and return 404', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          fs.writeFileSync(pathMod.join(tmpDir, 'safe.txt'), 'safe', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, {
+            static: { root: tmpDir },
+          });
+          await app.start();
+
+          const request = new Request('http://localhost:3000/../etc/passwd', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response = await (mockServer as any).fetchHandler(request);
+
+          expect(response.status).toBe(404);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      test('should cache file existence and serve from cache on second request', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          const filePath = pathMod.join(tmpDir, 'cached.html');
+          fs.writeFileSync(filePath, '<html>Cached</html>', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, {
+            static: { root: tmpDir, fileExistenceCacheTtlMs: 60_000 },
+          });
+          await app.start();
+
+          const request = new Request('http://localhost:3000/cached.html', { method: 'GET' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response1 = await (mockServer as any).fetchHandler(request);
+          expect(response1.status).toBe(200);
+          expect(await response1.text()).toBe('<html>Cached</html>');
+
+          // Second request should still return the file (cache hit; no extra disk read for existence)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response2 = await (mockServer as any).fetchHandler(request);
+          expect(response2.status).toBe(200);
+          expect(await response2.text()).toBe('<html>Cached</html>');
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      test('should not serve static for POST', async () => {
+        const pathMod = await import('node:path');
+        const tmpDir = fs.mkdtempSync(pathMod.join(fs.realpathSync(os.tmpdir()), 'onebun-static-'));
+        try {
+          fs.writeFileSync(pathMod.join(tmpDir, 'index.html'), '<html>Hi</html>', 'utf8');
+
+          @Module({})
+          class TestModule {}
+
+          const app = createTestApp(TestModule, { static: { root: tmpDir } });
+          await app.start();
+
+          const request = new Request('http://localhost:3000/index.html', { method: 'POST' });
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const response = await (mockServer as any).fetchHandler(request);
+
+          expect(response.status).toBe(404);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+    });
+
     test('should handle method not allowed', async () => {
       @Controller('/api')
       class ApiController extends BaseController {
@@ -3691,6 +3871,169 @@ describe('OneBunApplication', () => {
 
       // Cleanup
       process.on = originalProcessOn;
+      await app.stop();
+    });
+  });
+
+  describe('queue custom adapter', () => {
+    /** Mock adapter that records constructor options for testing */
+    /* eslint-disable @typescript-eslint/no-empty-function */
+    class MockCustomAdapter implements QueueAdapter {
+      static receivedOptions: unknown = null;
+      readonly name = 'mock-custom';
+      readonly type = 'jetstream';
+      private connected = false;
+
+      constructor(options?: unknown) {
+        (this.constructor as typeof MockCustomAdapter).receivedOptions = options;
+      }
+
+      async connect(): Promise<void> {
+        this.connected = true;
+      }
+
+      async disconnect(): Promise<void> {
+        this.connected = false;
+      }
+
+      isConnected(): boolean {
+        return this.connected;
+      }
+
+      async publish(): Promise<string> {
+        return 'mock-id';
+      }
+
+      async publishBatch(): Promise<string[]> {
+        return [];
+      }
+
+      async subscribe(): Promise<Subscription> {
+        return {
+          async unsubscribe() {},
+          pause() {},
+          resume() {},
+          pattern: '',
+          isActive: true,
+        };
+      }
+
+      async addScheduledJob(): Promise<void> {}
+      async removeScheduledJob(): Promise<boolean> {
+        return false;
+      }
+      async getScheduledJobs(): Promise<import('../queue/types').ScheduledJobInfo[]> {
+        return [];
+      }
+      supports(): boolean {
+        return false;
+      }
+      on(): void {}
+      off(): void {}
+    }
+    /* eslint-enable @typescript-eslint/no-empty-function */
+
+    @Controller('/q')
+    class QueueTestController extends BaseController {
+      @Subscribe('test.event')
+      async handle(): Promise<void> {}
+    }
+
+    @Module({
+      controllers: [QueueTestController],
+      providers: [],
+    })
+    class QueueTestModule {}
+
+    beforeEach(() => {
+      MockCustomAdapter.receivedOptions = null;
+    });
+
+    test('should initialize queue with custom adapter constructor and options', async () => {
+      const app = createTestApp(QueueTestModule, {
+        port: 0,
+        queue: {
+          enabled: true,
+          adapter: MockCustomAdapter,
+          options: { servers: 'nats://localhost:4222' },
+        },
+      });
+      await app.start();
+
+      const queueService = app.getQueueService();
+      expect(queueService).not.toBeNull();
+      expect(MockCustomAdapter.receivedOptions).toEqual({
+        servers: 'nats://localhost:4222',
+      });
+
+      await app.stop();
+    });
+  });
+
+  describe('QueueService DI injection', () => {
+    @Controller('/queue-di')
+    class QueueDiTestController extends BaseController {
+      constructor(private queueService: QueueService) {
+        super();
+      }
+
+      /** Exposed for tests: call publish on injected QueueService */
+      publishTest(pattern: string, data: unknown) {
+        return this.queueService.publish(pattern, data);
+      }
+    }
+
+    @Controller('/q')
+    class QueueSubscribeController extends BaseController {
+      @Subscribe('di.test')
+      async handle(): Promise<void> {}
+    }
+
+    @Module({
+      controllers: [QueueDiTestController],
+      providers: [],
+    })
+    class QueueDisabledModule {}
+
+    @Module({
+      controllers: [QueueDiTestController, QueueSubscribeController],
+      providers: [],
+    })
+    class QueueEnabledModule {}
+
+    test('when queue is enabled, controller with injected QueueService gets working instance', async () => {
+      const app = createTestApp(QueueEnabledModule, {
+        port: 0,
+        queue: {
+          enabled: true,
+          adapter: 'memory',
+        },
+      });
+      await app.start();
+
+      const rootModule = (app as unknown as { rootModule: ModuleInstance }).rootModule;
+      const controller = rootModule.getControllerInstance?.(QueueDiTestController) as
+        | QueueDiTestController
+        | undefined;
+      expect(controller).toBeDefined();
+      await expect(controller!.publishTest('di.test', {})).resolves.toBeDefined();
+
+      await app.stop();
+    });
+
+    test('when queue is disabled, injected QueueService throws on first method call', async () => {
+      const app = createTestApp(QueueDisabledModule, { port: 0 });
+      await app.start();
+
+      const rootModule = (app as unknown as { rootModule: ModuleInstance }).rootModule;
+      const controller = rootModule.getControllerInstance?.(QueueDiTestController) as
+        | QueueDiTestController
+        | undefined;
+      expect(controller).toBeDefined();
+      await expect(controller!.publishTest('e', {})).rejects.toThrow(
+        QUEUE_NOT_ENABLED_ERROR_MESSAGE,
+      );
+
       await app.stop();
     });
   });

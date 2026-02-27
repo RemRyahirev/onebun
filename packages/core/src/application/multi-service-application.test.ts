@@ -181,6 +181,21 @@ describe('MultiServiceApplication', () => {
     });
   });
 
+  describe('queue option', () => {
+    test('should accept queue option and pass it to child applications', () => {
+      const app = new MultiServiceApplication({
+        services: {
+          serviceA: { module: TestModuleA, port: 3001 },
+        },
+        queue: {
+          enabled: true,
+          adapter: 'memory',
+        },
+      });
+      expect(app).toBeDefined();
+    });
+  });
+
   describe('filtering configuration', () => {
     test('should accept enabledServices option', () => {
       const app = new MultiServiceApplication({

@@ -577,6 +577,9 @@ await app.stop();
 
 ```typescript
 interface MultiServiceApplicationOptions {
+  // Queue config applied to every service (same broker/config for all)
+  queue?: QueueApplicationOptions;
+  
   // List of service names to start (if set, only these services run)
   enabledServices?: string[];
   

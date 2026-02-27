@@ -35,6 +35,7 @@ import {
   MessageAnyGuard,
   createMessageGuard,
   type Message,
+  type QueueAdapter,
   CronExpression,
   parseCronExpression,
   getNextRun,
@@ -113,9 +114,9 @@ describe('Setup Section Examples (docs/api/queue.md)', () => {
  * @source docs/api/queue.md#quick-start
  */
 describe('Quick Start Example (docs/api/queue.md)', () => {
-  it('should define service with queue decorators', () => {
-    // From docs/api/queue.md: Quick Start
-    class OrderService {
+  it('should define controller with queue decorators', () => {
+    // From docs/api/queue.md: Quick Start (queue handlers must be in controllers)
+    class EventProcessor {
       @OnQueueReady()
       onReady() {
         // console.log('Queue connected');
@@ -134,19 +135,19 @@ describe('Quick Start Example (docs/api/queue.md)', () => {
     }
 
     // Verify decorators are registered
-    expect(hasQueueDecorators(OrderService)).toBe(true);
+    expect(hasQueueDecorators(EventProcessor)).toBe(true);
 
-    const subscriptions = getSubscribeMetadata(OrderService);
+    const subscriptions = getSubscribeMetadata(EventProcessor);
     expect(subscriptions.length).toBe(1);
     expect(subscriptions[0].pattern).toBe('orders.created');
 
-    const cronJobs = getCronMetadata(OrderService);
+    const cronJobs = getCronMetadata(EventProcessor);
     expect(cronJobs.length).toBe(1);
     expect(cronJobs[0].expression).toBe(CronExpression.EVERY_HOUR);
     expect(cronJobs[0].options.pattern).toBe('cleanup.expired');
   });
 
-  it('should define service with interval decorator', () => {
+  it('should define controller with interval decorator', () => {
     // From docs/api/queue.md: Quick Start - Interval example
     class EventProcessor {
       @Subscribe('orders.created')
@@ -389,9 +390,9 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
  * @source docs/api/queue.md#lifecycle-decorators
  */
 describe('Lifecycle Decorators Examples (docs/api/queue.md)', () => {
-  it('should define lifecycle handlers', () => {
-    // From docs/api/queue.md: Lifecycle Decorators section
-    class EventService {
+  it('should define lifecycle handlers on controller', () => {
+    // From docs/api/queue.md: Lifecycle Decorators (handlers must be in controllers)
+    class EventProcessor {
       @OnQueueReady()
       handleReady() {
         // console.log('Queue connected');
@@ -418,8 +419,67 @@ describe('Lifecycle Decorators Examples (docs/api/queue.md)', () => {
       }
     }
 
-    // Class should be defined without errors
-    expect(EventService).toBeDefined();
+    // Class with lifecycle handlers only; hasQueueDecorators checks Subscribe/Cron/Interval/Timeout only
+    expect(EventProcessor).toBeDefined();
+  });
+});
+
+/**
+ * @source docs/api/queue.md#custom-adapter-nats-jetstream
+ */
+describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
+  it('should use custom adapter constructor with options', async () => {
+    // From docs/api/queue.md: Custom adapter: NATS JetStream
+    // Minimal adapter class that implements QueueAdapter for use with queue: { adapter, options }
+    /* eslint-disable @typescript-eslint/no-empty-function */
+    class NatsJetStreamAdapter implements QueueAdapter {
+      readonly name = 'nats-jetstream';
+      readonly type = 'jetstream';
+      constructor(private opts: { servers: string; stream?: string }) {}
+      async connect(): Promise<void> {}
+      async disconnect(): Promise<void> {}
+      isConnected(): boolean {
+        return true;
+      }
+      async publish(): Promise<string> {
+        return '';
+      }
+      async publishBatch(): Promise<string[]> {
+        return [];
+      }
+      async subscribe(): Promise<import('./types').Subscription> {
+        return {
+          async unsubscribe() {},
+          pause() {},
+          resume() {},
+          pattern: '',
+          isActive: true,
+        };
+      }
+      async addScheduledJob(): Promise<void> {}
+      async removeScheduledJob(): Promise<boolean> {
+        return false;
+      }
+      async getScheduledJobs(): Promise<import('./types').ScheduledJobInfo[]> {
+        return [];
+      }
+      supports(): boolean {
+        return false;
+      }
+      on(): void {}
+      off(): void {}
+    }
+    /* eslint-enable @typescript-eslint/no-empty-function */
+
+    const adapter = new NatsJetStreamAdapter({
+      servers: 'nats://localhost:4222',
+      stream: 'EVENTS',
+    });
+    await adapter.connect();
+    expect(adapter.name).toBe('nats-jetstream');
+    expect(adapter.type).toBe('jetstream');
+    expect(adapter.isConnected()).toBe(true);
+    await adapter.disconnect();
   });
 });
 

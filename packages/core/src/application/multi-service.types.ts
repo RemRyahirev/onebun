@@ -30,7 +30,7 @@ export type TracingOptions = NonNullable<ApplicationOptions['tracing']>;
  * Any new shared options should be added to ApplicationOptions first.
  */
 export interface BaseServiceOptions
-  extends Pick<ApplicationOptions, 'host' | 'basePath' | 'metrics' | 'tracing' | 'middleware'> {
+  extends Pick<ApplicationOptions, 'host' | 'basePath' | 'metrics' | 'tracing' | 'middleware' | 'static'> {
   /**
    * Add service name as prefix to all routes.
    * When true, the service name will be used as routePrefix.
@@ -132,4 +132,10 @@ export interface MultiServiceApplicationOptions<TServices extends ServicesMap = 
    * ```
    */
   externalServiceUrls?: Partial<Record<keyof TServices, string>>;
+
+  /**
+   * Queue configuration applied to all services.
+   * When set, each service's OneBunApplication receives this queue config.
+   */
+  queue?: ApplicationOptions['queue'];
 }

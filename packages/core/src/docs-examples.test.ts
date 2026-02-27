@@ -2406,6 +2406,34 @@ describe('OneBunApplication (docs/api/core.md)', () => {
     const app = new OneBunApplication(AppModule, { tracing: tracingOptions, loggerLayer: makeMockLoggerLayer() });
     expect(app).toBeDefined();
   });
+
+  /**
+   * @source docs/api/core.md#staticapplicationoptions
+   */
+  it('should accept static file serving configuration (SPA on same host)', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const os = await import('node:os');
+
+    const tmpDir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'onebun-docs-static-'));
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'index.html'), '<!DOCTYPE html><html><body>SPA</body></html>', 'utf8');
+
+      @Module({ controllers: [] })
+      class AppModule {}
+
+      // From docs: Static files (SPA on same host)
+      const app = new OneBunApplication(AppModule, {
+        loggerLayer: makeMockLoggerLayer(),
+        static: { root: tmpDir, fallbackFile: 'index.html' },
+      });
+      expect(app).toBeDefined();
+      await app.start();
+      await app.stop();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('MultiServiceApplication (docs/api/core.md)', () => {
