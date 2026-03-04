@@ -40,6 +40,7 @@ export default defineConfig({
       { text: 'API', link: '/api/core' },
       { text: 'Examples', link: '/examples/basic-app' },
       { text: 'AI Docs', link: '/ai-docs' },
+      { text: 'Roadmap', link: '/roadmap' },
     ],
 
     // Sidebar navigation
@@ -111,6 +112,11 @@ export default defineConfig({
           text: 'AI Documentation',
           collapsed: false,
           items: [{ text: 'AI Documentation', link: '/ai-docs' }],
+        },
+        {
+          text: 'Project',
+          collapsed: false,
+          items: [{ text: 'Roadmap', link: '/roadmap' }],
         },
       ],
     },
