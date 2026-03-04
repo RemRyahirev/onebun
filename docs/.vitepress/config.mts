@@ -63,6 +63,7 @@ export default defineConfig({
             { text: 'Decorators', link: '/api/decorators' },
             { text: 'Controllers', link: '/api/controllers' },
             { text: 'Services', link: '/api/services' },
+            { text: 'Graceful Shutdown & Lifecycle', link: '/api/graceful-shutdown' },
             { text: 'Validation', link: '/api/validation' },
           ],
         },
@@ -71,6 +72,7 @@ export default defineConfig({
           collapsed: false,
           items: [
             { text: 'WebSocket Gateway', link: '/api/websocket' },
+            { text: 'SSE (Server-Sent Events)', link: '/api/sse' },
             { text: 'HTTP Client', link: '/api/requests' },
             { text: 'API Documentation (OpenAPI)', link: '/api/docs' },
           ],
