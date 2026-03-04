@@ -313,6 +313,8 @@ await userService.sendScheduledEmails();
 
 ### Graceful Shutdown
 
+> **See also:** [Graceful Shutdown & Lifecycle](/api/graceful-shutdown) for the full shutdown sequence, all 5 lifecycle hook interfaces with examples, and configuration patterns.
+
 OneBun enables graceful shutdown **by default**. When the application receives SIGTERM or SIGINT signals, it automatically:
 1. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
 2. Stops the HTTP server
