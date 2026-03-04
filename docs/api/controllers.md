@@ -44,6 +44,12 @@ export class Controller {
 
   /** Create text response */
   protected text(data: string, status?: number): Response;
+
+  /** Create SSE (Server-Sent Events) response — see [SSE API](/api/sse) for details */
+  protected sse(
+    source: AsyncIterable<SseEvent | unknown> | ((signal: AbortSignal) => AsyncIterable<SseEvent | unknown>),
+    options?: SseOptions,
+  ): Response;
 }
 ```
 

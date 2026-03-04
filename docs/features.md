@@ -17,7 +17,8 @@ production-grade backend services.
 - **HTTP Routing**: Decorator-based (@Get, @Post, @Put, @Delete, @Patch) with path params, query, body, headers
 - **Guards**: Custom route guards for authentication/authorization
 - **Middleware**: @UseMiddleware decorator with chaining support
-- **Graceful Shutdown**: Enabled by default, handles SIGTERM/SIGINT
+- **SSE**: Server-Sent Events via @Sse() decorator or Controller.sse() programmatic API
+- **Graceful Shutdown**: Enabled by default, handles SIGTERM/SIGINT with 5 lifecycle hooks
 
 ### WebSocket
 - WebSocket Gateway with @WebSocketGateway, @SubscribeMessage decorators
@@ -140,6 +141,12 @@ rooms, namespaces, and broadcasting.
 Auto-generated typed client for type-safe frontend ↔ backend
 WebSocket communication.
 → [API Reference](/api/websocket)
+
+### SSE (Server-Sent Events)
+Built-in SSE support with two patterns: `@Sse()` decorator for async generators
+and `Controller.sse()` for programmatic usage. Automatic heartbeat keep-alive,
+client disconnect detection, and SSE proxy/relay support with `AbortSignal`.
+→ [API Reference](/api/sse)
 
 ## Microservices (@onebun/core)
 
