@@ -32,12 +32,14 @@ import {
 import { makeTraceService, TraceService } from '@onebun/trace';
 
 import {
+  getControllerGuards,
   getControllerMetadata,
   getControllerMiddleware,
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
 import { OneBunFile, validateFile } from '../file/onebun-file';
+import { executeHttpGuards, HttpExecutionContextImpl } from '../http-guards/http-guards';
 import {
   NotInitializedConfig,
   type IConfig,
@@ -652,31 +654,37 @@ export class OneBunApplication {
           try {
             let response: Response;
 
-            // Execute middleware chain if any, then handler
-            if (routeMeta.middleware && routeMeta.middleware.length > 0) {
-              const next = async (index: number): Promise<Response> => {
-                if (index >= routeMeta.middleware!.length) {
-                  return await executeHandler(
+            // Run guards then handler — shared by middleware chain and direct path
+            const runGuardedHandler = async (): Promise<Response> => {
+              if (routeMeta.guards && routeMeta.guards.length > 0) {
+                const guardCtx = new HttpExecutionContextImpl(
+                  req,
+                  routeMeta.handler,
+                  controller.constructor.name,
+                );
+                const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+
+                if (!allowed) {
+                  return new Response(
+                    JSON.stringify(
+                      createErrorResponse(
+                        'Forbidden',
+                        HttpStatusCode.FORBIDDEN,
+                        'Forbidden',
+                      ),
+                    ),
                     {
-                      handler: boundHandler,
-                      handlerName: routeMeta.handler,
-                      controller,
-                      params: routeMeta.params,
-                      responseSchemas: routeMeta.responseSchemas,
+                      status: HttpStatusCode.OK,
+                      headers: {
+                        // eslint-disable-next-line @typescript-eslint/naming-convention
+                        'Content-Type': 'application/json',
+                      },
                     },
-                    req,
-                    queryParams,
                   );
                 }
+              }
 
-                const middleware = routeMeta.middleware![index];
-
-                return await middleware(req, () => next(index + 1));
-              };
-
-              response = await next(0);
-            } else {
-              response = await executeHandler(
+              return await executeHandler(
                 {
                   handler: boundHandler,
                   handlerName: routeMeta.handler,
@@ -687,6 +695,23 @@ export class OneBunApplication {
                 req,
                 queryParams,
               );
+            };
+
+            // Execute middleware chain if any, then guarded handler
+            if (routeMeta.middleware && routeMeta.middleware.length > 0) {
+              const next = async (index: number): Promise<Response> => {
+                if (index >= routeMeta.middleware!.length) {
+                  return await runGuardedHandler();
+                }
+
+                const middleware = routeMeta.middleware![index];
+
+                return await middleware(req, () => next(index + 1));
+              };
+
+              response = await next(0);
+            } else {
+              response = await runGuardedHandler();
             }
 
             const duration = Date.now() - startTime;
@@ -847,9 +872,16 @@ export class OneBunApplication {
             ...ctrlMiddleware,
             ...routeMiddleware,
           ];
+
+          // Merge guards: controller-level first, then route-level
+          const ctrlGuards = getControllerGuards(controllerClass);
+          const routeGuards = route.guards ?? [];
+          const mergedGuards = [...ctrlGuards, ...routeGuards];
+
           const routeWithMergedMiddleware: RouteMetadata = {
             ...route,
             middleware: mergedMiddleware.length > 0 ? mergedMiddleware : undefined,
+            guards: mergedGuards.length > 0 ? mergedGuards : undefined,
           };
 
           // Create wrapped handler with full OneBun lifecycle (tracing, metrics, middleware)

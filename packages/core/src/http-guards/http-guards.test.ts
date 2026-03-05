@@ -1,6 +1,15 @@
-import { describe, expect, it } from 'bun:test';
+import {
+  describe,
+  expect,
+  it,
+} from 'bun:test';
 
-import type { HttpExecutionContext, HttpGuard } from '../types';
+import type {
+  HttpExecutionContext,
+  HttpGuard,
+  OneBunRequest,
+} from '../types';
+
 import {
   AuthGuard,
   createHttpGuard,
@@ -13,20 +22,25 @@ import {
 // Helpers
 // ============================================================================
 
-function makeRequest(headers: Record<string, string> = {}): Request {
-  return new Request('http://localhost/test', { headers });
+function makeRequest(headers?: Headers): OneBunRequest {
+  return new Request('http://localhost/test', { headers }) as unknown as OneBunRequest;
+}
+
+function makeHeaders(entries: [string, string][]): Headers {
+  const h = new Headers();
+  for (const [key, value] of entries) {
+    h.set(key, value);
+  }
+
+  return h;
 }
 
 function makeContext(
-  headers: Record<string, string> = {},
+  headers: [string, string][] = [],
   handler = 'testHandler',
   controller = 'TestController',
 ): HttpExecutionContext {
-  return new HttpExecutionContextImpl(
-    makeRequest(headers) as import('../types').OneBunRequest,
-    handler,
-    controller,
-  );
+  return new HttpExecutionContextImpl(makeRequest(makeHeaders(headers)), handler, controller);
 }
 
 // ============================================================================
@@ -35,24 +49,20 @@ function makeContext(
 
 describe('HttpExecutionContextImpl', () => {
   it('returns request from getRequest()', () => {
-    const req = makeRequest({ authorization: 'Bearer token' });
-    const ctx = new HttpExecutionContextImpl(
-      req as import('../types').OneBunRequest,
-      'myHandler',
-      'MyController',
-    );
+    const req = makeRequest(makeHeaders([['authorization', 'Bearer token']]));
+    const ctx = new HttpExecutionContextImpl(req, 'myHandler', 'MyController');
 
     expect(ctx.getRequest()).toBe(req);
   });
 
   it('returns handler name from getHandler()', () => {
-    const ctx = makeContext({}, 'getUser', 'UserController');
+    const ctx = makeContext([], 'getUser', 'UserController');
 
     expect(ctx.getHandler()).toBe('getUser');
   });
 
   it('returns controller name from getController()', () => {
-    const ctx = makeContext({}, 'getUser', 'UserController');
+    const ctx = makeContext([], 'getUser', 'UserController');
 
     expect(ctx.getController()).toBe('UserController');
   });
@@ -70,32 +80,32 @@ describe('executeHttpGuards', () => {
   });
 
   it('returns true when all guards pass', async () => {
-    const PassGuard = createHttpGuard(() => true);
+    const passGuard = createHttpGuard(() => true);
     const ctx = makeContext();
 
-    expect(await executeHttpGuards([PassGuard, PassGuard], ctx)).toBe(true);
+    expect(await executeHttpGuards([passGuard, passGuard], ctx)).toBe(true);
   });
 
   it('returns false when any guard fails', async () => {
-    const PassGuard = createHttpGuard(() => true);
-    const FailGuard = createHttpGuard(() => false);
+    const passGuard = createHttpGuard(() => true);
+    const failGuard = createHttpGuard(() => false);
     const ctx = makeContext();
 
-    expect(await executeHttpGuards([PassGuard, FailGuard, PassGuard], ctx)).toBe(false);
+    expect(await executeHttpGuards([passGuard, failGuard, passGuard], ctx)).toBe(false);
   });
 
   it('short-circuits on first failing guard', async () => {
     let secondCalled = false;
 
-    const FailGuard = createHttpGuard(() => false);
-    const TrackGuard = createHttpGuard(() => {
+    const failGuard = createHttpGuard(() => false);
+    const trackGuard = createHttpGuard(() => {
       secondCalled = true;
 
       return true;
     });
     const ctx = makeContext();
 
-    await executeHttpGuards([FailGuard, TrackGuard], ctx);
+    await executeHttpGuards([failGuard, trackGuard], ctx);
 
     expect(secondCalled).toBe(false);
   });
@@ -108,14 +118,14 @@ describe('executeHttpGuards', () => {
   });
 
   it('accepts async guards', async () => {
-    const AsyncPassGuard = createHttpGuard(async () => {
+    const asyncPassGuard = createHttpGuard(async () => {
       await Promise.resolve();
 
       return true;
     });
     const ctx = makeContext();
 
-    expect(await executeHttpGuards([AsyncPassGuard], ctx)).toBe(true);
+    expect(await executeHttpGuards([asyncPassGuard], ctx)).toBe(true);
   });
 });
 
@@ -125,20 +135,20 @@ describe('executeHttpGuards', () => {
 
 describe('createHttpGuard', () => {
   it('returns a class constructor', () => {
-    const Guard = createHttpGuard(() => true);
+    const guardClass = createHttpGuard(() => true);
 
-    expect(typeof Guard).toBe('function');
+    expect(typeof guardClass).toBe('function');
   });
 
   it('instantiated class calls the provided function', async () => {
     let called = false;
-    const Guard = createHttpGuard((ctx) => {
+    const guardClass = createHttpGuard((ctx) => {
       called = true;
 
       return ctx.getHandler() === 'target';
     });
-    const ctx = makeContext({}, 'target');
-    const instance = new Guard();
+    const ctx = makeContext([], 'target');
+    const instance = new guardClass();
 
     expect(await instance.canActivate(ctx)).toBe(true);
     expect(called).toBe(true);
@@ -152,7 +162,7 @@ describe('createHttpGuard', () => {
 describe('AuthGuard', () => {
   it('allows request with Bearer token', () => {
     const guard = new AuthGuard();
-    const ctx = makeContext({ authorization: 'Bearer my-token' });
+    const ctx = makeContext([['authorization', 'Bearer my-token']]);
 
     expect(guard.canActivate(ctx)).toBe(true);
   });
@@ -166,7 +176,7 @@ describe('AuthGuard', () => {
 
   it('blocks request with non-Bearer Authorization header', () => {
     const guard = new AuthGuard();
-    const ctx = makeContext({ authorization: 'Basic dXNlcjpwYXNz' });
+    const ctx = makeContext([['authorization', 'Basic dXNlcjpwYXNz']]);
 
     expect(guard.canActivate(ctx)).toBe(false);
   });
@@ -179,14 +189,16 @@ describe('AuthGuard', () => {
 describe('RolesGuard', () => {
   it('allows when user has all required roles (default extractor)', () => {
     const guard = new RolesGuard(['admin', 'editor']);
-    const ctx = makeContext({ 'x-user-roles': 'admin, editor, viewer' });
+    const headers = makeHeaders([['x-user-roles', 'admin, editor, viewer']]);
+    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
 
     expect(guard.canActivate(ctx)).toBe(true);
   });
 
   it('blocks when user is missing a required role', () => {
     const guard = new RolesGuard(['admin']);
-    const ctx = makeContext({ 'x-user-roles': 'viewer' });
+    const headers = makeHeaders([['x-user-roles', 'viewer']]);
+    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
 
     expect(guard.canActivate(ctx)).toBe(false);
   });
@@ -199,17 +211,19 @@ describe('RolesGuard', () => {
   });
 
   it('uses custom roles extractor when provided', () => {
+    const headers = makeHeaders([['x-roles', 'admin|user']]);
     const guard = new RolesGuard(['admin'], (ctx) =>
       ctx.getRequest().headers.get('x-roles')?.split('|') ?? [],
     );
-    const ctx = makeContext({ 'x-roles': 'admin|user' });
+    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
 
     expect(guard.canActivate(ctx)).toBe(true);
   });
 
   it('requires ALL roles to be present (not just one)', () => {
     const guard = new RolesGuard(['admin', 'superuser']);
-    const ctx = makeContext({ 'x-user-roles': 'admin' });
+    const headers = makeHeaders([['x-user-roles', 'admin']]);
+    const ctx = new HttpExecutionContextImpl(makeRequest(headers), 'handler', 'Controller');
 
     expect(guard.canActivate(ctx)).toBe(false);
   });

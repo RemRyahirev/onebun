@@ -5,7 +5,11 @@
  * Apply with `@UseGuards()` on controllers or individual routes.
  */
 
-import type { HttpExecutionContext, HttpGuard, OneBunRequest } from '../types';
+import type {
+  HttpExecutionContext,
+  HttpGuard,
+  OneBunRequest,
+} from '../types';
 
 // ============================================================================
 // Execution Context Implementation
