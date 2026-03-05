@@ -23,21 +23,21 @@ import {
   type SyncLogger,
 } from '@onebun/logger';
 import {
-  type ApiResponse,
   createErrorResponse,
   createSuccessResponse,
   HttpStatusCode,
-  OneBunBaseError,
 } from '@onebun/requests';
 import { makeTraceService, TraceService } from '@onebun/trace';
 
 import {
+  getControllerFilters,
   getControllerGuards,
   getControllerMetadata,
   getControllerMiddleware,
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
+import { defaultExceptionFilter, type ExceptionFilter } from '../exception-filters/exception-filters';
 import { OneBunFile, validateFile } from '../file/onebun-file';
 import { executeHttpGuards, HttpExecutionContextImpl } from '../http-guards/http-guards';
 import {
@@ -691,6 +691,7 @@ export class OneBunApplication {
                   controller,
                   params: routeMeta.params,
                   responseSchemas: routeMeta.responseSchemas,
+                  filters: routeMeta.filters,
                 },
                 req,
                 queryParams,
@@ -878,10 +879,17 @@ export class OneBunApplication {
           const routeGuards = route.guards ?? [];
           const mergedGuards = [...ctrlGuards, ...routeGuards];
 
+          // Merge exception filters: global → controller → route (route has highest priority)
+          const globalFilters = (this.options.filters as ExceptionFilter[] | undefined) ?? [];
+          const ctrlFilters = getControllerFilters(controllerClass);
+          const routeFilters = route.filters ?? [];
+          const mergedFilters = [...globalFilters, ...ctrlFilters, ...routeFilters];
+
           const routeWithMergedMiddleware: RouteMetadata = {
             ...route,
             middleware: mergedMiddleware.length > 0 ? mergedMiddleware : undefined,
             guards: mergedGuards.length > 0 ? mergedGuards : undefined,
+            filters: mergedFilters.length > 0 ? mergedFilters : undefined,
           };
 
           // Create wrapped handler with full OneBun lifecycle (tracing, metrics, middleware)
@@ -1233,6 +1241,7 @@ export class OneBunApplication {
         controller: Controller;
         params?: ParamMetadata[];
         responseSchemas?: RouteMetadata['responseSchemas'];
+        filters?: ExceptionFilter[];
       },
       req: OneBunRequest,
       queryParams: Record<string, string | string[]>,
@@ -1587,31 +1596,25 @@ export class OneBunApplication {
           },
         });
       } catch (error) {
-        // Convert any thrown errors to standardized error response
-        let errorResponse: ApiResponse<never>;
+        // Run through exception filters (route → controller → global), then default
+        const filters = route.filters ?? [];
 
-        if (error instanceof OneBunBaseError) {
-          errorResponse = error.toErrorResponse();
-        } else {
-          const message = error instanceof Error ? error.message : String(error);
-          const code =
-            error instanceof Error && 'code' in error
-              ? Number((error as { code: unknown }).code)
-              : HttpStatusCode.INTERNAL_SERVER_ERROR;
-          errorResponse = createErrorResponse(message, code, message, undefined, {
-            originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-            stack: error instanceof Error ? error.stack : undefined,
-          });
+        if (filters.length > 0) {
+          const guardCtx = new HttpExecutionContextImpl(
+            req,
+            route.handlerName ?? '',
+            route.controller.constructor.name,
+          );
+
+          // Last filter wins (route-level filters were appended last and take highest priority)
+          return await filters[filters.length - 1].catch(error, guardCtx);
         }
 
-        // Always return 200 for consistency with API response format
-        return new Response(JSON.stringify(errorResponse), {
-          status: HttpStatusCode.OK,
-          headers: {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Content-Type': 'application/json',
-          },
-        });
+        return await defaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
+          req,
+          route.handlerName ?? '',
+          route.controller.constructor.name,
+        ));
       }
     }
 

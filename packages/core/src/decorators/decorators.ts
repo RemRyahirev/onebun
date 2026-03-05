@@ -1,6 +1,8 @@
 import './metadata'; // Import polyfill first
 import { type, type Type } from 'arktype';
 
+import type { ExceptionFilter } from '../exception-filters/exception-filters';
+
 import {
   type ControllerMetadata,
   type FileUploadOptions,
@@ -226,6 +228,18 @@ export function controllerDecorator(basePath: string = '') {
       );
     }
 
+    // Copy controller-level exception filters from original class to wrapped class
+    // This ensures @UseFilters works regardless of decorator order
+    const existingControllerFilters: ExceptionFilter[] | undefined =
+      Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target);
+    if (existingControllerFilters) {
+      Reflect.defineMetadata(
+        CONTROLLER_EXCEPTION_FILTERS_METADATA,
+        existingControllerFilters,
+        WrappedController,
+      );
+    }
+
     return WrappedController as T;
   };
 }
@@ -347,6 +361,10 @@ function createRouteDecorator(method: HttpMethod) {
       const guards: (Function | HttpGuard)[] =
         Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
 
+      // Get exception filters metadata if exists
+      const filters: ExceptionFilter[] =
+        Reflect.getMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey) || [];
+
       // Get response schemas metadata if exists
       const responseSchemas: Array<{
         statusCode: number;
@@ -361,6 +379,7 @@ function createRouteDecorator(method: HttpMethod) {
         params,
         middleware,
         guards,
+        filters,
         responseSchemas: responseSchemas.map((rs) => ({
           statusCode: rs.statusCode,
           schema: rs.schema,
@@ -708,6 +727,16 @@ const HTTP_GUARDS_METADATA = 'onebun:http_guards';
 const HTTP_CONTROLLER_GUARDS_METADATA = 'onebun:controller_http_guards';
 
 /**
+ * Metadata key for route-level exception filters
+ */
+const EXCEPTION_FILTERS_METADATA = 'onebun:exception_filters';
+
+/**
+ * Metadata key for controller-level exception filters
+ */
+const CONTROLLER_EXCEPTION_FILTERS_METADATA = 'onebun:controller_exception_filters';
+
+/**
  * Middleware decorator — can be applied to both controllers (class) and individual routes (method).
  *
  * Pass middleware **class constructors** (extending `BaseMiddleware`), not instances.
@@ -869,6 +898,78 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
     Reflect.defineMetadata(
       HTTP_GUARDS_METADATA,
       [...existingGuards, ...guards],
+      target,
+      propertyKey,
+    );
+
+    return descriptor;
+  };
+}
+
+/**
+ * Get controller-level exception filters for a controller class.
+ * Returns filters registered via @UseFilters() applied to the class.
+ *
+ * @param target - Controller class (constructor)
+ * @returns Array of exception filter instances
+ */
+export function getControllerFilters(target: Function): ExceptionFilter[] {
+  return Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target) || [];
+}
+
+/**
+ * Exception Filters decorator — can be applied to both controllers (class) and individual routes (method).
+ *
+ * Pass filter **instances** (from `createExceptionFilter()` or implementing `ExceptionFilter`).
+ * Route-level filters take priority over controller-level filters.
+ *
+ * Filters run in order: controller-level first, then route-level.
+ * The first filter in the combined list catches the error.
+ * If no filters are registered, the default filter handles the error.
+ *
+ * @example Class-level (all routes)
+ * ```typescript
+ * \@Controller('/api')
+ * \@UseFilters(new HttpExceptionFilter())
+ * class ApiController extends BaseController { ... }
+ * ```
+ *
+ * @example Method-level (single route)
+ * ```typescript
+ * \@Get('/risky')
+ * \@UseFilters(createExceptionFilter((err, ctx) => new Response('Custom error', { status: 500 })))
+ * riskyRoute() { ... }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function UseFilters(...filters: ExceptionFilter[]): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return function useFiltersDecorator(...args: any[]): any {
+    // ---- Class decorator: target is a constructor function ----
+    if (args.length === 1 && typeof args[0] === 'function') {
+      const target = args[0] as Function;
+      const existing: ExceptionFilter[] =
+        Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target) || [];
+      Reflect.defineMetadata(
+        CONTROLLER_EXCEPTION_FILTERS_METADATA,
+        [...existing, ...filters],
+        target,
+      );
+
+      return target;
+    }
+
+    // ---- Method decorator: (target, propertyKey, descriptor) ----
+    const [target, propertyKey, descriptor] = args as [
+      object,
+      string | symbol,
+      PropertyDescriptor,
+    ];
+    const existingFilters: ExceptionFilter[] =
+      Reflect.getMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey) || [];
+    Reflect.defineMetadata(
+      EXCEPTION_FILTERS_METADATA,
+      [...existingFilters, ...filters],
       target,
       propertyKey,
     );

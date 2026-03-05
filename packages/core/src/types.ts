@@ -471,6 +471,20 @@ export interface ApplicationOptions {
    * @defaultValue true
    */
   gracefulShutdown?: boolean;
+
+  /**
+   * Global exception filters applied to all routes.
+   * Route-level and controller-level filters take priority over global ones.
+   * If no filters match, the built-in default filter is used.
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   filters: [new GlobalExceptionFilter()],
+   * });
+   * ```
+   */
+  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
 }
 
 /**
@@ -804,6 +818,8 @@ export interface RouteMetadata {
   middleware?: Function[];
   /** Guards to execute before the route handler. Supports class constructors and instances. */
   guards?: (Function | HttpGuard)[];
+  /** Exception filters to apply when the route handler throws. */
+  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
   /**
    * Response schemas for validation
    * Key is HTTP status code (e.g., 200, 201, 404)
