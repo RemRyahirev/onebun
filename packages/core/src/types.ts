@@ -765,6 +765,35 @@ export interface RouteOptions {
 }
 
 /**
+ * HTTP Execution Context provided to HTTP guards.
+ * Gives read-only access to the incoming request and routing information.
+ */
+export interface HttpExecutionContext {
+  /** Returns the incoming request object */
+  getRequest(): OneBunRequest;
+  /** Returns the handler method name (e.g. 'getUser') */
+  getHandler(): string;
+  /** Returns the controller class name (e.g. 'UserController') */
+  getController(): string;
+}
+
+/**
+ * HTTP Guard interface — implement to protect routes via `@UseGuards()`.
+ *
+ * @example
+ * ```typescript
+ * class MyGuard implements HttpGuard {
+ *   canActivate(ctx: HttpExecutionContext): boolean {
+ *     return ctx.getRequest().headers.get('x-api-key') === 'secret';
+ *   }
+ * }
+ * ```
+ */
+export interface HttpGuard {
+  canActivate(context: HttpExecutionContext): boolean | Promise<boolean>;
+}
+
+/**
  * Route metadata
  */
 export interface RouteMetadata {
@@ -773,6 +802,8 @@ export interface RouteMetadata {
   handler: string;
   params?: ParamMetadata[];
   middleware?: Function[];
+  /** Guards to execute before the route handler. Supports class constructors and instances. */
+  guards?: (Function | HttpGuard)[];
   /**
    * Response schemas for validation
    * Key is HTTP status code (e.g., 200, 201, 404)

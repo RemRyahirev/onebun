@@ -6,6 +6,7 @@ import {
   type FileUploadOptions,
   type FilesUploadOptions,
   HttpMethod,
+  type HttpGuard,
   type ParamDecoratorOptions,
   type ParamMetadata,
   ParamType,
@@ -213,6 +214,18 @@ export function controllerDecorator(basePath: string = '') {
       );
     }
 
+    // Copy controller-level guards from original class to wrapped class
+    // This ensures @UseGuards works regardless of decorator order
+    const existingControllerGuards: (Function | HttpGuard)[] | undefined =
+      Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target);
+    if (existingControllerGuards) {
+      Reflect.defineMetadata(
+        HTTP_CONTROLLER_GUARDS_METADATA,
+        existingControllerGuards,
+        WrappedController,
+      );
+    }
+
     return WrappedController as T;
   };
 }
@@ -330,6 +343,10 @@ function createRouteDecorator(method: HttpMethod) {
       const middleware: Function[] =
         Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
 
+      // Get HTTP guards metadata if exists
+      const guards: (Function | HttpGuard)[] =
+        Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+
       // Get response schemas metadata if exists
       const responseSchemas: Array<{
         statusCode: number;
@@ -343,6 +360,7 @@ function createRouteDecorator(method: HttpMethod) {
         handler: propertyKey,
         params,
         middleware,
+        guards,
         responseSchemas: responseSchemas.map((rs) => ({
           statusCode: rs.statusCode,
           schema: rs.schema,
@@ -680,6 +698,16 @@ export function FormField(fieldName: string, options?: ParamDecoratorOptions): P
 const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 
 /**
+ * Metadata key for route-level HTTP guards
+ */
+const HTTP_GUARDS_METADATA = 'onebun:http_guards';
+
+/**
+ * Metadata key for controller-level HTTP guards
+ */
+const HTTP_CONTROLLER_GUARDS_METADATA = 'onebun:controller_http_guards';
+
+/**
  * Middleware decorator — can be applied to both controllers (class) and individual routes (method).
  *
  * Pass middleware **class constructors** (extending `BaseMiddleware`), not instances.
@@ -763,6 +791,90 @@ export function UseMiddleware(...middleware: Function[]): any {
  */
 export function getControllerMiddleware(target: Function): Function[] {
   return Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target) || [];
+}
+
+/**
+ * Get controller-level HTTP guards for a controller class.
+ * Returns guards registered via @UseGuards() applied to the class.
+ *
+ * @param target - Controller class (constructor)
+ * @returns Array of guard class constructors or instances
+ */
+export function getControllerGuards(target: Function): (Function | HttpGuard)[] {
+  return Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+}
+
+/**
+ * Guards decorator — can be applied to both controllers (class) and individual routes (method).
+ *
+ * Pass guard **class constructors** or **instances**. Class constructors are instantiated
+ * for each request; instances are reused.
+ *
+ * Guards run after the middleware chain but before the route handler.
+ * If any guard returns false, the request is rejected with a 403 Forbidden response.
+ *
+ * Execution order: middleware → guards → handler
+ *
+ * @example Class-level (all routes)
+ * ```typescript
+ * \@Controller('/admin')
+ * \@UseGuards(AuthGuard)
+ * class AdminController extends BaseController { ... }
+ * ```
+ *
+ * @example Method-level (single route)
+ * ```typescript
+ * \@Get('/dashboard')
+ * \@UseGuards(new RolesGuard(['admin']))
+ * getDashboard() { ... }
+ * ```
+ *
+ * @example Combined (class guard + route guard)
+ * ```typescript
+ * \@Controller('/api')
+ * \@UseGuards(AuthGuard)                      // runs on every route
+ * class ApiController extends BaseController {
+ *   \@Get('/admin')
+ *   \@UseGuards(new RolesGuard(['admin']))     // runs only here, after AuthGuard
+ *   getAdmin() { ... }
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function UseGuards(...guards: (Function | HttpGuard)[]): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return function useGuardsDecorator(...args: any[]): any {
+    // ---- Class decorator: target is a constructor function ----
+    if (args.length === 1 && typeof args[0] === 'function') {
+      const target = args[0] as Function;
+      const existing: (Function | HttpGuard)[] =
+        Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+      Reflect.defineMetadata(
+        HTTP_CONTROLLER_GUARDS_METADATA,
+        [...existing, ...guards],
+        target,
+      );
+
+      return target;
+    }
+
+    // ---- Method decorator: (target, propertyKey, descriptor) ----
+    const [target, propertyKey, descriptor] = args as [
+      object,
+      string | symbol,
+      PropertyDescriptor,
+    ];
+    const existingGuards: (Function | HttpGuard)[] =
+      Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+    Reflect.defineMetadata(
+      HTTP_GUARDS_METADATA,
+      [...existingGuards, ...guards],
+      target,
+      propertyKey,
+    );
+
+    return descriptor;
+  };
 }
 
 /**
