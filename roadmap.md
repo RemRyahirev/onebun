@@ -5,35 +5,38 @@
 
 ---
 
-## Фаза 1: Production-Ready (критичные блокеры)
+## Фаза 1: Production-Ready (критичные блокеры) ✅
 
 ### HTTP Guards / Auth
-- [ ] Интерфейс `CanActivate` для HTTP (по аналогии с `WsGuard`)
-- [ ] Декоратор `@UseGuards(...guards)` для контроллеров и роутов
-- [ ] Встроенные guards: `AuthGuard`, `RolesGuard` (RBAC)
-- [ ] Фабрика `createGuard(fn)` (как в WS/Queue)
-- [ ] Интеграция в request pipeline между middleware и handler
+- [x] Интерфейс `CanActivate` для HTTP (по аналогии с `WsGuard`)
+- [x] Декоратор `@UseGuards(...guards)` для контроллеров и роутов
+- [x] Встроенные guards: `AuthGuard`, `RolesGuard` (RBAC)
+- [x] Фабрика `createGuard(fn)` (как в WS/Queue)
+- [x] Интеграция в request pipeline между middleware и handler
 
 ### Exception Filters
-- [ ] Интерфейс `ExceptionFilter` с методом `catch(error, context)`
-- [ ] Декоратор `@UseFilters(...filters)` на контроллер/роут
-- [ ] Глобальный exception filter через `ApplicationOptions`
-- [ ] Дефолтный фильтр — текущая логика обработки `OneBunBaseError`
+- [x] Интерфейс `ExceptionFilter` с методом `catch(error, context)`
+- [x] Декоратор `@UseFilters(...filters)` на контроллер/роут
+- [x] Глобальный exception filter через `ApplicationOptions`
+- [x] Дефолтный фильтр — текущая логика обработки `OneBunBaseError`
 
 ### Testing Utilities
-- [ ] `TestingModule.create({ imports, controllers, providers, overrides })`
-- [ ] `.overrideProvider(Token).useValue(mock)` / `.useClass(MockClass)`
-- [ ] `.compile()` → экземпляр приложения для тестирования
-- [ ] HTTP-тестирование без поднятия сервера
+- [x] `TestingModule.create({ imports, controllers, providers, overrides })`
+- [x] `.overrideProvider(Token).useValue(mock)` / `.useClass(MockClass)`
+- [x] `.compile()` → экземпляр приложения для тестирования
+- [x] HTTP-тестирование через реальный сервер на случайном порту
 
 ### Security Middleware
-- [ ] `CorsMiddleware` с конфигурацией через `ApplicationOptions.cors`
-- [ ] `RateLimitMiddleware` (in-memory + Redis бэкенды)
-- [ ] `SecurityHeadersMiddleware` (аналог helmet)
+- [x] `CorsMiddleware` с конфигурацией через `ApplicationOptions.cors`
+- [x] `RateLimitMiddleware` (in-memory + Redis бэкенды)
+- [x] `SecurityHeadersMiddleware` (аналог helmet)
 
 ### Документация (пробелы Фазы 1)
-- [ ] Раздел про graceful shutdown в docs (уже реализован в коде)
-- [ ] Документирование SSE (уже реализовано в коде)
+- [x] Раздел про graceful shutdown в docs (уже реализован в коде)
+- [x] Документирование SSE (уже реализовано в коде)
+- [x] Документация для Guards (`docs/api/guards.md`)
+- [x] Документация для Exception Filters (`docs/api/exception-filters.md`)
+- [x] Документация для Security Middleware (`docs/api/security.md`)
 
 ---
 

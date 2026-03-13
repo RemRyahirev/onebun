@@ -5,3 +5,4 @@
  */
 
 export * from './test-utils';
+export * from './testing-module';

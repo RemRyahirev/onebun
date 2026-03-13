@@ -64,6 +64,9 @@ export default defineConfig({
             { text: 'Controllers', link: '/api/controllers' },
             { text: 'Services', link: '/api/services' },
             { text: 'Validation', link: '/api/validation' },
+            { text: 'Guards', link: '/api/guards' },
+            { text: 'Exception Filters', link: '/api/exception-filters' },
+            { text: 'Security Middleware', link: '/api/security' },
           ],
         },
         {

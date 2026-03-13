@@ -159,6 +159,10 @@ This makes it safe to use "standalone" services whose main work happens inside `
 `onModuleInit` hooks are called **sequentially in dependency order**: if service A depends on service B, then B's `onModuleInit` will complete **before** A's `onModuleInit` starts. This guarantees that when your `onModuleInit` runs, all injected dependencies are already fully initialized.
 :::
 
+::: tip Cross-Module Lifecycle
+`onModuleInit` is called for services and controllers in **all modules** across the entire import tree — not just the root module. If `AppModule` imports `UserModule` which imports `AuthModule`, then services in all three modules will have their `onModuleInit` called. Deeply nested modules are initialized first (depth-first order).
+:::
+
 ### Usage
 
 Implement lifecycle interfaces to hook into the application lifecycle:

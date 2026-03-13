@@ -485,6 +485,57 @@ export interface ApplicationOptions {
    * ```
    */
   filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+
+  /**
+   * CORS configuration. When provided, `CorsMiddleware` is automatically prepended
+   * to the global middleware chain.
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   cors: { origin: 'https://my-frontend.example.com', credentials: true },
+   * });
+   * ```
+   */
+  cors?: import('./security/cors-middleware').CorsOptions | true;
+
+  /**
+   * Rate limiting configuration. When provided, `RateLimitMiddleware` is automatically
+   * prepended to the global middleware chain (after CORS, before other middleware).
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   rateLimit: { windowMs: 60_000, max: 100 },
+   * });
+   * ```
+   */
+  rateLimit?: import('./security/rate-limit-middleware').RateLimitOptions | true;
+
+  /**
+   * Security headers configuration. When provided, `SecurityHeadersMiddleware` is
+   * automatically appended to the global middleware chain.
+   * Pass `true` to use all defaults (equivalent to no options).
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   security: { strictTransportSecurity: false }, // disable HSTS for local dev
+   * });
+   * ```
+   */
+  security?: import('./security/security-headers-middleware').SecurityHeadersOptions | true;
+
+  /**
+   * Pre-register service instances for testing.
+   * These are injected before `setup()` so controllers receive mocks at construction time.
+   * @internal Use `TestingModule` instead of setting this directly.
+   */
+  _testProviders?: Array<{
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    tag: Context.Tag<any, any>;
+    value: unknown;
+  }>;
 }
 
 /**

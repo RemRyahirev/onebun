@@ -35,8 +35,29 @@ const app = new OneBunApplication(AppModule, {
   tracing: { enabled: true, serviceName: 'my-service' },
   loggerOptions: { minLevel: 'info', format: 'json' },
   gracefulShutdown: true,  // default
+  // Security shortcuts (auto-add built-in middleware):
+  cors: { origin: 'https://my-frontend.com', credentials: true },
+  rateLimit: { windowMs: 60_000, max: 100 },
+  security: true,
+  // Exception filters (applied globally to all routes):
+  filters: [myGlobalExceptionFilter],
 });
 ```
+
+**Guards and Filters**:
+- Use `@UseGuards(AuthGuard)` on a controller or route method to add authorization
+- Use `@UseFilters(myFilter)` on a controller or route method to add error handling
+- Both decorators merge with parent-level (controller + route, global + controller + route)
+- See [Guards](./guards.md) and [Exception Filters](./exception-filters.md) for full docs
+
+**Security Middleware shorthand**:
+```typescript
+// CORS + rate limiting + security headers in one line each:
+cors: { origin: '*' }           // or: cors: true
+rateLimit: { max: 100 }         // or: rateLimit: true
+security: { xFrameOptions: 'DENY' }  // or: security: true
+```
+Auto-ordering: CorsMiddleware → RateLimitMiddleware → [user middleware] → SecurityHeadersMiddleware
 
 **Static files (SPA on same host)**:
 ```typescript
@@ -57,7 +78,7 @@ await app.start();
 - `app.getHttpUrl()` - get listening URL
 
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
-- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services)
+- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree)
 - `onApplicationInit()` - after all modules, before HTTP starts
 - `onModuleDestroy()` - during shutdown
 - `beforeApplicationDestroy(signal?)` - start of shutdown
@@ -161,6 +182,30 @@ interface ApplicationOptions {
 
   /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
   gracefulShutdown?: boolean;
+
+  /** Global exception filters. Route/controller filters take priority. */
+  filters?: ExceptionFilter[];
+
+  /**
+   * CORS shorthand — auto-prepends CorsMiddleware.
+   * Pass `true` for permissive defaults, or a CorsOptions object for custom config.
+   * See Security Middleware for details.
+   */
+  cors?: CorsOptions | true;
+
+  /**
+   * Rate limiting shorthand — auto-prepends RateLimitMiddleware.
+   * Pass `true` for defaults (100 req / 60s, in-memory), or a RateLimitOptions object.
+   * See Security Middleware for details.
+   */
+  rateLimit?: RateLimitOptions | true;
+
+  /**
+   * Security headers shorthand — auto-appends SecurityHeadersMiddleware.
+   * Pass `true` for all defaults, or a SecurityHeadersOptions object.
+   * See Security Middleware for details.
+   */
+  security?: SecurityHeadersOptions | true;
 }
 ```
 

@@ -1422,6 +1422,84 @@ describe('OneBunModule', () => {
       expect(depValueInInit).not.toBeNull();
       expect(depValueInInit as unknown as number).toBe(8080);
     });
+
+    test('should call onModuleInit for services and controllers in deeply nested module tree', async () => {
+      const initLog: string[] = [];
+
+      @Service()
+      class GrandchildService {
+        async onModuleInit(): Promise<void> {
+          initLog.push('grandchild-service');
+        }
+      }
+
+      @CtrlDeco('/grandchild')
+      class GrandchildController extends CtrlBase {
+        async onModuleInit(): Promise<void> {
+          initLog.push('grandchild-controller');
+        }
+      }
+
+      @Module({
+        providers: [GrandchildService],
+        controllers: [GrandchildController],
+      })
+      class GrandchildModule {}
+
+      @Service()
+      class ChildService {
+        async onModuleInit(): Promise<void> {
+          initLog.push('child-service');
+        }
+      }
+
+      @CtrlDeco('/child')
+      class ChildController extends CtrlBase {
+        async onModuleInit(): Promise<void> {
+          initLog.push('child-controller');
+        }
+      }
+
+      @Module({
+        imports: [GrandchildModule],
+        providers: [ChildService],
+        controllers: [ChildController],
+      })
+      class ChildModule {}
+
+      @Service()
+      class RootService {
+        async onModuleInit(): Promise<void> {
+          initLog.push('root-service');
+        }
+      }
+
+      @CtrlDeco('/root')
+      class RootController extends CtrlBase {
+        async onModuleInit(): Promise<void> {
+          initLog.push('root-controller');
+        }
+      }
+
+      @Module({
+        imports: [ChildModule],
+        providers: [RootService],
+        controllers: [RootController],
+      })
+      class RootModule {}
+
+      const module = new ModuleClass(RootModule, mockLoggerLayer);
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // All services and controllers across all levels must have onModuleInit called
+      expect(initLog).toContain('grandchild-service');
+      expect(initLog).toContain('grandchild-controller');
+      expect(initLog).toContain('child-service');
+      expect(initLog).toContain('child-controller');
+      expect(initLog).toContain('root-service');
+      expect(initLog).toContain('root-controller');
+      expect(initLog.length).toBe(6);
+    });
   });
 
   describe('Module DI scoping (exports only for cross-module)', () => {

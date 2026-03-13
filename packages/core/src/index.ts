@@ -132,3 +132,12 @@ export * from './validation';
 
 // Testing Utilities
 export * from './testing';
+
+// HTTP Guards
+export * from './http-guards';
+
+// Exception Filters
+export * from './exception-filters';
+
+// Security Middleware
+export * from './security';

@@ -627,7 +627,21 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
-    // Find service instance that matches the type
+    // Try to find by Effect Context.Tag first.
+    // This is the primary mechanism and also makes test overrides work:
+    // TestingModule.overrideProvider(MyService).useValue(mock) registers the mock
+    // under MyService's tag, so it is found here even if mock is not instanceof MyService.
+    try {
+      const tag = getServiceTag(type as new (...args: unknown[]) => unknown);
+      const byTag = this.serviceInstances.get(tag as Context.Tag<unknown, unknown>);
+      if (byTag !== undefined) {
+        return byTag;
+      }
+    } catch {
+      // Not a @Service()-decorated class — fall through to instanceof check below
+    }
+
+    // Fallback: find service instance that matches the type by reference equality or inheritance
     const serviceInstance = Array.from(this.serviceInstances.values()).find((instance) => {
       if (!instance) {
         return false;
@@ -689,11 +703,27 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Setup the module and its dependencies
    */
+  /**
+   * Collect all descendant modules in depth-first order (leaves first).
+   * This ensures that deeply nested modules are initialized before their parents.
+   */
+  private collectDescendantModules(): OneBunModule[] {
+    const result: OneBunModule[] = [];
+    for (const child of this.childModules) {
+      result.push(...child.collectDescendantModules());
+      result.push(child);
+    }
+
+    return result;
+  }
+
   setup(): Effect.Effect<unknown, never, void> {
+    const allDescendants = this.collectDescendantModules();
+
     return this.callServicesOnModuleInit().pipe(
-      // Also run onModuleInit for child modules' services
+      // Run onModuleInit for all descendant modules' services (depth-first)
       Effect.flatMap(() =>
-        Effect.forEach(this.childModules, (childModule) => childModule.callServicesOnModuleInit(), {
+        Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
           discard: true,
         }),
       ),
@@ -704,18 +734,18 @@ export class OneBunModule implements ModuleInstance {
           this.resolveModuleMiddleware();
         }),
       ),
-      // Create controller instances in child modules first, then this module (each uses its own DI scope)
+      // Create controller instances in all descendant modules first, then this module
       Effect.flatMap(() =>
-        Effect.forEach(this.childModules, (childModule) => childModule.createControllerInstances(), {
+        Effect.forEach(allDescendants, (mod) => mod.createControllerInstances(), {
           discard: true,
         }),
       ),
       Effect.flatMap(() => this.createControllerInstances()),
       // Then call onModuleInit for controllers
       Effect.flatMap(() => this.callControllersOnModuleInit()),
-      // Also run onModuleInit for child modules' controllers
+      // Run onModuleInit for all descendant modules' controllers
       Effect.flatMap(() =>
-        Effect.forEach(this.childModules, (childModule) => childModule.callControllersOnModuleInit(), {
+        Effect.forEach(allDescendants, (mod) => mod.callControllersOnModuleInit(), {
           discard: true,
         }),
       ),

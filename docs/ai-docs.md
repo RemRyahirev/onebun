@@ -71,7 +71,7 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 
 | Package | Description |
 |---------|-------------|
-| `@onebun/core` | Framework core: Modules & DI, Controllers with decorator routing, Services, WebSocket Gateway (+ Socket.IO + typed client), Queue & Scheduler (in-memory, Redis, NATS, JetStream backends), Guards, Middleware, MultiServiceApplication for microservices, Graceful Shutdown |
+| `@onebun/core` | Framework core: Modules & DI, Controllers with decorator routing, Services, WebSocket Gateway (+ Socket.IO + typed client), Queue & Scheduler (in-memory, Redis, NATS, JetStream backends), HTTP Guards (`@UseGuards`, `AuthGuard`, `RolesGuard`, `createHttpGuard`), Exception Filters (`@UseFilters`, `createExceptionFilter`, `defaultExceptionFilter`), TestingModule for isolated controller/service tests (`TestingModule.create(...).overrideProvider(...).compile()`), Security Middleware (`CorsMiddleware`, `RateLimitMiddleware`, `SecurityHeadersMiddleware`), Middleware, MultiServiceApplication for microservices, Graceful Shutdown, SSE (`@Sse`, `sse()`) |
 | `@onebun/docs` | Automatic OpenAPI 3.1 generation from decorators and ArkType schemas, Swagger UI, @ApiTags, @ApiOperation decorators |
 | `@onebun/drizzle` | Drizzle ORM integration: PostgreSQL + SQLite (bun:sqlite), schema-first types, CLI & programmatic migrations, auto-migrate on startup, BaseRepository pattern |
 | `@onebun/cache` | CacheModule with in-memory (TTL, max size) and Redis backends, shared Redis connection pool, batch operations (getMany/setMany/deleteMany) |

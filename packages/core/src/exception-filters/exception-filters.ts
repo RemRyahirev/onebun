@@ -14,6 +14,7 @@ import {
   OneBunBaseError,
 } from '@onebun/requests';
 
+import { HttpException } from './http-exception';
 
 // ============================================================================
 // Interfaces
@@ -80,6 +81,22 @@ export function createExceptionFilter(
  */
 export const defaultExceptionFilter: ExceptionFilter = {
   catch(error: unknown): OneBunResponse {
+    if (error instanceof HttpException) {
+      const errorResponse = createErrorResponse(
+        error.message,
+        error.statusCode,
+        error.message,
+      );
+
+      return new Response(JSON.stringify(errorResponse), {
+        status: error.statusCode,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+      });
+    }
+
     if (error instanceof OneBunBaseError) {
       return new Response(JSON.stringify(error.toErrorResponse()), {
         status: HttpStatusCode.OK,

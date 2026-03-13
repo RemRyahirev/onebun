@@ -300,12 +300,13 @@ this.createServicesWithDI(metadata);
 
 // Phase 3: Call onModuleInit() on services that implement it
 // (sequentially in dependency order — dependencies complete before dependents)
-await this.callServicesOnModuleInit();
+// Recursively traverses ALL modules in the import tree (depth-first)
+await this.callServicesOnModuleInit(); // root + all descendants
 
-// Phase 4: Create controllers with injected services
+// Phase 4: Create controllers with injected services (all modules)
 this.createControllersWithDI();
 
-// Phase 5: Call onModuleInit() on controllers that implement it
+// Phase 5: Call onModuleInit() on controllers that implement it (all modules)
 await this.callControllersOnModuleInit();
 
 // Phase 6: After all modules ready, call onApplicationInit() (before HTTP server)
