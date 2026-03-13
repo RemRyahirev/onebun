@@ -134,4 +134,39 @@ describe('defaultExceptionFilter', () => {
 
     expect(response.headers.get('content-type')).toContain('application/json');
   });
+
+  it('returns actual HTTP status for HttpException', async () => {
+    const error = new HttpException(400, 'Validation failed');
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+    expect(response.status).toBe(400);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Validation failed');
+  });
+
+  it('returns 404 for HttpException with 404 status', async () => {
+    const error = new HttpException(404, 'Not found');
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+    expect(response.status).toBe(404);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Not found');
+  });
+});
+
+// ============================================================================
+// Validation error via HttpException (bug reproduction)
+// ============================================================================
+
+describe('Validation error via HttpException (bug reproduction)', () => {
+  it('returns 400 with JSON body for validation HttpException', async () => {
+    const error = new HttpException(400, 'Parameter body validation failed: name must be a string (was missing)');
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(400);
+    const body = await response.json() as { success: boolean; error: string; statusCode: number };
+    expect(body.success).toBe(false);
+    expect(body.error).toContain('validation failed');
+    expect(response.headers.get('content-type')).toContain('application/json');
+  });
 });
