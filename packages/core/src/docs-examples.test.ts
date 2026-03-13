@@ -9,6 +9,9 @@
  * - docs/api/services.md
  * - docs/api/validation.md
  * - docs/api/websocket.md
+ * - docs/api/guards.md
+ * - docs/api/exception-filters.md
+ * - docs/api/security.md
  * - docs/examples/basic-app.md
  * - docs/examples/crud-api.md
  * - docs/examples/websocket-chat.md
@@ -33,6 +36,7 @@ import type {
   BeforeApplicationDestroy,
   OnApplicationDestroy,
 } from './';
+import type { ExceptionFilter } from './exception-filters/exception-filters';
 import type {
   SseEvent,
   SseGenerator,
@@ -41,6 +45,7 @@ import type {
   MiddlewareClass,
   OnModuleConfigure,
 } from './types';
+import type { HttpExecutionContext } from './types';
 import type { ServerWebSocket } from 'bun';
 
 import {
@@ -125,6 +130,19 @@ import {
   DEFAULT_IDLE_TIMEOUT,
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
+  UseGuards,
+  AuthGuard,
+  RolesGuard,
+  createHttpGuard,
+  HttpExecutionContextImpl,
+  UseFilters,
+  createExceptionFilter,
+  defaultExceptionFilter,
+  HttpException,
+  CorsMiddleware,
+  RateLimitMiddleware,
+  MemoryRateLimitStore,
+  SecurityHeadersMiddleware,
 } from './';
 
 
@@ -1096,7 +1114,7 @@ describe('Middleware API Documentation Examples (docs/api/controllers.md)', () =
         }
       }
 
-      class CorsMiddleware extends BaseMiddleware {
+      class ExampleCorsMiddleware extends BaseMiddleware {
         async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>) {
           const response = await next();
           response.headers.set('Access-Control-Allow-Origin', '*');
@@ -1115,7 +1133,7 @@ describe('Middleware API Documentation Examples (docs/api/controllers.md)', () =
 
       const app = new OneBunApplication(AppModule, {
         port: 0,
-        middleware: [RequestIdMiddleware, CorsMiddleware],
+        middleware: [RequestIdMiddleware, ExampleCorsMiddleware],
       });
 
       expect(app).toBeDefined();
@@ -1854,6 +1872,67 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
       // Database initialized first, then cache saw database was ready
       expect(initOrder).toEqual(['database', 'cache:db-ready=true']);
+    });
+
+    /**
+     * @source docs/api/services.md#lifecycle-hooks
+     * onModuleInit is called for services in ALL modules across the entire
+     * import tree, not just the root module. Deeply nested modules are
+     * initialized in depth-first order.
+     */
+    it('should call onModuleInit for services across the entire module import tree', async () => {
+      const moduleMod = await import('./module/module');
+      const testUtils = await import('./testing/test-utils');
+      const effectLib = await import('effect');
+
+      const initLog: string[] = [];
+
+      @Service()
+      class AuthService extends BaseService implements OnModuleInit {
+        async onModuleInit(): Promise<void> {
+          initLog.push('auth');
+        }
+      }
+
+      @Module({
+        providers: [AuthService],
+      })
+      class AuthModule {}
+
+      @Service()
+      class UserService extends BaseService implements OnModuleInit {
+        async onModuleInit(): Promise<void> {
+          initLog.push('user');
+        }
+      }
+
+      @Module({
+        imports: [AuthModule],
+        providers: [UserService],
+      })
+      class UserModule {}
+
+      @Service()
+      class AppService extends BaseService implements OnModuleInit {
+        async onModuleInit(): Promise<void> {
+          initLog.push('app');
+        }
+      }
+
+      @Module({
+        imports: [UserModule],
+        providers: [AppService],
+      })
+      class AppModule {}
+
+      const mod = new moduleMod.OneBunModule(AppModule, testUtils.makeMockLoggerLayer());
+      await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
+
+      // All three modules' services should have onModuleInit called
+      expect(initLog).toContain('auth');
+      expect(initLog).toContain('user');
+      expect(initLog).toContain('app');
+      expect(initLog.length).toBe(3);
     });
   });
 });
@@ -5348,5 +5427,281 @@ describe('File Upload API Documentation (docs/api/controllers.md)', () => {
     }
 
     expect(FileController).toBeDefined();
+  });
+});
+
+// ============================================================================
+// docs/api/guards.md examples
+// ============================================================================
+
+describe('docs/api/guards.md', () => {
+  it('createHttpGuard — function-based guard returns a class constructor', () => {
+    const apiKeyGuardClass = createHttpGuard((ctx) => {
+      return ctx.getRequest().headers.get('x-api-key') !== null;
+    });
+
+    expect(apiKeyGuardClass).toBeDefined();
+    // createHttpGuard returns a constructor — instantiate to get the guard instance
+    const instance = new apiKeyGuardClass();
+    expect(typeof instance.canActivate).toBe('function');
+  });
+
+  it('AuthGuard blocks request without Bearer token', async () => {
+    const guard = new AuthGuard();
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    expect(await guard.canActivate(ctx)).toBe(false);
+  });
+
+  it('AuthGuard allows request with Bearer token', async () => {
+    const guard = new AuthGuard();
+    const req = new Request('http://localhost/', {
+      headers: { authorization: 'Bearer my-token' },
+    }) as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    expect(await guard.canActivate(ctx)).toBe(true);
+  });
+
+  it('RolesGuard checks x-user-roles header', async () => {
+    const guard = new RolesGuard(['admin']);
+    const h = new Headers();
+    h.set('x-user-roles', 'admin,user');
+    const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    expect(await guard.canActivate(ctx)).toBe(true);
+  });
+
+  it('RolesGuard rejects when role not present', async () => {
+    const guard = new RolesGuard(['admin']);
+    const h = new Headers();
+    h.set('x-user-roles', 'user');
+    const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    expect(await guard.canActivate(ctx)).toBe(false);
+  });
+
+  it('RolesGuard with custom role extractor', async () => {
+    const guard = new RolesGuard(
+      ['admin'],
+      (ctx) => {
+        const raw = ctx.getRequest().headers.get('x-custom-roles');
+
+        return raw ? raw.split(':') : [];
+      },
+    );
+    const h = new Headers();
+    h.set('x-custom-roles', 'admin:editor');
+    const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    expect(await guard.canActivate(ctx)).toBe(true);
+  });
+
+  it('@UseGuards applies metadata to controller', () => {
+    @UseGuards(AuthGuard)
+    @Controller('/protected')
+    class ProtectedController extends BaseController {
+      @Get('/')
+      index() {
+        return { message: 'authenticated' };
+      }
+    }
+
+    expect(ProtectedController).toBeDefined();
+  });
+});
+
+// ============================================================================
+// docs/api/exception-filters.md examples
+// ============================================================================
+
+describe('docs/api/exception-filters.md', () => {
+  it('createExceptionFilter — function-based filter', async () => {
+    const filter = createExceptionFilter((error, _ctx) => {
+      if (error instanceof Error) {
+        return new Response(JSON.stringify({ caught: error.message }), { status: 200 });
+      }
+      throw error;
+    });
+
+    expect(filter).toBeDefined();
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+    const res = await filter.catch(new Error('boom'), ctx);
+    const body = await res.json() as { caught: string };
+
+    expect(body.caught).toBe('boom');
+  });
+
+  it('class-based filter — re-throws unknown errors', async () => {
+    class TypedFilter implements ExceptionFilter {
+      catch(error: unknown, _ctx: HttpExecutionContext): Response {
+        if (error instanceof RangeError) {
+          return Response.json({ success: false, error: 'range' });
+        }
+        throw error;
+      }
+    }
+
+    const filter = new TypedFilter();
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+
+    const res = await filter.catch(new RangeError('out of range'), ctx);
+    const body = await res.json() as { success: boolean; error: string };
+
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('range');
+  });
+
+  it('defaultExceptionFilter handles OneBunBaseError subclass', async () => {
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+    const res = await defaultExceptionFilter.catch(new NotFoundError('not found'), ctx);
+    const body = await res.json() as { success: boolean };
+
+    expect(body.success).toBe(false);
+  });
+
+  it('async filter resolves correctly', async () => {
+    const asyncFilter = createExceptionFilter(async (error, _ctx) => {
+      await Promise.resolve(); // simulate async work
+
+      return new Response(JSON.stringify({ async: true, msg: String(error) }));
+    });
+
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+    const res = await asyncFilter.catch(new Error('err'), ctx);
+    const body = await res.json() as { async: boolean };
+
+    expect(body.async).toBe(true);
+  });
+
+  it('HttpException — carries statusCode', () => {
+    const ex = new HttpException(400, 'Bad request');
+
+    expect(ex).toBeInstanceOf(Error);
+    expect(ex.statusCode).toBe(400);
+    expect(ex.message).toBe('Bad request');
+  });
+
+  it('defaultExceptionFilter returns real HTTP status for HttpException', async () => {
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+    const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
+    const res = await defaultExceptionFilter.catch(
+      new HttpException(404, 'Not found'),
+      ctx,
+    );
+
+    expect(res.status).toBe(404);
+    const body = await res.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Not found');
+  });
+
+  it('@UseFilters applies metadata to controller', () => {
+    const filter = createExceptionFilter((err, _ctx) => {
+      throw err;
+    });
+
+    @UseFilters(filter)
+    @Controller('/filtered')
+    class FilteredController extends BaseController {
+      @Get('/')
+      index() {
+        return {};
+      }
+    }
+
+    expect(FilteredController).toBeDefined();
+  });
+});
+
+// ============================================================================
+// docs/api/security.md examples
+// ============================================================================
+
+describe('docs/api/security.md', () => {
+  it('CorsMiddleware — default wildcard origin', async () => {
+    const mw = new CorsMiddleware();
+    const req = new Request('http://localhost/', {
+      headers: { origin: 'https://example.com' },
+    }) as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
+  });
+
+  it('CorsMiddleware — preflight returns 204', async () => {
+    const mw = new CorsMiddleware();
+    const req = new Request('http://localhost/', {
+      method: 'OPTIONS',
+      headers: { origin: 'https://example.com' },
+    }) as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.status).toBe(204);
+  });
+
+  it('CorsMiddleware.configure() factory', async () => {
+    const configuredClass = CorsMiddleware.configure({ origin: 'https://trusted.com' });
+    const mw = new configuredClass();
+    const req = new Request('http://localhost/', {
+      headers: { origin: 'https://trusted.com' },
+    }) as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://trusted.com');
+  });
+
+  it('RateLimitMiddleware — allows below max', async () => {
+    const store = new MemoryRateLimitStore();
+    const mw = new RateLimitMiddleware({ max: 5, windowMs: 60_000, store });
+    const h1 = new Headers();
+    h1.set('x-forwarded-for', '1.2.3.4');
+    const req = new Request('http://localhost/', { headers: h1 }) as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.status).toBe(200);
+  });
+
+  it('RateLimitMiddleware — returns 429 when over limit', async () => {
+    const store = new MemoryRateLimitStore();
+    const mw = new RateLimitMiddleware({ max: 1, windowMs: 60_000, store });
+    const h2 = new Headers();
+    h2.set('x-forwarded-for', '9.9.9.9');
+    const req = new Request('http://localhost/', { headers: h2 }) as unknown as OneBunRequest;
+    await mw.use(req, async () => new Response('ok'));
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.status).toBe(429);
+  });
+
+  it('SecurityHeadersMiddleware — sets X-Frame-Options', async () => {
+    const mw = new SecurityHeadersMiddleware();
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.headers.get('X-Frame-Options')).toBe('SAMEORIGIN');
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff');
+  });
+
+  it('SecurityHeadersMiddleware — disabled header is absent', async () => {
+    const mw = new SecurityHeadersMiddleware({ strictTransportSecurity: false });
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
+
+    const res = await mw.use(req, async () => new Response('ok'));
+
+    expect(res.headers.get('Strict-Transport-Security')).toBeNull();
   });
 });
