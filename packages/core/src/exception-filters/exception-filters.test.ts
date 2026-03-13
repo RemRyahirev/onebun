@@ -11,6 +11,7 @@ import { NotFoundError, HttpStatusCode } from '@onebun/requests';
 import { HttpExecutionContextImpl } from '../http-guards/http-guards';
 
 import { createExceptionFilter, defaultExceptionFilter } from './exception-filters';
+import { HttpException } from './http-exception';
 
 // ============================================================================
 // Helpers
@@ -21,6 +22,26 @@ function makeContext(): HttpExecutionContextImpl {
 
   return new HttpExecutionContextImpl(req, 'testHandler', 'TestController');
 }
+
+// ============================================================================
+// HttpException
+// ============================================================================
+
+describe('HttpException', () => {
+  it('stores statusCode and message', () => {
+    const ex = new HttpException(400, 'Bad request');
+    expect(ex).toBeInstanceOf(Error);
+    expect(ex.statusCode).toBe(400);
+    expect(ex.message).toBe('Bad request');
+    expect(ex.name).toBe('HttpException');
+  });
+
+  it('works with instanceof check', () => {
+    const ex = new HttpException(404, 'Not found');
+    expect(ex instanceof HttpException).toBe(true);
+    expect(ex instanceof Error).toBe(true);
+  });
+});
 
 // ============================================================================
 // createExceptionFilter

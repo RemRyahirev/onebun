@@ -1,3 +1,7 @@
+import { HttpStatusCode } from '@onebun/requests';
+
+import { HttpException } from '../exception-filters/http-exception';
+
 /**
  * OneBunFile - Unified file wrapper for file uploads
  *
@@ -287,7 +291,8 @@ export function validateFile(
 
   // Validate file size
   if (options.maxSize !== undefined && file.size > options.maxSize) {
-    throw new Error(
+    throw new HttpException(
+      HttpStatusCode.BAD_REQUEST,
       `${prefix} exceeds maximum size. Got ${file.size} bytes, max is ${options.maxSize} bytes`,
     );
   }
@@ -296,7 +301,8 @@ export function validateFile(
   if (options.mimeTypes && options.mimeTypes.length > 0) {
     const matches = options.mimeTypes.some((pattern) => matchMimeType(file.type, pattern));
     if (!matches) {
-      throw new Error(
+      throw new HttpException(
+        HttpStatusCode.BAD_REQUEST,
         `${prefix} has invalid MIME type "${file.type}". Allowed: ${options.mimeTypes.join(', ')}`,
       );
     }

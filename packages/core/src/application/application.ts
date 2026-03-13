@@ -38,6 +38,7 @@ import {
   type SseDecoratorOptions,
 } from '../decorators/decorators';
 import { defaultExceptionFilter, type ExceptionFilter } from '../exception-filters/exception-filters';
+import { HttpException } from '../exception-filters/http-exception';
 import { OneBunFile, validateFile } from '../file/onebun-file';
 import { executeHttpGuards, HttpExecutionContextImpl } from '../http-guards/http-guards';
 import {
@@ -64,6 +65,9 @@ import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { hasQueueDecorators } from '../queue/decorators';
 import { SharedRedisProvider } from '../redis/shared-redis';
+import { CorsMiddleware } from '../security/cors-middleware';
+import { RateLimitMiddleware } from '../security/rate-limit-middleware';
+import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
 import {
   type ApplicationOptions,
   type HttpMethod,
@@ -500,6 +504,13 @@ export class OneBunApplication {
         );
       }
 
+      // Register test provider overrides (must happen before setup() so controllers receive mocks)
+      if (this.options._testProviders) {
+        for (const { tag, value } of this.options._testProviders) {
+          this.ensureModule().registerService?.(tag, value);
+        }
+      }
+
       // Start metrics collection if enabled
       if (this.metricsService && this.metricsService.startSystemMetricsCollection) {
         this.metricsService.startSystemMetricsCollection();
@@ -808,10 +819,31 @@ export class OneBunApplication {
         };
       }
 
+      // Build auto-configured security middleware from shorthand options.
+      // These are prepended/appended in a fixed order: CORS → RateLimit → [user] → Security.
+      const autoPrefix: Function[] = [];
+      const autoSuffix: Function[] = [];
+
+      if (this.options.cors) {
+        const corsOpts = this.options.cors === true ? {} : this.options.cors;
+        autoPrefix.push(CorsMiddleware.configure(corsOpts));
+      }
+
+      if (this.options.rateLimit) {
+        const rlOpts = this.options.rateLimit === true ? {} : this.options.rateLimit;
+        autoPrefix.push(RateLimitMiddleware.configure(rlOpts));
+      }
+
+      if (this.options.security) {
+        const secOpts = this.options.security === true ? {} : this.options.security;
+        autoSuffix.push(SecurityHeadersMiddleware.configure(secOpts));
+      }
+
       // Application-wide middleware — resolve class constructors via root module DI
-      const globalMiddlewareClasses = (this.options.middleware as Function[] | undefined) ?? [];
-      const globalMiddleware: Function[] = globalMiddlewareClasses.length > 0
-        ? (this.ensureModule().resolveMiddleware?.(globalMiddlewareClasses) ?? [])
+      const userMiddlewareClasses = (this.options.middleware as Function[] | undefined) ?? [];
+      const allGlobalClasses = [...autoPrefix, ...userMiddlewareClasses, ...autoSuffix];
+      const globalMiddleware: Function[] = allGlobalClasses.length > 0
+        ? (this.ensureModule().resolveMiddleware?.(allGlobalClasses) ?? [])
         : [];
 
       // Add routes from controllers
@@ -1264,224 +1296,226 @@ export class OneBunApplication {
         return result;
       }
 
+      try {
       // Prepare arguments array based on parameter metadata
-      const args: unknown[] = [];
+        const args: unknown[] = [];
 
-      // Sort params by index to ensure correct order
-      const sortedParams = [...(route.params || [])].sort((a, b) => a.index - b.index);
+        // Sort params by index to ensure correct order
+        const sortedParams = [...(route.params || [])].sort((a, b) => a.index - b.index);
 
-      // Pre-parse body for file upload params (FormData or JSON, cached for all params)
-      const needsFileData = sortedParams.some(
-        (p) =>
-          p.type === ParamType.FILE ||
+        // Pre-parse body for file upload params (FormData or JSON, cached for all params)
+        const needsFileData = sortedParams.some(
+          (p) =>
+            p.type === ParamType.FILE ||
           p.type === ParamType.FILES ||
           p.type === ParamType.FORM_FIELD,
-      );
+        );
 
-      // Validate that @Body and file decorators are not used on the same method
-      if (needsFileData) {
-        const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
-        if (hasBody) {
-          throw new Error(
-            'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
+        // Validate that @Body and file decorators are not used on the same method
+        if (needsFileData) {
+          const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
+          if (hasBody) {
+            throw new HttpException(
+              HttpStatusCode.BAD_REQUEST,
+              'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
             'Both consume the request body. Use file decorators for multipart/base64 uploads.',
-          );
-        }
-      }
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let formData: any = null;
-      let jsonBody: Record<string, unknown> | null = null;
-      let isMultipart = false;
-
-      if (needsFileData) {
-        const contentType = req.headers.get('content-type') || '';
-
-        if (contentType.includes('multipart/form-data')) {
-          isMultipart = true;
-          try {
-            formData = await req.formData();
-          } catch {
-            formData = null;
-          }
-        } else if (contentType.includes('application/json')) {
-          try {
-            const parsed = await req.json();
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-              jsonBody = parsed as Record<string, unknown>;
-            }
-          } catch {
-            jsonBody = null;
-          }
-        }
-      }
-
-      for (const param of sortedParams) {
-        switch (param.type) {
-          case ParamType.PATH:
-            // Use req.params from BunRequest (natively populated by Bun routes API)
-            args[param.index] = param.name
-              ? (req.params as Record<string, string>)[param.name]
-              : undefined;
-            break;
-
-          case ParamType.QUERY:
-            args[param.index] = param.name ? queryParams[param.name] : undefined;
-            break;
-
-          case ParamType.BODY:
-            try {
-              args[param.index] = await req.json();
-            } catch {
-              args[param.index] = undefined;
-            }
-            break;
-
-          case ParamType.HEADER:
-            args[param.index] = param.name ? req.headers.get(param.name) : undefined;
-            break;
-
-          case ParamType.COOKIE:
-            args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
-            break;
-
-          case ParamType.REQUEST:
-            args[param.index] = req;
-            break;
-
-          case ParamType.RESPONSE:
-            // For now, we don't support direct response manipulation
-            args[param.index] = undefined;
-            break;
-
-          case ParamType.FILE: {
-            let file: OneBunFile | undefined;
-
-            if (isMultipart && formData && param.name) {
-              const entry = formData.get(param.name);
-              if (entry instanceof File) {
-                file = new OneBunFile(entry);
-              }
-            } else if (jsonBody && param.name) {
-              file = extractFileFromJson(jsonBody, param.name);
-            }
-
-            if (file && param.fileOptions) {
-              validateFile(file, param.fileOptions, param.name);
-            }
-
-            args[param.index] = file;
-            break;
-          }
-
-          case ParamType.FILES: {
-            let files: OneBunFile[] = [];
-
-            if (isMultipart && formData) {
-              if (param.name) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                const entries: any[] = formData.getAll(param.name);
-                files = entries
-                  .filter((entry: unknown): entry is File => entry instanceof File)
-                  .map((f: File) => new OneBunFile(f));
-              } else {
-                // Get all files from all fields
-                for (const [, value] of formData.entries()) {
-                  if (value instanceof File) {
-                    files.push(new OneBunFile(value));
-                  }
-                }
-              }
-            } else if (jsonBody) {
-              if (param.name) {
-                const fieldValue = jsonBody[param.name];
-                if (Array.isArray(fieldValue)) {
-                  files = fieldValue
-                    .map((item) => extractFileFromJsonValue(item))
-                    .filter((f): f is OneBunFile => f !== undefined);
-                }
-              } else {
-                // Extract all file-like values from JSON
-                for (const [, value] of Object.entries(jsonBody)) {
-                  const file = extractFileFromJsonValue(value);
-                  if (file) {
-                    files.push(file);
-                  }
-                }
-              }
-            }
-
-            // Validate maxCount
-            if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
-              throw new Error(
-                `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
-              );
-            }
-
-            // Validate each file
-            if (param.fileOptions) {
-              for (const file of files) {
-                validateFile(file, param.fileOptions, param.name);
-              }
-            }
-
-            args[param.index] = files;
-            break;
-          }
-
-          case ParamType.FORM_FIELD: {
-            let value: string | undefined;
-
-            if (isMultipart && formData && param.name) {
-              const entry = formData.get(param.name);
-              if (typeof entry === 'string') {
-                value = entry;
-              }
-            } else if (jsonBody && param.name) {
-              const jsonValue = jsonBody[param.name];
-              if (jsonValue !== undefined && jsonValue !== null) {
-                value = String(jsonValue);
-              }
-            }
-
-            args[param.index] = value;
-            break;
-          }
-
-          default:
-            args[param.index] = undefined;
-        }
-
-        // Validate parameter if required
-        if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
-          throw new Error(`Required parameter ${param.name || param.index} is missing`);
-        }
-
-        // For FILES type, also check for empty array when required
-        if (
-          param.isRequired &&
-          param.type === ParamType.FILES &&
-          Array.isArray(args[param.index]) &&
-          (args[param.index] as unknown[]).length === 0
-        ) {
-          throw new Error(`Required parameter ${param.name || param.index} is missing`);
-        }
-
-        // Apply arktype schema validation if provided
-        if (param.schema && args[param.index] !== undefined) {
-          try {
-            args[param.index] = validateOrThrow(param.schema, args[param.index]);
-          } catch (error) {
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
-            throw new Error(
-              `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
             );
           }
         }
-      }
 
-      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let formData: any = null;
+        let jsonBody: Record<string, unknown> | null = null;
+        let isMultipart = false;
+
+        if (needsFileData) {
+          const contentType = req.headers.get('content-type') || '';
+
+          if (contentType.includes('multipart/form-data')) {
+            isMultipart = true;
+            try {
+              formData = await req.formData();
+            } catch {
+              formData = null;
+            }
+          } else if (contentType.includes('application/json')) {
+            try {
+              const parsed = await req.json();
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                jsonBody = parsed as Record<string, unknown>;
+              }
+            } catch {
+              jsonBody = null;
+            }
+          }
+        }
+
+        for (const param of sortedParams) {
+          switch (param.type) {
+            case ParamType.PATH:
+            // Use req.params from BunRequest (natively populated by Bun routes API)
+              args[param.index] = param.name
+                ? (req.params as Record<string, string>)[param.name]
+                : undefined;
+              break;
+
+            case ParamType.QUERY:
+              args[param.index] = param.name ? queryParams[param.name] : undefined;
+              break;
+
+            case ParamType.BODY:
+              try {
+                args[param.index] = await req.json();
+              } catch {
+                args[param.index] = undefined;
+              }
+              break;
+
+            case ParamType.HEADER:
+              args[param.index] = param.name ? req.headers.get(param.name) : undefined;
+              break;
+
+            case ParamType.COOKIE:
+              args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
+              break;
+
+            case ParamType.REQUEST:
+              args[param.index] = req;
+              break;
+
+            case ParamType.RESPONSE:
+            // For now, we don't support direct response manipulation
+              args[param.index] = undefined;
+              break;
+
+            case ParamType.FILE: {
+              let file: OneBunFile | undefined;
+
+              if (isMultipart && formData && param.name) {
+                const entry = formData.get(param.name);
+                if (entry instanceof File) {
+                  file = new OneBunFile(entry);
+                }
+              } else if (jsonBody && param.name) {
+                file = extractFileFromJson(jsonBody, param.name);
+              }
+
+              if (file && param.fileOptions) {
+                validateFile(file, param.fileOptions, param.name);
+              }
+
+              args[param.index] = file;
+              break;
+            }
+
+            case ParamType.FILES: {
+              let files: OneBunFile[] = [];
+
+              if (isMultipart && formData) {
+                if (param.name) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const entries: any[] = formData.getAll(param.name);
+                  files = entries
+                    .filter((entry: unknown): entry is File => entry instanceof File)
+                    .map((f: File) => new OneBunFile(f));
+                } else {
+                // Get all files from all fields
+                  for (const [, value] of formData.entries()) {
+                    if (value instanceof File) {
+                      files.push(new OneBunFile(value));
+                    }
+                  }
+                }
+              } else if (jsonBody) {
+                if (param.name) {
+                  const fieldValue = jsonBody[param.name];
+                  if (Array.isArray(fieldValue)) {
+                    files = fieldValue
+                      .map((item) => extractFileFromJsonValue(item))
+                      .filter((f): f is OneBunFile => f !== undefined);
+                  }
+                } else {
+                // Extract all file-like values from JSON
+                  for (const [, value] of Object.entries(jsonBody)) {
+                    const file = extractFileFromJsonValue(value);
+                    if (file) {
+                      files.push(file);
+                    }
+                  }
+                }
+              }
+
+              // Validate maxCount
+              if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
+                throw new HttpException(
+                  HttpStatusCode.BAD_REQUEST,
+                  `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
+                );
+              }
+
+              // Validate each file
+              if (param.fileOptions) {
+                for (const file of files) {
+                  validateFile(file, param.fileOptions, param.name);
+                }
+              }
+
+              args[param.index] = files;
+              break;
+            }
+
+            case ParamType.FORM_FIELD: {
+              let value: string | undefined;
+
+              if (isMultipart && formData && param.name) {
+                const entry = formData.get(param.name);
+                if (typeof entry === 'string') {
+                  value = entry;
+                }
+              } else if (jsonBody && param.name) {
+                const jsonValue = jsonBody[param.name];
+                if (jsonValue !== undefined && jsonValue !== null) {
+                  value = String(jsonValue);
+                }
+              }
+
+              args[param.index] = value;
+              break;
+            }
+
+            default:
+              args[param.index] = undefined;
+          }
+
+          // Validate parameter if required
+          if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
+            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+          }
+
+          // For FILES type, also check for empty array when required
+          if (
+            param.isRequired &&
+          param.type === ParamType.FILES &&
+          Array.isArray(args[param.index]) &&
+          (args[param.index] as unknown[]).length === 0
+          ) {
+            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+          }
+
+          // Apply arktype schema validation if provided
+          if (param.schema && args[param.index] !== undefined) {
+            try {
+              args[param.index] = validateOrThrow(param.schema, args[param.index]);
+            } catch (error) {
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              throw new HttpException(
+                HttpStatusCode.BAD_REQUEST,
+                `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
+              );
+            }
+          }
+        }
         // Call handler with injected parameters
         const result = await route.handler(...args);
 
@@ -1954,11 +1988,30 @@ export class OneBunApplication {
   }
 
   /**
+   * Get the actual port the server is listening on.
+   * When `port: 0` is passed, the OS assigns a free port — use this method
+   * to obtain the real port after `start()`.
+   * @returns Actual listening port, or the configured port if not yet started
+   */
+  getPort(): number {
+    return this.server?.port ?? this.options.port ?? 3000;
+  }
+
+  /**
+   * Get the underlying Bun server instance.
+   * Use this to dispatch requests directly (bypassing the global `fetch`) e.g. in tests.
+   * @internal
+   */
+  getServer(): ReturnType<typeof Bun.serve> | null {
+    return this.server;
+  }
+
+  /**
    * Get the HTTP URL where the application is listening
    * @returns The HTTP URL
    */
   getHttpUrl(): string {
-    return `http://${this.options.host}:${this.options.port}`;
+    return `http://${this.options.host ?? '0.0.0.0'}:${this.getPort()}`;
   }
 
   /**

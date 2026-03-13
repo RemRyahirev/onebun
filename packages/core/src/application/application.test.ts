@@ -1842,7 +1842,7 @@ describe('OneBunApplication', () => {
       expect(body.result.hasOptional).toBe(false);
     });
 
-    test('should return 500 when required query parameter is missing', async () => {
+    test('should return 400 when required query parameter is missing', async () => {
       @Controller('/api')
       class ApiController extends BaseController {
         @Get('/required-query')
@@ -1869,7 +1869,7 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(400);
     });
 
     test('should pass validation with required query parameter present', async () => {
@@ -1966,7 +1966,7 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(400);
     });
 
     test('should validate body with arktype schema', async () => {
@@ -2045,7 +2045,7 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(400);
     });
 
     test('should handle metrics endpoint', async () => {
@@ -3449,7 +3449,7 @@ describe('OneBunApplication', () => {
       expect(body.result.isUndefined).toBe(true);
     });
 
-    test('should return 500 when required cookie is missing', async () => {
+    test('should return 400 when required cookie is missing', async () => {
       @Controller('/api')
       class ApiController extends BaseController {
         @Get('/auth')
@@ -3474,7 +3474,7 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(400);
     });
 
     test('should extract multiple cookies with @Cookie decorator', async () => {
