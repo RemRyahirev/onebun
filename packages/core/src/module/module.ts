@@ -73,6 +73,16 @@ export function clearGlobalServicesRegistry(): void {
 }
 
 /**
+ * Register a service instance in the global services registry so it is available
+ * in all modules (including child modules) via PHASE 0 of module initialization.
+ * Must be called BEFORE creating the root module.
+ * @internal
+ */
+export function registerGlobalService<T>(tag: Context.Tag<unknown, T>, instance: T): void {
+  globalServicesRegistry.set(tag as Context.Tag<unknown, unknown>, instance);
+}
+
+/**
  * Get all global services (useful for debugging)
  * @internal
  */

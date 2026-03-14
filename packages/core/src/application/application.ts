@@ -53,7 +53,7 @@ import {
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
 } from '../module/controller';
-import { OneBunModule } from '../module/module';
+import { OneBunModule, registerGlobalService } from '../module/module';
 import {
   QueueService,
   QueueServiceProxy,
@@ -490,19 +490,19 @@ export class OneBunApplication {
         this.logger.info('Application configuration initialized');
       }
 
-      // Create the root module AFTER config is initialized,
-      // so services can safely use this.config.get() in their constructors
-      this.rootModule = OneBunModule.create(this.moduleClass, this.loggerLayer, this.config);
-
-      // Register QueueService proxy in DI so controllers/providers/middleware can inject QueueService.
+      // Register QueueService proxy in global registry BEFORE creating the root module,
+      // so all modules (including child modules) pick it up via PHASE 0 of initModule().
       // After initializeQueue(), setDelegate(real) is called when queue is enabled.
       this.queueServiceProxy = new QueueServiceProxy();
-      if (this.ensureModule().registerService) {
-        this.ensureModule().registerService!(
-          QueueServiceTag as Context.Tag<unknown, QueueService>,
-          this.queueServiceProxy as unknown as QueueService,
-        );
-      }
+      registerGlobalService(
+        QueueServiceTag as Context.Tag<unknown, QueueService>,
+        this.queueServiceProxy as unknown as QueueService,
+      );
+
+      // Create the root module AFTER config is initialized and QueueService proxy is registered,
+      // so services can safely use this.config.get() in their constructors
+      // and inject QueueService in any module depth.
+      this.rootModule = OneBunModule.create(this.moduleClass, this.loggerLayer, this.config);
 
       // Register test provider overrides (must happen before setup() so controllers receive mocks)
       if (this.options._testProviders) {

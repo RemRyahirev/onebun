@@ -49,16 +49,13 @@ bun add @onebun/core
 ## Quick Start
 
 ```typescript
-import { Effect, Layer } from 'effect';
-import { OneBunApplication, Controller, Get, Module } from '@onebun/core';
+import { OneBunApplication, OneBunResponse, Controller, Get, Module } from '@onebun/core';
 
 @Controller('api')
 class AppController {
   @Get('hello')
-  async hello(): Promise<Response> {
-    return new Response(JSON.stringify({ message: 'Hello, OneBun!' }), {
-      headers: { 'Content-Type': 'application/json' }
-    });
+  async hello(): Promise<OneBunResponse> {
+    return this.success({ message: 'Hello, OneBun!' });
   }
 }
 
@@ -68,7 +65,7 @@ class AppController {
 class AppModule {}
 
 const app = new OneBunApplication(AppModule);
-await Effect.runPromise(app.start());
+await app.start();
 ```
 
 ## Documentation

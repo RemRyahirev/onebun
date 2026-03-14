@@ -435,7 +435,7 @@ describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
     class NatsJetStreamAdapter implements QueueAdapter {
       readonly name = 'nats-jetstream';
       readonly type = 'jetstream';
-      constructor(private opts: { servers: string; stream?: string }) {}
+      constructor(private opts: { servers: string; streams?: Array<{ name: string; subjects: string[] }> }) {}
       async connect(): Promise<void> {}
       async disconnect(): Promise<void> {}
       isConnected(): boolean {
@@ -473,7 +473,7 @@ describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
 
     const adapter = new NatsJetStreamAdapter({
       servers: 'nats://localhost:4222',
-      stream: 'EVENTS',
+      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
     });
     await adapter.connect();
     expect(adapter.name).toBe('nats-jetstream');

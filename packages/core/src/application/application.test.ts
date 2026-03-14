@@ -38,6 +38,7 @@ import {
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
+import { clearGlobalServicesRegistry } from '../module/module';
 import { Service } from '../module/service';
 import { QueueService, QUEUE_NOT_ENABLED_ERROR_MESSAGE } from '../queue';
 import { Subscribe } from '../queue/decorators';
@@ -157,6 +158,7 @@ describe('OneBunApplication', () => {
 
   afterEach(() => {
     register.clear();
+    clearGlobalServicesRegistry();
   });
 
   describe('Constructor and basic initialization', () => {
@@ -4033,6 +4035,50 @@ describe('OneBunApplication', () => {
       await expect(controller!.publishTest('e', {})).rejects.toThrow(
         QUEUE_NOT_ENABLED_ERROR_MESSAGE,
       );
+
+      await app.stop();
+    });
+
+    test('QueueService is injectable in controllers of child modules', async () => {
+      @Controller('/child-queue')
+      class ChildQueueController extends BaseController {
+        constructor(private queueService: QueueService) {
+          super();
+        }
+
+        publishTest(pattern: string, data: unknown) {
+          return this.queueService.publish(pattern, data);
+        }
+      }
+
+      @Controller('/child-sub')
+      class ChildSubscribeController extends BaseController {
+        @Subscribe('child.test')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({
+        controllers: [ChildQueueController, ChildSubscribeController],
+      })
+      class ChildQueueModule {}
+
+      @Module({
+        imports: [ChildQueueModule],
+      })
+      class ParentQueueModule {}
+
+      const app = createTestApp(ParentQueueModule, {
+        port: 0,
+        queue: { enabled: true, adapter: 'memory' },
+      });
+      await app.start();
+
+      const rootModule = (app as unknown as { rootModule: ModuleInstance }).rootModule;
+      const controller = rootModule.getControllerInstance?.(ChildQueueController) as
+        | ChildQueueController
+        | undefined;
+      expect(controller).toBeDefined();
+      await expect(controller!.publishTest('child.test', { ok: true })).resolves.toBeDefined();
 
       await app.stop();
     });
