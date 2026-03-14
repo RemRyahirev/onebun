@@ -9,10 +9,8 @@ import {
   beforeAll,
   afterAll,
 } from 'bun:test';
-import { Effect } from 'effect';
 
-import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
-import { LoggerService } from '@onebun/logger';
+import { createTestService } from '@onebun/core';
 
 import { DrizzleModule } from '../src/drizzle.module';
 import { DrizzleService } from '../src/drizzle.service';
@@ -61,16 +59,8 @@ describe('DrizzleService', () => {
     delete process.env.DB_TYPE;
 
     // Create service and initialize with mock logger
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-    // Create service and initialize via initializeService method
-    service = new DrizzleService();
-    service.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
   });
 
   afterEach(async () => {
@@ -137,15 +127,7 @@ describe('DrizzleService', () => {
     });
 
     test('should throw error if database not initialized', () => {
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const newService = new DrizzleService();
-      newService.initializeService(logger, createMockConfig());
+      const { instance: newService } = createTestService(DrizzleService);
       expect(() => newService.getDatabase()).toThrow('Database not initialized');
     });
 
@@ -199,15 +181,7 @@ describe('DrizzleService', () => {
     });
 
     test('should return null connection options when not initialized', () => {
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const newService = new DrizzleService();
-      newService.initializeService(logger, createMockConfig());
+      const { instance: newService } = createTestService(DrizzleService);
       const options = newService.getConnectionOptions();
       expect(options).toBeNull();
     });
@@ -238,15 +212,7 @@ describe('DrizzleService', () => {
       delete process.env.DB_TYPE;
 
       try {
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const newService = new DrizzleService();
-        newService.initializeService(logger, createMockConfig());
+        const { instance: newService } = createTestService(DrizzleService);
         // Call onModuleInit to trigger auto-init attempt
         await newService.onModuleInit();
         // Verify database is not initialized (no DB_URL set)
@@ -321,15 +287,7 @@ describe('DrizzleService', () => {
       delete process.env.DB_TYPE;
 
       try {
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const newService = new DrizzleService();
-        newService.initializeService(logger, createMockConfig());
+        const { instance: newService } = createTestService(DrizzleService);
         // Call onModuleInit to trigger auto-init attempt
         await newService.onModuleInit();
         // Verify database is not initialized (no DB_URL set)
@@ -361,15 +319,7 @@ describe('DrizzleService', () => {
       delete process.env.DB_TYPE;
 
       try {
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const newService = new DrizzleService();
-        newService.initializeService(logger, createMockConfig());
+        const { instance: newService } = createTestService(DrizzleService);
         // onModuleInit should complete without error even if no DB_URL is set
         await newService.onModuleInit();
         // But database should not be initialized
@@ -407,15 +357,7 @@ describe('DrizzleService', () => {
         });
 
         // Create service - should auto-initialize from module options
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const autoService = new DrizzleService();
-        autoService.initializeService(logger, createMockConfig());
+        const { instance: autoService } = createTestService(DrizzleService);
 
         // Call onModuleInit to trigger auto-initialization (as the framework does)
         await autoService.onModuleInit();
@@ -440,15 +382,7 @@ describe('DrizzleService', () => {
           },
         });
 
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const autoService = new DrizzleService();
-        autoService.initializeService(logger, createMockConfig());
+        const { instance: autoService } = createTestService(DrizzleService);
         await autoService.onModuleInit();
 
         // Should be able to use the database immediately
@@ -467,15 +401,7 @@ describe('DrizzleService', () => {
           },
         });
 
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const autoService = new DrizzleService();
-        autoService.initializeService(logger, createMockConfig());
+        const { instance: autoService } = createTestService(DrizzleService);
         await autoService.onModuleInit();
 
         expect(autoService.isSQLite()).toBe(true);
@@ -500,15 +426,7 @@ describe('DrizzleService', () => {
         process.env.DB_AUTO_MIGRATE = 'false'; // Disable auto-migrate to avoid migration folder errors
 
         try {
-          const loggerLayer = makeMockLoggerLayer();
-          const logger = Effect.runSync(
-            Effect.provide(
-              Effect.map(LoggerService, (l) => l),
-              loggerLayer,
-            ),
-          );
-          const envService = new DrizzleService();
-          envService.initializeService(logger, createMockConfig());
+          const { instance: envService } = createTestService(DrizzleService);
           await envService.onModuleInit();
 
           // Database should be initialized from env vars
@@ -538,15 +456,7 @@ describe('DrizzleService', () => {
         process.env.DB_AUTO_MIGRATE = 'false'; // Disable auto-migrate
 
         try {
-          const loggerLayer = makeMockLoggerLayer();
-          const logger = Effect.runSync(
-            Effect.provide(
-              Effect.map(LoggerService, (l) => l),
-              loggerLayer,
-            ),
-          );
-          const envService = new DrizzleService();
-          envService.initializeService(logger, createMockConfig());
+          const { instance: envService } = createTestService(DrizzleService);
           await envService.onModuleInit();
 
           expect(envService.isSQLite()).toBe(true);
@@ -565,15 +475,7 @@ describe('DrizzleService', () => {
         delete process.env.DB_URL;
         delete process.env.DB_TYPE;
 
-        const loggerLayer = makeMockLoggerLayer();
-        const logger = Effect.runSync(
-          Effect.provide(
-            Effect.map(LoggerService, (l) => l),
-            loggerLayer,
-          ),
-        );
-        const noEnvService = new DrizzleService();
-        noEnvService.initializeService(logger, createMockConfig());
+        const { instance: noEnvService } = createTestService(DrizzleService);
         await noEnvService.onModuleInit();
 
         // Database should NOT be initialized
@@ -585,15 +487,7 @@ describe('DrizzleService', () => {
         process.env.DB_URL = '';
 
         try {
-          const loggerLayer = makeMockLoggerLayer();
-          const logger = Effect.runSync(
-            Effect.provide(
-              Effect.map(LoggerService, (l) => l),
-              loggerLayer,
-            ),
-          );
-          const emptyEnvService = new DrizzleService();
-          emptyEnvService.initializeService(logger, createMockConfig());
+          const { instance: emptyEnvService } = createTestService(DrizzleService);
           await emptyEnvService.onModuleInit();
 
           // Database should NOT be initialized with empty string
@@ -618,15 +512,7 @@ describe('DrizzleService', () => {
         });
 
         try {
-          const loggerLayer = makeMockLoggerLayer();
-          const logger = Effect.runSync(
-            Effect.provide(
-              Effect.map(LoggerService, (l) => l),
-              loggerLayer,
-            ),
-          );
-          const priorityService = new DrizzleService();
-          priorityService.initializeService(logger, createMockConfig());
+          const { instance: priorityService } = createTestService(DrizzleService);
           await priorityService.onModuleInit();
 
           // Module options should win - url should be :memory: not ./env-database.db
@@ -674,15 +560,7 @@ describe('DrizzleService', () => {
         migrationsFolder: testMigrationsFolder,
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const autoMigrateService = new DrizzleService();
-      autoMigrateService.initializeService(logger, createMockConfig());
+      const { instance: autoMigrateService } = createTestService(DrizzleService);
       await autoMigrateService.onModuleInit();
 
       // Verify migrations were applied - test_users table should exist
@@ -708,15 +586,7 @@ describe('DrizzleService', () => {
         migrationsFolder: testMigrationsFolder,
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const noMigrateService = new DrizzleService();
-      noMigrateService.initializeService(logger, createMockConfig());
+      const { instance: noMigrateService } = createTestService(DrizzleService);
       await noMigrateService.onModuleInit();
 
       // Verify migrations were NOT applied - test_users table should NOT exist
@@ -742,15 +612,7 @@ describe('DrizzleService', () => {
         migrationsFolder: testMigrationsFolder,
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const defaultService = new DrizzleService();
-      defaultService.initializeService(logger, createMockConfig());
+      const { instance: defaultService } = createTestService(DrizzleService);
       await defaultService.onModuleInit();
 
       // Verify migrations WERE applied (default is now true)
@@ -775,15 +637,7 @@ describe('DrizzleService', () => {
         migrationsFolder: testMigrationsFolder, // Custom folder
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const customFolderService = new DrizzleService();
-      customFolderService.initializeService(logger, createMockConfig());
+      const { instance: customFolderService } = createTestService(DrizzleService);
       await customFolderService.onModuleInit();
 
       // Verify migrations from custom folder were applied
@@ -808,15 +662,7 @@ describe('DrizzleService', () => {
         migrationsFolder: testMigrationsFolder,
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const trackingService = new DrizzleService();
-      trackingService.initializeService(logger, createMockConfig());
+      const { instance: trackingService } = createTestService(DrizzleService);
       await trackingService.onModuleInit();
 
       // Verify __drizzle_migrations table was created and has entries
@@ -842,15 +688,7 @@ describe('DrizzleService', () => {
         migrationsFolder: './non-existent-migrations-folder',
       });
 
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l),
-          loggerLayer,
-        ),
-      );
-      const missingFolderService = new DrizzleService();
-      missingFolderService.initializeService(logger, createMockConfig());
+      const { instance: missingFolderService } = createTestService(DrizzleService);
 
       // Should not throw, but auto-init might fail gracefully
       await missingFolderService.onModuleInit();

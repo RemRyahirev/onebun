@@ -14,15 +14,12 @@ import {
   text,
   integer,
 } from 'drizzle-orm/sqlite-core';
-import { Effect } from 'effect';
 
 import {
-  makeMockLoggerLayer,
-  createMockConfig,
+  createTestService,
   BaseService,
   Service,
 } from '@onebun/core';
-import { LoggerService } from '@onebun/logger';
 
 import { DrizzleModule } from '../src/drizzle.module';
 import { DrizzleService } from '../src/drizzle.service';
@@ -89,16 +86,8 @@ describe('DrizzleService DI injection', () => {
     });
 
     // Create and initialize DrizzleService
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
-    drizzleService = new DrizzleService();
-    drizzleService.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    drizzleService = instance;
     await drizzleService.onModuleInit();
 
     // Create test table manually
@@ -123,17 +112,8 @@ describe('DrizzleService DI injection', () => {
   });
 
   test('client service receives DrizzleService via constructor injection', async () => {
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
     // Simulate DI by passing drizzleService to constructor
-    const userService = new UserService(drizzleService);
-    userService.initializeService(logger, createMockConfig());
+    const { instance: userService } = createTestService(UserService, { deps: [drizzleService] });
 
     // Verify service can use injected DrizzleService
     expect(userService).toBeInstanceOf(UserService);
@@ -143,16 +123,7 @@ describe('DrizzleService DI injection', () => {
   });
 
   test('service can perform CRUD operations through injected DrizzleService', async () => {
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
-    const userService = new UserService(drizzleService);
-    userService.initializeService(logger, createMockConfig());
+    const { instance: userService } = createTestService(UserService, { deps: [drizzleService] });
 
     // Create
     const newUser = await userService.createUser('John Doe', 'john@example.com');
@@ -177,19 +148,9 @@ describe('DrizzleService DI injection', () => {
   });
 
   test('multiple services can inject same DrizzleService instance (singleton)', async () => {
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
     // Create two service instances with the same DrizzleService
-    const userService1 = new UserService(drizzleService);
-    const userService2 = new AnotherUserService(drizzleService);
-    userService1.initializeService(logger, createMockConfig());
-    userService2.initializeService(logger, createMockConfig());
+    const { instance: userService1 } = createTestService(UserService, { deps: [drizzleService] });
+    const { instance: userService2 } = createTestService(AnotherUserService, { deps: [drizzleService] });
 
     // Both should reference the same DrizzleService instance
     const drizzleFromService2 = userService2.getDrizzleServiceInstance();
@@ -218,16 +179,7 @@ describe('DrizzleService DI injection', () => {
       },
     });
 
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
-    const newDrizzleService = new DrizzleService();
-    newDrizzleService.initializeService(logger, createMockConfig());
+    const { instance: newDrizzleService } = createTestService(DrizzleService);
     await newDrizzleService.onModuleInit();
 
     // Module options should be used
@@ -243,16 +195,7 @@ describe('DrizzleService DI injection', () => {
   });
 
   test('injected DrizzleService database is ready immediately after onModuleInit', async () => {
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-
-    const userService = new UserService(drizzleService);
-    userService.initializeService(logger, createMockConfig());
+    createTestService(UserService, { deps: [drizzleService] });
 
     // Should be able to use DB immediately (no additional wait needed)
     const db = drizzleService.getDatabase();

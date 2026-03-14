@@ -10,10 +10,8 @@ import {
   expect,
   test,
 } from 'bun:test';
-import { Effect } from 'effect';
 
-import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
-import { LoggerService } from '@onebun/logger';
+import { createTestService } from '@onebun/core';
 
 import { DrizzleService, DatabaseType } from '../src/index';
 
@@ -32,15 +30,8 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
 
   beforeAll(async () => {
     // Initialize DrizzleService
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-    drizzleService = new DrizzleService();
-    drizzleService.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    drizzleService = instance;
     
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,

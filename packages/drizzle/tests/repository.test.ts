@@ -5,10 +5,8 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
-import { Effect } from 'effect';
 
-import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
-import { LoggerService } from '@onebun/logger';
+import { createTestService } from '@onebun/core';
 
 import { DrizzleService } from '../src/drizzle.service';
 import { BaseRepository } from '../src/repository';
@@ -38,16 +36,9 @@ describe('BaseRepository', () => {
     // Clear DB env vars to prevent auto-initialization
     delete process.env.DB_URL;
     delete process.env.DB_TYPE;
-    
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-    drizzleService = new DrizzleService();
-    drizzleService.initializeService(logger, createMockConfig());
+
+    const { instance } = createTestService(DrizzleService);
+    drizzleService = instance;
     await drizzleService.initialize({
       type: DatabaseType.SQLITE,
       options: {

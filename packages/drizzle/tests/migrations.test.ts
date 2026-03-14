@@ -11,8 +11,7 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
-import { LoggerService } from '@onebun/logger';
+import { createTestService, createMockConfig } from '@onebun/core';
 
 import { DrizzleService } from '../src/drizzle.service';
 import { generateMigrations, pushSchema } from '../src/migrations';
@@ -101,15 +100,8 @@ describe('runMigrations integration tests', () => {
     delete process.env.DB_TYPE;
 
     // Create service and initialize with mock logger
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-    service = new DrizzleService();
-    service.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
   });
 
   afterEach(async () => {
@@ -239,15 +231,7 @@ describe('runMigrations integration tests', () => {
 
   test('should throw error when database not initialized', async () => {
     // Create fresh service without initialization
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l),
-        loggerLayer,
-      ),
-    );
-    const uninitializedService = new DrizzleService();
-    uninitializedService.initializeService(logger, createMockConfig());
+    const { instance: uninitializedService } = createTestService(DrizzleService);
     // Call onModuleInit but there's no config, so service won't be initialized
     await uninitializedService.onModuleInit();
 

@@ -569,9 +569,7 @@ describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { Effect } = require('effect');
-  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
-  const { LoggerService } = require('@onebun/logger');
+  const { createTestService } = require('@onebun/core');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema
@@ -591,16 +589,8 @@ describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
     DrizzleModule.clearOptions();
 
     // Create service with mock logger
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l: unknown) => l),
-        loggerLayer,
-      ),
-    );
-
-    service = new DrizzleService();
-    service.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
 
     // Initialize with in-memory SQLite
     await service.initialize({
@@ -793,9 +783,7 @@ describe('DrizzleService returning() Type Inference', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { Effect } = require('effect');
-  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
-  const { LoggerService } = require('@onebun/logger');
+  const { createTestService } = require('@onebun/core');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema with multiple columns to ensure proper type inference
@@ -816,16 +804,8 @@ describe('DrizzleService returning() Type Inference', () => {
   beforeEach(async () => {
     DrizzleModule.clearOptions();
 
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l: unknown) => l),
-        loggerLayer,
-      ),
-    );
-
-    service = new DrizzleService();
-    service.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
 
     await service.initialize({
       type: DatabaseType.SQLITE,
@@ -1094,9 +1074,7 @@ describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { Effect } = require('effect');
-  const { makeMockLoggerLayer, createMockConfig } = require('@onebun/core');
-  const { LoggerService } = require('@onebun/logger');
+  const { createTestService } = require('@onebun/core');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema
@@ -1113,17 +1091,9 @@ describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
   beforeEach(async () => {
     DrizzleModule.clearOptions();
 
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l: unknown) => l),
-        loggerLayer,
-      ),
-    );
-
     // Create DrizzleService WITHOUT generic parameter
-    service = new DrizzleService();
-    service.initializeService(logger, createMockConfig());
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
 
     await service.initialize({
       type: DatabaseType.SQLITE,
