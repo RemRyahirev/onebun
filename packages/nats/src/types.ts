@@ -35,32 +35,36 @@ export interface NatsConnectionOptions {
 }
 
 /**
+ * Stream definition for JetStream multi-stream configuration
+ */
+export interface StreamDefinition {
+  /** Stream name */
+  name: string;
+  /** Subjects stored in this stream */
+  subjects: string[];
+  /** Retention policy */
+  retention?: 'limits' | 'interest' | 'workqueue';
+  /** Maximum messages */
+  maxMsgs?: number;
+  /** Maximum bytes */
+  maxBytes?: number;
+  /** Maximum age in nanoseconds */
+  maxAge?: number;
+  /** Storage type */
+  storage?: 'file' | 'memory';
+  /** Number of replicas */
+  replicas?: number;
+}
+
+/**
  * JetStream adapter options
  */
 export interface JetStreamAdapterOptions extends NatsConnectionOptions {
-  /** Stream name to use */
-  stream: string;
+  /** Stream definitions — all are created/ensured during connect() */
+  streams: StreamDefinition[];
 
-  /** Whether to create the stream if it doesn't exist */
-  createStream?: boolean;
-
-  /** Stream configuration (if creating) */
-  streamConfig?: {
-    /** Subjects to store in the stream */
-    subjects?: string[];
-    /** Retention policy */
-    retention?: 'limits' | 'interest' | 'workqueue';
-    /** Maximum messages */
-    maxMsgs?: number;
-    /** Maximum bytes */
-    maxBytes?: number;
-    /** Maximum age in nanoseconds */
-    maxAge?: number;
-    /** Storage type */
-    storage?: 'file' | 'memory';
-    /** Number of replicas */
-    replicas?: number;
-  };
+  /** Default stream config merged into every stream definition */
+  streamDefaults?: Omit<StreamDefinition, 'name' | 'subjects'>;
 
   /** Default consumer configuration */
   consumerConfig?: {

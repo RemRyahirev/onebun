@@ -9,6 +9,7 @@ export type {
   NatsConnectionOptions,
   NatsAdapterOptions,
   JetStreamAdapterOptions,
+  StreamDefinition,
 } from './types';
 
 // NATS Client
