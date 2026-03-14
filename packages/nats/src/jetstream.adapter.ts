@@ -5,7 +5,7 @@
  * Provides reliable message delivery with persistence and acknowledgments.
  */
 
-import type { JetStreamAdapterOptions } from './types';
+import type { JetStreamAdapterOptions, StreamDefinition } from './types';
 
 import type {
   QueueAdapter,
@@ -43,6 +43,14 @@ async function getJetStreamModule() {
   }
 
   return jetstreamModule;
+}
+
+// ============================================================================
+// Resolved Stream Type
+// ============================================================================
+
+interface ResolvedStream extends StreamDefinition {
+  natsSubjects: string[];
 }
 
 // ============================================================================
@@ -175,18 +183,15 @@ class JetStreamSubscription implements Subscription {
  * ```typescript
  * const adapter = new JetStreamQueueAdapter({
  *   servers: 'nats://localhost:4222',
- *   stream: 'EVENTS',
- *   createStream: true,
- *   streamConfig: {
- *     subjects: ['events.>'],
- *     retention: 'limits',
- *     maxMsgs: 1000000,
- *   },
+ *   streams: [
+ *     { name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000 },
+ *     { name: 'COMMANDS', subjects: ['commands.>'] },
+ *   ],
  * });
  * await adapter.connect();
  *
  * await adapter.subscribe('events.*', async (message) => {
- *   console.log('Received:', message.data);
+ *   // Automatically routed to EVENTS stream
  *   await message.ack();
  * }, { ackMode: 'manual', group: 'event-processor' });
  *
@@ -198,6 +203,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   readonly type: QueueAdapterType = 'jetstream';
 
   private client: NatsClient;
+  private readonly resolvedStreams: ResolvedStream[];
   private connected = false;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: JetStreamSubscriptionEntry[] = [];
@@ -212,6 +218,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
   constructor(private readonly options: JetStreamAdapterOptions) {
     this.client = new NatsClient(options);
+
+    const defaults = options.streamDefaults ?? {};
+    this.resolvedStreams = options.streams.map((s) => ({
+      ...defaults,
+      ...s,
+      natsSubjects: s.subjects.map((subj) => subj.replace(/#/g, '>')),
+    }));
   }
 
   // ============================================================================
@@ -233,10 +246,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       this.js = jsModule.jetstream(nc);
       this.jsm = await jsModule.jetstreamManager(nc);
 
-      // Create stream if needed
-      if (this.options.createStream) {
-        await this.ensureStream();
-      }
+      // Create/ensure all streams
+      await this.ensureAllStreams();
 
       this.connected = true;
       this.scheduler = createQueueScheduler(this);
@@ -340,9 +351,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       ? jsModule.AckPolicy.Explicit
       : jsModule.AckPolicy.None;
 
+    // Resolve which stream this subject belongs to
+    const streamName = this.resolveStreamForSubject(pattern);
+
     // Create or get consumer
     try {
-      await this.jsm.consumers.add(this.options.stream, {
+      await this.jsm.consumers.add(streamName, {
         durable_name: options?.group ? consumerName : undefined,
         name: consumerName,
         ack_policy: ackPolicy,
@@ -355,7 +369,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       // Consumer might already exist, try to get it
     }
 
-    const consumer = await this.js.consumers.get(this.options.stream, consumerName);
+    const consumer = await this.js.consumers.get(streamName, consumerName);
 
     const entry: JetStreamSubscriptionEntry = {
       pattern,
@@ -488,24 +502,86 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
   }
 
-  private async ensureStream(): Promise<void> {
-    const config = this.options.streamConfig ?? {};
+  /**
+   * Resolve which stream a subject belongs to by matching against configured subject patterns.
+   * Falls back to the first stream if no match is found.
+   */
+  resolveStreamForSubject(subject: string): string {
+    const natsSubject = subject.replace(/#/g, '>');
+
+    for (const stream of this.resolvedStreams) {
+      for (const pattern of stream.natsSubjects) {
+        if (this.natsSubjectMatches(pattern, natsSubject)) {
+          return stream.name;
+        }
+      }
+    }
+
+    // Fallback to first stream
+    return this.resolvedStreams[0].name;
+  }
+
+  /**
+   * Check if a NATS subject matches a pattern.
+   * Supports `.` as separator, `*` as single-level wildcard, `>` as multi-level wildcard.
+   */
+  private natsSubjectMatches(pattern: string, subject: string): boolean {
+    const patternTokens = pattern.split('.');
+    const subjectTokens = subject.split('.');
+
+    for (let i = 0; i < patternTokens.length; i++) {
+      const pt = patternTokens[i];
+
+      // Multi-level wildcard matches the rest
+      if (pt === '>') {
+        return i <= subjectTokens.length;
+      }
+
+      // No more subject tokens but pattern continues
+      if (i >= subjectTokens.length) {
+        return false;
+      }
+
+      // Single-level wildcard matches any single token
+      if (pt === '*') {
+        continue;
+      }
+
+      // Exact match required
+      if (pt !== subjectTokens[i]) {
+        return false;
+      }
+    }
+
+    // Both must be fully consumed
+    return patternTokens.length === subjectTokens.length;
+  }
+
+  private async ensureAllStreams(): Promise<void> {
+    for (const stream of this.resolvedStreams) {
+      await this.ensureStream(stream);
+    }
+  }
+
+  private async ensureStream(stream: ResolvedStream): Promise<void> {
+    const streamConfig = {
+      name: stream.name,
+      subjects: stream.natsSubjects,
+      retention: stream.retention ?? 'limits',
+      max_msgs: stream.maxMsgs,
+      max_bytes: stream.maxBytes,
+      max_age: stream.maxAge,
+      storage: stream.storage ?? 'file',
+      num_replicas: stream.replicas ?? 1,
+    };
 
     try {
-      // Try to get existing stream
-      await this.jsm.streams.info(this.options.stream);
+      // Try to get existing stream info, then update
+      await this.jsm.streams.info(stream.name);
+      await this.jsm.streams.update(stream.name, streamConfig);
     } catch {
       // Stream doesn't exist, create it
-      await this.jsm.streams.add({
-        name: this.options.stream,
-        subjects: config.subjects ?? [`${this.options.stream}.>`],
-        retention: config.retention ?? 'limits',
-        max_msgs: config.maxMsgs,
-        max_bytes: config.maxBytes,
-        max_age: config.maxAge,
-        storage: config.storage ?? 'file',
-        num_replicas: config.replicas ?? 1,
-      });
+      await this.jsm.streams.add(streamConfig);
     }
   }
 

@@ -73,41 +73,42 @@ describe('nats-types', () => {
     it('should accept minimal options', () => {
       const options: JetStreamAdapterOptions = {
         servers: 'nats://localhost:4222',
-        stream: 'EVENTS',
+        streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
       };
 
       expect(options.servers).toBe('nats://localhost:4222');
-      expect(options.stream).toBe('EVENTS');
+      expect(options.streams[0].name).toBe('EVENTS');
     });
 
-    it('should accept stream configuration', () => {
+    it('should accept streams with full configuration', () => {
       const options: JetStreamAdapterOptions = {
         servers: 'nats://localhost:4222',
-        stream: 'EVENTS',
-        createStream: true,
-        streamConfig: {
-          subjects: ['events.>'],
-          retention: 'limits',
-          maxMsgs: 1000000,
-          maxBytes: 1073741824,
-          maxAge: 86400000000000,
-          storage: 'file',
-          replicas: 3,
-        },
+        streams: [
+          {
+            name: 'EVENTS',
+            subjects: ['events.>'],
+            retention: 'limits',
+            maxMsgs: 1000000,
+            maxBytes: 1073741824,
+            maxAge: 86400000000000,
+            storage: 'file',
+            replicas: 3,
+          },
+        ],
       };
 
-      expect(options.createStream).toBe(true);
-      expect(options.streamConfig?.subjects).toEqual(['events.>']);
-      expect(options.streamConfig?.retention).toBe('limits');
-      expect(options.streamConfig?.maxMsgs).toBe(1000000);
-      expect(options.streamConfig?.storage).toBe('file');
-      expect(options.streamConfig?.replicas).toBe(3);
+      const stream = options.streams[0];
+      expect(stream.subjects).toEqual(['events.>']);
+      expect(stream.retention).toBe('limits');
+      expect(stream.maxMsgs).toBe(1000000);
+      expect(stream.storage).toBe('file');
+      expect(stream.replicas).toBe(3);
     });
 
     it('should accept consumer configuration', () => {
       const options: JetStreamAdapterOptions = {
         servers: 'nats://localhost:4222',
-        stream: 'EVENTS',
+        streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
         consumerConfig: {
           ackWait: 30000000000,
           maxDeliver: 5,

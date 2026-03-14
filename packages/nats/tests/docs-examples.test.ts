@@ -51,13 +51,11 @@ describe('JetStream (Persistent) Example (README.md)', () => {
     // From README.md: JetStream (Persistent) section
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
-      stream: 'EVENTS',
-      createStream: true,
-      streamConfig: {
-        subjects: ['events.>'],
-        retention: 'limits',
-        maxMsgs: 1000000,
-      },
+      streams: [
+        {
+          name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000, 
+        },
+      ],
     };
 
     const adapter = new JetStreamQueueAdapter(options);
@@ -91,7 +89,7 @@ describe('Feature Comparison (README.md)', () => {
     // From README.md: Feature Comparison table
     const adapter = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
-      stream: 'TEST',
+      streams: [{ name: 'TEST', subjects: ['test.>'] }],
     });
 
     // Supported
@@ -133,17 +131,18 @@ describe('Configuration Options (README.md)', () => {
     // From README.md: JetStreamAdapterOptions interface
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
-      stream: 'MY_STREAM',
-      createStream: true,
-      streamConfig: {
-        subjects: ['events.>'],
-        retention: 'limits',
-        maxMsgs: 1000000,
-        maxBytes: 1073741824,
-        maxAge: 86400000000000,
-        storage: 'file',
-        replicas: 1,
-      },
+      streams: [
+        {
+          name: 'EVENTS',
+          subjects: ['events.>'],
+          retention: 'limits',
+          maxMsgs: 1000000,
+          maxBytes: 1073741824,
+          maxAge: 86400000000000,
+          storage: 'file',
+          replicas: 1,
+        },
+      ],
       consumerConfig: {
         ackWait: 30000000000, // 30s in nanoseconds
         maxDeliver: 5,
@@ -179,13 +178,11 @@ describe('JetStreamQueueAdapter (docs/api/queue.md)', () => {
     // From docs/api/queue.md: JetStreamQueueAdapter section
     const adapter = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
-      stream: 'EVENTS',
-      createStream: true,
-      streamConfig: {
-        subjects: ['events.>'],
-        retention: 'limits',
-        maxMsgs: 1000000,
-      },
+      streams: [
+        {
+          name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000, 
+        },
+      ],
     });
 
     expect(adapter.name).toBe('jetstream');
@@ -229,7 +226,7 @@ describe('Feature Support Matrix - NATS (docs/api/queue.md)', () => {
     // From docs/api/queue.md: Feature Support Matrix table - JetStream column
     const js = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
-      stream: 'TEST',
+      streams: [{ name: 'TEST', subjects: ['test.>'] }],
     });
 
     expect(js.supports('pattern-subscriptions')).toBe(true);

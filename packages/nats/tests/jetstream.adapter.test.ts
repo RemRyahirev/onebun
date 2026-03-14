@@ -20,7 +20,7 @@ describe('JetStreamQueueAdapter', () => {
   beforeEach(() => {
     adapter = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
-      stream: 'TEST_STREAM',
+      streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
     });
   });
 
@@ -118,11 +118,74 @@ describe('JetStreamQueueAdapter', () => {
     });
   });
 
+  describe('multi-stream support', () => {
+    it('should accept streams array in constructor', () => {
+      const multiAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [
+          { name: 'EVENTS', subjects: ['events.>'] },
+          { name: 'COMMANDS', subjects: ['commands.>'] },
+        ],
+      });
+
+      expect(multiAdapter).toBeInstanceOf(JetStreamQueueAdapter);
+      expect(multiAdapter.name).toBe('jetstream');
+    });
+
+    it('should accept streamDefaults merged into each stream', () => {
+      const multiAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [
+          { name: 'EVENTS', subjects: ['events.>'] },
+          { name: 'COMMANDS', subjects: ['commands.>'], retention: 'workqueue' },
+        ],
+        streamDefaults: {
+          retention: 'limits',
+          storage: 'memory',
+          replicas: 1,
+        },
+      });
+
+      expect(multiAdapter).toBeInstanceOf(JetStreamQueueAdapter);
+    });
+
+    it('should resolve stream name from subject pattern', () => {
+      const multiAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [
+          { name: 'EVENTS', subjects: ['events.>'] },
+          { name: 'COMMANDS', subjects: ['commands.>'] },
+          { name: 'LOGS', subjects: ['logs.app.*'] },
+        ],
+      });
+
+      // Exact match via multi-level wildcard
+      expect(multiAdapter.resolveStreamForSubject('events.created')).toBe('EVENTS');
+      expect(multiAdapter.resolveStreamForSubject('events.user.updated')).toBe('EVENTS');
+      expect(multiAdapter.resolveStreamForSubject('commands.run')).toBe('COMMANDS');
+
+      // Single-level wildcard
+      expect(multiAdapter.resolveStreamForSubject('logs.app.info')).toBe('LOGS');
+    });
+
+    it('should fallback to first stream for unknown subjects', () => {
+      const multiAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [
+          { name: 'DEFAULT', subjects: ['default.>'] },
+          { name: 'EVENTS', subjects: ['events.>'] },
+        ],
+      });
+
+      expect(multiAdapter.resolveStreamForSubject('unknown.topic')).toBe('DEFAULT');
+    });
+  });
+
   describe('createJetStreamQueueAdapter', () => {
     it('should create adapter instance', () => {
       const created = createJetStreamQueueAdapter({
         servers: 'nats://localhost:4222',
-        stream: 'MY_STREAM',
+        streams: [{ name: 'MY_STREAM', subjects: ['my.>'] }],
       });
 
       expect(created).toBeInstanceOf(JetStreamQueueAdapter);
@@ -132,13 +195,11 @@ describe('JetStreamQueueAdapter', () => {
     it('should accept stream configuration', () => {
       const created = createJetStreamQueueAdapter({
         servers: 'nats://localhost:4222',
-        stream: 'EVENTS',
-        createStream: true,
-        streamConfig: {
-          subjects: ['events.>'],
-          retention: 'limits',
-          maxMsgs: 1000000,
-        },
+        streams: [
+          {
+            name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000, 
+          },
+        ],
       });
 
       expect(created).toBeInstanceOf(JetStreamQueueAdapter);
@@ -147,7 +208,7 @@ describe('JetStreamQueueAdapter', () => {
     it('should accept consumer configuration', () => {
       const created = createJetStreamQueueAdapter({
         servers: 'nats://localhost:4222',
-        stream: 'EVENTS',
+        streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
         consumerConfig: {
           ackWait: 30000000000,
           maxDeliver: 5,
