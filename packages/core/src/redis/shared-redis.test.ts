@@ -13,11 +13,8 @@ import {
   it,
 } from 'bun:test';
 import { Effect, pipe } from 'effect';
-import {
-  GenericContainer,
-  type StartedTestContainer,
-  Wait,
-} from 'testcontainers';
+
+import { createRedisContainer, type TestContainer } from '../testing/containers';
 
 import {
   SharedRedisProvider,
@@ -27,30 +24,15 @@ import {
 } from './shared-redis';
 
 describe('SharedRedisProvider', () => {
-  let redisContainer: StartedTestContainer;
-  let redisUrl: string;
+  let redis: TestContainer;
 
   beforeAll(async () => {
-    // Start Redis container
-    redisContainer = await new GenericContainer('redis:7-alpine')
-      .withExposedPorts(6379)
-      .withWaitStrategy(Wait.forLogMessage(/.*Ready to accept connections.*/))
-      .withStartupTimeout(30000)
-      .withLogConsumer(() => {
-        // Suppress container logs
-      })
-      .start();
-
-    const host = redisContainer.getHost();
-    const port = redisContainer.getMappedPort(6379);
-    redisUrl = `redis://${host}:${port}`;
+    redis = await createRedisContainer();
   });
 
   afterAll(async () => {
     await SharedRedisProvider.reset();
-    if (redisContainer) {
-      await redisContainer.stop();
-    }
+    await redis.stop();
   });
 
   afterEach(async () => {
@@ -61,7 +43,7 @@ describe('SharedRedisProvider', () => {
     it('should configure the provider', () => {
       expect(SharedRedisProvider.isConfigured()).toBe(false);
       
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
       
       expect(SharedRedisProvider.isConfigured()).toBe(true);
     });
@@ -76,7 +58,7 @@ describe('SharedRedisProvider', () => {
   describe('connection', () => {
     it('should connect and return a client', async () => {
       SharedRedisProvider.configure({
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'test:',
       });
 
@@ -88,7 +70,7 @@ describe('SharedRedisProvider', () => {
     });
 
     it('should return the same instance on multiple calls', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
 
       const client1 = await SharedRedisProvider.getClient();
       const client2 = await SharedRedisProvider.getClient();
@@ -97,7 +79,7 @@ describe('SharedRedisProvider', () => {
     });
 
     it('should handle concurrent getClient calls', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
 
       // Call getClient multiple times concurrently
       const [client1, client2, client3] = await Promise.all([
@@ -112,7 +94,7 @@ describe('SharedRedisProvider', () => {
     });
 
     it('should disconnect properly', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
 
       await SharedRedisProvider.getClient();
       expect(SharedRedisProvider.isConnected()).toBe(true);
@@ -123,7 +105,7 @@ describe('SharedRedisProvider', () => {
     });
 
     it('should reconnect after disconnect', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
 
       const client1 = await SharedRedisProvider.getClient();
       await SharedRedisProvider.disconnect();
@@ -140,7 +122,7 @@ describe('SharedRedisProvider', () => {
   describe('client operations', () => {
     it('should perform basic Redis operations', async () => {
       SharedRedisProvider.configure({
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'test:ops:',
       });
 
@@ -160,10 +142,10 @@ describe('SharedRedisProvider', () => {
 
   describe('createClient', () => {
     it('should create standalone client with custom URL', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
 
       const standalone = SharedRedisProvider.createClient({
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'standalone:',
       });
       
@@ -179,7 +161,7 @@ describe('SharedRedisProvider', () => {
 
     it('should use base options when not specified', async () => {
       SharedRedisProvider.configure({
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'base:',
         reconnect: true,
       });
@@ -199,7 +181,7 @@ describe('SharedRedisProvider', () => {
 
   describe('reset', () => {
     it('should reset provider state completely', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
       await SharedRedisProvider.getClient();
       
       expect(SharedRedisProvider.isConnected()).toBe(true);
@@ -215,17 +197,17 @@ describe('SharedRedisProvider', () => {
   describe('Effect.js integration', () => {
     it('should work with makeSharedRedisLayer', async () => {
       const layer = makeSharedRedisLayer({
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'effect:',
       });
 
       const program = pipe(
         SharedRedisService,
-        Effect.flatMap((redis) =>
+        Effect.flatMap((redisClient) =>
           Effect.promise(async () => {
-            await redis.set('effect-test', 'value');
+            await redisClient.set('effect-test', 'value');
 
-            return await redis.get('effect-test');
+            return await redisClient.get('effect-test');
           }),
         ),
       );
@@ -245,7 +227,7 @@ describe('SharedRedisProvider', () => {
     });
 
     it('should succeed getSharedRedis when configured', async () => {
-      SharedRedisProvider.configure({ url: redisUrl });
+      SharedRedisProvider.configure({ url: redis.url });
       
       const result = await Effect.runPromiseExit(getSharedRedis);
       

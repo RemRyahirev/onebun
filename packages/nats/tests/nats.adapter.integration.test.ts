@@ -14,41 +14,25 @@ import {
   it,
   mock,
 } from 'bun:test';
-import {
-  GenericContainer,
-  type StartedTestContainer,
-  Wait,
-} from 'testcontainers';
 
 import type { Message } from '@onebun/core';
+import { createNatsContainer, type TestContainer } from '@onebun/core';
+
 
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
 
 describe('NatsQueueAdapter Integration', () => {
-  let natsContainer: StartedTestContainer;
+  let nats: TestContainer;
   let natsUrl: string;
   let adapter: NatsQueueAdapter;
 
   beforeAll(async () => {
-    // Start NATS container
-    natsContainer = await new GenericContainer('nats:2.10-alpine')
-      .withExposedPorts(4222)
-      .withWaitStrategy(Wait.forLogMessage(/.*Server is ready.*/))
-      .withStartupTimeout(30000)
-      .withLogConsumer(() => {
-        // Suppress container logs
-      })
-      .start();
-
-    const host = natsContainer.getHost();
-    const port = natsContainer.getMappedPort(4222);
-    natsUrl = `nats://${host}:${port}`;
+    nats = await createNatsContainer();
+    natsUrl = nats.url;
   });
 
   afterAll(async () => {
-    if (natsContainer) {
-      await natsContainer.stop();
-    }
+    await nats.stop();
   });
 
   beforeEach(() => {

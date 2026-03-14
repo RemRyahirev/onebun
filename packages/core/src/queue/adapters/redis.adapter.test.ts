@@ -14,45 +14,27 @@ import {
   it,
   mock,
 } from 'bun:test';
-import {
-  GenericContainer,
-  type StartedTestContainer,
-  Wait,
-} from 'testcontainers';
 
 import { SharedRedisProvider } from '../../redis/shared-redis';
+import { createRedisContainer, type TestContainer } from '../../testing/containers';
+
 
 import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
 
 describe('RedisQueueAdapter', () => {
-  let redisContainer: StartedTestContainer;
-  let redisUrl: string;
+  let redis: TestContainer;
   let adapter: RedisQueueAdapter;
 
   beforeAll(async () => {
-    // Start Redis container
-    redisContainer = await new GenericContainer('redis:7-alpine')
-      .withExposedPorts(6379)
-      .withWaitStrategy(Wait.forLogMessage(/.*Ready to accept connections.*/))
-      .withStartupTimeout(30000)
-      .withLogConsumer(() => {
-        // Suppress container logs
-      })
-      .start();
-
-    const host = redisContainer.getHost();
-    const port = redisContainer.getMappedPort(6379);
-    redisUrl = `redis://${host}:${port}`;
+    redis = await createRedisContainer();
 
     // Configure shared Redis
-    SharedRedisProvider.configure({ url: redisUrl });
+    SharedRedisProvider.configure({ url: redis.url });
   });
 
   afterAll(async () => {
     await SharedRedisProvider.reset();
-    if (redisContainer) {
-      await redisContainer.stop();
-    }
+    await redis.stop();
   });
 
   beforeEach(async () => {
@@ -125,7 +107,7 @@ describe('RedisQueueAdapter', () => {
     it('should create own client when useSharedClient is false', async () => {
       const ownAdapter = new RedisQueueAdapter({
         useSharedClient: false,
-        url: redisUrl,
+        url: redis.url,
         keyPrefix: 'own:',
       });
 

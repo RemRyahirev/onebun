@@ -5,38 +5,22 @@ import {
   expect,
   it,
 } from 'bun:test';
-import {
-  GenericContainer,
-  type StartedTestContainer,
-  Wait,
-} from 'testcontainers';
+
+import { createRedisContainer, type TestContainer } from '@onebun/core';
 
 import { createRedisCache, RedisCache } from '../src/redis-cache';
 
 describe('RedisCache', () => {
-  let redisContainer: StartedTestContainer;
+  let redis: TestContainer;
   let cache: RedisCache;
-  let redisHost: string;
-  let redisPort: number;
 
   beforeAll(async () => {
-    // Start Redis container (with logging disabled)
-    redisContainer = await new GenericContainer('redis:7-alpine')
-      .withExposedPorts(6379)
-      .withWaitStrategy(Wait.forLogMessage(/.*Ready to accept connections.*/))
-      .withStartupTimeout(30000)
-      .withLogConsumer(() => {
-        // Suppress container logs
-      })
-      .start();
-
-    redisHost = redisContainer.getHost();
-    redisPort = redisContainer.getMappedPort(6379);
+    redis = await createRedisContainer();
 
     // Create cache instance
     cache = createRedisCache({
-      host: redisHost,
-      port: redisPort,
+      host: redis.host,
+      port: redis.port,
       keyPrefix: 'test:cache:',
     });
     await cache.connect();
@@ -46,11 +30,7 @@ describe('RedisCache', () => {
   afterAll(async () => {
     await cache.clear();
     await cache.close();
-    
-    // Stop Redis container
-    if (redisContainer) {
-      await redisContainer.stop();
-    }
+    await redis.stop();
   });
 
   describe('Basic operations', () => {
@@ -124,8 +104,8 @@ describe('RedisCache', () => {
 
     it('should use default TTL when not specified', async () => {
       const cacheWithTtl = createRedisCache({
-        host: redisHost,
-        port: redisPort,
+        host: redis.host,
+        port: redis.port,
         keyPrefix: 'test:cache:ttl:',
         defaultTtl: 10,
       });
@@ -195,8 +175,8 @@ describe('RedisCache', () => {
   describe('Statistics', () => {
     it('should track hits and misses', async () => {
       const testCache = createRedisCache({
-        host: redisHost,
-        port: redisPort,
+        host: redis.host,
+        port: redis.port,
         keyPrefix: 'test:stats:',
       });
       await testCache.connect();
@@ -217,8 +197,8 @@ describe('RedisCache', () => {
 
     it('should count entries', async () => {
       const testCache = createRedisCache({
-        host: redisHost,
-        port: redisPort,
+        host: redis.host,
+        port: redis.port,
         keyPrefix: 'test:count:',
       });
       await testCache.connect();
@@ -238,8 +218,8 @@ describe('RedisCache', () => {
   describe('Key prefix', () => {
     it('should use key prefix', async () => {
       const prefixCache = createRedisCache({
-        host: redisHost,
-        port: redisPort,
+        host: redis.host,
+        port: redis.port,
         keyPrefix: 'custom:prefix:',
       });
       await prefixCache.connect();
