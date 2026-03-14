@@ -480,19 +480,12 @@ class EventProcessor extends BaseController {
 
 ### InMemoryQueueAdapter
 
-In-process message bus. Good for development and testing.
+In-process message bus. Good for development and testing. This is the default adapter when `queue.adapter` is not specified:
 
 ```typescript
-import { InMemoryQueueAdapter } from '@onebun/core';
-
-const adapter = new InMemoryQueueAdapter();
-await adapter.connect();
-
-await adapter.subscribe('events.*', async (message) => {
-  console.log('Received:', message.data);
+const app = new OneBunApplication(AppModule, {
+  queue: { adapter: 'memory' },
 });
-
-await adapter.publish('events.created', { id: 1 });
 ```
 
 **Supported Features:**
@@ -503,22 +496,26 @@ await adapter.publish('events.created', { id: 1 });
 
 ### RedisQueueAdapter
 
-Distributed queue using Redis. Uses SharedRedisProvider by default.
+Distributed queue using Redis. Uses SharedRedisProvider by default:
 
 ```typescript
-import { RedisQueueAdapter } from '@onebun/core';
-
-// Using shared Redis (default)
-const adapter = new RedisQueueAdapter();
-
-// Or custom connection
-const adapter = new RedisQueueAdapter({
-  useSharedClient: false,
-  url: 'redis://localhost:6379',
-  keyPrefix: 'myapp:queue:',
+const app = new OneBunApplication(AppModule, {
+  queue: {
+    adapter: 'redis',
+    redis: { useSharedProvider: true, prefix: 'myapp:queue:' },
+  },
 });
+```
 
-await adapter.connect();
+Or with a dedicated Redis connection:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  queue: {
+    adapter: 'redis',
+    redis: { useSharedProvider: false, url: 'redis://localhost:6379' },
+  },
+});
 ```
 
 **Supported Features:**
@@ -537,7 +534,7 @@ import { AppModule } from './app.module';
 class NatsJetStreamAdapter implements QueueAdapter {
   readonly name = 'nats-jetstream';
   readonly type = 'jetstream';
-  constructor(private opts: { servers: string; stream?: string }) {}
+  constructor(private opts: { servers: string; streams?: Array<{ name: string; subjects: string[] }> }) {}
   async connect() { /* connect to NATS */ }
   async disconnect() { /* disconnect */ }
   isConnected() { return true; }
@@ -567,7 +564,10 @@ const app = new OneBunApplication(AppModule, {
   port: 3000,
   queue: {
     adapter: NatsJetStreamAdapter,
-    options: { servers: 'nats://localhost:4222', stream: 'EVENTS' },
+    options: {
+      servers: 'nats://localhost:4222',
+      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+    },
   },
 });
 await app.start();
@@ -577,16 +577,22 @@ The framework instantiates the adapter with `new Adapter(queue.options)` and use
 
 ### NatsQueueAdapter
 
-NATS pub/sub for lightweight messaging (no persistence).
+NATS pub/sub for lightweight messaging (no persistence). Pass the adapter class in application options — the framework handles instantiation and connection automatically:
 
 ```typescript
+import { OneBunApplication } from '@onebun/core';
 import { NatsQueueAdapter } from '@onebun/nats';
 
-const adapter = new NatsQueueAdapter({
-  servers: 'nats://localhost:4222',
+const app = new OneBunApplication(AppModule, {
+  queue: {
+    adapter: NatsQueueAdapter,
+    options: { servers: 'nats://localhost:4222' },
+  },
 });
-await adapter.connect();
+await app.start();
 ```
+
+`QueueService` is automatically available for injection in any controller or service across all modules — no additional imports or configuration required.
 
 **Supported Features:**
 - Pattern subscriptions
@@ -595,23 +601,46 @@ await adapter.connect();
 
 ### JetStreamQueueAdapter
 
-NATS JetStream for persistent, reliable messaging.
+NATS JetStream for persistent, reliable messaging. Pass the adapter class in application options:
 
 ```typescript
+import { OneBunApplication } from '@onebun/core';
 import { JetStreamQueueAdapter } from '@onebun/nats';
 
-const adapter = new JetStreamQueueAdapter({
-  servers: 'nats://localhost:4222',
-  stream: 'EVENTS',
-  createStream: true,
-  streamConfig: {
-    subjects: ['events.>'],
-    retention: 'limits',
-    maxMsgs: 1000000,
+const app = new OneBunApplication(AppModule, {
+  queue: {
+    adapter: JetStreamQueueAdapter,
+    options: {
+      servers: 'nats://localhost:4222',
+      streamDefaults: {
+        retention: 'limits',
+        storage: 'file',
+        replicas: 1,
+      },
+      streams: [
+        {
+          name: 'EVENTS',
+          subjects: ['events.>'],
+        },
+        {
+          name: 'agent_events',
+          subjects: ['agent.events.>'],
+          maxAge: 7 * 24 * 60 * 60 * 1e9,
+        },
+        {
+          name: 'agent_dlq',
+          subjects: ['agent.dlq.>'],
+          maxAge: 7 * 24 * 60 * 60 * 1e9,
+          storage: 'memory',
+        },
+      ],
+    },
   },
 });
-await adapter.connect();
+await app.start();
 ```
+
+All streams are created automatically during startup. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter automatically resolves the correct stream.
 
 **Supported Features:**
 - Pattern subscriptions

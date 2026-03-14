@@ -47,14 +47,14 @@ describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
  * @source docs/api/queue.md#jetstreamqueueadapter
  */
 describe('JetStream (Persistent) Example (README.md)', () => {
-  it('should create JetStreamQueueAdapter with stream configuration', () => {
+  it('should create JetStreamQueueAdapter with multi-stream configuration', () => {
     // From README.md: JetStream (Persistent) section
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
+      streamDefaults: { retention: 'limits', storage: 'file' },
       streams: [
-        {
-          name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000, 
-        },
+        { name: 'EVENTS', subjects: ['events.>'] },
+        { name: 'agent_events', subjects: ['agent.events.>'] },
       ],
     };
 
@@ -131,16 +131,18 @@ describe('Configuration Options (README.md)', () => {
     // From README.md: JetStreamAdapterOptions interface
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
+      streamDefaults: {
+        retention: 'limits',
+        storage: 'file',
+        replicas: 1,
+        maxMsgs: 1000000,
+        maxBytes: 1073741824,
+        maxAge: 86400000000000,
+      },
       streams: [
         {
           name: 'EVENTS',
           subjects: ['events.>'],
-          retention: 'limits',
-          maxMsgs: 1000000,
-          maxBytes: 1073741824,
-          maxAge: 86400000000000,
-          storage: 'file',
-          replicas: 1,
         },
       ],
       consumerConfig: {
@@ -174,13 +176,30 @@ describe('NatsQueueAdapter (docs/api/queue.md)', () => {
  * @source docs/api/queue.md#jetstreamqueueadapter
  */
 describe('JetStreamQueueAdapter (docs/api/queue.md)', () => {
-  it('should create adapter for persistent messaging', () => {
+  it('should create adapter for persistent messaging with multi-stream', () => {
     // From docs/api/queue.md: JetStreamQueueAdapter section
     const adapter = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
+      streamDefaults: {
+        retention: 'limits',
+        storage: 'file',
+        replicas: 1,
+      },
       streams: [
         {
-          name: 'EVENTS', subjects: ['events.>'], retention: 'limits', maxMsgs: 1000000, 
+          name: 'EVENTS',
+          subjects: ['events.>'],
+        },
+        {
+          name: 'agent_events',
+          subjects: ['agent.events.>'],
+          maxAge: 7 * 24 * 60 * 60 * 1e9,
+        },
+        {
+          name: 'agent_dlq',
+          subjects: ['agent.dlq.>'],
+          maxAge: 7 * 24 * 60 * 60 * 1e9,
+          storage: 'memory',
         },
       ],
     });

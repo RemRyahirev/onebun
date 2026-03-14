@@ -21,7 +21,7 @@ bun add @onebun/nats
 import { OneBunApplication } from '@onebun/core';
 import { NatsQueueAdapter } from '@onebun/nats';
 
-const app = await OneBunApplication.create(AppModule, {
+const app = new OneBunApplication(AppModule, {
   queue: {
     adapter: NatsQueueAdapter,
     options: {
@@ -37,18 +37,16 @@ const app = await OneBunApplication.create(AppModule, {
 import { OneBunApplication } from '@onebun/core';
 import { JetStreamQueueAdapter } from '@onebun/nats';
 
-const app = await OneBunApplication.create(AppModule, {
+const app = new OneBunApplication(AppModule, {
   queue: {
     adapter: JetStreamQueueAdapter,
     options: {
       servers: 'nats://localhost:4222',
-      stream: 'EVENTS',
-      createStream: true,
-      streamConfig: {
-        subjects: ['events.>'],
-        retention: 'limits',
-        maxMsgs: 1000000,
-      },
+      streamDefaults: { retention: 'limits', storage: 'file' },
+      streams: [
+        { name: 'EVENTS', subjects: ['events.>'] },
+        { name: 'agent_events', subjects: ['agent.events.>'] },
+      ],
     },
   },
 });
@@ -117,17 +115,24 @@ interface NatsConnectionOptions {
 
 ```typescript
 interface JetStreamAdapterOptions extends NatsConnectionOptions {
-  stream: string;              // Stream name
-  createStream?: boolean;      // Create stream if not exists
-  streamConfig?: {
-    subjects?: string[];       // Subjects to store
+  streamDefaults?: {
     retention?: 'limits' | 'interest' | 'workqueue';
-    maxMsgs?: number;
-    maxBytes?: number;
-    maxAge?: number;
     storage?: 'file' | 'memory';
     replicas?: number;
+    maxMsgs?: number;
+    maxBytes?: number;
+    maxAge?: number;           // Nanoseconds
   };
+  streams: Array<{
+    name: string;              // Stream name
+    subjects: string[];        // Subjects to store
+    retention?: 'limits' | 'interest' | 'workqueue';
+    storage?: 'file' | 'memory';
+    replicas?: number;
+    maxMsgs?: number;
+    maxBytes?: number;
+    maxAge?: number;           // Nanoseconds
+  }>;
   consumerConfig?: {
     ackWait?: number;          // Ack timeout (nanoseconds)
     maxDeliver?: number;       // Max delivery attempts
