@@ -5,15 +5,8 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
-import { Effect } from 'effect';
 
-import {
-  makeMockLoggerLayer,
-  createMockConfig,
-  useFakeTimers,
-} from '@onebun/core';
-// eslint-disable-next-line import/no-extraneous-dependencies
-import { LoggerService } from '@onebun/logger';
+import { createTestService, useFakeTimers } from '@onebun/core';
 
 import { CacheModule } from '../src/cache.module';
 import { CacheService } from '../src/cache.service';
@@ -47,17 +40,7 @@ describe('CacheService', () => {
     restore = fakeTimers.restore;
 
     // Create service with mock logger
-    const loggerLayer = makeMockLoggerLayer();
-    const logger = Effect.runSync(
-      Effect.provide(
-        Effect.map(LoggerService, (l) => l.child({ className: 'CacheService' })),
-        loggerLayer,
-      ),
-    );
-
-    service = new CacheService();
-    // Initialize service with logger (mimics what the DI framework does)
-    service.initializeService(logger, createMockConfig());
+    ({ instance: service } = createTestService(CacheService));
   });
 
   afterEach(async () => {
@@ -262,16 +245,7 @@ describe('CacheService', () => {
       });
 
       // Create new service to pick up module options
-      const loggerLayer = makeMockLoggerLayer();
-      const logger = Effect.runSync(
-        Effect.provide(
-          Effect.map(LoggerService, (l) => l.child({ className: 'CacheService' })),
-          loggerLayer,
-        ),
-      );
-
-      const newService = new CacheService();
-      newService.initializeService(logger, createMockConfig());
+      const { instance: newService } = createTestService(CacheService);
 
       await newService.waitForInit();
 
