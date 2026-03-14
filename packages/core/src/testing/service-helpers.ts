@@ -1,8 +1,9 @@
 import { mock } from 'bun:test';
 
+import type { IConfig, OneBunAppConfig } from '../module/config.interface';
+
 import type { SyncLogger } from '@onebun/logger';
 
-import type { IConfig, OneBunAppConfig } from '../module/config.interface';
 
 import { createMockConfig } from './test-utils';
 
