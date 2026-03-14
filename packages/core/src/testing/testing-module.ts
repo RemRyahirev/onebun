@@ -17,7 +17,12 @@
  */
 
 import type { OneBunApplication } from '../application/application';
-import type { HttpMethod, OneBunResponse } from '../types';
+import type { IConfig, OneBunAppConfig } from '../module/config.interface';
+import type {
+  ApplicationOptions,
+  HttpMethod,
+  OneBunResponse,
+} from '../types';
 import type { Context } from 'effect';
 
 import { Module } from '../decorators/decorators';
@@ -124,6 +129,31 @@ export class CompiledTestingModule {
   }
 
   /**
+   * Get the underlying OneBunApplication instance.
+   * Useful for accessing application-level APIs not exposed by the testing module.
+   */
+  getApp(): OneBunApplication {
+    return this.app;
+  }
+
+  /**
+   * Get the port the test server is listening on.
+   */
+  getPort(): number {
+    return this.port;
+  }
+
+  /**
+   * Get the application configuration.
+   * Requires `envSchema` to be set via `setOptions()`.
+   *
+   * @throws If configuration was not initialized (no envSchema provided)
+   */
+  getConfig(): IConfig<OneBunAppConfig> {
+    return this.app.getConfig();
+  }
+
+  /**
    * Stop the test server and release resources.
    * Call this in `afterEach` / `afterAll` to prevent port leaks.
    */
@@ -176,6 +206,7 @@ export class TestingModule {
     tag: Context.Tag<any, any>;
     value: unknown;
   }> = [];
+  private appOptions: Partial<ApplicationOptions> = {};
 
   private constructor(options: TestingModuleCreateOptions) {
     this.options = options;
@@ -188,6 +219,19 @@ export class TestingModule {
    */
   static create(options: TestingModuleCreateOptions): TestingModule {
     return new TestingModule(options);
+  }
+
+  /**
+   * Set additional application options (e.g. envSchema, cors, basePath).
+   * Options are merged into the application config. `gracefulShutdown` and
+   * `_testProviders` are always forced by the testing module.
+   *
+   * @param options - Partial application options to merge
+   */
+  setOptions(options: Partial<ApplicationOptions>): TestingModule {
+    this.appOptions = options;
+
+    return this;
   }
 
   /**
@@ -239,8 +283,9 @@ export class TestingModule {
     // - silent logger
     // - test provider overrides injected before setup()
     const app = new OneBunApplication(_TestingAppModule, {
-      port: 0,
       loggerLayer: makeMockLoggerLayer() as import('effect').Layer.Layer<import('@onebun/logger').Logger>,
+      port: 0,
+      ...this.appOptions,
       gracefulShutdown: false,
       _testProviders: this.overrides,
     });

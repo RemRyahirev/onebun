@@ -6,6 +6,7 @@ import {
   it,
 } from 'bun:test';
 
+import { OneBunApplication } from '../application/application';
 import {
   Controller,
   Get,
@@ -16,6 +17,7 @@ import {
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
 import { BaseService, Service } from '../module/service';
+
 
 import { TestingModule, type CompiledTestingModule } from './testing-module';
 
@@ -140,6 +142,84 @@ describe('TestingModule', () => {
         const service = module.get(GreetingService);
         expect(service).toBeInstanceOf(GreetingService);
         expect(service.greet('test')).toBe('Hello, test!');
+      } finally {
+        await module.close();
+      }
+    });
+  });
+
+  describe('setOptions()', () => {
+    it('passes options to the application', async () => {
+      const module = await TestingModule
+        .create({
+          controllers: [GreetController],
+          providers: [GreetingService],
+        })
+        .setOptions({ basePath: '/api' })
+        .compile();
+
+      try {
+        // Without basePath prefix the route should not match
+        const notFound = await module.inject('GET', '/greet/world');
+        expect(notFound.status).toBe(404);
+
+        // With basePath prefix the route should match
+        const found = await module.inject('GET', '/api/greet/world');
+        expect(found.status).toBe(200);
+      } finally {
+        await module.close();
+      }
+    });
+  });
+
+  describe('getApp()', () => {
+    it('returns an OneBunApplication instance', async () => {
+      const module = await TestingModule
+        .create({
+          controllers: [GreetController],
+          providers: [GreetingService],
+        })
+        .compile();
+
+      try {
+        expect(module.getApp()).toBeInstanceOf(OneBunApplication);
+      } finally {
+        await module.close();
+      }
+    });
+  });
+
+  describe('getPort()', () => {
+    it('returns a port greater than 0', async () => {
+      const module = await TestingModule
+        .create({
+          controllers: [GreetController],
+          providers: [GreetingService],
+        })
+        .compile();
+
+      try {
+        expect(module.getPort()).toBeGreaterThan(0);
+      } finally {
+        await module.close();
+      }
+    });
+  });
+
+  describe('getConfig()', () => {
+    it('returns config object when envSchema is provided', async () => {
+      const module = await TestingModule
+        .create({
+          controllers: [GreetController],
+          providers: [GreetingService],
+        })
+        .setOptions({ envSchema: {} })
+        .compile();
+
+      try {
+        const config = module.getConfig();
+        expect(config).toBeDefined();
+        expect(typeof config.get).toBe('function');
       } finally {
         await module.close();
       }
