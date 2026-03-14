@@ -1,6 +1,8 @@
 /* eslint-disable
    @typescript-eslint/no-unused-vars,
-   @typescript-eslint/no-explicit-any */
+   @typescript-eslint/no-explicit-any,
+   @typescript-eslint/naming-convention,
+   jest/unbound-method */
 import {
   describe,
   test,
@@ -10,6 +12,9 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
+import type { SyncLogger } from '@onebun/logger';
+
+import { createTestService } from '../testing/service-helpers';
 import { createMockConfig } from '../testing/test-utils';
 
 import {
@@ -19,50 +24,48 @@ import {
 } from './config.interface';
 import { BaseService } from './service';
 
+function createMockLogger(): SyncLogger {
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
+  const noOp = () => {};
+  const logger: SyncLogger = {
+    trace: mock(noOp),
+    debug: mock(noOp),
+    info: mock(noOp),
+    warn: mock(noOp),
+    error: mock(noOp),
+    fatal: mock(noOp),
+    child: mock(() => logger),
+  };
+
+  return logger;
+}
+
 describe('BaseService', () => {
-  let mockLogger: any;
-  let mockConfig: IConfig<OneBunAppConfig>;
-
-  beforeEach(() => {
-    mockLogger = {
-      child: mock((context: any) => mockLogger),
-      debug: mock(),
-      info: mock(),
-      warn: mock(),
-      error: mock(),
-    };
-    
-    mockConfig = createMockConfig({
-      /* eslint-disable @typescript-eslint/naming-convention */
-      'database.host': 'localhost',
-      'app.name': 'test-app',
-      /* eslint-enable @typescript-eslint/naming-convention */
-    });
-  });
-
   describe('Initialization via initializeService', () => {
     test('should initialize service with logger and config via initializeService', () => {
       class TestService extends BaseService {}
 
-      const service = new TestService();
-      expect(service).toBeInstanceOf(BaseService);
-      expect(service.isInitialized).toBe(false);
+      const { instance: service, config } = createTestService(TestService, {
+        config: {
+          'database.host': 'localhost',
+          'app.name': 'test-app',
+        },
+      });
 
-      // Initialize service
-      service.initializeService(mockLogger, mockConfig);
-      
+      expect(service).toBeInstanceOf(BaseService);
       expect(service.isInitialized).toBe(true);
       expect((service as any).logger).toBeDefined();
-      expect((service as any).config).toBe(mockConfig);
+      expect((service as any).config).toBe(config);
     });
 
     test('should initialize service with logger and NotInitializedConfig', () => {
       class TestService extends BaseService {}
 
       const service = new TestService();
+      const mockLogger = createMockLogger();
       const notInitConfig = new NotInitializedConfig();
       service.initializeService(mockLogger, notInitConfig);
-      
+
       expect(service.isInitialized).toBe(true);
       expect((service as any).logger).toBeDefined();
       expect((service as any).config).toBeInstanceOf(NotInitializedConfig);
@@ -72,6 +75,7 @@ describe('BaseService', () => {
       class TestService extends BaseService {}
 
       const service = new TestService();
+      const mockConfig = createMockConfig({});
       expect(() => service.initializeService(undefined as any, mockConfig))
         .toThrow('Logger is required for service TestService');
     });
@@ -80,6 +84,7 @@ describe('BaseService', () => {
       class TestService extends BaseService {}
 
       const service = new TestService();
+      const mockConfig = createMockConfig({});
       expect(() => service.initializeService(null as any, mockConfig))
         .toThrow('Logger is required for service TestService');
     });
@@ -87,15 +92,19 @@ describe('BaseService', () => {
     test('should not reinitialize if already initialized', () => {
       class TestService extends BaseService {}
 
-      const service = new TestService();
-      service.initializeService(mockLogger, mockConfig);
-      
-      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      const { instance: service, config } = createTestService(TestService, {
+        config: {
+          'database.host': 'localhost',
+          'app.name': 'test-app',
+        },
+      });
+
+      const otherLogger = createMockLogger();
       const otherConfig = createMockConfig({ 'other': 'config' });
       service.initializeService(otherLogger, otherConfig);
-      
-      // Should still have original logger (no reinit)
-      expect((service as any).config).toBe(mockConfig);
+
+      // Should still have original config (no reinit)
+      expect((service as any).config).toBe(config);
     });
   });
 
@@ -113,8 +122,8 @@ describe('BaseService', () => {
     let service: TestService;
 
     beforeEach(() => {
-      service = new TestService();
-      service.initializeService(mockLogger, mockConfig);
+      const result = createTestService(TestService);
+      service = result.instance;
     });
 
     test('should run effect successfully', async () => {
@@ -125,14 +134,14 @@ describe('BaseService', () => {
 
     test('should handle effect failure', async () => {
       const effect = Effect.fail(new Error('Test error'));
-      
+
       await expect(service.testRunEffect(effect)).rejects.toThrow('Test error');
     });
 
     test('should format Error instances', () => {
       const error = new Error('Test error');
       const formattedError = service.testFormatError(error);
-      
+
       expect(formattedError).toBe(error);
       expect(formattedError.message).toBe('Test error');
     });
@@ -140,7 +149,7 @@ describe('BaseService', () => {
     test('should format string errors', () => {
       const error = 'String error message';
       const formattedError = service.testFormatError(error);
-      
+
       expect(formattedError).toBeInstanceOf(Error);
       expect(formattedError.message).toBe('String error message');
     });
@@ -148,7 +157,7 @@ describe('BaseService', () => {
     test('should format unknown errors', () => {
       const error = { unknown: 'object' };
       const formattedError = service.testFormatError(error);
-      
+
       expect(formattedError).toBeInstanceOf(Error);
       expect(formattedError.message).toBe('[object Object]'); // String(object) result
     });
@@ -156,10 +165,10 @@ describe('BaseService', () => {
     test('should format null/undefined errors', () => {
       const nullError = service.testFormatError(null);
       const undefinedError = service.testFormatError(undefined);
-      
+
       expect(nullError).toBeInstanceOf(Error);
       expect(nullError.message).toBe('null'); // String(null) result
-      
+
       expect(undefinedError).toBeInstanceOf(Error);
       expect(undefinedError.message).toBe('undefined'); // String(undefined) result
     });
@@ -177,6 +186,12 @@ describe('BaseService', () => {
           this.loggerAvailableInConstructor = this.logger !== undefined;
         }
       }
+
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({
+        'database.host': 'localhost',
+        'app.name': 'test-app',
+      });
 
       // Set init context before construction (as the framework does)
       BaseService.setInitContext(mockLogger, mockConfig);
@@ -203,6 +218,11 @@ describe('BaseService', () => {
         }
       }
 
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({
+        'database.host': 'localhost',
+      });
+
       BaseService.setInitContext(mockLogger, mockConfig);
       let service: TestService;
       try {
@@ -216,6 +236,9 @@ describe('BaseService', () => {
 
     test('should create child logger with correct className in constructor', () => {
       class MyCustomService extends BaseService {}
+
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
 
       BaseService.setInitContext(mockLogger, mockConfig);
       try {
@@ -240,6 +263,9 @@ describe('BaseService', () => {
     test('initializeService should be a no-op if already initialized via init context', () => {
       class TestService extends BaseService {}
 
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+
       BaseService.setInitContext(mockLogger, mockConfig);
       let service: TestService;
       try {
@@ -251,7 +277,7 @@ describe('BaseService', () => {
       expect(service.isInitialized).toBe(true);
 
       // Call initializeService again — should be a no-op
-      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      const otherLogger = createMockLogger();
       const otherConfig = createMockConfig({ other: 'config' });
       service.initializeService(otherLogger, otherConfig);
 
@@ -260,6 +286,9 @@ describe('BaseService', () => {
     });
 
     test('clearInitContext should prevent subsequent constructors from picking up context', () => {
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+
       BaseService.setInitContext(mockLogger, mockConfig);
       BaseService.clearInitContext();
 
@@ -275,13 +304,12 @@ describe('BaseService', () => {
       class TestService extends BaseService {
         async testComplexEffect() {
           const effect = Effect.succeed(84); // Simplify to avoid generator complexity
-          
+
           return await this.runEffect(effect as any);
         }
       }
 
-      const service = new TestService();
-      service.initializeService(mockLogger, mockConfig);
+      const { instance: service } = createTestService(TestService);
       const result = await service.testComplexEffect();
       expect(result).toBe(84);
     });
@@ -291,13 +319,12 @@ describe('BaseService', () => {
         testStackTrace() {
           const originalError = new Error('Original error');
           const formattedError = this.formatError(originalError);
-          
+
           expect(formattedError).toBe(originalError); // Same Error instance returned
         }
       }
 
-      const service = new TestService();
-      service.initializeService(mockLogger, mockConfig);
+      const { instance: service } = createTestService(TestService);
       service.testStackTrace();
     });
   });

@@ -7,41 +7,34 @@ import {
   describe,
   test,
   expect,
-  beforeEach,
   mock,
 } from 'bun:test';
 import { Context } from 'effect';
 
-import type { IConfig, OneBunAppConfig } from './config.interface';
-
 import type { SyncLogger } from '@onebun/logger';
 
+import { createTestController } from '../testing/service-helpers';
 import { createMockConfig } from '../testing/test-utils';
 
 import { Controller } from './controller';
 
+function createMockLogger(): SyncLogger {
+   
+  const noOp = () => {};
+  const logger: SyncLogger = {
+    trace: mock(noOp),
+    debug: mock(noOp),
+    info: mock(noOp),
+    warn: mock(noOp),
+    error: mock(noOp),
+    fatal: mock(noOp),
+    child: mock(() => logger),
+  };
+
+  return logger;
+}
+
 describe('Controller', () => {
-  let mockLogger: SyncLogger;
-  let mockConfig: IConfig<OneBunAppConfig>;
-
-  beforeEach(() => {
-    mockLogger = {
-      debug: mock(() => {}),
-      info: mock(() => {}),
-      warn: mock(() => {}),
-      error: mock(() => {}),
-      fatal: mock(() => {}),
-      trace: mock(() => {}),
-      child: mock(() => mockLogger),
-    };
-
-    mockConfig = createMockConfig({
-      'test': 'value',
-      'database.host': 'localhost',
-      'database.port': 5432,
-    });
-  });
-
   describe('Controller initialization', () => {
     test('should initialize controller with logger and config', () => {
       class TestController extends Controller {
@@ -50,14 +43,16 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      
-      expect(() => {
-        controller.initializeController(mockLogger, mockConfig);
-      }).not.toThrow();
+      const { logger } = createTestController(TestController, {
+        config: {
+          'test': 'value',
+          'database.host': 'localhost',
+          'database.port': 5432,
+        },
+      });
 
-      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'TestController' });
-      expect(mockLogger.debug).toHaveBeenCalledWith('Controller TestController initialized');
+      expect(logger.child).toHaveBeenCalledWith({ className: 'TestController' });
+      expect(logger.debug).toHaveBeenCalledWith('Controller TestController initialized');
     });
 
     test('should throw error when logger is not provided', () => {
@@ -68,7 +63,8 @@ describe('Controller', () => {
       }
 
       const controller = new TestController();
-      
+      const mockConfig = createMockConfig({ 'test': 'value' });
+
       expect(() => {
         controller.initializeController(undefined as any, mockConfig);
       }).toThrow('Logger is required for controller TestController');
@@ -82,7 +78,8 @@ describe('Controller', () => {
       }
 
       const controller = new TestController();
-      
+      const mockConfig = createMockConfig({ 'test': 'value' });
+
       expect(() => {
         controller.initializeController(null as any, mockConfig);
       }).toThrow('Logger is required for controller TestController');
@@ -100,8 +97,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       // The method should exist and be callable
       expect(typeof controller.testGetService).toBe('function');
@@ -117,8 +113,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       const info = controller.getLoggerInfo();
       expect(info.hasLogger).toBe(true);
@@ -134,11 +129,10 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new CustomNamedController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { logger } = createTestController(CustomNamedController);
 
-      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'CustomNamedController' });
-      expect(mockLogger.debug).toHaveBeenCalledWith('Controller CustomNamedController initialized');
+      expect(logger.child).toHaveBeenCalledWith({ className: 'CustomNamedController' });
+      expect(logger.debug).toHaveBeenCalledWith('Controller CustomNamedController initialized');
     });
 
     test('should provide typed config access', () => {
@@ -146,20 +140,19 @@ describe('Controller', () => {
         getConfigValue(path: string) {
           return this.config.get(path);
         }
-        
+
         checkConfigInitialized() {
           return this.config.isInitialized;
         }
       }
 
-      const controller = new TestController();
-      const typedConfig = createMockConfig({
-        'server.port': 3000,
-        'server.host': '0.0.0.0',
+      const { instance: controller } = createTestController(TestController, {
+        config: {
+          'server.port': 3000,
+          'server.host': '0.0.0.0',
+        },
       });
-      
-      controller.initializeController(mockLogger, typedConfig);
-      
+
       expect(controller.getConfigValue('server.port')).toBe(3000);
       expect(controller.getConfigValue('server.host')).toBe('0.0.0.0');
       expect(controller.checkConfigInitialized()).toBe(true);
@@ -180,11 +173,10 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new ExtendedController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { logger } = createTestController(ExtendedController);
 
-      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'ExtendedController' });
-      expect(mockLogger.debug).toHaveBeenCalledWith('Controller ExtendedController initialized');
+      expect(logger.child).toHaveBeenCalledWith({ className: 'ExtendedController' });
+      expect(logger.debug).toHaveBeenCalledWith('Controller ExtendedController initialized');
     });
 
     test('should handle complex inheritance chains', () => {
@@ -206,11 +198,10 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new Level3Controller();
-      controller.initializeController(mockLogger, mockConfig);
+      const { logger } = createTestController(Level3Controller);
 
-      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'Level3Controller' });
-      expect(mockLogger.debug).toHaveBeenCalledWith('Controller Level3Controller initialized');
+      expect(logger.child).toHaveBeenCalledWith({ className: 'Level3Controller' });
+      expect(logger.debug).toHaveBeenCalledWith('Controller Level3Controller initialized');
     });
   });
 
@@ -220,13 +211,9 @@ describe('Controller', () => {
         // No additional methods
       }
 
-      const controller = new EmptyController();
-      
-      expect(() => {
-        controller.initializeController(mockLogger, mockConfig);
-      }).not.toThrow();
+      const { logger } = createTestController(EmptyController);
 
-      expect(mockLogger.child).toHaveBeenCalledWith({ className: 'EmptyController' });
+      expect(logger.child).toHaveBeenCalledWith({ className: 'EmptyController' });
     });
 
     test('should handle re-initialization attempts (no-op after first init)', () => {
@@ -236,26 +223,18 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      
-      // First initialization
-      controller.initializeController(mockLogger, mockConfig);
-      expect(mockLogger.debug).toHaveBeenCalledWith('Controller TestController initialized');
+      const { instance: controller, logger, config } = createTestController(TestController);
+      expect(logger.debug).toHaveBeenCalledWith('Controller TestController initialized');
 
       // Second initialization — should be a no-op (already initialized)
-      const newMockLogger = {
-        ...mockLogger,
-        child: mock(() => newMockLogger),
-        debug: mock(() => {}),
-      };
-
+      const newMockLogger = createMockLogger();
       const newConfig = createMockConfig({ 'newConfig': true });
       controller.initializeController(newMockLogger, newConfig);
 
       // Should NOT have been called — initializeController is a no-op after first init
       expect(newMockLogger.debug).not.toHaveBeenCalled();
       // Should still have original config
-      expect((controller as any).config).toBe(mockConfig);
+      expect((controller as any).config).toBe(config);
     });
   });
 
@@ -272,9 +251,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const result = controller.testSetAndGetService();
       expect(result).toEqual({ value: 'test-value' });
     });
@@ -288,8 +266,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       expect(() => controller.testGetMissingService()).toThrow('Service undefined not found');
     });
@@ -307,9 +284,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const result = controller.testServiceLookup();
       expect(result).toBe('test-service-value');
     });
@@ -323,8 +299,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       // Test JSON content type
       const jsonRequest = new Request('http://test.com', {
@@ -356,9 +331,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const testData = { message: 'hello', number: 42 };
       const request = new Request('http://test.com', {
         method: 'POST',
@@ -377,8 +351,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       const testData = { id: 1, name: 'Test' };
 
@@ -399,8 +372,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       // Test with default values
       const defaultResponse = controller.testError('Something went wrong');
@@ -419,12 +391,11 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       const testData = { legacy: true };
       const response = controller.testJson(testData, 201);
-      
+
       expect(response.status).toBe(201);
       expect(response.headers.get('Content-Type')).toBe('application/json');
     });
@@ -438,9 +409,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const response = controller.testSuccessContent();
       const content = await response.json();
 
@@ -457,9 +427,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const response = controller.testErrorContent();
       const content = await response.json();
 
@@ -479,9 +448,8 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const response = controller.testEmptySuccess();
       expect(response.status).toBe(200);
     });
@@ -490,15 +458,14 @@ describe('Controller', () => {
       class TestController extends Controller {
         testGetServiceByClass() {
           class MockServiceClass {}
-          
+
           // This will throw because the class is not registered
           expect(() => this.getService(MockServiceClass)).toThrow();
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       controller.testGetServiceByClass();
     });
 
@@ -515,8 +482,7 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
+      const { instance: controller } = createTestController(TestController);
 
       await expect(controller.testMalformedJson()).rejects.toThrow();
     });
@@ -531,15 +497,14 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const result = controller.testTextResponse();
-      
+
       expect(result).toBeInstanceOf(Response);
       expect(result.status).toBe(200);
       expect(result.headers.get('Content-Type')).toBe('text/plain');
-      
+
       const text = await result.text();
       expect(text).toBe('Hello, World!');
     });
@@ -551,15 +516,14 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const result = controller.testTextResponseWithStatus();
-      
+
       expect(result).toBeInstanceOf(Response);
       expect(result.status).toBe(404);
       expect(result.headers.get('Content-Type')).toBe('text/plain');
-      
+
       const text = await result.text();
       expect(text).toBe('Not Found');
     });
@@ -571,14 +535,13 @@ describe('Controller', () => {
         }
       }
 
-      const controller = new TestController();
-      controller.initializeController(mockLogger, mockConfig);
-      
+      const { instance: controller } = createTestController(TestController);
+
       const result = controller.testEmptyTextResponse();
-      
+
       expect(result).toBeInstanceOf(Response);
       expect(result.status).toBe(200);
-      
+
       const text = await result.text();
       expect(text).toBe('');
     });
@@ -596,6 +559,13 @@ describe('Controller', () => {
           this.loggerAvailableInConstructor = this.logger !== undefined;
         }
       }
+
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({
+        'test': 'value',
+        'database.host': 'localhost',
+        'database.port': 5432,
+      });
 
       // Set init context before construction (as the framework does)
       Controller.setInitContext(mockLogger, mockConfig);
@@ -621,6 +591,11 @@ describe('Controller', () => {
         }
       }
 
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({
+        'database.host': 'localhost',
+      });
+
       Controller.setInitContext(mockLogger, mockConfig);
       let controller: TestController;
       try {
@@ -634,6 +609,9 @@ describe('Controller', () => {
 
     test('should create child logger with correct className in constructor', () => {
       class MyCustomController extends Controller {}
+
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
 
       Controller.setInitContext(mockLogger, mockConfig);
       try {
@@ -660,6 +638,9 @@ describe('Controller', () => {
     test('initializeController should be a no-op if already initialized via init context', () => {
       class TestController extends Controller {}
 
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+
       Controller.setInitContext(mockLogger, mockConfig);
       let controller: TestController;
       try {
@@ -669,7 +650,7 @@ describe('Controller', () => {
       }
 
       // Call initializeController again — should be a no-op
-      const otherLogger = { ...mockLogger, child: mock(() => ({ ...mockLogger })) };
+      const otherLogger = createMockLogger();
       const otherConfig = createMockConfig({ other: 'config' });
       controller.initializeController(otherLogger, otherConfig);
 
@@ -678,6 +659,9 @@ describe('Controller', () => {
     });
 
     test('clearInitContext should prevent subsequent constructors from picking up context', () => {
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+
       Controller.setInitContext(mockLogger, mockConfig);
       Controller.clearInitContext();
 
