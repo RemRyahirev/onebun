@@ -168,6 +168,28 @@ describe('JetStreamQueueAdapter', () => {
       expect(multiAdapter.resolveStreamForSubject('logs.app.info')).toBe('LOGS');
     });
 
+    it('should not match > wildcard against zero trailing tokens', () => {
+      const multiAdapter = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [
+          { name: 'SPECIFIC', subjects: ['events.>'] },
+          { name: 'CATCH_ALL', subjects: ['*'] },
+        ],
+      });
+
+      // 'events' alone should NOT match 'events.>' — falls through to CATCH_ALL
+      expect(multiAdapter.resolveStreamForSubject('events')).toBe('CATCH_ALL');
+      // But 'events.created' should match 'events.>'
+      expect(multiAdapter.resolveStreamForSubject('events.created')).toBe('SPECIFIC');
+    });
+
+    it('should throw if streams array is empty', () => {
+      expect(() => new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [],
+      })).toThrow('JetStreamQueueAdapter requires at least one stream definition');
+    });
+
     it('should fallback to first stream for unknown subjects', () => {
       const multiAdapter = new JetStreamQueueAdapter({
         servers: 'nats://localhost:4222',

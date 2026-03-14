@@ -32,6 +32,7 @@ import { NatsClient } from './nats-client';
 
 const DEFAULT_ACK_WAIT_NANOSECONDS = 30_000_000_000; // 30 seconds in nanoseconds
 const DEFAULT_MAX_DELIVER = 3;
+const CONSUME_RESTART_DELAY_MS = 100;
 
 // Import JetStream types dynamically
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -217,6 +218,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   private eventHandlers: Map<keyof QueueEvents, Set<(...args: unknown[]) => void>> = new Map();
 
   constructor(private readonly options: JetStreamAdapterOptions) {
+    if (!options.streams.length) {
+      throw new Error('JetStreamQueueAdapter requires at least one stream definition');
+    }
+
     this.client = new NatsClient(options);
 
     const defaults = options.streamDefaults ?? {};
@@ -534,7 +539,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
       // Multi-level wildcard matches the rest
       if (pt === '>') {
-        return i <= subjectTokens.length;
+        return i < subjectTokens.length;
       }
 
       // No more subject tokens but pattern continues
@@ -653,7 +658,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
     // Restart consumption if still running
     if (entry.running) {
-      setTimeout(() => this.consumeMessages(entry), 100);
+      setTimeout(() => this.consumeMessages(entry), CONSUME_RESTART_DELAY_MS);
     }
   }
 }
