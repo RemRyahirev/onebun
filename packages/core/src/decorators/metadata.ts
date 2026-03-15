@@ -44,6 +44,31 @@ export function defineMetadata(
 }
 
 /**
+ * Copy all metadata from one target to another.
+ * Used by @Controller to preserve method-decorator metadata (e.g. queue decorators)
+ * when wrapping the original class.
+ */
+export function copyAllMetadata(source: object, destination: object): void {
+  const sourceMetadata = metadataStorage.get(source);
+  if (!sourceMetadata) {
+    return;
+  }
+
+  let destMetadata = metadataStorage.get(destination);
+  if (!destMetadata) {
+    destMetadata = new Map<string, Map<string | symbol, any>>();
+    metadataStorage.set(destination, destMetadata);
+  }
+
+  for (const [metadataKey, keyMap] of sourceMetadata) {
+    // Only copy if destination doesn't already have this key
+    if (!destMetadata.has(metadataKey)) {
+      destMetadata.set(metadataKey, new Map(keyMap));
+    }
+  }
+}
+
+/**
  * Get metadata from a target object
  * @param metadataKey - The key for the metadata
  * @param target - The target object

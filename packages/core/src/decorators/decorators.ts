@@ -15,7 +15,11 @@ import {
   type RouteOptions,
 } from '../types';
 
-import { getConstructorParamTypes as getDesignParamTypes, Reflect } from './metadata';
+import {
+  copyAllMetadata,
+  getConstructorParamTypes as getDesignParamTypes,
+  Reflect,
+} from './metadata';
 
 /**
  * Metadata storage for controllers
@@ -173,6 +177,9 @@ export function controllerDecorator(basePath: string = '') {
         super(...allArgs);
       }
     }
+
+    // Copy all method-decorator metadata (queue decorators, etc.) from original to wrapped class
+    copyAllMetadata(target, WrappedController);
 
     // Copy metadata and static properties
     META_CONTROLLERS.set(WrappedController, metadata);

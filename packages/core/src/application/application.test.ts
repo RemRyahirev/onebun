@@ -41,7 +41,14 @@ import { BaseMiddleware } from '../module/middleware';
 import { clearGlobalServicesRegistry } from '../module/module';
 import { Service } from '../module/service';
 import { QueueService, QUEUE_NOT_ENABLED_ERROR_MESSAGE } from '../queue';
-import { Subscribe } from '../queue/decorators';
+import { CronExpression } from '../queue/cron-expression';
+import {
+  Cron,
+  Interval,
+  OnQueueReady,
+  Subscribe,
+  Timeout,
+} from '../queue/decorators';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 
 
@@ -4079,6 +4086,227 @@ describe('OneBunApplication', () => {
         | undefined;
       expect(controller).toBeDefined();
       await expect(controller!.publishTest('child.test', { ok: true })).resolves.toBeDefined();
+
+      await app.stop();
+    });
+  });
+
+  describe('queue auto-detection', () => {
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    const noop = () => {};
+
+    afterEach(async () => {
+      clearGlobalServicesRegistry();
+      register.clear();
+    });
+
+    test('auto-enables queue when controller has @Subscribe', async () => {
+      @Controller('/auto-sub')
+      class AutoSubController extends BaseController {
+        @Subscribe('auto.test')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [AutoSubController] })
+      class AutoSubModule {}
+
+      const app = createTestApp(AutoSubModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('auto-enables queue when controller has @Cron', async () => {
+      @Controller('/auto-cron')
+      class AutoCronController extends BaseController {
+        @Cron(CronExpression.EVERY_MINUTE, { pattern: 'cron.test' })
+        getData() {
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [AutoCronController] })
+      class AutoCronModule {}
+
+      const app = createTestApp(AutoCronModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('auto-enables queue when controller has @Interval', async () => {
+       
+      const intervalMs = 5000;
+
+      @Controller('/auto-interval')
+      class AutoIntervalController extends BaseController {
+        @Interval(intervalMs, { pattern: 'interval.test' })
+        getData() {
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [AutoIntervalController] })
+      class AutoIntervalModule {}
+
+      const app = createTestApp(AutoIntervalModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('auto-enables queue when controller has @Timeout', async () => {
+       
+      const timeoutMs = 1000;
+
+      @Controller('/auto-timeout')
+      class AutoTimeoutController extends BaseController {
+        @Timeout(timeoutMs, { pattern: 'timeout.test' })
+        getData() {
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [AutoTimeoutController] })
+      class AutoTimeoutModule {}
+
+      const app = createTestApp(AutoTimeoutModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('does not enable queue when no queue decorators present', async () => {
+      @Controller('/plain')
+      class PlainController extends BaseController {
+        @Get('/')
+        async index(): Promise<OneBunResponse> {
+          return this.success({ ok: true });
+        }
+      }
+
+      @Module({ controllers: [PlainController] })
+      class PlainModule {}
+
+      const app = createTestApp(PlainModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+
+      await app.stop();
+    });
+
+    test('does not enable queue when only lifecycle decorators present', async () => {
+      @Controller('/lifecycle-only')
+      class LifecycleOnlyController extends BaseController {
+        @OnQueueReady()
+        onReady() {
+          noop();
+        }
+      }
+
+      @Module({ controllers: [LifecycleOnlyController] })
+      class LifecycleOnlyModule {}
+
+      const app = createTestApp(LifecycleOnlyModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+
+      await app.stop();
+    });
+
+    test('enabled: false overrides auto-detection', async () => {
+      @Controller('/force-off')
+      class ForceOffController extends BaseController {
+        @Subscribe('force.off')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [ForceOffController] })
+      class ForceOffModule {}
+
+      const app = createTestApp(ForceOffModule, {
+        port: 0,
+        queue: { enabled: false },
+      });
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+
+      await app.stop();
+    });
+
+    test('auto-detects from nested child module', async () => {
+      @Controller('/child-auto')
+      class ChildAutoController extends BaseController {
+        @Subscribe('child.auto')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [ChildAutoController] })
+      class ChildAutoModule {}
+
+      @Module({ imports: [ChildAutoModule] })
+      class ParentAutoModule {}
+
+      const app = createTestApp(ParentAutoModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('auto-detects from deeply nested module (grandchild)', async () => {
+      @Controller('/grandchild')
+      class GrandchildController extends BaseController {
+        @Subscribe('grandchild.event')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [GrandchildController] })
+      class GrandchildModule {}
+
+      @Module({ imports: [GrandchildModule] })
+      class MiddleModule {}
+
+      @Module({ imports: [MiddleModule] })
+      class TopModule {}
+
+      const app = createTestApp(TopModule, { port: 0 });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('getQueueService() returns null when queue not enabled', async () => {
+      @Controller('/no-queue')
+      class NoQueueController extends BaseController {
+        @Get('/')
+        async index(): Promise<OneBunResponse> {
+          return this.success({});
+        }
+      }
+
+      @Module({ controllers: [NoQueueController] })
+      class NoQueueModule {}
+
+      const app = createTestApp(NoQueueModule, { port: 0 });
+      await app.start();
+
+      const queueService = app.getQueueService();
+      expect(queueService).toBeNull();
 
       await app.stop();
     });
