@@ -34,6 +34,9 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `createMockLogger()` — no-op async Effect logger
 - `makeMockLoggerLayer()` — Effect Layer providing mock async logger
 - `useFakeTimers()` — replaces global `setTimeout`/`setInterval`/`Date.now`, returns control object
+- `FakeTimers` class and `fakeTimers` singleton are also exported for direct use, but `useFakeTimers()` is the recommended API
+
+**Exported types**: `TestInstanceResult<T>`, `TestContainer`, `RedisContainerOptions`, `NatsContainerOptions`, `CompiledTestingModule`
 
 </llm-only>
 
@@ -50,6 +53,7 @@ import {
   TestingModule,
   useFakeTimers,
   createMockConfig,
+  createMockLogger,
   makeMockLoggerLayer,
   createMockSyncLogger,
   createRedisContainer,
@@ -336,6 +340,17 @@ config.isInitialized;      // true
 **Options:**
 - `values` — `Record<string, unknown>` — config values
 - `options.isInitialized` — whether config is initialized (default: `true`)
+
+### `createMockLogger`
+
+Creates a silent async `Logger` (Effect-based). All methods return `Effect.succeed(undefined)`, `child()` returns itself.
+
+```typescript
+import { createMockLogger } from '@onebun/core';
+
+const logger = createMockLogger();
+// Use with Effect programs that require Logger
+```
 
 ### `makeMockLoggerLayer`
 

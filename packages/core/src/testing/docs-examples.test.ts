@@ -22,7 +22,11 @@ import { Controller as BaseController } from '../module/controller';
 import { BaseService, Service } from '../module/service';
 
 import { createTestController, createTestService } from './service-helpers';
-import { createMockConfig, useFakeTimers } from './test-utils';
+import {
+  createMockConfig,
+  createMockLogger,
+  useFakeTimers,
+} from './test-utils';
 import { TestingModule } from './testing-module';
 
 // ============================================================================
@@ -161,6 +165,50 @@ describe('docs/testing.md — TestingModule', () => {
       await module?.close();
     }
   });
+
+  /**
+   * @source docs/testing.md#overrideproviderserviceclass
+   */
+  it('overrideProvider — replaces service with mock value', async () => {
+    const mockUser = { id: '1', name: 'MockUser' };
+    let module: CompiledTestingModule | undefined;
+
+    try {
+      module = await TestingModule
+        .create({ controllers: [UserController], providers: [UserService] })
+        .overrideProvider(UserService).useValue({ findById: () => mockUser })
+        .compile();
+
+      const response = await module.inject('GET', '/users/1');
+
+      expect(response.status).toBe(200);
+
+      const body = await response.json() as { result: { id: string; name: string } };
+      expect(body.result.name).toBe('MockUser');
+    } finally {
+      await module?.close();
+    }
+  });
+
+  /**
+   * @source docs/testing.md#setoptionsoptions
+   */
+  it('setOptions — applies basePath to routes', async () => {
+    let module: CompiledTestingModule | undefined;
+
+    try {
+      module = await TestingModule
+        .create({ controllers: [UserController], providers: [UserService] })
+        .setOptions({ basePath: '/api' })
+        .compile();
+
+      const response = await module.inject('GET', '/api/users/1');
+
+      expect(response.status).toBe(200);
+    } finally {
+      await module?.close();
+    }
+  });
 });
 
 // ============================================================================
@@ -188,6 +236,24 @@ describe('docs/testing.md — useFakeTimers', () => {
     } finally {
       timers.restore();
     }
+  });
+});
+
+// ============================================================================
+// createMockLogger — docs/testing.md
+// ============================================================================
+
+describe('docs/testing.md — createMockLogger', () => {
+  /**
+   * @source docs/testing.md#createmocklogger
+   */
+  it('basic usage — creates silent async logger', () => {
+    const logger = createMockLogger();
+
+    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
+    expect(typeof logger.child).toBe('function');
+    expect(logger.child({ context: 'test' })).toBe(logger);
   });
 });
 

@@ -102,6 +102,11 @@ export default defineConfig({
           items: [{ text: 'Environment', link: '/api/envs' }],
         },
         {
+          text: 'Testing',
+          collapsed: false,
+          items: [{ text: 'Testing Utilities', link: '/testing' }],
+        },
+        {
           text: 'Examples',
           collapsed: false,
           items: [
