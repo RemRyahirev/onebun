@@ -6,7 +6,7 @@ import {
   it,
 } from 'bun:test';
 
-import { createRedisContainer, type TestContainer } from '@onebun/core';
+import { createRedisContainer, type TestContainer } from '@onebun/core/testing';
 
 import { createRedisCache, RedisCache } from '../src/redis-cache';
 

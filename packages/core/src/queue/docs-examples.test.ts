@@ -49,6 +49,7 @@ import {
   getIntervalMetadata,
   getTimeoutMetadata,
   hasQueueDecorators,
+  QueueScheduler,
 } from './index';
 
 /**
@@ -591,5 +592,94 @@ describe('Feature Support Matrix (docs/api/queue.md)', () => {
     expect(adapter.supports('consumer-groups')).toBe(false);
     expect(adapter.supports('dead-letter-queue')).toBe(false);
     expect(adapter.supports('retry')).toBe(false);
+  });
+});
+
+/**
+ * @source docs/api/queue.md#setup (scheduled-only tip)
+ */
+describe('Scheduled-only Controllers (docs/api/queue.md)', () => {
+  it('should auto-detect queue decorators on controller with only @Interval', () => {
+    // From docs/api/queue.md: Scheduled-only Controllers tip
+    class ScheduledOnlyController {
+      @Interval(60000, { pattern: 'metrics.collect' })
+      getMetrics() {
+        return { cpu: process.cpuUsage() };
+      }
+    }
+
+    // No @Subscribe — only scheduling decorators
+    expect(hasQueueDecorators(ScheduledOnlyController)).toBe(true);
+    expect(getSubscribeMetadata(ScheduledOnlyController).length).toBe(0);
+    expect(getIntervalMetadata(ScheduledOnlyController).length).toBe(1);
+  });
+
+  it('should auto-detect queue decorators on controller with only @Cron', () => {
+    class CronOnlyController {
+      @Cron(CronExpression.EVERY_HOUR, { pattern: 'cleanup.expired' })
+      getCleanupData() {
+        return { timestamp: Date.now() };
+      }
+    }
+
+    expect(hasQueueDecorators(CronOnlyController)).toBe(true);
+    expect(getSubscribeMetadata(CronOnlyController).length).toBe(0);
+    expect(getCronMetadata(CronOnlyController).length).toBe(1);
+  });
+
+  it('should auto-detect queue decorators on controller with only @Timeout', () => {
+    class TimeoutOnlyController {
+      @Timeout(5000, { pattern: 'startup.warmup' })
+      getWarmupData() {
+        return { type: 'warmup' };
+      }
+    }
+
+    expect(hasQueueDecorators(TimeoutOnlyController)).toBe(true);
+    expect(getSubscribeMetadata(TimeoutOnlyController).length).toBe(0);
+    expect(getTimeoutMetadata(TimeoutOnlyController).length).toBe(1);
+  });
+});
+
+/**
+ * @source docs/api/queue.md#setup (error handling info)
+ */
+describe('Scheduled Job Error Handling (docs/api/queue.md)', () => {
+  let adapter: InMemoryQueueAdapter;
+
+  beforeEach(async () => {
+    adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+  });
+
+  afterEach(async () => {
+    await adapter.disconnect();
+  });
+
+  it('should continue scheduler after handler error via setErrorHandler', async () => {
+    // From docs/api/queue.md: Scheduled Job Error Handling info
+    const scheduler = new QueueScheduler(adapter);
+
+    const errors: Array<{ name: string; error: unknown }> = [];
+    scheduler.setErrorHandler((name: string, error: unknown) => {
+      errors.push({ name, error });
+    });
+
+    // Add a job that will fail
+    scheduler.addIntervalJob('failing-job', 60000, 'test.fail', () => {
+      throw new Error('Job failed');
+    });
+
+    scheduler.start();
+
+    // executeJob is async fire-and-forget, wait for it
+    await new Promise(r => setTimeout(r, 50));
+
+    // Error handler should have been called (immediate execution)
+    expect(errors.length).toBe(1);
+    expect(errors[0].name).toBe('failing-job');
+    expect((errors[0].error as Error).message).toBe('Job failed');
+
+    scheduler.stop();
   });
 });

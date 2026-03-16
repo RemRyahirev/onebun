@@ -6,7 +6,7 @@ import {
   afterEach,
 } from 'bun:test';
 
-import { createTestService, useFakeTimers } from '@onebun/core';
+import { createTestService, useFakeTimers } from '@onebun/core/testing';
 
 import { CacheModule } from '../src/cache.module';
 import { CacheService } from '../src/cache.service';

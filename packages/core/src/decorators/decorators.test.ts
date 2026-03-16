@@ -104,7 +104,7 @@ describe('decorators', () => {
 
       const metadata = getControllerMetadata(TestController);
       expect(metadata).toBeDefined();
-      expect(metadata?.path).toBe('/');
+      expect(metadata?.path).toBe('');
       expect(metadata?.routes).toEqual([]);
     });
 

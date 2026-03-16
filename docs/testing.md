@@ -44,7 +44,7 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 
 OneBun provides a set of testing utilities for unit and integration testing of services, controllers, and full application modules.
 
-All testing utilities are exported from `@onebun/core`:
+All testing utilities are exported from `@onebun/core/testing`:
 
 ```typescript
 import {
@@ -58,7 +58,7 @@ import {
   createMockSyncLogger,
   createRedisContainer,
   createNatsContainer,
-} from '@onebun/core';
+} from '@onebun/core/testing';
 ```
 
 ## Unit Testing — `createTestService` / `createTestController`
@@ -70,7 +70,7 @@ For isolated unit testing of services and controllers without starting an HTTP s
 Creates a service instance with a mock logger and mock config. Calls `initializeService()` internally, so `this.logger` and `this.config` are available in the service.
 
 ```typescript
-import { createTestService } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 const { instance, logger, config } = createTestService(UserService);
 
@@ -104,7 +104,7 @@ const { instance } = createTestService(UserService, {
 Same API as `createTestService`, but calls `initializeController()` instead.
 
 ```typescript
-import { createTestController } from '@onebun/core';
+import { createTestController } from '@onebun/core/testing';
 
 const { instance, logger, config } = createTestController(UserController, {
   deps: [mockUserService],
@@ -119,7 +119,7 @@ For full integration testing with a real HTTP server, middleware pipeline, and D
 
 ```typescript
 import { describe, it, expect, afterEach } from 'bun:test';
-import { TestingModule, type CompiledTestingModule } from '@onebun/core';
+import { TestingModule, type CompiledTestingModule } from '@onebun/core/testing';
 
 describe('UserController', () => {
   let module: CompiledTestingModule;
@@ -229,7 +229,7 @@ Helpers for spinning up Redis and NATS containers in tests. Requires Docker.
 ### `createRedisContainer`
 
 ```typescript
-import { createRedisContainer, type TestContainer } from '@onebun/core';
+import { createRedisContainer, type TestContainer } from '@onebun/core/testing';
 
 let redis: TestContainer;
 
@@ -252,7 +252,7 @@ afterAll(async () => {
 ### `createNatsContainer`
 
 ```typescript
-import { createNatsContainer, type TestContainer } from '@onebun/core';
+import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
 
 let nats: TestContainer;
 
@@ -290,7 +290,7 @@ interface TestContainer {
 Replaces global `setTimeout`, `setInterval`, `clearTimeout`, `clearInterval`, and `Date.now` with controllable fakes. Useful for testing timer-based logic without real delays.
 
 ```typescript
-import { useFakeTimers } from '@onebun/core';
+import { useFakeTimers } from '@onebun/core/testing';
 import { describe, it, expect, afterEach } from 'bun:test';
 
 describe('TimerService', () => {
@@ -326,7 +326,7 @@ describe('TimerService', () => {
 Creates a mock `IConfig` object for testing. Returns values from the provided map via `get(path)`.
 
 ```typescript
-import { createMockConfig } from '@onebun/core';
+import { createMockConfig } from '@onebun/core/testing';
 
 const config = createMockConfig({
   'server.port': 3000,
@@ -346,7 +346,7 @@ config.isInitialized;      // true
 Creates a silent async `Logger` (Effect-based). All methods return `Effect.succeed(undefined)`, `child()` returns itself.
 
 ```typescript
-import { createMockLogger } from '@onebun/core';
+import { createMockLogger } from '@onebun/core/testing';
 
 const logger = createMockLogger();
 // Use with Effect programs that require Logger
@@ -357,7 +357,7 @@ const logger = createMockLogger();
 Creates an Effect `Layer` that provides a silent mock logger. Used internally by `TestingModule`.
 
 ```typescript
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer } from '@onebun/core/testing';
 
 const loggerLayer = makeMockLoggerLayer();
 // Use with Effect.provide(loggerLayer)
@@ -368,7 +368,7 @@ const loggerLayer = makeMockLoggerLayer();
 Creates a silent no-op `SyncLogger`. All methods are no-ops, `child()` returns itself.
 
 ```typescript
-import { createMockSyncLogger } from '@onebun/core';
+import { createMockSyncLogger } from '@onebun/core/testing';
 
 const logger = createMockSyncLogger();
 logger.info('this does nothing');

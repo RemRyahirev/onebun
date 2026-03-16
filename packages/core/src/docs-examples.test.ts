@@ -48,6 +48,8 @@ import type {
 import type { HttpExecutionContext } from './types';
 import type { ServerWebSocket } from 'bun';
 
+import { makeMockLoggerLayer } from './testing';
+
 import {
   Controller,
   Get,
@@ -109,7 +111,6 @@ import {
   createWsClient,
   createNativeWsClient,
   matchPattern,
-  makeMockLoggerLayer,
   hasOnModuleInit,
   hasOnApplicationInit,
   hasOnModuleDestroy,

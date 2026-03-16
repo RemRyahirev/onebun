@@ -39,7 +39,7 @@ import {
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
 import { clearGlobalServicesRegistry } from '../module/module';
-import { Service } from '../module/service';
+import { BaseService, Service } from '../module/service';
 import { QueueService, QUEUE_NOT_ENABLED_ERROR_MESSAGE } from '../queue';
 import { CronExpression } from '../queue/cron-expression';
 import {
@@ -2706,6 +2706,43 @@ describe('OneBunApplication', () => {
       expect(bodyListWithSlash.result).toEqual({ tasks: ['t1', 't2'], status: 'all' });
     });
 
+    test('should not produce double slash when @Controller() has no path prefix', async () => {
+      @Controller()
+      class NoPrefixController extends BaseController {
+        @Get('/users')
+        async listUsers(): Promise<OneBunResponse> {
+          return this.success({ users: ['u1'] });
+        }
+
+        @Get('/')
+        async root(): Promise<OneBunResponse> {
+          return this.success({ root: true });
+        }
+      }
+
+      @Module({ controllers: [NoPrefixController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Route should be /users, not //users
+      const responseUsers = await (mockServer as /* eslint-disable-line @typescript-eslint/no-explicit-any */ any).fetchHandler(
+        new Request('http://localhost:3000/users', { method: 'GET' }),
+      );
+      expect(responseUsers.status).toBe(200);
+      const bodyUsers = await responseUsers.json();
+      expect(bodyUsers.result).toEqual({ users: ['u1'] });
+
+      // Route should be /, not empty
+      const responseRoot = await (mockServer as /* eslint-disable-line @typescript-eslint/no-explicit-any */ any).fetchHandler(
+        new Request('http://localhost:3000/', { method: 'GET' }),
+      );
+      expect(responseRoot.status).toBe(200);
+      const bodyRoot = await responseRoot.json();
+      expect(bodyRoot.result).toEqual({ root: true });
+    });
+
     test('should normalize metrics route labels - trailing slash requests use same label as non-trailing', async () => {
       @Controller('/api')
       class ApiController extends BaseController {
@@ -4307,6 +4344,293 @@ describe('OneBunApplication', () => {
 
       const queueService = app.getQueueService();
       expect(queueService).toBeNull();
+
+      await app.stop();
+    });
+  });
+
+  describe('queue handler execution', () => {
+    afterEach(async () => {
+      clearGlobalServicesRegistry();
+      register.clear();
+    });
+
+    test('@Interval handler fires immediately on start (auto-detected, no explicit queue config)', async () => {
+      let callCount = 0;
+      const intervalMs = 60000;
+
+      @Controller('/interval-fire')
+      class IntervalFireController extends BaseController {
+        @Interval(intervalMs, { pattern: 'test.interval' })
+        getData() {
+          callCount++;
+
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [IntervalFireController] })
+      class IntervalFireModule {}
+
+      const app = createTestApp(IntervalFireModule, { port: 0 });
+      await app.start();
+
+      // scheduler.startIntervalJob calls executeJob immediately (fire-and-forget async)
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(app.getQueueService()).not.toBeNull();
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('@Interval handler fires with explicit queue: { enabled: true }', async () => {
+      let callCount = 0;
+      const intervalMs = 60000;
+
+      @Controller('/interval-explicit')
+      class IntervalExplicitController extends BaseController {
+        @Interval(intervalMs, { pattern: 'test.explicit' })
+        getData() {
+          callCount++;
+
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [IntervalExplicitController] })
+      class IntervalExplicitModule {}
+
+      const app = createTestApp(IntervalExplicitModule, {
+        port: 0,
+        queue: { enabled: true },
+      });
+      await app.start();
+
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('@Interval handler fires with injected service dependency', async () => {
+      let callCount = 0;
+      const intervalMs = 60000;
+
+      @Service()
+      class WorkerService extends BaseService {
+        async doWork(): Promise<string> {
+          return 'done';
+        }
+      }
+
+      @Controller('/interval-di')
+      class IntervalDIController extends BaseController {
+        constructor(private readonly worker: WorkerService) {
+          super();
+        }
+
+        @Interval(intervalMs, { pattern: 'test.di' })
+        async getData(): Promise<Record<string, unknown>> {
+          callCount++;
+
+          return { result: await this.worker.doWork() };
+        }
+      }
+
+      @Module({ controllers: [IntervalDIController], providers: [WorkerService] })
+      class IntervalDIModule {}
+
+      const app = createTestApp(IntervalDIModule, { port: 0 });
+      await app.start();
+
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('@Cron handler registers job in scheduler (auto-detected)', async () => {
+      @Controller('/cron-register')
+      class CronRegisterController extends BaseController {
+        @Cron(CronExpression.EVERY_HOUR, { pattern: 'cron.hourly' })
+        getData() {
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [CronRegisterController] })
+      class CronRegisterModule {}
+
+      const app = createTestApp(CronRegisterModule, { port: 0 });
+      await app.start();
+
+      const scheduler = app.getQueueService()!.getScheduler();
+      const jobs = scheduler.getJobs();
+      expect(jobs.length).toBe(1);
+      expect(jobs[0].pattern).toBe('cron.hourly');
+
+      await app.stop();
+    });
+
+    test('@Timeout handler registers and fires once (auto-detected)', async () => {
+      let callCount = 0;
+      const timeoutMs = 10;
+
+      @Controller('/timeout-fire')
+      class TimeoutFireController extends BaseController {
+        @Timeout(timeoutMs, { pattern: 'test.timeout' })
+        getData() {
+          callCount++;
+
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [TimeoutFireController] })
+      class TimeoutFireModule {}
+
+      const app = createTestApp(TimeoutFireModule, { port: 0 });
+      await app.start();
+
+      // Wait for timeout to fire
+      await new Promise(r => setTimeout(r, 100));
+
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('scheduled decorators in nested child module auto-init queue and fire', async () => {
+      let callCount = 0;
+      const intervalMs = 60000;
+
+      @Controller('/nested-interval')
+      class NestedIntervalController extends BaseController {
+        @Interval(intervalMs, { pattern: 'nested.interval' })
+        getData() {
+          callCount++;
+
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [NestedIntervalController] })
+      class ChildModule {}
+
+      @Module({ imports: [ChildModule] })
+      class ParentModule {}
+
+      const app = createTestApp(ParentModule, { port: 0 });
+      await app.start();
+
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(app.getQueueService()).not.toBeNull();
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('scheduled decorators in deeply nested module auto-init queue and fire', async () => {
+      let callCount = 0;
+      const intervalMs = 60000;
+
+      @Controller('/deep-interval')
+      class DeepIntervalController extends BaseController {
+        @Interval(intervalMs, { pattern: 'deep.interval' })
+        getData() {
+          callCount++;
+
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [DeepIntervalController] })
+      class GrandchildModule {}
+
+      @Module({ imports: [GrandchildModule] })
+      class MiddleModule {}
+
+      @Module({ imports: [MiddleModule] })
+      class TopModule {}
+
+      const app = createTestApp(TopModule, { port: 0 });
+      await app.start();
+
+      await new Promise(r => setTimeout(r, 50));
+
+      expect(app.getQueueService()).not.toBeNull();
+      expect(callCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('handler error does not break scheduler', async () => {
+      let errorCallCount = 0;
+      let successCallCount = 0;
+      const intervalMs = 60000;
+
+      @Controller('/error-handler')
+      class ErrorHandlerController extends BaseController {
+        @Interval(intervalMs, { pattern: 'error.handler' })
+        getErrorData() {
+          errorCallCount++;
+          throw new Error('Handler failed');
+        }
+
+        @Interval(intervalMs, { pattern: 'success.handler' })
+        getSuccessData() {
+          successCallCount++;
+
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [ErrorHandlerController] })
+      class ErrorHandlerModule {}
+
+      const app = createTestApp(ErrorHandlerModule, { port: 0 });
+      await app.start();
+
+      await new Promise(r => setTimeout(r, 50));
+
+      // Both handlers should have been called despite one throwing
+      expect(errorCallCount).toBe(1);
+      expect(successCallCount).toBe(1);
+
+      await app.stop();
+    });
+
+    test('only scheduled decorators (no @Subscribe) implicitly use in-memory adapter', async () => {
+      @Controller('/scheduled-only')
+      class ScheduledOnlyController extends BaseController {
+        @Interval(60000, { pattern: 'scheduled.only' })
+        getData() {
+          return { ts: Date.now() };
+        }
+
+        @Cron(CronExpression.EVERY_HOUR, { pattern: 'scheduled.cron' })
+        getCronData() {
+          return { ts: Date.now() };
+        }
+      }
+
+      @Module({ controllers: [ScheduledOnlyController] })
+      class ScheduledOnlyModule {}
+
+      // No queue config at all — should auto-detect and use in-memory
+      const app = createTestApp(ScheduledOnlyModule, { port: 0 });
+      await app.start();
+
+      const qs = app.getQueueService();
+      expect(qs).not.toBeNull();
+
+      const scheduler = qs!.getScheduler();
+      const jobs = scheduler.getJobs();
+      expect(jobs.length).toBe(2);
 
       await app.stop();
     });

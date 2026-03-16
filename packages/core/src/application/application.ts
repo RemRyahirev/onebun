@@ -1777,7 +1777,7 @@ export class OneBunApplication {
         return false;
       }
 
-      return hasQueueDecorators(instance.constructor);
+      return hasQueueDecorators(controller) || hasQueueDecorators(instance.constructor);
     });
 
     // Determine if queue should be enabled
@@ -1840,24 +1840,41 @@ export class OneBunApplication {
           : queueOptions?.redis,
     };
     this.queueService = new QueueService(queueServiceConfig);
-    
+
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);
+
+    // Wire scheduler error handler so failed jobs are logged
+    this.queueService.getScheduler().setErrorHandler((jobName, error) => {
+      this.logger.warn(`Scheduled job "${jobName}" failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     // Register handlers from controllers using registerService
     for (const controllerClass of controllers) {
       const instance = this.ensureModule().getControllerInstance?.(controllerClass);
       if (!instance) {
+        this.logger.debug(`Queue: skipping controller ${controllerClass.name} (no instance found)`);
         continue;
       }
-      
-      // Only register if the controller has queue decorators
-      if (hasQueueDecorators(controllerClass)) {
+
+      // Check both controllerClass and instance.constructor for queue decorators
+      // These should be identical, but if @Controller wrapping produces a different reference,
+      // we check both to be safe
+      const hasDecorators =
+        hasQueueDecorators(controllerClass) || hasQueueDecorators(instance.constructor);
+
+      if (hasDecorators) {
+        // Use whichever reference has the metadata for registration
+        const registrationClass = hasQueueDecorators(controllerClass)
+          ? controllerClass
+          : instance.constructor;
         await this.queueService.registerService(
           instance,
-          controllerClass as new (...args: unknown[]) => unknown,
+          registrationClass as new (...args: unknown[]) => unknown,
         );
         this.logger.debug(`Registered queue handlers for controller: ${controllerClass.name}`);
+      } else {
+        this.logger.debug(`Queue: controller ${controllerClass.name} has no queue decorators`);
       }
     }
 

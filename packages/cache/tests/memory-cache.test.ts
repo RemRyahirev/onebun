@@ -7,7 +7,7 @@ import {
   it,
 } from 'bun:test';
 
-import { useFakeTimers } from '@onebun/core';
+import { useFakeTimers } from '@onebun/core/testing';
 
 import { createInMemoryCache, InMemoryCache } from '../src/memory-cache';
 

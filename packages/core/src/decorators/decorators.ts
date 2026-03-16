@@ -156,7 +156,7 @@ export function controllerDecorator(basePath: string = '') {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return <T extends new (...args: any[]) => any>(target: T): T => {
     const metadata: ControllerMetadata = {
-      path: basePath.startsWith('/') ? basePath : `/${basePath}`,
+      path: basePath === '' ? '' : (basePath.startsWith('/') ? basePath : `/${basePath}`),
       routes: [],
     };
 

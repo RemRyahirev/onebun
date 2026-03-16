@@ -426,7 +426,7 @@ Effect.runPromise(
 ### Mock Logger
 
 ```typescript
-import { makeMockLoggerLayer } from '@onebun/core';
+import { makeMockLoggerLayer } from '@onebun/core/testing';
 
 describe('UserService', () => {
   it('should log user creation', async () => {

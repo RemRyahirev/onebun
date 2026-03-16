@@ -64,8 +64,16 @@ export class QueueScheduler {
   private running = false;
   private cronCheckInterval?: ReturnType<typeof setInterval>;
   private readonly cronCheckIntervalMs = 1000; // Check cron jobs every second
+  private onJobError?: (jobName: string, error: unknown) => void;
 
   constructor(private readonly adapter: QueueAdapter) {}
+
+  /**
+   * Set error handler for scheduled job failures
+   */
+  setErrorHandler(handler: (jobName: string, error: unknown) => void): void {
+    this.onJobError = handler;
+  }
 
   /**
    * Start the scheduler
@@ -363,8 +371,11 @@ export class QueueScheduler {
       await this.adapter.publish(job.pattern, data, {
         metadata: job.metadata,
       });
-    } catch {
-      // Error executing job - silently continue (error handling should be done via events)
+    } catch (error) {
+      // Report error via handler if set, otherwise silently continue
+      if (this.onJobError) {
+        this.onJobError(job.name, error);
+      }
     } finally {
       job.isRunning = false;
     }

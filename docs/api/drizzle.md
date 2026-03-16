@@ -887,7 +887,7 @@ For testing services that depend on DrizzleService, use in-memory SQLite databas
 ```typescript
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { Effect } from 'effect';
-import { makeMockLoggerLayer, createMockConfig } from '@onebun/core';
+import { makeMockLoggerLayer, createMockConfig } from '@onebun/core/testing';
 import { LoggerService } from '@onebun/logger';
 import { DrizzleService, DrizzleModule, DatabaseType } from '@onebun/drizzle';
 

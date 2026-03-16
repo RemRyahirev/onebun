@@ -6,7 +6,7 @@ import {
   afterEach,
 } from 'bun:test';
 
-import { createTestService } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 import { DrizzleService } from '../src/drizzle.service';
 import { BaseRepository } from '../src/repository';

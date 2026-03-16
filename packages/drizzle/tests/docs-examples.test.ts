@@ -569,7 +569,7 @@ describe('DrizzleService Direct Query Methods (docs/api/drizzle.md)', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { createTestService } = require('@onebun/core');
+  const { createTestService } = require('@onebun/core/testing');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema
@@ -783,7 +783,7 @@ describe('DrizzleService returning() Type Inference', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { createTestService } = require('@onebun/core');
+  const { createTestService } = require('@onebun/core/testing');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema with multiple columns to ensure proper type inference
@@ -1074,7 +1074,7 @@ describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
   /* eslint-disable @typescript-eslint/naming-convention */
   const { DrizzleService } = require('../src/drizzle.service');
   const { eq } = require('../src/index');
-  const { createTestService } = require('@onebun/core');
+  const { createTestService } = require('@onebun/core/testing');
   /* eslint-enable @typescript-eslint/naming-convention */
 
   // Define test schema

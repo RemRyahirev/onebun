@@ -10,7 +10,7 @@ import {
   afterAll,
 } from 'bun:test';
 
-import { createTestService } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 import { DrizzleModule } from '../src/drizzle.module';
 import { DrizzleService } from '../src/drizzle.service';

@@ -130,8 +130,8 @@ export * from './queue';
 // Validation
 export * from './validation';
 
-// Testing Utilities
-export * from './testing';
+// Testing Utilities are available via '@onebun/core/testing' subpath import
+// to avoid requiring testcontainers as a mandatory dependency
 
 // HTTP Guards
 export * from './http-guards';

@@ -15,7 +15,7 @@ import { Effect } from 'effect';
 import { register } from 'prom-client';
 
  
-import { useFakeTimers } from '@onebun/core';
+import { useFakeTimers } from '@onebun/core/testing';
 
 import {
   MeasureTime,

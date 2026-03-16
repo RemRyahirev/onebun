@@ -15,11 +15,8 @@ import {
   integer,
 } from 'drizzle-orm/sqlite-core';
 
-import {
-  createTestService,
-  BaseService,
-  Service,
-} from '@onebun/core';
+import { BaseService, Service } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 import { DrizzleModule } from '../src/drizzle.module';
 import { DrizzleService } from '../src/drizzle.service';

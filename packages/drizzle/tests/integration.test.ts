@@ -11,7 +11,7 @@ import {
   test,
 } from 'bun:test';
 
-import { createTestService } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 import { DrizzleService, DatabaseType } from '../src/index';
 

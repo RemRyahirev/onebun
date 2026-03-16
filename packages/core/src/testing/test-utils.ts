@@ -232,7 +232,7 @@ export const fakeTimers = new FakeTimers();
  * 
  * @example
  * ```typescript
- * import { useFakeTimers } from '@onebun/core';
+ * import { useFakeTimers } from '@onebun/core/testing';
  * 
  * describe('My tests', () => {
  *   const { advanceTime, restore } = useFakeTimers();

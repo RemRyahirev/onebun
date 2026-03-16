@@ -16,7 +16,7 @@ import {
 } from 'bun:test';
 
 import type { Message } from '@onebun/core';
-import { createNatsContainer, type TestContainer } from '@onebun/core';
+import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
 
 
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';

@@ -11,7 +11,7 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
-import { createTestService, createMockConfig } from '@onebun/core';
+import { createTestService, createMockConfig } from '@onebun/core/testing';
 
 import { DrizzleService } from '../src/drizzle.service';
 import { generateMigrations, pushSchema } from '../src/migrations';

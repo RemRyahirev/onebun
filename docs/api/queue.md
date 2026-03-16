@@ -103,16 +103,29 @@ class OrderModule {}
 Queue handlers are only discovered in classes registered in the `controllers` array of a `@Module`. Classes in `providers` will **not** be scanned for queue decorators.
 :::
 
+::: tip Scheduled-only Controllers
+If your controllers use **only** scheduling decorators (`@Cron`, `@Interval`, `@Timeout`) without `@Subscribe`, the queue system still auto-initializes with the in-memory adapter. No explicit `queue` configuration is needed. This works regardless of where in the module tree the controller is located — root, child, or deeply nested modules.
+:::
+
+::: info Scheduled Job Error Handling
+Errors thrown inside `@Cron`, `@Interval`, and `@Timeout` handlers are caught and logged as warnings. The scheduler continues running — one failed job does not affect other scheduled jobs.
+:::
+
 <llm-only>
 
 **Technical details for AI agents:**
 - Queue auto-enables by checking all **controllers** (not providers) for `hasQueueDecorators()` which inspects `@Subscribe`, `@Cron`, `@Interval`, `@Timeout` metadata
+- Controllers are collected recursively from the entire module tree via `getControllers()` (root + all child modules)
 - `initializeQueue(controllers)` is called during `app.start()` after `ensureModule().setup()` — it receives `getControllers()` result
+- Both `controllerClass` and `instance.constructor` are checked for queue decorators (defensive against `@Controller` wrapping edge cases)
 - The adapter is created, connected, then `QueueService` is initialized and handlers are registered via `registerService(instance, class)` for each controller with queue decorators
 - `registerService()` processes: subscribe handlers → cron jobs → interval jobs → timeout jobs → lifecycle handlers
+- `@Interval` handlers fire immediately on scheduler start, then repeat at the configured interval
+- Scheduler error handler logs warnings for failed jobs via `QueueScheduler.setErrorHandler()`
 - Message guards (`@UseMessageGuards`) are applied as wrappers around the actual handler
 - The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `SKIP`, `QUEUE`, `REPLACE`
 - Queue shutdown sequence: `queueService.stop()` → `queueAdapter.disconnect()`
+- Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
 
 **QueueApplicationOptions interface:**
 ```typescript
