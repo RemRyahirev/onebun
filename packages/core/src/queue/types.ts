@@ -224,29 +224,78 @@ export interface Subscription {
 export type OverlapStrategy = 'skip' | 'queue';
 
 /**
- * Options for scheduled jobs
+ * Add a cron job
  */
-export interface ScheduledJobOptions {
-  /** Pattern to publish to */
+export interface AddCronJob {
+  type: 'cron';
+  name: string;
+  expression: string;
   pattern: string;
-
-  /** Data to include in the message */
-  data?: unknown;
-
-  /** Schedule configuration */
-  schedule: {
-    /** Cron expression */
-    cron?: string;
-    /** Interval in milliseconds */
-    every?: number;
-  };
-
-  /** Metadata to include in messages */
+  getDataFn?: () => unknown | Promise<unknown>;
   metadata?: Partial<MessageMetadata>;
-
-  /** What to do if previous job is still running */
   overlapStrategy?: OverlapStrategy;
 }
+
+/**
+ * Add an interval job
+ */
+export interface AddIntervalJob {
+  type: 'interval';
+  name: string;
+  intervalMs: number;
+  pattern: string;
+  getDataFn?: () => unknown | Promise<unknown>;
+  metadata?: Partial<MessageMetadata>;
+}
+
+/**
+ * Add a timeout job
+ */
+export interface AddTimeoutJob {
+  type: 'timeout';
+  name: string;
+  timeoutMs: number;
+  pattern: string;
+  getDataFn?: () => unknown | Promise<unknown>;
+  metadata?: Partial<MessageMetadata>;
+}
+
+/**
+ * Discriminated union for adding any scheduled job type
+ */
+export type AddJobOptions = AddCronJob | AddIntervalJob | AddTimeoutJob;
+
+/**
+ * Update a cron job's expression
+ */
+export interface UpdateCronJob {
+  type: 'cron';
+  name: string;
+  expression: string;
+}
+
+/**
+ * Update an interval job's interval
+ */
+export interface UpdateIntervalJob {
+  type: 'interval';
+  name: string;
+  intervalMs: number;
+}
+
+/**
+ * Update a timeout job's delay
+ */
+export interface UpdateTimeoutJob {
+  type: 'timeout';
+  name: string;
+  timeoutMs: number;
+}
+
+/**
+ * Discriminated union for updating any scheduled job type
+ */
+export type UpdateJobOptions = UpdateCronJob | UpdateIntervalJob | UpdateTimeoutJob;
 
 /**
  * Information about a scheduled job
@@ -255,13 +304,20 @@ export interface ScheduledJobInfo {
   /** Job name */
   name: string;
 
+  /** Job type */
+  type: 'cron' | 'interval' | 'timeout';
+
   /** Pattern to publish to */
   pattern: string;
+
+  /** Whether the job is paused */
+  paused: boolean;
 
   /** Schedule configuration */
   schedule: {
     cron?: string;
     every?: number;
+    timeout?: number;
   };
 
   /** Next scheduled run time */
@@ -286,7 +342,6 @@ export type QueueFeature =
   | 'priority'
   | 'dead-letter-queue'
   | 'retry'
-  | 'scheduled-jobs'
   | 'consumer-groups'
   | 'pattern-subscriptions';
 
@@ -352,16 +407,6 @@ export interface QueueAdapter {
     handler: MessageHandler<T>,
     options?: SubscribeOptions
   ): Promise<Subscription>;
-
-  // Scheduled Jobs
-  /** Add a scheduled job */
-  addScheduledJob(name: string, options: ScheduledJobOptions): Promise<void>;
-
-  /** Remove a scheduled job */
-  removeScheduledJob(name: string): Promise<boolean>;
-
-  /** Get all scheduled jobs */
-  getScheduledJobs(): Promise<ScheduledJobInfo[]>;
 
   // Feature Support
   /** Check if a feature is supported by this adapter */
