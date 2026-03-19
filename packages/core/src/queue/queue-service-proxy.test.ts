@@ -27,11 +27,18 @@ describe('QueueServiceProxy', () => {
         /* no-op for throw test */
       }),
     ).rejects.toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
-    await expect(proxy.addScheduledJob('j', { pattern: 'e', schedule: { every: 1000 } })).rejects.toThrow(
+    expect(() => proxy.addJob({ type: 'cron', name: 'j', expression: '* * * * *', pattern: 'e' })).toThrow(
       QUEUE_NOT_ENABLED_ERROR_MESSAGE,
     );
-    await expect(proxy.removeScheduledJob('j')).rejects.toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
-    await expect(proxy.getScheduledJobs()).rejects.toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.removeJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.getJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.getJobs()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.hasJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.pauseJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.resumeJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(() => proxy.updateJob({ type: 'cron', name: 'j', expression: '* * * * *' })).toThrow(
+      QUEUE_NOT_ENABLED_ERROR_MESSAGE,
+    );
     expect(() => proxy.supports('pattern-subscriptions')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
     expect(() =>
       proxy.on('onReady', () => {

@@ -8,14 +8,15 @@ import type { QueueService } from './queue.service';
 import type { QueueScheduler } from './scheduler';
 import type { QueueAdapter } from './types';
 import type {
+  AddJobOptions,
   MessageHandler,
   PublishOptions,
   QueueEvents,
   ScheduledJobInfo,
-  ScheduledJobOptions,
   SubscribeOptions,
   Subscription,
   QueueFeature,
+  UpdateJobOptions,
 } from './types';
 
 const QUEUE_NOT_ENABLED_MESSAGE =
@@ -74,22 +75,51 @@ export class QueueServiceProxy {
     return await this.delegate.subscribe(pattern, handler, options);
   }
 
-  async addScheduledJob(name: string, options: ScheduledJobOptions): Promise<void> {
+  addJob(options: AddJobOptions): void {
     throwIfNoDelegate(this.delegate);
-
-    return await this.delegate.addScheduledJob(name, options);
+    this.delegate.addJob(options);
   }
 
-  async removeScheduledJob(name: string): Promise<boolean> {
+  removeJob(name: string): boolean {
     throwIfNoDelegate(this.delegate);
 
-    return await this.delegate.removeScheduledJob(name);
+    return this.delegate.removeJob(name);
   }
 
-  async getScheduledJobs(): Promise<ScheduledJobInfo[]> {
+  getJob(name: string): ScheduledJobInfo | undefined {
     throwIfNoDelegate(this.delegate);
 
-    return await this.delegate.getScheduledJobs();
+    return this.delegate.getJob(name);
+  }
+
+  getJobs(): ScheduledJobInfo[] {
+    throwIfNoDelegate(this.delegate);
+
+    return this.delegate.getJobs();
+  }
+
+  hasJob(name: string): boolean {
+    throwIfNoDelegate(this.delegate);
+
+    return this.delegate.hasJob(name);
+  }
+
+  pauseJob(name: string): boolean {
+    throwIfNoDelegate(this.delegate);
+
+    return this.delegate.pauseJob(name);
+  }
+
+  resumeJob(name: string): boolean {
+    throwIfNoDelegate(this.delegate);
+
+    return this.delegate.resumeJob(name);
+  }
+
+  updateJob(options: UpdateJobOptions): boolean {
+    throwIfNoDelegate(this.delegate);
+
+    return this.delegate.updateJob(options);
   }
 
   supports(feature: QueueFeature): boolean {
