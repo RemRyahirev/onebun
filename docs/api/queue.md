@@ -759,7 +759,13 @@ queueService.addJob({
 const job = queueService.getJob('cleanup');
 const allJobs = queueService.getJobs();
 const exists = queueService.hasJob('cleanup');
+
+// Filter by origin — decorator-created vs dynamic
+const decoratorJobs = allJobs.filter(j => j.declarative);
+const dynamicJobs = allJobs.filter(j => !j.declarative);
 ```
+
+`ScheduledJobInfo` fields: `name`, `type`, `pattern`, `paused`, `declarative`, `schedule`, `lastRun`, `nextRun`, `isRunning`. The `declarative` field is `true` for jobs created via `@Cron`/`@Interval`/`@Timeout` decorators, `false` for jobs added via `addJob()`.
 
 ### Controlling Jobs
 
@@ -787,12 +793,13 @@ through this API by their name (defaults to method name, overridable via `name` 
 - `addJob()` accepts a discriminated union `AddJobOptions` with `type: 'cron' | 'interval' | 'timeout'`
 - `updateJob()` accepts `UpdateJobOptions` — same discriminated union but fields (except `name` and `type`) are optional
 - `getJob()` returns `ScheduledJobInfo | undefined`, `getJobs()` returns `ScheduledJobInfo[]`
-- `ScheduledJobInfo` includes: `name`, `type`, `pattern`, `schedule` (with `cron?`, `every?`, `timeout?`), `paused`, `lastRun`, `nextRun`, `runCount`
+- `ScheduledJobInfo` includes: `name`, `type`, `pattern`, `paused`, `declarative`, `schedule` (with `cron?`, `every?`, `timeout?`), `lastRun`, `nextRun`, `isRunning`
+- `declarative: true` for jobs created via `@Cron`/`@Interval`/`@Timeout` decorators, `false` for jobs added via `addJob()`
 - Jobs added via decorators are registered during `registerService()` and get default names from method names
 - Decorator-created jobs can be overridden with a custom `name` via the decorator options (e.g. `@Cron('...', { name: 'my-job' })`)
 - Scheduler management is entirely in-process — it does not use the queue adapter for persistence
-- `pauseJob()` / `resumeJob()` clear and re-create timers respectively
-- `updateJob()` removes the old job and re-adds it with merged options
+- `pauseJob()` clears timers and sets `paused: true`; `resumeJob()` restarts timers
+- `updateJob()` validates type match, updates timing parameters in-place, and restarts timer if running
 
 </llm-only>
 
