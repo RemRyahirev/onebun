@@ -457,13 +457,6 @@ describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
           isActive: true,
         };
       }
-      async addScheduledJob(): Promise<void> {}
-      async removeScheduledJob(): Promise<boolean> {
-        return false;
-      }
-      async getScheduledJobs(): Promise<import('./types').ScheduledJobInfo[]> {
-        return [];
-      }
       supports(): boolean {
         return false;
       }
@@ -586,8 +579,6 @@ describe('Feature Support Matrix (docs/api/queue.md)', () => {
     expect(adapter.supports('pattern-subscriptions')).toBe(true);
     expect(adapter.supports('delayed-messages')).toBe(true);
     expect(adapter.supports('priority')).toBe(true);
-    expect(adapter.supports('scheduled-jobs')).toBe(true);
-
     // Not supported
     expect(adapter.supports('consumer-groups')).toBe(false);
     expect(adapter.supports('dead-letter-queue')).toBe(false);

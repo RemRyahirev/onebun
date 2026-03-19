@@ -384,10 +384,6 @@ describe('InMemoryQueueAdapter', () => {
       expect(adapter.supports('priority')).toBe(true);
     });
 
-    it('should support scheduled-jobs', () => {
-      expect(adapter.supports('scheduled-jobs')).toBe(true);
-    });
-
     it('should not support consumer-groups', () => {
       expect(adapter.supports('consumer-groups')).toBe(false);
     });

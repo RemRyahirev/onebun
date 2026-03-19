@@ -158,76 +158,12 @@ describe('RedisQueueAdapter', () => {
   // current RedisClient.raw() implementation. These features need a proper
   // implementation using Bun's Redis client's sendCommand API.
 
-  describe('scheduled jobs', () => {
-    beforeEach(async () => {
-      await adapter.connect();
-    });
-
-    it('should add and get scheduled jobs', async () => {
-      await adapter.addScheduledJob('test-job', {
-        pattern: 'job:test',
-        data: { action: 'process' },
-        schedule: { every: 1000 },
-      });
-      
-      const jobs = await adapter.getScheduledJobs();
-      
-      expect(jobs.find((j) => j.name === 'test-job')).toBeDefined();
-    });
-
-    it('should add cron scheduled job', async () => {
-      await adapter.addScheduledJob('cron-job', {
-        pattern: 'job:cron',
-        data: { action: 'cron' },
-        schedule: { cron: '0 * * * *' },
-      });
-      
-      const jobs = await adapter.getScheduledJobs();
-      
-      expect(jobs.find((j) => j.name === 'cron-job')).toBeDefined();
-    });
-
-    it('should remove scheduled job', async () => {
-      await adapter.addScheduledJob('removable-job', {
-        pattern: 'job:remove',
-        data: {},
-        schedule: { every: 1000 },
-      });
-      
-      const removed = await adapter.removeScheduledJob('removable-job');
-      
-      expect(removed).toBe(true);
-      
-      const jobs = await adapter.getScheduledJobs();
-      expect(jobs.find((j) => j.name === 'removable-job')).toBeUndefined();
-    });
-
-    it('should return false when removing non-existent job', async () => {
-      const removed = await adapter.removeScheduledJob('non-existent');
-      
-      expect(removed).toBe(false);
-    });
-
-    it('should throw when adding job while disconnected', async () => {
-      await adapter.disconnect();
-      
-      await expect(
-        adapter.addScheduledJob('fail-job', {
-          pattern: 'job:fail',
-          data: {},
-          schedule: { every: 1000 },
-        }),
-      ).rejects.toThrow('not connected');
-    });
-  });
-
   describe('features', () => {
     it('should support all standard queue features', () => {
       expect(adapter.supports('delayed-messages')).toBe(true);
       expect(adapter.supports('priority')).toBe(true);
       expect(adapter.supports('dead-letter-queue')).toBe(true);
       expect(adapter.supports('retry')).toBe(true);
-      expect(adapter.supports('scheduled-jobs')).toBe(true);
       expect(adapter.supports('consumer-groups')).toBe(true);
       expect(adapter.supports('pattern-subscriptions')).toBe(true);
     });

@@ -48,10 +48,6 @@ describe('NatsQueueAdapter', () => {
       expect(adapter.supports('consumer-groups')).toBe(true);
     });
 
-    it('should support scheduled-jobs', () => {
-      expect(adapter.supports('scheduled-jobs')).toBe(true);
-    });
-
     it('should not support delayed-messages', () => {
       expect(adapter.supports('delayed-messages')).toBe(false);
     });
@@ -83,14 +79,6 @@ describe('NatsQueueAdapter', () => {
       );
     });
 
-    it('should throw when adding scheduled job without connecting', async () => {
-      await expect(
-        adapter.addScheduledJob('test', {
-          pattern: 'test',
-          schedule: { every: 1000 },
-        }),
-      ).rejects.toThrow('NatsQueueAdapter not connected');
-    });
   });
 
   describe('event handlers', () => {

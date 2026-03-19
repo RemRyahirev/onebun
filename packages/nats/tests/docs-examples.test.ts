@@ -76,8 +76,6 @@ describe('Feature Comparison (README.md)', () => {
     // Supported
     expect(adapter.supports('pattern-subscriptions')).toBe(true);
     expect(adapter.supports('consumer-groups')).toBe(true);
-    expect(adapter.supports('scheduled-jobs')).toBe(true);
-
     // Not supported
     expect(adapter.supports('delayed-messages')).toBe(false);
     expect(adapter.supports('priority')).toBe(false);
@@ -95,7 +93,6 @@ describe('Feature Comparison (README.md)', () => {
     // Supported
     expect(adapter.supports('pattern-subscriptions')).toBe(true);
     expect(adapter.supports('consumer-groups')).toBe(true);
-    expect(adapter.supports('scheduled-jobs')).toBe(true);
     expect(adapter.supports('dead-letter-queue')).toBe(true);
     expect(adapter.supports('retry')).toBe(true);
 
@@ -234,7 +231,6 @@ describe('Feature Support Matrix - NATS (docs/api/queue.md)', () => {
 
     expect(nats.supports('pattern-subscriptions')).toBe(true);
     expect(nats.supports('consumer-groups')).toBe(true);
-    expect(nats.supports('scheduled-jobs')).toBe(true);
     expect(nats.supports('delayed-messages')).toBe(false);
     expect(nats.supports('priority')).toBe(false);
     expect(nats.supports('dead-letter-queue')).toBe(false);
@@ -250,7 +246,6 @@ describe('Feature Support Matrix - NATS (docs/api/queue.md)', () => {
 
     expect(js.supports('pattern-subscriptions')).toBe(true);
     expect(js.supports('consumer-groups')).toBe(true);
-    expect(js.supports('scheduled-jobs')).toBe(true);
     expect(js.supports('dead-letter-queue')).toBe(true);
     expect(js.supports('retry')).toBe(true);
     expect(js.supports('delayed-messages')).toBe(false);

@@ -49,10 +49,6 @@ describe('JetStreamQueueAdapter', () => {
       expect(adapter.supports('consumer-groups')).toBe(true);
     });
 
-    it('should support scheduled-jobs', () => {
-      expect(adapter.supports('scheduled-jobs')).toBe(true);
-    });
-
     it('should support dead-letter-queue', () => {
       expect(adapter.supports('dead-letter-queue')).toBe(true);
     });
@@ -84,14 +80,6 @@ describe('JetStreamQueueAdapter', () => {
       );
     });
 
-    it('should throw when adding scheduled job without connecting', async () => {
-      await expect(
-        adapter.addScheduledJob('test', {
-          pattern: 'test',
-          schedule: { cron: '* * * * *' },
-        }),
-      ).rejects.toThrow('JetStreamQueueAdapter not connected');
-    });
   });
 
   describe('event handlers', () => {

@@ -18,8 +18,6 @@ import type {
   PublishOptions,
   SubscribeOptions,
   Subscription,
-  ScheduledJobOptions,
-  ScheduledJobInfo,
   MessageHandler,
   QueueScheduler,
 } from '@onebun/core';
@@ -319,45 +317,6 @@ export class NatsQueueAdapter implements QueueAdapter {
   }
 
   // ============================================================================
-  // Scheduled Jobs
-  // ============================================================================
-
-  async addScheduledJob(name: string, options: ScheduledJobOptions): Promise<void> {
-    this.ensureConnected();
-
-    if (!this.scheduler) {
-      throw new Error('Scheduler not initialized');
-    }
-
-    if (options.schedule.cron) {
-      this.scheduler.addCronJob(name, options.schedule.cron, options.pattern, () => options.data, {
-        metadata: options.metadata,
-        overlapStrategy: options.overlapStrategy,
-      });
-    } else if (options.schedule.every) {
-      this.scheduler.addIntervalJob(name, options.schedule.every, options.pattern, () => options.data, {
-        metadata: options.metadata,
-      });
-    }
-  }
-
-  async removeScheduledJob(name: string): Promise<boolean> {
-    if (!this.scheduler) {
-      return false;
-    }
-
-    return this.scheduler.removeJob(name);
-  }
-
-  async getScheduledJobs(): Promise<ScheduledJobInfo[]> {
-    if (!this.scheduler) {
-      return [];
-    }
-
-    return this.scheduler.getJobs();
-  }
-
-  // ============================================================================
   // Features
   // ============================================================================
 
@@ -365,7 +324,6 @@ export class NatsQueueAdapter implements QueueAdapter {
     switch (feature) {
       case 'pattern-subscriptions':
       case 'consumer-groups':
-      case 'scheduled-jobs':
         return true;
       case 'delayed-messages':
       case 'priority':

@@ -554,9 +554,6 @@ class NatsJetStreamAdapter implements QueueAdapter {
   async publish() { return ''; }
   async publishBatch() { return []; }
   async subscribe() { return { unsubscribe: async () => {}, pause: () => {}, resume: () => {}, pattern: '', isActive: true }; }
-  async addScheduledJob() {}
-  async removeScheduledJob() { return false; }
-  async getScheduledJobs() { return []; }
   supports() { return false; }
   on() {}
   off() {}

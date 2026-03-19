@@ -3964,13 +3964,6 @@ describe('OneBunApplication', () => {
         };
       }
 
-      async addScheduledJob(): Promise<void> {}
-      async removeScheduledJob(): Promise<boolean> {
-        return false;
-      }
-      async getScheduledJobs(): Promise<import('../queue/types').ScheduledJobInfo[]> {
-        return [];
-      }
       supports(): boolean {
         return false;
       }
