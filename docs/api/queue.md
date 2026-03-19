@@ -126,6 +126,8 @@ Errors thrown inside `@Cron`, `@Interval`, and `@Timeout` handlers are caught an
 - The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `SKIP`, `QUEUE`, `REPLACE`
 - Queue shutdown sequence: `queueService.stop()` → `queueAdapter.disconnect()`
 - Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
+- Dynamic job management: `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` on `QueueService` — all synchronous, delegate to `QueueScheduler`
+- Jobs created via decorators are also accessible through the dynamic API by their name (method name by default, overridable via `name` option)
 
 **QueueApplicationOptions interface:**
 ```typescript
@@ -718,6 +720,81 @@ class OrderService {
   }
 }
 ```
+
+## Dynamic Job Management
+
+QueueService provides programmatic control over scheduled jobs at runtime.
+
+### Adding Jobs
+
+```typescript
+// Cron job
+queueService.addJob({
+  type: 'cron',
+  name: 'cleanup',
+  expression: '0 * * * *',
+  pattern: 'jobs.cleanup',
+});
+
+// Interval job
+queueService.addJob({
+  type: 'interval',
+  name: 'heartbeat',
+  intervalMs: 5000,
+  pattern: 'jobs.heartbeat',
+});
+
+// Timeout job (one-time)
+queueService.addJob({
+  type: 'timeout',
+  name: 'warmup',
+  timeoutMs: 3000,
+  pattern: 'jobs.warmup',
+});
+```
+
+### Querying Jobs
+
+```typescript
+const job = queueService.getJob('cleanup');
+const allJobs = queueService.getJobs();
+const exists = queueService.hasJob('cleanup');
+```
+
+### Controlling Jobs
+
+```typescript
+queueService.pauseJob('cleanup');   // Pause
+queueService.resumeJob('cleanup');  // Resume
+queueService.removeJob('cleanup');  // Delete
+```
+
+### Updating Jobs
+
+```typescript
+queueService.updateJob({ type: 'cron', name: 'cleanup', expression: '*/5 * * * *' });
+queueService.updateJob({ type: 'interval', name: 'heartbeat', intervalMs: 10000 });
+```
+
+Jobs created via decorators (`@Cron`, `@Interval`, `@Timeout`) are also accessible
+through this API by their name (defaults to method name, overridable via `name` option in decorator).
+
+<llm-only>
+
+**Technical details for AI agents:**
+- `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` are all synchronous methods on `QueueService`
+- They delegate to `QueueScheduler` which manages the underlying timers/cron jobs
+- `addJob()` accepts a discriminated union `AddJobOptions` with `type: 'cron' | 'interval' | 'timeout'`
+- `updateJob()` accepts `UpdateJobOptions` — same discriminated union but fields (except `name` and `type`) are optional
+- `getJob()` returns `ScheduledJobInfo | undefined`, `getJobs()` returns `ScheduledJobInfo[]`
+- `ScheduledJobInfo` includes: `name`, `type`, `pattern`, `schedule` (with `cron?`, `every?`, `timeout?`), `paused`, `lastRun`, `nextRun`, `runCount`
+- Jobs added via decorators are registered during `registerService()` and get default names from method names
+- Decorator-created jobs can be overridden with a custom `name` via the decorator options (e.g. `@Cron('...', { name: 'my-job' })`)
+- Scheduler management is entirely in-process — it does not use the queue adapter for persistence
+- `pauseJob()` / `resumeJob()` clear and re-create timers respectively
+- `updateJob()` removes the old job and re-adds it with merged options
+
+</llm-only>
 
 ## Cron Parser
 
