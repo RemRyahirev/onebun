@@ -14,6 +14,7 @@ import {
 
 import {
   defineMetadata,
+  diagnoseDecoratorMetadata,
   getMetadata,
   getConstructorParamTypes,
   setConstructorParamTypes,
@@ -728,6 +729,91 @@ describe('Metadata System', () => {
       expect(getConstructorParamTypes(TestClass)).toEqual([ServiceC]);
       
       (globalThis as any).Reflect = originalReflect;
+    });
+  });
+
+  describe('diagnoseDecoratorMetadata', () => {
+    test('should return ok when no classes have constructor params', () => {
+      class NoParams {}
+
+      const result = diagnoseDecoratorMetadata([NoParams]);
+
+      expect(result.ok).toBe(true);
+      expect(result.classesWithParams).toBe(0);
+      expect(result.classesWithMetadata).toBe(0);
+    });
+
+    test('should return ok when classes with params have metadata', () => {
+      class DepA {}
+      class WithMeta {
+        constructor(_dep: DepA) {}
+      }
+
+      // Simulate Bun emitting design:paramtypes via Reflect polyfill
+      (globalThis as any).Reflect.defineMetadata('design:paramtypes', [DepA], WithMeta);
+
+      const result = diagnoseDecoratorMetadata([WithMeta]);
+
+      expect(result.ok).toBe(true);
+      expect(result.classesWithParams).toBe(1);
+      expect(result.classesWithMetadata).toBe(1);
+    });
+
+    test('should return not ok when classes with params have NO metadata', () => {
+      // Use a fresh class without any metadata set
+      class NoDep {}
+      class BrokenService {
+        constructor(_dep: NoDep) {}
+      }
+
+      const result = diagnoseDecoratorMetadata([BrokenService]);
+
+      expect(result.ok).toBe(false);
+      expect(result.classesWithParams).toBe(1);
+      expect(result.classesWithMetadata).toBe(0);
+    });
+
+    test('should return ok when at least one class has metadata', () => {
+      class DepA {}
+      class DepB {}
+
+      class ServiceA {
+        constructor(_dep: DepA) {}
+      }
+      class ServiceB {
+        constructor(_dep: DepB) {}
+      }
+
+      // Only one has metadata — still ok (metadata emission works in principle)
+      (globalThis as any).Reflect.defineMetadata('design:paramtypes', [DepA], ServiceA);
+
+      const result = diagnoseDecoratorMetadata([ServiceA, ServiceB]);
+
+      expect(result.ok).toBe(true);
+      expect(result.classesWithParams).toBe(2);
+      expect(result.classesWithMetadata).toBe(1);
+    });
+
+    test('should return ok for empty class list', () => {
+      const result = diagnoseDecoratorMetadata([]);
+
+      expect(result.ok).toBe(true);
+      expect(result.classesWithParams).toBe(0);
+    });
+
+    test('should handle mixed classes with and without params', () => {
+      class Dep {}
+      class NoParamsService {}
+      class WithParamsService {
+        constructor(_dep: Dep) {}
+      }
+
+      // No metadata for WithParamsService
+      const result = diagnoseDecoratorMetadata([NoParamsService, WithParamsService]);
+
+      expect(result.ok).toBe(false);
+      expect(result.classesWithParams).toBe(1);
+      expect(result.classesWithMetadata).toBe(0);
     });
   });
 

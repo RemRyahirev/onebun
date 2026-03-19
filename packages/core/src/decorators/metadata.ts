@@ -287,6 +287,205 @@ export function getConstructorParamTypes(target: Function): Function[] | undefin
 }
 
 /**
+ * Diagnostic: check whether Bun is emitting decorator metadata (design:paramtypes).
+ *
+ * Scans an array of decorated classes. If at least one class has constructor
+ * parameters (target.length > 0) but NONE of them have design:paramtypes,
+ * then emitDecoratorMetadata is not working — typically because the setting
+ * is missing from the root tsconfig.json that Bun actually reads.
+ *
+ * @param decoratedClasses - Classes registered via @Service / @Controller / @Middleware
+ * @returns Object with diagnostic result and details
+ */
+export function diagnoseDecoratorMetadata(decoratedClasses: Function[]): {
+  ok: boolean;
+  classesWithParams: number;
+  classesWithMetadata: number;
+} {
+  let classesWithParams = 0;
+  let classesWithMetadata = 0;
+
+  for (const cls of decoratedClasses) {
+    if (cls.length > 0) {
+      classesWithParams++;
+      const types = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', cls);
+      if (types && Array.isArray(types) && types.length > 0) {
+        classesWithMetadata++;
+      }
+    }
+  }
+
+  return {
+    ok: classesWithParams === 0 || classesWithMetadata > 0,
+    classesWithParams,
+    classesWithMetadata,
+  };
+}
+
+/**
+ * Build a detailed diagnostic message by inspecting the project's tsconfig files.
+ *
+ * Walks up from `process.cwd()` looking for tsconfig.json files, reads them,
+ * and tells the user exactly which file to edit and what to add.
+ */
+export function buildDecoratorMetadataDiagnosticMessage(
+  classesWithParams: number,
+): string {
+  const fs = require('node:fs');
+  const pathModule = require('node:path');
+
+  const header =
+    `[OneBun] Dependency injection is broken: none of the ${classesWithParams} ` +
+    'service(s) with constructor parameters have design:paramtypes metadata.\n' +
+    'Bun is NOT emitting decorator metadata.\n';
+
+  type TsconfigInfo = { path: string; content: any; hasEmit: boolean; hasExperimental: boolean };
+
+  const readTsconfig = (tsconfigPath: string): TsconfigInfo | null => {
+    try {
+      if (!fs.existsSync(tsconfigPath)) {
+        return null;
+      }
+      const raw = fs.readFileSync(tsconfigPath, 'utf-8');
+      // Strip comments (single-line // and multi-line /* */) for JSON.parse
+      const stripped = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+      const parsed = JSON.parse(stripped);
+      const compilerOptions = parsed.compilerOptions || {};
+
+      return {
+        path: tsconfigPath,
+        content: parsed,
+        hasEmit: compilerOptions.emitDecoratorMetadata === true,
+        hasExperimental: compilerOptions.experimentalDecorators === true,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  // 1. Find tsconfig.json files walking UP from cwd to filesystem root
+  const tsconfigFiles: TsconfigInfo[] = [];
+  let dir = process.cwd();
+  const root = pathModule.parse(dir).root;
+
+  while (dir !== root) {
+    const info = readTsconfig(pathModule.join(dir, 'tsconfig.json'));
+    if (info) {
+      tsconfigFiles.push(info);
+    }
+    dir = pathModule.dirname(dir);
+  }
+
+  // 2. Also scan immediate subdirectories of cwd for child tsconfig.json files
+  //    (e.g. packages/backend/tsconfig.json in a monorepo)
+  const childTsconfigFiles: TsconfigInfo[] = [];
+  try {
+    const scanDirs = [process.cwd()];
+    // Scan up to 2 levels deep to find packages/*/tsconfig.json and similar
+    for (const scanDir of scanDirs) {
+      const entries = fs.readdirSync(scanDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          const subdir = pathModule.join(scanDir, entry.name);
+          const info = readTsconfig(pathModule.join(subdir, 'tsconfig.json'));
+          if (info) {
+            childTsconfigFiles.push(info);
+          }
+          // One level deeper (e.g. packages/backend/)
+          try {
+            const subEntries = fs.readdirSync(subdir, { withFileTypes: true });
+            for (const subEntry of subEntries) {
+              if (subEntry.isDirectory() && !subEntry.name.startsWith('.') && subEntry.name !== 'node_modules') {
+                const info2 = readTsconfig(pathModule.join(subdir, subEntry.name, 'tsconfig.json'));
+                if (info2) {
+                  childTsconfigFiles.push(info2);
+                }
+              }
+            }
+          } catch {
+            // Skip unreadable directories
+          }
+        }
+      }
+    }
+  } catch {
+    // Skip if directory scanning fails
+  }
+
+  if (tsconfigFiles.length === 0) {
+    return (
+      header +
+      '\nNo tsconfig.json found. Create one in your project root with:\n\n' +
+      '  {\n' +
+      '    "compilerOptions": {\n' +
+      '      "experimentalDecorators": true,\n' +
+      '      "emitDecoratorMetadata": true\n' +
+      '    }\n' +
+      '  }\n'
+    );
+  }
+
+  // The first (deepest / closest to cwd) tsconfig is what the user likely expects to work.
+  // The last (shallowest / closest to root) is what Bun actually reads.
+  const rootTsconfig = tsconfigFiles[tsconfigFiles.length - 1];
+
+  // Check if any child tsconfig has the settings but root does not
+  // Look in both parent chain and scanned subdirectories
+  const allConfigs = [...tsconfigFiles, ...childTsconfigFiles];
+  const childWithSettings = allConfigs.find(
+    (t) => t.path !== rootTsconfig.path && (t.hasEmit || t.hasExperimental),
+  );
+
+  const lines: string[] = [header];
+
+  if (rootTsconfig.hasEmit && rootTsconfig.hasExperimental) {
+    // Root has both settings — unusual, might be a different issue
+    lines.push(`\nRoot tsconfig (${rootTsconfig.path}) already has both settings.`);
+    lines.push('If DI is still broken, check that Bun is reading this file for your entry point.');
+
+    return lines.join('\n');
+  }
+
+  // Report what's missing from the root tsconfig
+  const missing: string[] = [];
+  if (!rootTsconfig.hasExperimental) {
+    missing.push('"experimentalDecorators": true');
+  }
+  if (!rootTsconfig.hasEmit) {
+    missing.push('"emitDecoratorMetadata": true');
+  }
+
+  lines.push(`\nRoot tsconfig: ${rootTsconfig.path}`);
+  lines.push(`Missing in "compilerOptions": ${missing.join(', ')}`);
+
+  if (childWithSettings) {
+    const childHas: string[] = [];
+    if (childWithSettings.hasExperimental) {
+      childHas.push('"experimentalDecorators": true');
+    }
+    if (childWithSettings.hasEmit) {
+      childHas.push('"emitDecoratorMetadata": true');
+    }
+    lines.push(
+      `\nNote: ${childWithSettings.path} has ${childHas.join(' and ')},` +
+      ' but Bun ignores these when they are only in a child tsconfig.',
+    );
+  }
+
+  lines.push(`\nFix: add the missing option(s) to ${rootTsconfig.path}:\n`);
+  lines.push('  "compilerOptions": {');
+  if (!rootTsconfig.hasExperimental) {
+    lines.push('    "experimentalDecorators": true,');
+  }
+  if (!rootTsconfig.hasEmit) {
+    lines.push('    "emitDecoratorMetadata": true');
+  }
+  lines.push('  }');
+
+  return lines.join('\n');
+}
+
+/**
  * Namespace for metadata functions to mimic Reflect API
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention

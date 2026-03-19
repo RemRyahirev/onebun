@@ -22,6 +22,7 @@ import {
   isGlobalModule,
   registerControllerDependencies,
 } from '../decorators/decorators';
+import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
 import { QueueService, QueueServiceTag } from '../queue';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
@@ -70,6 +71,7 @@ const processedGlobalModules: Set<Function> = ((globalThis as any)[Symbol.for('o
 export function clearGlobalServicesRegistry(): void {
   globalServicesRegistry.clear();
   processedGlobalModules.clear();
+  OneBunModule.resetDecoratorMetadataDiagnosis();
 }
 
 /**
@@ -274,6 +276,20 @@ export class OneBunModule implements ModuleInstance {
    * Create services with automatic dependency injection
    * Services can depend on other services (including imported ones)
    */
+  /**
+   * Whether the decorator metadata diagnostic has already run (once per process).
+   * Prevents repeated checks across multiple module initializations.
+   */
+  private static decoratorMetadataDiagnosed = false;
+
+  /**
+   * Reset the diagnostic flag (for testing).
+   * @internal
+   */
+  static resetDecoratorMetadataDiagnosis(): void {
+    OneBunModule.decoratorMetadataDiagnosed = false;
+  }
+
   private createServicesWithDI(metadata: ReturnType<typeof getModuleMetadata>): void {
     if (!metadata?.providers) {
       return;
@@ -292,6 +308,26 @@ export class OneBunModule implements ModuleInstance {
     for (const [, instance] of this.serviceInstances) {
       if (instance && typeof instance === 'object') {
         availableServiceClasses.set(instance.constructor.name, instance.constructor);
+      }
+    }
+
+    // Run decorator metadata diagnostic once: check that Bun emits design:paramtypes.
+    // If emitDecoratorMetadata is missing from the root tsconfig.json, Bun silently
+    // skips metadata emission and ALL constructor-based DI breaks.
+    // Only mark as diagnosed when we actually found classes with constructor params
+    // (modules with only zero-arg services can't tell us anything).
+    if (!OneBunModule.decoratorMetadataDiagnosed) {
+      const providerClasses = metadata.providers.filter(
+        (p): p is Function => typeof p === 'function',
+      );
+      const diagnosis = diagnoseDecoratorMetadata(providerClasses);
+      if (diagnosis.classesWithParams > 0) {
+        OneBunModule.decoratorMetadataDiagnosed = true;
+        if (!diagnosis.ok) {
+          throw new Error(
+            buildDecoratorMetadataDiagnosticMessage(diagnosis.classesWithParams),
+          );
+        }
       }
     }
 

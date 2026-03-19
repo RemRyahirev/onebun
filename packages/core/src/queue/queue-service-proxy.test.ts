@@ -27,7 +27,9 @@ describe('QueueServiceProxy', () => {
         /* no-op for throw test */
       }),
     ).rejects.toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
-    expect(() => proxy.addJob({ type: 'cron', name: 'j', expression: '* * * * *', pattern: 'e' })).toThrow(
+    expect(() => proxy.addJob({
+      type: 'cron', name: 'j', expression: '* * * * *', pattern: 'e', 
+    })).toThrow(
       QUEUE_NOT_ENABLED_ERROR_MESSAGE,
     );
     expect(() => proxy.removeJob('j')).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
