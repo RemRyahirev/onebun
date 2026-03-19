@@ -324,6 +324,7 @@ export class QueueService {
         {
           metadata: cron.options.metadata,
           overlapStrategy: cron.options.overlapStrategy,
+          declarative: true,
         },
       );
     }
@@ -337,7 +338,7 @@ export class QueueService {
         interval.milliseconds,
         interval.options.pattern,
         method,
-        { metadata: interval.options.metadata },
+        { metadata: interval.options.metadata, declarative: true },
       );
     }
 
@@ -350,7 +351,7 @@ export class QueueService {
         timeout.milliseconds,
         timeout.options.pattern,
         method,
-        { metadata: timeout.options.metadata },
+        { metadata: timeout.options.metadata, declarative: true },
       );
     }
 

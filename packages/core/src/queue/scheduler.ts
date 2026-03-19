@@ -47,6 +47,9 @@ interface ScheduledJob {
   // Pause state
   paused?: boolean;
 
+  // Whether created via decorator
+  declarative?: boolean;
+
   // Runtime state
   timer?: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
   isRunning?: boolean;
@@ -146,6 +149,7 @@ export class QueueScheduler {
     options?: {
       metadata?: Partial<MessageMetadata>;
       overlapStrategy?: OverlapStrategy;
+      declarative?: boolean;
     },
   ): void {
     const schedule = parseCronExpression(expression);
@@ -161,6 +165,7 @@ export class QueueScheduler {
       getDataFn,
       metadata: options?.metadata,
       overlapStrategy: options?.overlapStrategy ?? 'skip',
+      declarative: options?.declarative,
     };
 
     this.jobs.set(name, job);
@@ -176,6 +181,7 @@ export class QueueScheduler {
     getDataFn?: () => unknown | Promise<unknown>,
     options?: {
       metadata?: Partial<MessageMetadata>;
+      declarative?: boolean;
     },
   ): void {
     const job: ScheduledJob = {
@@ -185,6 +191,7 @@ export class QueueScheduler {
       intervalMs,
       getDataFn,
       metadata: options?.metadata,
+      declarative: options?.declarative,
     };
 
     this.jobs.set(name, job);
@@ -205,6 +212,7 @@ export class QueueScheduler {
     getDataFn?: () => unknown | Promise<unknown>,
     options?: {
       metadata?: Partial<MessageMetadata>;
+      declarative?: boolean;
     },
   ): void {
     const job: ScheduledJob = {
@@ -214,6 +222,7 @@ export class QueueScheduler {
       timeoutMs,
       getDataFn,
       metadata: options?.metadata,
+      declarative: options?.declarative,
     };
 
     this.jobs.set(name, job);
@@ -367,6 +376,7 @@ export class QueueScheduler {
         name: job.name,
         type: job.type,
         paused: job.paused ?? false,
+        declarative: job.declarative ?? false,
         pattern: job.pattern,
         schedule: {
           cron: job.cronExpression,
@@ -395,6 +405,7 @@ export class QueueScheduler {
       name: job.name,
       type: job.type,
       paused: job.paused ?? false,
+      declarative: job.declarative ?? false,
       pattern: job.pattern,
       schedule: {
         cron: job.cronExpression,

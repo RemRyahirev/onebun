@@ -313,6 +313,9 @@ export interface ScheduledJobInfo {
   /** Whether the job is paused */
   paused: boolean;
 
+  /** Whether the job was created via decorator (@Cron, @Interval, @Timeout) */
+  declarative: boolean;
+
   /** Schedule configuration */
   schedule: {
     cron?: string;

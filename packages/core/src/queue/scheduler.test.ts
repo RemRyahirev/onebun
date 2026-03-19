@@ -252,6 +252,7 @@ describe('QueueScheduler', () => {
       expect(job).toBeDefined();
       expect(job!.type).toBe('cron');
       expect(job!.paused).toBe(false);
+      expect(job!.declarative).toBe(false);
       expect(job!.schedule.cron).toBe('0 0 * * * *');
     });
 
@@ -267,6 +268,7 @@ describe('QueueScheduler', () => {
       expect(job).toBeDefined();
       expect(job!.type).toBe('interval');
       expect(job!.paused).toBe(false);
+      expect(job!.declarative).toBe(false);
       expect(job!.schedule.every).toBe(5000);
     });
 
@@ -282,6 +284,7 @@ describe('QueueScheduler', () => {
       expect(job).toBeDefined();
       expect(job!.type).toBe('timeout');
       expect(job!.paused).toBe(false);
+      expect(job!.declarative).toBe(false);
       expect(job!.schedule.timeout).toBe(3000);
     });
   });
@@ -314,6 +317,42 @@ describe('QueueScheduler', () => {
       expect(timeoutJob!.type).toBe('timeout');
       expect(timeoutJob!.paused).toBe(false);
       expect(timeoutJob!.schedule.timeout).toBe(2000);
+    });
+  });
+
+  describe('declarative field', () => {
+    it('should mark jobs added via addCronJob with declarative option as declarative', () => {
+      scheduler.addCronJob('dec-cron', '* * * * *', 'p', undefined, { declarative: true });
+
+      const job = scheduler.getJob('dec-cron');
+      expect(job).toBeDefined();
+      expect(job!.declarative).toBe(true);
+    });
+
+    it('should mark jobs added via addIntervalJob with declarative option as declarative', () => {
+      scheduler.addIntervalJob('dec-interval', 1000, 'p', undefined, { declarative: true });
+
+      const job = scheduler.getJob('dec-interval');
+      expect(job).toBeDefined();
+      expect(job!.declarative).toBe(true);
+    });
+
+    it('should mark jobs added via addTimeoutJob with declarative option as declarative', () => {
+      scheduler.addTimeoutJob('dec-timeout', 1000, 'p', undefined, { declarative: true });
+
+      const job = scheduler.getJob('dec-timeout');
+      expect(job).toBeDefined();
+      expect(job!.declarative).toBe(true);
+    });
+
+    it('should mark jobs added via addJob as not declarative', () => {
+      scheduler.addJob({
+        type: 'cron', name: 'dyn-cron', expression: '* * * * *', pattern: 'p', 
+      });
+
+      const job = scheduler.getJob('dyn-cron');
+      expect(job).toBeDefined();
+      expect(job!.declarative).toBe(false);
     });
   });
 
