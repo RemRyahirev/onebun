@@ -239,6 +239,247 @@ describe('QueueScheduler', () => {
     });
   });
 
+  describe('addJob', () => {
+    it('should add a cron job visible via getJob', () => {
+      scheduler.addJob({
+        type: 'cron',
+        name: 'my-cron',
+        expression: '0 0 * * * *',
+        pattern: 'test.cron',
+      });
+
+      const job = scheduler.getJob('my-cron');
+      expect(job).toBeDefined();
+      expect(job!.type).toBe('cron');
+      expect(job!.paused).toBe(false);
+      expect(job!.schedule.cron).toBe('0 0 * * * *');
+    });
+
+    it('should add an interval job visible via getJob', () => {
+      scheduler.addJob({
+        type: 'interval',
+        name: 'my-interval',
+        intervalMs: 5000,
+        pattern: 'test.interval',
+      });
+
+      const job = scheduler.getJob('my-interval');
+      expect(job).toBeDefined();
+      expect(job!.type).toBe('interval');
+      expect(job!.paused).toBe(false);
+      expect(job!.schedule.every).toBe(5000);
+    });
+
+    it('should add a timeout job visible via getJob', () => {
+      scheduler.addJob({
+        type: 'timeout',
+        name: 'my-timeout',
+        timeoutMs: 3000,
+        pattern: 'test.timeout',
+      });
+
+      const job = scheduler.getJob('my-timeout');
+      expect(job).toBeDefined();
+      expect(job!.type).toBe('timeout');
+      expect(job!.paused).toBe(false);
+      expect(job!.schedule.timeout).toBe(3000);
+    });
+  });
+
+  describe('getJobs returns type, paused, and timeout', () => {
+    it('should return correct type, paused, and schedule for all job types', () => {
+      scheduler.addJob({
+        type: 'cron', name: 'c1', expression: '* * * * *', pattern: 'p', 
+      });
+      scheduler.addJob({
+        type: 'interval', name: 'i1', intervalMs: 1000, pattern: 'p', 
+      });
+      scheduler.addJob({
+        type: 'timeout', name: 't1', timeoutMs: 2000, pattern: 'p', 
+      });
+
+      const jobs = scheduler.getJobs();
+      expect(jobs.length).toBe(3);
+
+      const cronJob = jobs.find((j) => j.name === 'c1');
+      expect(cronJob!.type).toBe('cron');
+      expect(cronJob!.paused).toBe(false);
+
+      const intervalJob = jobs.find((j) => j.name === 'i1');
+      expect(intervalJob!.type).toBe('interval');
+      expect(intervalJob!.paused).toBe(false);
+      expect(intervalJob!.schedule.every).toBe(1000);
+
+      const timeoutJob = jobs.find((j) => j.name === 't1');
+      expect(timeoutJob!.type).toBe('timeout');
+      expect(timeoutJob!.paused).toBe(false);
+      expect(timeoutJob!.schedule.timeout).toBe(2000);
+    });
+  });
+
+  describe('pauseJob', () => {
+    it('should pause an existing job and return true', () => {
+      scheduler.addJob({
+        type: 'interval', name: 'j1', intervalMs: 1000, pattern: 'p', 
+      });
+
+      const result = scheduler.pauseJob('j1');
+      expect(result).toBe(true);
+
+      const job = scheduler.getJob('j1');
+      expect(job!.paused).toBe(true);
+    });
+
+    it('should return false for nonexistent job', () => {
+      const result = scheduler.pauseJob('nonexistent');
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('resumeJob', () => {
+    it('should resume a paused job and return true', () => {
+      scheduler.addJob({
+        type: 'interval', name: 'j1', intervalMs: 1000, pattern: 'p', 
+      });
+      scheduler.pauseJob('j1');
+
+      const result = scheduler.resumeJob('j1');
+      expect(result).toBe(true);
+
+      const job = scheduler.getJob('j1');
+      expect(job!.paused).toBe(false);
+    });
+
+    it('should return false for nonexistent job', () => {
+      const result = scheduler.resumeJob('nonexistent');
+      expect(result).toBe(false);
+    });
+
+    it('should return false for non-paused job', () => {
+      scheduler.addJob({
+        type: 'interval', name: 'j1', intervalMs: 1000, pattern: 'p', 
+      });
+
+      const result = scheduler.resumeJob('j1');
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('updateJob', () => {
+    it('should update cron expression', () => {
+      scheduler.addJob({
+        type: 'cron',
+        name: 'c1',
+        expression: '0 0 * * * *',
+        pattern: 'p',
+      });
+
+      const result = scheduler.updateJob({ type: 'cron', name: 'c1', expression: '*/5 * * * *' });
+      expect(result).toBe(true);
+
+      const job = scheduler.getJob('c1');
+      expect(job!.schedule.cron).toBe('*/5 * * * *');
+    });
+
+    it('should update interval', () => {
+      scheduler.addJob({
+        type: 'interval', name: 'i1', intervalMs: 1000, pattern: 'p', 
+      });
+
+      const result = scheduler.updateJob({ type: 'interval', name: 'i1', intervalMs: 5000 });
+      expect(result).toBe(true);
+
+      const job = scheduler.getJob('i1');
+      expect(job!.schedule.every).toBe(5000);
+    });
+
+    it('should update timeout', () => {
+      scheduler.addJob({
+        type: 'timeout', name: 't1', timeoutMs: 1000, pattern: 'p', 
+      });
+
+      const result = scheduler.updateJob({ type: 'timeout', name: 't1', timeoutMs: 9000 });
+      expect(result).toBe(true);
+
+      const job = scheduler.getJob('t1');
+      expect(job!.schedule.timeout).toBe(9000);
+    });
+
+    it('should return false when type does not match', () => {
+      scheduler.addJob({
+        type: 'interval', name: 'i1', intervalMs: 1000, pattern: 'p', 
+      });
+
+      const result = scheduler.updateJob({ type: 'cron', name: 'i1', expression: '* * * * *' });
+      expect(result).toBe(false);
+    });
+
+    it('should return false for nonexistent job', () => {
+      const result = scheduler.updateJob({ type: 'cron', name: 'nope', expression: '* * * * *' });
+      expect(result).toBe(false);
+    });
+  });
+
+  describe('paused jobs do not fire', () => {
+    it('should not fire paused cron job', async () => {
+      const received: Message[] = [];
+      await adapter.subscribe('test.cron', async (message) => {
+        received.push(message);
+      });
+
+      // Every second cron
+      scheduler.addJob({
+        type: 'cron',
+        name: 'cron-paused',
+        expression: '* * * * * *',
+        pattern: 'test.cron',
+      });
+      scheduler.pauseJob('cron-paused');
+      scheduler.start();
+
+      // Advance time well past when cron would fire
+      advanceTime(5000);
+      await Promise.resolve();
+
+      expect(received.length).toBe(0);
+    });
+
+    it('should not fire paused interval job, and resume restarts it', async () => {
+      const received: Message[] = [];
+      await adapter.subscribe('test.interval', async (message) => {
+        received.push(message);
+      });
+
+      scheduler.addJob({
+        type: 'interval',
+        name: 'int-paused',
+        intervalMs: 100,
+        pattern: 'test.interval',
+      });
+      scheduler.start();
+
+      // Should fire immediately on start
+      advanceTime(10);
+      await Promise.resolve();
+      expect(received.length).toBe(1);
+
+      // Pause the job
+      scheduler.pauseJob('int-paused');
+
+      // Advance time — no new messages
+      advanceTime(500);
+      await Promise.resolve();
+      expect(received.length).toBe(1);
+
+      // Resume — should restart interval and fire immediately
+      scheduler.resumeJob('int-paused');
+
+      advanceTime(10);
+      await Promise.resolve();
+      expect(received.length).toBe(2);
+    });
+  });
+
   describe('createQueueScheduler', () => {
     it('should create scheduler instance', () => {
       const created = createQueueScheduler(adapter);

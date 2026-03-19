@@ -6,6 +6,8 @@
  */
 
 import type {
+  AddJobOptions,
+  UpdateJobOptions,
   QueueAdapter,
   ScheduledJobInfo,
   OverlapStrategy,
@@ -41,6 +43,9 @@ interface ScheduledJob {
 
   // Timeout-specific
   timeoutMs?: number;
+
+  // Pause state
+  paused?: boolean;
 
   // Runtime state
   timer?: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
@@ -90,8 +95,12 @@ export class QueueScheduler {
       this.checkCronJobs();
     }, this.cronCheckIntervalMs);
 
-    // Start all interval and timeout jobs
+    // Start all interval and timeout jobs (skip paused)
     for (const job of this.jobs.values()) {
+      if (job.paused) {
+        continue;
+      }
+
       if (job.type === 'interval' && job.intervalMs) {
         this.startIntervalJob(job);
       } else if (job.type === 'timeout' && job.timeoutMs) {
@@ -216,6 +225,118 @@ export class QueueScheduler {
   }
 
   /**
+   * Add a job using the unified API
+   */
+  addJob(options: AddJobOptions): void {
+    switch (options.type) {
+      case 'cron':
+        this.addCronJob(options.name, options.expression, options.pattern, options.getDataFn, {
+          metadata: options.metadata,
+          overlapStrategy: options.overlapStrategy,
+        });
+        break;
+      case 'interval':
+        this.addIntervalJob(options.name, options.intervalMs, options.pattern, options.getDataFn, {
+          metadata: options.metadata,
+        });
+        break;
+      case 'timeout':
+        this.addTimeoutJob(options.name, options.timeoutMs, options.pattern, options.getDataFn, {
+          metadata: options.metadata,
+        });
+        break;
+    }
+  }
+
+  /**
+   * Pause a scheduled job
+   */
+  pauseJob(name: string): boolean {
+    const job = this.jobs.get(name);
+    if (!job) {
+      return false;
+    }
+
+    job.paused = true;
+
+    if (job.timer) {
+      clearTimeout(job.timer);
+      clearInterval(job.timer);
+      job.timer = undefined;
+    }
+
+    return true;
+  }
+
+  /**
+   * Resume a paused job
+   */
+  resumeJob(name: string): boolean {
+    const job = this.jobs.get(name);
+    if (!job || !job.paused) {
+      return false;
+    }
+
+    job.paused = false;
+
+    if (this.running) {
+      if (job.type === 'interval' && job.intervalMs) {
+        this.startIntervalJob(job);
+      } else if (job.type === 'timeout' && job.timeoutMs) {
+        this.startTimeoutJob(job);
+      } else if (job.type === 'cron' && job.cronSchedule) {
+        job.nextRun = getNextRun(job.cronSchedule) ?? undefined;
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Update a scheduled job's timing configuration
+   */
+  updateJob(options: UpdateJobOptions): boolean {
+    const job = this.jobs.get(options.name);
+    if (!job || job.type !== options.type) {
+      return false;
+    }
+
+    switch (options.type) {
+      case 'cron': {
+        const schedule = parseCronExpression(options.expression);
+        job.cronExpression = options.expression;
+        job.cronSchedule = schedule;
+        job.nextRun = getNextRun(schedule) ?? undefined;
+        break;
+      }
+      case 'interval': {
+        if (job.timer) {
+          clearInterval(job.timer);
+          job.timer = undefined;
+        }
+        job.intervalMs = options.intervalMs;
+        if (this.running && !job.paused) {
+          this.startIntervalJob(job);
+        }
+        break;
+      }
+      case 'timeout': {
+        if (job.timer) {
+          clearTimeout(job.timer);
+          job.timer = undefined;
+        }
+        job.timeoutMs = options.timeoutMs;
+        if (this.running && !job.paused) {
+          this.startTimeoutJob(job);
+        }
+        break;
+      }
+    }
+
+    return true;
+  }
+
+  /**
    * Remove a job
    */
   removeJob(name: string): boolean {
@@ -244,10 +365,13 @@ export class QueueScheduler {
     for (const job of this.jobs.values()) {
       result.push({
         name: job.name,
+        type: job.type,
+        paused: job.paused ?? false,
         pattern: job.pattern,
         schedule: {
           cron: job.cronExpression,
           every: job.intervalMs,
+          timeout: job.timeoutMs,
         },
         nextRun: job.nextRun,
         lastRun: job.lastRun,
@@ -269,10 +393,13 @@ export class QueueScheduler {
 
     return {
       name: job.name,
+      type: job.type,
+      paused: job.paused ?? false,
       pattern: job.pattern,
       schedule: {
         cron: job.cronExpression,
         every: job.intervalMs,
+        timeout: job.timeoutMs,
       },
       nextRun: job.nextRun,
       lastRun: job.lastRun,
@@ -299,6 +426,10 @@ export class QueueScheduler {
 
     for (const job of this.jobs.values()) {
       if (job.type !== 'cron' || !job.cronSchedule) {
+        continue;
+      }
+
+      if (job.paused) {
         continue;
       }
 
