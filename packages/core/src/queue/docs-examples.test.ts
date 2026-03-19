@@ -50,6 +50,7 @@ import {
   getTimeoutMetadata,
   hasQueueDecorators,
   QueueScheduler,
+  QueueService,
 } from './index';
 
 /**
@@ -672,5 +673,134 @@ describe('Scheduled Job Error Handling (docs/api/queue.md)', () => {
     expect((errors[0].error as Error).message).toBe('Job failed');
 
     scheduler.stop();
+  });
+});
+
+/**
+ * @source docs/api/queue.md#dynamic-job-management
+ */
+describe('Dynamic Job Management (docs/api/queue.md)', () => {
+  let queueService: QueueService;
+
+  beforeEach(async () => {
+    queueService = new QueueService({ adapter: 'memory' });
+    const adapter = new InMemoryQueueAdapter();
+    await queueService.initialize(adapter);
+    await queueService.start();
+  });
+
+  afterEach(async () => {
+    await queueService.stop();
+  });
+
+  it('should add and get a cron job', () => {
+    // From docs/api/queue.md: Dynamic Job Management - addJob (cron)
+    queueService.addJob({
+      type: 'cron',
+      name: 'cleanup',
+      expression: '0 * * * *',
+      pattern: 'jobs.cleanup',
+    });
+
+    const job = queueService.getJob('cleanup');
+    expect(job).toBeDefined();
+    expect(job!.type).toBe('cron');
+    expect(job!.schedule.cron).toBe('0 * * * *');
+    expect(job!.paused).toBe(false);
+  });
+
+  it('should add and get an interval job', () => {
+    // From docs/api/queue.md: Dynamic Job Management - addJob (interval)
+    queueService.addJob({
+      type: 'interval',
+      name: 'heartbeat',
+      intervalMs: 5000,
+      pattern: 'jobs.heartbeat',
+    });
+
+    const job = queueService.getJob('heartbeat');
+    expect(job).toBeDefined();
+    expect(job!.type).toBe('interval');
+    expect(job!.schedule.every).toBe(5000);
+  });
+
+  it('should add and get a timeout job', () => {
+    // From docs/api/queue.md: Dynamic Job Management - addJob (timeout)
+    queueService.addJob({
+      type: 'timeout',
+      name: 'warmup',
+      timeoutMs: 3000,
+      pattern: 'jobs.warmup',
+    });
+
+    const job = queueService.getJob('warmup');
+    expect(job).toBeDefined();
+    expect(job!.type).toBe('timeout');
+    expect(job!.schedule.timeout).toBe(3000);
+  });
+
+  it('should pause and resume a job', () => {
+    // From docs/api/queue.md: Dynamic Job Management - pauseJob / resumeJob
+    queueService.addJob({
+      type: 'interval',
+      name: 'metrics',
+      intervalMs: 10000,
+      pattern: 'jobs.metrics',
+    });
+
+    expect(queueService.pauseJob('metrics')).toBe(true);
+    expect(queueService.getJob('metrics')!.paused).toBe(true);
+
+    expect(queueService.resumeJob('metrics')).toBe(true);
+    expect(queueService.getJob('metrics')!.paused).toBe(false);
+  });
+
+  it('should update a cron job expression', () => {
+    // From docs/api/queue.md: Dynamic Job Management - updateJob
+    queueService.addJob({
+      type: 'cron',
+      name: 'report',
+      expression: '0 0 * * *',
+      pattern: 'jobs.report',
+    });
+
+    expect(queueService.getJob('report')!.schedule.cron).toBe('0 0 * * *');
+
+    queueService.updateJob({
+      type: 'cron',
+      name: 'report',
+      expression: '0 */2 * * *',
+    });
+
+    expect(queueService.getJob('report')!.schedule.cron).toBe('0 */2 * * *');
+  });
+
+  it('should list and remove jobs', () => {
+    // From docs/api/queue.md: Dynamic Job Management - getJobs / removeJob
+    queueService.addJob({
+      type: 'cron',
+      name: 'job-a',
+      expression: '0 * * * *',
+      pattern: 'jobs.a',
+    });
+    queueService.addJob({
+      type: 'interval',
+      name: 'job-b',
+      intervalMs: 5000,
+      pattern: 'jobs.b',
+    });
+    queueService.addJob({
+      type: 'timeout',
+      name: 'job-c',
+      timeoutMs: 1000,
+      pattern: 'jobs.c',
+    });
+
+    const jobs = queueService.getJobs();
+    expect(jobs.length).toBe(3);
+
+    expect(queueService.removeJob('job-b')).toBe(true);
+    expect(queueService.hasJob('job-b')).toBe(false);
+    expect(queueService.getJobs().length).toBe(2);
   });
 });
