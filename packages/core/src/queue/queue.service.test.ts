@@ -192,30 +192,152 @@ describe('QueueService', () => {
     });
   });
 
-  describe('scheduled jobs via adapter', () => {
-    test('should add and remove scheduled jobs', async () => {
-      await service.start();
-
-      await service.addScheduledJob('test-scheduled', {
-        pattern: 'scheduled.pattern',
-        schedule: { every: 60000 },
+  describe('scheduled jobs', () => {
+    test('addJob should delegate to scheduler addJob', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'test-interval',
+        intervalMs: 5000,
+        pattern: 'test.pattern',
       });
 
-      const jobs = await service.getScheduledJobs();
-      expect(jobs.some((j) => j.name === 'test-scheduled')).toBe(true);
-
-      const removed = await service.removeScheduledJob('test-scheduled');
-      expect(removed).toBe(true);
-
-      const jobsAfter = await service.getScheduledJobs();
-      expect(jobsAfter.some((j) => j.name === 'test-scheduled')).toBe(false);
+      expect(service.hasJob('test-interval')).toBe(true);
     });
 
-    test('should return false when removing non-existent job', async () => {
-      await service.start();
+    test('removeJob should delegate to scheduler removeJob', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'remove-me',
+        intervalMs: 5000,
+        pattern: 'test.pattern',
+      });
 
-      const removed = await service.removeScheduledJob('nonexistent');
-      expect(removed).toBe(false);
+      const removed = service.removeJob('remove-me');
+      expect(removed).toBe(true);
+      expect(service.hasJob('remove-me')).toBe(false);
+    });
+
+    test('removeJob should return false for non-existent job', () => {
+      expect(service.removeJob('nonexistent')).toBe(false);
+    });
+
+    test('getJob should delegate to scheduler getJob', () => {
+      service.addJob({
+        type: 'cron',
+        name: 'my-cron',
+        expression: '*/5 * * * *',
+        pattern: 'cron.pattern',
+      });
+
+      const job = service.getJob('my-cron');
+      expect(job).toBeDefined();
+      expect(job!.name).toBe('my-cron');
+      expect(job!.type).toBe('cron');
+      expect(job!.pattern).toBe('cron.pattern');
+    });
+
+    test('getJob should return undefined for non-existent job', () => {
+      expect(service.getJob('nonexistent')).toBeUndefined();
+    });
+
+    test('getJobs should delegate to scheduler getJobs', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'job-a',
+        intervalMs: 1000,
+        pattern: 'a.pattern',
+      });
+      service.addJob({
+        type: 'timeout',
+        name: 'job-b',
+        timeoutMs: 2000,
+        pattern: 'b.pattern',
+      });
+
+      const jobs = service.getJobs();
+      expect(jobs.length).toBe(2);
+      expect(jobs.some((j) => j.name === 'job-a')).toBe(true);
+      expect(jobs.some((j) => j.name === 'job-b')).toBe(true);
+    });
+
+    test('hasJob should delegate to scheduler hasJob', () => {
+      expect(service.hasJob('nope')).toBe(false);
+
+      service.addJob({
+        type: 'interval',
+        name: 'exists',
+        intervalMs: 1000,
+        pattern: 'test.pattern',
+      });
+
+      expect(service.hasJob('exists')).toBe(true);
+    });
+
+    test('pauseJob should delegate to scheduler pauseJob', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'pausable',
+        intervalMs: 1000,
+        pattern: 'test.pattern',
+      });
+
+      const paused = service.pauseJob('pausable');
+      expect(paused).toBe(true);
+
+      const job = service.getJob('pausable');
+      expect(job!.paused).toBe(true);
+    });
+
+    test('pauseJob should return false for non-existent job', () => {
+      expect(service.pauseJob('nonexistent')).toBe(false);
+    });
+
+    test('resumeJob should delegate to scheduler resumeJob', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'resumable',
+        intervalMs: 1000,
+        pattern: 'test.pattern',
+      });
+
+      service.pauseJob('resumable');
+      const resumed = service.resumeJob('resumable');
+      expect(resumed).toBe(true);
+
+      const job = service.getJob('resumable');
+      expect(job!.paused).toBe(false);
+    });
+
+    test('resumeJob should return false for non-existent job', () => {
+      expect(service.resumeJob('nonexistent')).toBe(false);
+    });
+
+    test('updateJob should delegate to scheduler updateJob', () => {
+      service.addJob({
+        type: 'interval',
+        name: 'updatable',
+        intervalMs: 1000,
+        pattern: 'test.pattern',
+      });
+
+      const updated = service.updateJob({
+        type: 'interval',
+        name: 'updatable',
+        intervalMs: 5000,
+      });
+      expect(updated).toBe(true);
+
+      const job = service.getJob('updatable');
+      expect(job!.schedule.every).toBe(5000);
+    });
+
+    test('updateJob should return false for non-existent job', () => {
+      const updated = service.updateJob({
+        type: 'interval',
+        name: 'nonexistent',
+        intervalMs: 1000,
+      });
+      expect(updated).toBe(false);
     });
   });
 

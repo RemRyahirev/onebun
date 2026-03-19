@@ -18,7 +18,8 @@ import type {
   PublishOptions,
   SubscribeOptions,
   Subscription,
-  ScheduledJobOptions,
+  AddJobOptions,
+  UpdateJobOptions,
   ScheduledJobInfo,
   QueueFeature,
   QueueEvents,
@@ -184,24 +185,59 @@ export class QueueService {
   // ============================================================================
 
   /**
-   * Add a scheduled job
+   * Add a scheduled job dynamically
    */
-  async addScheduledJob(name: string, options: ScheduledJobOptions): Promise<void> {
-    return await this.getAdapter().addScheduledJob(name, options);
+  addJob(options: AddJobOptions): void {
+    this.getScheduler().addJob(options);
   }
 
   /**
-   * Remove a scheduled job
+   * Remove a scheduled job by name
    */
-  async removeScheduledJob(name: string): Promise<boolean> {
-    return await this.getAdapter().removeScheduledJob(name);
+  removeJob(name: string): boolean {
+    return this.getScheduler().removeJob(name);
+  }
+
+  /**
+   * Get information about a specific scheduled job
+   */
+  getJob(name: string): ScheduledJobInfo | undefined {
+    return this.getScheduler().getJob(name);
   }
 
   /**
    * Get all scheduled jobs
    */
-  async getScheduledJobs(): Promise<ScheduledJobInfo[]> {
-    return await this.getAdapter().getScheduledJobs();
+  getJobs(): ScheduledJobInfo[] {
+    return this.getScheduler().getJobs();
+  }
+
+  /**
+   * Check if a scheduled job exists
+   */
+  hasJob(name: string): boolean {
+    return this.getScheduler().hasJob(name);
+  }
+
+  /**
+   * Pause a scheduled job
+   */
+  pauseJob(name: string): boolean {
+    return this.getScheduler().pauseJob(name);
+  }
+
+  /**
+   * Resume a paused scheduled job
+   */
+  resumeJob(name: string): boolean {
+    return this.getScheduler().resumeJob(name);
+  }
+
+  /**
+   * Update a scheduled job's timing configuration
+   */
+  updateJob(options: UpdateJobOptions): boolean {
+    return this.getScheduler().updateJob(options);
   }
 
   // ============================================================================
