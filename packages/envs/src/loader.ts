@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+
 import { Effect } from 'effect';
 
 import { EnvLoadError, type EnvLoadOptions } from './types';
@@ -53,6 +55,57 @@ export class EnvLoader {
   }
 
   /**
+   * Load environment variables synchronously.
+   * Uses readFileSync for .env file loading.
+   * Same priority chain as load() (highest to lowest):
+   * 1. valueOverrides (if provided)
+   * 2. process.env (if envOverridesDotEnv = true)
+   * 3. .env file
+   * 4. process.env (if envOverridesDotEnv = false)
+   */
+  static loadSync(options: EnvLoadOptions = {}): Record<string, string> {
+    const {
+      envFilePath = '.env',
+      loadDotEnv = true,
+      envOverridesDotEnv = true,
+      valueOverrides,
+    } = options;
+
+    let dotEnvVars: Record<string, string> = {};
+
+    if (loadDotEnv) {
+      try {
+        if (existsSync(envFilePath)) {
+          const content = readFileSync(envFilePath, 'utf-8');
+          dotEnvVars = EnvLoader.parseDotEnvContent(content);
+        }
+      } catch (error) {
+        throw new EnvLoadError(
+          envFilePath,
+          `Failed to read .env file: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    const processEnvVars = EnvLoader.loadProcessEnv();
+    let result: Record<string, string>;
+
+    if (envOverridesDotEnv) {
+      result = { ...dotEnvVars, ...processEnvVars };
+    } else {
+      result = { ...processEnvVars, ...dotEnvVars };
+    }
+
+    if (valueOverrides) {
+      for (const [key, value] of Object.entries(valueOverrides)) {
+        result[key] = String(value);
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Load variables from .env file
    */
   private static loadDotEnvFile(
@@ -82,7 +135,7 @@ export class EnvLoader {
   /**
    * Parse .env file content
    */
-  private static parseDotEnvContent(content: string): Record<string, string> {
+  static parseDotEnvContent(content: string): Record<string, string> {
     const variables: Record<string, string> = {};
     const lines = content.split('\n');
 
@@ -129,7 +182,7 @@ export class EnvLoader {
   /**
    * Load variables from process.env
    */
-  private static loadProcessEnv(): Record<string, string> {
+  static loadProcessEnv(): Record<string, string> {
     const variables: Record<string, string> = {};
 
     for (const [key, value] of Object.entries(process.env)) {

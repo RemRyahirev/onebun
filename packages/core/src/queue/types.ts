@@ -433,11 +433,12 @@ export interface QueueAdapter {
 export type BuiltInAdapterType = 'memory' | 'redis';
 
 /**
- * Queue adapter constructor
+ * Queue adapter constructor — generic over the options type.
+ * When used as a generic constraint (e.g. `QueueApplicationOptions<typeof MyAdapter>`),
+ * TypeScript infers the correct options type automatically.
  */
-export interface QueueAdapterConstructor {
-  new (options?: unknown): QueueAdapter;
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type QueueAdapterConstructor<TOptions = any> = new (options: TOptions) => QueueAdapter;
 
 /**
  * Queue configuration options

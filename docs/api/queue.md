@@ -64,7 +64,7 @@ For NATS/JetStream or other backends, use a custom adapter constructor (see [Cus
 |--------|------|---------|-------------|
 | `enabled` | `boolean` | auto | Enable queue system (auto-enabled if handlers detected) |
 | `adapter` | `'memory' \| 'redis'` or adapter class | `'memory'` | Built-in type or custom adapter constructor (e.g. for NATS JetStream) |
-| `options` | `unknown` | - | Options passed to the custom adapter constructor when `adapter` is a class |
+| `options` | inferred from adapter | - | Options passed to the custom adapter constructor — type-safe when `adapter` is a class |
 | `redis.useSharedProvider` | `boolean` | `true` | Use shared Redis connection pool |
 | `redis.url` | `string` | - | Redis URL (required if `useSharedProvider: false`) |
 | `redis.prefix` | `string` | `'onebun:queue:'` | Key prefix for Redis keys |
@@ -131,10 +131,11 @@ Errors thrown inside `@Cron`, `@Interval`, and `@Timeout` handlers are caught an
 
 **QueueApplicationOptions interface:**
 ```typescript
-interface QueueApplicationOptions {
+// Generic: options type is inferred from the adapter constructor
+interface QueueApplicationOptions<A extends QueueAdapterConstructor = QueueAdapterConstructor> {
   enabled?: boolean;
-  adapter?: 'memory' | 'redis' | QueueAdapterConstructor;
-  options?: unknown;  // passed to custom adapter constructor
+  adapter?: 'memory' | 'redis' | A;
+  options?: A extends QueueAdapterConstructor<infer O> ? O : never;
   redis?: {
     useSharedProvider?: boolean;
     url?: string;
@@ -585,7 +586,7 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 ```
 
-The framework instantiates the adapter with `new Adapter(queue.options)` and uses it as the queue backend. For a ready-made NATS/JetStream adapter, use the `@onebun/nats` package if available and pass its adapter class and options the same way.
+The framework instantiates the adapter with `new Adapter(queue.options)` and uses it as the queue backend. When you pass a class constructor as `adapter`, `options` is automatically typed to match the adapter's constructor argument — no type assertions needed. For a ready-made NATS/JetStream adapter, use the `@onebun/nats` package if available and pass its adapter class and options the same way.
 
 ### NatsQueueAdapter
 

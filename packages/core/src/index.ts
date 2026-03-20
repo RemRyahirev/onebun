@@ -3,6 +3,7 @@ export {
   Env,
   type EnvSchema,
   EnvValidationError,
+  getConfig,
   type InferConfigType,
   type EnvVariableConfig,
 } from '@onebun/envs';

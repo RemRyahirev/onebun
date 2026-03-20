@@ -246,7 +246,8 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
 /**
  * OneBun Application
  */
-export class OneBunApplication {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export class OneBunApplication<QA extends import('../queue/types').QueueAdapterConstructor<any> = import('../queue/types').QueueAdapterConstructor> {
   private rootModule: ModuleInstance | null = null;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private options: ApplicationOptions;
@@ -272,7 +273,7 @@ export class OneBunApplication {
    */
   constructor(
     moduleClass: new (...args: unknown[]) => object,
-    options?: Partial<ApplicationOptions>,
+    options?: Partial<ApplicationOptions<QA>>,
   ) {
     this.moduleClass = moduleClass;
 

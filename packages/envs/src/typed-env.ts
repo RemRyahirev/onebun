@@ -1,11 +1,10 @@
 import { Effect } from 'effect';
 
 import { EnvLoader } from './loader';
-import { EnvParser } from './parser';
+import { isEnvVariableConfig, parseSchema } from './schema-parser';
 import {
   type EnvLoadOptions,
   type EnvSchema,
-  EnvValidationError,
   type EnvVariableConfig,
 } from './types';
 
@@ -87,7 +86,7 @@ class ConfigProxy<T> {
     for (const [key, config] of Object.entries(schema)) {
       const fullPath = prefix ? `${prefix}.${key}` : key;
 
-      if (this.isEnvVariableConfig(config)) {
+      if (isEnvVariableConfig(config)) {
         if ((config as EnvVariableConfig).sensitive) {
           this._sensitiveFields.add(fullPath);
         }
@@ -97,66 +96,27 @@ class ConfigProxy<T> {
     }
   }
 
-  private isEnvVariableConfig(config: unknown): boolean {
-    return Boolean(config) && typeof config === 'object' && 'type' in config!;
-  }
-
   private async ensureInitialized(): Promise<void> {
     if (this._isInitialized) {
       return;
     }
 
     const rawVariables = await Effect.runPromise(EnvLoader.load(this._options));
-    this._values = this.parseNestedSchema(this._schema, rawVariables, '') as T;
+    this._values = parseSchema(this._schema, rawVariables, '', this._options) as T;
     this._isInitialized = true;
   }
 
-   
-  private parseNestedSchema(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    schema: any,
-    rawVariables: Record<string, string>,
-    prefix: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ): any {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result: any = {};
-
-    for (const [key, config] of Object.entries(schema)) {
-      const fullPath = prefix ? `${prefix}.${key}` : key;
-
-      if (this.isEnvVariableConfig(config)) {
-        const envConfig = config as EnvVariableConfig;
-        const envVar = envConfig.env || this.pathToEnvVar(fullPath);
-        const rawValue = rawVariables[envVar];
-
-        try {
-          const parsed = Effect.runSync(
-            EnvParser.parse(
-              envVar,
-              rawValue,
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              envConfig as any,
-              this._options,
-            ),
-          );
-          result[key] = parsed;
-        } catch (error) {
-          if (error instanceof EnvValidationError) {
-            throw error;
-          }
-          throw new EnvValidationError(envVar, rawValue, String(error));
-        }
-      } else {
-        result[key] = this.parseNestedSchema(config, rawVariables, fullPath);
-      }
+  /**
+   * Initialize configuration synchronously from pre-loaded raw variables.
+   * Used by getConfig() to avoid async overhead.
+   */
+  initializeSync(rawVariables: Record<string, string>): void {
+    if (this._isInitialized) {
+      return;
     }
 
-    return result;
-  }
-
-  private pathToEnvVar(path: string): string {
-    return path.toUpperCase().replace(/\./g, '_');
+    this._values = parseSchema(this._schema, rawVariables, '', this._options) as T;
+    this._isInitialized = true;
   }
 
   private getValueByPath(obj: Record<string, unknown>, path: string): unknown {

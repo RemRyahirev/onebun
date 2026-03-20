@@ -19,6 +19,8 @@ import {
   Effect,
   type EnvSchema,
   EnvValidationError,
+  getConfig,
+  clearGetConfigCache,
 } from '../src';
 
 // Counter for unique instance keys to avoid cache conflicts between tests
@@ -468,6 +470,50 @@ describe('Envs API Documentation Examples', () => {
       // Result
       const hosts = config.get('allowedHosts');
       expect(hosts).toEqual(['example.com', 'api.example.com', 'localhost']);
+    });
+  });
+
+  describe('Pre-init Config Access (docs/api/envs.md)', () => {
+    afterEach(() => {
+      clearGetConfigCache();
+    });
+
+    /**
+     * @source docs/api/envs.md#pre-init-config-access
+     */
+    it('should access config synchronously before app bootstrap', () => {
+      // From docs: Pre-init Config Access
+      // Use getConfig() to access environment values before OneBunApplication is created
+      const envSchema: EnvSchema<{
+        server: { port: number; host: string };
+        nats: { url: string };
+      }> = {
+        server: {
+          port: Env.number({ default: 3000, env: 'PREINIT_PORT' }),
+          host: Env.string({ default: '0.0.0.0', env: 'PREINIT_HOST' }),
+        },
+        nats: {
+          url: Env.string({ default: 'nats://localhost:4222', env: 'PREINIT_NATS_URL' }),
+        },
+      };
+
+      // Synchronous — no await needed
+      const config = getConfig(envSchema, { loadDotEnv: false });
+
+      // Same .get() API as this.config in services
+      const port = config.get('server.port');
+      const natsUrl = config.get('nats.url');
+
+      expect(port).toBe(3000);
+      expect(natsUrl).toBe('nats://localhost:4222');
+      expect(config.isInitialized).toBe(true);
+
+      // Can be used to configure ApplicationOptions:
+      // const app = new OneBunApplication(AppModule, {
+      //   envSchema,
+      //   cors: { origin: config.get('server.host') },
+      //   queue: { adapter: new JetStreamQueueAdapter({ servers: config.get('nats.url') }) },
+      // });
     });
   });
 });

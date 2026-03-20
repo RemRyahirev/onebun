@@ -198,7 +198,8 @@ export interface TypedEnvSchema {
 /**
  * Application options
  */
-export interface ApplicationOptions {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = QueueAdapterConstructor> {
   /**
    * Application name (used for metrics and tracing labels)
    */
@@ -431,7 +432,7 @@ export interface ApplicationOptions {
   /**
    * Queue configuration
    */
-  queue?: QueueApplicationOptions;
+  queue?: QueueApplicationOptions<QA>;
 
   /**
    * Static file serving: serve files from a directory for requests not matched by API routes.
@@ -544,15 +545,18 @@ export interface ApplicationOptions {
 export type QueueAdapterType = 'memory' | 'redis';
 
 /**
- * Queue configuration for OneBunApplication
+ * Queue configuration for OneBunApplication.
+ * Generic parameter `A` infers the adapter constructor type, so `options`
+ * is automatically typed to match the adapter's constructor argument.
  */
-export interface QueueApplicationOptions {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export interface QueueApplicationOptions<A extends QueueAdapterConstructor<any> = QueueAdapterConstructor> {
   /** Enable/disable queue (default: auto - enabled if handlers exist) */
   enabled?: boolean;
   /** Adapter type, or custom adapter constructor (e.g. for NATS JetStream) */
-  adapter?: QueueAdapterType | QueueAdapterConstructor;
+  adapter?: QueueAdapterType | A;
   /** Options passed to the custom adapter constructor when adapter is a class */
-  options?: unknown;
+  options?: A extends QueueAdapterConstructor<infer O> ? O : never;
   /** Redis-specific options (only used when adapter is 'redis') */
   redis?: {
     /** Use shared Redis provider instead of dedicated connection */

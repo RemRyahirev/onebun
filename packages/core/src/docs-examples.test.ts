@@ -37,6 +37,7 @@ import type {
   OnApplicationDestroy,
 } from './';
 import type { ExceptionFilter } from './exception-filters/exception-filters';
+import type { QueueAdapter, QueueAdapterConstructor } from './queue/types';
 import type {
   SseEvent,
   SseGenerator,
@@ -44,6 +45,7 @@ import type {
   OneBunResponse,
   MiddlewareClass,
   OnModuleConfigure,
+  QueueApplicationOptions,
 } from './types';
 import type { HttpExecutionContext } from './types';
 import type { ServerWebSocket } from 'bun';
@@ -5704,5 +5706,98 @@ describe('docs/api/security.md', () => {
     const res = await mw.use(req, async () => new Response('ok'));
 
     expect(res.headers.get('Strict-Transport-Security')).toBeNull();
+  });
+});
+
+// ============================================================================
+// docs/api/queue.md — Type-safe queue adapter configuration
+// ============================================================================
+describe('docs/api/queue.md — type-safe adapter options', () => {
+  // Minimal custom adapter for type-checking purposes
+  interface CustomAdapterOptions {
+    servers: string;
+    streams?: Array<{ name: string; subjects: string[] }>;
+  }
+
+  class CustomAdapter implements QueueAdapter {
+    readonly name = 'custom';
+    readonly type = 'jetstream' as const;
+    constructor(private opts: CustomAdapterOptions) {}
+    async connect() { /* noop */ }
+    async disconnect() { /* noop */ }
+    isConnected() {
+      return true; 
+    }
+    async publish() {
+      return ''; 
+    }
+    async publishBatch() {
+      return []; 
+    }
+    async subscribe() {
+      return {
+        async unsubscribe() { /* noop */ },
+        pause() { /* noop */ },
+        resume() { /* noop */ },
+        pattern: '',
+        isActive: true,
+      };
+    }
+    supports() {
+      return false; 
+    }
+    on() { /* noop */ }
+    off() { /* noop */ }
+  }
+
+  it('QueueApplicationOptions infers options type from adapter constructor', () => {
+    // When adapter is a specific class, options should be typed as its constructor argument
+    const queueOpts: QueueApplicationOptions<typeof CustomAdapter> = {
+      adapter: CustomAdapter,
+      options: {
+        servers: 'nats://localhost:4222',
+        streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+      },
+    };
+
+    expect(queueOpts.adapter).toBe(CustomAdapter);
+    expect(queueOpts.options?.servers).toBe('nats://localhost:4222');
+  });
+
+  it('QueueApplicationOptions works with string adapter type (backward compatibility)', () => {
+    const queueOpts: QueueApplicationOptions = {
+      adapter: 'memory',
+      enabled: true,
+    };
+
+    expect(queueOpts.adapter).toBe('memory');
+  });
+
+  it('QueueAdapterConstructor is compatible with custom adapter classes', () => {
+    // Verify that a custom adapter class satisfies QueueAdapterConstructor
+    const ctor: QueueAdapterConstructor<CustomAdapterOptions> = CustomAdapter;
+    const instance = new ctor({ servers: 'nats://localhost:4222' });
+
+    expect(instance.name).toBe('custom');
+    expect(instance.type).toBe('jetstream');
+  });
+
+  it('OneBunApplication accepts typed adapter options without type assertion', () => {
+    // This is the main desired usage — no `as SomeOptions` needed
+    @Module({ controllers: [] })
+    class TestModule {}
+
+    const app = new OneBunApplication(TestModule, {
+      loggerLayer: makeMockLoggerLayer(),
+      queue: {
+        adapter: CustomAdapter,
+        options: {
+          servers: 'nats://localhost:4222',
+          streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+        },
+      },
+    });
+
+    expect(app).toBeDefined();
   });
 });

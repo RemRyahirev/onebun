@@ -182,6 +182,42 @@ If you don't use module augmentation, you can still access config but need type 
 const port = this.config.get('server.port') as number;
 ```
 
+## Pre-init Config Access
+
+Use `getConfig()` to access configuration values **synchronously before application bootstrap** — for example, to configure `cors`, `rateLimit`, or queue adapters in `ApplicationOptions`.
+
+```typescript
+import { OneBunApplication, getConfig } from '@onebun/core';
+import { AppModule } from './app.module';
+import { envSchema, type AppConfig } from './config';
+
+// Synchronous — reads .env via readFileSync, no await needed
+const config = getConfig<AppConfig>(envSchema);
+
+const app = new OneBunApplication(AppModule, {
+  envSchema,
+  cors: { origin: config.get('server.corsOrigin') },
+  rateLimit: { windowMs: config.get('rateLimit.windowMs'), max: config.get('rateLimit.max') },
+});
+```
+
+`getConfig()` returns the same interface as `this.config` in services — with `.get()`, `.values`, `.getSafeConfig()`, and full type inference via module augmentation.
+
+Results are cached per schema reference — calling `getConfig()` multiple times with the same schema object returns the same instance.
+
+<llm-only>
+
+**Technical details for AI agents:**
+- `getConfig()` is defined in `@onebun/envs`, re-exported from `@onebun/core`
+- Uses `readFileSync`/`existsSync` from `node:fs` for synchronous .env file loading
+- Returns `ConfigProxy<T>` — same class used by `TypedEnv.create()` and the framework internally
+- Accepts same `EnvLoadOptions` as async path (envFilePath, loadDotEnv, envOverridesDotEnv, valueOverrides, strict)
+- Cache is `WeakMap<object, ConfigProxy>` keyed by schema reference; use `clearGetConfigCache()` for testing
+- When `OneBunApplication` later initializes with the same `envSchema`, it creates its own `ConfigProxy` via `TypedEnv.create()` — the values are parsed independently (cheap operation)
+- Signature: `getConfig<T>(schema: EnvSchema<T>, options?: EnvLoadOptions): ConfigProxy<T>`
+
+</llm-only>
+
 ## Loading Configuration
 
 ### In Application
