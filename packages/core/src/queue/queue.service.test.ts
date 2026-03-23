@@ -13,6 +13,7 @@ import {
 import type { Message } from './types';
 
 import { InMemoryQueueAdapter } from './adapters/memory.adapter';
+import { OnQueueReady, Subscribe } from './decorators';
 import { QueueService } from './queue.service';
 
 describe('QueueService', () => {
@@ -339,6 +340,161 @@ describe('QueueService', () => {
       });
       expect(updated).toBe(false);
     });
+  });
+
+  describe('registerService lifecycle', () => {
+    test('should call @OnQueueReady handler when queue starts', async () => {
+      let readyCalled = false;
+
+      class TestService {
+        @OnQueueReady()
+        handleReady() {
+          readyCalled = true;
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+      expect(readyCalled).toBe(false);
+
+      await service.start();
+      expect(readyCalled).toBe(true);
+    });
+
+    test('should allow publishing from @OnQueueReady handler', async () => {
+      const received: Message[] = [];
+
+      class TestService {
+        @OnQueueReady()
+        handleReady() {
+          service.publish('init.ready', { status: 'ok' });
+        }
+
+        @Subscribe('init.ready')
+        handleInit(_message: Message) {}
+      }
+
+      const instance = new TestService();
+
+      // Subscribe before start so the handler is in place
+      await service.subscribe('init.ready', async (message) => {
+        received.push(message);
+      });
+
+      await service.registerService(instance, TestService);
+      await service.start();
+
+      expect(received.length).toBe(1);
+      expect(received[0].data).toEqual({ status: 'ok' });
+    });
+
+    test('should call multiple @OnQueueReady handlers in order', async () => {
+      const callOrder: string[] = [];
+
+      class TestService {
+        @OnQueueReady()
+        handleReady1() {
+          callOrder.push('first');
+        }
+
+        @OnQueueReady()
+        handleReady2() {
+          callOrder.push('second');
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+      await service.start();
+
+      expect(callOrder).toEqual(['first', 'second']);
+    });
+
+    test('should call @OnQueueReady with correct this binding', async () => {
+      let capturedValue: string | null = null as string | null;
+
+      class TestService {
+        readonly name = 'test-service';
+
+        @OnQueueReady()
+        handleReady() {
+          capturedValue = this.name;
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+      await service.start();
+
+      expect(capturedValue).toBe('test-service');
+    });
+
+    test('should call @OnQueueReady again after stop() and start()', async () => {
+      let readyCount = 0;
+
+      class TestService {
+        @OnQueueReady()
+        handleReady() {
+          readyCount++;
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+
+      await service.start();
+      expect(readyCount).toBe(1);
+
+      await service.stop();
+      await service.start();
+      expect(readyCount).toBe(2);
+    });
+
+    test('should call @OnQueueReady on adapter reconnect', async () => {
+      let readyCount = 0;
+
+      class TestService {
+        @OnQueueReady()
+        handleReady() {
+          readyCount++;
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+
+      await service.start();
+      expect(readyCount).toBe(1);
+
+      // Simulate reconnect without stopping the service
+      await adapter.disconnect();
+      await adapter.connect();
+      expect(readyCount).toBe(2);
+    });
+
+    test('should not call @OnQueueReady on adapter reconnect when service is stopped', async () => {
+      let readyCount = 0;
+
+      class TestService {
+        @OnQueueReady()
+        handleReady() {
+          readyCount++;
+        }
+      }
+
+      const instance = new TestService();
+      await service.registerService(instance, TestService);
+
+      await service.start();
+      expect(readyCount).toBe(1);
+
+      await service.stop();
+
+      // Reconnect while service is stopped — handler should NOT fire
+      await adapter.connect();
+      expect(readyCount).toBe(1);
+    });
+
   });
 
   describe('error handling', () => {

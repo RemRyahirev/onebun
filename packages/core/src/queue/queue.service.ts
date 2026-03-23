@@ -56,6 +56,8 @@ export class QueueService {
   private subscriptions: Subscription[] = [];
   private started = false;
   private config: QueueConfig;
+  private onReadyHandlers: Array<() => void> = [];
+  private adapterOnReadyRegistered = false;
 
   constructor(config: QueueConfig) {
     this.config = config;
@@ -86,11 +88,28 @@ export class QueueService {
       await this.adapter.connect();
     }
 
+    // Register adapter-level onReady listener once for reconnection scenarios
+    if (!this.adapterOnReadyRegistered) {
+      this.adapter.on('onReady', () => {
+        if (this.started) {
+          for (const handler of this.onReadyHandlers) {
+            handler();
+          }
+        }
+      });
+      this.adapterOnReadyRegistered = true;
+    }
+
     if (this.scheduler) {
       this.scheduler.start();
     }
 
     this.started = true;
+
+    // Call @OnQueueReady handlers — queue is fully ready at this point
+    for (const handler of this.onReadyHandlers) {
+      handler();
+    }
   }
 
   /**
@@ -359,7 +378,7 @@ export class QueueService {
     const onReadyHandlers = getMetadata(QUEUE_METADATA.ON_READY, serviceClass) || [];
     for (const handler of onReadyHandlers) {
       const method = serviceInstance[handler.propertyKey].bind(serviceInstance);
-      this.on('onReady', method);
+      this.onReadyHandlers.push(method);
     }
 
     const onErrorHandlers = getMetadata(QUEUE_METADATA.ON_ERROR, serviceClass) || [];

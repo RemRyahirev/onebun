@@ -189,6 +189,48 @@ describe('queue-decorators', () => {
       expect(handlers[0].propertyKey).toBe('handleReady');
     });
 
+    it('should support multiple @OnQueueReady handlers in one class', () => {
+      class TestService {
+        @OnQueueReady()
+        handleReady1() {}
+
+        @OnQueueReady()
+        handleReady2() {}
+      }
+
+      const handlers = getLifecycleHandlers(TestService, 'ON_READY');
+      expect(handlers.length).toBe(2);
+      expect(handlers[0].propertyKey).toBe('handleReady1');
+      expect(handlers[1].propertyKey).toBe('handleReady2');
+    });
+
+    it('should return empty array when no @OnQueueReady handlers', () => {
+      class TestService {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        handle() {}
+      }
+
+      const handlers = getLifecycleHandlers(TestService, 'ON_READY');
+      expect(handlers.length).toBe(0);
+    });
+
+    it('should not mix @OnQueueReady with other lifecycle metadata', () => {
+      class TestService {
+        @OnQueueReady()
+        handleReady() {}
+
+        @OnQueueError()
+        handleError(_error: Error) {}
+      }
+
+      const readyHandlers = getLifecycleHandlers(TestService, 'ON_READY');
+      const errorHandlers = getLifecycleHandlers(TestService, 'ON_ERROR');
+      expect(readyHandlers.length).toBe(1);
+      expect(readyHandlers[0].propertyKey).toBe('handleReady');
+      expect(errorHandlers.length).toBe(1);
+      expect(errorHandlers[0].propertyKey).toBe('handleError');
+    });
+
     it('should register @OnQueueError handler', () => {
       class TestService {
         @OnQueueError()
