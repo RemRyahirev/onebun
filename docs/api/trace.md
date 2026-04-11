@@ -252,6 +252,8 @@ Logs automatically include trace context:
 
 ## Exporting Traces
 
+OneBun exports traces via OTLP HTTP using a custom `fetch()`-based exporter (guaranteed Bun compatibility). When `exportOptions.endpoint` is configured, a `BasicTracerProvider` with `BatchSpanProcessor` is automatically registered.
+
 ### OTLP Exporter
 
 ```typescript
@@ -259,17 +261,33 @@ const app = new OneBunApplication(AppModule, {
   tracing: {
     enabled: true,
     serviceName: 'my-service',
+    serviceVersion: '1.0.0',
     exportOptions: {
-      endpoint: 'http://jaeger:4318/v1/traces',  // OTLP HTTP endpoint
+      endpoint: 'http://localhost:4318',  // OTel Collector OTLP HTTP
       headers: {
         'Authorization': 'Bearer token',
       },
-      timeout: 10000,
-      batchSize: 100,
-      batchTimeout: 5000,
+      timeout: 10000,    // request timeout (default: 10000ms)
+      batchSize: 100,     // spans per batch (default: 100)
+      batchTimeout: 5000, // max wait before flush (default: 5000ms)
     },
   },
 });
+```
+
+Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format. On application shutdown, pending spans are flushed automatically.
+
+### SigNoz / OTel Collector Integration
+
+```yaml
+# docker-compose.yml
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4318:4318"    # OTLP HTTP
+    volumes:
+      - ./otel-config.yaml:/etc/otel/config.yaml
 ```
 
 ### Jaeger Integration
@@ -284,6 +302,20 @@ services:
       - "4318:4318"    # OTLP HTTP
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+```
+
+### Custom Exporter
+
+For advanced use cases, you can use the `OtlpFetchSpanExporter` directly:
+
+```typescript
+import { OtlpFetchSpanExporter } from '@onebun/trace';
+
+const exporter = new OtlpFetchSpanExporter({
+  endpoint: 'http://localhost:4318',
+  headers: { 'X-Custom': 'value' },
+  timeout: 5000,
+});
 ```
 
 ## Sampling

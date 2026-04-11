@@ -16,11 +16,15 @@ export {
   createTraceMiddleware,
   Span,
   span,
-  // Backward compatibility aliases
+  Spanned,
   Trace,
+  Traced,
   TraceMiddleware,
   trace,
 } from './middleware.js';
+
+// OTLP exporter
+export { OtlpFetchSpanExporter, type OtlpExporterOptions } from './otlp-exporter.js';
 
 // Core service
 export {

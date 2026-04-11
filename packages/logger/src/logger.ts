@@ -5,11 +5,14 @@ import {
   Layer,
 } from 'effect';
 
+import { CompositeTransport } from './composite-transport';
 import { JsonFormatter, PrettyFormatter } from './formatter';
+import { OtlpLogTransport } from './otlp-transport';
 import { ConsoleTransport } from './transport';
 import {
   type LoggerConfig,
   type LoggerOptions,
+  type LogTransport,
   LogLevel,
   type TraceInfo,
 } from './types';
@@ -329,14 +332,30 @@ export const createSyncLogger = (logger: Logger): SyncLogger => {
 };
 
 /**
+ * Active transport reference for shutdown support
+ */
+let activeTransport: LogTransport | null = null;
+
+/**
+ * Shutdown the active logger transport (flush OTLP batches, etc.)
+ * Should be called as the very last step in application shutdown.
+ */
+export const shutdownLogger = async (): Promise<void> => {
+  if (activeTransport?.shutdown) {
+    await activeTransport.shutdown();
+  }
+  activeTransport = null;
+};
+
+/**
  * Create a logger layer from LoggerOptions.
  * Provides a simple declarative API for configuring logging.
- * 
+ *
  * Priority: options > env variables > NODE_ENV defaults
- * 
+ *
  * @param options - Logger configuration options
  * @returns Layer providing Logger service
- * 
+ *
  * @example
  * ```typescript
  * const loggerLayer = makeLoggerFromOptions({
@@ -371,12 +390,34 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
         : (isDev ? new PrettyFormatter() : new JsonFormatter());
   }
 
+  // Build transport: Console + optional OTLP
+  const otlpEndpoint = options?.otlpEndpoint
+    || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+    || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+
+  let transport: LogTransport;
+
+  if (otlpEndpoint) {
+    const otlpTransport = new OtlpLogTransport({
+      endpoint: otlpEndpoint,
+      headers: options?.otlpHeaders,
+      batchSize: options?.otlpBatchSize,
+      batchTimeout: options?.otlpBatchTimeout,
+      resourceAttributes: options?.otlpResourceAttributes,
+    });
+    transport = new CompositeTransport([new ConsoleTransport(), otlpTransport]);
+  } else {
+    transport = new ConsoleTransport();
+  }
+
+  activeTransport = transport;
+
   return Layer.succeed(
     LoggerService,
     new LoggerImpl({
       minLevel,
       formatter,
-      transport: new ConsoleTransport(),
+      transport,
       defaultContext: options?.defaultContext ?? {},
     }),
   );

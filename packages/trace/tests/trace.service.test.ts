@@ -203,6 +203,12 @@ describe('TraceService', () => {
       const disabledService = new TraceServiceImpl({ enabled: false });
       expect(disabledService).toBeInstanceOf(TraceServiceImpl);
     });
+
+    test('should have shutdown method', async () => {
+      const instance = new TraceServiceImpl({ enabled: false });
+      expect(typeof instance.shutdown).toBe('function');
+      await instance.shutdown(); // should not throw
+    });
   });
 
   describe('Context and FiberRef', () => {

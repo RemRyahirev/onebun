@@ -261,6 +261,50 @@ const app = new OneBunApplication(AppModule, {
 // All logs will include serviceName, version, environment
 ```
 
+## OTLP Log Export
+
+Send logs to an OpenTelemetry Collector alongside console output. Uses native `fetch()` for Bun compatibility — no additional dependencies.
+
+### Configuration
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    format: 'json',
+    minLevel: 'info',
+    defaultContext: { service: 'my-service' },
+    // Enable OTLP log export
+    otlpEndpoint: 'http://localhost:4318',
+    otlpHeaders: { 'Authorization': 'Bearer token' },
+    otlpBatchSize: 100,       // logs per batch (default: 100)
+    otlpBatchTimeout: 5000,   // max wait before flush (default: 5000ms)
+  },
+  tracing: {
+    serviceName: 'my-service',     // auto-populated as OTLP resource attribute
+    serviceVersion: '1.0.0',
+  },
+});
+```
+
+When `otlpEndpoint` is set, logs are sent to **both** console and OTLP collector. The `service.name` and `service.version` resource attributes are automatically populated from `tracing` config.
+
+### Environment Variable
+
+OTLP export is also enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 bun run start
+```
+
+### OTLP Format
+
+Log entries are sent as OTLP JSON to `{endpoint}/v1/logs`:
+- `LogLevel` maps to OTLP severity: Trace→1, Debug→5, Info→9, Warning→13, Error→17, Fatal→21
+- Trace correlation: `traceId` and `spanId` are included when a span is active
+- Error info: `exception.type`, `exception.message`, `exception.stacktrace` attributes
+- Context fields become OTLP attributes
+- Pending logs are flushed on application shutdown
+
 ## Getting Logger from Application
 
 ```typescript
@@ -377,7 +421,10 @@ The `trace` field is automatically injected by the logger when a span is active.
 - Trace context is injected into log entries by the trace middleware when a span is active
 - `makeDevLogger()` forces pretty format + debug level
 - `makeProdLogger()` forces JSON format + info level
-- `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext }` and creates the appropriate layer
+- `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext, otlpEndpoint, otlpHeaders, otlpBatchSize, otlpBatchTimeout, otlpResourceAttributes }` and creates the appropriate layer
+- When `otlpEndpoint` is set, `makeLoggerFromOptions()` creates a `CompositeTransport` with both `ConsoleTransport` and `OtlpLogTransport`
+- OTLP log transport auto-enables from env: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `shutdownLogger()` flushes pending OTLP batches — called automatically in `app.stop()`
 - Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
 
 </llm-only>

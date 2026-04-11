@@ -20,6 +20,7 @@ import {
   LoggerService,
   makeLogger,
   makeLoggerFromOptions,
+  shutdownLogger,
   type SyncLogger,
 } from '@onebun/logger';
 import {
@@ -295,9 +296,26 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Use provided logger layer, or create from options, or use default
     // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
+    // Auto-populate OTLP resource attributes from tracing config if available
+    const loggerOptions = this.options.loggerOptions
+      ? {
+        ...this.options.loggerOptions,
+        otlpResourceAttributes: this.options.loggerOptions.otlpResourceAttributes ?? (
+          this.options.loggerOptions.otlpEndpoint && this.options.tracing
+            ? {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'service.name': this.options.tracing.serviceName ?? 'onebun-service',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'service.version': this.options.tracing.serviceVersion ?? '1.0.0',
+            }
+            : undefined
+        ),
+      }
+      : undefined;
+
     this.loggerLayer = this.options.loggerLayer
-      ?? (this.options.loggerOptions
-        ? makeLoggerFromOptions(this.options.loggerOptions)
+      ?? (loggerOptions
+        ? makeLoggerFromOptions(loggerOptions)
         : makeLogger());
 
     // Initialize logger with application class name as context
@@ -1744,6 +1762,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.logger.debug('HTTP server stopped');
     }
 
+    // Shutdown trace service — flush pending spans before module destroy
+    if (this.traceService?.shutdown) {
+      this.logger.debug('Shutting down trace service');
+      await this.traceService.shutdown();
+    }
+
     // Call onModuleDestroy lifecycle hook
     if (this.rootModule?.callOnModuleDestroy) {
       this.logger.debug('Calling onModuleDestroy hooks');
@@ -1763,6 +1787,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     }
 
     this.logger.info('OneBun application stopped');
+
+    // Shutdown logger transport LAST — flush OTLP log batches after final log message
+    await shutdownLogger();
   }
 
   /**

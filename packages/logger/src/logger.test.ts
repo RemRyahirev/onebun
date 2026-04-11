@@ -5,6 +5,8 @@ import {
   spyOn,
   beforeEach,
   afterEach,
+  mock,
+  test,
 } from 'bun:test';
 import { Effect } from 'effect';
 
@@ -15,6 +17,7 @@ import {
   makeDevLogger,
   makeLoggerFromOptions,
   parseLogLevel,
+  shutdownLogger,
 } from './logger';
 import { makeLogger } from './logger';
 import { ConsoleTransport } from './transport';
@@ -863,5 +866,98 @@ describe('makeLogger with LOG_FORMAT env', () => {
     // Pretty format should contain [INFO] marker, not valid JSON
     expect(outputs[0]).toContain('[INFO');
     expect(() => JSON.parse(outputs[0])).toThrow();
+  });
+});
+ 
+
+describe('makeLoggerFromOptions with OTLP', () => {
+  const originalFetch = globalThis.fetch;
+  const originalOtelLogs = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+  const originalOtelEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+
+  beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    globalThis.fetch = mock(async () => new Response('{}', { status: 200 })) as any;
+    delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    if (originalOtelLogs === undefined) {
+      delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    } else {
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = originalOtelLogs;
+    }
+    if (originalOtelEndpoint === undefined) {
+      delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    } else {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = originalOtelEndpoint;
+    }
+  });
+
+  test('should create composite transport when otlpEndpoint is set', async () => {
+    const layer = makeLoggerFromOptions({
+      otlpEndpoint: 'http://localhost:4318',
+      otlpBatchTimeout: 600000, // prevent timer from firing during test
+      minLevel: 'info',
+    });
+
+    const logger = Effect.runSync(
+      Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+    );
+
+    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
+
+    // Cleanup: shutdown the OTLP transport to prevent its scheduleFlush timer
+    // from leaking into other test files and corrupting their fetch mocks
+    await shutdownLogger();
+  });
+
+  test('should create regular transport without otlpEndpoint', () => {
+    const layer = makeLoggerFromOptions({
+      minLevel: 'info',
+    });
+
+    const logger = Effect.runSync(
+      Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+    );
+
+    expect(logger).toBeDefined();
+    expect(typeof logger.info).toBe('function');
+  });
+});
+
+describe('shutdownLogger', () => {
+  test('should be exported', () => {
+    expect(typeof shutdownLogger).toBe('function');
+  });
+
+  test('should resolve when no active transport', async () => {
+    // Reset active transport by creating a logger without OTLP
+    makeLoggerFromOptions({ minLevel: 'info' });
+    // Call shutdown — should not throw
+    await shutdownLogger();
+  });
+
+  test('should resolve after shutdown of OTLP transport', async () => {
+    const originalFetch = globalThis.fetch;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    globalThis.fetch = mock(async () => new Response('{}', { status: 200 })) as any;
+
+    try {
+      // Create a logger with OTLP to set activeTransport to CompositeTransport
+      makeLoggerFromOptions({
+        otlpEndpoint: 'http://localhost:4318',
+        otlpBatchTimeout: 600000, // prevent timer from firing during test
+        minLevel: 'info',
+      });
+
+      // Should flush and not throw
+      await shutdownLogger();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

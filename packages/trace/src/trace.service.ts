@@ -13,6 +13,7 @@ import {
 
 import { HttpStatusCode } from '@onebun/requests';
 
+import { initTracerProvider, type TracerProviderResult } from './provider.js';
 import {
   type HttpTraceData,
   type SpanStatus,
@@ -89,6 +90,11 @@ export interface TraceService {
    * End HTTP request tracing
    */
   endHttpTrace(span: TraceSpan, data: Partial<HttpTraceData>): Effect.Effect<void>;
+
+  /**
+   * Shutdown the trace service, flushing pending spans
+   */
+  shutdown(): Promise<void>;
 }
 
 /**
@@ -111,8 +117,9 @@ export const currentSpan = FiberRef.unsafeMake<TraceSpan | null>(null);
  * Implementation of TraceService
  */
 export class TraceServiceImpl implements TraceService {
-  private readonly tracer = trace.getTracer('@onebun/trace');
+  private readonly tracer;
   private readonly options: Required<TraceOptions>;
+  private readonly providerResult: TracerProviderResult | null = null;
 
   constructor(options: TraceOptions = {}) {
     this.options = {
@@ -126,6 +133,20 @@ export class TraceServiceImpl implements TraceService {
       exportOptions: {},
       ...options,
     };
+
+    // Initialize TracerProvider BEFORE creating the tracer
+    // so trace.getTracer() returns a real tracer, not NoopTracer
+    if (this.options.enabled) {
+      this.providerResult = initTracerProvider(this.options);
+    }
+
+    this.tracer = trace.getTracer('@onebun/trace');
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.providerResult) {
+      await this.providerResult.shutdown();
+    }
   }
 
   getCurrentContext(): Effect.Effect<TraceContext | null> {

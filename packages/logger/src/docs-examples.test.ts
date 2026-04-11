@@ -357,3 +357,59 @@ describe('Logger API Documentation Examples', () => {
     });
   });
 });
+
+/* eslint-disable @typescript-eslint/naming-convention */
+describe('OTLP Log Export (docs/api/logger.md)', () => {
+  it('should export OtlpLogTransport', () => {
+    const { OtlpLogTransport } = require('./otlp-transport');
+    expect(OtlpLogTransport).toBeDefined();
+    expect(typeof OtlpLogTransport).toBe('function');
+  });
+
+  it('should export CompositeTransport', () => {
+    const { CompositeTransport } = require('./composite-transport');
+    expect(CompositeTransport).toBeDefined();
+    expect(typeof CompositeTransport).toBe('function');
+  });
+
+  it('should export shutdownLogger', () => {
+    const { shutdownLogger } = require('./logger');
+    expect(shutdownLogger).toBeDefined();
+    expect(typeof shutdownLogger).toBe('function');
+  });
+
+  it('should create OtlpLogTransport with options from docs', async () => {
+    const { OtlpLogTransport } = require('./otlp-transport');
+
+    // From docs: OTLP Log Export configuration
+    const transport = new OtlpLogTransport({
+      endpoint: 'http://localhost:4318',
+      headers: { Authorization: 'Bearer token' },
+      batchSize: 100,
+      batchTimeout: 5000,
+      resourceAttributes: {
+        'service.name': 'my-service',
+        'service.version': '1.0.0',
+      },
+    });
+
+    expect(transport).toBeDefined();
+    expect(typeof transport.log).toBe('function');
+    expect(typeof transport.shutdown).toBe('function');
+
+    // Cleanup: prevent scheduleFlush timer from leaking into other tests
+    await transport.shutdown();
+  });
+
+  it('should accept otlpEndpoint in LoggerOptions', () => {
+    // From docs: loggerOptions with otlpEndpoint
+    const loggerOptions = {
+      format: 'json' as const,
+      minLevel: 'info',
+      defaultContext: { service: 'my-service' },
+      otlpEndpoint: 'http://localhost:4318',
+    };
+
+    expect(loggerOptions.otlpEndpoint).toBe('http://localhost:4318');
+  });
+});

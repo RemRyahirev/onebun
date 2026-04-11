@@ -40,7 +40,7 @@
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.2.3",
+      "version": "0.2.5",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "effect": "^3.13.10",
@@ -56,7 +56,7 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.2.7",
+      "version": "0.2.15",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -70,6 +70,12 @@
         "bun-types": "^1.3.8",
         "testcontainers": "^11.7.1",
       },
+      "peerDependencies": {
+        "testcontainers": ">=10.0.0",
+      },
+      "optionalPeers": [
+        "testcontainers",
+      ],
     },
     "packages/docs": {
       "name": "@onebun/docs",
@@ -88,7 +94,7 @@
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.2.2",
+      "version": "0.2.4",
       "bin": {
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
@@ -112,7 +118,7 @@
     },
     "packages/envs": {
       "name": "@onebun/envs",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -132,7 +138,7 @@
     },
     "packages/metrics": {
       "name": "@onebun/metrics",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "effect": "^3.13.10",
@@ -145,7 +151,7 @@
     },
     "packages/nats": {
       "name": "@onebun/nats",
-      "version": "0.2.2",
+      "version": "0.2.6",
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",
@@ -176,6 +182,10 @@
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "@opentelemetry/api": "^1.8.0",
+        "@opentelemetry/core": "^2.6.1",
+        "@opentelemetry/resources": "^2.6.1",
+        "@opentelemetry/sdk-trace-base": "^2.6.1",
+        "@opentelemetry/semantic-conventions": "^1.40.0",
         "effect": "^3.13.10",
       },
       "devDependencies": {
@@ -385,6 +395,14 @@
     "@onebun/trace": ["@onebun/trace@workspace:packages/trace"],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
+
+    "@opentelemetry/core": ["@opentelemetry/core@2.6.1", "", { "dependencies": { "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.0.0 <1.10.0" } }, "sha512-8xHSGWpJP9wBxgBpnqGL0R3PbdWQndL1Qp50qrg71+B28zK5OQmUgcDKLJgzyAAV38t4tOyLMGDD60LneR5W8g=="],
+
+    "@opentelemetry/resources": ["@opentelemetry/resources@2.6.1", "", { "dependencies": { "@opentelemetry/core": "2.6.1", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-lID/vxSuKWXM55XhAKNoYXu9Cutoq5hFdkbTdI/zDKQktXzcWBVhNsOkiZFTMU9UtEWuGRNe0HUgmsFldIdxVA=="],
+
+    "@opentelemetry/sdk-trace-base": ["@opentelemetry/sdk-trace-base@2.6.1", "", { "dependencies": { "@opentelemetry/core": "2.6.1", "@opentelemetry/resources": "2.6.1", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-r86ut4T1e8vNwB35CqCcKd45yzqH6/6Wzvpk2/cZB8PsPLlZFTvrh8yfOS3CYZYcUmAx4hHTZJ8AO8Dj8nrdhw=="],
+
+    "@opentelemetry/semantic-conventions": ["@opentelemetry/semantic-conventions@1.40.0", "", {}, "sha512-cifvXDhcqMwwTlTK04GBNeIe7yyo28Mfby85QXFe1Yk8nmi36Ab/5UQwptOx84SsoGNRg+EVSjwzfSZMy6pmlw=="],
 
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 

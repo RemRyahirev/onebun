@@ -1,3 +1,4 @@
+import { SpanStatusCode as OtelSpanStatusCode, trace as otelTrace } from '@opentelemetry/api';
 import { Effect } from 'effect';
 
 import type { HttpTraceData, TraceHeaders } from './types.js';
@@ -183,7 +184,21 @@ export const createTraceMiddleware = (): TraceMiddleware => {
 };
 
 /**
- * Trace decorator for controller methods
+ * Trace decorator for async/await controller and service methods.
+ *
+ * Creates an OpenTelemetry span around the decorated method. Works with
+ * methods that return Promises — the span is automatically ended when
+ * the Promise resolves or rejects.
+ *
+ * @param operationName - Custom span name. Defaults to `ClassName.methodName`
+ *
+ * @example
+ * ```typescript
+ * class WorkspaceService extends BaseService {
+ *   \@Traced('workspace.findAll')
+ *   async findAll(): Promise<Workspace[]> { ... }
+ * }
+ * ```
  */
 export function trace(operationName?: string): MethodDecorator {
   return (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
@@ -194,52 +209,24 @@ export function trace(operationName?: string): MethodDecorator {
         : { name: 'Unknown' };
     const spanName = operationName || `${targetConstructor.name}.${String(propertyKey)}`;
 
-    descriptor.value = function (...args: unknown[]) {
-      return Effect.flatMap(traceService, (traceServiceInstance) =>
-        Effect.flatMap(traceServiceInstance.startSpan(spanName), (_traceSpan) => {
-          const startTime = Date.now();
+    descriptor.value = async function (...args: unknown[]) {
+      const tracer = otelTrace.getTracer('@onebun/trace');
 
-          return Effect.tryPromise({
-            try: () => originalMethod.apply(this, args),
-            catch: (error) => error as Error,
-          }).pipe(
-            Effect.tap(() => {
-              const duration = Date.now() - startTime;
+      return await tracer.startActiveSpan(spanName, async (activeSpan) => {
+        try {
+          const result = await originalMethod.apply(this, args);
+          activeSpan.setStatus({ code: OtelSpanStatusCode.OK });
 
-              return Effect.flatMap(
-                traceServiceInstance.setAttributes({
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'method.name': String(propertyKey),
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'method.duration': duration,
-                }),
-                () => traceServiceInstance.endSpan(_traceSpan),
-              );
-            }),
-            Effect.tapError((error) => {
-              const duration = Date.now() - startTime;
-
-              return Effect.flatMap(
-                traceServiceInstance.setAttributes({
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'method.name': String(propertyKey),
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'method.duration': duration,
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'error.type': error.constructor.name,
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'error.message': error.message,
-                }),
-                () =>
-                  traceServiceInstance.endSpan(_traceSpan, {
-                    code: 2, // ERROR
-                    message: error.message,
-                  }),
-              );
-            }),
-          );
-        }),
-      );
+          return result;
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          activeSpan.setStatus({ code: OtelSpanStatusCode.ERROR, message: err.message });
+          activeSpan.recordException(err);
+          throw error;
+        } finally {
+          activeSpan.end();
+        }
+      });
     };
 
     return descriptor;
@@ -247,7 +234,12 @@ export function trace(operationName?: string): MethodDecorator {
 }
 
 /**
- * Span decorator for creating custom spans
+ * Span decorator for creating custom spans around async methods.
+ *
+ * Lighter version of \@trace — creates a span without automatic error attribute
+ * enrichment. Best for internal methods where you want basic span tracking.
+ *
+ * @param name - Custom span name. Defaults to `ClassName.methodName`
  */
 export function span(name?: string): MethodDecorator {
   return (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {
@@ -258,26 +250,34 @@ export function span(name?: string): MethodDecorator {
         : { name: 'Unknown' };
     const spanName = name || `${targetConstructor.name}.${String(propertyKey)}`;
 
-    descriptor.value = function (...args: unknown[]) {
-      return Effect.flatMap(traceService, (traceServiceInstance) =>
-        Effect.flatMap(traceServiceInstance.startSpan(spanName), (spanInstance) =>
-          Effect.flatMap(
-            Effect.try(() => originalMethod.apply(this, args)),
-            (result) =>
-              Effect.flatMap(traceServiceInstance.endSpan(spanInstance), () =>
-                Effect.succeed(result),
-              ),
-          ),
-        ),
-      );
+    descriptor.value = async function (...args: unknown[]) {
+      const tracer = otelTrace.getTracer('@onebun/trace');
+
+      return await tracer.startActiveSpan(spanName, async (activeSpan) => {
+        try {
+          const result = await originalMethod.apply(this, args);
+
+          return result;
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          activeSpan.setStatus({ code: OtelSpanStatusCode.ERROR, message: err.message });
+          throw error;
+        } finally {
+          activeSpan.end();
+        }
+      });
     };
 
     return descriptor;
   };
 }
 
-// Backward compatibility aliases
+// Aliases — all point to the same async-compatible implementations
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Trace = trace;
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Span = span;
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const Traced = trace;
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export const Spanned = span;

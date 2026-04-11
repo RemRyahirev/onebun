@@ -3,11 +3,13 @@
    @typescript-eslint/naming-convention,
    @typescript-eslint/no-unused-vars,
    jest/unbound-method */
+import { trace as otelTrace } from '@opentelemetry/api';
 import {
   describe,
   test,
   expect,
   beforeEach,
+  afterEach,
   mock,
 } from 'bun:test';
 import { Effect } from 'effect';
@@ -18,6 +20,11 @@ import {
   TraceMiddleware,
   createTraceMiddleware,
   trace,
+  span,
+  Trace,
+  Span,
+  Traced,
+  Spanned,
 } from '../src/middleware';
 
 describe('TraceMiddleware', () => {
@@ -278,7 +285,7 @@ describe('TraceMiddleware', () => {
     test('should decorate method descriptor', () => {
       const decorator = trace('test-op');
       const originalMethod = mock(() => 'result');
-      
+
       const mockDescriptor = {
         value: originalMethod,
       };
@@ -294,7 +301,7 @@ describe('TraceMiddleware', () => {
     test('should handle missing constructor name', () => {
       const decorator = trace();
       const originalMethod = mock(() => 'result');
-      
+
       const mockDescriptor = {
         value: originalMethod,
       };
@@ -306,7 +313,7 @@ describe('TraceMiddleware', () => {
     test('should use constructor name in span name', () => {
       const decorator = trace();
       const originalMethod = mock(() => 'result');
-      
+
       const mockDescriptor = {
         value: originalMethod,
       };
@@ -320,11 +327,47 @@ describe('TraceMiddleware', () => {
       // The decorated method should exist
       expect(typeof mockDescriptor.value).toBe('function');
     });
+
+    test('decorated async method should return correct result via await', async () => {
+      class TestService {
+        @Trace('test-operation')
+        async doWork(): Promise<string> {
+          return 'work-result';
+        }
+      }
+
+      const service = new TestService();
+      const result = await service.doWork();
+      expect(result).toBe('work-result');
+    });
+
+    test('decorated method that throws should propagate error', async () => {
+      class TestService {
+        @Trace('failing-op')
+        async doWork(): Promise<string> {
+          throw new Error('operation failed');
+        }
+      }
+
+      const service = new TestService();
+      await expect(service.doWork()).rejects.toThrow('operation failed');
+    });
+
+    test('decorated method should return a Promise', () => {
+      class TestService {
+        @Trace('async-op')
+        async getValue(): Promise<number> {
+          return 42;
+        }
+      }
+
+      const service = new TestService();
+      const result = service.getValue();
+      expect(result).toBeInstanceOf(Promise);
+    });
   });
 
   describe('span decorator', () => {
-    const { span, Span } = require('../src/middleware');
-
     test('should be a function', () => {
       expect(typeof span).toBe('function');
     });
@@ -341,7 +384,7 @@ describe('TraceMiddleware', () => {
     test('should decorate method descriptor', () => {
       const decorator = span('my-span');
       const originalMethod = mock(() => 'span result');
-      
+
       const mockDescriptor = {
         value: originalMethod,
       };
@@ -352,16 +395,47 @@ describe('TraceMiddleware', () => {
       expect(typeof mockDescriptor.value).toBe('function');
     });
 
+    test('decorated async method should return correct result via await', async () => {
+      class TestService {
+        @Span('test-span')
+        async fetchData(): Promise<number[]> {
+          return [1, 2, 3];
+        }
+      }
+
+      const service = new TestService();
+      const result = await service.fetchData();
+      expect(result).toEqual([1, 2, 3]);
+    });
+
+    test('decorated method that throws should propagate error', async () => {
+      class TestService {
+        @Span('failing-span')
+        async fetchData(): Promise<number[]> {
+          throw new Error('fetch failed');
+        }
+      }
+
+      const service = new TestService();
+      await expect(service.fetchData()).rejects.toThrow('fetch failed');
+    });
+
     test('Span alias should equal span', () => {
       expect(Span).toBe(span);
     });
   });
 
-  describe('Trace alias', () => {
-    const { Trace } = require('../src/middleware');
-
+  describe('decorator aliases', () => {
     test('Trace alias should equal trace', () => {
       expect(Trace).toBe(trace);
+    });
+
+    test('Traced alias should equal trace', () => {
+      expect(Traced).toBe(trace);
+    });
+
+    test('Spanned alias should equal span', () => {
+      expect(Spanned).toBe(span);
     });
   });
 

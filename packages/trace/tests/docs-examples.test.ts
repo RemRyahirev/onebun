@@ -11,7 +11,13 @@ import {
   expect,
 } from 'bun:test';
 
-import { Span, Trace } from '../src';
+import {
+  OtlpFetchSpanExporter,
+  Span,
+  Spanned,
+  Trace,
+  Traced,
+} from '../src';
 
 describe('Trace README Examples', () => {
   describe('Decorators (README)', () => {
@@ -227,6 +233,55 @@ describe('Trace Context Propagation (docs/api/trace.md)', () => {
       expect(traceHeaders['x-trace-id']).toBe('abc123def456789');
       expect(traceHeaders['x-span-id']).toBe('span123');
     });
+  });
+});
+
+describe('Decorator Aliases (docs/api/trace.md)', () => {
+  it('should export Traced alias', () => {
+    expect(Traced).toBeDefined();
+    expect(typeof Traced).toBe('function');
+    expect(Traced).toBe(Trace);
+  });
+
+  it('should export Spanned alias', () => {
+    expect(Spanned).toBeDefined();
+    expect(typeof Spanned).toBe('function');
+    expect(Spanned).toBe(Span);
+  });
+
+  it('should use @Traced decorator for async service methods', () => {
+    // From docs: @Traced() decorator
+    class WorkspaceService {
+      @Traced()
+      async findAll(): Promise<unknown[]> {
+        return [];
+      }
+
+      @Traced('workspace.create')
+      async create(dto: unknown): Promise<unknown> {
+        return dto;
+      }
+    }
+
+    const service = new WorkspaceService();
+    expect(typeof service.findAll).toBe('function');
+    expect(typeof service.create).toBe('function');
+  });
+});
+
+/* eslint-disable @typescript-eslint/naming-convention */
+describe('OTLP Exporter (docs/api/trace.md)', () => {
+  it('should create OtlpFetchSpanExporter', () => {
+    // From docs: Custom Exporter example
+    const exporter = new OtlpFetchSpanExporter({
+      endpoint: 'http://localhost:4318',
+      headers: { 'X-Custom': 'value' },
+      timeout: 5000,
+    });
+
+    expect(exporter).toBeDefined();
+    expect(typeof exporter.export).toBe('function');
+    expect(typeof exporter.shutdown).toBe('function');
   });
 });
 

@@ -46,6 +46,11 @@ export interface LogFormatter {
  */
 export interface LogTransport {
   log(formattedEntry: string, entry: LogEntry): Effect.Effect<void>;
+
+  /**
+   * Optional shutdown method for transports that need cleanup (e.g. flush pending batches)
+   */
+  shutdown?(): Promise<void>;
 }
 
 /**
@@ -83,4 +88,33 @@ export interface LoggerOptions {
    * Useful for adding service name, version, environment, etc.
    */
   defaultContext?: Record<string, unknown>;
+
+  /**
+   * OTLP endpoint for log export (e.g. 'http://localhost:4318').
+   * When set, logs are sent to the OTLP collector in addition to console output.
+   */
+  otlpEndpoint?: string;
+
+  /**
+   * Custom HTTP headers for OTLP log export requests.
+   */
+  otlpHeaders?: Record<string, string>;
+
+  /**
+   * Batch size for OTLP log export.
+   * @defaultValue 100
+   */
+  otlpBatchSize?: number;
+
+  /**
+   * Batch timeout in milliseconds for OTLP log export.
+   * @defaultValue 5000
+   */
+  otlpBatchTimeout?: number;
+
+  /**
+   * Resource attributes for OTLP (e.g. service.name, service.version).
+   * Automatically populated from tracing config when available.
+   */
+  otlpResourceAttributes?: Record<string, string>;
 }
