@@ -164,5 +164,8 @@ export default defineConfig({
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:title', content: 'OneBun Framework' }],
     ['meta', { property: 'og:description', content: 'A bun.js framework inspired by nest.js with effect.ts' }],
+    // Plausible analytics
+    ['script', { async: '', src: 'https://plausible.io/js/pa-MzObSIBpey3LVouMVQma4.js' }],
+    ['script', {}, 'window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init()'],
   ],
 });
