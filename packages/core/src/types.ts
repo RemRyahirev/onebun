@@ -386,6 +386,47 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
     traceDatabaseQueries?: boolean;
 
     /**
+     * Auto-trace all async methods on services and controllers.
+     * When enabled, all async methods are wrapped in spans without
+     * requiring @Traced() on each method.
+     *
+     * Priority: method-level decorators > class-level > this setting.
+     * Use @NoTrace() to opt out, @TraceAll() on a class to opt in
+     * when traceAll is false.
+     *
+     * @defaultValue false
+     */
+    traceAll?: boolean;
+
+    /**
+     * Filter options for traceAll. Only effective when traceAll is true.
+     */
+    traceFilter?: {
+      /**
+       * Only trace async methods. Sync methods are skipped.
+       * @defaultValue true
+       */
+      asyncOnly?: boolean;
+
+      /**
+       * Additional method names to exclude from auto-tracing
+       * (on top of built-in exclusions like lifecycle hooks and base class methods).
+       */
+      excludeMethods?: string[];
+
+      /**
+       * Class name glob patterns to include (e.g. ['*Service', '*Repository']).
+       * When set, only matching classes are auto-traced.
+       */
+      includeClasses?: string[];
+
+      /**
+       * Class name glob patterns to exclude (e.g. ['HealthController']).
+       */
+      excludeClasses?: string[];
+    };
+
+    /**
      * Custom attributes to add to all spans
      */
     defaultAttributes?: Record<string, string | number | boolean>;

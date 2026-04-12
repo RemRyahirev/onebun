@@ -12,11 +12,18 @@ import {
 } from 'bun:test';
 
 import {
+  NoTrace,
   OtlpFetchSpanExporter,
+  shouldAutoTrace,
   Span,
+  SpanAttribute,
+  SPAN_ATTRIBUTES,
   Spanned,
   Trace,
+  TraceAll,
   Traced,
+  TRACE_ALL,
+  NO_TRACE,
 } from '../src';
 
 describe('Trace README Examples', () => {
@@ -282,6 +289,77 @@ describe('OTLP Exporter (docs/api/trace.md)', () => {
     expect(exporter).toBeDefined();
     expect(typeof exporter.export).toBe('function');
     expect(typeof exporter.shutdown).toBe('function');
+  });
+});
+
+ 
+describe('Auto-Tracing (docs/api/trace.md)', () => {
+  it('should export TraceAll decorator', () => {
+    expect(TraceAll).toBeDefined();
+    expect(typeof TraceAll).toBe('function');
+  });
+
+  it('should export NoTrace decorator', () => {
+    expect(NoTrace).toBeDefined();
+    expect(typeof NoTrace).toBe('function');
+  });
+
+  it('should export shouldAutoTrace', () => {
+    expect(shouldAutoTrace).toBeDefined();
+    expect(typeof shouldAutoTrace).toBe('function');
+  });
+
+  it('should set TRACE_ALL symbol via @TraceAll()', () => {
+    @TraceAll()
+    class MyService {}
+
+    expect((MyService as unknown as Record<symbol, boolean>)[TRACE_ALL]).toBe(true);
+  });
+
+  it('should set NO_TRACE symbol via @NoTrace() on class', () => {
+    @NoTrace()
+    class MyService {}
+
+    expect((MyService as unknown as Record<symbol, boolean>)[NO_TRACE]).toBe(true);
+  });
+
+  it('should respect priority: traceAll + @NoTrace class', () => {
+    @NoTrace()
+    class InternalService {}
+
+    // @NoTrace overrides global traceAll
+    expect(shouldAutoTrace(InternalService, 'InternalService', true)).toBe(false);
+  });
+
+  it('should respect priority: @TraceAll class when traceAll is false', () => {
+    @TraceAll()
+    class ImportantService {}
+
+    expect(shouldAutoTrace(ImportantService, 'ImportantService', false)).toBe(true);
+  });
+});
+/* eslint-enable @typescript-eslint/naming-convention */
+
+describe('SpanAttribute (docs/api/trace.md)', () => {
+  it('should export SpanAttribute decorator', () => {
+    expect(SpanAttribute).toBeDefined();
+    expect(typeof SpanAttribute).toBe('function');
+  });
+
+  it('should store metadata for @SpanAttribute parameters', () => {
+    class UserService {
+      @Traced()
+       
+      async findById(@SpanAttribute('user.id') id: string) {
+        return { id };
+      }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const meta = (UserService.prototype as any)[SPAN_ATTRIBUTES];
+    expect(meta).toBeDefined();
+    expect(meta.findById).toBeDefined();
+    expect(meta.findById[0].attrName).toBe('user.id');
   });
 });
 

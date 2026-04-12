@@ -79,27 +79,31 @@ interface TracingOptions {
 Create trace spans for methods.
 
 ```typescript
-import { Service, BaseService, Span } from '@onebun/core';
+import { Service, BaseService, Span, SpanAttribute } from '@onebun/core';
 
 @Service()
 export class UserService extends BaseService {
   @Span('find-user-by-id')
-  async findById(id: string): Promise<User | null> {
-    // This method execution is traced
+  async findById(
+    @SpanAttribute('user.id') id: string,
+  ): Promise<User | null> {
+    // This method execution is traced, id is auto-recorded as span attribute
     return this.repository.findById(id);
   }
 
   @Span()  // Uses method name as span name
   async processUser(user: User): Promise<void> {
-    // Span name: "processUser"
     await this.validate(user);
     await this.save(user);
   }
 
   @Span('user-search')
-  async search(query: string): Promise<User[]> {
-    // Nested spans are automatically linked
+  async search(
+    @SpanAttribute('search.query') query: string,
+  ): Promise<User[]> {
     const normalized = await this.normalizeQuery(query);
+    // Add dynamic attributes via this.span
+    this.span?.setAttribute('search.resultCount', normalized.length);
     return this.repository.search(normalized);
   }
 
@@ -109,6 +113,58 @@ export class UserService extends BaseService {
   }
 }
 ```
+
+## @SpanAttribute() Decorator
+
+Automatically records method arguments as span attributes. Works with `@Traced()`, `@Span()`, and auto-traced methods.
+
+```typescript
+@Traced('order.create')
+async createOrder(
+  @SpanAttribute('order.customerId') customerId: string,
+  @SpanAttribute('order.total') total: number,
+  @SpanAttribute('order.items') items: OrderItem[],  // objects → JSON.stringify
+): Promise<Order> { ... }
+```
+
+Values are recorded as:
+- `string`, `number`, `boolean` → recorded as-is
+- Objects/arrays → `JSON.stringify`
+- `undefined`/`null` → skipped
+
+## this.span
+
+`BaseService` and `BaseController` provide a `this.span` getter for imperative access to the active OpenTelemetry span. The API is fully synchronous.
+
+```typescript
+@Service()
+export class OrderService extends BaseService {
+  @Traced()
+  async processOrder(orderId: string): Promise<Order> {
+    const order = await this.repository.findById(orderId);
+
+    // Set attributes dynamically
+    this.span?.setAttribute('order.status', order.status);
+    this.span?.setAttribute('order.total', order.total);
+
+    // Add events
+    this.span?.addEvent('validation.started');
+    await this.validate(order);
+    this.span?.addEvent('validation.completed');
+
+    // Record exceptions without throwing
+    if (order.hasWarnings) {
+      this.span?.addEvent('order.warnings', {
+        count: order.warnings.length,
+      });
+    }
+
+    return order;
+  }
+}
+```
+
+Returns `undefined` when no span is active (outside `@Traced` context).
 
 ## Trace Context
 
@@ -317,6 +373,80 @@ const exporter = new OtlpFetchSpanExporter({
   timeout: 5000,
 });
 ```
+
+## Auto-Tracing
+
+Automatically trace all async methods on services and controllers without adding `@Traced()` to each method.
+
+### Global Auto-Trace
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  tracing: {
+    enabled: true,
+    serviceName: 'my-service',
+    traceAll: true,  // ← all async methods auto-traced
+    exportOptions: { endpoint: 'http://localhost:4318' },
+  },
+});
+```
+
+### Filtering
+
+```typescript
+tracing: {
+  traceAll: true,
+  traceFilter: {
+    asyncOnly: true,             // default: only async methods
+    excludeMethods: ['helper'],  // skip specific methods
+    includeClasses: ['*Service', '*Repository'],  // only these
+    excludeClasses: ['HealthController'],          // skip these
+  },
+}
+```
+
+### Class-Level Control
+
+```typescript
+import { TraceAll, NoTrace, Traced } from '@onebun/core';
+
+// Opt-in when traceAll is false
+@Service()
+@TraceAll()
+class ImportantService extends BaseService {
+  async findAll() { ... }  // auto-traced
+}
+
+// Opt-out when traceAll is true
+@Service()
+@NoTrace()
+class InternalService extends BaseService {
+  async helper() { ... }   // NOT traced
+
+  @Traced()
+  async critical() { ... } // traced (method override)
+}
+```
+
+### Priority
+
+Method-level decorators always win over class-level, which win over global config:
+
+| Global | Class | Method | Result |
+|--------|-------|--------|--------|
+| `traceAll: true` | — | — | auto-traced |
+| `traceAll: true` | `@NoTrace` | — | NOT traced |
+| `traceAll: true` | `@NoTrace` | `@Traced` | traced |
+| `traceAll: false` | `@TraceAll` | — | auto-traced |
+| `traceAll: false` | `@TraceAll` | `@NoTrace` | NOT traced |
+| any | — | `@Traced` | traced |
+
+### Excluded Methods
+
+These are never auto-traced (framework internals):
+- Lifecycle hooks: `onModuleInit`, `onModuleDestroy`, etc.
+- Base class methods: `success`, `error`, `json`, `text`, `sse`, etc.
+- Constructor
 
 ## Sampling
 

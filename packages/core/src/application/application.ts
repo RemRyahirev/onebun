@@ -521,7 +521,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Create the root module AFTER config is initialized and QueueService proxy is registered,
       // so services can safely use this.config.get() in their constructors
       // and inject QueueService in any module depth.
-      this.rootModule = OneBunModule.create(this.moduleClass, this.loggerLayer, this.config);
+      this.rootModule = OneBunModule.create(
+        this.moduleClass, this.loggerLayer, this.config,
+        this.options.tracing?.traceAll
+          ? { traceAll: true, traceFilter: this.options.tracing.traceFilter }
+          : undefined,
+      );
 
       // Register test provider overrides (must happen before setup() so controllers receive mocks)
       if (this.options._testProviders) {

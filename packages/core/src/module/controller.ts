@@ -1,9 +1,12 @@
+import { trace } from '@opentelemetry/api';
+
 import type { IConfig, OneBunAppConfig } from './config.interface';
 import type {
   OneBunRequest,
   SseEvent,
   SseOptions,
 } from '../types';
+import type { Span } from '@opentelemetry/api';
 import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -132,6 +135,14 @@ export class Controller {
     this._initialized = true;
 
     this.logger.debug(`Controller ${className} initialized`);
+  }
+
+  /**
+   * Get the currently active OpenTelemetry span.
+   * Returns undefined when no span is active.
+   */
+  protected get span(): Span | undefined {
+    return trace.getActiveSpan();
   }
 
   /**

@@ -56,13 +56,14 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.2.15",
+      "version": "0.2.17",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
         "@onebun/metrics": "workspace:^",
         "@onebun/requests": "workspace:^",
         "@onebun/trace": "workspace:^",
+        "@opentelemetry/api": "^1.9.1",
         "arktype": "^2.0.0",
         "effect": "^3.13.10",
       },
@@ -128,7 +129,7 @@
     },
     "packages/logger": {
       "name": "@onebun/logger",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -178,7 +179,7 @@
     },
     "packages/trace": {
       "name": "@onebun/trace",
-      "version": "0.2.1",
+      "version": "0.2.3",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "@opentelemetry/api": "^1.8.0",
@@ -394,7 +395,7 @@
 
     "@onebun/trace": ["@onebun/trace@workspace:packages/trace"],
 
-    "@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
+    "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 
     "@opentelemetry/core": ["@opentelemetry/core@2.6.1", "", { "dependencies": { "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.0.0 <1.10.0" } }, "sha512-8xHSGWpJP9wBxgBpnqGL0R3PbdWQndL1Qp50qrg71+B28zK5OQmUgcDKLJgzyAAV38t4tOyLMGDD60LneR5W8g=="],
 
@@ -1565,6 +1566,8 @@
     "lazystream/readable-stream": ["readable-stream@2.3.8", "", { "dependencies": { "core-util-is": "~1.0.0", "inherits": "~2.0.3", "isarray": "~1.0.0", "process-nextick-args": "~2.0.0", "safe-buffer": "~5.1.1", "string_decoder": "~1.1.1", "util-deprecate": "~1.0.1" } }, "sha512-8p0AUk4XODgIewSi0l8Epjs+EVnWiK7NoDIEGU0HhE7+ZyY8D1IMY7odu5lRrFXGg71L15KG8QrPmum45RTtdA=="],
 
     "mdast-util-frontmatter/escape-string-regexp": ["escape-string-regexp@5.0.0", "", {}, "sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw=="],
+
+    "prom-client/@opentelemetry/api": ["@opentelemetry/api@1.9.0", "", {}, "sha512-3giAOQvZiH5F9bMlMiv8+GSPMeqg0dbaeo58/0SlA9sxSqZhnUtxzX9/2FzyhS9sWQf5S0GJE0AKBrFqjpeYcg=="],
 
     "readdir-glob/minimatch": ["minimatch@5.1.6", "", { "dependencies": { "brace-expansion": "^2.0.1" } }, "sha512-lKwV/1brpG6mBUFHtb7NUmtABCb2WZZmm2wNiOA5hAb8VdCS4B3dtMWyvcoViccwAW/COERjXLt0zP1zXUN26g=="],
 

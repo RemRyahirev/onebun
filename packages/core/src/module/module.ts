@@ -14,6 +14,11 @@ import {
   makeLogger,
   type SyncLogger,
 } from '@onebun/logger';
+import {
+  applyAutoTrace,
+  shouldAutoTrace,
+  type TraceFilterOptions,
+} from '@onebun/trace';
 
 import {
   autoDetectDependencies,
@@ -47,6 +52,7 @@ import {
   getServiceMetadata,
   getServiceTag,
 } from './service';
+
 
 /**
  * Global services registry
@@ -127,11 +133,17 @@ export class OneBunModule implements ModuleInstance {
    */
   private resolvedAncestorMiddleware: Function[] = [];
 
+  /**
+   * Tracing options for auto-trace (traceAll + filters)
+   */
+  private readonly tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions };
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: IConfig<OneBunAppConfig>,
     ancestorMiddleware?: Function[],
+    tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
   ) {
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
@@ -144,6 +156,7 @@ export class OneBunModule implements ModuleInstance {
     ) as Logger;
     this.logger = createSyncLogger(effectLogger);
     this.config = config ?? new NotInitializedConfig();
+    this.tracingOptions = tracingOptions;
     this.ancestorMiddlewareClasses = ancestorMiddleware ?? [];
 
     // Read module-level middleware from OnModuleConfigure interface
@@ -230,7 +243,10 @@ export class OneBunModule implements ModuleInstance {
 
         // Pass the logger layer, config, and accumulated middleware class refs to child modules
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
-        const childModule = new OneBunModule(importModule, this.loggerLayer, this.config, accumulatedMiddleware);
+        const childModule = new OneBunModule(
+          importModule, this.loggerLayer, this.config,
+          accumulatedMiddleware, this.tracingOptions,
+        );
         this.childModules.push(childModule);
 
         // Merge layers
@@ -424,6 +440,14 @@ export class OneBunModule implements ModuleInstance {
             name: provider.name,
             instance: serviceInstance,
           });
+        }
+
+        // Apply auto-tracing if enabled
+        if (
+          this.tracingOptions &&
+          shouldAutoTrace(provider, provider.name, !!this.tracingOptions.traceAll, this.tracingOptions.traceFilter)
+        ) {
+          applyAutoTrace(serviceInstance, provider.name, this.tracingOptions.traceFilter);
         }
 
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
@@ -631,6 +655,17 @@ export class OneBunModule implements ModuleInstance {
         }
       } else if (typeof controller.initializeController === 'function') {
         controller.initializeController(this.logger, this.config);
+      }
+
+      // Apply auto-tracing if enabled
+      if (
+        this.tracingOptions &&
+        shouldAutoTrace(
+          controllerClass, controllerClass.name,
+          !!this.tracingOptions.traceAll, this.tracingOptions.traceFilter,
+        )
+      ) {
+        applyAutoTrace(controller, controllerClass.name, this.tracingOptions.traceFilter);
       }
 
       this.controllerInstances.set(controllerClass, controller);
@@ -1145,9 +1180,10 @@ export class OneBunModule implements ModuleInstance {
     moduleClass: Function,
     loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: IConfig<OneBunAppConfig>,
+    tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
   ): ModuleInstance {
     // Using console.log here because we don't have access to the logger instance yet
     // The instance will create its own logger in the constructor
-    return new OneBunModule(moduleClass, loggerLayer, config);
+    return new OneBunModule(moduleClass, loggerLayer, config, undefined, tracingOptions);
   }
 }

@@ -15,6 +15,9 @@ export type { Context } from '@opentelemetry/api';
 export {
   createTraceMiddleware,
   Span,
+  SPAN_ATTRIBUTES,
+  SpanAttribute,
+  type SpanAttributeEntry,
   span,
   Spanned,
   Trace,
@@ -22,6 +25,18 @@ export {
   TraceMiddleware,
   trace,
 } from './middleware.js';
+
+// Auto-trace
+export {
+  ALREADY_TRACED,
+  applyAutoTrace,
+  NO_TRACE,
+  NoTrace,
+  shouldAutoTrace,
+  TRACE_ALL,
+  TraceAll,
+  type TraceFilterOptions,
+} from './auto-trace.js';
 
 // OTLP exporter
 export { OtlpFetchSpanExporter, type OtlpExporterOptions } from './otlp-exporter.js';

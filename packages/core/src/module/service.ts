@@ -1,3 +1,4 @@
+import { trace } from '@opentelemetry/api';
 import {
   Context,
   Effect,
@@ -5,6 +6,7 @@ import {
 } from 'effect';
 
 import type { IConfig, OneBunAppConfig } from './config.interface';
+import type { Span } from '@opentelemetry/api';
 
 import type { SyncLogger } from '@onebun/logger';
 
@@ -22,7 +24,7 @@ const META_SERVICES = new Map<
  * Services extending BaseService will have logger and config available
  * immediately after super() in the constructor (via ambient init context),
  * as well as through the initializeService fallback method.
- * 
+ *
  * @param tag - Optional Effect Context tag for the service
  */
 export function Service<T>(tag?: Context.Tag<T, T>) {
@@ -168,6 +170,21 @@ export class BaseService {
    */
   get isInitialized(): boolean {
     return this._initialized;
+  }
+
+  /**
+   * Get the currently active OpenTelemetry span.
+   * Returns undefined when no span is active (e.g. outside of @Traced context).
+   *
+   * The returned Span has a fully synchronous API:
+   * - `span.setAttribute(key, value)`
+   * - `span.setAttributes({ key: value })`
+   * - `span.addEvent(name, attributes?)`
+   * - `span.recordException(error)`
+   * - `span.setStatus({ code, message })`
+   */
+  protected get span(): Span | undefined {
+    return trace.getActiveSpan();
   }
 
   /**

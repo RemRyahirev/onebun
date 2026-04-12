@@ -5,7 +5,85 @@ import type { HttpTraceData, TraceHeaders } from './types.js';
 
 import { HttpStatusCode } from '@onebun/requests';
 
+import { ALREADY_TRACED } from './auto-trace.js';
 import { traceService } from './trace.service.js';
+
+/**
+ * Symbol for storing @SpanAttribute metadata on the prototype
+ */
+export const SPAN_ATTRIBUTES = Symbol.for('onebun:spanAttributes');
+
+/**
+ * Metadata entry for a @SpanAttribute parameter
+ */
+export interface SpanAttributeEntry {
+  paramIndex: number;
+  attrName: string;
+}
+
+/**
+ * Read @SpanAttribute metadata and set span attributes from method arguments
+ */
+function applySpanAttributes(
+  target: unknown,
+  methodName: string | symbol,
+  args: unknown[],
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  activeSpan: any,
+): void {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (target as any)?.[SPAN_ATTRIBUTES]?.[String(methodName)] as
+    | SpanAttributeEntry[]
+    | undefined;
+  if (!meta) {
+    return;
+  }
+
+  for (const { paramIndex, attrName } of meta) {
+    const value = args[paramIndex];
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      activeSpan.setAttribute(attrName, value);
+    } else {
+      activeSpan.setAttribute(attrName, JSON.stringify(value));
+    }
+  }
+}
+
+/**
+ * @SpanAttribute() — parameter decorator.
+ * Automatically records the method argument as a span attribute when used
+ * with @Traced() or @Spanned().
+ *
+ * @param name - The span attribute name (e.g. 'user.id', 'db.operation')
+ *
+ * @example
+ * ```typescript
+ * \@Traced()
+ * async findById(
+ *   \@SpanAttribute('user.id') id: string,
+ * ): Promise<User | null> { ... }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function SpanAttribute(name: string): ParameterDecorator {
+  return (target: object, propertyKey: string | symbol | undefined, parameterIndex: number) => {
+    if (!propertyKey) {
+      return;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const existing = (target as any)[SPAN_ATTRIBUTES] ?? {};
+    const key = String(propertyKey);
+    existing[key] = existing[key] ?? [];
+    existing[key].push({ paramIndex: parameterIndex, attrName: name });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (target as any)[SPAN_ATTRIBUTES] = existing;
+  };
+}
 
 /**
  * HTTP trace middleware for OneBun applications
@@ -208,11 +286,14 @@ export function trace(operationName?: string): MethodDecorator {
         ? target.constructor
         : { name: 'Unknown' };
     const spanName = operationName || `${targetConstructor.name}.${String(propertyKey)}`;
+    const decoratorTarget = target;
 
-    descriptor.value = async function (...args: unknown[]) {
+    const wrapped = async function (this: unknown, ...args: unknown[]) {
       const tracer = otelTrace.getTracer('@onebun/trace');
 
       return await tracer.startActiveSpan(spanName, async (activeSpan) => {
+        applySpanAttributes(decoratorTarget, propertyKey, args, activeSpan);
+
         try {
           const result = await originalMethod.apply(this, args);
           activeSpan.setStatus({ code: OtelSpanStatusCode.OK });
@@ -228,6 +309,10 @@ export function trace(operationName?: string): MethodDecorator {
         }
       });
     };
+
+    // Mark as traced to prevent auto-trace from double-wrapping
+    (wrapped as unknown as Record<symbol, boolean>)[ALREADY_TRACED] = true;
+    descriptor.value = wrapped;
 
     return descriptor;
   };
@@ -248,12 +333,15 @@ export function span(name?: string): MethodDecorator {
       target && typeof target === 'object' && target.constructor
         ? target.constructor
         : { name: 'Unknown' };
-    const spanName = name || `${targetConstructor.name}.${String(propertyKey)}`;
+    const resolvedName = name || `${targetConstructor.name}.${String(propertyKey)}`;
+    const decoratorTarget = target;
 
-    descriptor.value = async function (...args: unknown[]) {
+    const wrapped = async function (this: unknown, ...args: unknown[]) {
       const tracer = otelTrace.getTracer('@onebun/trace');
 
-      return await tracer.startActiveSpan(spanName, async (activeSpan) => {
+      return await tracer.startActiveSpan(resolvedName, async (activeSpan) => {
+        applySpanAttributes(decoratorTarget, propertyKey, args, activeSpan);
+
         try {
           const result = await originalMethod.apply(this, args);
 
@@ -267,6 +355,10 @@ export function span(name?: string): MethodDecorator {
         }
       });
     };
+
+    // Mark as traced to prevent auto-trace from double-wrapping
+    (wrapped as unknown as Record<symbol, boolean>)[ALREADY_TRACED] = true;
+    descriptor.value = wrapped;
 
     return descriptor;
   };

@@ -25,6 +25,8 @@ import {
   Span,
   Traced,
   Spanned,
+  SpanAttribute,
+  SPAN_ATTRIBUTES,
 } from '../src/middleware';
 
 describe('TraceMiddleware', () => {
@@ -494,5 +496,80 @@ describe('TraceMiddleware', () => {
       const size = MiddlewareClass.getResponseSize(mockResponse);
       expect(size).toBe(Buffer.byteLength('[1,2,3]'));
     });
+  });
+});
+
+describe('SpanAttribute', () => {
+  test('should be a function', () => {
+    expect(typeof SpanAttribute).toBe('function');
+  });
+
+  test('should return a parameter decorator', () => {
+    const decorator = SpanAttribute('user.id');
+    expect(typeof decorator).toBe('function');
+  });
+
+  test('should store metadata on the prototype', () => {
+    class TestService {
+      async findById(
+        @SpanAttribute('user.id') id: string,
+        @SpanAttribute('format') fmt: string,
+      ) {
+        return { id, fmt };
+      }
+    }
+
+    const meta = (TestService.prototype as any)[SPAN_ATTRIBUTES];
+    expect(meta).toBeDefined();
+    expect(meta.findById).toBeDefined();
+    expect(meta.findById).toHaveLength(2);
+
+    // Parameter decorators fire in reverse order
+    const sorted = [...meta.findById].sort(
+      (a: any, b: any) => a.paramIndex - b.paramIndex,
+    );
+    expect(sorted[0]).toEqual({ paramIndex: 0, attrName: 'user.id' });
+    expect(sorted[1]).toEqual({ paramIndex: 1, attrName: 'format' });
+  });
+
+  test('should not interfere with undecorated methods', () => {
+    class TestService {
+      async findById(@SpanAttribute('user.id') id: string) {
+        return id;
+      }
+      async findAll() {
+        return [];
+      }
+    }
+
+    const meta = (TestService.prototype as any)[SPAN_ATTRIBUTES];
+    expect(meta.findById).toBeDefined();
+    expect(meta.findAll).toBeUndefined();
+  });
+
+  test('should work with @Traced decorator', () => {
+    class TestService {
+      @Traced('test.find')
+      async findById(@SpanAttribute('user.id') id: string) {
+        return id;
+      }
+    }
+
+    // Method should be wrapped (async function)
+    expect(typeof TestService.prototype.findById).toBe('function');
+
+    // Metadata should be stored
+    const meta = (TestService.prototype as any)[SPAN_ATTRIBUTES];
+    expect(meta.findById).toBeDefined();
+  });
+
+  test('should handle missing propertyKey gracefully', () => {
+    // Call decorator with undefined propertyKey (constructor param)
+    const decorator = SpanAttribute('test');
+    expect(() => decorator({}, undefined as any, 0)).not.toThrow();
+
+    // No metadata should be stored
+    const meta = ({} as any)[SPAN_ATTRIBUTES];
+    expect(meta).toBeUndefined();
   });
 });
