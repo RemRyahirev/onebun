@@ -2,9 +2,9 @@
 
 OneBun is actively developed. This page outlines what is already shipped, what is coming next, and our longer-term vision.
 
-## Current Status (v0.2.x)
+## Current Status (v0.3.x)
 
-OneBun is at **v0.2.x** — a pre-1.0 release focused on API stabilization and filling production gaps. The core framework, DI system, and all listed packages are functional and tested. Most features needed for production HTTP services are already implemented.
+OneBun is at **v0.3.x** — a pre-1.0 release focused on API stabilization and production readiness. The core framework, DI system, and all listed packages are functional and tested. Most features needed for production HTTP services are already implemented.
 
 ---
 
