@@ -4,6 +4,16 @@ on:
   workflow_dispatch:
   schedule:
     - cron: '0 3 * * 0'  # Weekly, Sunday 3am UTC
+  push:
+    branches: [master]
+    paths:
+      - 'packages/core/src/**'
+      - 'packages/requests/src/**'
+      - 'packages/logger/src/**'
+      - 'packages/trace/src/**'
+      - 'packages/metrics/src/**'
+      - 'packages/envs/src/**'
+      - 'benchmarks/**'
 
 jobs:
   benchmark:
