@@ -1,25 +1,97 @@
 # OneBun
 
+**NestJS-style DI & modules for Bun.js — with ArkType validation, Prometheus metrics, and OpenTelemetry tracing built in.**
+
 [![CI](https://github.com/RemRyahirev/onebun/actions/workflows/publish.yml/badge.svg)](https://github.com/RemRyahirev/onebun/actions/workflows/publish.yml)
 [![codecov](https://codecov.io/gh/RemRyahirev/onebun/branch/master/graph/badge.svg)](https://codecov.io/gh/RemRyahirev/onebun)
-[![License: LGPL-3.0](https://img.shields.io/badge/License-LGPL--3.0-blue.svg)](LICENSE)
+<!-- Replace bde6a4c4930c19a963199fa0bea2b265 with your actual Gist ID to enable the test count badge -->
+[![Tests](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265/raw/onebun-test-badge.json)](https://github.com/RemRyahirev/onebun/actions/workflows/publish.yml)
+[![License: MPL-2.0](https://img.shields.io/badge/License-MPL--2.0-blue.svg)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Bun](https://img.shields.io/badge/Bun-1.2+-black?logo=bun&logoColor=white)](https://bun.sh/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 [![Documentation](https://img.shields.io/badge/docs-online-blue?logo=gitbook&logoColor=white)](https://onebun.dev/)
 
-A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows the principle of "exactly one default way to solve each problem" - trading flexibility for development speed and performance.
+## Why OneBun?
 
-## Features
+NestJS deserves a Bun-native alternative. OneBun gives you the module system and DI you know, without the Express/Fastify legacy — plus observability and validation that just work out of the box.
 
-- **Modular Architecture** - Organize code in modules with controllers and services
-- **Declarative Routes** - Use decorators (@Controller, @Get, @Post, etc.)
-- **Type-safe DI** - Effect.Context and Layer for dependency management
-- **Built-in Logging** - Extended logging based on Effect.Logger
-- **Unified HTTP Requests** - @onebun/requests with retries, auth, and tracing
-- **Metrics & Tracing** - Prometheus metrics and OpenTelemetry-compatible tracing
-- **Environment Management** - Typed configuration with validation
-- **High Performance** - Built on Bun.js for maximum speed
+| Feature | OneBun | NestJS + Fastify | Hono | Elysia |
+|---------|--------|-----------------|------|--------|
+| **Runtime** | Bun-native | Node.js | Multi-runtime | Bun-native |
+| **DI & Modules** | Built-in (Effect.ts) | Built-in | -- | -- |
+| **Validation** | ArkType (type = runtime = OpenAPI) | class-validator | Zod (optional) | t.Object |
+| **Observability** | Built-in (Prometheus + OTEL) | Community packages | -- | -- |
+| **Type Safety** | Full (strict, no `any`) | Partial (decorators) | Full | Full |
+
+## 30-Second Quickstart
+
+```bash
+bunx create-onebun my-app
+cd my-app
+bun run dev
+```
+
+Or add OneBun to an existing project:
+
+```bash
+bun add @onebun/core
+```
+
+```typescript
+import {
+  BaseController, Controller, Get, Module, OneBunApplication, Service, BaseService, Post, Body,
+} from '@onebun/core';
+import { type } from 'arktype';
+
+const CreateUser = type({ name: 'string', email: 'string.email' });
+
+@Service()
+class UserService extends BaseService {
+  getAll() { return [{ id: 1, name: 'Alice' }]; }
+}
+
+@Controller('/users')
+class UserController extends BaseController {
+  constructor(private users: UserService) { super(); }
+
+  @Get('/')
+  async list() { return this.success(this.users.getAll()); }
+
+  @Post('/')
+  async create(@Body(CreateUser) body: typeof CreateUser.infer) {
+    return this.success(body, 201);
+  }
+}
+
+@Module({ controllers: [UserController], providers: [UserService] })
+class AppModule {}
+
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  metrics: { enabled: true },   // Prometheus at /metrics
+  tracing: { enabled: true },   // OpenTelemetry spans
+});
+await app.start();
+```
+
+One schema (`CreateUser`) gives you the TypeScript type, runtime validation, and OpenAPI spec — no duplication.
+
+## Key Features
+
+- **NestJS-style architecture** — modules, controllers, services with full dependency injection via Effect.ts
+- **ArkType validation** — one schema = TypeScript type + runtime check + OpenAPI spec
+- **Built-in Prometheus metrics & OpenTelemetry tracing** — no community packages needed
+- **Redis / in-memory caching** with decorator-driven TTL
+- **Typed environment variables** with validation and defaults
+- **WebSocket support** — Socket.IO protocol, rooms, guards, typed clients
+- **Queue system** — `@Cron`, `@Interval`, `@Timeout`, `@Subscribe` decorators
+- **Drizzle ORM integration** — database access with migrations
+- **NATS / JetStream** — message bus for microservices
+- **OpenAPI / Swagger** — auto-generated from ArkType schemas and route decorators
+- **2500+ tests** with high coverage ([Codecov](https://codecov.io/gh/RemRyahirev/onebun))
+
+**[Benchmarks](https://onebun.dev/benchmarks)** | [Raw data](https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265)
 
 ## Packages
 
@@ -36,68 +108,14 @@ A Bun.js framework inspired by NestJS with Effect.ts integration. OneBun follows
 | [@onebun/requests](packages/requests) | [![npm](https://img.shields.io/npm/v/@onebun/requests?color=blue)](https://www.npmjs.com/package/@onebun/requests) | Unified HTTP client |
 | [@onebun/trace](packages/trace) | [![npm](https://img.shields.io/npm/v/@onebun/trace?color=blue)](https://www.npmjs.com/package/@onebun/trace) | OpenTelemetry tracing |
 
-## Installation
-
-```bash
-# Install Bun if not installed
-curl -fsSL https://bun.sh/install | bash
-
-# Add core package
-bun add @onebun/core
-```
-
-## Quick Start
-
-```typescript
-import { OneBunApplication, OneBunResponse, Controller, Get, Module } from '@onebun/core';
-
-@Controller('api')
-class AppController {
-  @Get('hello')
-  async hello(): Promise<OneBunResponse> {
-    return this.success({ message: 'Hello, OneBun!' });
-  }
-}
-
-@Module({
-  controllers: [AppController],
-})
-class AppModule {}
-
-const app = new OneBunApplication(AppModule);
-await app.start();
-```
-
 ## Documentation
 
-📚 **[Full Documentation](https://onebun.dev/)**
-
-- [Getting Started](https://onebun.dev/getting-started)
-- [Architecture](https://onebun.dev/architecture)
-- [API Reference](https://onebun.dev/api/core)
-- [Examples](https://onebun.dev/examples/basic-app)
-
-## Development
-
-```bash
-# Clone repository
-git clone https://github.com/RemRyahirev/onebun.git
-cd onebun
-
-# Install dependencies
-bun install
-
-# Run tests
-bun test
-
-# Run example
-bun run dev
-```
+Full documentation is available at **[onebun.dev](https://onebun.dev/)**.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+PRs are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-[LGPL-3.0](LICENSE) - You can use OneBun freely in commercial projects, but modifications to the framework itself must remain open source.
+[MPL-2.0](LICENSE) — use OneBun freely in commercial projects. Modifications to the framework's source files must remain open source; your application code stays yours.

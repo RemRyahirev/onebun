@@ -39,3 +39,6 @@ repofleet/
 *.key
 credentials.json
 secrets.json
+
+# Benchmark results
+benchmarks/results/

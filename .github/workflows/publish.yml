@@ -41,7 +41,38 @@ jobs:
         run: bunx eslint packages/
 
       - name: Test with coverage
-        run: bun test --coverage --coverage-reporter=lcov
+        run: bun test --reporter=default --reporter=junit --reporter-outfile=test-results.xml --coverage --coverage-reporter=lcov
+
+      - name: Extract test count for badge
+        if: github.ref == 'refs/heads/master'
+        run: |
+          # Parse test count from JUnit XML
+          TESTS=$(grep -oP 'tests="\K[0-9]+' test-results.xml | head -1)
+          FAILURES=$(grep -oP 'failures="\K[0-9]+' test-results.xml | head -1)
+
+          if [ "$FAILURES" = "0" ]; then
+            echo "BADGE_COLOR=brightgreen" >> "$GITHUB_ENV"
+          else
+            echo "BADGE_COLOR=red" >> "$GITHUB_ENV"
+          fi
+
+          echo "TEST_COUNT=${TESTS}" >> "$GITHUB_ENV"
+
+      # NOTE: To enable the test badge, you need to:
+      # 1. Create a GitHub Gist and copy its ID
+      # 2. Create a Personal Access Token (PAT) with gist scope
+      # 3. Add the PAT as a repository secret named GIST_TOKEN
+      # 4. Replace bde6a4c4930c19a963199fa0bea2b265 below with your actual Gist ID
+      - name: Update test badge
+        if: github.ref == 'refs/heads/master'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: bde6a4c4930c19a963199fa0bea2b265
+          filename: onebun-test-badge.json
+          label: tests
+          message: ${{ env.TEST_COUNT }} passed
+          color: ${{ env.BADGE_COLOR }}
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

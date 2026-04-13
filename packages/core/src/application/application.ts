@@ -28,7 +28,6 @@ import {
   createSuccessResponse,
   HttpStatusCode,
 } from '@onebun/requests';
-import { makeTraceService, TraceService } from '@onebun/trace';
 
 import {
   getControllerFilters,
@@ -38,7 +37,7 @@ import {
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
-import { defaultExceptionFilter, type ExceptionFilter } from '../exception-filters/exception-filters';
+import { createDefaultExceptionFilter, type ExceptionFilter } from '../exception-filters/exception-filters';
 import { HttpException } from '../exception-filters/http-exception';
 import { OneBunFile, validateFile } from '../file/onebun-file';
 import { executeHttpGuards, HttpExecutionContextImpl } from '../http-guards/http-guards';
@@ -134,7 +133,7 @@ function clearGlobalTraceContext(): void {
 /**
  * Normalize URL path by removing trailing slashes (except for root path).
  * This ensures consistent route matching and metrics collection.
- * 
+ *
  * @param path - The URL path to normalize
  * @returns Normalized path without trailing slash
  * @example
@@ -365,14 +364,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.logger.debug('createMetricsService not available, metrics will be disabled');
     }
 
-    // Initialize tracing if enabled
+    // Initialize tracing if enabled (lazy import to avoid loading OTEL at startup when not needed)
     if (this.options.tracing?.enabled !== false) {
       try {
         this.logger.debug('Attempting to initialize trace service');
         this.logger.debug('Tracing options:', this.options.tracing);
 
-        const traceLayer = makeTraceService(this.options.tracing || {});
-        this.traceService = Effect.runSync(Effect.provide(TraceService, traceLayer));
+        const trace = require('@onebun/trace') as typeof import('@onebun/trace');
+        const traceLayer = trace.makeTraceService(this.options.tracing || {});
+        this.traceService = Effect.runSync(Effect.provide(trace.TraceService, traceLayer));
 
         this.logger.debug('Trace service Effect run successfully');
 
@@ -401,7 +401,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Get configuration service with full type inference.
    * Uses module augmentation of OneBunAppConfig for type-safe access.
-   * 
+   *
    * @example
    * // With module augmentation:
    * declare module '@onebun/core' {
@@ -409,7 +409,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *     server: { port: number; host: string };
    *   }
    * }
-   * 
+   *
    * const config = app.getConfig();
    * const port = config.get('server.port'); // number
    */
@@ -424,7 +424,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Get configuration value by path (convenience method) with full type inference.
    * Uses module augmentation of OneBunAppConfig for type-safe access.
-   * 
+   *
    * @example
    * // With module augmentation:
    * declare module '@onebun/core' {
@@ -432,7 +432,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *     server: { port: number; host: string };
    *   }
    * }
-   * 
+   *
    * const port = app.getConfigValue('server.port'); // number
    * const host = app.getConfigValue('server.host'); // string
    */
@@ -502,6 +502,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * This method now handles all the Effect.js calls internally
    */
   async start(): Promise<void> {
+    // Default exception filter respects httpEnvelope option
+    const appDefaultExceptionFilter = createDefaultExceptionFilter({
+      httpEnvelope: this.options.httpEnvelope,
+    });
+
     try {
       // Initialize configuration if schema was provided
       if (!(this.config instanceof NotInitializedConfig)) {
@@ -550,7 +555,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
       // Initialize WebSocket handler and detect gateways
       this.wsHandler = new WsHandler(this.logger, this.options.websocket);
-      
+
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
       for (const controllerClass of controllers) {
         if (isWebSocketGateway(controllerClass)) {
@@ -973,7 +978,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (app.options.docs?.enabled !== false && app.openApiSpec) {
         if (app.swaggerHtml) {
           bunRoutes[docsPath] = {
-             
+
             GET: () => new Response(app.swaggerHtml!, {
               headers: {
                 // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -983,7 +988,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           };
         }
         bunRoutes[openApiPath] = {
-           
+
           GET: () => new Response(JSON.stringify(app.openApiSpec, null, 2), {
             headers: {
               // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -995,7 +1000,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
       if (app.metricsService) {
         bunRoutes[metricsPath] = {
-           
+
           async GET() {
             try {
               const metrics = await app.metricsService.getMetrics();
@@ -1041,17 +1046,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
 
       const hasWebSocketGateways = this.wsHandler?.hasGateways() ?? false;
-      
+
       // Prepare WebSocket handlers if gateways exist
       // When no gateways, use no-op handlers (required by Bun.serve)
       const wsHandlers = hasWebSocketGateways ? this.wsHandler!.createWebSocketHandlers() : {
-         
+
         open() { /* no-op */ },
-         
+
         message() { /* no-op */ },
-         
+
         close() { /* no-op */ },
-         
+
         drain() { /* no-op */ },
       };
 
@@ -1117,7 +1122,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           }
         }
       }
-      
+
       this.server = Bun.serve<WsClientData>({
         port: this.options.port,
         hostname: this.options.host,
@@ -1668,7 +1673,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           return await filters[filters.length - 1].catch(error, guardCtx);
         }
 
-        return await defaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
+        return await appDefaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
           req,
           route.handlerName ?? '',
           route.controller.constructor.name,
@@ -1802,7 +1807,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   private async initializeQueue(controllers: Function[]): Promise<void> {
     const queueOptions = this.options.queue;
-    
+
     // Check if any controller has queue-related decorators
     const hasQueueHandlers = controllers.some(controller => {
       const instance = this.ensureModule().getControllerInstance?.(controller);
@@ -2004,7 +2009,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Register signal handlers for graceful shutdown
    * Call this after start() to enable automatic shutdown on SIGTERM/SIGINT
-   * 
+   *
    * @example
    * ```typescript
    * const app = new OneBunApplication(AppModule, options);
@@ -2067,16 +2072,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Get a service instance by class from the module container.
    * Useful for accessing services outside of the request context.
-   * 
+   *
    * @param serviceClass - The service class to get
    * @returns The service instance
    * @throws Error if service is not found
-   * 
+   *
    * @example
    * ```typescript
    * const app = new OneBunApplication(AppModule, options);
    * await app.start();
-   * 
+   *
    * const userService = app.getService(UserService);
    * await userService.performBackgroundTask();
    * ```

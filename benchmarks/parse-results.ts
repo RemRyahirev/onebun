@@ -1,0 +1,187 @@
+#!/usr/bin/env bun
+/* eslint-disable no-console */
+
+/**
+ * Parses bombardier output files and startup results into structured JSON.
+ *
+ * Reads:
+ *   benchmarks/results/*.txt      — bombardier HTTP benchmark output
+ *   benchmarks/results/startup.json — startup timing results
+ *
+ * Writes:
+ *   benchmarks/results/benchmark-results.json
+ */
+
+import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { join, basename } from 'node:path';
+import { execFileSync } from 'node:child_process';
+
+const SCRIPT_DIR = import.meta.dir;
+const RESULTS_DIR = join(SCRIPT_DIR, 'results');
+
+interface HttpResult {
+  name: string;
+  reqPerSec: number;
+  avgLatency: string;
+  maxLatency: string;
+  p99Latency: string;
+  p95Latency: string;
+  throughput: string;
+}
+
+interface StartupResult {
+  name: string;
+  meanMs: number;
+  minMs: number;
+  maxMs: number;
+}
+
+interface BenchmarkResults {
+  date: string;
+  machine: {
+    cpu: string;
+    ram: string;
+    os: string;
+    bunVersion: string;
+    nodeVersion: string;
+  };
+  settings: string;
+  http: HttpResult[];
+  startup: StartupResult[];
+}
+
+// Display name mapping for benchmark files
+const DISPLAY_NAMES: Record<string, string> = {
+  'bun-serve': 'Bun.serve (baseline)',
+  'onebun': 'OneBun',
+  'hono': 'Hono',
+  'elysia': 'Elysia',
+  'nestjs-fastify-bun': 'NestJS + Fastify (Bun)',
+  'nestjs-fastify-node': 'NestJS + Fastify (Node)',
+};
+
+function parseBombardierOutput(content: string): Omit<HttpResult, 'name'> | null {
+  // Parse: Reqs/sec     57019.03    5299.24   65335.33
+  const reqsMatch = content.match(/Reqs\/sec\s+([\d.]+)/);
+  // Parse: Latency        0.88ms   217.55us    23.56ms
+  const latencyMatch = content.match(/^\s+Latency\s+([\d.]+(?:us|ms|s))\s+[\d.]+(?:us|ms|s)\s+([\d.]+(?:us|ms|s))/m);
+  // Parse: 95%     1.51ms
+  const p95Match = content.match(/95%\s+([\d.]+(?:us|ms|s))/);
+  // Parse: 99%     1.97ms
+  const p99Match = content.match(/99%\s+([\d.]+(?:us|ms|s))/);
+  // Parse: Throughput:    13.86MB/s
+  const throughputMatch = content.match(/Throughput:\s+([\d.]+\S+)/);
+
+  if (!reqsMatch || !latencyMatch) {
+    return null;
+  }
+
+  return {
+    reqPerSec: parseFloat(reqsMatch[1]),
+    avgLatency: latencyMatch[1],
+    maxLatency: latencyMatch[2],
+    p99Latency: p99Match ? p99Match[1] : 'N/A',
+    p95Latency: p95Match ? p95Match[1] : 'N/A',
+    throughput: throughputMatch ? throughputMatch[1] : 'N/A',
+  };
+}
+
+function getSystemInfo() {
+  const bunVersion = execFileSync('bun', ['--version'], { encoding: 'utf-8' }).trim();
+
+  let nodeVersion = 'N/A';
+  try {
+    nodeVersion = execFileSync('node', ['--version'], { encoding: 'utf-8' }).trim();
+  } catch {
+    try {
+      nodeVersion = execFileSync('fnm', ['exec', '--using=24', 'node', '--version'], { encoding: 'utf-8' }).trim();
+    } catch {
+      // Node.js may not be available
+    }
+  }
+
+  const cpu = execFileSync('uname', ['-m'], { encoding: 'utf-8' }).trim();
+  const osName = execFileSync('uname', ['-s'], { encoding: 'utf-8' }).trim();
+  const osRelease = execFileSync('uname', ['-r'], { encoding: 'utf-8' }).trim();
+
+  let ram = 'N/A';
+  try {
+    const memBytes = parseInt(execFileSync('grep', ['MemTotal', '/proc/meminfo'], { encoding: 'utf-8' }).match(/\d+/)?.[0] || '0', 10);
+    ram = `${Math.round(memBytes / 1024 / 1024)} GB`;
+  } catch {
+    // /proc/meminfo not available on all systems
+  }
+
+  return {
+    date: new Date().toISOString(),
+    machine: {
+      cpu,
+      ram,
+      os: `${osName} ${osRelease}`,
+      bunVersion,
+      nodeVersion,
+    },
+    settings: '50 connections, 10s duration',
+  };
+}
+
+function main() {
+  if (!existsSync(RESULTS_DIR)) {
+    console.error(`Results directory not found: ${RESULTS_DIR}`);
+    console.error('Run the benchmarks first (run-http.sh and/or startup.sh).');
+    process.exit(1);
+  }
+
+  // Parse HTTP benchmark results
+  const httpResults: HttpResult[] = [];
+  const txtFiles = readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.txt'));
+
+  for (const file of txtFiles) {
+    const content = readFileSync(join(RESULTS_DIR, file), 'utf-8');
+    const slug = basename(file, '.txt');
+    const parsed = parseBombardierOutput(content);
+
+    if (parsed) {
+      httpResults.push({
+        name: DISPLAY_NAMES[slug] || slug,
+        ...parsed,
+      });
+    } else {
+      console.warn(`Warning: Could not parse ${file}`);
+    }
+  }
+
+  // Sort by req/sec descending
+  httpResults.sort((a, b) => b.reqPerSec - a.reqPerSec);
+
+  // Parse startup results
+  let startupResults: StartupResult[] = [];
+  const startupPath = join(RESULTS_DIR, 'startup.json');
+
+  if (existsSync(startupPath)) {
+    try {
+      startupResults = JSON.parse(readFileSync(startupPath, 'utf-8'));
+    } catch (e) {
+      console.warn(`Warning: Could not parse startup.json: ${e}`);
+    }
+  } else {
+    console.warn('Warning: startup.json not found, startup results will be empty');
+  }
+
+  const sysInfo = getSystemInfo();
+  const results: BenchmarkResults = {
+    date: sysInfo.date,
+    machine: sysInfo.machine,
+    settings: sysInfo.settings,
+    http: httpResults,
+    startup: startupResults,
+  };
+
+  const outputPath = join(RESULTS_DIR, 'benchmark-results.json');
+  writeFileSync(outputPath, JSON.stringify(results, null, 2) + '\n');
+  console.log(`Benchmark results written to ${outputPath}`);
+  console.log(`  HTTP results: ${httpResults.length} frameworks`);
+  console.log(`  Startup results: ${startupResults.length} frameworks`);
+}
+
+main();

@@ -176,11 +176,6 @@ describe('decorators', () => {
     }
 
     test('should register dependencies automatically with decorator', () => {
-      const availableServices = new Map<string, any>([
-        ['MockService', MockService],
-        ['CounterService', CounterService],
-      ]);
-
       @injectable()
       class TestController {
         constructor(
@@ -189,7 +184,7 @@ describe('decorators', () => {
         ) {}
       }
 
-      registerControllerDependencies(TestController, availableServices);
+      registerControllerDependencies(TestController);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeDefined();
       expect(deps?.length).toBe(2);
@@ -198,21 +193,17 @@ describe('decorators', () => {
     });
 
     test('should handle constructor without parameters', () => {
-      const availableServices = new Map();
-
       @injectable()
       class TestController {
         constructor() {}
       }
 
-      registerControllerDependencies(TestController, availableServices);
+      registerControllerDependencies(TestController);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeUndefined();
     });
 
     test('should skip logger and config parameters', () => {
-      const availableServices = new Map([['MockService', MockService]]);
-
       @injectable()
       class TestController {
         constructor(
@@ -222,7 +213,7 @@ describe('decorators', () => {
         ) {}
       }
 
-      registerControllerDependencies(TestController, availableServices);
+      registerControllerDependencies(TestController);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeDefined();
       expect(deps?.length).toBe(1);
@@ -230,14 +221,12 @@ describe('decorators', () => {
     });
 
     test('should return undefined for class without decorator (no design:paramtypes)', () => {
-      const availableServices = new Map([['CounterService', CounterService]]);
-
       // Without decorator, TypeScript does not emit design:paramtypes
       class TestControllerWithoutDecorator {
         constructor(private counterService: CounterService) {}
       }
 
-      registerControllerDependencies(TestControllerWithoutDecorator, availableServices);
+      registerControllerDependencies(TestControllerWithoutDecorator);
       const deps = getConstructorParamTypes(TestControllerWithoutDecorator);
       // Without decorator, design:paramtypes is not available
       expect(deps).toBeUndefined();
@@ -882,8 +871,7 @@ describe('decorators', () => {
     test('should handle class without constructor in dependency detection', () => {
       class TestController {}
 
-      const availableServices = new Map();
-      registerControllerDependencies(TestController, availableServices);
+      registerControllerDependencies(TestController);
       const deps = getConstructorParamTypes(TestController);
       expect(deps).toBeUndefined();
     });
@@ -893,8 +881,7 @@ describe('decorators', () => {
       const malformedClass = function() {} as any;
       malformedClass.toString = () => 'class Test { invalidConstructor }';
 
-      const availableServices = new Map();
-      registerControllerDependencies(malformedClass, availableServices);
+      registerControllerDependencies(malformedClass);
       const deps = getConstructorParamTypes(malformedClass);
       expect(deps).toBeUndefined();
     });

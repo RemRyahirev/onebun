@@ -14,14 +14,9 @@ import {
   makeLogger,
   type SyncLogger,
 } from '@onebun/logger';
-import {
-  applyAutoTrace,
-  shouldAutoTrace,
-  type TraceFilterOptions,
-} from '@onebun/trace';
+import type { TraceFilterOptions } from '@onebun/trace';
 
 import {
-  autoDetectDependencies,
   getConstructorParamTypes,
   getModuleMetadata,
   isGlobalModule,
@@ -232,7 +227,7 @@ export class OneBunModule implements ModuleInstance {
       for (const importModule of metadata.imports) {
         // Check if this is a global module that was already processed
         const isGlobal = isGlobalModule(importModule);
-        
+
         if (isGlobal && processedGlobalModules.has(importModule)) {
           // Global module already processed, just use services from global registry
           this.logger.debug(
@@ -367,11 +362,8 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
-      // Use getConstructorParamTypes first (for @Inject and TypeScript metadata),
-      // then fallback to autoDetectDependencies (for constructor source analysis)
-      const detectedDeps =
-        getConstructorParamTypes(provider) ||
-        autoDetectDependencies(provider, availableServiceClasses);
+      // Use getConstructorParamTypes for @Inject and TypeScript design:paramtypes metadata
+      const detectedDeps = getConstructorParamTypes(provider);
       const dependencies: unknown[] = [];
       let allDependenciesResolved = true;
 
@@ -442,12 +434,12 @@ export class OneBunModule implements ModuleInstance {
           });
         }
 
-        // Apply auto-tracing if enabled
-        if (
-          this.tracingOptions &&
-          shouldAutoTrace(provider, provider.name, !!this.tracingOptions.traceAll, this.tracingOptions.traceFilter)
-        ) {
-          applyAutoTrace(serviceInstance, provider.name, this.tracingOptions.traceFilter);
+        // Apply auto-tracing if enabled (lazy require to avoid loading OTEL when tracing is off)
+        if (this.tracingOptions) {
+          const { shouldAutoTrace, applyAutoTrace } = require('@onebun/trace');
+          if (shouldAutoTrace(provider, provider.name, !!this.tracingOptions.traceAll, this.tracingOptions.traceFilter)) {
+            applyAutoTrace(serviceInstance, provider.name, this.tracingOptions.traceFilter);
+          }
         }
 
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
@@ -581,17 +573,9 @@ export class OneBunModule implements ModuleInstance {
    */
   createControllerInstances(): Effect.Effect<unknown, never, void> {
     return Effect.sync(() => {
-      // Build map of available services from this module's DI scope (own providers + imported exports + global)
-      const availableServices = new Map<string, Function>();
-      for (const [, instance] of this.serviceInstances) {
-        if (instance && typeof instance === 'object') {
-          availableServices.set(instance.constructor.name, instance.constructor);
-        }
-      }
-
       // Automatically analyze and register dependencies for all controllers of this module
       for (const controllerClass of this.controllers) {
-        registerControllerDependencies(controllerClass, availableServices);
+        registerControllerDependencies(controllerClass);
       }
 
       // Create controller instances with automatic dependency injection
@@ -658,14 +642,15 @@ export class OneBunModule implements ModuleInstance {
       }
 
       // Apply auto-tracing if enabled
-      if (
-        this.tracingOptions &&
-        shouldAutoTrace(
+      // Apply auto-tracing if enabled (lazy require to avoid loading OTEL when tracing is off)
+      if (this.tracingOptions) {
+        const { shouldAutoTrace, applyAutoTrace } = require('@onebun/trace');
+        if (shouldAutoTrace(
           controllerClass, controllerClass.name,
           !!this.tracingOptions.traceAll, this.tracingOptions.traceFilter,
-        )
-      ) {
-        applyAutoTrace(controller, controllerClass.name, this.tracingOptions.traceFilter);
+        )) {
+          applyAutoTrace(controller, controllerClass.name, this.tracingOptions.traceFilter);
+        }
       }
 
       this.controllerInstances.set(controllerClass, controller);
@@ -870,7 +855,7 @@ export class OneBunModule implements ModuleInstance {
    */
   callControllersOnModuleInit(): Effect.Effect<unknown, never, void> {
     const controllers = Array.from(this.controllerInstances.values());
-    const controllersWithInit = controllers.filter((c): c is Controller & { onModuleInit(): Promise<void> | void } => 
+    const controllersWithInit = controllers.filter((c): c is Controller & { onModuleInit(): Promise<void> | void } =>
       hasOnModuleInit(c),
     );
 

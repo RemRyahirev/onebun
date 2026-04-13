@@ -1,0 +1,7 @@
+{
+  "name": "bench-hono-bun",
+  "private": true,
+  "dependencies": {
+    "hono": "^4.7.0"
+  }
+}

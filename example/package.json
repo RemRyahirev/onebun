@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@onebun/core": "workspace:*",
+    "@onebun/trace": "workspace:*",
     "effect": "^3.10.15"
   },
   "devDependencies": {

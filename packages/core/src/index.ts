@@ -18,8 +18,6 @@ export {
   OneBunBaseError,
   type SuccessResponse,
 } from '@onebun/requests';
-export { Span } from '@onebun/trace';
-
 // Re-export Effect and Layer from effect
 export { Effect, Layer } from 'effect';
 

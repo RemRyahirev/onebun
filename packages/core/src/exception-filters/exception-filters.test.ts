@@ -10,7 +10,11 @@ import { NotFoundError, HttpStatusCode } from '@onebun/requests';
 
 import { HttpExecutionContextImpl } from '../http-guards/http-guards';
 
-import { createExceptionFilter, defaultExceptionFilter } from './exception-filters';
+import {
+  createDefaultExceptionFilter,
+  createExceptionFilter,
+  defaultExceptionFilter,
+} from './exception-filters';
 import { HttpException } from './http-exception';
 
 // ============================================================================
@@ -97,33 +101,33 @@ describe('createExceptionFilter', () => {
 });
 
 // ============================================================================
-// defaultExceptionFilter
+// defaultExceptionFilter (proper HTTP status codes)
 // ============================================================================
 
 describe('defaultExceptionFilter', () => {
-  it('returns HTTP 200 with serialised OneBunBaseError', async () => {
+  it('returns proper HTTP status for OneBunBaseError', async () => {
     const error = new NotFoundError('Not found');
     const response = await defaultExceptionFilter.catch(error, makeContext());
 
-    expect(response.status).toBe(HttpStatusCode.OK);
+    expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
     const body = await response.json() as { success: boolean };
     expect(body.success).toBe(false);
   });
 
-  it('returns HTTP 200 with generic error details for plain Error', async () => {
+  it('returns HTTP 500 for plain Error', async () => {
     const error = new Error('Something went wrong');
     const response = await defaultExceptionFilter.catch(error, makeContext());
 
-    expect(response.status).toBe(HttpStatusCode.OK);
+    expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
     expect(body.error).toBe('Something went wrong');
   });
 
-  it('returns HTTP 200 for non-Error values', async () => {
+  it('returns HTTP 500 for non-Error values', async () => {
     const response = await defaultExceptionFilter.catch('string error', makeContext());
 
-    expect(response.status).toBe(HttpStatusCode.OK);
+    expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
     expect(body.error).toBe('string error');
@@ -151,6 +155,53 @@ describe('defaultExceptionFilter', () => {
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
     expect(body.error).toBe('Not found');
+  });
+});
+
+// ============================================================================
+// httpEnvelope mode (always HTTP 200)
+// ============================================================================
+
+describe('createDefaultExceptionFilter with httpEnvelope: true', () => {
+  const envelopeFilter = createDefaultExceptionFilter({ httpEnvelope: true });
+
+  it('returns HTTP 200 for OneBunBaseError', async () => {
+    const error = new NotFoundError('Not found');
+    const response = await envelopeFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    const body = await response.json() as { success: boolean; code: number };
+    expect(body.success).toBe(false);
+    expect(body.code).toBe(HttpStatusCode.NOT_FOUND);
+  });
+
+  it('returns HTTP 200 for HttpException', async () => {
+    const error = new HttpException(400, 'Validation failed');
+    const response = await envelopeFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Validation failed');
+  });
+
+  it('returns HTTP 200 for plain Error', async () => {
+    const error = new Error('Something went wrong');
+    const response = await envelopeFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Something went wrong');
+  });
+
+  it('returns HTTP 200 for non-Error values', async () => {
+    const response = await envelopeFilter.catch('string error', makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    const body = await response.json() as { success: boolean; error: string };
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('string error');
   });
 });
 

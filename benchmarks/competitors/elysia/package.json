@@ -1,0 +1,7 @@
+{
+  "name": "bench-elysia",
+  "private": true,
+  "dependencies": {
+    "elysia": "^1.2.0"
+  }
+}

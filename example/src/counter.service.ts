@@ -1,8 +1,5 @@
-import {
-  BaseService,
-  Service,
-  Span,
-} from '@onebun/core';
+import { BaseService, Service } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 // Service implementation with @Service decorator
 @Service()

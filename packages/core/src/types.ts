@@ -529,6 +529,13 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
 
   /**
+   * When true, all error responses use HTTP 200 with the error code in the JSON body (envelope mode).
+   * When false (default), error responses use proper HTTP status codes (e.g., 404 for NotFoundError).
+   * @defaultValue false
+   */
+  httpEnvelope?: boolean;
+
+  /**
    * CORS configuration. When provided, `CorsMiddleware` is automatically prepended
    * to the global middleware chain.
    *

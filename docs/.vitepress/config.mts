@@ -53,6 +53,7 @@ export default defineConfig({
             { text: 'Features Overview', link: '/features' },
             { text: 'Getting Started', link: '/getting-started' },
             { text: 'Architecture', link: '/architecture' },
+            { text: 'Migration from NestJS', link: '/migration-nestjs' },
           ],
         },
         {
@@ -122,6 +123,11 @@ export default defineConfig({
           items: [{ text: 'AI Documentation', link: '/ai-docs' }],
         },
         {
+          text: 'Performance',
+          collapsed: false,
+          items: [{ text: 'Benchmarks', link: '/benchmarks' }],
+        },
+        {
           text: 'Project',
           collapsed: false,
           items: [{ text: 'Roadmap', link: '/roadmap' }],
@@ -136,7 +142,7 @@ export default defineConfig({
 
     // Footer
     footer: {
-      message: 'Released under the LGPL-3.0 License.',
+      message: 'Released under the MPL-2.0 License.',
       copyright: 'Copyright © 2024-present RemRyahirev',
     },
 

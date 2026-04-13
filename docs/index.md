@@ -33,6 +33,10 @@ features:
   - icon: 🔌
     title: WebSocket Gateway
     details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and type-safe clients.
+  - icon: 🧪
+    title: Battle-Tested
+    details: Comprehensive test suite with high coverage — verified on every commit
+    link: https://codecov.io/gh/RemRyahirev/onebun
 ---
 
 **A complete, batteries-included TypeScript backend framework for Bun.js.**

@@ -73,57 +73,68 @@ export function createExceptionFilter(
 // ============================================================================
 
 /**
- * Default exception filter — mirrors the built-in error handling behaviour.
- * - `OneBunBaseError` instances are serialised with their own `toErrorResponse()`.
- * - Every other error is converted to a generic 500 response.
- * All responses use HTTP 200 with the standardised `ApiResponse` envelope,
- * consistent with the rest of the framework.
+ * Create the default exception filter.
+ *
+ * @param options.httpEnvelope - When true, all error responses use HTTP 200 (envelope mode).
+ *   When false (default), proper HTTP status codes are used.
  */
-export const defaultExceptionFilter: ExceptionFilter = {
-  catch(error: unknown): OneBunResponse {
-    if (error instanceof HttpException) {
-      const errorResponse = createErrorResponse(
-        error.message,
-        error.statusCode,
-        error.message,
-      );
+export function createDefaultExceptionFilter(
+  options: { httpEnvelope?: boolean } = {},
+): ExceptionFilter {
+  const { httpEnvelope = false } = options;
+
+  return {
+    catch(error: unknown): OneBunResponse {
+      if (error instanceof HttpException) {
+        const errorResponse = createErrorResponse(
+          error.message,
+          error.statusCode,
+          error.message,
+        );
+
+        return new Response(JSON.stringify(errorResponse), {
+          status: httpEnvelope ? HttpStatusCode.OK : error.statusCode,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+
+      if (error instanceof OneBunBaseError) {
+        return new Response(JSON.stringify(error.toErrorResponse()), {
+          status: httpEnvelope ? HttpStatusCode.OK : error.code,
+          headers: {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+
+      const message = error instanceof Error ? error.message : String(error);
+      const code =
+        error instanceof Error && 'code' in error
+          ? Number((error as { code: unknown }).code)
+          : HttpStatusCode.INTERNAL_SERVER_ERROR;
+
+      const errorResponse = createErrorResponse(message, code, message, undefined, {
+        originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+        stack: error instanceof Error ? error.stack : undefined,
+      });
 
       return new Response(JSON.stringify(errorResponse), {
-        status: error.statusCode,
+        status: httpEnvelope ? HttpStatusCode.OK : code,
         headers: {
           // eslint-disable-next-line @typescript-eslint/naming-convention
           'Content-Type': 'application/json',
         },
       });
-    }
+    },
+  };
+}
 
-    if (error instanceof OneBunBaseError) {
-      return new Response(JSON.stringify(error.toErrorResponse()), {
-        status: HttpStatusCode.OK,
-        headers: {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'Content-Type': 'application/json',
-        },
-      });
-    }
-
-    const message = error instanceof Error ? error.message : String(error);
-    const code =
-      error instanceof Error && 'code' in error
-        ? Number((error as { code: unknown }).code)
-        : HttpStatusCode.INTERNAL_SERVER_ERROR;
-
-    const errorResponse = createErrorResponse(message, code, message, undefined, {
-      originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-      stack: error instanceof Error ? error.stack : undefined,
-    });
-
-    return new Response(JSON.stringify(errorResponse), {
-      status: HttpStatusCode.OK,
-      headers: {
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'Content-Type': 'application/json',
-      },
-    });
-  },
-};
+/**
+ * Default exception filter instance with proper HTTP status codes.
+ * For envelope mode (always HTTP 200), use `createDefaultExceptionFilter({ httpEnvelope: true })`.
+ */
+export const defaultExceptionFilter: ExceptionFilter = createDefaultExceptionFilter();

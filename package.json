@@ -15,7 +15,7 @@
     "bun": "1.2.12",
     "node": "24"
   },
-  "license": "LGPL-3.0",
+  "license": "MPL-2.0",
   "private": true,
   "scripts": {
     "dev": "bun run --watch example/src/index.ts",

@@ -44,65 +44,18 @@ export function injectable() {
 }
 
 /**
- * Automatic dependency detection through smart constructor analysis
- * This function analyzes constructor parameters and matches them with available services
+ * Automatic dependency detection through TypeScript metadata
+ * Uses design:paramtypes emitted by TypeScript when emitDecoratorMetadata is enabled
  */
 export function autoDetectDependencies(
   target: Function,
-  availableServices: Map<string, Function>,
 ): Function[] {
-  // First, try to get types from TypeScript's design:paramtypes
   const designTypes = getDesignParamTypes(target);
   if (designTypes && designTypes.length > 0) {
     return designTypes;
   }
 
-  // Fallback: analyze constructor source code
-  const constructorStr = target.toString();
-  const constructorMatch = constructorStr.match(/constructor\s*\(([^)]*)\)/);
-
-  if (!constructorMatch || !constructorMatch[1]) {
-    return [];
-  }
-
-  const paramsStr = constructorMatch[1];
-  const params = paramsStr.split(',').map((p) => p.trim());
-  const dependencies: Function[] = [];
-
-  for (const param of params) {
-    // Extract parameter name first (before the colon, handling modifiers like private/public)
-    // Pattern: "private configService: ConfigService" -> "configService"
-    const paramNameMatch = param.match(/^\s*(?:private|protected|public|readonly|\s)*(\w+)/);
-    if (!paramNameMatch) {
-      continue;
-    }
-    const paramName = paramNameMatch[1];
-
-    // Skip only if parameter name is exactly 'logger' or 'config'
-    if (paramName === 'logger' || paramName === 'config') {
-      continue;
-    }
-
-    // Try to extract type information
-    // Look for patterns like: "private counterService: CounterService"
-    const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
-    if (typeMatch) {
-      const typeName = typeMatch[1];
-
-      // Skip framework types (logger, config, etc.)
-      if (typeName === 'SyncLogger' || typeName === 'Logger' || typeName === 'unknown') {
-        continue;
-      }
-
-      // Try to find service by exact type name
-      const serviceType = availableServices.get(typeName);
-      if (serviceType) {
-        dependencies.push(serviceType);
-      }
-    }
-  }
-
-  return dependencies;
+  return [];
 }
 
 /**
@@ -110,9 +63,8 @@ export function autoDetectDependencies(
  */
 export function registerControllerDependencies(
   target: Function,
-  availableServices: Map<string, Function>,
 ): void {
-  const dependencies = autoDetectDependencies(target, availableServices);
+  const dependencies = autoDetectDependencies(target);
 
   if (dependencies.length > 0) {
     META_CONSTRUCTOR_PARAMS.set(target, dependencies);

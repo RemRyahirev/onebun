@@ -1,8 +1,8 @@
 {
   "name": "@onebun/nats",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "description": "NATS and JetStream integration for OneBun framework",
-  "license": "LGPL-3.0",
+  "license": "MPL-2.0",
   "author": "RemRyahirev",
   "keywords": [
     "onebun",

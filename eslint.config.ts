@@ -8,7 +8,7 @@ import importNewlinesPlugin from 'eslint-plugin-import-newlines';
 import stylisticPlugin from '@stylistic/eslint-plugin';
 
 const config: Linter.Config[] = [
-  { ignores: ['future-example/**', 'scripts/**', 'docs/.vitepress/**', 'eslint.config.ts'] },
+  { ignores: ['future-example/**', 'scripts/**', 'docs/.vitepress/**', 'eslint.config.ts', 'benchmarks/**'] },
   {
     files: ['**/*.ts', '**/*.tsx'],
     languageOptions: {
