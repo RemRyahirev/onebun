@@ -19,7 +19,7 @@ All features below are shipped, tested, and documented. If something looks missi
 | Module system (`@Module`, `@Global`) | `@onebun/core` | [Core](/api/core) |
 | Controllers & routing (`@Get`, `@Post`, etc.) | `@onebun/core` | [Controllers](/api/controllers) |
 | Services & DI via Effect.Context + Layer | `@onebun/core` | [Services](/api/services) |
-| Middleware (`@UseMiddleware`, `@Middleware`) | `@onebun/core` | [Middleware](/api/middleware) |
+| Middleware (`@UseMiddleware`, `@Middleware`) | `@onebun/core` | [Security](/api/security) |
 | Lifecycle hooks (`OnModuleInit`, `OnApplicationDestroy`, etc.) | `@onebun/core` | [Core](/api/core) |
 | Graceful shutdown (SIGTERM/SIGINT handling) | `@onebun/core` | [Core](/api/core) |
 | Static file serving with SPA fallback | `@onebun/core` | [Core](/api/core) |
@@ -54,9 +54,9 @@ All features below are shipped, tested, and documented. If something looks missi
 
 | Feature | Package | Docs |
 |---------|---------|------|
-| CORS middleware | `@onebun/core` | [Middleware](/api/middleware) |
-| Rate limiting (in-memory + Redis) | `@onebun/core` | [Middleware](/api/middleware) |
-| Security headers (helmet-like) | `@onebun/core` | [Middleware](/api/middleware) |
+| CORS middleware | `@onebun/core` | [Security](/api/security) |
+| Rate limiting (in-memory + Redis) | `@onebun/core` | [Security](/api/security) |
+| Security headers (helmet-like) | `@onebun/core` | [Security](/api/security) |
 
 ### WebSocket & Queues
 
@@ -73,11 +73,11 @@ All features below are shipped, tested, and documented. If something looks missi
 
 | Feature | Package | Docs |
 |---------|---------|------|
-| `TestingModule.create()` with mock providers | `@onebun/core` | [Testing](/api/testing) |
-| `.overrideProvider().useValue()` / `.useClass()` | `@onebun/core` | [Testing](/api/testing) |
-| HTTP integration testing | `@onebun/core` | [Testing](/api/testing) |
-| Mock logger, config | `@onebun/core` | [Testing](/api/testing) |
-| Fake timers | `@onebun/core` | [Testing](/api/testing) |
+| `TestingModule.create()` with mock providers | `@onebun/core` | [Core](/api/core) |
+| `.overrideProvider().useValue()` / `.useClass()` | `@onebun/core` | [Core](/api/core) |
+| HTTP integration testing | `@onebun/core` | [Core](/api/core) |
+| Mock logger, config | `@onebun/core` | [Core](/api/core) |
+| Fake timers | `@onebun/core` | [Core](/api/core) |
 
 ### Ecosystem Packages
 
