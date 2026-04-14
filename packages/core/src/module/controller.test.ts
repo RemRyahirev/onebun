@@ -4,6 +4,7 @@
    @typescript-eslint/naming-convention,
    jest/unbound-method */
 import {
+  afterEach,
   describe,
   test,
   expect,
@@ -437,6 +438,37 @@ describe('Controller', () => {
         code: 1001,
         message: 'Test error',
       });
+    });
+  });
+
+  describe('metrics getter', () => {
+    afterEach(() => {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    });
+
+    test('returns undefined when metrics not enabled', () => {
+      class TestController extends Controller {
+        getMetrics() {
+          return this.metrics;
+        }
+      }
+
+      const { instance: controller } = createTestController(TestController);
+      expect(controller.getMetrics()).toBeUndefined();
+    });
+
+    test('returns MetricsService when available', () => {
+      const mockMetrics = { createCounter: () => ({}) };
+      (globalThis as Record<string, unknown>).__onebunMetricsService = mockMetrics;
+
+      class TestController extends Controller {
+        getMetrics() {
+          return this.metrics;
+        }
+      }
+
+      const { instance: controller } = createTestController(TestController);
+      expect(controller.getMetrics()).toBe(mockMetrics);
     });
   });
 
