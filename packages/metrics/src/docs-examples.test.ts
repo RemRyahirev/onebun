@@ -19,6 +19,7 @@ import type { MetricsService as MetricsServiceInterface } from './metrics.servic
 import {
   Timed,
   Counted,
+  Gauged,
   MetricsMiddleware,
   createMetricsService,
 } from './';
@@ -40,6 +41,11 @@ describe('Metrics README Examples', () => {
       // From README: Method Decorators - @Counted
       expect(Counted).toBeDefined();
       expect(typeof Counted).toBe('function');
+    });
+
+    it('should have @Gauged decorator available', () => {
+      expect(Gauged).toBeDefined();
+      expect(typeof Gauged).toBe('function');
     });
 
     it('should use decorators on controller methods', () => {
@@ -303,6 +309,30 @@ describe('Metrics API Documentation Examples', () => {
       expect(MetricsMiddleware).toBeDefined();
       expect(typeof MetricsMiddleware).toBe('function');
     });
+  });
+});
+
+describe('this.metrics access pattern (docs/api/metrics.md)', () => {
+  let metricsService: MetricsServiceInterface;
+
+  beforeEach(() => {
+    metricsService = getMetricsService();
+    metricsService.clear();
+    (globalThis as Record<string, unknown>).__onebunMetricsService = metricsService;
+  });
+
+  afterEach(() => {
+    metricsService.clear();
+    delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+  });
+
+  it('should access metrics via globalThis pattern', () => {
+    // From docs: this.metrics getter reads from globalThis.__onebunMetricsService
+    const service = (globalThis as Record<string, unknown>).__onebunMetricsService as MetricsServiceInterface;
+    expect(service).toBeDefined();
+    expect(typeof service.createCounter).toBe('function');
+    expect(typeof service.createGauge).toBe('function');
+    expect(typeof service.createHistogram).toBe('function');
   });
 });
 
