@@ -93,6 +93,7 @@ This guide walks through the mapping of concepts, decorators, and code patterns.
 | -- | `@Span()` | OpenTelemetry span decorator (`@onebun/trace`) |
 | -- | `@Timed()` | Prometheus duration metric (`@onebun/metrics`) |
 | -- | `@Counted()` | Prometheus counter metric (`@onebun/metrics`) |
+| -- | `@Gauged()` | Prometheus gauge metric (`@onebun/metrics`) |
 
 ## Side-by-Side Examples
 
@@ -507,7 +508,7 @@ This provides a consistent API response envelope across all endpoints.
 
 These features are built into the framework -- no community packages needed:
 
-- **Prometheus metrics** (`@onebun/metrics`) -- auto HTTP/system metrics, `@Timed()`, `@Counted()`, custom counters/gauges/histograms at `/metrics`
+- **Prometheus metrics** (`@onebun/metrics`) -- auto HTTP/system metrics, `@Timed()`, `@Counted()`, `@Gauged()`, custom counters/gauges/histograms at `/metrics`
 - **OpenTelemetry tracing** (`@onebun/trace`) -- auto HTTP tracing, `@Span()` decorator, configurable sampling and export
 - **Redis/in-memory cache** (`@onebun/cache`) -- `CacheModule` with TTL, batch operations, shared Redis connection
 - **Typed environment variables** (`@onebun/envs`) -- schema-based config with validation, defaults, sensitive value masking

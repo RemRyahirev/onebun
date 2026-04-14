@@ -63,7 +63,7 @@ production-grade backend services.
 - Typed service clients for inter-service communication
 
 ### Observability
-- **Prometheus Metrics** (@onebun/metrics): auto HTTP/system/GC metrics, @Timed, @Counted, custom counters/gauges/histograms
+- **Prometheus Metrics** (@onebun/metrics): auto HTTP/system/GC metrics, @Timed, @Counted, @Gauged, custom counters/gauges/histograms
 - **OpenTelemetry Tracing** (@onebun/trace): auto HTTP tracing, @Span decorator, configurable export
 - **Structured Logging** (@onebun/logger): JSON/pretty output, levels, child loggers, trace context integration
 
@@ -81,7 +81,7 @@ production-grade backend services.
 | @onebun/cache | In-memory + Redis caching, shared connections, batch operations |
 | @onebun/envs | Type-safe env variables, validation, sensitive masking, .env support |
 | @onebun/logger | Structured logging, JSON/pretty, child loggers, trace context |
-| @onebun/metrics | Prometheus metrics, auto HTTP/system metrics, @Timed, @Counted |
+| @onebun/metrics | Prometheus metrics, auto HTTP/system metrics, @Timed, @Counted, @Gauged |
 | @onebun/trace | OpenTelemetry, @Span decorator, configurable sampling/export |
 | @onebun/requests | HTTP client, auth schemes, retries, typed service clients |
 | @onebun/nats | NATS + JetStream integration for queues |
@@ -251,7 +251,7 @@ type-safe inter-service REST communication without code generation.
 - Automatic HTTP request metrics (duration, count, status codes)
 - System metrics (CPU, memory, event loop, GC)
 - Custom metrics: Counter, Gauge, Histogram
-- Decorator-based: @Timed(), @Counted()
+- Decorator-based: @Timed(), @Counted(), @Gauged()
 - Endpoint: GET /metrics
 → [API Reference](/api/metrics)
 

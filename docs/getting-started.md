@@ -26,7 +26,7 @@ microservice orchestration (MultiServiceApplication), and graceful shutdown.
 * @onebun/docs - auto-generated OpenAPI 3.1 from ArkType schemas and decorators
 * @onebun/envs - type-safe env config with validation, sensitive masking, .env loading
 * @onebun/logger - structured logging (JSON/pretty), child loggers, trace context
-* @onebun/metrics - Prometheus metrics, @Timed/@Counted, auto HTTP/system metrics
+* @onebun/metrics - Prometheus metrics, @Timed/@Counted/@Gauged, auto HTTP/system metrics
 * @onebun/trace - OpenTelemetry, @Span decorator, configurable sampling/export
 * @onebun/requests - HTTP client with retries, auth schemes, typed inter-service clients
 * @onebun/nats - NATS/JetStream queue backends
@@ -421,7 +421,7 @@ You've built a basic OneBun application. Here's what else the framework offers:
 - **[WebSocket](/api/websocket)** — Real-time communication with Socket.IO support and typed clients
 
 ### Production Readiness
-- **[Metrics](/api/metrics)** — Prometheus-compatible: auto HTTP/system metrics, @Timed/@Counted decorators
+- **[Metrics](/api/metrics)** — Prometheus-compatible: auto HTTP/system metrics, @Timed/@Counted/@Gauged decorators
 - **[Tracing](/api/trace)** — OpenTelemetry with @Span decorator, trace context in logs
 - **[HTTP Client](/api/requests)** — Typed clients with retries, auth schemes, inter-service HMAC
 

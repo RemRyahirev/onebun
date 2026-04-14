@@ -77,7 +77,7 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 | `@onebun/cache` | CacheModule with in-memory (TTL, max size) and Redis backends, shared Redis connection pool, batch operations (getMany/setMany/deleteMany) |
 | `@onebun/envs` | Type-safe environment configuration: schema with Env.string/number/boolean/array, validation, defaults, transforms, sensitive value masking, .env file support |
 | `@onebun/logger` | Structured logging: JSON (production) and pretty (development) output, 6 log levels, child loggers with context inheritance, automatic trace context integration |
-| `@onebun/metrics` | Prometheus-compatible metrics: automatic HTTP/system/GC collection, @Timed/@Counted decorators, custom Counter/Gauge/Histogram, /metrics endpoint |
+| `@onebun/metrics` | Prometheus-compatible metrics: automatic HTTP/system/GC collection, @Timed/@Counted/@Gauged decorators, custom Counter/Gauge/Histogram, /metrics endpoint |
 | `@onebun/trace` | OpenTelemetry distributed tracing: automatic HTTP tracing, @Span decorator, configurable sampling rate, export to external collectors |
 | `@onebun/requests` | HTTP client: Bearer/API Key/Basic/HMAC auth, retry strategies (fixed/linear/exponential), typed ApiResponse, typed service clients via createServiceDefinition for inter-service communication |
 | `@onebun/nats` | NATS and JetStream integration for distributed queues and messaging with at-least-once delivery |
