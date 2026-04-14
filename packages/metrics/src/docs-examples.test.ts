@@ -17,8 +17,8 @@ import { Effect } from 'effect';
 import type { MetricsService as MetricsServiceInterface } from './metrics.service';
 
 import {
-  MeasureTime,
-  CountCalls,
+  Timed,
+  Counted,
   MetricsMiddleware,
   createMetricsService,
 } from './';
@@ -30,23 +30,23 @@ const getMetricsService = (): MetricsServiceInterface => {
 
 describe('Metrics README Examples', () => {
   describe('Method Decorators (README)', () => {
-    it('should have @MeasureTime decorator available', () => {
-      // From README: Method Decorators - @MeasureTime
-      expect(MeasureTime).toBeDefined();
-      expect(typeof MeasureTime).toBe('function');
+    it('should have @Timed decorator available', () => {
+      // From README: Method Decorators - @Timed
+      expect(Timed).toBeDefined();
+      expect(typeof Timed).toBe('function');
     });
 
-    it('should have @CountCalls decorator available', () => {
-      // From README: Method Decorators - @CountCalls
-      expect(CountCalls).toBeDefined();
-      expect(typeof CountCalls).toBe('function');
+    it('should have @Counted decorator available', () => {
+      // From README: Method Decorators - @Counted
+      expect(Counted).toBeDefined();
+      expect(typeof Counted).toBe('function');
     });
 
     it('should use decorators on controller methods', () => {
       // From README: Method Decorators example
       class ApiController {
-        @MeasureTime('heavy_operation_duration')
-        @CountCalls('heavy_operation_calls')
+        @Timed('heavy_operation_duration')
+        @Counted('heavy_operation_calls')
         async heavyOperation(): Promise<unknown> {
           // This method's execution time and call count will be automatically tracked
           return { success: true };

@@ -18,9 +18,9 @@ import { register } from 'prom-client';
 import { useFakeTimers } from '@onebun/core/testing';
 
 import {
-  MeasureTime,
-  CountCalls,
-  MeasureGauge,
+  Timed,
+  Counted,
+  Gauged,
   InjectMetric,
   WithMetrics,
   measureExecutionTime,
@@ -72,10 +72,10 @@ describe('Metrics Decorators', () => {
     register.clear();
   });
 
-  describe('MeasureTime decorator', () => {
+  describe('Timed decorator', () => {
     test('should measure execution time for synchronous method', () => {
       class TestService {
-        @MeasureTime()
+        @Timed()
         syncMethod(value: number): number {
           return value * 2;
         }
@@ -92,7 +92,7 @@ describe('Metrics Decorators', () => {
       const timers = useFakeTimers();
       
       class TestService {
-        @MeasureTime()
+        @Timed()
         async asyncMethod(value: number): Promise<number> {
           await new Promise(resolve => setTimeout(resolve, 10));
 
@@ -116,7 +116,7 @@ describe('Metrics Decorators', () => {
 
     test('should measure execution time even when method throws', () => {
       class TestService {
-        @MeasureTime()
+        @Timed()
         throwingMethod(): never {
           throw new Error('Test error');
         }
@@ -129,7 +129,7 @@ describe('Metrics Decorators', () => {
 
     test('should measure execution time even when async method rejects', async () => {
       class TestService {
-        @MeasureTime()
+        @Timed()
         async rejectingMethod(): Promise<never> {
           throw new Error('Async error');
         }
@@ -142,7 +142,7 @@ describe('Metrics Decorators', () => {
 
     test('should use custom metric name when provided', () => {
       class TestService {
-        @MeasureTime('custom_metric')
+        @Timed('custom_metric')
         customMethod(): number {
           return 42;
         }
@@ -156,7 +156,7 @@ describe('Metrics Decorators', () => {
 
     test('should generate default metric name from class and method', () => {
       class TestService {
-        @MeasureTime()
+        @Timed()
         testMethod(): number {
           return 42;
         }
@@ -172,7 +172,7 @@ describe('Metrics Decorators', () => {
       delete (globalThis as any).__onebunMetricsService;
 
       class TestService {
-        @MeasureTime()
+        @Timed()
         testMethod(): number {
           return 42;
         }
@@ -187,7 +187,7 @@ describe('Metrics Decorators', () => {
       mockMetricsService.getMetric = mock(() => ({}));
 
       class TestService {
-        @MeasureTime()
+        @Timed()
         testMethod(): number {
           return 42;
         }
@@ -199,10 +199,10 @@ describe('Metrics Decorators', () => {
     });
   });
 
-  describe('CountCalls decorator', () => {
+  describe('Counted decorator', () => {
     test('should increment counter on method call', () => {
       class TestService {
-        @CountCalls()
+        @Counted()
         countedMethod(value: number): number {
           return value * 2;
         }
@@ -217,7 +217,7 @@ describe('Metrics Decorators', () => {
 
     test('should use custom metric name when provided', () => {
       class TestService {
-        @CountCalls('custom_counter')
+        @Counted('custom_counter')
         customMethod(): number {
           return 42;
         }
@@ -231,7 +231,7 @@ describe('Metrics Decorators', () => {
 
     test('should generate default counter name from class and method', () => {
       class TestService {
-        @CountCalls()
+        @Counted()
         testMethod(): number {
           return 42;
         }
@@ -247,7 +247,7 @@ describe('Metrics Decorators', () => {
       delete (globalThis as any).__onebunMetricsService;
 
       class TestService {
-        @CountCalls()
+        @Counted()
         testMethod(): number {
           return 42;
         }
@@ -262,7 +262,7 @@ describe('Metrics Decorators', () => {
       mockMetricsService.getMetric = mock(() => ({}));
 
       class TestService {
-        @CountCalls()
+        @Counted()
         testMethod(): number {
           return 42;
         }
@@ -275,7 +275,7 @@ describe('Metrics Decorators', () => {
 
     test('should count calls with labels', () => {
       class TestService {
-        @CountCalls('labeled_counter', ['method', 'service'])
+        @Counted('labeled_counter', ['method', 'service'])
         labeledMethod(): number {
           return 42;
         }
@@ -288,13 +288,13 @@ describe('Metrics Decorators', () => {
     });
   });
 
-  describe('MeasureGauge decorator', () => {
+  describe('Gauged decorator', () => {
     test('should update gauge after synchronous method execution', () => {
       let gaugeValue = 100;
       const getValue = () => gaugeValue;
 
       class TestService {
-        @MeasureGauge('test_gauge', getValue)
+        @Gauged('test_gauge', getValue)
         updateGaugeMethod(): void {
           gaugeValue = 200;
         }
@@ -313,7 +313,7 @@ describe('Metrics Decorators', () => {
       const getValue = () => gaugeValue;
 
       class TestService {
-        @MeasureGauge('test_gauge', getValue)
+        @Gauged('test_gauge', getValue)
         async updateGaugeMethodAsync(): Promise<void> {
           await new Promise(resolve => setTimeout(resolve, 10));
           gaugeValue = 200;
@@ -339,7 +339,7 @@ describe('Metrics Decorators', () => {
       };
 
       class TestService {
-        @MeasureGauge('test_gauge', getValue)
+        @Gauged('test_gauge', getValue)
         testMethod(): number {
           return 42;
         }
@@ -356,7 +356,7 @@ describe('Metrics Decorators', () => {
       const getValue = () => 100;
 
       class TestService {
-        @MeasureGauge('test_gauge', getValue)
+        @Gauged('test_gauge', getValue)
         testMethod(): number {
           return 42;
         }
@@ -372,7 +372,7 @@ describe('Metrics Decorators', () => {
       const getValue = () => 100;
 
       class TestService {
-        @MeasureGauge('test_gauge', getValue)
+        @Gauged('test_gauge', getValue)
         testMethod(): number {
           return 42;
         }
@@ -489,8 +489,8 @@ describe('Metrics Decorators', () => {
       delete (globalThis as any).__onebunMetricsService;
 
       class TestService {
-        @MeasureTime()
-        @CountCalls()
+        @Timed()
+        @Counted()
         testMethod(): number {
           return 42;
         }
@@ -511,7 +511,7 @@ describe('Metrics Decorators', () => {
       });
 
       class TestService {
-        @MeasureTime()
+        @Timed()
         testMethod(): number {
           return 42;
         }
