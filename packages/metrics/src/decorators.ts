@@ -11,9 +11,11 @@ import type { CustomMetricConfig } from './types';
 import { MetricsService } from './metrics.service';
 
 /**
- * Decorator for measuring method execution time
+ * Decorator for measuring method execution time.
+ * Records duration in a histogram metric.
+ * Default metric name: `{ClassName}_{methodName}_duration`
  */
-export function MeasureTime(metricName?: string, labels?: string[]): MethodDecorator {
+export function Timed(metricName?: string, labels?: string[]): MethodDecorator {
   return (
     target: any,
     propertyKey: string | symbol,
@@ -55,9 +57,11 @@ export function MeasureTime(metricName?: string, labels?: string[]): MethodDecor
 }
 
 /**
- * Decorator for counting method calls
+ * Decorator for counting method calls.
+ * Increments a counter metric on each call.
+ * Default metric name: `{ClassName}_{methodName}_calls_total`
  */
-export function CountCalls(metricName?: string, labels?: string[]): MethodDecorator {
+export function Counted(metricName?: string, labels?: string[]): MethodDecorator {
   return (
     target: any,
     propertyKey: string | symbol,
@@ -78,9 +82,10 @@ export function CountCalls(metricName?: string, labels?: string[]): MethodDecora
 }
 
 /**
- * Decorator for measuring gauge values
+ * Decorator for measuring gauge values.
+ * Updates a gauge metric after method execution.
  */
-export function MeasureGauge(
+export function Gauged(
   metricName: string,
   getValue: () => number,
   labels?: string[],
@@ -212,6 +217,21 @@ function getMetricsService(): any {
 
   return undefined;
 }
+
+/**
+ * @deprecated Use `Timed` instead. Will be removed in 1.0.
+ */
+export const MeasureTime = Timed;
+
+/**
+ * @deprecated Use `Counted` instead. Will be removed in 1.0.
+ */
+export const CountCalls = Counted;
+
+/**
+ * @deprecated Use `Gauged` instead. Will be removed in 1.0.
+ */
+export const MeasureGauge = Gauged;
 
 /**
  * Effect-based decorators

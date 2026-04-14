@@ -16,10 +16,13 @@ export type {
 } from 'prom-client';
 // Decorators
 export {
+  Counted,
   CountCalls,
+  Gauged,
   InjectMetric,
   MeasureGauge,
   MeasureTime,
+  Timed,
   measureExecutionTime,
   WithMetrics,
 } from './decorators';
