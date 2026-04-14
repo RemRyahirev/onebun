@@ -351,6 +351,73 @@ describe('Metrics Decorators', () => {
       expect(mockGauge.set).toHaveBeenCalledWith({}, 2);
     });
 
+    test('should support async getValue callback', async () => {
+      const mockGauge = { set: mock(() => {}) };
+      mockMetricsService.getMetric = mock(() => mockGauge);
+
+      class TestService {
+        @Gauged('async_gauge', async () => {
+          await Promise.resolve();
+
+          return 42;
+        })
+        doWork(): string {
+          return 'done';
+        }
+      }
+
+      const service = new TestService();
+      service.doWork();
+
+      // Wait for the async getValue to resolve
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(mockGauge.set).toHaveBeenCalledWith({}, 42);
+    });
+
+    test('should handle async getValue with instance access', async () => {
+      const mockGauge = { set: mock(() => {}) };
+      mockMetricsService.getMetric = mock(() => mockGauge);
+
+      class TestService {
+        count = 10;
+
+        @Gauged('async_instance_gauge', async (self) => {
+          await Promise.resolve();
+
+          return self.count;
+        })
+        decrement(): void {
+          this.count--;
+        }
+      }
+
+      const service = new TestService();
+      service.decrement();
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(mockGauge.set).toHaveBeenCalledWith({}, 9);
+    });
+
+    test('should handle async getValue rejection gracefully', async () => {
+      class TestService {
+        @Gauged('failing_async_gauge', async () => {
+          throw new Error('async error');
+        })
+        testMethod(): number {
+          return 42;
+        }
+      }
+
+      const service = new TestService();
+      expect(service.testMethod()).toBe(42);
+
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(capturedWarns).toContain('Failed to update gauge failing_async_gauge: Error: async error');
+    });
+
     test('should handle getValue function throwing error', () => {
       const getValue = () => {
         throw new Error('getValue error');

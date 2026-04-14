@@ -84,16 +84,17 @@ export function Counted(metricName?: string, labels?: string[]): MethodDecorator
 /**
  * Decorator for measuring gauge values.
  * Updates a gauge metric after method execution.
- * The `getValue` callback receives the class instance, so you can read instance state:
+ * The `getValue` callback receives the class instance, so you can read instance state.
+ * Supports both sync and async callbacks:
  *
  * ```typescript
  * @Gauged('queue_depth', (self) => self.pendingItems.length)
- * async processNext(): Promise<void> { ... }
+ * @Gauged('db_count', async (self) => self.repo.count())
  * ```
  */
 export function Gauged<T extends object>(
   metricName: string,
-  getValue: (instance: T) => number,
+  getValue: (instance: T) => number | Promise<number>,
   labels?: string[],
 ): (target: T, propertyKey: string | symbol, descriptor: PropertyDescriptor) => PropertyDescriptor {
   return (
@@ -110,8 +111,17 @@ export function Gauged<T extends object>(
       // Update gauge after method execution
       const updateGauge = (): void => {
         try {
-          const value = getValue(instance);
-          setGaugeValue(metricName, value, labels);
+          const valueOrPromise = getValue(instance);
+
+          if (valueOrPromise instanceof Promise) {
+            valueOrPromise.then(
+              (value) => setGaugeValue(metricName, value, labels),
+              // eslint-disable-next-line no-console
+              (error) => console.warn(`Failed to update gauge ${metricName}:`, error),
+            );
+          } else {
+            setGaugeValue(metricName, valueOrPromise, labels);
+          }
         } catch (error) {
           // eslint-disable-next-line no-console
           console.warn(`Failed to update gauge ${metricName}:`, error);

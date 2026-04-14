@@ -230,7 +230,8 @@ export class EmailService extends BaseService {
 ### @Gauged()
 
 Update a gauge metric after method execution.
-The callback receives the class instance, so you can read its state:
+The callback receives the class instance, so you can read its state.
+Supports both sync and async callbacks:
 
 ```typescript
 import { Gauged } from '@onebun/metrics';
@@ -239,11 +240,17 @@ import { Gauged } from '@onebun/metrics';
 export class QueueService extends BaseService {
   pendingItems: Item[] = [];
 
+  // Sync — read instance state directly
   @Gauged('queue_depth', (self) => self.pendingItems.length)
   async processNext(): Promise<void> {
     const item = this.pendingItems.shift();
     await this.handle(item);
-    // Gauge is automatically updated with pendingItems.length after execution
+  }
+
+  // Async — query a database, call an API, etc.
+  @Gauged('total_items', async (self) => self.repo.count())
+  async addItem(item: Item): Promise<void> {
+    await this.repo.insert(item);
   }
 }
 ```
