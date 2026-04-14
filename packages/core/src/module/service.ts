@@ -188,6 +188,24 @@ export class BaseService {
   }
 
   /**
+   * Get the global MetricsService instance.
+   * Returns undefined when metrics are not enabled.
+   *
+   * Usage:
+   * - `this.metrics?.createCounter({ name, help })`
+   * - `this.metrics?.createHistogram({ name, help, buckets })`
+   * - `this.metrics?.getMetric<Counter>(name)`
+   */
+  protected get metrics(): import('@onebun/metrics').MetricsService | undefined {
+    if (typeof globalThis !== 'undefined') {
+      return (globalThis as Record<string, unknown>).__onebunMetricsService as
+        import('@onebun/metrics').MetricsService | undefined;
+    }
+
+    return undefined;
+  }
+
+  /**
    * Run an effect with error handling
    * @param effect - The effect to run
    * @returns A promise that resolves to the effect's result or rejects with an error

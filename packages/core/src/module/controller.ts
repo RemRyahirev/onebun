@@ -146,6 +146,24 @@ export class Controller {
   }
 
   /**
+   * Get the global MetricsService instance.
+   * Returns undefined when metrics are not enabled.
+   *
+   * Usage:
+   * - `this.metrics?.createCounter({ name, help })`
+   * - `this.metrics?.createHistogram({ name, help, buckets })`
+   * - `this.metrics?.getMetric<Counter>(name)`
+   */
+  protected get metrics(): import('@onebun/metrics').MetricsService | undefined {
+    if (typeof globalThis !== 'undefined') {
+      return (globalThis as Record<string, unknown>).__onebunMetricsService as
+        import('@onebun/metrics').MetricsService | undefined;
+    }
+
+    return undefined;
+  }
+
+  /**
    * Get a service instance by tag
    * @param tag - The service tag
    * @returns The service instance
