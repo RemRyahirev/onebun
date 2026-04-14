@@ -1,6 +1,6 @@
 {
   "name": "@onebun/metrics",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Prometheus-compatible metrics for OneBun framework - HTTP, system, and custom metrics",
   "license": "MPL-2.0",
   "author": "RemRyahirev",
