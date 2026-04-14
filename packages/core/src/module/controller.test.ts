@@ -5,6 +5,7 @@
    jest/unbound-method */
 import {
   afterEach,
+  beforeEach,
   describe,
   test,
   expect,
@@ -442,6 +443,10 @@ describe('Controller', () => {
   });
 
   describe('metrics getter', () => {
+    beforeEach(() => {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    });
+
     afterEach(() => {
       delete (globalThis as Record<string, unknown>).__onebunMetricsService;
     });
@@ -468,7 +473,7 @@ describe('Controller', () => {
       }
 
       const { instance: controller } = createTestController(TestController);
-      expect(controller.getMetrics()).toBe(mockMetrics);
+      expect(controller.getMetrics() as unknown).toBe(mockMetrics);
     });
   });
 

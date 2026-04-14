@@ -301,6 +301,10 @@ describe('BaseService', () => {
   });
 
   describe('metrics getter', () => {
+    beforeEach(() => {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    });
+
     afterEach(() => {
       delete (globalThis as Record<string, unknown>).__onebunMetricsService;
     });
@@ -327,7 +331,7 @@ describe('BaseService', () => {
       }
 
       const { instance: service } = createTestService(TestService);
-      expect(service.getMetrics()).toBe(mockMetrics);
+      expect(service.getMetrics() as unknown).toBe(mockMetrics);
     });
   });
 
