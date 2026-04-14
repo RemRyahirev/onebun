@@ -290,13 +290,12 @@ describe('Metrics Decorators', () => {
 
   describe('Gauged decorator', () => {
     test('should update gauge after synchronous method execution', () => {
-      let gaugeValue = 100;
-      const getValue = () => gaugeValue;
-
       class TestService {
-        @Gauged('test_gauge', getValue)
+        value = 100;
+
+        @Gauged('test_gauge', (self) => self.value)
         updateGaugeMethod(): void {
-          gaugeValue = 200;
+          this.value = 200;
         }
       }
 
@@ -308,29 +307,48 @@ describe('Metrics Decorators', () => {
 
     test('should update gauge after asynchronous method execution', async () => {
       const timers = useFakeTimers();
-      
-      let gaugeValue = 100;
-      const getValue = () => gaugeValue;
 
       class TestService {
-        @Gauged('test_gauge', getValue)
+        value = 100;
+
+        @Gauged('test_gauge', (self) => self.value)
         async updateGaugeMethodAsync(): Promise<void> {
           await new Promise(resolve => setTimeout(resolve, 10));
-          gaugeValue = 200;
+          this.value = 200;
         }
       }
 
       const service = new TestService();
       const resultPromise = service.updateGaugeMethodAsync();
-      
+
       // Advance timers to resolve the setTimeout
       timers.advanceTime(10);
-      
+
       await resultPromise;
 
       expect(mockMetricsService.getMetric).toHaveBeenCalledWith('test_gauge');
-      
+
       timers.restore();
+    });
+
+    test('should receive class instance and read its state', () => {
+      const mockGauge = { set: mock(() => {}) };
+      mockMetricsService.getMetric = mock(() => mockGauge);
+
+      class TestService {
+        items: string[] = ['a', 'b', 'c'];
+
+        @Gauged('queue_depth', (self) => self.items.length)
+        processItem(): string | undefined {
+          return this.items.shift();
+        }
+      }
+
+      const service = new TestService();
+      service.processItem();
+
+      // After shift(), items.length is 2
+      expect(mockGauge.set).toHaveBeenCalledWith({}, 2);
     });
 
     test('should handle getValue function throwing error', () => {
@@ -353,10 +371,9 @@ describe('Metrics Decorators', () => {
 
     test('should handle missing metrics service gracefully', () => {
       delete (globalThis as any).__onebunMetricsService;
-      const getValue = () => 100;
 
       class TestService {
-        @Gauged('test_gauge', getValue)
+        @Gauged('test_gauge', () => 100)
         testMethod(): number {
           return 42;
         }
@@ -369,10 +386,9 @@ describe('Metrics Decorators', () => {
 
     test('should handle metric without set method', () => {
       mockMetricsService.getMetric = mock(() => ({}));
-      const getValue = () => 100;
 
       class TestService {
-        @Gauged('test_gauge', getValue)
+        @Gauged('test_gauge', () => 100)
         testMethod(): number {
           return 42;
         }

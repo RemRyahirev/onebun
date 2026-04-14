@@ -84,26 +84,33 @@ export function Counted(metricName?: string, labels?: string[]): MethodDecorator
 /**
  * Decorator for measuring gauge values.
  * Updates a gauge metric after method execution.
+ * The `getValue` callback receives the class instance, so you can read instance state:
+ *
+ * ```typescript
+ * @Gauged('queue_depth', (self) => self.pendingItems.length)
+ * async processNext(): Promise<void> { ... }
+ * ```
  */
-export function Gauged(
+export function Gauged<T extends object>(
   metricName: string,
-  getValue: () => number,
+  getValue: (instance: T) => number,
   labels?: string[],
-): MethodDecorator {
+): (target: T, propertyKey: string | symbol, descriptor: PropertyDescriptor) => PropertyDescriptor {
   return (
-    target: any,
+    target: T,
     propertyKey: string | symbol,
     descriptor: PropertyDescriptor,
   ): PropertyDescriptor => {
     const originalMethod = descriptor.value;
 
-    descriptor.value = function (...args: any[]): any {
+    descriptor.value = function (this: T, ...args: any[]): any {
       const result = originalMethod.apply(this, args);
+      const instance = this;
 
       // Update gauge after method execution
       const updateGauge = (): void => {
         try {
-          const value = getValue();
+          const value = getValue(instance);
           setGaugeValue(metricName, value, labels);
         } catch (error) {
           // eslint-disable-next-line no-console
