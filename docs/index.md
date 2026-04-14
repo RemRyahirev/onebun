@@ -217,7 +217,7 @@ export class UserController extends BaseController {
 ### Validation with ArkType
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 const createUserSchema = type({
   name: 'string',

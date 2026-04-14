@@ -556,9 +556,8 @@ Effect.runPromise(
 ## Complete Example
 
 ```typescript
-import { Module, Controller, BaseController, Service, BaseService, Get, Post, Delete, Param, Body } from '@onebun/core';
+import { Module, Controller, BaseController, Service, BaseService, Get, Post, Delete, Param, Body, type } from '@onebun/core';
 import { CacheModule, CacheService, CacheType } from '@onebun/cache';
-import { type } from 'arktype';
 
 // Types
 interface Product {

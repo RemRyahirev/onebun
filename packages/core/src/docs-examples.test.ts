@@ -17,7 +17,6 @@
  * - docs/examples/websocket-chat.md
  */
 
-import { type } from 'arktype';
 import {
   describe,
   it,
@@ -49,6 +48,8 @@ import type {
 } from './types';
 import type { HttpExecutionContext } from './types';
 import type { ServerWebSocket } from 'bun';
+
+import { type } from '@onebun/core';
 
 import { makeMockLoggerLayer } from './testing';
 

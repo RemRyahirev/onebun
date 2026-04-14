@@ -28,9 +28,8 @@ The `@onebun/docs` package provides decorators for adding documentation metadata
 - `@ApiResponse` must be placed **below** route decorators
 
 ```typescript
-import { Controller, Get, Post, Body, BaseController, ApiResponse } from '@onebun/core';
+import { Controller, Get, Post, Body, BaseController, ApiResponse, type } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
-import { type } from 'arktype';
 
 const createUserSchema = type({
   name: 'string',
@@ -104,8 +103,7 @@ async getUser(@Param('id') id: string): Promise<Response> {
 Document and validate response types. This decorator is provided by `@onebun/core`.
 
 ```typescript
-import { ApiResponse } from '@onebun/core';
-import { type } from 'arktype';
+import { ApiResponse, type } from '@onebun/core';
 
 const userSchema = type({
   id: 'string',
@@ -164,7 +162,7 @@ Convert ArkType schemas to JSON Schema format for OpenAPI documentation:
 
 ```typescript
 import { arktypeToJsonSchema } from '@onebun/docs';
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 const userSchema = type({
   id: 'string',

@@ -870,8 +870,8 @@ import {
   UseMiddleware,
   HttpStatusCode,
   type OneBunRequest,
+  type,
 } from '@onebun/core';
-import { type } from 'arktype';
 
 import { UserService } from './user.service';
 import { authMiddleware } from './middleware/auth';

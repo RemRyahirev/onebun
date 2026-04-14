@@ -32,18 +32,13 @@ const packageJson = `{
   "private": true,
   "scripts": {
     "dev": "bun run --watch src/index.ts",
-    "start": "bun run src/index.ts",
-    "build": "bun build src/index.ts --outdir dist --target bun"
+    "start": "bun run src/index.ts"
   },
   "dependencies": {
-    "@onebun/core": "^0.2.0",
-    "@onebun/logger": "^0.2.0",
-    "@onebun/envs": "^0.2.0",
-    "effect": "^3.13.10"
+    "@onebun/core": "^0.3.0"
   },
   "devDependencies": {
-    "bun-types": "^1.3.8",
-    "@types/node": "^22.9.0"
+    "bun-types": "^1.3.8"
   }
 }
 `;
@@ -68,19 +63,33 @@ const tsconfig = `{
     "lib": ["ESNext"]
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist"]
+  "exclude": ["node_modules"]
+}
+`;
+
+const configTs = `import { Env, type InferConfigType } from '@onebun/core';
+
+export const envSchema = {
+  server: {
+    port: Env.number({ default: 3000, env: 'PORT' }),
+    host: Env.string({ default: '0.0.0.0', env: 'HOST' }),
+  },
+};
+
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
 }
 `;
 
 const indexTs = `import { OneBunApplication } from '@onebun/core';
 
 import { AppModule } from './app.module';
-
-const DEFAULT_PORT = 3000;
+import { envSchema } from './config';
 
 const app = new OneBunApplication(AppModule, {
-  port: DEFAULT_PORT,
-  host: '0.0.0.0',
+  envSchema,
   development: true,
 });
 
@@ -115,6 +124,7 @@ const appControllerTs = `import {
   BaseController,
   Controller,
   Get,
+  type OneBunResponse,
 } from '@onebun/core';
 
 import { AppService } from './app.service';
@@ -126,7 +136,7 @@ export class AppController extends BaseController {
   }
 
   @Get('/')
-  async getHello(): Promise<Response> {
+  async getHello(): Promise<OneBunResponse> {
     const message = this.appService.getHello();
 
     return this.success({ message });
@@ -183,6 +193,7 @@ await Promise.all([
   Bun.write(`${projectDir}/package.json`, packageJson),
   Bun.write(`${projectDir}/tsconfig.json`, tsconfig),
   Bun.write(`${projectDir}/src/index.ts`, indexTs),
+  Bun.write(`${projectDir}/src/config.ts`, configTs),
   Bun.write(`${projectDir}/src/app.module.ts`, appModuleTs),
   Bun.write(`${projectDir}/src/app.controller.ts`, appControllerTs),
   Bun.write(`${projectDir}/src/app.service.ts`, appServiceTs),
@@ -193,6 +204,7 @@ await Promise.all([
 console.log('  Created package.json');
 console.log('  Created tsconfig.json');
 console.log('  Created src/index.ts');
+console.log('  Created src/config.ts');
 console.log('  Created src/app.module.ts');
 console.log('  Created src/app.controller.ts');
 console.log('  Created src/app.service.ts');

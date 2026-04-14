@@ -14,13 +14,13 @@
  * Note: \@ApiResponse is provided by \@onebun/core for response validation
  */
 
-import { type } from 'arktype';
 import {
   describe,
   expect,
   it,
 } from 'bun:test';
 
+import { type } from '@onebun/core';
 import {
   ApiResponse,
   BaseController,

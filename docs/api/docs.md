@@ -203,9 +203,8 @@ Describe an API operation with summary, description, and additional tags. Import
 :::
 
 ```typescript
-import { Controller, BaseController, Get, Post, Param, Body } from '@onebun/core';
+import { Controller, BaseController, Get, Post, Param, Body, type } from '@onebun/core';
 import { ApiOperation } from '@onebun/docs';
-import { type } from 'arktype';
 
 @Controller('/users')
 export class UserController extends BaseController {
@@ -231,8 +230,7 @@ Define response schemas for documentation and validation. Imported from `@onebun
 :::
 
 ```typescript
-import { Controller, BaseController, Get, Param, ApiResponse } from '@onebun/core';
-import { type } from 'arktype';
+import { Controller, BaseController, Get, Param, ApiResponse, type } from '@onebun/core';
 
 const userSchema = type({
   id: 'string',
@@ -262,7 +260,7 @@ export class UserController extends BaseController {
 ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to OpenAPI-compatible JSON Schema. This provides a **single source of truth**: one schema definition serves as TypeScript type, runtime validation, and OpenAPI documentation.
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 // Define schema once
 const createUserSchema = type({
@@ -329,7 +327,7 @@ const json = JSON.stringify(spec, null, 2);
 const html = generateSwaggerUiHtml('/openapi.json');
 
 // Convert an ArkType schema to JSON Schema
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 const schema = type({ name: 'string', age: 'number' });
 const jsonSchema = arktypeToJsonSchema(schema);
 ```
@@ -361,9 +359,9 @@ import {
   Service,
   BaseService,
   Module,
+  type,
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
-import { type } from 'arktype';
 
 // ---- Schemas (single source of truth) ----
 

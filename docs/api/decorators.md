@@ -320,7 +320,7 @@ Extract path parameter from URL. **Path parameters are always required** per Ope
 **Example:**
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 const idSchema = type('string.uuid');
 
@@ -369,7 +369,7 @@ Extract and optionally validate request body. **Required is determined from sche
 **Example:**
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 const createUserSchema = type({
   name: 'string',
@@ -848,7 +848,7 @@ Define response schema for documentation and validation.
 **Example:**
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 const userResponseSchema = type({
   id: 'string',
@@ -960,9 +960,8 @@ export class UserController extends BaseController {
 Use both `@onebun/core` and `@onebun/docs` decorators together for complete documentation:
 
 ```typescript
-import { Controller, BaseController, Get, Post, Body, Param, ApiResponse } from '@onebun/core';
+import { Controller, BaseController, Get, Post, Body, Param, ApiResponse, type } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
-import { type } from 'arktype';
 
 const userSchema = type({
   id: 'string',
@@ -1117,9 +1116,9 @@ import {
   ApiResponse,
   Inject,
   type OneBunRequest,
+  type,
 } from '@onebun/core';
 import { Span } from '@onebun/trace';
-import { type } from 'arktype';
 
 // Validation schemas
 const createUserSchema = type({

@@ -152,10 +152,9 @@ export class UserController {
 ```typescript
 import {
   BaseController, Controller, Get, Post, Put, Delete,
-  Param, Body, Query, UseGuards, ApiResponse,
+  Param, Body, Query, UseGuards, ApiResponse, type,
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
-import { type } from 'arktype';
 
 import { AuthGuard } from './auth.guard';
 import { UserService } from './user.service';

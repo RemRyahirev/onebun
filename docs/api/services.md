@@ -559,9 +559,8 @@ const program = pipe(
 ## Complete Service Example
 
 ```typescript
-import { Service, BaseService, Span } from '@onebun/core';
+import { Service, BaseService, Span, type } from '@onebun/core';
 import { CacheService } from '@onebun/cache';
-import { type } from 'arktype';
 
 // Types
 interface User {

@@ -45,7 +45,7 @@ export const envSchema = {
 ## src/users/schemas/user.schema.ts
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 /**
  * User entity schema

@@ -113,8 +113,7 @@ export class UserService extends BaseService {
 ## src/users/users.controller.ts
 
 ```typescript
-import { Controller, BaseController, Get, Post, Param, Body } from '@onebun/core';
-import { type } from 'arktype';
+import { Controller, BaseController, Get, Post, Param, Body, type } from '@onebun/core';
 import { UserService } from './users.service';
 
 const createUserSchema = type({
@@ -272,8 +271,7 @@ export class OrderService extends BaseService {
 ## src/orders/orders.controller.ts
 
 ```typescript
-import { Controller, BaseController, Get, Post, Put, Param, Body, Query } from '@onebun/core';
-import { type } from 'arktype';
+import { Controller, BaseController, Get, Post, Put, Param, Body, Query, type } from '@onebun/core';
 import { OrderService } from './orders.service';
 
 const createOrderSchema = type({

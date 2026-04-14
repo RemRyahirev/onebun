@@ -174,8 +174,8 @@ import {
   Param,
   Body,
   Query,
+  type,
 } from '@onebun/core';
-import { type } from 'arktype';
 
 import { HelloService } from './hello.service';
 

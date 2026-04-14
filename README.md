@@ -40,9 +40,8 @@ bun add @onebun/core
 
 ```typescript
 import {
-  BaseController, Controller, Get, Module, OneBunApplication, Service, BaseService, Post, Body,
+  BaseController, Controller, Get, Module, OneBunApplication, Service, BaseService, Post, Body, type,
 } from '@onebun/core';
-import { type } from 'arktype';
 
 const CreateUser = type({ name: 'string', email: 'string.email' });
 

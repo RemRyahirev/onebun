@@ -8,12 +8,18 @@ Package: `@onebun/core` (uses ArkType)
 
 OneBun uses [ArkType](https://arktype.io/) for runtime type validation and TypeScript type inference.
 
+Для типизации параметров, принимающих схему, используйте тип `ValidationSchema` — это реэкспорт `Type` из ArkType:
+
+```typescript
+import { type, type ValidationSchema } from '@onebun/core';
+```
+
 ## Basic Usage
 
 ### Defining Schemas
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 // Primitive types
 const stringSchema = type('string');
@@ -35,8 +41,7 @@ type User = typeof userSchema.infer;
 ### Using in Controllers
 
 ```typescript
-import { Controller, BaseController, Post, Body } from '@onebun/core';
-import { type } from 'arktype';
+import { Controller, BaseController, Post, Body, type } from '@onebun/core';
 
 const createUserSchema = type({
   name: 'string',
@@ -66,7 +71,7 @@ export class UserController extends BaseController {
 ### Primitives
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 type('string')          // string
 type('number')          // number
@@ -219,8 +224,7 @@ type(['string', 'number', 'boolean']) // [string, number, boolean]
 Validate data against a schema, returning a result object.
 
 ```typescript
-import { validate } from '@onebun/core';
-import { type } from 'arktype';
+import { validate, type } from '@onebun/core';
 
 const schema = type({
   name: 'string',
@@ -251,8 +255,7 @@ type ValidationResult<T> =
 Validate data and throw an error if validation fails.
 
 ```typescript
-import { validateOrThrow } from '@onebun/core';
-import { type } from 'arktype';
+import { validateOrThrow, type } from '@onebun/core';
 
 const schema = type({
   name: 'string',
@@ -273,7 +276,7 @@ try {
 ### Create/Update DTOs
 
 ```typescript
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 // Create DTO - all fields required
 const createUserSchema = type({
@@ -438,8 +441,7 @@ if (result instanceof type.errors) {
 Convert ArkType schemas to JSON Schema for OpenAPI/Swagger:
 
 ```typescript
-import { toJsonSchema, getJsonSchema } from '@onebun/core';
-import { type } from 'arktype';
+import { toJsonSchema, getJsonSchema, type } from '@onebun/core';
 
 const userSchema = type({
   name: 'string',
@@ -471,7 +473,7 @@ const jsonSchemaWithFallback = getJsonSchema(userSchema, {
 
 ```typescript
 // schemas/user.schema.ts
-import { type } from 'arktype';
+import { type } from '@onebun/core';
 
 export const createUserSchema = type({
   name: 'string',
