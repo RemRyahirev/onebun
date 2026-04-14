@@ -1,5 +1,5 @@
 ---
-description: "Prometheus-compatible metrics. @MeasureTime, @CountCalls decorators. HTTP, system, GC metrics. Custom counters, gauges, histograms."
+description: "Prometheus-compatible metrics. @Timed, @Counted, @Gauged decorators. HTTP, system, GC metrics. Custom counters, gauges, histograms."
 ---
 
 # Metrics API
@@ -116,12 +116,15 @@ import { Service, BaseService } from '@onebun/core';
 
 @Service()
 export class OrderService extends BaseService {
-  private metricsService: any;
+  async createOrder(data: OrderData): Promise<Order> {
+    // this.metrics is available in any BaseService or Controller
+    const counter = this.metrics?.createCounter({
+      name: 'orders_created_total',
+      help: 'Total number of orders created',
+    });
 
-  constructor() {
-    super();
-    // Get global metrics service
-    this.metricsService = (globalThis as any).__onebunMetricsService;
+    counter?.inc();
+    // ... process order
   }
 }
 ```
@@ -132,7 +135,7 @@ Track cumulative values that only increase.
 
 ```typescript
 // Create counter - returns prom-client Counter object
-const ordersCounter = this.metricsService.createCounter({
+const ordersCounter = this.metrics?.createCounter({
   name: 'orders_created_total',
   help: 'Total number of orders created',
   labelNames: ['status', 'payment_method'],
@@ -151,7 +154,7 @@ Track values that can go up and down.
 
 ```typescript
 // Create gauge - returns prom-client Gauge object
-const pendingGauge = this.metricsService.createGauge({
+const pendingGauge = this.metrics?.createGauge({
   name: 'orders_pending',
   help: 'Number of pending orders',
   labelNames: ['priority'],
@@ -173,7 +176,7 @@ Track distributions of values.
 
 ```typescript
 // Create histogram - returns prom-client Histogram object
-const processingHistogram = this.metricsService.createHistogram({
+const processingHistogram = this.metrics?.createHistogram({
   name: 'order_processing_duration_seconds',
   help: 'Order processing duration in seconds',
   labelNames: ['order_type'],
@@ -199,9 +202,9 @@ import { Timed } from '@onebun/metrics';
 
 @Service()
 export class OrderService extends BaseService {
-  @Timed('order_processing_duration_seconds', { order_type: 'standard' })
+  @Timed('order_processing_duration_seconds')
   async processOrder(orderId: string): Promise<Order> {
-    // Method execution time is automatically recorded
+    // Method execution time is automatically recorded as a histogram
     return this.doProcess(orderId);
   }
 }
@@ -216,10 +219,30 @@ import { Counted } from '@onebun/metrics';
 
 @Service()
 export class EmailService extends BaseService {
-  @Counted('emails_sent_total', { type: 'transactional' })
+  @Counted('emails_sent_total')
   async sendEmail(to: string, subject: string): Promise<void> {
     // Counter incremented on each call
     await this.smtp.send({ to, subject });
+  }
+}
+```
+
+### @Gauged()
+
+Update a gauge metric after method execution.
+
+```typescript
+import { Gauged } from '@onebun/metrics';
+
+@Service()
+export class QueueService extends BaseService {
+  private queue: Item[] = [];
+
+  @Gauged('queue_depth', () => this.queue.length)
+  async processNext(): Promise<void> {
+    const item = this.queue.shift();
+    await this.handle(item);
+    // Gauge is automatically updated with queue.length after execution
   }
 }
 ```
@@ -231,36 +254,34 @@ import type { Counter, Gauge, Histogram } from 'prom-client';
 
 @Service()
 export class PaymentService extends BaseService {
-  private metricsService: any;
   private paymentsCounter?: Counter<string>;
   private processingHistogram?: Histogram<string>;
   private queueGauge?: Gauge<string>;
 
   constructor() {
     super();
-    this.metricsService = (globalThis as any).__onebunMetricsService;
 
     // Register custom metrics on service init
     this.registerMetrics();
   }
 
   private registerMetrics(): void {
-    if (!this.metricsService) return;
+    if (!this.metrics) return;
 
     // Store references to metric objects for later use
-    this.paymentsCounter = this.metricsService.createCounter({
+    this.paymentsCounter = this.metrics.createCounter({
       name: 'payments_processed_total',
       help: 'Total number of payments processed',
       labelNames: ['status', 'method'],
     });
 
-    this.processingHistogram = this.metricsService.createHistogram({
+    this.processingHistogram = this.metrics.createHistogram({
       name: 'payment_processing_seconds',
       help: 'Payment processing duration',
       buckets: [0.1, 0.5, 1, 2, 5, 10],
     });
 
-    this.queueGauge = this.metricsService.createGauge({
+    this.queueGauge = this.metrics.createGauge({
       name: 'payment_queue_size',
       help: 'Current payment queue size',
     });
@@ -369,34 +390,32 @@ import type { Counter, Gauge, Histogram } from 'prom-client';
 // Service with custom metrics
 @Service()
 export class AnalyticsService extends BaseService {
-  private metricsService: any;
   private eventsCounter?: Counter<string>;
   private processingHistogram?: Histogram<string>;
   private queueGauge?: Gauge<string>;
 
   constructor() {
     super();
-    this.metricsService = (globalThis as any).__onebunMetricsService;
     this.initMetrics();
   }
 
   private initMetrics(): void {
-    if (!this.metricsService) return;
+    if (!this.metrics) return;
 
     // Store references to prom-client metric objects
-    this.eventsCounter = this.metricsService.createCounter({
+    this.eventsCounter = this.metrics.createCounter({
       name: 'analytics_events_total',
       help: 'Total analytics events',
       labelNames: ['event_type', 'source'],
     });
 
-    this.processingHistogram = this.metricsService.createHistogram({
+    this.processingHistogram = this.metrics.createHistogram({
       name: 'analytics_processing_seconds',
       help: 'Analytics event processing time',
       buckets: [0.001, 0.005, 0.01, 0.05, 0.1],
     });
 
-    this.queueGauge = this.metricsService.createGauge({
+    this.queueGauge = this.metrics.createGauge({
       name: 'analytics_queue_depth',
       help: 'Current queue depth',
     });
