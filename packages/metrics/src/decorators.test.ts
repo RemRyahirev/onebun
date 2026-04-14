@@ -401,7 +401,11 @@ describe('Metrics Decorators', () => {
     });
 
     test('should handle async getValue rejection gracefully', async () => {
+      const warnMock = mock(() => {});
+
       class TestService {
+        logger = { warn: warnMock };
+
         @Gauged('failing_async_gauge', async () => {
           throw new Error('async error');
         })
@@ -415,15 +419,21 @@ describe('Metrics Decorators', () => {
 
       await new Promise(resolve => setTimeout(resolve, 0));
 
-      expect(capturedWarns).toContain('Failed to update gauge failing_async_gauge: Error: async error');
+      expect(warnMock).toHaveBeenCalledWith(
+        'Failed to update gauge failing_async_gauge',
+        { error: expect.any(Error) },
+      );
     });
 
     test('should handle getValue function throwing error', () => {
+      const warnMock = mock(() => {});
       const getValue = () => {
         throw new Error('getValue error');
       };
 
       class TestService {
+        logger = { warn: warnMock };
+
         @Gauged('test_gauge', getValue)
         testMethod(): number {
           return 42;
@@ -433,7 +443,10 @@ describe('Metrics Decorators', () => {
       const service = new TestService();
       service.testMethod();
 
-      expect(capturedWarns).toContain('Failed to update gauge test_gauge: Error: getValue error');
+      expect(warnMock).toHaveBeenCalledWith(
+        'Failed to update gauge test_gauge',
+        { error: expect.any(Error) },
+      );
     });
 
     test('should handle missing metrics service gracefully', () => {

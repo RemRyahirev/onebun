@@ -107,6 +107,14 @@ export function Gauged<T extends object>(
     descriptor.value = function (this: T, ...args: any[]): any {
       const result = originalMethod.apply(this, args);
       const instance = this;
+      const logger = 'logger' in this && this.logger as { warn(msg: string, ctx?: object): void }
+        | undefined;
+      const logWarn = (error: unknown): void => {
+        const msg = `Failed to update gauge ${metricName}`;
+        if (logger) {
+          logger.warn(msg, { error });
+        }
+      };
 
       // Update gauge after method execution
       const updateGauge = (): void => {
@@ -116,15 +124,13 @@ export function Gauged<T extends object>(
           if (valueOrPromise instanceof Promise) {
             valueOrPromise.then(
               (value) => setGaugeValue(metricName, value, labels),
-              // eslint-disable-next-line no-console
-              (error) => console.warn(`Failed to update gauge ${metricName}:`, error),
+              logWarn,
             );
           } else {
             setGaugeValue(metricName, valueOrPromise, labels);
           }
         } catch (error) {
-          // eslint-disable-next-line no-console
-          console.warn(`Failed to update gauge ${metricName}:`, error);
+          logWarn(error);
         }
       };
 
