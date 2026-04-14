@@ -496,7 +496,7 @@ This provides a consistent API response envelope across all endpoints.
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Interceptors | Planned | No equivalent yet |
-| GraphQL (`@nestjs/graphql`) | Not planned | Use REST + OpenAPI |
+| GraphQL (`@nestjs/graphql`) | Not available (post-1.0 consideration) | Use REST + OpenAPI |
 | CQRS (`@nestjs/cqrs`) | Not available | -- |
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |
 | Microservices (`@nestjs/microservices`) | Different approach | `MultiServiceApplication` for multi-service from single image |

@@ -121,6 +121,17 @@ Request/response middleware with @UseMiddleware decorator.
 Supports middleware chaining on individual routes.
 → [API Reference](/api/decorators)
 
+### File Upload
+Built-in multipart/form-data and JSON+base64 file upload support.
+@UploadedFile() for single files, @UploadedFiles() for multiple,
+@FormField() for non-file form fields — all with automatic content type detection.
+→ [API Reference](/api/controllers#file-upload)
+
+### Cookie Handling
+Extract cookie values directly with @Cookie() decorator.
+Works alongside @Header(), @Query(), and other parameter decorators.
+→ [API Reference](/api/decorators)
+
 ### Static file serving
 Serve a static directory (e.g. SPA build) from the same host and port as the API.
 Configure `static.root`, optional `pathPrefix` and `fallbackFile` (e.g. `index.html`) for client-side routing.
@@ -312,6 +323,38 @@ If you're coming from NestJS, here's what to expect:
 
 ### Not yet available
 - Interceptors and Pipes (planned)
-- GraphQL integration (planned, separate package)
+- GraphQL integration (post-1.0 consideration)
 - CQRS module
 - Extensive third-party ecosystem
+
+## Feature Comparison
+
+How OneBun compares to other TypeScript backend frameworks.
+
+**Legend:** ✅ built-in · 🔌 plugin/adapter · 👥 community · ❌ none
+
+| Feature | OneBun | NestJS | Hono | Elysia |
+|---------|--------|--------|------|--------|
+| **DI / IoC container** | ✅ Effect.Context | ✅ Custom container | ❌ | ❌ |
+| **Module system** | ✅ @Module | ✅ @Module | ❌ | ❌ |
+| **Decorator routing** | ✅ | ✅ | ❌ | ✅ |
+| **Guards / Auth** | ✅ | ✅ | 👥 | 👥 |
+| **Middleware** | ✅ | ✅ | ✅ | ✅ |
+| **Validation** | ✅ ArkType | 🔌 class-validator | 👥 | ✅ TypeBox |
+| **OpenAPI generation** | ✅ Auto from schemas | 🔌 @nestjs/swagger | 👥 | ✅ |
+| **WebSocket** | ✅ Native + Socket.IO | 🔌 @nestjs/websockets | 👥 | ✅ |
+| **File upload** | ✅ | 🔌 multer | 👥 | ✅ |
+| **Queue / Scheduler** | ✅ In-memory, Redis, NATS | 🔌 @nestjs/bull | ❌ | ❌ |
+| **Prometheus metrics** | ✅ @onebun/metrics | 👥 | ❌ | ❌ |
+| **OpenTelemetry tracing** | ✅ @onebun/trace | 👥 | 👥 | 👥 |
+| **Structured logging** | ✅ @onebun/logger | 👥 | 👥 | 👥 |
+| **Database (ORM)** | ✅ Drizzle | 🔌 TypeORM/Prisma | ❌ | ❌ |
+| **Caching** | ✅ In-memory + Redis | 🔌 @nestjs/cache-manager | ❌ | ❌ |
+| **Env validation** | ✅ @onebun/envs | 🔌 @nestjs/config | ❌ | ❌ |
+| **Multi-service** | ✅ Single image | ❌ | ❌ | ❌ |
+| **Graceful shutdown** | ✅ | 🔌 | ❌ | ❌ |
+| **GraphQL** | ❌ (post-1.0) | 🔌 @nestjs/graphql | 👥 | 👥 |
+| **Interceptors / Pipes** | ❌ (planned) | ✅ | ❌ | ✅ hooks |
+| **CQRS** | ❌ | 🔌 @nestjs/cqrs | ❌ | ❌ |
+| **Node.js support** | ❌ Bun only | ✅ | ✅ | ❌ Bun only |
+| **Third-party ecosystem** | 🆕 Growing | ✅ Mature | ✅ Growing | 👥 Growing |
