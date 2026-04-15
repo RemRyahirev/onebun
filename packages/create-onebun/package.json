@@ -9,5 +9,10 @@
   "files": [
     "src"
   ],
-  "type": "module"
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RemRyahirev/onebun.git",
+    "directory": "packages/create-onebun"
+  }
 }
