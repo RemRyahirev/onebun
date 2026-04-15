@@ -710,7 +710,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       createErrorResponse(
                         'Forbidden',
                         HttpStatusCode.FORBIDDEN,
-                        'Forbidden',
                       ),
                     ),
                     {

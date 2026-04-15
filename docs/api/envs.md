@@ -282,17 +282,17 @@ With module augmentation in place, config access is fully typed - no `as any` ne
 @Controller('/info')
 export class InfoController extends BaseController {
   @Get('/')
-  async getInfo(): Promise<Response> {
+  async getInfo() {
     // Fully typed access - no casting needed
     const serverPort = this.config.get('server.port');  // number
     const appName = this.config.get('app.name');        // string
     const debug = this.config.get('app.debug');          // boolean
 
-    return this.success({
+    return {
       appName,
       serverPort,
       debug,
-    });
+    };
   }
 }
 ```

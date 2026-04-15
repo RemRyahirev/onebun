@@ -27,10 +27,6 @@ _LAUDE.md
 SWEEP.md
 plan.md
 
-# Test projects
-padel
-repofleet/
-
 # NPM
 .npmrc
 
@@ -42,3 +38,5 @@ secrets.json
 
 # Benchmark results
 benchmarks/results/
+
+press-kit/

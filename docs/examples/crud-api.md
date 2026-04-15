@@ -339,6 +339,7 @@ import {
   Query,
   Body,
   HttpStatusCode,
+  HttpException,
   ApiResponse,
 } from '@onebun/core';
 
@@ -367,20 +368,20 @@ export class UserController extends BaseController {
   async findAll(
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-  ): Promise<Response> {
+  ) {
     const pageNum = page ? parseInt(page, 10) : 1;
     const limitNum = limit ? parseInt(limit, 10) : 10;
 
     // Validate pagination params
     if (pageNum < 1) {
-      return this.error('Page must be >= 1', HttpStatusCode.BAD_REQUEST, HttpStatusCode.BAD_REQUEST);
+      throw new HttpException(HttpStatusCode.BAD_REQUEST, 'Page must be >= 1');
     }
     if (limitNum < 1 || limitNum > 100) {
-      return this.error('Limit must be between 1 and 100', HttpStatusCode.BAD_REQUEST, HttpStatusCode.BAD_REQUEST);
+      throw new HttpException(HttpStatusCode.BAD_REQUEST, 'Limit must be between 1 and 100');
     }
 
     const result = await this.userService.findAll(pageNum, limitNum);
-    return this.success(result);
+    return result;
   }
 
   /**
@@ -390,13 +391,13 @@ export class UserController extends BaseController {
   @Get('/:id')
   @ApiResponse(200, { schema: userSchema, description: 'User found' })
   @ApiResponse(404, { description: 'User not found' })
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     try {
       const user = await this.userService.findById(id);
-      return this.success(user);
+      return user;
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
-        return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+        throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
       }
       throw error;
     }
@@ -412,13 +413,13 @@ export class UserController extends BaseController {
   @ApiResponse(409, { description: 'Email already exists' })
   async create(
     @Body(createUserSchema) body: CreateUserDto,
-  ): Promise<Response> {
+  ) {
     try {
       const user = await this.userService.create(body);
       return this.success(user, HttpStatusCode.CREATED);
     } catch (error) {
       if (error instanceof Error && error.message.includes('already exists')) {
-        return this.error('Email already exists', HttpStatusCode.CONFLICT, HttpStatusCode.CONFLICT);
+        throw new HttpException(HttpStatusCode.CONFLICT, 'Email already exists');
       }
       throw error;
     }
@@ -436,17 +437,17 @@ export class UserController extends BaseController {
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: UpdateUserDto,
-  ): Promise<Response> {
+  ) {
     try {
       const user = await this.userService.update(id, body);
-      return this.success(user);
+      return user;
     } catch (error) {
       if (error instanceof Error) {
         if (error.message.includes('not found')) {
-          return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+          throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
         }
         if (error.message.includes('already exists')) {
-          return this.error('Email already exists', HttpStatusCode.CONFLICT, HttpStatusCode.CONFLICT);
+          throw new HttpException(HttpStatusCode.CONFLICT, 'Email already exists');
         }
       }
       throw error;
@@ -460,13 +461,13 @@ export class UserController extends BaseController {
   @Delete('/:id')
   @ApiResponse(200, { description: 'User deleted' })
   @ApiResponse(404, { description: 'User not found' })
-  async delete(@Param('id') id: string): Promise<Response> {
+  async delete(@Param('id') id: string) {
     try {
       await this.userService.delete(id);
-      return this.success({ deleted: true, id });
+      return { deleted: true, id };
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
-        return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+        throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
       }
       throw error;
     }

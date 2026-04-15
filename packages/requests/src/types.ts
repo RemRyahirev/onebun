@@ -42,7 +42,6 @@ export enum HttpStatusCode {
 export interface OneBunError<E extends string = string, R extends string = string> {
   error: E;
   code: number;
-  message?: string;
   traceId?: string;
   details?: Record<string, unknown>;
   originalError?: OneBunError<R>;
@@ -293,7 +292,6 @@ export function createSuccessResponse<T>(result: T, traceId?: string): SuccessRe
 export function createErrorResponse<E extends string, R extends string>(
   error: string,
   code: number,
-  message?: string,
   traceId?: string,
   details: Record<string, unknown> = {},
   originalError?: OneBunError<E, R>,
@@ -301,7 +299,6 @@ export function createErrorResponse<E extends string, R extends string>(
   return {
     success: false,
     error,
-    message,
     traceId,
     code,
     details,

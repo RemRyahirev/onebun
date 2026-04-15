@@ -55,13 +55,13 @@ export class UserController extends BaseController {
   async create(
     // Body is validated and typed
     @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ): Promise<Response> {
+  ) {
     // body is guaranteed to be valid here
     // body.name: string
     // body.email: string
     // body.age: number | undefined
 
-    return this.success({ user: body });
+    return { user: body };
   }
 }
 ```
@@ -313,14 +313,14 @@ const paginationSchema = type({
 async findAll(
   @Query('page') page?: string,
   @Query('limit') limit?: string,
-): Promise<Response> {
+) {
   const pagination = validate(paginationSchema, {
     page: page ? parseInt(page) : 1,
     limit: limit ? parseInt(limit) : 10,
   });
 
   if (!pagination.success) {
-    return this.error('Invalid pagination', 400, 400);
+    throw new HttpException(400, 'Invalid pagination');
   }
 
   // Use pagination.data
@@ -349,7 +349,7 @@ const createOrderSchema = type({
 @Post('/orders')
 async createOrder(
   @Body(createOrderSchema) body: typeof createOrderSchema.infer,
-): Promise<Response> {
+) {
   // body is fully typed and validated
   const order = await this.orderService.create(body);
   return this.success(order, 201);
@@ -378,15 +378,15 @@ export class UserController extends BaseController {
   @ApiResponse(404, {
     description: 'User not found',
   })
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const user = await this.userService.findById(id);
 
     if (!user) {
-      return this.error('User not found', 404, 404);
+      throw new HttpException(404, 'User not found');
     }
 
     // Response will be validated against userResponseSchema
-    return this.success(user);
+    return user;
   }
 }
 ```
@@ -534,6 +534,6 @@ function processUser(user: User) {
 async create(@Body(createUserSchema) body: typeof createUserSchema.infer) {
   // Validation happens at parameter extraction
   // Body is guaranteed valid here
-  return this.success(await this.service.create(body));
+  return this.service.create(body);
 }
 ```

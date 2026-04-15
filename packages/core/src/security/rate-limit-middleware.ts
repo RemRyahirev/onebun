@@ -1,6 +1,8 @@
 import type { RedisClient } from '../redis/redis-client';
 import type { OneBunRequest, OneBunResponse } from '../types';
 
+import { createErrorResponse } from '@onebun/requests';
+
 import { BaseMiddleware } from '../module/middleware';
 
 /**
@@ -252,7 +254,7 @@ export class RateLimitMiddleware extends BaseMiddleware {
       }
 
       return new Response(
-        JSON.stringify({ success: false, error: this.message, statusCode: TOO_MANY_REQUESTS }),
+        JSON.stringify(createErrorResponse(this.message, TOO_MANY_REQUESTS)),
         { status: TOO_MANY_REQUESTS, headers },
       );
     }

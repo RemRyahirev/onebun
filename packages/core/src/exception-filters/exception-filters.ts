@@ -89,7 +89,6 @@ export function createDefaultExceptionFilter(
         const errorResponse = createErrorResponse(
           error.message,
           error.statusCode,
-          error.message,
         );
 
         return new Response(JSON.stringify(errorResponse), {
@@ -117,7 +116,7 @@ export function createDefaultExceptionFilter(
           ? Number((error as { code: unknown }).code)
           : HttpStatusCode.INTERNAL_SERVER_ERROR;
 
-      const errorResponse = createErrorResponse(message, code, message, undefined, {
+      const errorResponse = createErrorResponse(message, code, undefined, {
         originalErrorName: error instanceof Error ? error.name : 'UnknownError',
         stack: error instanceof Error ? error.stack : undefined,
       });

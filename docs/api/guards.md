@@ -23,7 +23,7 @@ import { HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } from '@on
 
 **Order of execution:** global middleware → controller middleware → route middleware → guards → handler
 
-**If a guard returns `false` or rejects:** responds with `{ success: false, error: 'Forbidden', statusCode: 403 }` (HTTP 200, consistent with framework error response pattern).
+**If a guard returns `false` or rejects:** responds with `{ success: false, error: 'Forbidden', code: 403 }` (HTTP 200, consistent with framework error response pattern).
 
 **HttpExecutionContext:**
 ```typescript
@@ -206,7 +206,7 @@ When a guard returns `false`, the framework responds with HTTP 200 and a JSON er
 {
   "success": false,
   "error": "Forbidden",
-  "statusCode": 403
+  "code": 403
 }
 ```
 

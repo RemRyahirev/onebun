@@ -152,15 +152,15 @@ class CounterController extends BaseController {
   }
 
   @Get('/')
-  async getValue(): Promise<Response> {
+  async getValue() {
     const value = this.counterService.getValue();
-    return this.success({ value });
+    return { value };
   }
 
   @Post('/increment')
-  async increment(@Body() body?: { amount?: number }): Promise<Response> {
+  async increment(@Body() body?: { amount?: number }) {
     const newValue = this.counterService.increment(body?.amount);
-    return this.success({ value: newValue });
+    return { value: newValue };
   }
 }
 
@@ -190,14 +190,14 @@ app.start();
 
 ### Response Format
 
-Always use standardized responses:
+Controllers return plain data (auto-wrapped) and throw for errors:
 
 ```typescript
-// Success
-return this.success(data);           // { success: true, result: data }
+// Success: return plain data (auto-wrapped)
+return data;                              // → { success: true, result: data }
 
-// Error
-return this.error('message', 400);   // { success: false, code: 400, message: 'message' }
+// Error: throw HttpException
+throw new HttpException(400, 'message');  // → { success: false, error: 'message', code: 400 }
 ```
 
 ### Dependency Injection

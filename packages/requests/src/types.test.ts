@@ -36,11 +36,10 @@ describe('types helpers', () => {
   });
 
   it('createErrorResponse returns standardized error object', () => {
-    const res = createErrorResponse('ERR', 500, 'boom', 'trace-2', { x: 1 });
+    const res = createErrorResponse('ERR', 500, 'trace-2', { x: 1 });
     expect(res.success).toBe(false);
     expect(res.error).toBe('ERR');
     expect(res.code).toBe(500);
-    expect(res.message).toBe('boom');
     expect(res.traceId).toBe('trace-2');
     expect(res.details).toEqual({ x: 1 });
     expect(isErrorResponse(res)).toBe(true);

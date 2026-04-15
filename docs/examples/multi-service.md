@@ -113,7 +113,7 @@ export class UserService extends BaseService {
 ## src/users/users.controller.ts
 
 ```typescript
-import { Controller, BaseController, Get, Post, Param, Body, type } from '@onebun/core';
+import { Controller, BaseController, Get, Post, Param, Body, HttpException, type } from '@onebun/core';
 import { UserService } from './users.service';
 
 const createUserSchema = type({
@@ -128,24 +128,24 @@ export class UserController extends BaseController {
   }
 
   @Get('/')
-  async findAll(): Promise<Response> {
+  async findAll() {
     const users = await this.userService.findAll();
-    return this.success(users);
+    return users;
   }
 
   @Get('/:id')
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const user = await this.userService.findById(id);
     if (!user) {
-      return this.error('User not found', 404, 404);
+      throw new HttpException(404, 'User not found');
     }
-    return this.success(user);
+    return user;
   }
 
   @Post('/')
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ): Promise<Response> {
+  ) {
     const user = await this.userService.create(body);
     return this.success(user, 201);
   }
@@ -271,7 +271,7 @@ export class OrderService extends BaseService {
 ## src/orders/orders.controller.ts
 
 ```typescript
-import { Controller, BaseController, Get, Post, Put, Param, Body, Query, type } from '@onebun/core';
+import { Controller, BaseController, Get, Post, Put, Param, Body, Query, HttpException, type } from '@onebun/core';
 import { OrderService } from './orders.service';
 
 const createOrderSchema = type({
@@ -294,25 +294,25 @@ export class OrderController extends BaseController {
   }
 
   @Get('/')
-  async findAll(@Query('userId') userId?: string): Promise<Response> {
+  async findAll(@Query('userId') userId?: string) {
     if (userId) {
       const orders = await this.orderService.findByUserId(userId);
-      return this.success(orders);
+      return orders;
     }
     const orders = await this.orderService.findAll();
-    return this.success(orders);
+    return orders;
   }
 
   @Post('/')
   async create(
     @Body(createOrderSchema) body: typeof createOrderSchema.infer,
-  ): Promise<Response> {
+  ) {
     try {
       const order = await this.orderService.create(body);
       return this.success(order, 201);
     } catch (error) {
       if (error instanceof Error && error.message === 'User not found') {
-        return this.error('User not found', 404, 404);
+        throw new HttpException(404, 'User not found');
       }
       throw error;
     }
@@ -322,12 +322,12 @@ export class OrderController extends BaseController {
   async updateStatus(
     @Param('id') id: string,
     @Body(updateStatusSchema) body: typeof updateStatusSchema.infer,
-  ): Promise<Response> {
+  ) {
     const order = await this.orderService.updateStatus(id, body.status);
     if (!order) {
-      return this.error('Order not found', 404, 404);
+      throw new HttpException(404, 'Order not found');
     }
-    return this.success(order);
+    return order;
   }
 }
 ```

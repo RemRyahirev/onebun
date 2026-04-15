@@ -35,7 +35,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 3. Middleware chain executes (global → module → controller → route)
 4. Parameter decorators extract @Param, @Query, @Body
 5. Controller method executes with injected services
-6. Response serialized (this.success/this.error or direct return)
+6. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
 7. MetricsMiddleware records metrics
 
 **Module Metadata Storage**:
@@ -544,7 +544,7 @@ async myOperation(): Promise<void> {
 
 ## Error Handling
 
-OneBun provides standardized error responses via `this.error()` on controllers and typed error classes (`NotFoundError`, `InternalServerError`, etc.). See [Controllers API — error()](/api/controllers#error) for the response format and usage examples.
+OneBun provides standardized error responses via `throw new HttpException(statusCode, message)` and typed error classes (`NotFoundError`, `InternalServerError`, etc.). See [Controllers API](/api/controllers) for the response format and usage examples.
 
 ## Multi-Service Architecture
 

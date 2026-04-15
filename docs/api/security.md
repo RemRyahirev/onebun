@@ -29,7 +29,7 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
-**Rate limit response:** HTTP 429, `{ success: false, error: 'Too Many Requests', statusCode: 429 }`
+**Rate limit response:** HTTP 429, `{ success: false, error: 'Too Many Requests', code: 429 }`
 
 **Rate limit backends:**
 - `MemoryRateLimitStore` — default, in-process only
@@ -201,7 +201,7 @@ RateLimitMiddleware.configure({
 {
   "success": false,
   "error": "Too Many Requests",
-  "statusCode": 429
+  "code": 429
 }
 ```
 

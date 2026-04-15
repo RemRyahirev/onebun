@@ -525,7 +525,7 @@ formatDate(date: Date): string {}
 ## Complete Example
 
 ```typescript
-import { Module, Controller, BaseController, Service, BaseService, Get, Post, Param, Body, Span } from '@onebun/core';
+import { Module, Controller, BaseController, Service, BaseService, Get, Post, Param, Body, HttpException, Span } from '@onebun/core';
 
 // Service with comprehensive tracing
 @Service()
@@ -623,15 +623,14 @@ export class OrderController extends BaseController {
   }
 
   @Post('/')
-  async create(@Body() body: CreateOrderDto): Promise<Response> {
+  async create(@Body() body: CreateOrderDto) {
     const order = await this.orderService.createOrder(body);
     return this.success(order, 201);
   }
 
   @Post('/:id/pay')
-  async pay(@Param('id') id: string): Promise<Response> {
-    const result = await this.orderService.processPayment(id);
-    return this.success(result);
+  async pay(@Param('id') id: string) {
+    return await this.orderService.processPayment(id);
   }
 }
 

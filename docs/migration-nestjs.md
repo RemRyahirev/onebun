@@ -16,7 +16,7 @@ This guide walks through the mapping of concepts, decorators, and code patterns.
 |--------|--------|-------|
 | `@Module()` | `@Module()` | Same structure: `imports`, `controllers`, `providers`, `exports` |
 | `@Injectable()` | `@Service()` | Services extend `BaseService` for logger/config access |
-| `@Controller()` | `@Controller()` | Controllers extend `BaseController` for `this.success()` / `this.error()` |
+| `@Controller()` | `@Controller()` | Controllers extend `BaseController`. Return plain objects (auto-wrapped), throw `HttpException` for errors |
 | Pipe (`@UsePipes`) | ArkType schema in `@Body()` | Declarative schema, not class-based. One schema = type + validation + OpenAPI |
 | Guard (`@UseGuards`) | Guard (`@UseGuards`) | Same `CanActivate`-style pattern via `HttpGuard` interface |
 | Exception Filter (`@UseFilters`) | Exception Filter (`@UseFilters`) | Same pattern. `HttpException` for throwing, `ExceptionFilter` for catching |
@@ -152,7 +152,7 @@ export class UserController {
 ```typescript
 import {
   BaseController, Controller, Get, Post, Put, Delete,
-  Param, Body, Query, UseGuards, ApiResponse, type,
+  Param, Body, Query, UseGuards, HttpException, ApiResponse, type,
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
 
@@ -188,20 +188,19 @@ export class UserController extends BaseController {
   @ApiOperation({ summary: 'List all users' })
   @Get('/')
   @ApiResponse(200, { schema: userSchema.array() })
-  async findAll(@Query('page') page?: string): Promise<Response> {
-    const users = await this.userService.findAll(page);
-    return this.success(users);
+  async findAll(@Query('page') page?: string) {
+    return this.userService.findAll(page);
   }
 
   @Get('/:id')
   @ApiResponse(200, { schema: userSchema })
   @ApiResponse(404, { description: 'User not found' })
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const user = await this.userService.findOne(id);
     if (!user) {
-      return this.error('User not found', 404, 404);
+      throw new HttpException(404, 'User not found');
     }
-    return this.success(user);
+    return user;
   }
 
   @Post('/')
@@ -209,9 +208,8 @@ export class UserController extends BaseController {
   @ApiResponse(201, { schema: userSchema })
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ): Promise<Response> {
-    const user = await this.userService.create(body);
-    return this.success(user);
+  ) {
+    return this.userService.create(body);
   }
 
   @Put('/:id')
@@ -219,23 +217,22 @@ export class UserController extends BaseController {
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: typeof updateUserSchema.infer,
-  ): Promise<Response> {
-    const user = await this.userService.update(id, body);
-    return this.success(user);
+  ) {
+    return this.userService.update(id, body);
   }
 
   @Delete('/:id')
   @UseGuards(AuthGuard)
-  async remove(@Param('id') id: string): Promise<Response> {
+  async remove(@Param('id') id: string) {
     await this.userService.remove(id);
-    return this.success({ deleted: true });
+    return { deleted: true };
   }
 }
 ```
 
 **Key differences:**
 - Controllers extend `BaseController` and call `super()` in the constructor
-- Route handlers return `Response` via `this.success()` / `this.error()`
+- Route handlers return plain objects (auto-wrapped to `{ success: true, result: data }`), throw `HttpException` for errors
 - Validation is declarative: pass ArkType schema to `@Body(schema)` instead of DTO classes with `class-validator`
 - One schema gives you TypeScript types, runtime validation, and OpenAPI spec -- no duplication
 
@@ -479,14 +476,14 @@ and no Express/Fastify adapter. This means:
 
 ### Response Pattern
 
-OneBun controllers return `Response` objects via helper methods:
+OneBun controllers return plain objects -- the framework auto-wraps them into a standard envelope:
 
 ```typescript
-// Success response: { success: true, result: data }
-return this.success(data);
+// Return plain data -- auto-wrapped to: { success: true, result: data }
+return data;
 
-// Error response: { success: false, error: message, statusCode: code }
-return this.error('Not found', 404, 404);
+// Throw for errors -- produces: { success: false, error: 'Not found', code: 404 }
+throw new HttpException(404, 'Not found');
 ```
 
 This provides a consistent API response envelope across all endpoints.
@@ -525,7 +522,7 @@ These features are built into the framework -- no community packages needed:
 4. Replace `@Injectable()` with `@Service()` and extend `BaseService`
 5. Update controllers to extend `BaseController` and add `super()` call
 6. Replace DTO classes + `class-validator` with ArkType schemas
-7. Update route handlers to return `this.success()` / `this.error()`
+7. Update route handlers to return plain objects and throw `HttpException` for errors
 8. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
 9. Move `ConfigService` usage to `this.config` (from `BaseService`)
 10. Move `Logger` usage to `this.logger` (from `BaseService`)

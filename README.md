@@ -55,11 +55,11 @@ class UserController extends BaseController {
   constructor(private users: UserService) { super(); }
 
   @Get('/')
-  async list() { return this.success(this.users.getAll()); }
+  async list() { return this.users.getAll(); }
 
   @Post('/')
   async create(@Body(CreateUser) body: typeof CreateUser.infer) {
-    return this.success(body, 201);
+    return this.success(body, 201);  // this.success() only when custom status needed
   }
 }
 

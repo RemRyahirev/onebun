@@ -144,7 +144,6 @@ const applyAuthIfNeeded = (
           createErrorResponse(
             'AUTH_ERROR',
             HttpStatusCode.UNAUTHORIZED,
-            `Authentication failed: ${error}`,
             traceId,
             { details: error },
           ),
@@ -200,7 +199,6 @@ const parseResponseData = <T>(
           createErrorResponse(
             'RESPONSE_PARSE_ERROR',
             response.status,
-            `Failed to read response text: ${error}`,
             traceId,
             { details: error },
           ),
@@ -211,7 +209,6 @@ const parseResponseData = <T>(
             createErrorResponse(
               'RESPONSE_PARSE_ERROR',
               response.status,
-              'Response text is empty',
               traceId,
               { details: 'Response text is empty' },
             ),
@@ -226,7 +223,6 @@ const parseResponseData = <T>(
             createErrorResponse(
               'RESPONSE_PARSE_ERROR',
               response.status,
-              'Response text is not valid JSON',
               traceId,
               { details: text },
             ),
@@ -251,7 +247,6 @@ const parseResponseData = <T>(
         createErrorResponse(
           'RESPONSE_READ_ERROR',
           response.status,
-          `Failed to read response: ${error}`,
           traceId,
           { details: error },
         ),
@@ -294,7 +289,6 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         createErrorResponse(
           'FETCH_ERROR',
           HttpStatusCode.INTERNAL_SERVER_ERROR,
-          `Request failed: ${error}`,
           traceId,
           { details: error },
         ),
@@ -320,7 +314,6 @@ const executeSingleRequest = <T, E extends string, R extends string>(
           return createErrorResponse(
             'HTTP_ERROR',
             response.status,
-            `HTTP ${response.status}: ${response.statusText}`,
             traceId,
             {
               headers: responseHeaders,
@@ -411,7 +404,6 @@ const executeWithRetry = <T, E extends string, R extends string>(
               createErrorResponse(
                 'RETRY_CALLBACK_ERROR',
                 HttpStatusCode.INTERNAL_SERVER_ERROR,
-                'Retry callback failed',
                 traceId,
                 { details: error },
               ),

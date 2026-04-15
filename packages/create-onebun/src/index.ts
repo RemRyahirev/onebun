@@ -124,7 +124,6 @@ const appControllerTs = `import {
   BaseController,
   Controller,
   Get,
-  type OneBunResponse,
 } from '@onebun/core';
 
 import { AppService } from './app.service';
@@ -136,10 +135,8 @@ export class AppController extends BaseController {
   }
 
   @Get('/')
-  async getHello(): Promise<OneBunResponse> {
-    const message = this.appService.getHello();
-
-    return this.success({ message });
+  async getHello() {
+    return { message: this.appService.getHello() };
   }
 }
 `;

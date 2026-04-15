@@ -462,9 +462,9 @@ export class AnalyticsController extends BaseController {
   }
 
   @Post('/track')
-  async track(@Body() body: { event: string; source: string; data?: unknown }): Promise<Response> {
+  async track(@Body() body: { event: string; source: string; data?: unknown }) {
     await this.analyticsService.trackEvent(body.event, body.source, body.data);
-    return this.success({ tracked: true });
+    return { tracked: true };
   }
 }
 

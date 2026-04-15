@@ -556,7 +556,7 @@ Effect.runPromise(
 ## Complete Example
 
 ```typescript
-import { Module, Controller, BaseController, Service, BaseService, Get, Post, Delete, Param, Body, type } from '@onebun/core';
+import { Module, Controller, BaseController, Service, BaseService, Get, Post, Delete, Param, Body, HttpException, type } from '@onebun/core';
 import { CacheModule, CacheService, CacheType } from '@onebun/cache';
 
 // Types
@@ -639,34 +639,33 @@ export class ProductController extends BaseController {
   }
 
   @Get('/')
-  async findAll(): Promise<Response> {
-    const products = await this.productService.findAll();
-    return this.success(products);
+  async findAll() {
+    return await this.productService.findAll();
   }
 
   @Get('/:id')
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const product = await this.productService.findById(id);
 
     if (!product) {
-      return this.error('Product not found', 404, 404);
+      throw new HttpException(404, 'Product not found');
     }
 
-    return this.success(product);
+    return product;
   }
 
   @Post('/:id/stock')
   async updateStock(
     @Param('id') id: string,
     @Body() body: { quantity: number },
-  ): Promise<Response> {
+  ) {
     const product = await this.productService.updateStock(id, body.quantity);
 
     if (!product) {
-      return this.error('Product not found', 404, 404);
+      throw new HttpException(404, 'Product not found');
     }
 
-    return this.success(product);
+    return product;
   }
 }
 

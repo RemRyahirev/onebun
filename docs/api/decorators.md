@@ -51,8 +51,8 @@ async getUser(
   @Header('Authorization', { required: true }) auth: string, // explicitly required
   @Cookie('session') session?: string,          // optional by default
   @Cookie('token', { required: true }) token: string, // explicitly required
-): Promise<Response> {
-  return this.success({ id, page, limit });
+) {
+  return { id, page, limit };
 }
 
 // Access raw request (OneBunRequest = BunRequest with .cookies and .params)
@@ -93,11 +93,11 @@ async upload(
   @UploadedFiles('docs', { maxCount: 10 }) docs: OneBunFile[],
   @FormField('name', { required: true }) name: string,
   @FormField('email') email?: string,
-): Promise<Response> {
+) {
   await file.writeTo(`./uploads/${file.name}`);
   const base64 = await file.toBase64();
   const buffer = await file.toBuffer();
-  return this.success({ name: file.name, size: file.size });
+  return { name: file.name, size: file.size };
 }
 
 // JSON base64 format: { "avatar": "base64..." } or { "avatar": { "data": "base64...", "filename": "photo.png", "mimeType": "image/png" } }
@@ -534,9 +534,9 @@ export class FileController extends BaseController {
       maxSize: 5 * 1024 * 1024,
       mimeTypes: [MimeType.ANY_IMAGE],
     }) file: OneBunFile,
-  ): Promise<Response> {
+  ) {
     await file.writeTo(`./uploads/${file.name}`);
-    return this.success({ filename: file.name, size: file.size });
+    return { filename: file.name, size: file.size };
   }
 }
 ```
@@ -564,19 +564,19 @@ interface FilesUploadOptions extends FileUploadOptions {
 @Post('/documents')
 async uploadDocs(
   @UploadedFiles('docs', { maxCount: 10 }) files: OneBunFile[],
-): Promise<Response> {
+) {
   for (const file of files) {
     await file.writeTo(`./uploads/${file.name}`);
   }
-  return this.success({ count: files.length });
+  return { count: files.length };
 }
 
 // All files from request (no field name filter)
 @Post('/batch')
 async uploadBatch(
   @UploadedFiles(undefined, { maxCount: 20 }) files: OneBunFile[],
-): Promise<Response> {
-  return this.success({ count: files.length });
+) {
+  return { count: files.length };
 }
 ```
 
@@ -596,9 +596,9 @@ async createProfile(
   @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
   @FormField('name', { required: true }) name: string,
   @FormField('email') email: string,
-): Promise<Response> {
+) {
   await avatar.writeTo(`./uploads/${avatar.name}`);
-  return this.success({ name, email, avatar: avatar.name });
+  return { name, email, avatar: avatar.name };
 }
 ```
 
@@ -794,13 +794,13 @@ export class UserController extends BaseController {
   @Get('/protected')
   @UseMiddleware(AuthMiddleware)
   async protectedRoute() {
-    return this.success({ message: 'Secret data' });
+    return { message: 'Secret data' };
   }
 
   @Post('/action')
   @UseMiddleware(LogMiddleware, AuthMiddleware)  // Multiple middleware
   async action() {
-    return this.success({ message: 'Action performed' });
+    return { message: 'Action performed' };
   }
 }
 ```
@@ -813,13 +813,13 @@ export class UserController extends BaseController {
 export class AdminController extends BaseController {
   @Get('/dashboard')
   getDashboard() {
-    return this.success({ stats: {} });
+    return { stats: {} };
   }
 
   @Put('/settings')
   @UseMiddleware(AuditLogMiddleware)  // Additional middleware for this route
   updateSettings() {
-    return this.success({ updated: true });
+    return { updated: true };
   }
 }
 ```
@@ -869,7 +869,7 @@ export class UserController extends BaseController {
   })
   async findOne(@Param('id') id: string) {
     // Response will be validated against userResponseSchema
-    return this.success({ id, name: 'John', email: 'john@example.com' });
+    return { id, name: 'John', email: 'john@example.com' };
   }
 }
 ```
@@ -915,7 +915,7 @@ export class UserController extends BaseController {
   @ApiTags('Admin')
   @Get('/admins')
   async getAdmins() {
-    return this.success([]);
+    return [];
   }
 }
 ```
@@ -950,7 +950,7 @@ export class UserController extends BaseController {
   })
   @Get('/:id')
   async getUser(@Param('id') id: string) {
-    return this.success({ id, name: 'John' });
+    return { id, name: 'John' };
   }
 }
 ```
@@ -1114,6 +1114,7 @@ import {
   Req,
   UseMiddleware,
   ApiResponse,
+  HttpException,
   Inject,
   type OneBunRequest,
   type,
@@ -1181,20 +1182,20 @@ export class UserController extends BaseController {
   async findAll(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
-  ): Promise<Response> {
+  ) {
     const users = await this.userService.findAll();
-    return this.success(users);
+    return users;
   }
 
   @Get('/:id')
   @ApiResponse(200, { schema: userSchema })
   @ApiResponse(404, { description: 'User not found' })
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const user = await this.userService.findById(id);
     if (!user) {
-      return this.error('User not found', 404, 404);
+      throw new HttpException(404, 'User not found');
     }
-    return this.success(user);
+    return user;
   }
 
   @Post('/')
@@ -1203,10 +1204,10 @@ export class UserController extends BaseController {
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,
     @Header('X-Request-ID') requestId?: string,
-  ): Promise<Response> {
+  ) {
     this.logger.info('Creating user', { requestId });
     const user = await this.userService.create(body);
-    return this.success(user);
+    return user;
   }
 }
 

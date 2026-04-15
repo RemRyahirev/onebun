@@ -33,10 +33,9 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 ```
 
 **The default filter** handles:
-- `HttpException` → `{ success: false, error: message, statusCode: code }` (HTTP status = exception's statusCode)
-- `OneBunBaseError` subclasses → `{ success: false, error: message, statusCode: code }` (HTTP 200)
-- Any other `Error` → `{ success: false, error: 'Internal Server Error', statusCode: 500 }` (HTTP 200)
-- HTTP 200 with JSON body is intentional — it matches the framework's existing error envelope convention.
+- `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
+- `OneBunBaseError` subclasses → `{ success: false, error: message, code: errorCode }` (HTTP status = error's code)
+- Any other `Error` → `{ success: false, error: message, code: 500 }` (HTTP 500)
 
 </llm-only>
 
@@ -68,7 +67,7 @@ import { OneBunBaseError } from '@onebun/requests';
 const myFilter = createExceptionFilter((error, ctx) => {
   if (error instanceof OneBunBaseError) {
     return new Response(
-      JSON.stringify({ success: false, message: error.message, code: error.statusCode }),
+      JSON.stringify({ success: false, error: error.message, code: error.statusCode }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   }
@@ -104,12 +103,10 @@ import { HttpException } from '@onebun/core';
 
 // In a controller handler:
 @Get('/:id')
-async findOne(@Param('id') id: string): Promise<OneBunResponse> {
+async findOne(@Param('id') id: string) {
   const item = await this.itemService.findById(id);
-  if (!item) {
-    throw new HttpException(404, 'Item not found');
-  }
-  return this.success(item);
+  if (!item) throw new HttpException(404, 'Item not found');
+  return item;
 }
 ```
 
@@ -117,9 +114,9 @@ The default exception filter converts `HttpException` to a JSON response with th
 
 | Input | Response |
 |-------|----------|
-| `throw new HttpException(400, 'Bad input')` | HTTP 400 `{ success: false, error: "Bad input", statusCode: 400 }` |
-| `throw new HttpException(404, 'Not found')` | HTTP 404 `{ success: false, error: "Not found", statusCode: 404 }` |
-| `throw new HttpException(409, 'Conflict')` | HTTP 409 `{ success: false, error: "Conflict", statusCode: 409 }` |
+| `throw new HttpException(400, 'Bad input')` | HTTP 400 `{ success: false, error: "Bad input", code: 400 }` |
+| `throw new HttpException(404, 'Not found')` | HTTP 404 `{ success: false, error: "Not found", code: 404 }` |
+| `throw new HttpException(409, 'Conflict')` | HTTP 409 `{ success: false, error: "Conflict", code: 409 }` |
 
 > **Note:** Framework validation errors (`@Body(schema)`, `@Param`, `@File`) automatically throw `HttpException(400, ...)`, so validation failures return HTTP 400 with a descriptive error message.
 
@@ -182,11 +179,9 @@ The `defaultExceptionFilter` is always active. It handles:
 
 | Error type | Response body | Status |
 |------------|---------------|--------|
-| `HttpException` | `{ success: false, error: message, statusCode: code }` | exception's statusCode |
-| `OneBunBaseError` subclass | `{ success: false, error: message, statusCode: code }` | 200 |
-| Any other `Error` or value | `{ success: false, error: 'Internal Server Error', statusCode: 500 }` | 200 |
-
-> **Note:** HTTP 200 with a JSON error body is an intentional framework convention — it keeps all API responses structurally consistent (success / error both use the same envelope).
+| `HttpException` | `{ success: false, error: message, code: statusCode }` | exception's statusCode |
+| `OneBunBaseError` subclass | `{ success: false, error: message, code: errorCode }` | error's code |
+| Any other `Error` or value | `{ success: false, error: message, code: 500 }` | 500 |
 
 ## Accessing the Request in a Filter
 

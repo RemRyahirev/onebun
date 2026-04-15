@@ -178,8 +178,8 @@ export class UserController extends BaseController {
   // All endpoints in this controller are tagged with 'Users' and 'User Management'
 
   @Get('/')
-  async findAll(): Promise<Response> {
-    return this.success([]);
+  async findAll() {
+    return [];
   }
 }
 ```
@@ -189,8 +189,8 @@ Can also be used on individual methods (place above the route decorator):
 ```typescript
 @ApiTags('Admin')
 @Get('/admins')
-async getAdmins(): Promise<Response> {
-  return this.success([]);
+async getAdmins() {
+  return [];
 }
 ```
 
@@ -215,8 +215,8 @@ export class UserController extends BaseController {
     tags: ['Users'],
   })
   @Get('/:id')
-  async getUser(@Param('id') id: string): Promise<Response> {
-    return this.success({ id, name: 'John' });
+  async getUser(@Param('id') id: string) {
+    return { id, name: 'John' };
   }
 }
 ```
@@ -249,8 +249,8 @@ export class UserController extends BaseController {
   @ApiResponse(404, {
     description: 'User not found',
   })
-  async getUser(@Param('id') id: string): Promise<Response> {
-    return this.success({ id, name: 'John', email: 'john@example.com' });
+  async getUser(@Param('id') id: string) {
+    return { id, name: 'John', email: 'john@example.com' };
   }
 }
 ```
@@ -273,9 +273,9 @@ const createUserSchema = type({
 @Post('/')
 async createUser(
   @Body(createUserSchema) body: typeof createUserSchema.infer,
-): Promise<Response> {
+) {
   // body is validated and typed
-  return this.success(body);
+  return body;
 }
 ```
 
@@ -356,6 +356,7 @@ import {
   Body,
   Query,
   ApiResponse,
+  HttpException,
   Service,
   BaseService,
   Module,
@@ -432,19 +433,18 @@ class UserController extends BaseController {
   async findAll(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
-  ): Promise<Response> {
-    const users = await this.userService.findAll();
-    return this.success(users);
+  ) {
+    return await this.userService.findAll();
   }
 
   @ApiOperation({ summary: 'Get user by ID' })
   @Get('/:id')
   @ApiResponse(200, { schema: userSchema, description: 'User found' })
   @ApiResponse(404, { description: 'User not found' })
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     const user = await this.userService.findById(id);
-    if (!user) return this.error('User not found', 404, 404);
-    return this.success(user);
+    if (!user) throw new HttpException(404, 'User not found');
+    return user;
   }
 
   @ApiOperation({ summary: 'Create a new user' })
@@ -453,9 +453,9 @@ class UserController extends BaseController {
   @ApiResponse(400, { description: 'Invalid input' })
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ): Promise<Response> {
+  ) {
     const user = await this.userService.create(body);
-    return this.success(user);
+    return this.success(user, 201);
   }
 
   @ApiOperation({ summary: 'Update a user' })
@@ -465,20 +465,20 @@ class UserController extends BaseController {
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: typeof updateUserSchema.infer,
-  ): Promise<Response> {
+  ) {
     const user = await this.userService.update(id, body);
-    if (!user) return this.error('User not found', 404, 404);
-    return this.success(user);
+    if (!user) throw new HttpException(404, 'User not found');
+    return user;
   }
 
   @ApiOperation({ summary: 'Delete a user' })
   @Delete('/:id')
   @ApiResponse(200, { description: 'User deleted' })
   @ApiResponse(404, { description: 'User not found' })
-  async delete(@Param('id') id: string): Promise<Response> {
+  async delete(@Param('id') id: string) {
     const deleted = await this.userService.delete(id);
-    if (!deleted) return this.error('User not found', 404, 404);
-    return this.success({ deleted: true });
+    if (!deleted) throw new HttpException(404, 'User not found');
+    return { deleted: true };
   }
 }
 

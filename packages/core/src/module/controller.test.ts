@@ -432,13 +432,11 @@ describe('Controller', () => {
       const { instance: controller } = createTestController(TestController);
 
       const response = controller.testErrorContent();
-      const content = await response.json();
+      const content = await response.json() as { success: boolean; error: string; code: number };
 
-      expect(content).toEqual({
-        success: false,
-        code: 1001,
-        message: 'Test error',
-      });
+      expect(content.success).toBe(false);
+      expect(content.error).toBe('Test error');
+      expect(content.code).toBe(1001);
     });
   });
 

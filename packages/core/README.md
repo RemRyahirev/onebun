@@ -297,18 +297,15 @@ export class UserController extends BaseController {
     // Get the service using dependency injection
     const userService = this.getService(UserService);
 
-    // Call the service method directly
-    const users = userService.findAll();
-
-    // Return a standardized success response
-    return this.success({ users });
+    // Return plain data (auto-wrapped to { success: true, result: data })
+    return userService.findAll();
   }
 
   @Post()
   createUser(@Body() userData: any) {
     const userService = this.getService(UserService);
     const user = userService.create(userData);
-    return this.success({ user });
+    return this.success({ user }, 201);  // this.success() only when custom status needed
   }
 }
 ```
@@ -318,11 +315,11 @@ export class UserController extends BaseController {
 OneBun provides standardized response formats:
 
 ```typescript
-// Success response: { success: true, result: data }
-return this.success({ users });
+// Success: return plain data (auto-wrapped)
+return users;                                  // → { success: true, result: data }
 
-// Error response: { success: false, code: number, message: string }
-return this.error('User not found', 404);
+// Error: throw HttpException
+throw new HttpException(404, 'User not found'); // → { success: false, error: '...', code: 404 }
 ```
 
 Errors thrown in controller methods are automatically caught and converted to standardized error responses.

@@ -143,68 +143,38 @@ export class ApiController extends BaseController {
    * Demonstrate comprehensive error handling with \@onebun/requests (Promise API)
    */
   @Get('demo/error-handling')
-  async demonstrateErrorHandling(): Promise<Response> {
-    try {
-      await this.api.demonstrateErrorHandling();
+  async demonstrateErrorHandling(): Promise<{ message: string }> {
+    await this.api.demonstrateErrorHandling();
 
-      return this.success({
-        message: 'Error handling demonstration completed - check console logs',
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-      return this.error(
-        `Error handling demo failed: ${errorMessage}`,
-        HttpStatusCode.INTERNAL_SERVER_ERROR,
-      );
-    }
+    return { message: 'Error handling demonstration completed - check console logs' };
   }
 
   /**
    * Demonstrate authentication methods available in \@onebun/requests (Promise API)
    */
   @Get('demo/authentication')
-  async demonstrateAuthentication(): Promise<Response> {
-    try {
-      await this.api.demonstrateAuthentication();
+  async demonstrateAuthentication(): Promise<{ message: string }> {
+    await this.api.demonstrateAuthentication();
 
-      return this.success({
-        message: 'Authentication methods demonstration completed - check console logs',
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-      return this.error(
-        `Authentication demo failed: ${errorMessage}`,
-        HttpStatusCode.INTERNAL_SERVER_ERROR,
-      );
-    }
+    return { message: 'Authentication methods demonstration completed - check console logs' };
   }
 
   /**
    * Demonstrate retry functionality in \@onebun/requests (Promise API)
    */
   @Get('demo/retries')
-  async demonstrateRetries(): Promise<Response> {
-    try {
-      await this.api.demonstrateRetries();
+  async demonstrateRetries(): Promise<{ message: string }> {
+    await this.api.demonstrateRetries();
 
-      return this.success({
-        message: 'Retry functionality demonstration completed - check console logs',
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-      return this.error(`Retry demo failed: ${errorMessage}`, HttpStatusCode.INTERNAL_SERVER_ERROR);
-    }
+    return { message: 'Retry functionality demonstration completed - check console logs' };
   }
 
   /**
    * Health check endpoint that shows \@onebun/requests integration
    */
   @Get('health')
-  async healthCheck(): Promise<Response> {
-    return this.success({
+  async healthCheck(): Promise<Record<string, unknown>> {
+    return {
       status: 'OK',
       requests: '@onebun/requests package integrated and working with Promise API',
       features: [
@@ -214,29 +184,17 @@ export class ApiController extends BaseController {
         'Automatic retries and authentication',
       ],
       timestamp: Date.now(),
-    });
+    };
   }
 
   /**
    * Demonstrate error handling with Effect API
    */
   @Get('effect/demo/error-handling')
-  async demonstrateErrorHandlingEffect(): Promise<Response> {
+  async demonstrateErrorHandlingEffect(): Promise<{ message: string }> {
     const { Effect: effectLib } = await import('effect');
+    await effectLib.runPromise(this.api.demonstrateErrorHandlingEffect());
 
-    try {
-      await effectLib.runPromise(this.api.demonstrateErrorHandlingEffect());
-
-      return this.success({
-        message: 'Error handling demonstration (Effect API) completed - check console logs',
-      });
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-
-      return this.error(
-        `Error handling demo failed: ${errorMessage}`,
-        HttpStatusCode.INTERNAL_SERVER_ERROR,
-      );
-    }
+    return { message: 'Error handling demonstration (Effect API) completed - check console logs' };
   }
 }

@@ -197,9 +197,9 @@ export class HelloController extends BaseController {
    * Basic hello endpoint
    */
   @Get('/')
-  async hello(): Promise<Response> {
+  async hello() {
     this.logger.info('Hello endpoint called');
-    return this.success({ message: 'Hello from OneBun!' });
+    return { message: 'Hello from OneBun!' };
   }
 
   /**
@@ -207,9 +207,9 @@ export class HelloController extends BaseController {
    * Greet a specific person
    */
   @Get('/:name')
-  async greetByPath(@Param('name') name: string): Promise<Response> {
+  async greetByPath(@Param('name') name: string) {
     const greeting = this.helloService.greet(name);
-    return this.success({ greeting });
+    return { greeting };
   }
 
   /**
@@ -219,12 +219,12 @@ export class HelloController extends BaseController {
   @Post('/greet')
   async greetWithBody(
     @Body(greetBodySchema) body: typeof greetBodySchema.infer,
-  ): Promise<Response> {
+  ) {
     const greeting = this.helloService.greet(body.name);
-    return this.success({
+    return {
       greeting,
       customMessage: body.message,
-    });
+    };
   }
 
   /**
@@ -232,18 +232,18 @@ export class HelloController extends BaseController {
    * Get service statistics
    */
   @Get('/stats')
-  async stats(): Promise<Response> {
-    return this.success({
+  async stats() {
+    return {
       totalGreets: this.helloService.getCount(),
       uptime: process.uptime(),
-    });
+    };
   }
 }
 ```
 
 **Key Points**:
 - `@Controller(path)` defines base path for all routes
-- `BaseController` provides `this.success()`, `this.error()`, `this.logger`
+- `BaseController` provides `this.logger`, `this.config`, and response helpers
 - `@Param('name')` extracts path parameters
 - `@Body(schema)` validates and injects request body
 - Constructor DI is automatic (just declare private property) — see [Architecture — DI](/architecture#dependency-injection-system) for details

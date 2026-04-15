@@ -52,7 +52,7 @@ export class Controller {
 Always extend `BaseController` (exported as `BaseController` from `@onebun/core`):
 
 ```typescript
-import { Controller, BaseController, Get, Post, Body } from '@onebun/core';
+import { Controller, BaseController, Get, Post, Body, Param, HttpException } from '@onebun/core';
 import { UserService } from './user.service';
 
 @Controller('/users')
@@ -62,24 +62,33 @@ export class UserController extends BaseController {
   }
 
   @Get('/')
-  async findAll(): Promise<Response> {
-    const users = await this.userService.findAll();
-    return this.success(users);
+  async findAll() {
+    return this.userService.findAll();
+    // → { success: true, result: [...] }
+  }
+
+  @Get('/:id')
+  async findOne(@Param('id') id: string) {
+    const user = await this.userService.findById(id);
+    if (!user) throw new HttpException(404, 'User not found');
+    return user;
+    // → { success: true, result: { ... } }
+  }
+
+  @Post('/')
+  async create(@Body() body: unknown) {
+    const user = await this.userService.create(body);
+    return user;
+    // → { success: true, result: { ... } }
   }
 }
 ```
 
-## Response Methods
+The framework automatically wraps plain return values into `{ success: true, result: <data> }`. For errors, throw `HttpException` — the exception filter converts it to `{ success: false, error: <message>, code: <statusCode> }` with the matching HTTP status code.
 
-### success()
+## Response Formats
 
-Create a standardized success response.
-
-```typescript
-protected success<T = unknown>(result: T, status: number = 200): Response
-```
-
-**Response Format:**
+**Success** (auto-wrapped from plain return values):
 
 ```json
 {
@@ -88,25 +97,47 @@ protected success<T = unknown>(result: T, status: number = 200): Response
 }
 ```
 
+**Error** (from `HttpException` or exception filters):
+
+```json
+{
+  "success": false,
+  "error": "<error message>",
+  "code": <HTTP status code>
+}
+```
+
+## Response Methods (Alternative)
+
+These methods are available on `BaseController` but are not the recommended default. Prefer returning plain data and throwing `HttpException`.
+
+### success()
+
+Explicitly create a success response. Equivalent to returning plain data, but more verbose.
+
+```typescript
+protected success<T = unknown>(result: T, status: number = 200): Response
+```
+
 **Examples:**
 
 ```typescript
 @Get('/')
-async getUser(): Promise<Response> {
-  // Simple data
+async getUser() {
+  // Recommended: return plain data
+  return { name: 'John', age: 30 };
+
+  // Alternative: explicit wrapper
   return this.success({ name: 'John', age: 30 });
 
-  // Array
-  return this.success([{ id: 1 }, { id: 2 }]);
-
-  // With custom status
-  return this.success({ id: '123' }, 201);  // Created
+  // With custom status (only via success())
+  return this.success({ id: '123' }, 201);
 }
 ```
 
 ### error()
 
-Create a standardized error response.
+Create an error response manually. Prefer `throw new HttpException()` instead.
 
 ```typescript
 public error(
@@ -121,8 +152,8 @@ public error(
 ```json
 {
   "success": false,
-  "code": <error code>,
-  "message": "<error message>"
+  "error": "<error message>",
+  "code": <error code>
 }
 ```
 
@@ -130,25 +161,16 @@ public error(
 
 ```typescript
 @Get('/:id')
-async findOne(@Param('id') id: string): Promise<Response> {
+async findOne(@Param('id') id: string) {
   const user = await this.userService.findById(id);
 
-  if (!user) {
-    return this.error('User not found', 404, 404);
-  }
+  // Recommended: throw HttpException
+  if (!user) throw new HttpException(404, 'User not found');
 
-  return this.success(user);
-}
+  // Alternative: manual error response
+  if (!user) return this.error('User not found', 404, 404);
 
-@Post('/')
-async create(@Body() body: unknown): Promise<Response> {
-  try {
-    const user = await this.userService.create(body);
-    return this.success(user, 201);
-  } catch (e) {
-    // Validation error
-    return this.error('Invalid data', 400, 400);
-  }
+  return user;
 }
 ```
 
@@ -197,14 +219,14 @@ export class UserController extends BaseController {
   }
 
   @Get('/')
-  async findAll(): Promise<Response> {
+  async findAll() {
     // Use injected services directly
     const cached = await this.cacheService.get('users');
-    if (cached) return this.success(cached);
+    if (cached) return cached;
 
     const users = await this.userService.findAll();
     await this.cacheService.set('users', users, { ttl: 60 });
-    return this.success(users);
+    return users;
   }
 }
 ```
@@ -215,15 +237,14 @@ export class UserController extends BaseController {
 @Controller('/users')
 export class UserController extends BaseController {
   @Get('/')
-  async findAll(): Promise<Response> {
+  async findAll() {
     // By class
     const userService = this.getService(UserService);
 
     // By tag
     const userService = this.getService(UserServiceTag);
 
-    const users = await userService.findAll();
-    return this.success(users);
+    return userService.findAll();
   }
 }
 ```
@@ -238,19 +259,15 @@ Controllers support the same lifecycle hooks as services (`OnModuleInit`, `OnApp
 @Controller('/users')
 export class UserController extends BaseController {
   @Get('/')
-  async findAll(): Promise<Response> {
+  async findAll() {
     // Log levels: trace, debug, info, warn, error, fatal
     this.logger.info('Finding all users');
     this.logger.debug('Request received', { timestamp: Date.now() });
 
-    try {
-      const users = await this.userService.findAll();
-      this.logger.info('Users found', { count: users.length });
-      return this.success(users);
-    } catch (error) {
-      this.logger.error('Failed to find users', error);
-      return this.error('Internal error', 500);
-    }
+    const users = await this.userService.findAll();
+    this.logger.info('Users found', { count: users.length });
+    return users;
+    // Errors are caught by exception filters automatically
   }
 }
 ```
@@ -261,16 +278,16 @@ export class UserController extends BaseController {
 @Controller('/users')
 export class UserController extends BaseController {
   @Get('/info')
-  async info(): Promise<Response> {
+  async info() {
     // Access typed configuration (with module augmentation, no cast needed)
     const port = this.config.get('server.port');    // number
     const appName = this.config.get('app.name');    // string
 
-    return this.success({
+    return {
       port,
       appName,
       configAvailable: this.config.isInitialized,
-    });
+    };
   }
 }
 ```
@@ -452,7 +469,7 @@ class AuthMiddleware extends BaseMiddleware {
     if (!this.authService.verify(token, secret)) {
       this.logger.warn('Authentication failed');
       return new Response(JSON.stringify({
-        success: false, code: 401, message: 'Unauthorized',
+        success: false, error: 'Unauthorized', code: 401,
       }), { status: 401, headers: { 'Content-Type': 'application/json' } });
     }
 
@@ -678,8 +695,8 @@ export class JwtAuthMiddleware extends BaseMiddleware {
       this.logger.warn('Missing or invalid Authorization header');
       return new Response(JSON.stringify({
         success: false,
+        error: 'Missing or invalid Authorization header',
         code: 401,
-        message: 'Missing or invalid Authorization header',
       }), {
         status: 401,
         headers: { 'Content-Type': 'application/json' },
@@ -784,9 +801,9 @@ Check if request has JSON content type.
 
 ```typescript
 @Post('/')
-async create(@Req() req: OneBunRequest): Promise<Response> {
+async create(@Req() req: OneBunRequest) {
   if (!this.isJson(req)) {
-    return this.error('Content-Type must be application/json', 400, 400);
+    throw new HttpException(400, 'Content-Type must be application/json');
   }
   // ...
 }
@@ -798,7 +815,7 @@ Parse JSON from request body (when not using @Body decorator).
 
 ```typescript
 @Post('/')
-async create(@Req() req: OneBunRequest): Promise<Response> {
+async create(@Req() req: OneBunRequest) {
   const body = await this.parseJson<CreateUserDto>(req);
   // body is typed as CreateUserDto
 }
@@ -812,20 +829,16 @@ Import common status codes:
 import { HttpStatusCode } from '@onebun/core';
 
 @Get('/:id')
-async findOne(@Param('id') id: string): Promise<Response> {
+async findOne(@Param('id') id: string) {
   const user = await this.userService.findById(id);
-
-  if (!user) {
-    return this.error('Not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
-  }
-
-  return this.success(user, HttpStatusCode.OK);
+  if (!user) throw new HttpException(HttpStatusCode.NOT_FOUND, 'Not found');
+  return user;
 }
 
 @Post('/')
-async create(@Body() body: CreateUserDto): Promise<Response> {
+async create(@Body() body: CreateUserDto) {
   const user = await this.userService.create(body);
-  return this.success(user, HttpStatusCode.CREATED);
+  return this.success(user, HttpStatusCode.CREATED);  // custom status via success()
 }
 ```
 
@@ -908,7 +921,7 @@ export class UserController extends BaseController {
   async findAll(
     @Query('page') page: string = '1',
     @Query('limit') limit: string = '10',
-  ): Promise<Response> {
+  ) {
     this.logger.info('Listing users', { page, limit });
 
     const users = await this.userService.findAll({
@@ -916,12 +929,12 @@ export class UserController extends BaseController {
       limit: parseInt(limit, 10),
     });
 
-    return this.success({
+    return {
       users: users.items,
       total: users.total,
       page: users.page,
       limit: users.limit,
-    });
+    };
   }
 
   /**
@@ -929,17 +942,17 @@ export class UserController extends BaseController {
    * Get user by ID
    */
   @Get('/:id')
-  async findOne(@Param('id') id: string): Promise<Response> {
+  async findOne(@Param('id') id: string) {
     this.logger.debug('Finding user', { id });
 
     const user = await this.userService.findById(id);
 
     if (!user) {
       this.logger.warn('User not found', { id });
-      return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
     }
 
-    return this.success(user);
+    return user;
   }
 
   /**
@@ -951,19 +964,12 @@ export class UserController extends BaseController {
   async create(
     @Body(createUserSchema) body: typeof createUserSchema.infer,
     @Header('X-Request-ID') requestId?: string,
-  ): Promise<Response> {
+  ) {
     this.logger.info('Creating user', { email: body.email, requestId });
 
-    try {
-      const user = await this.userService.create(body);
-      this.logger.info('User created', { userId: user.id });
-      return this.success(user, HttpStatusCode.CREATED);
-    } catch (error) {
-      if (error instanceof Error && error.message.includes('duplicate')) {
-        return this.error('Email already exists', HttpStatusCode.CONFLICT, HttpStatusCode.CONFLICT);
-      }
-      throw error;
-    }
+    const user = await this.userService.create(body);
+    this.logger.info('User created', { userId: user.id });
+    return this.success(user, HttpStatusCode.CREATED);
   }
 
   /**
@@ -975,16 +981,16 @@ export class UserController extends BaseController {
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: typeof updateUserSchema.infer,
-  ): Promise<Response> {
+  ) {
     this.logger.info('Updating user', { id, fields: Object.keys(body) });
 
     const user = await this.userService.update(id, body);
 
     if (!user) {
-      return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
     }
 
-    return this.success(user);
+    return user;
   }
 
   /**
@@ -993,16 +999,16 @@ export class UserController extends BaseController {
    */
   @Delete('/:id')
   @UseMiddleware(authMiddleware)
-  async remove(@Param('id') id: string): Promise<Response> {
+  async remove(@Param('id') id: string) {
     this.logger.info('Deleting user', { id });
 
     const deleted = await this.userService.delete(id);
 
     if (!deleted) {
-      return this.error('User not found', HttpStatusCode.NOT_FOUND, HttpStatusCode.NOT_FOUND);
+      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
     }
 
-    return this.success({ deleted: true });
+    return { deleted: true };
   }
 
   /**
@@ -1013,13 +1019,12 @@ export class UserController extends BaseController {
   async search(
     @Query('q') query: string,
     @Query('field') field: string = 'name',
-  ): Promise<Response> {
+  ) {
     if (!query) {
-      return this.error('Query parameter "q" is required', HttpStatusCode.BAD_REQUEST, HttpStatusCode.BAD_REQUEST);
+      throw new HttpException(HttpStatusCode.BAD_REQUEST, 'Query parameter "q" is required');
     }
 
-    const users = await this.userService.search(query, field);
-    return this.success(users);
+    return this.userService.search(query, field);
   }
 }
 ```
@@ -1365,7 +1370,7 @@ export class FileController extends BaseController {
       maxSize: 5 * 1024 * 1024,        // 5 MB
       mimeTypes: [MimeType.ANY_IMAGE],  // Any image type
     }) file: OneBunFile,
-  ): Promise<Response> {
+  ) {
     // Write to disk
     await file.writeTo(`./uploads/${file.name}`);
 
@@ -1375,11 +1380,11 @@ export class FileController extends BaseController {
     // Or get as Buffer
     const buffer = await file.toBuffer();
 
-    return this.success({
+    return {
       filename: file.name,
       size: file.size,
       type: file.type,
-    });
+    };
   }
 }
 ```
@@ -1394,11 +1399,11 @@ async uploadDocuments(
     maxSize: 10 * 1024 * 1024,
     mimeTypes: [MimeType.PDF, MimeType.DOCX],
   }) files: OneBunFile[],
-): Promise<Response> {
+) {
   for (const file of files) {
     await file.writeTo(`./uploads/${file.name}`);
   }
-  return this.success({ uploaded: files.length });
+  return { uploaded: files.length };
 }
 ```
 
@@ -1410,9 +1415,9 @@ async createProfile(
   @UploadedFile('avatar', { mimeTypes: [MimeType.ANY_IMAGE] }) avatar: OneBunFile,
   @FormField('name', { required: true }) name: string,
   @FormField('email') email: string,
-): Promise<Response> {
+) {
   await avatar.writeTo(`./uploads/${avatar.name}`);
-  return this.success({ name, email, avatar: avatar.name });
+  return { name, email, avatar: avatar.name };
 }
 ```
 

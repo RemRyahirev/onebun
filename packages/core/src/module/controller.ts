@@ -10,7 +10,7 @@ import type { Span } from '@opentelemetry/api';
 import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
-import { HttpStatusCode } from '@onebun/requests';
+import { HttpStatusCode, createErrorResponse } from '@onebun/requests';
 
 /**
  * Default idle timeout for HTTP connections (in seconds).
@@ -263,7 +263,7 @@ export class Controller {
     code: number = HttpStatusCode.INTERNAL_SERVER_ERROR,
     status: number = HttpStatusCode.INTERNAL_SERVER_ERROR,
   ): Response {
-    return new Response(JSON.stringify({ success: false, code, message }), {
+    return new Response(JSON.stringify(createErrorResponse(message, code)), {
       status,
       headers: {
         // eslint-disable-next-line @typescript-eslint/naming-convention

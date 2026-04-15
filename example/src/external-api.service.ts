@@ -311,13 +311,12 @@ export class ExternalApiService extends BaseService {
       Effect.catchAll((error: ErrorResponse) => {
         this.logger.info('@onebun/requests error handling demonstration:');
         this.logger.info(`- Error code: ${error.code}`);
-        this.logger.info(`- Message: ${error.message}`);
-        this.logger.info(`- Status: ${error.code || 'N/A'}`);
+        this.logger.info(`- Error: ${error.error}`);
         this.logger.info(`- Trace ID: ${error.traceId || 'N/A'}`);
         this.logger.info(`- Timestamp: ${new Date().toISOString()}`);
 
         if (error.originalError) {
-          this.logger.info(`- Caused by: ${error.originalError.message}`);
+          this.logger.info(`- Caused by: ${error.originalError.error}`);
         }
 
         this.logger.info('Error handling demonstration completed');
@@ -443,7 +442,7 @@ export class ExternalApiService extends BaseService {
       ),
       Effect.flatMap(() => retryClient.getEffect('/500')),
       Effect.catchAll((error: ErrorResponse) => {
-        this.logger.info(`Request failed after retries: ${error.message}`);
+        this.logger.info(`Request failed after retries: ${error.error}`);
         this.logger.info('Retry functionality demonstrated');
 
         return Effect.succeed(undefined);

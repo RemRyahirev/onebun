@@ -158,10 +158,10 @@ export class HelloController extends BaseController {
    * Simple hello endpoint
    */
   @Get('/hello')
-  async hello(): Promise<Response> {
+  async hello() {
     this.logger.info('Hello endpoint called');
     const message = this.helloService.sayHello();
-    return this.success({ message });
+    return { message };
   }
 
   /**
@@ -169,10 +169,10 @@ export class HelloController extends BaseController {
    * Greet a specific person
    */
   @Get('/hello/:name')
-  async greet(@Param('name') name: string): Promise<Response> {
+  async greet(@Param('name') name: string) {
     this.logger.info('Greet endpoint called', { name });
     const greeting = this.helloService.greet(name);
-    return this.success({ greeting });
+    return { greeting };
   }
 
   /**
@@ -180,9 +180,9 @@ export class HelloController extends BaseController {
    * Get service statistics
    */
   @Get('/stats')
-  async stats(): Promise<Response> {
+  async stats() {
     const stats = this.helloService.getStats();
-    return this.success(stats);
+    return stats;
   }
 
   /**
@@ -190,11 +190,11 @@ export class HelloController extends BaseController {
    * Health check endpoint
    */
   @Get('/health')
-  async health(): Promise<Response> {
-    return this.success({
+  async health() {
+    return {
       status: 'healthy',
       timestamp: new Date().toISOString(),
-    });
+    };
   }
 }
 ```
@@ -297,6 +297,6 @@ curl http://localhost:3000/metrics
 1. **Decorators**: Use `@Module`, `@Controller`, `@Service`, `@Get` to define structure
 2. **Base Classes**: Extend `BaseController` and `BaseService` for built-in features
 3. **DI**: Services are automatically injected via constructor
-4. **Responses**: Use `this.success()` for standardized JSON responses
+4. **Responses**: Return plain data — auto-wrapped to standardized JSON responses
 5. **Logging**: Use `this.logger` for structured logging
 6. **Config**: Define schema in `config.ts`, load via `envSchema` option

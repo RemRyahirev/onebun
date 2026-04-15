@@ -45,19 +45,14 @@ interface SyncLogger {
 @Controller('/users')
 export class UserController extends BaseController {
   @Get('/')
-  async findAll(): Promise<Response> {
+  async findAll() {
     // Logger is automatically available
     this.logger.info('Finding all users');
     this.logger.debug('Request received', { timestamp: Date.now() });
 
-    try {
-      const users = await this.userService.findAll();
-      this.logger.info('Users found', { count: users.length });
-      return this.success(users);
-    } catch (error) {
-      this.logger.error('Failed to find users', error);
-      return this.error('Internal error', 500);
-    }
+    const users = await this.userService.findAll();
+    this.logger.info('Users found', { count: users.length });
+    return users;
   }
 }
 ```
