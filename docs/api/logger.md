@@ -591,7 +591,8 @@ async processOrder(orderId: string): Promise<Order> {
 ## Complete Example
 
 ```typescript
-import { Service, BaseService, Span } from '@onebun/core';
+import { Service, BaseService } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 @Service()
 export class PaymentService extends BaseService {

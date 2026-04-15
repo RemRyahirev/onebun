@@ -205,7 +205,8 @@ export class UserRepository extends BaseService {
 ## src/users/users.service.ts
 
 ```typescript
-import { Service, BaseService, Span, NotFoundError } from '@onebun/core';
+import { Service, BaseService, NotFoundError } from '@onebun/core';
+import { Span } from '@onebun/trace';
 import { UserRepository } from './users.repository';
 import type {
   User,

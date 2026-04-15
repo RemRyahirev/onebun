@@ -369,7 +369,8 @@ export class DatabaseService extends BaseService {
 Use `@Span()` decorator to create trace spans:
 
 ```typescript
-import { Service, BaseService, Span } from '@onebun/core';
+import { Service, BaseService } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 @Service()
 export class OrderService extends BaseService {
@@ -559,7 +560,8 @@ const program = pipe(
 ## Complete Service Example
 
 ```typescript
-import { Service, BaseService, Span, type } from '@onebun/core';
+import { Service, BaseService, type } from '@onebun/core';
+import { Span } from '@onebun/trace';
 import { CacheService } from '@onebun/cache';
 
 // Types

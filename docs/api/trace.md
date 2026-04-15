@@ -79,7 +79,8 @@ interface TracingOptions {
 Create trace spans for methods.
 
 ```typescript
-import { Service, BaseService, Span, SpanAttribute } from '@onebun/core';
+import { Service, BaseService } from '@onebun/core';
+import { Span, SpanAttribute } from '@onebun/trace';
 
 @Service()
 export class UserService extends BaseService {
@@ -525,7 +526,8 @@ formatDate(date: Date): string {}
 ## Complete Example
 
 ```typescript
-import { Module, Controller, BaseController, Service, BaseService, Get, Post, Param, Body, HttpException, Span } from '@onebun/core';
+import { Module, Controller, BaseController, Service, BaseService, Get, Post, Param, Body, HttpException } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 // Service with comprehensive tracing
 @Service()

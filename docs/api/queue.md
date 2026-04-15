@@ -251,7 +251,7 @@ The `@Subscribe` decorator marks a method as a message handler.
 ```typescript
 @Subscribe('orders.*')
 async handleOrder(message: Message<OrderData>) {
-  console.log('Order:', message.pattern, message.data);
+  this.logger.info('Order received', { pattern: message.pattern, data: message.data });
 }
 ```
 

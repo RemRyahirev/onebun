@@ -67,7 +67,8 @@ export const envSchema = {
 ## src/users/users.service.ts
 
 ```typescript
-import { Service, BaseService, Span } from '@onebun/core';
+import { Service, BaseService } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 interface User {
   id: string;
@@ -170,7 +171,8 @@ export class UserModule {}
 ## src/orders/orders.service.ts
 
 ```typescript
-import { Service, BaseService, Span, createHttpClient, isErrorResponse } from '@onebun/core';
+import { Service, BaseService, createHttpClient, isErrorResponse } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 interface Order {
   id: string;

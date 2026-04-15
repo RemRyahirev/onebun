@@ -1008,7 +1008,7 @@ Create a trace span for a method (from `@onebun/trace`).
 **Example:**
 
 ```typescript
-import { Span } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 @Service()
 export class UserService extends BaseService {

@@ -246,8 +246,8 @@ async set<T>(key: string, value: T, options?: CacheSetOptions): Promise<void>
 // With default TTL
 await this.cacheService.set('user:123', user);
 
-// With custom TTL (in seconds)
-await this.cacheService.set('user:123', user, { ttl: 600 });
+// With custom TTL (in milliseconds)
+await this.cacheService.set('user:123', user, { ttl: 600_000 }); // 10 minutes
 
 // No expiration
 await this.cacheService.set('user:123', user, { ttl: 0 });
@@ -291,57 +291,42 @@ async clear(): Promise<void>
 await this.cacheService.clear();
 ```
 
-#### `getMany<T>()`
+#### `mget<T>()`
 
 Get multiple values at once.
 
 ```typescript
-async getMany<T>(keys: string[]): Promise<Map<string, T | null>>
+async mget<T = unknown>(keys: string[]): Promise<(T | undefined)[]>
 ```
 
 ```typescript
-const results = await this.cacheService.getMany<User>([
+const results = await this.cacheService.mget<User>([
   'user:1',
   'user:2',
   'user:3',
 ]);
 
-for (const [key, user] of results) {
+for (const user of results) {
   if (user) {
-    console.log(key, user.name);
+    this.logger.info('Found user', { name: user.name });
   }
 }
 ```
 
-#### setMany()
+#### `mset<T>()`
 
 Set multiple values at once.
 
 ```typescript
-async setMany<T>(entries: Map<string, T>, options?: CacheSetOptions): Promise<void>
+async mset<T = unknown>(
+  entries: Array<{ key: string; value: T; options?: CacheSetOptions }>
+): Promise<void>
 ```
 
 ```typescript
-const users = new Map([
-  ['user:1', user1],
-  ['user:2', user2],
-]);
-
-await this.cacheService.setMany(users, { ttl: 300 });
-```
-
-#### deleteMany()
-
-Delete multiple keys.
-
-```typescript
-async deleteMany(keys: string[]): Promise<number>
-```
-
-```typescript
-const deletedCount = await this.cacheService.deleteMany([
-  'user:1',
-  'user:2',
+await this.cacheService.mset([
+  { key: 'user:1', value: user1 },
+  { key: 'user:2', value: user2, options: { ttl: 300_000 } },
 ]);
 ```
 
@@ -375,7 +360,7 @@ export class UserService extends BaseService {
 
     // Store in cache
     if (user) {
-      await this.cacheService.set(cacheKey, user, { ttl: 300 });
+      await this.cacheService.set(cacheKey, user, { ttl: 300_000 }); // 5 minutes
     }
 
     return user;
@@ -404,11 +389,11 @@ export class UserService extends BaseService {
     await this.repository.delete(id);
 
     // Invalidate all related caches
-    await this.cacheService.deleteMany([
-      `user:${id}`,
-      `user:${id}:posts`,
-      `user:${id}:settings`,
-      'users:list',
+    await Promise.all([
+      this.cacheService.delete(`user:${id}`),
+      this.cacheService.delete(`user:${id}:posts`),
+      this.cacheService.delete(`user:${id}:settings`),
+      this.cacheService.delete('users:list'),
     ]);
   }
 }
@@ -431,11 +416,9 @@ export class CacheWarmerService extends BaseService {
 
     const users = await this.userRepository.findAll({ limit: 1000 });
 
-    const entries = new Map(
-      users.map(user => [`user:${user.id}`, user])
+    await this.cacheService.mset(
+      users.map(user => ({ key: `user:${user.id}`, value: user, options: { ttl: 3_600_000 } }))
     );
-
-    await this.cacheService.setMany(entries, { ttl: 3600 });
 
     this.logger.info('User cache warmed', { count: users.length });
   }
@@ -459,7 +442,7 @@ export class ConfigService extends BaseService {
 
     if (!flags) {
       flags = await this.fetchFeatureFlags();
-      await this.cacheService.set(cacheKey, flags, { ttl: 3600 }); // 1 hour
+      await this.cacheService.set(cacheKey, flags, { ttl: 3_600_000 }); // 1 hour
     }
 
     return flags;
@@ -473,7 +456,7 @@ export class ConfigService extends BaseService {
 
 ```typescript
 interface CacheSetOptions {
-  /** Time-to-live in seconds. 0 for no expiration */
+  /** Time-to-live in milliseconds. 0 for no expiration */
   ttl?: number;
 }
 ```
@@ -594,7 +577,7 @@ export class ProductService extends BaseService {
 
     // Cache result
     if (product) {
-      await this.cacheService.set(cacheKey, product, { ttl: 60 });
+      await this.cacheService.set(cacheKey, product, { ttl: 60_000 }); // 1 minute
     }
 
     return product;
@@ -609,7 +592,7 @@ export class ProductService extends BaseService {
     }
 
     const products = Array.from(this.products.values());
-    await this.cacheService.set(cacheKey, products, { ttl: 30 });
+    await this.cacheService.set(cacheKey, products, { ttl: 30_000 }); // 30 seconds
 
     return products;
   }
@@ -622,9 +605,9 @@ export class ProductService extends BaseService {
     this.products.set(id, product);
 
     // Invalidate caches
-    await this.cacheService.deleteMany([
-      `product:${id}`,
-      'products:all',
+    await Promise.all([
+      this.cacheService.delete(`product:${id}`),
+      this.cacheService.delete('products:all'),
     ]);
 
     return product;

@@ -276,7 +276,7 @@ describe('Cache API Documentation Examples', () => {
     });
 
     it('should implement set() with custom TTL', async () => {
-      // From docs: set() with custom TTL (in seconds in docs, milliseconds in actual API)
+      // From docs: set() with custom TTL (in milliseconds)
       await cache.set('user:123', { name: 'John' }, { ttl: 600 });
 
       const user = await cache.get('user:123');

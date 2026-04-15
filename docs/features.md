@@ -55,7 +55,7 @@ production-grade backend services.
 ### Caching (@onebun/cache)
 - In-memory cache (TTL, max size, cleanup) and Redis cache
 - Shared Redis connection pool across modules
-- Batch operations (getMany, setMany, deleteMany)
+- Batch operations (mget, mset)
 
 ### HTTP Client (@onebun/requests)
 - createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential)
@@ -228,7 +228,7 @@ Cron-like task scheduling with the same backend options.
 ### CacheModule
 - **In-memory cache** — with TTL, max size, cleanup intervals
 - **Redis cache** — with shared connection pool support
-- Batch operations: getMany, setMany, deleteMany
+- Batch operations: mget, mset
 - Cache-aside, invalidation, and warming patterns
 → [API Reference](/api/cache)
 
