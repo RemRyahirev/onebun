@@ -23,6 +23,11 @@ import {
   registerControllerDependencies,
 } from '../decorators/decorators';
 import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
+import {
+  type ProfileMark,
+  PROFILING_ENABLED,
+  getProfiler,
+} from '../profiler';
 import { QueueService, QueueServiceTag } from '../queue';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
@@ -402,6 +407,12 @@ export class OneBunModule implements ModuleInstance {
       // Create service instance with resolved dependencies.
       // Set ambient init context so BaseService constructor can pick up logger/config,
       // making them available immediately after super() in subclass constructors.
+      let diMark: ProfileMark | undefined;
+      if (PROFILING_ENABLED) {
+        diMark = getProfiler()!.start('di', `service:${provider.name}`, {
+          dependencyCount: dependencies.length,
+        });
+      }
       try {
         const serviceConstructor = provider as new (...args: unknown[]) => unknown;
 
@@ -444,10 +455,16 @@ export class OneBunModule implements ModuleInstance {
 
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
         createdServices.add(provider.name);
+        if (diMark) {
+          getProfiler()!.end(diMark);
+        }
         this.logger.debug(
           `Created service ${provider.name} with ${dependencies.length} injected dependencies`,
         );
       } catch (error) {
+        if (diMark) {
+          getProfiler()!.end(diMark);
+        }
         this.logger.error(`Failed to create service ${provider.name}: ${error}`);
       }
     }
@@ -545,7 +562,12 @@ export class OneBunModule implements ModuleInstance {
       // the constructor (e.g., not extending BaseMiddleware, or for backwards compatibility).
       instance.initializeMiddleware(this.logger, this.config);
 
-      return instance.use.bind(instance);
+      const bound = instance.use.bind(instance);
+      // Preserve class name for profiling and debugging
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bound as any)._middlewareName = cls.name;
+
+      return bound;
     });
   }
 

@@ -55,6 +55,14 @@ import {
 } from '../module/controller';
 import { OneBunModule, registerGlobalService } from '../module/module';
 import {
+  type ProfileMark,
+  PROFILING_ENABLED,
+  getProfiler,
+  setProfiler,
+  runProfileScope,
+  DefaultProfiler,
+} from '../profiler';
+import {
   QueueService,
   QueueServiceProxy,
   QueueServiceTag,
@@ -73,7 +81,6 @@ import {
   type HttpMethod,
   type ModuleInstance,
   type OneBunRequest,
-  type ParamMetadata,
   ParamType,
   type RouteMetadata,
 } from '../types';
@@ -150,23 +157,35 @@ function normalizePath(pathStr: string): string {
   return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
 }
 
+const EMPTY_QUERY_PARAMS: Record<string, string | string[]> = Object.freeze({});
+
 /**
- * Extract query parameters from URL, handling array notation and repeated keys.
+ * Extract query parameters from a raw URL string without `new URL()`.
+ * Uses indexOf + URLSearchParams on the query portion only — avoids
+ * full URL parsing (protocol, host, path) which is expensive.
  *
- * @param url - The URL to extract query parameters from
+ * @param rawUrl - The raw request URL string (e.g. 'http://host/path?a=1&b=2')
  * @returns Record of parameter names to values (string for single, string[] for repeated/array notation)
  * @example
- * extractQueryParams(new URL('http://x.com/?a=1&b=2'))     // { a: '1', b: '2' }
- * extractQueryParams(new URL('http://x.com/?tag=a&tag=b')) // { tag: ['a', 'b'] }
- * extractQueryParams(new URL('http://x.com/?tag[]=a'))     // { tag: ['a'] }
+ * extractQueryParams('http://x.com/?a=1&b=2')     // { a: '1', b: '2' }
+ * extractQueryParams('http://x.com/?tag=a&tag=b')  // { tag: ['a', 'b'] }
+ * extractQueryParams('http://x.com/?tag[]=a')       // { tag: ['a'] }
+ * extractQueryParams('http://x.com/users')          // {} (frozen empty object, zero alloc)
  */
-function extractQueryParams(url: URL): Record<string, string | string[]> {
-  const queryParams: Record<string, string | string[]> = {};
+function extractQueryParams(rawUrl: string): Record<string, string | string[]> {
+  const qIdx = rawUrl.indexOf('?');
+  if (qIdx === -1) {
+    return EMPTY_QUERY_PARAMS;
+  }
 
-  for (const [rawKey, value] of url.searchParams.entries()) {
+  const queryParams: Record<string, string | string[]> = {};
+  const searchParams = new URLSearchParams(rawUrl.slice(qIdx + 1));
+
+  for (const [rawKey, value] of searchParams.entries()) {
     // Handle array notation: tag[] -> tag (as array)
     const isArrayNotation = rawKey.endsWith('[]');
-    const key = isArrayNotation ? rawKey.replace('[]', '') : rawKey;
+    // eslint-disable-next-line @typescript-eslint/no-magic-numbers
+    const key = isArrayNotation ? rawKey.slice(0, -2) : rawKey;
 
     const existing = queryParams[key];
     if (existing !== undefined) {
@@ -267,6 +286,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   // Docs (OpenAPI/Swagger) - generated on start()
   private openApiSpec: Record<string, unknown> | null = null;
   private swaggerHtml: string | null = null;
+  // Internal profiling
+  private profilingReports: import('../profiler').ProfileReport[] = [];
 
   /**
    * Create application instance
@@ -394,6 +415,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
     }
 
+    // Initialize profiler from options (env-based init happens at module load in profiler.ts)
+    if (this.options.profiling?.enabled && !getProfiler()) {
+      setProfiler(this.options.profiling.profiler ?? new DefaultProfiler());
+    } else if (this.options.profiling?.profiler) {
+      setProfiler(this.options.profiling.profiler);
+    }
+
     // Note: root module creation is deferred to start() to ensure
     // config is fully initialized before services are created.
   }
@@ -509,9 +537,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     try {
       // Initialize configuration if schema was provided
+      let profileMark: ProfileMark | undefined;
+      if (PROFILING_ENABLED) {
+        profileMark = getProfiler()!.start('bootstrap', 'config:init');
+      }
       if (!(this.config instanceof NotInitializedConfig)) {
         await this.config.initialize();
         this.logger.info('Application configuration initialized');
+      }
+      if (profileMark) {
+        getProfiler()!.end(profileMark);
       }
 
       // Register QueueService proxy in global registry BEFORE creating the root module,
@@ -526,12 +561,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Create the root module AFTER config is initialized and QueueService proxy is registered,
       // so services can safely use this.config.get() in their constructors
       // and inject QueueService in any module depth.
+      if (PROFILING_ENABLED) {
+        profileMark = getProfiler()!.start('bootstrap', 'module:create');
+      }
       this.rootModule = OneBunModule.create(
         this.moduleClass, this.loggerLayer, this.config,
         this.options.tracing?.traceAll
           ? { traceAll: true, traceFilter: this.options.tracing.traceFilter }
           : undefined,
       );
+      if (profileMark) {
+        getProfiler()!.end(profileMark);
+      }
 
       // Register test provider overrides (must happen before setup() so controllers receive mocks)
       if (this.options._testProviders) {
@@ -547,7 +588,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
 
       // Setup the module and create controller instances
+      if (PROFILING_ENABLED) {
+        profileMark = getProfiler()!.start('bootstrap', 'module:setup');
+      }
       await Effect.runPromise(this.ensureModule().setup() as Effect.Effect<unknown, never, never>);
+      if (profileMark) {
+        getProfiler()!.end(profileMark);
+      }
 
       // Get all controllers from the root module
       const controllers = this.ensureModule().getControllers();
@@ -568,10 +615,22 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
 
       // Initialize Queue system if configured or handlers exist
+      if (PROFILING_ENABLED) {
+        profileMark = getProfiler()!.start('bootstrap', 'queue:init');
+      }
       await this.initializeQueue(controllers);
+      if (profileMark) {
+        getProfiler()!.end(profileMark);
+      }
 
       // Initialize Docs (OpenAPI/Swagger) if enabled and available
+      if (PROFILING_ENABLED) {
+        profileMark = getProfiler()!.start('bootstrap', 'docs:init');
+      }
       await this.initializeDocs(controllers);
+      if (profileMark) {
+        getProfiler()!.end(profileMark);
+      }
 
       // Create server context binding (used by route handlers and executeHandler)
       const app = this;
@@ -602,248 +661,379 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // Determine the effective timeout for this route:
         // SSE endpoints check @Sse({ timeout }) first, then route-level, then DEFAULT_SSE_TIMEOUT
         // Normal endpoints use route-level timeout only (undefined = use global idleTimeout)
-        const isSse = routeMeta.handler
-          ? getSseMetadata(Object.getPrototypeOf(controller), routeMeta.handler) !== undefined
-          : false;
-        const sseDecoratorOptions = routeMeta.handler
-          ? getSseMetadata(Object.getPrototypeOf(controller), routeMeta.handler)
+        // Pre-compute route metadata at registration time (not per-request)
+        const controllerProto = Object.getPrototypeOf(controller);
+        const controllerName = controller.constructor.name;
+        const sseDecoratorOptions: SseDecoratorOptions | undefined = routeMeta.handler
+          ? getSseMetadata(controllerProto, routeMeta.handler)
           : undefined;
+        const isSse = sseDecoratorOptions !== undefined;
         const effectiveTimeout: number | undefined = isSse
           ? (sseDecoratorOptions?.timeout ?? routeMeta.timeout ?? DEFAULT_SSE_TIMEOUT)
           : routeMeta.timeout;
+        const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
+        const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
 
         return async (req, server) => {
-          const startTime = Date.now();
+          // Capture outermost timestamp before any closure/ALS overhead
+          const profiler = PROFILING_ENABLED ? getProfiler() : null;
+          const outerStartNs = profiler ? Bun.nanoseconds() : 0;
 
-          // Apply per-request idle timeout if configured
-          if (effectiveTimeout !== undefined) {
-            server.timeout(req, effectiveTimeout);
-          }
+          const requestHandler = async (): Promise<Response> => {
+            // Only measure time when metrics or tracing need it
+            const startTime = (app.metricsService || app.traceService) ? Date.now() : 0;
 
-          // Setup tracing context if available and enabled
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let traceSpan: any = null;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let traceContext: any = null;
-
-          if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
-            try {
-              // Extract trace headers
-              const headers = Object.fromEntries(req.headers.entries());
-              const traceHeaders = {
-                traceparent: headers.traceparent,
-                tracestate: headers.tracestate,
-                // eslint-disable-next-line @typescript-eslint/naming-convention
-                'x-trace-id': headers['x-trace-id'],
-                // eslint-disable-next-line @typescript-eslint/naming-convention
-                'x-span-id': headers['x-span-id'],
-              };
-
-              // Extract or generate trace context
-              const extractedContext = await Effect.runPromise(
-                app.traceService.extractFromHeaders(traceHeaders),
-              );
-
-              if (extractedContext) {
-                traceContext = extractedContext;
-                await Effect.runPromise(app.traceService.setContext(extractedContext));
-              } else {
-                // Generate new trace context
-                traceContext = await Effect.runPromise(app.traceService.generateTraceContext());
-                await Effect.runPromise(app.traceService.setContext(traceContext));
-              }
-
-              // Start HTTP trace span
-              const httpData = {
-                method,
-                url: req.url,
-                route: fullPath,
-                userAgent: headers['user-agent'],
-                remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
-                requestSize: headers['content-length']
-                  ? parseInt(headers['content-length'], 10)
-                  : undefined,
-              };
-
-              traceSpan = await Effect.runPromise(app.traceService.startHttpTrace(httpData));
-
-              // Set global trace context for this request
-              globalCurrentTraceContext = {
-                traceId: traceContext.traceId,
-                spanId: traceContext.spanId,
-                parentSpanId: traceContext.parentSpanId,
-              };
-
-              // Also set it globally for logger
-              if (typeof globalThis !== 'undefined') {
-                (globalThis as Record<string, unknown>).__onebunCurrentTraceContext =
-                  globalCurrentTraceContext;
-              }
-            } catch (error) {
-              app.logger.error(
-                'Failed to setup tracing:',
-                error instanceof Error ? error : new Error(String(error)),
-              );
+            // Apply per-request idle timeout if configured
+            if (effectiveTimeout !== undefined) {
+              server.timeout(req, effectiveTimeout);
             }
-          }
 
-          // Extract query parameters from URL
-          const url = new URL(req.url);
-          const queryParams = extractQueryParams(url);
+            // Setup tracing context if available and enabled
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let traceSpan: any = null;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let traceContext: any = null;
 
-          try {
-            let response: Response;
+            let pMark: ProfileMark | undefined;
+            if (profiler && app.traceService) {
+              pMark = profiler.start('framework', 'trace:setup');
+            }
+            if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
+              try {
+              // Extract trace headers
+                const headers = Object.fromEntries(req.headers.entries());
+                const traceHeaders = {
+                  traceparent: headers.traceparent,
+                  tracestate: headers.tracestate,
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'x-trace-id': headers['x-trace-id'],
+                  // eslint-disable-next-line @typescript-eslint/naming-convention
+                  'x-span-id': headers['x-span-id'],
+                };
 
-            // Run guards then handler — shared by middleware chain and direct path
-            const runGuardedHandler = async (): Promise<Response> => {
-              if (routeMeta.guards && routeMeta.guards.length > 0) {
-                const guardCtx = new HttpExecutionContextImpl(
-                  req,
-                  routeMeta.handler,
-                  controller.constructor.name,
+                // Extract or generate trace context
+                const extractedContext = await Effect.runPromise(
+                  app.traceService.extractFromHeaders(traceHeaders),
                 );
-                const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
 
-                if (!allowed) {
-                  return new Response(
-                    JSON.stringify(
-                      createErrorResponse(
-                        'Forbidden',
-                        HttpStatusCode.FORBIDDEN,
+                if (extractedContext) {
+                  traceContext = extractedContext;
+                  await Effect.runPromise(app.traceService.setContext(extractedContext));
+                } else {
+                // Generate new trace context
+                  traceContext = await Effect.runPromise(app.traceService.generateTraceContext());
+                  await Effect.runPromise(app.traceService.setContext(traceContext));
+                }
+
+                // Start HTTP trace span
+                const httpData = {
+                  method,
+                  url: req.url,
+                  route: fullPath,
+                  userAgent: headers['user-agent'],
+                  remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
+                  requestSize: headers['content-length']
+                    ? parseInt(headers['content-length'], 10)
+                    : undefined,
+                };
+
+                traceSpan = await Effect.runPromise(app.traceService.startHttpTrace(httpData));
+
+                // Set global trace context for this request
+                globalCurrentTraceContext = {
+                  traceId: traceContext.traceId,
+                  spanId: traceContext.spanId,
+                  parentSpanId: traceContext.parentSpanId,
+                };
+
+                // Also set it globally for logger
+                if (typeof globalThis !== 'undefined') {
+                  (globalThis as Record<string, unknown>).__onebunCurrentTraceContext =
+                    globalCurrentTraceContext;
+                }
+              } catch (error) {
+                app.logger.error(
+                  'Failed to setup tracing:',
+                  error instanceof Error ? error : new Error(String(error)),
+                );
+              }
+            }
+
+            if (pMark) {
+              profiler!.end(pMark);
+            }
+
+            // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
+            if (profiler && needsQueryParams) {
+              pMark = profiler.start('framework', 'url:parse');
+            }
+            const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
+            if (pMark) {
+              profiler!.end(pMark);
+            }
+
+            try {
+              let response: Response;
+
+              // Fast path: no params, no response schemas — inline handler call, skip executeHandler entirely
+              // Full path: delegate to executeHandler for param extraction, validation, response wrapping
+              const callHandler = isFastPath
+                ? async (): Promise<Response> => {
+                  let hMark: ProfileMark | undefined;
+                  if (profiler) {
+                    hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+                  }
+                  const result = await boundHandler(req);
+                  if (hMark) {
+                    profiler!.end(hMark);
+                  }
+                  if (sseDecoratorOptions) {
+                    return createSseResponseFromResult(result, sseDecoratorOptions);
+                  }
+
+                  return result;
+                }
+                : (): Promise<Response> => executeHandler(
+                  boundHandler, routeMeta, controller, controllerName,
+                  sseDecoratorOptions, req, queryParams, profiler,
+                );
+
+              // Execute middleware chain if any, then guards + handler
+              if (routeMeta.middleware && routeMeta.middleware.length > 0) {
+                const guardedHandler = async (): Promise<Response> => {
+                  if (routeMeta.guards && routeMeta.guards.length > 0) {
+                    let guardMark: ProfileMark | undefined;
+                    if (profiler) {
+                      guardMark = profiler.start('guard', fullPath);
+                    }
+                    const guardCtx = new HttpExecutionContextImpl(
+                      req,
+                      routeMeta.handler,
+                      controller.constructor.name,
+                    );
+                    const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                    if (guardMark) {
+                      profiler!.end(guardMark);
+                    }
+
+                    if (!allowed) {
+                      return new Response(
+                        JSON.stringify(
+                          createErrorResponse(
+                            'Forbidden',
+                            HttpStatusCode.FORBIDDEN,
+                          ),
+                        ),
+                        {
+                          status: HttpStatusCode.OK,
+                          headers: {
+                          // eslint-disable-next-line @typescript-eslint/naming-convention
+                            'Content-Type': 'application/json',
+                          },
+                        },
+                      );
+                    }
+                  }
+
+                  return await callHandler();
+                };
+
+                const next = async (index: number): Promise<Response> => {
+                  if (index >= routeMeta.middleware!.length) {
+                    return await guardedHandler();
+                  }
+
+                  const middleware = routeMeta.middleware![index];
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const mwName = (middleware as any)._middlewareName
+                  || middleware.name
+                  || `middleware[${index}]`;
+
+                  if (profiler) {
+                    const mwMark = profiler.start('middleware', mwName);
+                    const result = await middleware(req, () => next(index + 1));
+                    profiler.end(mwMark);
+
+                    return result;
+                  }
+
+                  return await middleware(req, () => next(index + 1));
+                };
+
+                response = await next(0);
+              } else {
+                // No middleware — run guards inline (no extra closure)
+                if (routeMeta.guards && routeMeta.guards.length > 0) {
+                  let guardMark: ProfileMark | undefined;
+                  if (profiler) {
+                    guardMark = profiler.start('guard', fullPath);
+                  }
+                  const guardCtx = new HttpExecutionContextImpl(
+                    req,
+                    routeMeta.handler,
+                    controller.constructor.name,
+                  );
+                  const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                  if (guardMark) {
+                    profiler!.end(guardMark);
+                  }
+
+                  if (!allowed) {
+                    response = new Response(
+                      JSON.stringify(
+                        createErrorResponse(
+                          'Forbidden',
+                          HttpStatusCode.FORBIDDEN,
+                        ),
                       ),
-                    ),
-                    {
-                      status: HttpStatusCode.OK,
-                      headers: {
+                      {
+                        status: HttpStatusCode.OK,
+                        headers: {
                         // eslint-disable-next-line @typescript-eslint/naming-convention
-                        'Content-Type': 'application/json',
+                          'Content-Type': 'application/json',
+                        },
                       },
-                    },
+                    );
+                  } else {
+                    response = await callHandler();
+                  }
+                } else {
+                  response = await callHandler();
+                }
+              }
+
+              // Skip Date.now() when neither metrics nor tracing need duration
+              const duration = (app.metricsService || traceSpan)
+                ? Date.now() - startTime
+                : 0;
+
+              // Record metrics and end trace
+              if (profiler) {
+                pMark = profiler.start('framework', 'metrics+trace');
+              }
+              if (app.metricsService && app.metricsService.recordHttpRequest) {
+                const durationSeconds = duration / 1000;
+                app.metricsService.recordHttpRequest({
+                  method,
+                  route: fullPath,
+                  statusCode: response?.status || HttpStatusCode.OK,
+                  duration: durationSeconds,
+                  controller: controller.constructor.name,
+                  action: 'unknown',
+                });
+              }
+
+              // End trace
+              if (traceSpan && app.traceService) {
+                try {
+                  await Effect.runPromise(
+                    app.traceService.endHttpTrace(traceSpan, {
+                      statusCode: response?.status || HttpStatusCode.OK,
+                      responseSize: response?.headers?.get('content-length')
+                        ? parseInt(response.headers.get('content-length')!, 10)
+                        : undefined,
+                      duration,
+                    }),
+                  );
+                } catch (traceError) {
+                  app.logger.error(
+                    'Failed to end trace:',
+                    traceError instanceof Error ? traceError : new Error(String(traceError)),
                   );
                 }
               }
 
-              return await executeHandler(
-                {
-                  handler: boundHandler,
-                  handlerName: routeMeta.handler,
-                  controller,
-                  params: routeMeta.params,
-                  responseSchemas: routeMeta.responseSchemas,
-                  filters: routeMeta.filters,
-                },
-                req,
-                queryParams,
+              // Clear trace context after request
+              clearGlobalTraceContext();
+              if (pMark) {
+                profiler!.end(pMark);
+              }
+
+              return response;
+            } catch (error) {
+              app.logger.error(
+                'Request handling error:',
+                error instanceof Error ? error : new Error(String(error)),
               );
-            };
+              const response = new Response('Internal Server Error', {
+                status: HttpStatusCode.INTERNAL_SERVER_ERROR,
+              });
+              const duration = Date.now() - startTime;
 
-            // Execute middleware chain if any, then guarded handler
-            if (routeMeta.middleware && routeMeta.middleware.length > 0) {
-              const next = async (index: number): Promise<Response> => {
-                if (index >= routeMeta.middleware!.length) {
-                  return await runGuardedHandler();
+              // Record error metrics
+              if (app.metricsService && app.metricsService.recordHttpRequest) {
+                const durationSeconds = duration / 1000;
+                app.metricsService.recordHttpRequest({
+                  method,
+                  route: fullPath,
+                  statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
+                  duration: durationSeconds,
+                  controller: controller.constructor.name,
+                  action: 'unknown',
+                });
+              }
+
+              // End trace with error
+              if (traceSpan && app.traceService) {
+                try {
+                  await Effect.runPromise(
+                    app.traceService.addEvent('error', {
+                      errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
+                      errorMessage: error instanceof Error ? error.message : String(error),
+                    }),
+                  );
+                  await Effect.runPromise(
+                    app.traceService.endHttpTrace(traceSpan, {
+                      statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
+                      duration,
+                    }),
+                  );
+                } catch (traceError) {
+                  app.logger.error(
+                    'Failed to end trace with error:',
+                    traceError instanceof Error ? traceError : new Error(String(traceError)),
+                  );
                 }
-
-                const middleware = routeMeta.middleware![index];
-
-                return await middleware(req, () => next(index + 1));
-              };
-
-              response = await next(0);
-            } else {
-              response = await runGuardedHandler();
-            }
-
-            const duration = Date.now() - startTime;
-
-            // Record metrics
-            if (app.metricsService && app.metricsService.recordHttpRequest) {
-              const durationSeconds = duration / 1000;
-              app.metricsService.recordHttpRequest({
-                method,
-                route: fullPath,
-                statusCode: response?.status || HttpStatusCode.OK,
-                duration: durationSeconds,
-                controller: controller.constructor.name,
-                action: 'unknown',
-              });
-            }
-
-            // End trace
-            if (traceSpan && app.traceService) {
-              try {
-                await Effect.runPromise(
-                  app.traceService.endHttpTrace(traceSpan, {
-                    statusCode: response?.status || HttpStatusCode.OK,
-                    responseSize: response?.headers?.get('content-length')
-                      ? parseInt(response.headers.get('content-length')!, 10)
-                      : undefined,
-                    duration,
-                  }),
-                );
-              } catch (traceError) {
-                app.logger.error(
-                  'Failed to end trace:',
-                  traceError instanceof Error ? traceError : new Error(String(traceError)),
-                );
               }
+
+              // Clear trace context after error
+              clearGlobalTraceContext();
+
+              return response;
             }
+          };
 
-            // Clear trace context after request
-            clearGlobalTraceContext();
+          // Wrap in profiling scope for per-request mark isolation
+          let response: Response;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let innerReport: any = null;
+          if (profiler) {
+            response = await runProfileScope(async () => {
+              const res = await requestHandler();
+              // Flush inside ALS scope to capture request-scoped marks
+              innerReport = profiler.flush({ route: fullPath, method });
 
-            return response;
-          } catch (error) {
-            app.logger.error(
-              'Request handling error:',
-              error instanceof Error ? error : new Error(String(error)),
-            );
-            const response = new Response('Internal Server Error', {
-              status: HttpStatusCode.INTERNAL_SERVER_ERROR,
+              return res;
             });
-            const duration = Date.now() - startTime;
-
-            // Record error metrics
-            if (app.metricsService && app.metricsService.recordHttpRequest) {
-              const durationSeconds = duration / 1000;
-              app.metricsService.recordHttpRequest({
-                method,
-                route: fullPath,
-                statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                duration: durationSeconds,
-                controller: controller.constructor.name,
-                action: 'unknown',
+            // Inject outer total mark that spans everything (ALS overhead + requestHandler)
+            const outerEndNs = Bun.nanoseconds();
+            const totalDurationNs = outerEndNs - outerStartNs;
+            if (innerReport) {
+              innerReport.marks.unshift({
+                category: 'request',
+                label: 'total',
+                startNs: outerStartNs,
+                endNs: outerEndNs,
+                durationNs: totalDurationNs,
               });
+              innerReport.totalNs = totalDurationNs;
+              app.handleProfileReport(innerReport);
             }
-
-            // End trace with error
-            if (traceSpan && app.traceService) {
-              try {
-                await Effect.runPromise(
-                  app.traceService.addEvent('error', {
-                    errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
-                    errorMessage: error instanceof Error ? error.message : String(error),
-                  }),
-                );
-                await Effect.runPromise(
-                  app.traceService.endHttpTrace(traceSpan, {
-                    statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                    duration,
-                  }),
-                );
-              } catch (traceError) {
-                app.logger.error(
-                  'Failed to end trace with error:',
-                  traceError instanceof Error ? traceError : new Error(String(traceError)),
-                );
-              }
-            }
-
-            // Clear trace context after error
-            clearGlobalTraceContext();
-
-            return response;
+          } else {
+            response = await requestHandler();
           }
+
+          return response;
         };
       }
 
@@ -1122,6 +1312,25 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
+      // Flush bootstrap profiling report
+      if (PROFILING_ENABLED) {
+        const profiler = getProfiler()!;
+        const bootstrapReport = profiler.flush({ route: 'bootstrap' });
+        this.handleProfileReport(bootstrapReport);
+      }
+
+      // Register profiling diagnostic endpoint
+      if (PROFILING_ENABLED && this.options.profiling?.endpoint) {
+        const profilePath = this.options.profiling.endpoint;
+        bunRoutes[profilePath] = {
+           
+          GET: () => new Response(JSON.stringify(this.profilingReports), {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        };
+      }
+
       this.server = Bun.serve<WsClientData>({
         port: this.options.port,
         hostname: this.options.host,
@@ -1294,42 +1503,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * Path parameters come from BunRequest.params (populated by Bun routes API).
      * Query parameters are extracted separately from the URL.
      */
+    /**
+     * Execute route handler with parameter injection, validation, and response wrapping.
+     * Called only for routes with params or response schemas (full path).
+     * Simple routes use the inline fast path in createRouteHandler.
+     */
     async function executeHandler(
-      route: {
-        handler: Function;
-        handlerName?: string;
-        controller: Controller;
-        params?: ParamMetadata[];
-        responseSchemas?: RouteMetadata['responseSchemas'];
-        filters?: ExceptionFilter[];
-      },
+      boundHandler: Function,
+      routeMeta: RouteMetadata,
+      controller: Controller,
+      controllerName: string,
+      sseOptions: SseDecoratorOptions | undefined,
       req: OneBunRequest,
       queryParams: Record<string, string | string[]>,
+      profiler: import('../profiler').Profiler | null,
     ): Promise<Response> {
-      // Check if this is an SSE endpoint
-      let sseOptions: SseDecoratorOptions | undefined;
-      if (route.handlerName) {
-        sseOptions = getSseMetadata(Object.getPrototypeOf(route.controller), route.handlerName);
-      }
-
-      // If no parameter metadata, just call the handler with the request
-      if (!route.params || route.params.length === 0) {
-        const result = await route.handler(req);
-
-        // Handle SSE response
-        if (sseOptions !== undefined) {
-          return createSseResponseFromResult(result, sseOptions);
-        }
-
-        return result;
-      }
-
       try {
       // Prepare arguments array based on parameter metadata
         const args: unknown[] = [];
 
         // Sort params by index to ensure correct order
-        const sortedParams = [...(route.params || [])].sort((a, b) => a.index - b.index);
+        const sortedParams = [...(routeMeta.params || [])].sort((a, b) => a.index - b.index);
 
         // Pre-parse body for file upload params (FormData or JSON, cached for all params)
         const needsFileData = sortedParams.some(
@@ -1378,6 +1572,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           }
         }
 
+        let paramsMark: ProfileMark | undefined;
+        if (profiler) {
+          paramsMark = profiler.start('handler', 'params:extract');
+        }
         for (const param of sortedParams) {
           switch (param.type) {
             case ParamType.PATH:
@@ -1544,8 +1742,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             }
           }
         }
+        if (paramsMark) {
+          profiler!.end(paramsMark);
+        }
         // Call handler with injected parameters
-        const result = await route.handler(...args);
+        let handlerMark: ProfileMark | undefined;
+        if (profiler) {
+          handlerMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+        }
+        const result = await boundHandler(...args);
+        if (handlerMark) {
+          profiler!.end(handlerMark);
+        }
 
         // Handle SSE response - wrap async generator in SSE Response
         if (sseOptions !== undefined) {
@@ -1570,12 +1778,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
               const bodyData = bodyText ? JSON.parse(bodyText) : null;
 
               // Validate response body if schema is provided
-              if (route.responseSchemas && route.responseSchemas.length > 0) {
-                const responseSchema = route.responseSchemas.find(
+              if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+                const responseSchema = routeMeta.responseSchemas.find(
                   (rs) => rs.statusCode === responseStatusCode,
-                ) || route.responseSchemas.find(
+                ) || routeMeta.responseSchemas.find(
                   (rs) => rs.statusCode === HttpStatusCode.OK,
-                ) || route.responseSchemas[0];
+                ) || routeMeta.responseSchemas[0];
 
                 if (responseSchema?.schema) {
                   try {
@@ -1614,11 +1822,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
 
         // Validate response against schema if provided
-        if (route.responseSchemas && route.responseSchemas.length > 0) {
+        if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
           // Find matching response schema (default to 200 if not found)
-          const responseSchema = route.responseSchemas.find(
+          const responseSchema = routeMeta.responseSchemas.find(
             (rs) => rs.statusCode === HttpStatusCode.OK,
-          ) || route.responseSchemas[0];
+          ) || routeMeta.responseSchemas[0];
 
           if (responseSchema?.schema) {
             try {
@@ -1638,34 +1846,52 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           validatedResult !== null &&
           'success' in validatedResult
         ) {
-          return new Response(JSON.stringify(validatedResult), {
+          let serMark: ProfileMark | undefined;
+          if (profiler) {
+            serMark = profiler.start('framework', 'response:serialize');
+          }
+          const resp = new Response(JSON.stringify(validatedResult), {
             status: responseStatusCode,
             headers: {
               // eslint-disable-next-line @typescript-eslint/naming-convention
               'Content-Type': 'application/json',
             },
           });
+          if (serMark) {
+            profiler!.end(serMark);
+          }
+
+          return resp;
         }
 
         // Otherwise, wrap in standardized success response
+        let serializeMark: ProfileMark | undefined;
+        if (profiler) {
+          serializeMark = profiler.start('framework', 'response:serialize');
+        }
         const successResponse = createSuccessResponse(validatedResult);
 
-        return new Response(JSON.stringify(successResponse), {
+        const resp = new Response(JSON.stringify(successResponse), {
           status: responseStatusCode,
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
           },
         });
+        if (serializeMark) {
+          profiler!.end(serializeMark);
+        }
+
+        return resp;
       } catch (error) {
         // Run through exception filters (route → controller → global), then default
-        const filters = route.filters ?? [];
+        const filters = routeMeta.filters ?? [];
 
         if (filters.length > 0) {
           const guardCtx = new HttpExecutionContextImpl(
             req,
-            route.handlerName ?? '',
-            route.controller.constructor.name,
+            routeMeta.handler ?? '',
+            controllerName,
           );
 
           // Last filter wins (route-level filters were appended last and take highest priority)
@@ -1674,8 +1900,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
         return await appDefaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
           req,
-          route.handlerName ?? '',
-          route.controller.constructor.name,
+          routeMeta.handler ?? '',
+          controllerName,
         ));
       }
     }
@@ -2049,6 +2275,24 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   getPort(): number {
     return this.server?.port ?? this.options.port ?? 3000;
+  }
+
+  /**
+   * Store a profile report and deliver it via configured channels.
+   * @internal
+   */
+  private handleProfileReport(report: import('../profiler').ProfileReport): void {
+    const maxReports = this.options.profiling?.maxReports ?? 100;
+    this.profilingReports.push(report);
+    if (this.profilingReports.length > maxReports) {
+      this.profilingReports.shift();
+    }
+    if (this.options.profiling?.onProfile) {
+      this.options.profiling.onProfile(report);
+    }
+    if (this.options.profiling?.logReport) {
+      this.logger.debug('Profile report', report as unknown as Record<string, unknown>);
+    }
   }
 
   /**

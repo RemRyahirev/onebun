@@ -129,6 +129,19 @@ export * from './queue';
 // Validation
 export * from './validation';
 
+// Profiler
+export {
+  type ProfileMark,
+  type ProfileReport,
+  type Profiler,
+  type ProfilingOptions,
+  PROFILING_ENABLED,
+  getProfiler,
+  setProfiler,
+  runProfileScope,
+  DefaultProfiler,
+} from './profiler';
+
 // Testing Utilities are available via '@onebun/core/testing' subpath import
 // to avoid requiring testcontainers as a mandatory dependency
 

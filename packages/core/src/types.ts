@@ -576,6 +576,22 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   security?: import('./security/security-headers-middleware').SecurityHeadersOptions | true;
 
   /**
+   * Internal framework profiling for development and benchmarking.
+   * Zero-cost when disabled — controlled by this option or `ONEBUN_PROFILE=1` env var.
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   profiling: {
+   *     enabled: true,
+   *     onProfile: (report) => console.log(report),
+   *   },
+   * });
+   * ```
+   */
+  profiling?: import('./profiler/profiler').ProfilingOptions;
+
+  /**
    * Pre-register service instances for testing.
    * These are injected before `setup()` so controllers receive mocks at construction time.
    * @internal Use `TestingModule` instead of setting this directly.
