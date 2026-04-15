@@ -116,24 +116,13 @@ async function validateLockfile(): Promise<boolean> {
 }
 
 /**
- * Run unit tests (excluding integration tests that require Docker/external services)
+ * Run all tests including integration tests
  */
 async function runTests(): Promise<boolean> {
-  log.step('Running unit tests (excluding integration tests)...');
+  log.step('Running all tests...');
 
   try {
-    // Get all test files excluding integration and redis tests
-    const findResult = await $`find packages -name "*.test.ts" ! -name "*integration*" ! -name "*redis*"`.nothrow();
-    const testFiles = findResult.stdout.toString().trim().split('\n').filter(Boolean);
-
-    if (testFiles.length === 0) {
-      log.warn('No test files found');
-      return true;
-    }
-
-    // Run tests on the filtered files (join with space for shell command)
-    const testFilesArg = testFiles.join(' ');
-    const result = await $`bun test ${{ raw: testFilesArg }}`.nothrow();
+    const result = await $`bun test`.nothrow();
     const output = result.stderr.toString() + result.stdout.toString();
 
     // Check if tests passed by looking for "0 fail" in output
@@ -145,7 +134,7 @@ async function runTests(): Promise<boolean> {
       const passCount = parseInt(passMatch[1], 10);
 
       if (failCount === 0 && passCount > 0) {
-        log.success(`All unit tests passed (${passCount} tests)`);
+        log.success(`All tests passed (${passCount} tests)`);
         return true;
       }
       log.error(`Tests failed: ${failCount} failed, ${passCount} passed`);
@@ -154,7 +143,7 @@ async function runTests(): Promise<boolean> {
 
     // Fallback to exit code if we can't parse output
     if (result.exitCode === 0) {
-      log.success('All unit tests passed');
+      log.success('All tests passed');
       return true;
     }
 

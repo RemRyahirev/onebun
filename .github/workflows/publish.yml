@@ -16,6 +16,7 @@ permissions:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -40,7 +41,12 @@ jobs:
       - name: Lint
         run: bunx eslint packages/
 
+      - name: Pre-pull testcontainer images
+        run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & wait
+
       - name: Test with coverage
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: 'true'
         run: bun test --reporter=default --reporter=junit --reporter-outfile=test-results.xml --coverage --coverage-reporter=lcov
 
       - name: Extract test count for badge
