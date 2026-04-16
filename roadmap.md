@@ -57,8 +57,13 @@
 - [x] `bun create @onebun my-app` — создание проекта из шаблона
 - [ ] `bunx onebun generate module/controller/service`
 
+### DX-улучшения
+- [ ] Необязательный ведущий слэш в route decorators: `@Get(':id')` как алиас для `@Get('/:id')` (NestJS-совместимость)
+- [ ] Scoped providers: `REQUEST` и `TRANSIENT` scope (как в NestJS)
+- [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами маршрутов (аналог NestJS `forRoutes()`)
+
 ### Документация (пробелы Фазы 2)
-- [ ] Migration guide: NestJS → OneBun
+- [x] Migration guide: NestJS → OneBun
 - [ ] Deployment guide: Docker, k8s, CI/CD
 - [ ] Testing guide: unit, integration, e2e
 - [ ] Расширенный Troubleshooting / FAQ

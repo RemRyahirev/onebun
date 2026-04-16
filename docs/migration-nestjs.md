@@ -27,6 +27,8 @@ This guide walks through the mapping of concepts, decorators, and code patterns.
 | `Logger` | `this.logger` | Built-in on `BaseService`/`BaseController`, structured JSON logging |
 | `@Inject()` | `@Inject()` | Rarely needed -- auto DI works for most cases |
 | Lifecycle hooks | Lifecycle hooks | `OnModuleInit`, `OnApplicationInit`, `OnModuleDestroy`, etc. |
+| `@Sse()` | `@Sse()` + `this.sse()` | Built-in heartbeat, per-route timeout, auto-abort on disconnect |
+| Static files (`ServeStaticModule`) | `static` option | Built-in with SPA fallback, no extra module needed |
 
 ## Decorator Mapping
 
@@ -510,6 +512,87 @@ throw new HttpException(404, 'Not found');
 
 This provides a consistent API response envelope across all endpoints.
 
+For custom HTTP status codes on success, use `this.success(data, statusCode)`:
+
+```typescript
+@Post('/')
+async create(@Body(createUserSchema) body: CreateUserBody) {
+  const user = await this.userService.create(body);
+  return this.success(user, 201);  // HTTP 201 + { success: true, result: user }
+}
+```
+
+### Route Path Format
+
+NestJS uses `@Get(':id')` — OneBun requires a leading slash: `@Get('/:id')`. Both formats are normalized internally, but the idiomatic style is with slash:
+
+```typescript
+// NestJS
+@Get(':id')
+@Post()
+
+// OneBun
+@Get('/:id')
+@Post('/')
+```
+
+### Singleton Services Only
+
+NestJS supports three provider scopes: `DEFAULT` (singleton), `REQUEST` (per-request), `TRANSIENT` (new instance per injection). OneBun services are **singletons only** — one instance per application lifetime, created at startup.
+
+If you relied on `REQUEST` scope for per-request state in NestJS, pass request-specific data through method arguments instead.
+
+### Provider Patterns
+
+NestJS supports `useFactory`, `useValue`, `useClass`, and `useExisting` in module providers. OneBun supports **class-based providers only** — list `@Service()` classes in the `providers` array. The `useValue`/`useClass` patterns are available in `TestingModule.overrideProvider()` for testing.
+
+If you used `useFactory` for dynamic providers, use `getConfig()` for pre-init config or `onModuleInit()` for async initialization.
+
+### Module Middleware Configuration
+
+NestJS uses `configure(consumer: MiddlewareConsumer)` with a fluent API to apply middleware to routes. OneBun uses `configureMiddleware()` which returns an array of middleware classes applied to all routes in the module:
+
+```typescript
+// NestJS
+export class UserModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(LoggerMiddleware).forRoutes('users');
+  }
+}
+
+// OneBun
+export class UserModule implements OnModuleConfigure {
+  configureMiddleware(): MiddlewareClass[] {
+    return [LoggerMiddleware];  // applied to all controllers in this module
+  }
+}
+```
+
+OneBun does not support per-route middleware configuration at the module level — use `@UseMiddleware()` on individual routes or controllers instead.
+
+### Testing Approach
+
+NestJS uses `Test.createTestingModule()` with `supertest` for HTTP testing. OneBun's `TestingModule` starts a **real HTTP server** on a random port and makes actual HTTP requests:
+
+```typescript
+// NestJS
+const module = await Test.createTestingModule({
+  controllers: [UserController],
+  providers: [UserService],
+}).compile();
+const app = module.createNestApplication();
+await app.init();
+const response = await request(app.getHttpServer()).get('/users');
+
+// OneBun
+const module = await TestingModule
+  .create({ controllers: [UserController], providers: [UserService] })
+  .overrideProvider(UserService).useValue(mockService)
+  .compile();  // starts real server on random port
+const response = await module.inject('GET', '/users');
+await module.close();  // always close in afterEach
+```
+
 ## What is Not Yet Available in OneBun
 
 | Feature | Status | Notes |
@@ -520,6 +603,9 @@ This provides a consistent API response envelope across all endpoints.
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |
 | Microservices (`@nestjs/microservices`) | Different approach | `MultiServiceApplication` for multi-service from single image |
 | Pipes (class-based) | Not available | ArkType schemas handle validation |
+| Scoped providers (`REQUEST`, `TRANSIENT`) | Not available | All services are singletons |
+| `useFactory` / `useExisting` providers | Not available | Class-based `@Service()` only; `useValue`/`useClass` in tests only |
+| Per-route module middleware (`forRoutes`) | Not available | Use `@UseMiddleware()` on controllers/routes |
 | Dynamic modules (`forRoot`/`forAsync`) | Partial | `DrizzleModule.forRoot()`, `CacheModule.forRoot()` — no `forAsync`, use `getConfig()` for dynamic values |
 
 ## What is Unique to OneBun
@@ -535,6 +621,12 @@ These features are built into the framework -- no community packages needed:
 - **WebSocket guards and queue guards** -- guards work not only on HTTP routes but also on WebSocket messages and queue handlers
 - **Typed inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()` with HMAC auth, no code generation
 - **Auto-generated typed WebSocket client** -- type-safe frontend SDK generated from gateway decorators
+- **SSE (Server-Sent Events)** -- `@Sse()` decorator with heartbeat, per-route timeout, auto-abort on disconnect; `this.sse()` for programmatic streaming
+- **Static file serving with SPA fallback** -- serve frontend build from the same host/port as the API, with `fallbackFile` for client-side routing
+- **OTLP log export** -- structured logs sent to OpenTelemetry Collector alongside console output, batch-based with configurable flush
+- **Auto-trace all methods** -- `traceAll: true` in tracing config + `@TraceAll()`/`@NoTrace()` per-class overrides with filtering
+- **Shared Redis connection pool** -- single connection reused by cache, WebSocket storage, and queue — less memory, fewer connections
+- **Project scaffolding** -- `bun create @onebun my-app` creates ready-to-run project with TypeScript config, env schema, Docker Compose
 
 ## Quick Migration Checklist
 
@@ -544,9 +636,10 @@ These features are built into the framework -- no community packages needed:
 4. Replace `@Injectable()` with `@Service()` and extend `BaseService`
 5. Update controllers to extend `BaseController` and add `super()` call
 6. Replace DTO classes + `class-validator` with ArkType schemas
-7. Update route handlers to return plain objects and throw `HttpException` for errors
-8. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
-9. Move `ConfigService` usage to `this.config` (from `BaseService`)
-10. Move `Logger` usage to `this.logger` (from `BaseService`)
-11. Update entry point from `NestFactory.create()` to `new OneBunApplication()`
-12. Run `bun run typecheck` and `bun test` to verify everything works
+7. Update route paths: `@Get(':id')` → `@Get('/:id')` (add leading slash)
+8. Update route handlers to return plain objects and throw `HttpException` for errors
+9. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
+10. Move `ConfigService` usage to `this.config` (from `BaseService`)
+11. Move `Logger` usage to `this.logger` (from `BaseService`)
+12. Update entry point from `NestFactory.create()` to `new OneBunApplication()`
+13. Run `bun run typecheck` and `bun test` to verify everything works
