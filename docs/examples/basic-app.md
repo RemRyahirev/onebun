@@ -300,3 +300,9 @@ curl http://localhost:3000/metrics
 4. **Responses**: Return plain data — auto-wrapped to standardized JSON responses
 5. **Logging**: Use `this.logger` for structured logging
 6. **Config**: Define schema in `config.ts`, load via `envSchema` option
+
+## Next Steps
+
+- [CRUD API](/examples/crud-api) — Validation, error handling, repository pattern
+- [WebSocket Chat](/examples/websocket-chat) — Real-time communication with rooms and guards
+- [Multi-Service](/examples/multi-service) — Multiple microservices from a single process

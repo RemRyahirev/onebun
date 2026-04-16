@@ -53,8 +53,8 @@
 - [ ] Агрегация статусов, liveness/readiness probes
 
 ### CLI / Scaffolding
-- [ ] Пакет `create-onebun` / `@onebun/cli`
-- [ ] `bunx create-onebun my-app` — создание проекта из шаблона
+- [x] Пакет `create-onebun` / `@onebun/cli`
+- [x] `bun create @onebun my-app` — создание проекта из шаблона
 - [ ] `bunx onebun generate module/controller/service`
 
 ### Документация (пробелы Фазы 2)
@@ -69,11 +69,11 @@
 ## Фаза 3: Ecosystem (после 1.0)
 
 ### Функциональность
-- [ ] Performance benchmarks vs Hono, Elysia, NestJS+Fastify
+- [x] Performance benchmarks vs Hono, Elysia, NestJS+Fastify
 - [ ] GraphQL + Drizzle интеграция (@pothos/plugin-drizzle)
 - [ ] Config validation at build time (документирование паттерна с ArkType)
 - [ ] Plugin system — формальный API для расширений
-- [ ] Рассмотреть переход на MPL-2.0 лицензию
+- [x] Рассмотреть переход на MPL-2.0 лицензию
 
 ---
 
@@ -90,6 +90,7 @@
 - [ ] Шаблоны: single app, multi app
 - [ ] Базовые конфиги: tsconfig, eslint, werf
 - [ ] Локальная инфраструктура и CI
+- [ ] Оптимизация `getNextRun` в cron-parser: пропускать неподходящие месяцы/дни/часы целиком вместо посекундного перебора (~31M итераций для невозможных расписаний)
 
 ### Auth (расширенная)
 - [ ] Межсервисная авторизация

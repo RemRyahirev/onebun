@@ -18,8 +18,9 @@
   "license": "MPL-2.0",
   "private": true,
   "scripts": {
-    "dev": "bun run --watch example/src/index.ts",
-    "dev:once": "bun run example/src/index.ts",
+    "ex1": "bun run examples/crud-api/src/index.ts",
+    "ex2": "bun run examples/multi-service/src/index.ts",
+    "ex3": "bun run examples/websocket-chat/src/index.ts",
     "test": "bun test",
     "lint": "eslint --fix",
     "typecheck": "bunx tsc --noEmit",
@@ -34,7 +35,7 @@
   },
   "workspaces": [
     "packages/*",
-    "example",
+    "examples/*",
     "!repofleet/**"
   ],
   "dependencies": {

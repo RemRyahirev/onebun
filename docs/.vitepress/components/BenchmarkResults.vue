@@ -59,11 +59,6 @@ function formatNumber(n: number): string {
   return n.toLocaleString('en-US');
 }
 
-function computeRatio(a: number, b: number): number {
-  if (b === 0) return 0;
-  return Math.round((a / b) * 10) / 10;
-}
-
 function pctDiff(baseline: number, other: number): string {
   if (baseline === 0) return '—';
   const pct = Math.round(((other - baseline) / baseline) * 100);
@@ -103,19 +98,6 @@ const nestBunHttp = computed(() =>
       !h.name.toLowerCase().includes('node'),
   ) ?? null,
 );
-
-const throughputRatio = computed(() => {
-  if (!onebunHttp.value || !nestNodeHttp.value) return '?';
-  return computeRatio(onebunHttp.value.reqPerSec, nestNodeHttp.value.reqPerSec);
-});
-
-const tailLatencyRatio = computed(() => {
-  if (!onebunHttp.value || !nestNodeHttp.value) return '?';
-  const onebunMax = parseLatencyToMs(onebunHttp.value.maxLatency);
-  const nestMax = parseLatencyToMs(nestNodeHttp.value.maxLatency);
-  if (onebunMax === 0) return '?';
-  return computeRatio(nestMax, onebunMax);
-});
 
 const onebunStartupMs = computed(() => {
   if (!data.value) return '?';
@@ -172,12 +154,8 @@ onMounted(async () => {
     <!-- Key Numbers -->
     <div class="bm-cards">
       <div class="bm-card">
-        <span class="bm-card-number">{{ throughputRatio }}x</span>
+        <span class="bm-card-number">~2x</span>
         <span class="bm-card-label">faster than NestJS&nbsp;(Node.js)</span>
-      </div>
-      <div class="bm-card">
-        <span class="bm-card-number">{{ tailLatencyRatio }}x</span>
-        <span class="bm-card-label">lower tail latency</span>
       </div>
       <div class="bm-card">
         <span class="bm-card-number">Zero</span>
@@ -185,15 +163,9 @@ onMounted(async () => {
       </div>
     </div>
 
-    <!-- Machine info -->
     <p class="bm-meta">
-      Measured on {{ data.machine.cpu }}, {{ data.machine.ram }}, {{ data.machine.os }},
-      Bun {{ data.machine.bunVersion }}.
-      <template v-if="data.date">Run date: {{ data.date }}.</template>
-      <template v-if="data.commit">
-        Commit:
-        <code>{{ data.commit.slice(0, 7) }}</code>.
-      </template>
+      ~2x is a conservative estimate across multiple runs. Exact results from the latest CI run
+      are in the tables below. Results vary &plusmn;20% between runs due to shared GitHub Actions runners.
     </p>
 
     <!-- HTTP Throughput -->
@@ -289,10 +261,15 @@ onMounted(async () => {
     <!-- Methodology -->
     <h2 id="methodology">Methodology</h2>
     <ul>
+      <li>
+        <strong>Environment:</strong> {{ data.machine.cpu }}, {{ data.machine.ram }}, {{ data.machine.os }},
+        Bun {{ data.machine.bunVersion }}<template v-if="data.date"> ({{ data.date }})</template>.
+      </li>
       <li><strong>HTTP:</strong> <a href="https://github.com/codesenberg/bombardier" target="_blank" rel="noopener">bombardier</a>, 50 concurrent connections, 10&nbsp;s duration.</li>
       <li><strong>Startup:</strong> Time from process start to first successful HTTP response, measured with 5&nbsp;ms Bun fetch polling.</li>
       <li>All frameworks return identical JSON payloads.</li>
       <li>Scripts are in the <code>benchmarks/</code> directory of the repository.</li>
+      <li>CI runs on shared GitHub Actions runners. Results vary &plusmn;20% between runs due to noisy-neighbor effects. Relative ranking between frameworks is consistent across runs. Raw data from all CI runs is available via <a href="https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265" target="_blank" rel="noopener">Gist revisions</a>.</li>
     </ul>
 
     <!-- Footnotes -->

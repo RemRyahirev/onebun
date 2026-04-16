@@ -52,8 +52,8 @@
         "typescript": "^5.8.0",
       },
     },
-    "example": {
-      "name": "onebun-example",
+    "examples/crud-api": {
+      "name": "onebun-example-crud-api",
       "version": "0.1.0",
       "dependencies": {
         "@onebun/core": "workspace:*",
@@ -61,13 +61,35 @@
         "effect": "^3.10.15",
       },
       "devDependencies": {
-        "@types/node": "^22.9.0",
+        "bun-types": "^1.3.8",
+      },
+    },
+    "examples/multi-service": {
+      "name": "onebun-example-multi-service",
+      "version": "0.1.0",
+      "dependencies": {
+        "@onebun/core": "workspace:*",
+        "@onebun/trace": "workspace:*",
+        "effect": "^3.10.15",
+      },
+      "devDependencies": {
+        "bun-types": "^1.3.8",
+      },
+    },
+    "examples/websocket-chat": {
+      "name": "onebun-example-websocket-chat",
+      "version": "0.1.0",
+      "dependencies": {
+        "@onebun/core": "workspace:*",
+        "effect": "^3.10.15",
+      },
+      "devDependencies": {
         "bun-types": "^1.3.8",
       },
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "effect": "^3.13.10",
@@ -83,7 +105,7 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.3.0",
+      "version": "0.3.3",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -107,14 +129,14 @@
     },
     "packages/create-onebun": {
       "name": "@onebun/create",
-      "version": "0.3.0",
+      "version": "0.3.2",
       "bin": {
         "create-onebun": "./src/index.ts",
       },
     },
     "packages/docs": {
       "name": "@onebun/docs",
-      "version": "0.3.0",
+      "version": "0.3.2",
       "dependencies": {
         "swagger-ui-dist": "^5.17.14",
       },
@@ -129,7 +151,7 @@
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "bin": {
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
@@ -173,7 +195,7 @@
     },
     "packages/metrics": {
       "name": "@onebun/metrics",
-      "version": "0.3.0",
+      "version": "0.3.2",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "effect": "^3.13.10",
@@ -186,7 +208,7 @@
     },
     "packages/nats": {
       "name": "@onebun/nats",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",
@@ -203,7 +225,7 @@
     },
     "packages/requests": {
       "name": "@onebun/requests",
-      "version": "0.3.0",
+      "version": "0.3.2",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -213,7 +235,7 @@
     },
     "packages/trace": {
       "name": "@onebun/trace",
-      "version": "0.3.0",
+      "version": "0.3.1",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "@opentelemetry/api": "^1.8.0",
@@ -1333,7 +1355,11 @@
 
     "once": ["once@1.4.0", "", { "dependencies": { "wrappy": "1" } }, "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w=="],
 
-    "onebun-example": ["onebun-example@workspace:example"],
+    "onebun-example-crud-api": ["onebun-example-crud-api@workspace:examples/crud-api"],
+
+    "onebun-example-multi-service": ["onebun-example-multi-service@workspace:examples/multi-service"],
+
+    "onebun-example-websocket-chat": ["onebun-example-websocket-chat@workspace:examples/websocket-chat"],
 
     "oniguruma-to-es": ["oniguruma-to-es@3.1.1", "", { "dependencies": { "emoji-regex-xs": "^1.0.0", "regex": "^6.0.1", "regex-recursion": "^6.0.2" } }, "sha512-bUH8SDvPkH3ho3dvwJwfonjlQ4R80vjyvrU8YpxuROddv55vAEJrTuCuCVUhhsHbtlD9tGGbaNApGQckXhS8iQ=="],
 

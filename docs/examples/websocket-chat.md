@@ -4,55 +4,39 @@ description: Real-time chat application with WebSocket Gateway. Rooms, message b
 
 # WebSocket Chat Application
 
-This example shows how to build a real-time chat application with OneBun WebSocket Gateway: gateway, module, application config, and two client options (native and Socket.IO).
+A real-time chat application with OneBun WebSocket Gateway: rooms, authentication guards, message broadcasting, and multiple client options.
 
 ## Overview
 
-We'll create a chat application with:
-- Multiple chat rooms
-- User authentication
-- Message broadcasting
-- Room management
+The chat application demonstrates:
+- Multiple chat rooms with join/leave
+- Guard-protected message handlers
+- Message history and broadcasting
+- Native WebSocket and Socket.IO clients
 
 ## Project structure
 
 ```
-src/
-├── chat.gateway.ts      # WebSocket gateway
-├── chat.service.ts      # Business logic
-├── chat.module.ts       # Module definition
-├── auth.guard.ts        # Custom guard
-└── index.ts             # Application entry
+websocket-chat/
+├── src/
+│   ├── chat.gateway.ts      # WebSocket gateway
+│   ├── chat.service.ts      # Business logic
+│   ├── chat.module.ts       # Module definition
+│   ├── auth.guard.ts        # Custom guard
+│   ├── config.ts            # Environment config
+│   └── index.ts             # Application entry
+├── client/
+│   └── native-client.ts     # Example client
+├── package.json
+└── tsconfig.json
 ```
 
 ## Step 1: Create the gateway
 
-Define the WebSocket gateway with connection and room handlers. Use `@WebSocketGateway({ path: '/chat' })` so clients connect to `/chat`.
+Define the WebSocket gateway with connection, room, and message handlers. Use `@WebSocketGateway({ path: '/chat' })` so clients connect to `/chat`.
 
 ```typescript
-// src/chat.gateway.ts
-import {
-  WebSocketGateway,
-  BaseWebSocketGateway,
-  OnConnect,
-  OnDisconnect,
-  OnJoinRoom,
-  OnLeaveRoom,
-  OnMessage,
-  Client,
-  MessageData,
-  RoomName,
-  PatternParams,
-  UseWsGuards,
-} from '@onebun/core';
-import type { WsClientData } from '@onebun/core';
-import { ChatService } from './chat.service';
-import { ChatAuthGuard } from './auth.guard';
-
-interface ChatMessage {
-  text: string;
-}
-
+// src/chat.gateway.ts (key handlers — full source in repo)
 @WebSocketGateway({ path: '/chat' })
 export class ChatGateway extends BaseWebSocketGateway {
   constructor(private chatService: ChatService) {
@@ -62,8 +46,7 @@ export class ChatGateway extends BaseWebSocketGateway {
   @OnConnect()
   async handleConnect(@Client() client: WsClientData) {
     this.logger.info(`Client ${client.id} connected`);
-    
-    // Send welcome message
+
     return {
       event: 'welcome',
       data: {
@@ -74,39 +57,22 @@ export class ChatGateway extends BaseWebSocketGateway {
     };
   }
 
-  @OnDisconnect()
-  async handleDisconnect(@Client() client: WsClientData) {
-    this.logger.info(`Client ${client.id} disconnected`);
-    
-    // Notify all rooms the client was in
-    for (const room of client.rooms) {
-      this.emitToRoom(room, 'user:left', {
-        userId: client.id,
-        room,
-      });
-    }
-  }
-
   @OnJoinRoom('room:{roomId}')
   async handleJoinRoom(
     @Client() client: WsClientData,
     @RoomName() room: string,
     @PatternParams() params: { roomId: string },
   ) {
-    this.logger.info(`Client ${client.id} joining room ${params.roomId}`);
-    
-    // Add to room
     await this.joinRoom(client.id, room);
-    
-    // Notify others in the room
+
+    // Notify others (exclude the joining user)
     this.emitToRoom(room, 'user:joined', {
       userId: client.id,
       room,
-    }, [client.id]); // Exclude the joining user
-    
-    // Get message history
+    }, [client.id]);
+
     const history = await this.chatService.getMessageHistory(params.roomId);
-    
+
     return {
       event: 'room:joined',
       data: {
@@ -117,22 +83,6 @@ export class ChatGateway extends BaseWebSocketGateway {
     };
   }
 
-  @OnLeaveRoom('room:{roomId}')
-  async handleLeaveRoom(
-    @Client() client: WsClientData,
-    @RoomName() room: string,
-    @PatternParams() params: { roomId: string },
-  ) {
-    // Remove from room
-    await this.leaveRoom(client.id, room);
-    
-    // Notify others
-    this.emitToRoom(room, 'user:left', {
-      userId: client.id,
-      room,
-    });
-  }
-
   @UseWsGuards(ChatAuthGuard)
   @OnMessage('chat:{roomId}:message')
   async handleMessage(
@@ -140,72 +90,35 @@ export class ChatGateway extends BaseWebSocketGateway {
     @MessageData() data: ChatMessage,
     @PatternParams() params: { roomId: string },
   ) {
-    // Validate client is in the room
     if (!client.rooms.includes(`room:${params.roomId}`)) {
-      return {
-        event: 'error',
-        data: { message: 'Not in room' },
-      };
+      return { event: 'error', data: { message: 'Not in room' } };
     }
-    
-    // Save message
+
     const message = await this.chatService.saveMessage({
       roomId: params.roomId,
       userId: client.id,
       text: data.text,
       timestamp: Date.now(),
     });
-    
+
     // Broadcast to room
     this.emitToRoom(`room:${params.roomId}`, 'chat:message', message);
-    
-    // Acknowledge sender
-    return {
-      event: 'chat:message:ack',
-      data: { messageId: message.id },
-    };
+
+    return { event: 'chat:message:ack', data: { messageId: message.id } };
   }
 
-  @OnMessage('typing:{roomId}')
-  handleTyping(
-    @Client() client: WsClientData,
-    @PatternParams() params: { roomId: string },
-  ) {
-    // Broadcast typing indicator (except to sender)
-    this.emitToRoom(
-      `room:${params.roomId}`,
-      'typing',
-      { userId: client.id },
-      [client.id],
-    );
-  }
-
-  // Helper method to get clients in a room
-  private async getClientsInRoom(roomName: string): Promise<string[]> {
-    const clients = await super.getClientsByRoom(roomName);
-    return clients.map(c => c.id);
-  }
+  // Also: @OnDisconnect, @OnLeaveRoom, @OnMessage('typing:{roomId}')
 }
 ```
 
 ## Step 2: Chat service
 
-Business logic for messages and history.
+Business logic for messages and history:
 
 ```typescript
 // src/chat.service.ts
-import { Service } from '@onebun/core';
-
-interface Message {
-  id: string;
-  roomId: string;
-  userId: string;
-  text: string;
-  timestamp: number;
-}
-
 @Service()
-export class ChatService {
+export class ChatService extends BaseService {
   private messages: Map<string, Message[]> = new Map();
   private messageIdCounter = 0;
 
@@ -235,7 +148,7 @@ export class ChatService {
 
 ## Step 3: Auth guard
 
-Optional guard to require authentication on message handlers.
+Guard to require authentication on message handlers:
 
 ```typescript
 // src/auth.guard.ts
@@ -243,15 +156,11 @@ import { createGuard, type WsExecutionContext } from '@onebun/core';
 
 export const ChatAuthGuard = createGuard((context: WsExecutionContext) => {
   const client = context.getClient();
-  
-  // Check if client has authenticated
+
   if (!client.auth?.authenticated) {
     return false;
   }
-  
-  // Optional: Check for specific permissions
-  // return client.auth.permissions?.includes('chat:send') ?? false;
-  
+
   return true;
 });
 ```
@@ -262,10 +171,6 @@ export const ChatAuthGuard = createGuard((context: WsExecutionContext) => {
 
 ```typescript
 // src/chat.module.ts
-import { Module } from '@onebun/core';
-import { ChatGateway } from './chat.gateway';
-import { ChatService } from './chat.service';
-
 @Module({
   controllers: [ChatGateway],  // Gateways are controllers — register here
   providers: [ChatService],
@@ -275,26 +180,22 @@ export class ChatModule {}
 
 ## Step 5: Application entry and WebSocket config
 
-Create the application and pass `websocket` in the options. You can optionally enable Socket.IO on a separate path.
-
 ```typescript
 // src/index.ts
 import { OneBunApplication } from '@onebun/core';
 import { ChatModule } from './chat.module';
+import { envSchema } from './config';
 
 const app = new OneBunApplication(ChatModule, {
-  port: 3000,
-  websocket: {
-    // Optional: enable Socket.IO on /socket.io for socket.io-client
-    // socketio: { enabled: true, path: '/socket.io' },
-  },
+  envSchema,
+  websocket: {},
 });
 
 await app.start();
 
-console.log('Chat server running on http://localhost:3000');
-console.log('Native WebSocket: ws://localhost:3000/chat');
-// If socketio.enabled: Socket.IO at ws://localhost:3000/socket.io
+const logger = app.getLogger();
+logger.info(`Chat server running on ${app.getHttpUrl()}`);
+logger.info(`Native WebSocket: ws://localhost:${app.getPort()}/chat`);
 ```
 
 ## Client implementation
@@ -512,63 +413,6 @@ bun run src/index.ts
 
 2. Connect clients using the typed client or socket.io-client.
 
-## Testing
+---
 
-```typescript
-// chat.test.ts
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
-import { OneBunApplication, createWsServiceDefinition, createWsClient } from '@onebun/core';
-import { ChatModule } from './chat.module';
-
-describe('Chat WebSocket', () => {
-  let app: OneBunApplication;
-  let client: ReturnType<typeof createWsClient>;
-
-  beforeAll(async () => {
-    app = new OneBunApplication(ChatModule, { port: 3001 });
-    await app.start();
-
-    const definition = createWsServiceDefinition(ChatModule);
-    client = createWsClient(definition, {
-      url: 'ws://localhost:3001/chat',
-    });
-    await client.connect();
-  });
-
-  afterAll(async () => {
-    client.disconnect();
-    await app.stop();
-  });
-
-  it('should receive welcome message on connect', (done) => {
-    client.ChatGateway.on('welcome', (data) => {
-      expect(data.message).toBe('Welcome to the chat!');
-      done();
-    });
-  });
-
-  it('should join room and receive history', async () => {
-    const response = await client.ChatGateway.emit('join', 'room:test');
-    expect(response.room).toBe('test');
-    expect(response.history).toBeArray();
-  });
-
-  it('should send and receive messages', async () => {
-    // Join room first
-    await client.ChatGateway.emit('join', 'room:test');
-
-    // Setup listener
-    const messagePromise = new Promise<any>((resolve) => {
-      client.ChatGateway.on('chat:message', resolve);
-    });
-
-    // Send message
-    const ack = await client.ChatGateway.emit('chat:test:message', { text: 'Hello' });
-    expect(ack.messageId).toBeDefined();
-
-    // Verify received
-    const received = await messagePromise;
-    expect(received.text).toBe('Hello');
-  });
-});
-```
+> Full source code: [examples/websocket-chat](https://github.com/RemRyahirev/onebun/tree/master/examples/websocket-chat)

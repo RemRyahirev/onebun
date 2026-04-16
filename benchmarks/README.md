@@ -66,6 +66,8 @@ Measures cold start time using hyperfine with 10 runs per framework.
 - Servers are given 2 seconds to start before benchmarking begins
 - All benchmarks run sequentially to avoid resource contention
 
+> **Note:** CI runs on shared GitHub Actions runners; results vary ±15–20% between runs due to noisy-neighbor effects. Published numbers reflect a single representative run. Raw data from all CI runs is available via [Gist revisions](https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265).
+
 ## Recording Results
 
 When publishing benchmark results, always record:

@@ -27,7 +27,7 @@ NestJS deserves a Bun-native alternative. OneBun gives you the module system and
 ## 30-Second Quickstart
 
 ```bash
-bunx create-onebun my-app
+bun create @onebun my-app
 cd my-app
 bun run dev
 ```

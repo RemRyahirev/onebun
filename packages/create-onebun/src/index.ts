@@ -4,10 +4,10 @@
 const projectName = process.argv[2];
 
 if (!projectName) {
-  console.log('Usage: bunx create-onebun <project-name>');
+  console.log('Usage: bun create @onebun <project-name>');
   console.log('');
   console.log('Example:');
-  console.log('  bunx create-onebun my-app');
+  console.log('  bun create @onebun my-app');
   process.exit(1);
 }
 

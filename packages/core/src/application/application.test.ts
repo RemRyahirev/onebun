@@ -4368,8 +4368,8 @@ describe('OneBunApplication', () => {
       const app = createTestApp(IntervalFireModule, { port: 0 });
       await app.start();
 
-      // scheduler.startIntervalJob calls executeJob immediately (fire-and-forget async)
-      await new Promise(r => setTimeout(r, 50));
+      // Let fire-and-forget executeJob promise settle (two awaits inside: getDataFn + publish)
+      await new Promise(r => setTimeout(r, 0));
 
       expect(app.getQueueService()).not.toBeNull();
       expect(callCount).toBe(1);
@@ -4400,7 +4400,7 @@ describe('OneBunApplication', () => {
       });
       await app.start();
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 0));
 
       expect(callCount).toBe(1);
 
@@ -4438,7 +4438,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(IntervalDIModule, { port: 0 });
       await app.start();
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 0));
 
       expect(callCount).toBe(1);
 
@@ -4519,7 +4519,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(ParentModule, { port: 0 });
       await app.start();
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 0));
 
       expect(app.getQueueService()).not.toBeNull();
       expect(callCount).toBe(1);
@@ -4553,7 +4553,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(TopModule, { port: 0 });
       await app.start();
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 0));
 
       expect(app.getQueueService()).not.toBeNull();
       expect(callCount).toBe(1);
@@ -4588,7 +4588,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(ErrorHandlerModule, { port: 0 });
       await app.start();
 
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise(r => setTimeout(r, 0));
 
       // Both handlers should have been called despite one throwing
       expect(errorCallCount).toBe(1);

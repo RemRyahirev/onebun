@@ -4,7 +4,7 @@ description: Running multiple microservices from single process. MultiServiceApp
 
 # Multi-Service Application Example
 
-Running multiple microservices from a single process with shared configuration.
+Running multiple microservices from a single process with shared configuration and inter-service communication.
 
 ## Project Structure
 
@@ -13,8 +13,6 @@ multi-service/
 ├── src/
 │   ├── index.ts
 │   ├── config.ts
-│   ├── shared/
-│   │   └── database.module.ts
 │   ├── users/
 │   │   ├── users.module.ts
 │   │   ├── users.controller.ts
@@ -28,27 +26,27 @@ multi-service/
 └── tsconfig.json
 ```
 
-## src/config.ts
+## Configuration
+
+Shared config with per-service settings and inter-service URLs:
 
 ```typescript
-import { Env } from '@onebun/core';
+// src/config.ts
+import { Env, type InferConfigType } from '@onebun/core';
 
 export const envSchema = {
-  // Shared configuration
   app: {
     name: Env.string({ default: 'multi-service' }),
     environment: Env.string({ default: 'development' }),
   },
 
-  // Users service
+  // Per-service ports and database URLs
   users: {
     port: Env.number({ default: 3001, env: 'USERS_PORT' }),
     database: {
       url: Env.string({ env: 'USERS_DATABASE_URL', sensitive: true }),
     },
   },
-
-  // Orders service
   orders: {
     port: Env.number({ default: 3002, env: 'ORDERS_PORT' }),
     database: {
@@ -56,158 +54,90 @@ export const envSchema = {
     },
   },
 
-  // Shared Redis
+  // Inter-service communication
+  usersServiceUrl: Env.string({ default: 'http://localhost:3001', env: 'USERS_SERVICE_URL' }),
+
   redis: {
     host: Env.string({ default: 'localhost' }),
     port: Env.number({ default: 6379 }),
   },
 };
-```
 
-## src/users/users.service.ts
+export type AppConfig = InferConfigType<typeof envSchema>;
 
-```typescript
-import { Service, BaseService } from '@onebun/core';
-import { Span } from '@onebun/trace';
-
-interface User {
-  id: string;
-  name: string;
-  email: string;
-}
-
-@Service()
-export class UserService extends BaseService {
-  private users = new Map<string, User>();
-
-  constructor() {
-    super();
-    // Seed some data
-    this.users.set('1', { id: '1', name: 'Alice', email: 'alice@example.com' });
-    this.users.set('2', { id: '2', name: 'Bob', email: 'bob@example.com' });
-  }
-
-  @Span('user-find-all')
-  async findAll(): Promise<User[]> {
-    this.logger.info('Finding all users');
-    return Array.from(this.users.values());
-  }
-
-  @Span('user-find-by-id')
-  async findById(id: string): Promise<User | null> {
-    return this.users.get(id) || null;
-  }
-
-  @Span('user-create')
-  async create(data: Omit<User, 'id'>): Promise<User> {
-    const user: User = {
-      id: crypto.randomUUID(),
-      ...data,
-    };
-    this.users.set(user.id, user);
-    this.logger.info('User created', { userId: user.id });
-    return user;
-  }
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
 }
 ```
 
-## src/users/users.controller.ts
+## Application Entry Point
+
+The core of multi-service — `MultiServiceApplication` with `getConfig` for typed port access and `getServiceUrl` for runtime URLs:
 
 ```typescript
-import { Controller, BaseController, Get, Post, Param, Body, HttpException, type } from '@onebun/core';
-import { UserService } from './users.service';
+// src/index.ts
+import { getConfig, MultiServiceApplication } from '@onebun/core';
+import { type AppConfig, envSchema } from './config';
+import { OrderModule } from './orders/orders.module';
+import { UserModule } from './users/users.module';
 
-const createUserSchema = type({
-  name: 'string',
-  email: 'string.email',
+const config = getConfig<AppConfig>(envSchema);
+
+const app = new MultiServiceApplication({
+  services: {
+    users: {
+      module: UserModule,
+      port: config.get('users.port'),
+      routePrefix: true,
+      metrics: { prefix: 'users_' },
+      tracing: { serviceName: 'users-service' },
+    },
+    orders: {
+      module: OrderModule,
+      port: config.get('orders.port'),
+      routePrefix: true,
+      envOverrides: {
+        'database.url': { fromEnv: 'ORDERS_DATABASE_URL' },
+      },
+      metrics: { prefix: 'orders_' },
+      tracing: { serviceName: 'orders-service' },
+    },
+  },
+  envSchema,
+  envOptions: { loadDotEnv: true },
+  externalServiceUrls: {
+    users: process.env.USERS_SERVICE_URL,
+    orders: process.env.ORDERS_SERVICE_URL,
+  },
+  metrics: { enabled: true },
+  tracing: { enabled: true },
 });
 
-@Controller('/users')
-export class UserController extends BaseController {
-  constructor(private userService: UserService) {
-    super();
-  }
-
-  @Get('/')
-  async findAll() {
-    const users = await this.userService.findAll();
-    return users;
-  }
-
-  @Get('/:id')
-  async findOne(@Param('id') id: string) {
-    const user = await this.userService.findById(id);
-    if (!user) {
-      throw new HttpException(404, 'User not found');
-    }
-    return user;
-  }
-
-  @Post('/')
-  async create(
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ) {
-    const user = await this.userService.create(body);
-    return this.success(user, 201);
-  }
-}
+app.start().then(() => {
+  const logger = app.getLogger();
+  logger.info('Multi-service application started');
+  logger.info('Running services:', app.getRunningServices());
+  logger.info(`Users service: ${app.getServiceUrl('users')}`);
+  logger.info(`Orders service: ${app.getServiceUrl('orders')}`);
+});
 ```
 
-## src/users/users.module.ts
+## Inter-Service Communication
+
+Services call each other via `createHttpClient` with URLs from typed config:
 
 ```typescript
-import { Module } from '@onebun/core';
-import { UserController } from './users.controller';
-import { UserService } from './users.service';
-
-@Module({
-  controllers: [UserController],
-  providers: [UserService],
-  exports: [UserService],
-})
-export class UserModule {}
-```
-
-## src/orders/orders.service.ts
-
-```typescript
-import { Service, BaseService, createHttpClient, isErrorResponse } from '@onebun/core';
-import { Span } from '@onebun/trace';
-
-interface Order {
-  id: string;
-  userId: string;
-  items: Array<{ productId: string; quantity: number }>;
-  total: number;
-  status: 'pending' | 'completed' | 'cancelled';
-  createdAt: string;
-}
-
-interface User {
-  id: string;
-  name: string;
-  email: string;
-}
-
+// src/orders/orders.service.ts (excerpt)
 @Service()
 export class OrderService extends BaseService {
   private orders = new Map<string, Order>();
+  private readonly usersClient;
 
-  // HTTP client for calling Users service
-  private usersClient = createHttpClient({
-    baseUrl: process.env.USERS_SERVICE_URL || 'http://localhost:3001',
-  });
-
-  @Span('order-find-all')
-  async findAll(): Promise<Order[]> {
-    return Array.from(this.orders.values());
-  }
-
-  @Span('order-find-by-user')
-  async findByUserId(userId: string): Promise<Order[]> {
-    return Array.from(this.orders.values()).filter(
-      (order) => order.userId === userId
-    );
+  constructor() {
+    super();
+    this.usersClient = createHttpClient({
+      baseUrl: this.config.get('usersServiceUrl'),
+    });
   }
 
   @Span('order-create')
@@ -226,202 +156,25 @@ export class OrderService extends BaseService {
     const user = userResponse.result;
     this.logger.info('User verified', { userId: user.id, name: user.name });
 
-    // Calculate total
-    const total = data.items.reduce(
-      (sum, item) => sum + item.quantity * item.price,
-      0
-    );
-
-    const order: Order = {
-      id: crypto.randomUUID(),
-      userId: data.userId,
-      items: data.items.map(({ productId, quantity }) => ({ productId, quantity })),
-      total,
-      status: 'pending',
-      createdAt: new Date().toISOString(),
-    };
-
-    this.orders.set(order.id, order);
-    this.logger.info('Order created', {
-      orderId: order.id,
-      userId: data.userId,
-      total,
-    });
-
-    return order;
-  }
-
-  @Span('order-update-status')
-  async updateStatus(
-    orderId: string,
-    status: 'pending' | 'completed' | 'cancelled',
-  ): Promise<Order | null> {
-    const order = this.orders.get(orderId);
-    if (!order) {
-      return null;
-    }
-
-    order.status = status;
-    this.orders.set(orderId, order);
-
-    this.logger.info('Order status updated', { orderId, status });
-    return order;
+    // Calculate total and create order...
   }
 }
-```
-
-## src/orders/orders.controller.ts
-
-```typescript
-import { Controller, BaseController, Get, Post, Put, Param, Body, Query, HttpException, type } from '@onebun/core';
-import { OrderService } from './orders.service';
-
-const createOrderSchema = type({
-  userId: 'string',
-  items: type({
-    productId: 'string',
-    quantity: 'number > 0',
-    price: 'number > 0',
-  }).array().configure({ minLength: 1 }),
-});
-
-const updateStatusSchema = type({
-  status: '"pending" | "completed" | "cancelled"',
-});
-
-@Controller('/orders')
-export class OrderController extends BaseController {
-  constructor(private orderService: OrderService) {
-    super();
-  }
-
-  @Get('/')
-  async findAll(@Query('userId') userId?: string) {
-    if (userId) {
-      const orders = await this.orderService.findByUserId(userId);
-      return orders;
-    }
-    const orders = await this.orderService.findAll();
-    return orders;
-  }
-
-  @Post('/')
-  async create(
-    @Body(createOrderSchema) body: typeof createOrderSchema.infer,
-  ) {
-    try {
-      const order = await this.orderService.create(body);
-      return this.success(order, 201);
-    } catch (error) {
-      if (error instanceof Error && error.message === 'User not found') {
-        throw new HttpException(404, 'User not found');
-      }
-      throw error;
-    }
-  }
-
-  @Put('/:id/status')
-  async updateStatus(
-    @Param('id') id: string,
-    @Body(updateStatusSchema) body: typeof updateStatusSchema.infer,
-  ) {
-    const order = await this.orderService.updateStatus(id, body.status);
-    if (!order) {
-      throw new HttpException(404, 'Order not found');
-    }
-    return order;
-  }
-}
-```
-
-## src/orders/orders.module.ts
-
-```typescript
-import { Module } from '@onebun/core';
-import { OrderController } from './orders.controller';
-import { OrderService } from './orders.service';
-
-@Module({
-  controllers: [OrderController],
-  providers: [OrderService],
-})
-export class OrderModule {}
-```
-
-## src/index.ts
-
-```typescript
-import { MultiServiceApplication } from '@onebun/core';
-import { UserModule } from './users/users.module';
-import { OrderModule } from './orders/orders.module';
-import { envSchema } from './config';
-
-const app = new MultiServiceApplication({
-  services: {
-    users: {
-      module: UserModule,
-      port: 3001,
-      routePrefix: true, // Uses 'users' as route prefix
-    },
-    orders: {
-      module: OrderModule,
-      port: 3002,
-      routePrefix: true, // Uses 'orders' as route prefix
-      // Orders service can have different env overrides
-      envOverrides: {
-        // Use different database for orders
-        'database.url': { fromEnv: 'ORDERS_DATABASE_URL' },
-      },
-    },
-  },
-  envSchema,
-  envOptions: {
-    loadDotEnv: true,
-  },
-  metrics: {
-    enabled: true,
-    prefix: 'multiservice_',
-  },
-  tracing: {
-    enabled: true,
-    serviceName: 'multi-service-app',
-  },
-  // Optional: only start specific services
-  // enabledServices: ['users'],
-  // excludedServices: ['orders'],
-});
-
-app.start().then(() => {
-  const logger = app.getLogger();
-  logger.info('Multi-service application started');
-  logger.info('Running services:', app.getRunningServices());
-  logger.info('Users service: http://localhost:3001');
-  logger.info('Orders service: http://localhost:3002');
-}).catch((error) => {
-  console.error('Failed to start:', error);
-  process.exit(1);
-});
 ```
 
 ## .env
 
 ```bash
-# App
 APP_NAME=multi-service
 NODE_ENV=development
 
-# Users Service
 USERS_PORT=3001
 USERS_DATABASE_URL=postgres://localhost:5432/users_db
 
-# Orders Service
 ORDERS_PORT=3002
 ORDERS_DATABASE_URL=postgres://localhost:5432/orders_db
 
-# Users service URL (for Orders to call)
 USERS_SERVICE_URL=http://localhost:3001
 
-# Shared Redis
 REDIS_HOST=localhost
 REDIS_PORT=6379
 ```
@@ -430,22 +183,14 @@ REDIS_PORT=6379
 
 ```bash
 # Users Service (port 3001)
-# List users
 curl http://localhost:3001/users/users
-
-# Get user
 curl http://localhost:3001/users/users/1
-
-# Create user
 curl -X POST http://localhost:3001/users/users \
   -H "Content-Type: application/json" \
   -d '{"name": "Charlie", "email": "charlie@example.com"}'
 
 # Orders Service (port 3002)
-# List orders
 curl http://localhost:3002/orders/orders
-
-# Create order (verifies user exists via Users service)
 curl -X POST http://localhost:3002/orders/orders \
   -H "Content-Type: application/json" \
   -d '{
@@ -455,11 +200,7 @@ curl -X POST http://localhost:3002/orders/orders \
       {"productId": "prod-2", "quantity": 1, "price": 49.99}
     ]
   }'
-
-# Get user's orders
 curl http://localhost:3002/orders/orders?userId=1
-
-# Update order status
 curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
   -H "Content-Type: application/json" \
   -d '{"status": "completed"}'
@@ -497,7 +238,6 @@ export class OrderService extends BaseService
   async onModuleInit(): Promise<void> {
     this.logger.info('OrderService initialized');
 
-    // Start a periodic cleanup task
     this.cleanupInterval = setInterval(() => {
       this.cleanupExpiredOrders();
     }, 60000);
@@ -506,7 +246,6 @@ export class OrderService extends BaseService
   // Called at the start of shutdown — stop accepting new work
   async beforeApplicationDestroy(signal?: string): Promise<void> {
     this.logger.info('Shutdown signal received, stopping new order processing', { signal });
-    // Stop accepting new orders, finish in-progress work
   }
 
   // Called during shutdown — clean up resources
@@ -517,8 +256,6 @@ export class OrderService extends BaseService
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = null;
     }
-
-    // Close database connections, flush buffers, etc.
   }
 
   private cleanupExpiredOrders(): void {
@@ -563,7 +300,7 @@ await app.stop();
 1. **MultiServiceApplication**: Run multiple services in one process
 2. **Service Isolation**: Each service has its own module, port, and route prefix
 3. **Environment Overrides**: Per-service environment variable customization
-4. **Inter-service Communication**: Use `createHttpClient` to call other services
+4. **Inter-service Communication**: Use `createHttpClient` with typed config URLs
 5. **Shared Configuration**: Common settings via `envSchema`
 6. **Trace Propagation**: Traces automatically flow between services
 7. **Metrics Aggregation**: All services expose metrics on their respective ports
@@ -595,33 +332,6 @@ interface MultiServiceApplicationOptions {
 
 - `ONEBUN_SERVICES` — comma-separated list of services to start (overrides `enabledServices`)
 - `ONEBUN_EXCLUDE_SERVICES` — comma-separated list of services to exclude (overrides `excludedServices`)
-
-### Single Entry Point for All Deployments
-
-```typescript
-// src/index.ts - same file for dev and production
-import { MultiServiceApplication } from '@onebun/core';
-import { UserModule } from './users/users.module';
-import { OrderModule } from './orders/orders.module';
-import { envSchema } from './config';
-
-const app = new MultiServiceApplication({
-  services: {
-    users: { module: UserModule, port: 3001, routePrefix: true },
-    orders: { module: OrderModule, port: 3002, routePrefix: true },
-  },
-  envSchema,
-  
-  // URLs for services when they run in separate processes
-  // Used by getServiceUrl() for inter-service communication
-  externalServiceUrls: {
-    users: process.env.USERS_SERVICE_URL,
-    orders: process.env.ORDERS_SERVICE_URL,
-  },
-});
-
-app.start();
-```
 
 ### Deployment Examples
 
@@ -692,3 +402,7 @@ const usersClient = createHttpClient({
 
 const user = await usersClient.get(`/users/${userId}`);
 ```
+
+---
+
+> Full source code: [examples/multi-service](https://github.com/RemRyahirev/onebun/tree/master/examples/multi-service)

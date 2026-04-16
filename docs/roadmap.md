@@ -122,7 +122,7 @@ Kubernetes-ready health endpoints.
 
 | Feature | Status |
 |---------|--------|
-| `bunx create-onebun my-app` | Done |
+| `bun create @onebun my-app` | Done |
 | `bunx onebun generate module/controller/service` | Planned |
 
 ### Documentation

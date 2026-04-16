@@ -157,6 +157,32 @@ function normalizePath(pathStr: string): string {
   return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
 }
 
+/**
+ * Recursively strip keys whose value is `undefined` from plain objects.
+ * Ensures ArkType optional-field validation treats missing values
+ * as absent rather than present-but-undefined.
+ */
+function stripUndefined(obj: unknown): unknown {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(stripUndefined);
+  }
+  if (typeof obj === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      if (value !== undefined) {
+        result[key] = stripUndefined(value);
+      }
+    }
+
+    return result;
+  }
+
+  return obj;
+}
+
 const EMPTY_QUERY_PARAMS: Record<string, string | string[]> = Object.freeze({});
 
 /**
@@ -791,7 +817,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     return createSseResponseFromResult(result, sseDecoratorOptions);
                   }
 
-                  return result;
+                  if (result instanceof Response) {
+                    return result;
+                  }
+
+                  const successResponse = createSuccessResponse(result);
+
+                  return new Response(JSON.stringify(successResponse), {
+                    status: HttpStatusCode.OK,
+                    headers: {
+                      // eslint-disable-next-line @typescript-eslint/naming-convention
+                      'Content-Type': 'application/json',
+                    },
+                  });
                 }
                 : (): Promise<Response> => executeHandler(
                   boundHandler, routeMeta, controller, controllerName,
@@ -1787,7 +1825,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
                 if (responseSchema?.schema) {
                   try {
-                    validatedResult = validateOrThrow(responseSchema.schema, bodyData);
+                    validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(bodyData));
                   } catch (error) {
                     const errorMessage =
                       error instanceof Error ? error.message : String(error);
@@ -1830,7 +1868,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
           if (responseSchema?.schema) {
             try {
-              validatedResult = validateOrThrow(responseSchema.schema, validatedResult);
+              validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(validatedResult));
               responseStatusCode = responseSchema.statusCode;
             } catch (error) {
               const errorMessage =

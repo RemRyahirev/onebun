@@ -1,3 +1,4 @@
+import { type } from 'arktype';
 import {
   afterEach,
   beforeEach,
@@ -8,6 +9,7 @@ import {
 
 import { OneBunApplication } from '../application/application';
 import {
+  ApiResponse,
   Controller,
   Get,
   Module,
@@ -275,5 +277,79 @@ describe('TestingModule', () => {
         await module.close();
       }
     });
+  });
+});
+
+// ============================================================================
+// Regression: fast path response wrapping
+// ============================================================================
+
+@Controller('/items')
+class NoParamController extends BaseController {
+  @Get('/')
+  findAll() {
+    return [{ id: 1, name: 'Item 1' }, { id: 2, name: 'Item 2' }];
+  }
+}
+
+describe('fast path (no param decorators, no response schema)', () => {
+  it('returns a proper JSON response with success envelope', async () => {
+    const module = await TestingModule.create({
+      controllers: [NoParamController],
+    }).compile();
+
+    try {
+      const response = await module.inject('GET', '/items');
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('application/json');
+
+      const body = await response.json() as { success: boolean; result: unknown[] };
+      expect(body.success).toBe(true);
+      expect(body.result).toEqual([
+        { id: 1, name: 'Item 1' },
+        { id: 2, name: 'Item 2' },
+      ]);
+    } finally {
+      await module.close();
+    }
+  });
+});
+
+// ============================================================================
+// Regression: response validation with optional undefined fields
+// ============================================================================
+
+/* eslint-disable @typescript-eslint/naming-convention */
+const optionalFieldSchema = type({ name: 'string', 'age?': 'number > 0' });
+/* eslint-enable @typescript-eslint/naming-convention */
+
+@Controller('/validated')
+class OptionalFieldController extends BaseController {
+  @Get('/')
+  @ApiResponse(200, { schema: optionalFieldSchema.array() })
+  findAll() {
+    return [{ name: 'Alice', age: undefined }];
+  }
+}
+
+describe('response validation with optional undefined fields', () => {
+  it('passes validation when optional field has undefined value', async () => {
+    const module = await TestingModule.create({
+      controllers: [OptionalFieldController],
+    }).compile();
+
+    try {
+      const response = await module.inject('GET', '/validated');
+
+      expect(response.status).toBe(200);
+
+      const body = await response.json() as { success: boolean; result: Array<{ name: string }> };
+      expect(body.success).toBe(true);
+      expect(body.result[0].name).toBe('Alice');
+      expect('age' in body.result[0]).toBe(false);
+    } finally {
+      await module.close();
+    }
   });
 });

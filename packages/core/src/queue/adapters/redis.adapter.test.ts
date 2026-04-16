@@ -180,27 +180,24 @@ describe('RedisQueueAdapter', () => {
     });
 
     it('should emit onError event on connection failure', async () => {
-      // Use a non-routable IP to fail quickly instead of DNS lookup timeout
-      const badAdapter = new RedisQueueAdapter({
-        useSharedClient: false,
-        url: 'redis://10.255.255.1:9999', // Non-routable IP
-      });
-      
-      const onError = mock(() => undefined);
-      badAdapter.on('onError', onError);
-      
-      const connectPromise = badAdapter.connect();
-      
-      // Race between connection attempt and timeout
-      const result = await Promise.race([
-        connectPromise.then(() => 'connected').catch(() => 'error'),
-        new Promise<string>((resolve) => setTimeout(() => resolve('timeout'), 3000)),
-      ]);
-      
-      // We expect either error or timeout, but onError should be called on error
-      expect(result).toBeOneOf(['error', 'timeout']);
-      if (result === 'error') {
-        expect(onError).toHaveBeenCalled();
+      const originalCreateClient = SharedRedisProvider.createClient.bind(SharedRedisProvider);
+      SharedRedisProvider.createClient = () => ({
+        connect: () => Promise.reject(new Error('Connection refused')),
+      }) as ReturnType<typeof SharedRedisProvider.createClient>;
+
+      try {
+        const badAdapter = new RedisQueueAdapter({
+          useSharedClient: false,
+          url: 'redis://localhost:9999',
+        });
+
+        const onError = mock(() => undefined);
+        badAdapter.on('onError', onError);
+
+        await expect(badAdapter.connect()).rejects.toThrow('Connection refused');
+        expect(onError).toHaveBeenCalledTimes(1);
+      } finally {
+        SharedRedisProvider.createClient = originalCreateClient;
       }
     });
   });
