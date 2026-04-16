@@ -82,13 +82,10 @@ import { Service, BaseService } from '@onebun/core';
 
 @Service()
 class ApiKeyGuard extends BaseService implements HttpGuard {
-  constructor(private readonly configService: ConfigService) {
-    super();
-  }
-
+  // BaseService provides this.config automatically — no need to inject ConfigService
   canActivate(ctx: HttpExecutionContext): boolean {
     const key = ctx.getRequest().headers.get('x-api-key');
-    return key === this.configService.get('apiKey');
+    return key === this.config.get('auth.apiKey');
   }
 }
 ```

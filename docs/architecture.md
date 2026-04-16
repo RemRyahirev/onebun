@@ -33,10 +33,11 @@ description: System architecture overview. Module hierarchy, DI container, reque
 1. Bun.serve receives HTTP request
 2. TraceMiddleware adds trace context
 3. Middleware chain executes (global → module → controller → route)
-4. Parameter decorators extract @Param, @Query, @Body
-5. Controller method executes with injected services
-6. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
-7. MetricsMiddleware records metrics
+4. Guards execute (@UseGuards — controller-level, then route-level)
+5. Parameter decorators extract @Param, @Query, @Body
+6. Controller method executes with injected services
+7. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
+8. MetricsMiddleware records metrics
 
 **Module Metadata Storage**:
 - Reflect.metadata stores decorator info
@@ -250,6 +251,14 @@ HTTP Request
     │
     ▼
 ┌─────────────────────────────────────────────┐
+│ Guards (@UseGuards)                         │
+│  ├── Controller-level guards                │
+│  └── Route-level guards                     │
+│  (403 Forbidden if guard rejects)           │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
 │ Parameter Extraction & Validation           │
 │  ├── Path params (@Param)                   │
 │  ├── Query params (@Query)                  │
@@ -346,7 +355,7 @@ export class DatabaseService extends BaseService implements OnModuleInit, OnModu
   private connection: Connection | null = null;
 
   async onModuleInit(): Promise<void> {
-    this.connection = await createConnection(this.config.database.url);
+    this.connection = await createConnection(this.config.get('database.url'));
     this.logger.info('Database connected');
   }
 
@@ -424,8 +433,8 @@ const metadata: ControllerMetadata = {
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;  // Available after super() in constructor
-  protected config: unknown;     // Available after super() in constructor
+  protected logger: SyncLogger;                // Available after super() in constructor
+  protected config: IConfig<OneBunAppConfig>;  // Available after super() in constructor
 
   // Logger and config are injected via ambient init context,
   // making them available immediately after super() in subclass constructors.
@@ -482,6 +491,8 @@ export class UserService extends BaseService {
 ### Schema Definition
 
 ```typescript
+import { Env, type InferConfigType } from '@onebun/core';
+
 export const envSchema = {
   server: {
     port: Env.number({ default: 3000 }),
@@ -496,6 +507,12 @@ export const envSchema = {
     allowedOrigins: Env.array({ separator: ',' }),
   },
 };
+
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
 ```
 
 ### Configuration Flow

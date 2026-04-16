@@ -376,27 +376,29 @@ const createUserSchema = type({
   email: 'string.email',
   'age?': 'number > 0',
 });
+type CreateUserBody = typeof createUserSchema.infer;
 
 // Schema doesn't accept undefined → required
 @Post('/')
 async create(
-  @Body(createUserSchema) body: typeof createUserSchema.infer,
+  @Body(createUserSchema) body: CreateUserBody,
 ) {}
 
 // Schema accepts undefined → optional
 const optionalBodySchema = type({
   name: 'string',
 }).or(type.undefined);
+type OptionalBody = typeof optionalBodySchema.infer;
 
 @Post('/optional')
 async createOptional(
-  @Body(optionalBodySchema) body: typeof optionalBodySchema.infer,
+  @Body(optionalBodySchema) body: OptionalBody,
 ) {}
 
 // Explicit override
 @Post('/force-optional')
 async forceOptional(
-  @Body(createUserSchema, { required: false }) body: typeof createUserSchema.infer,
+  @Body(createUserSchema, { required: false }) body: CreateUserBody,
 ) {}
 
 // Without validation - body is unknown
@@ -974,8 +976,11 @@ const createUserSchema = type({
   email: 'string.email',
 });
 
-@Controller('/users')
+type CreateUserBody = typeof createUserSchema.infer;
+
+// @ApiTags must be ABOVE @Controller
 @ApiTags('Users')
+@Controller('/users')
 export class UserController extends BaseController {
   @ApiOperation({ summary: 'Get user by ID' })
   @Get('/:id')
@@ -989,7 +994,7 @@ export class UserController extends BaseController {
   @Post('/')
   @ApiResponse(201, { schema: userSchema, description: 'User created' })
   @ApiResponse(400, { description: 'Invalid input' })
-  async createUser(@Body(createUserSchema) body: typeof createUserSchema.infer) {
+  async createUser(@Body(createUserSchema) body: CreateUserBody) {
     // ...
   }
 }
@@ -1104,51 +1109,50 @@ import {
   BaseService,
   Get,
   Post,
-  Put,
-  Delete,
   Param,
   Body,
   Query,
   Header,
-  Cookie,
-  Req,
   UseMiddleware,
+  BaseMiddleware,
   ApiResponse,
   HttpException,
-  Inject,
   type OneBunRequest,
+  type OneBunResponse,
   type,
 } from '@onebun/core';
 import { Span } from '@onebun/trace';
 
-// Validation schemas
+// Validation schemas (in a real app, these live in a separate schema file)
 const createUserSchema = type({
   name: 'string',
   email: 'string.email',
 });
+type CreateUserBody = typeof createUserSchema.infer;
 
 const userSchema = type({
   id: 'string',
   name: 'string',
   email: 'string.email',
 });
+type User = typeof userSchema.infer;
 
 // Service
 @Service()
 export class UserService extends BaseService {
-  private users = new Map<string, { id: string; name: string; email: string }>();
+  private users = new Map<string, User>();
 
   @Span('find-all-users')
-  async findAll(): Promise<Array<typeof userSchema.infer>> {
+  async findAll(): Promise<User[]> {
     return Array.from(this.users.values());
   }
 
   @Span('find-user-by-id')
-  async findById(id: string): Promise<typeof userSchema.infer | null> {
+  async findById(id: string): Promise<User | null> {
     return this.users.get(id) || null;
   }
 
-  async create(data: typeof createUserSchema.infer): Promise<typeof userSchema.infer> {
+  async create(data: CreateUserBody): Promise<User> {
     const user = { id: crypto.randomUUID(), ...data };
     this.users.set(user.id, user);
     this.logger.info('User created', { userId: user.id });
@@ -1183,8 +1187,7 @@ export class UserController extends BaseController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {
-    const users = await this.userService.findAll();
-    return users;
+    return this.userService.findAll();
   }
 
   @Get('/:id')
@@ -1192,9 +1195,7 @@ export class UserController extends BaseController {
   @ApiResponse(404, { description: 'User not found' })
   async findOne(@Param('id') id: string) {
     const user = await this.userService.findById(id);
-    if (!user) {
-      throw new HttpException(404, 'User not found');
-    }
+    if (!user) throw new HttpException(404, 'User not found');
     return user;
   }
 
@@ -1202,12 +1203,11 @@ export class UserController extends BaseController {
   @UseMiddleware(AuthMiddleware)
   @ApiResponse(201, { schema: userSchema })
   async create(
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
+    @Body(createUserSchema) body: CreateUserBody,
     @Header('X-Request-ID') requestId?: string,
   ) {
     this.logger.info('Creating user', { requestId });
-    const user = await this.userService.create(body);
-    return user;
+    return this.userService.create(body);
   }
 }
 

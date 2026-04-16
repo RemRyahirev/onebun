@@ -15,10 +15,10 @@ Base class for all HTTP controllers. Provides standardized response methods, log
 ```typescript
 export class Controller {
   protected logger: SyncLogger;
-  protected config: unknown;
+  protected config: IConfig<OneBunAppConfig>;
 
   /** Initialize controller with logger and config (called by framework) */
-  initializeController(logger: SyncLogger, config: unknown): void;
+  initializeController(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void;
 
   /** Get a service instance by tag or class */
   protected getService<T>(tag: Context.Tag<T, T>): T;
@@ -609,11 +609,8 @@ import { AppModule } from './app.module';
 import { RequestIdMiddleware, CorsMiddleware } from './middleware';
 
 const app = new OneBunApplication(AppModule, {
-  port: 3000,
   middleware: [RequestIdMiddleware, CorsMiddleware],
 });
-
-await app.start();
 ```
 
 Application-wide middleware runs **before** any module-level, controller-level or route-level middleware.
@@ -672,7 +669,13 @@ HTTP Request
     │
     ▼
 ┌─────────────────────────────────────────────┐
-│ 5. Controller Handler                       │
+│ 5. Guards (@UseGuards)                      │
+│    Controller-level → route-level           │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
+│ 6. Controller Handler                       │
 └─────────────────────────────────────────────┘
     │
     ▼
@@ -878,34 +881,17 @@ import {
   Body,
   Query,
   Header,
-  Cookie,
-  Req,
   UseMiddleware,
   HttpStatusCode,
-  type OneBunRequest,
-  type,
+  HttpException,
 } from '@onebun/core';
 
 import { UserService } from './user.service';
-import { authMiddleware } from './middleware/auth';
-
-// Validation schemas
-const createUserSchema = type({
-  name: 'string',
-  email: 'string.email',
-  'role?': '"admin" | "user"',
-});
-
-const updateUserSchema = type({
-  'name?': 'string',
-  'email?': 'string.email',
-  'role?': '"admin" | "user"',
-});
-
-const paginationSchema = type({
-  page: 'string.numeric.parse',
-  limit: 'string.numeric.parse',
-});
+import { AuthMiddleware } from './middleware/auth';
+import {
+  createUserSchema, type CreateUserBody,
+  updateUserSchema, type UpdateUserBody,
+} from './user.schema';
 
 @Controller('/api/users')
 export class UserController extends BaseController {
@@ -913,22 +899,16 @@ export class UserController extends BaseController {
     super();
   }
 
-  /**
-   * GET /api/users
-   * List all users with pagination
-   */
   @Get('/')
   async findAll(
     @Query('page') page: string = '1',
     @Query('limit') limit: string = '10',
   ) {
     this.logger.info('Listing users', { page, limit });
-
     const users = await this.userService.findAll({
       page: parseInt(page, 10),
       limit: parseInt(limit, 10),
     });
-
     return {
       users: users.items,
       total: users.total,
@@ -937,84 +917,7 @@ export class UserController extends BaseController {
     };
   }
 
-  /**
-   * GET /api/users/:id
-   * Get user by ID
-   */
-  @Get('/:id')
-  async findOne(@Param('id') id: string) {
-    this.logger.debug('Finding user', { id });
-
-    const user = await this.userService.findById(id);
-
-    if (!user) {
-      this.logger.warn('User not found', { id });
-      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
-    }
-
-    return user;
-  }
-
-  /**
-   * POST /api/users
-   * Create new user (requires authentication)
-   */
-  @Post('/')
-  @UseMiddleware(authMiddleware)
-  async create(
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
-    @Header('X-Request-ID') requestId?: string,
-  ) {
-    this.logger.info('Creating user', { email: body.email, requestId });
-
-    const user = await this.userService.create(body);
-    this.logger.info('User created', { userId: user.id });
-    return this.success(user, HttpStatusCode.CREATED);
-  }
-
-  /**
-   * PUT /api/users/:id
-   * Update user
-   */
-  @Put('/:id')
-  @UseMiddleware(authMiddleware)
-  async update(
-    @Param('id') id: string,
-    @Body(updateUserSchema) body: typeof updateUserSchema.infer,
-  ) {
-    this.logger.info('Updating user', { id, fields: Object.keys(body) });
-
-    const user = await this.userService.update(id, body);
-
-    if (!user) {
-      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
-    }
-
-    return user;
-  }
-
-  /**
-   * DELETE /api/users/:id
-   * Delete user
-   */
-  @Delete('/:id')
-  @UseMiddleware(authMiddleware)
-  async remove(@Param('id') id: string) {
-    this.logger.info('Deleting user', { id });
-
-    const deleted = await this.userService.delete(id);
-
-    if (!deleted) {
-      throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
-    }
-
-    return { deleted: true };
-  }
-
-  /**
-   * GET /api/users/search
-   * Search users
-   */
+  // Static routes must come before parametric ones
   @Get('/search')
   async search(
     @Query('q') query: string,
@@ -1023,8 +926,44 @@ export class UserController extends BaseController {
     if (!query) {
       throw new HttpException(HttpStatusCode.BAD_REQUEST, 'Query parameter "q" is required');
     }
-
     return this.userService.search(query, field);
+  }
+
+  @Get('/:id')
+  async findOne(@Param('id') id: string) {
+    const user = await this.userService.findById(id);
+    if (!user) throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
+    return user;
+  }
+
+  @Post('/')
+  @UseMiddleware(AuthMiddleware)
+  async create(
+    @Body(createUserSchema) body: CreateUserBody,
+    @Header('X-Request-ID') requestId?: string,
+  ) {
+    this.logger.info('Creating user', { email: body.email, requestId });
+    const user = await this.userService.create(body);
+    return this.success(user, HttpStatusCode.CREATED);
+  }
+
+  @Put('/:id')
+  @UseMiddleware(AuthMiddleware)
+  async update(
+    @Param('id') id: string,
+    @Body(updateUserSchema) body: UpdateUserBody,
+  ) {
+    const user = await this.userService.update(id, body);
+    if (!user) throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
+    return user;
+  }
+
+  @Delete('/:id')
+  @UseMiddleware(AuthMiddleware)
+  async remove(@Param('id') id: string) {
+    const deleted = await this.userService.delete(id);
+    if (!deleted) throw new HttpException(HttpStatusCode.NOT_FOUND, 'User not found');
+    return { deleted: true };
   }
 }
 ```

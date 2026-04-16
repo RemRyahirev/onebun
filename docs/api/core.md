@@ -10,13 +10,20 @@ description: OneBunApplication, MultiServiceApplication classes. Bootstrap optio
 ```typescript
 import { OneBunApplication } from '@onebun/core';
 import { AppModule } from './app.module';
+import { envSchema } from './config';
 
-// Uses PORT/HOST env vars if set, otherwise defaults (3000 / '0.0.0.0')
-const app = new OneBunApplication(AppModule);
-await app.start();
+const app = new OneBunApplication(AppModule, { envSchema });
 
-// Or with explicit port (overrides PORT env var)
-const app2 = new OneBunApplication(AppModule, { port: 3000 });
+app
+  .start()
+  .then(() => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.info('Application started');
+  })
+  .catch((error: unknown) => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+  });
 ```
 
 **Port/Host Resolution Priority**:
@@ -309,7 +316,6 @@ import { AppModule } from './app.module';
 import { envSchema } from './config';
 
 const app = new OneBunApplication(AppModule, {
-  port: 3000,
   basePath: '/api/v1',
   envSchema,
   metrics: {
@@ -324,20 +330,23 @@ const app = new OneBunApplication(AppModule, {
   },
 });
 
-await app.start();
+app
+  .start()
+  .then(() => {
+    // Access configuration - fully typed with module augmentation
+    const port = app.getConfigValue('server.port');  // number (auto-inferred)
+    const config = app.getConfig();
+    const host = config.get('server.host');          // string (auto-inferred)
 
-// Access configuration - fully typed with module augmentation
-const port = app.getConfigValue('server.port');  // number (auto-inferred)
-const config = app.getConfig();
-const host = config.get('server.host');          // string (auto-inferred)
-
-// Get logger
-const logger = app.getLogger({ component: 'main' });
-logger.info('Application started', { port, host });
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.info('Application started', { port, host });
+  })
+  .catch((error: unknown) => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+  });
 
 // Application will automatically handle shutdown signals (SIGTERM, SIGINT)
-// Or stop manually:
-await app.stop();
 ```
 
 ### Accessing Services Outside of Requests
@@ -618,7 +627,7 @@ The core package re-exports commonly used items:
 
 ```typescript
 // From @onebun/envs
-export { Env, type EnvSchema, EnvValidationError } from '@onebun/envs';
+export { Env, type EnvSchema, type InferConfigType, EnvValidationError } from '@onebun/envs';
 
 // From @onebun/logger
 export type { SyncLogger } from '@onebun/logger';
@@ -634,9 +643,6 @@ export {
   OneBunBaseError,
   type SuccessResponse,
 } from '@onebun/requests';
-
-// From @onebun/trace
-export { Span } from '@onebun/trace';
 
 // From effect
 export { Effect, Layer } from 'effect';

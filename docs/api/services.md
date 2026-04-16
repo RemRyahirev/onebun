@@ -14,17 +14,17 @@ Base class for all application services. Provides logger and configuration acces
 
 ```typescript
 export class BaseService {
-  protected logger: SyncLogger;  // Available after super() in constructor
-  protected config: unknown;     // Available after super() in constructor
+  protected logger: SyncLogger;                // Available after super() in constructor
+  protected config: IConfig<OneBunAppConfig>;  // Available after super() in constructor
 
   /** Set ambient init context (called by framework before construction) */
-  static setInitContext(logger: SyncLogger, config: unknown): void;
+  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void;
 
   /** Clear ambient init context (called by framework after construction) */
   static clearInitContext(): void;
 
   /** Initialize service with logger and config (fallback, called by framework) */
-  initializeService(logger: SyncLogger, config: unknown): void;
+  initializeService(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void;
 
   /** Check if service is initialized */
   get isInitialized(): boolean;
@@ -352,8 +352,9 @@ export class DatabaseService extends BaseService {
     super();
 
     // Config is available immediately after super()
-    this.connectionUrl = this.config.get('database.url') as string;
-    this.maxConnections = this.config.get('database.maxConnections') as number;
+    // With InferConfigType + module augmentation, these are fully typed — no casts needed
+    this.connectionUrl = this.config.get('database.url');
+    this.maxConnections = this.config.get('database.maxConnections');
   }
 
   async connect(): Promise<void> {

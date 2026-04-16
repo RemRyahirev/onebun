@@ -40,27 +40,35 @@ type User = typeof userSchema.infer;
 
 ### Using in Controllers
 
-```typescript
-import { Controller, BaseController, Post, Body, type } from '@onebun/core';
+Define schemas in a separate file and export named types:
 
-const createUserSchema = type({
+```typescript
+// user.schema.ts
+import { type } from '@onebun/core';
+
+export const createUserSchema = type({
   name: 'string',
   email: 'string.email',
   'age?': 'number > 0',  // Optional field
 });
 
+export type CreateUserBody = typeof createUserSchema.infer;
+// { name: string; email: string; age?: number }
+```
+
+```typescript
+// user.controller.ts
+import { Controller, BaseController, Post, Body } from '@onebun/core';
+import { createUserSchema, type CreateUserBody } from './user.schema';
+
 @Controller('/users')
 export class UserController extends BaseController {
   @Post('/')
-  async create(
-    // Body is validated and typed
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ) {
+  async create(@Body(createUserSchema) body: CreateUserBody) {
     // body is guaranteed to be valid here
     // body.name: string
     // body.email: string
     // body.age: number | undefined
-
     return { user: body };
   }
 }
@@ -346,10 +354,10 @@ const createOrderSchema = type({
   'paymentMethod': '"card" | "paypal" | "bank_transfer"',
 });
 
+type CreateOrderBody = typeof createOrderSchema.infer;
+
 @Post('/orders')
-async createOrder(
-  @Body(createOrderSchema) body: typeof createOrderSchema.infer,
-) {
+async createOrder(@Body(createOrderSchema) body: CreateOrderBody) {
   // body is fully typed and validated
   const order = await this.orderService.create(body);
   return this.success(order, 201);
@@ -530,9 +538,9 @@ function processUser(user: User) {
 ### 4. Validate Early
 
 ```typescript
+// Schema validation happens at parameter extraction — use named types from schema files
 @Post('/')
-async create(@Body(createUserSchema) body: typeof createUserSchema.infer) {
-  // Validation happens at parameter extraction
+async create(@Body(createUserSchema) body: CreateUserDto) {
   // Body is guaranteed valid here
   return this.service.create(body);
 }
