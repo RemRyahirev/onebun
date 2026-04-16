@@ -697,8 +697,11 @@ Inject `QueueService` in your controller, provider, middleware, or gateway const
 ```typescript
 import { QueueService } from '@onebun/core';
 
-class OrderService {
-  constructor(private queue: QueueService) {}
+@Service()
+class OrderService extends BaseService {
+  constructor(private queue: QueueService) {
+    super();
+  }
 
   async createOrder(data: OrderData) {
     // Publish with options

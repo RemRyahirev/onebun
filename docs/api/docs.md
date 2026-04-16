@@ -262,18 +262,17 @@ ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` ar
 ```typescript
 import { type } from '@onebun/core';
 
-// Define schema once
+// Define schema once (in a schema file)
 const createUserSchema = type({
   name: 'string',
   email: 'string.email',
   'age?': 'number > 0',
 });
+type CreateUserBody = typeof createUserSchema.infer;
 
 // Use in @Body — generates both validation AND OpenAPI request body schema
 @Post('/')
-async createUser(
-  @Body(createUserSchema) body: typeof createUserSchema.infer,
-) {
+async createUser(@Body(createUserSchema) body: CreateUserBody) {
   // body is validated and typed
   return body;
 }
@@ -336,13 +335,19 @@ const jsonSchema = arktypeToJsonSchema(schema);
 
 ```typescript
 // src/config.ts
-import { Env } from '@onebun/core';
+import { Env, type InferConfigType } from '@onebun/core';
 
 export const envSchema = {
   server: {
     port: Env.number({ default: 3000, env: 'PORT' }),
   },
 };
+
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
 
 // src/user.controller.ts
 import {
@@ -364,7 +369,7 @@ import {
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
 
-// ---- Schemas (single source of truth) ----
+// ---- Schemas (in a real app, these live in a separate file e.g. user.schema.ts) ----
 
 const userSchema = type({
   id: 'string',
@@ -372,40 +377,43 @@ const userSchema = type({
   email: 'string.email',
   'age?': 'number > 0',
 });
+type User = typeof userSchema.infer;
 
 const createUserSchema = type({
   name: 'string',
   email: 'string.email',
   'age?': 'number > 0',
 });
+type CreateUserBody = typeof createUserSchema.infer;
 
 const updateUserSchema = type({
   'name?': 'string',
   'email?': 'string.email',
   'age?': 'number > 0',
 });
+type UpdateUserBody = typeof updateUserSchema.infer;
 
 // ---- Service ----
 
 @Service()
 class UserService extends BaseService {
-  private users = new Map<string, typeof userSchema.infer>();
+  private users = new Map<string, User>();
 
-  async findAll(): Promise<Array<typeof userSchema.infer>> {
+  async findAll(): Promise<User[]> {
     return Array.from(this.users.values());
   }
 
-  async findById(id: string): Promise<typeof userSchema.infer | null> {
+  async findById(id: string): Promise<User | null> {
     return this.users.get(id) || null;
   }
 
-  async create(data: typeof createUserSchema.infer): Promise<typeof userSchema.infer> {
+  async create(data: CreateUserBody): Promise<User> {
     const user = { id: crypto.randomUUID(), ...data };
     this.users.set(user.id, user);
     return user;
   }
 
-  async update(id: string, data: typeof updateUserSchema.infer): Promise<typeof userSchema.infer | null> {
+  async update(id: string, data: UpdateUserBody): Promise<User | null> {
     const user = this.users.get(id);
     if (!user) return null;
     const updated = { ...user, ...data };
@@ -451,9 +459,7 @@ class UserController extends BaseController {
   @Post('/')
   @ApiResponse(201, { schema: userSchema, description: 'User created' })
   @ApiResponse(400, { description: 'Invalid input' })
-  async create(
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ) {
+  async create(@Body(createUserSchema) body: CreateUserBody) {
     const user = await this.userService.create(body);
     return this.success(user, 201);
   }
@@ -464,7 +470,7 @@ class UserController extends BaseController {
   @ApiResponse(404, { description: 'User not found' })
   async update(
     @Param('id') id: string,
-    @Body(updateUserSchema) body: typeof updateUserSchema.infer,
+    @Body(updateUserSchema) body: UpdateUserBody,
   ) {
     const user = await this.userService.update(id, body);
     if (!user) throw new HttpException(404, 'User not found');

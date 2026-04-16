@@ -289,18 +289,23 @@ import { Service, BaseService, createHttpClient } from '@onebun/core';
 
 @Service()
 export class ExternalApiService extends BaseService {
-  private client = createHttpClient({
-    baseUrl: 'https://api.external-service.com',
-    auth: {
-      type: 'bearer',
-      token: process.env.EXTERNAL_API_TOKEN!,
-    },
-    retries: {
-      max: 3,
-      backoff: 'exponential',
-      delay: 1000,
-    },
-  });
+  private readonly client;
+
+  constructor() {
+    super();
+    this.client = createHttpClient({
+      baseUrl: this.config.get('external.apiUrl'),
+      auth: {
+        type: 'bearer',
+        token: this.config.get('external.apiToken'),
+      },
+      retries: {
+        max: 3,
+        backoff: 'exponential',
+        delay: 1000,
+      },
+    });
+  }
 
   async fetchData(id: string): Promise<ExternalData> {
     this.logger.debug('Fetching external data', { id });
@@ -355,12 +360,13 @@ export const UsersServiceDefinition = createServiceDefinition({
 });
 
 // Create typed client
+// In a service, use this.config.get() for secrets
 const usersClient = createServiceClient(UsersServiceDefinition, {
-  baseUrl: 'http://users-service:3001',
+  baseUrl: this.config.get('services.usersUrl'),
   auth: {
     type: 'onebun',
     serviceId: 'orders-service',
-    secretKey: process.env.SERVICE_SECRET!,
+    secretKey: this.config.get('services.secretKey'),
   },
 });
 
@@ -403,8 +409,8 @@ import {
   createHttpClient,
   isErrorResponse,
   NotFoundError,
-  Span,
 } from '@onebun/core';
+import { Span } from '@onebun/trace';
 
 interface User {
   id: string;
@@ -419,25 +425,31 @@ interface CreateUserDto {
 
 @Service()
 export class UserApiService extends BaseService {
-  private client = createHttpClient({
-    baseUrl: process.env.USER_SERVICE_URL || 'http://localhost:3001',
-    timeout: 10000,
-    defaultHeaders: {
-      'Content-Type': 'application/json',
-    },
-    auth: {
-      type: 'onebun',
-      serviceId: 'my-service',
-      secretKey: process.env.SERVICE_SECRET!,
-    },
-    retries: {
-      max: 3,
-      backoff: 'exponential',
-      delay: 1000,
-      factor: 2,
-      retryOn: [408, 429, 500, 502, 503, 504],
-    },
-  });
+  private readonly client;
+
+  constructor() {
+    super();
+    // Config is available after super() — use it to initialize the HTTP client
+    this.client = createHttpClient({
+      baseUrl: this.config.get('services.usersUrl'),
+      timeout: 10000,
+      defaultHeaders: {
+        'Content-Type': 'application/json',
+      },
+      auth: {
+        type: 'onebun',
+        serviceId: 'my-service',
+        secretKey: this.config.get('services.secretKey'),
+      },
+      retries: {
+        max: 3,
+        backoff: 'exponential',
+        delay: 1000,
+        factor: 2,
+        retryOn: [408, 429, 500, 502, 503, 504],
+      },
+    });
+  }
 
   @Span('fetch-users')
   async findAll(page = 1, limit = 10): Promise<User[]> {

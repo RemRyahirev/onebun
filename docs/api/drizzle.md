@@ -35,7 +35,6 @@ import * as schema from './schema';
           url: './data/app.db',
         },
       },
-      autoMigrate: true,
       migrationsFolder: './drizzle',
     }),
   ],
@@ -52,17 +51,16 @@ DrizzleModule.forRoot({
   connection: {
     type: DatabaseType.POSTGRESQL,
     options: {
-      connectionString: process.env.DATABASE_URL,
+      connectionString: config.get('database.url'),
       // Or individual options:
       host: 'localhost',
       port: 5432,
       database: 'myapp',
       user: 'postgres',
       password: 'password',
-      ssl: process.env.NODE_ENV === 'production',
     },
   },
-  autoMigrate: true,
+  // autoMigrate defaults to true — omit unless you need to disable it
   migrationsFolder: './drizzle',
 })
 ```
@@ -680,7 +678,7 @@ Or enable automatic migrations in module configuration:
 ```typescript
 DrizzleModule.forRoot({
   connection: { /* ... */ },
-  autoMigrate: true,              // Run migrations on startup
+  // autoMigrate defaults to true — migrations run on startup automatically
   migrationsFolder: './drizzle',  // Migration files location
 })
 ```
@@ -829,14 +827,14 @@ export class UserService extends BaseService {
     super();
   }
 
-  async findById(id: string): Promise<User | null> {
+  async findById(id: number): Promise<User | null> {
     const cacheKey = `user:${id}`;
     const cached = await this.cacheService.get<User>(cacheKey);
     if (cached) return cached;
 
     const user = await this.userRepository.findById(id);
     if (user) {
-      await this.cacheService.set(cacheKey, user, { ttl: 300 });
+      await this.cacheService.set(cacheKey, user, { ttl: 300_000 }); // 5 minutes
     }
 
     return user;
@@ -864,10 +862,9 @@ import { CacheModule, CacheType } from '@onebun/cache';
       connection: {
         type: DatabaseType.POSTGRESQL,
         options: {
-          connectionString: process.env.DATABASE_URL,
+          connectionString: config.get('database.url'),
         },
       },
-      autoMigrate: true,
       migrationsFolder: './drizzle',
     }),
     CacheModule.forRoot({ type: CacheType.MEMORY, cacheOptions: { defaultTtl: 300000 } }),

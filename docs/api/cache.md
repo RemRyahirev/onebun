@@ -81,13 +81,14 @@ CacheModule.forRoot({
     defaultTtl: 300000,  // TTL in milliseconds
   },
   redisOptions: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT || '6379'),
-    password: process.env.REDIS_PASSWORD,
+    host: 'localhost',
+    port: 6379,
+    password: 'secret',
     database: 0,
     connectTimeout: 5000,     // Connection timeout in ms
     keyPrefix: 'myapp:cache:', // Key prefix for all cache keys
   },
+  // Prefer env-based configuration (see below) or use getConfig() for dynamic values
 })
 ```
 
@@ -689,7 +690,7 @@ import {
 } from '@onebun/cache';
 
 @Service()
-export class ResilientCacheService extends BaseService {
+export class ResilientCacheService extends BaseService implements OnModuleInit {
   private primaryCache: RedisCache | null = null;
   private fallbackCache: InMemoryCache;
   private usingFallback = false;

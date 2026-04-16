@@ -65,8 +65,8 @@ export class UserController extends BaseController {
 this.logger.info('User action', {
   userId: user.id,
   action: 'login',
-  ip: request.ip,
-  userAgent: request.headers['user-agent'],
+  ip: request.headers.get('x-forwarded-for'),
+  userAgent: request.headers.get('user-agent'),
 });
 
 // Output (JSON):

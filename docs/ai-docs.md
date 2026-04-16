@@ -100,7 +100,7 @@ The Drizzle package provides database schema management:
 - `generateMigrations()` - Generate SQL files from schema (build step)
 - `pushSchema()` - Apply schema directly (development)
 - `DrizzleService.runMigrations()` - Apply migrations at runtime
-- `autoMigrate: true` - Auto-run migrations on app startup
+- Auto-migrate on startup (enabled by default)
 
 See [Database API](/api/drizzle) for full documentation.
 

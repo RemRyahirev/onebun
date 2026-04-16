@@ -33,7 +33,7 @@ All features below are shipped, tested, and documented. If something looks missi
 | `@UseGuards()` decorator for controllers/routes | `@onebun/core` | [Guards](/api/guards) |
 | Built-in `AuthGuard` (token verification) | `@onebun/core` | [Guards](/api/guards) |
 | Built-in `RolesGuard` (RBAC) | `@onebun/core` | [Guards](/api/guards) |
-| `createGuard(fn)` factory | `@onebun/core` | [Guards](/api/guards) |
+| `createHttpGuard(fn)` factory | `@onebun/core` | [Guards](/api/guards) |
 
 ### Exception Filters
 
@@ -62,7 +62,7 @@ All features below are shipped, tested, and documented. If something looks missi
 
 | Feature | Package | Docs |
 |---------|---------|------|
-| WebSocket gateway (`@WebSocketGateway`, `@SubscribeMessage`) | `@onebun/core` | [WebSocket](/api/websocket) |
+| WebSocket gateway (`@WebSocketGateway`, `@OnMessage`) | `@onebun/core` | [WebSocket](/api/websocket) |
 | WebSocket guards (6 built-in) | `@onebun/core` | [WebSocket](/api/websocket) |
 | Queue system (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`) | `@onebun/core` | [Queue](/api/queue) |
 | Queue guards (4 built-in) | `@onebun/core` | [Queue](/api/queue) |
@@ -73,11 +73,11 @@ All features below are shipped, tested, and documented. If something looks missi
 
 | Feature | Package | Docs |
 |---------|---------|------|
-| `TestingModule.create()` with mock providers | `@onebun/core` | [Core](/api/core) |
-| `.overrideProvider().useValue()` / `.useClass()` | `@onebun/core` | [Core](/api/core) |
-| HTTP integration testing | `@onebun/core` | [Core](/api/core) |
-| Mock logger, config | `@onebun/core` | [Core](/api/core) |
-| Fake timers | `@onebun/core` | [Core](/api/core) |
+| `TestingModule.create()` with mock providers | `@onebun/core` | [Testing](/testing) |
+| `.overrideProvider().useValue()` / `.useClass()` | `@onebun/core` | [Testing](/testing) |
+| HTTP integration testing | `@onebun/core` | [Testing](/testing) |
+| Mock logger, config | `@onebun/core` | [Testing](/testing) |
+| Fake timers | `@onebun/core` | [Testing](/testing) |
 
 ### Ecosystem Packages
 

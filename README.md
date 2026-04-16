@@ -44,6 +44,7 @@ import {
 } from '@onebun/core';
 
 const CreateUser = type({ name: 'string', email: 'string.email' });
+type CreateUserBody = typeof CreateUser.infer;
 
 @Service()
 class UserService extends BaseService {
@@ -58,7 +59,7 @@ class UserController extends BaseController {
   async list() { return this.users.getAll(); }
 
   @Post('/')
-  async create(@Body(CreateUser) body: typeof CreateUser.infer) {
+``  async create(@Body(CreateUser) body: CreateUserBody) {
     return this.success(body, 201);  // this.success() only when custom status needed
   }
 }

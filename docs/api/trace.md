@@ -409,7 +409,7 @@ tracing: {
 ### Class-Level Control
 
 ```typescript
-import { TraceAll, NoTrace, Traced } from '@onebun/core';
+import { TraceAll, NoTrace, Traced } from '@onebun/trace';
 
 // Opt-in when traceAll is false
 @Service()
