@@ -21,6 +21,7 @@ export interface NatsContainerOptions {
   enableJetStream?: boolean;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-magic-numbers
 const DEFAULT_STARTUP_TIMEOUT = process.env.CI ? 60_000 : 30_000;
 const REDIS_PORT = 6379;
 const NATS_PORT = 4222;

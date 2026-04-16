@@ -262,31 +262,31 @@ export const MeasureGauge = Gauged;
 export const measureExecutionTime = <A, E, R>(
   metricName: string,
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E, R | MetricsService> =>
-  Effect.gen(function* () {
-    const metricsService = yield* MetricsService;
-    const startTime = Date.now();
+): Effect.Effect<A, E, R | MetricsService> => {
+  const MILLISECONDS_PER_SECOND = 1000;
 
-    try {
-      const result = yield* effect;
-      const duration = (Date.now() - startTime) / 1000;
-
-      // Record to histogram if exists
-      const histogram = metricsService.getMetric(metricName);
-      if (histogram && typeof histogram.observe === 'function') {
-        histogram.observe({}, duration);
-      }
-
-      return result;
-    } catch (error) {
-      const duration = (Date.now() - startTime) / 1000;
-
-      // Still record the duration even on error
-      const histogram = metricsService.getMetric(metricName);
-      if (histogram && typeof histogram.observe === 'function') {
-        histogram.observe({ status: 'error' }, duration);
-      }
-
-      throw error;
+  const observeMetric = (
+    metricsService: { getMetric: (name: string) =>
+      { observe?: (labels: Record<string, string>, value: number) => void } | undefined; },
+    startTime: number,
+    labels: Record<string, string> = {},
+  ) => {
+    const duration = (Date.now() - startTime) / MILLISECONDS_PER_SECOND;
+    const histogram = metricsService.getMetric(metricName);
+    if (histogram && typeof histogram.observe === 'function') {
+      histogram.observe(labels, duration);
     }
-  });
+  };
+
+  return MetricsService.pipe(
+    Effect.andThen((metricsService) => {
+      const startTime = Date.now();
+
+      return effect.pipe(
+        Effect.tap(() => Effect.sync(() => observeMetric(metricsService, startTime))),
+        Effect.tapError(() =>
+          Effect.sync(() => observeMetric(metricsService, startTime, { status: 'error' }))),
+      );
+    }),
+  );
+};

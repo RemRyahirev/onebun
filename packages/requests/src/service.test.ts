@@ -484,7 +484,7 @@ describe('RequestsService', () => {
         timeout: 10000,
         headers: { 'X-API-Key': 'test-key' },
         retries: {
-          max: 3, delay: 500, backoff: 'linear', retryOn: [503, 502], 
+          max: 3, delay: 500, backoff: 'linear', retryOn: [503, 502],
         },
         auth: { type: 'bearer', token: 'test-token' },
       };
@@ -516,6 +516,425 @@ describe('RequestsService', () => {
 
       const service = await Effect.runPromise(Effect.provide(program, layer));
       expect(service).toBeDefined();
+    });
+  });
+
+  describe('RequestsServiceImpl: updateConfig / updateConfigEffect / getConfig / createClient', () => {
+    let service: any;
+
+    beforeEach(async () => {
+      const layer = makeRequestsService({
+        baseUrl: 'https://test-api.com',
+        timeout: 5000,
+      });
+
+      const program = Effect.gen(function* () {
+        return yield* RequestsService;
+      });
+
+      service = await Effect.runPromise(Effect.provide(program, layer));
+    });
+
+    test('getConfig() returns a copy of current service options', () => {
+      const config = service.getConfig();
+
+      expect(config).toBeDefined();
+      expect(config.baseUrl).toBe('https://test-api.com');
+      expect(config.timeout).toBe(5000);
+    });
+
+    test('getConfig() returns a copy, not a reference', () => {
+      const config1 = service.getConfig();
+      config1.baseUrl = 'https://mutated.com';
+      const config2 = service.getConfig();
+
+      expect(config2.baseUrl).toBe('https://test-api.com');
+    });
+
+    test('updateConfig() merges new fields into service options', async () => {
+      await service.updateConfig({ baseUrl: 'https://updated-api.com', timeout: 8000 });
+      const config = service.getConfig();
+
+      expect(config.baseUrl).toBe('https://updated-api.com');
+      expect(config.timeout).toBe(8000);
+    });
+
+    test('updateConfig() preserves unmodified fields', async () => {
+      await service.updateConfig({ timeout: 9000 });
+      const config = service.getConfig();
+
+      expect(config.baseUrl).toBe('https://test-api.com');
+      expect(config.timeout).toBe(9000);
+    });
+
+    test('updateConfigEffect() merges new fields and returns Effect<void>', async () => {
+      const effect = service.updateConfigEffect({ baseUrl: 'https://effect-updated.com' });
+
+      expect(effect).toBeDefined();
+      await Effect.runPromise(effect);
+
+      const config = service.getConfig();
+      expect(config.baseUrl).toBe('https://effect-updated.com');
+    });
+
+    test('updateConfigEffect() preserves unmodified fields', async () => {
+      await Effect.runPromise(service.updateConfigEffect({ headers: { 'X-New-Header': 'value' } }));
+
+      const config = service.getConfig();
+      expect(config.baseUrl).toBe('https://test-api.com');
+      expect(config.headers['X-New-Header']).toBe('value');
+    });
+
+    test('createClient() returns an HttpClient instance', () => {
+      const client = service.createClient({ baseUrl: 'https://custom.api.com', timeout: 3000 });
+
+      expect(client).toBeDefined();
+      expect(typeof client.request).toBe('function');
+      expect(typeof client.get).toBe('function');
+      expect(typeof client.post).toBe('function');
+      expect(typeof client.put).toBe('function');
+      expect(typeof client.patch).toBe('function');
+      expect(typeof client.delete).toBe('function');
+      expect(typeof client.head).toBe('function');
+      expect(typeof client.options).toBe('function');
+    });
+
+    test('createClient() returns a new independent client', async () => {
+      const client = service.createClient({ baseUrl: 'https://independent.api.com' });
+      const result = await client.get('/users');
+
+      expect(result).toBeDefined();
+    });
+  });
+
+  describe('requestsService Effect methods', () => {
+    test('getEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.getEffect('https://api.test.com/users');
+
+      expect(effect).toBeDefined();
+      const result = await Effect.runPromise(effect);
+      expect(result).toBeDefined();
+    });
+
+    test('getEffect() with query parameters', async () => {
+      const effect = requestsService.getEffect('https://api.test.com/users', { page: 1, limit: 10 });
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('getEffect() with config parameter', async () => {
+      const effect = requestsService.getEffect(
+        'https://api.test.com/users',
+        { page: 1 },
+        { timeout: 5000 },
+      );
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+    });
+
+    test('postEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.postEffect('https://api.test.com/users', { name: 'Alice' });
+
+      expect(effect).toBeDefined();
+      const result = await Effect.runPromise(effect);
+      expect(result).toBeDefined();
+    });
+
+    test('postEffect() without data', async () => {
+      const result = await Effect.runPromise(
+        requestsService.postEffect('https://api.test.com/users'),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('putEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.putEffect('https://api.test.com/users/1', { name: 'Bob' });
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('putEffect() with config', async () => {
+      const result = await Effect.runPromise(
+        requestsService.putEffect('https://api.test.com/users/1', { name: 'Bob' }, { timeout: 3000 }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('patchEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.patchEffect('https://api.test.com/users/1', { name: 'Charlie' });
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+    });
+
+    test('patchEffect() with config', async () => {
+      const result = await Effect.runPromise(
+        requestsService.patchEffect('https://api.test.com/users/1', { name: 'Charlie' }, { timeout: 3000 }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.deleteEffect('https://api.test.com/users/1');
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() with query', async () => {
+      const result = await Effect.runPromise(
+        requestsService.deleteEffect('https://api.test.com/users', { ids: '1,2' }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() with query and config', async () => {
+      const result = await Effect.runPromise(
+        requestsService.deleteEffect(
+          'https://api.test.com/users',
+          { ids: '1,2' },
+          { timeout: 3000 },
+        ),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('headEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.headEffect('https://api.test.com/users');
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+    });
+
+    test('headEffect() with query', async () => {
+      const result = await Effect.runPromise(
+        requestsService.headEffect('https://api.test.com/users', { page: 1 }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('headEffect() with query and config', async () => {
+      const result = await Effect.runPromise(
+        requestsService.headEffect(
+          'https://api.test.com/users',
+          { page: 1 },
+          { timeout: 3000 },
+        ),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('optionsEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const effect = requestsService.optionsEffect('https://api.test.com/users');
+      const result = await Effect.runPromise(effect);
+
+      expect(result).toBeDefined();
+    });
+
+    test('optionsEffect() with query', async () => {
+      const result = await Effect.runPromise(
+        requestsService.optionsEffect('https://api.test.com/users', { page: 1 }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('optionsEffect() with query and config', async () => {
+      const result = await Effect.runPromise(
+        requestsService.optionsEffect(
+          'https://api.test.com/users',
+          { page: 1 },
+          { timeout: 3000 },
+        ),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('requestEffect() returns an Effect that resolves with ApiResponse', async () => {
+      const config: RequestConfig = {
+        method: HttpMethod.GET,
+        url: 'https://api.test.com/users',
+        headers: { 'X-Custom': 'header' },
+      };
+      const effect = requestsService.requestEffect(config);
+
+      expect(effect).toBeDefined();
+      const result = await Effect.runPromise(effect);
+      expect(result).toBeDefined();
+    });
+  });
+
+  describe('RequestsServiceImpl: put, patch, delete, head, options Promise methods', () => {
+    let service: any;
+
+    beforeEach(async () => {
+      const layer = makeRequestsService({ baseUrl: 'https://test-api.com' });
+      const program = Effect.gen(function* () {
+        return yield* RequestsService;
+      });
+
+      service = await Effect.runPromise(Effect.provide(program, layer));
+    });
+
+    test('put() resolves with unwrapped result', async () => {
+      const result = await service.put('/resource/1', { name: 'Updated' });
+
+      expect(result).toBeDefined();
+    });
+
+    test('patch() resolves with unwrapped result', async () => {
+      const result = await service.patch('/resource/1', { name: 'Patched' });
+
+      expect(result).toBeDefined();
+    });
+
+    test('delete() resolves with unwrapped result', async () => {
+      const result = await service.delete('/resource/1');
+
+      expect(result).toBeDefined();
+    });
+
+    test('delete() with query params', async () => {
+      const result = await service.delete('/resource', { ids: '1,2' });
+
+      expect(result).toBeDefined();
+    });
+
+    test('delete() with query and config fields', async () => {
+      const result = await service.delete('/resource', { timeout: 3000 });
+
+      expect(result).toBeDefined();
+    });
+
+    test('delete() with both query and config', async () => {
+      const result = await service.delete('/resource', { ids: '1,2' }, { timeout: 3000 });
+
+      expect(result).toBeDefined();
+    });
+
+    test('head() resolves without throwing', async () => {
+      await service.head('/resource');
+      // head() resolved successfully
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('head() with query params resolves without throwing', async () => {
+      await service.head('/resource', { page: 1 });
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('head() with config fields resolves without throwing', async () => {
+      await service.head('/resource', { timeout: 3000 });
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('head() with both query and config resolves without throwing', async () => {
+      await service.head('/resource', { page: 1 }, { timeout: 3000 });
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('options() resolves with unwrapped result', async () => {
+      const result = await service.options('/resource');
+
+      expect(result).toBeDefined();
+    });
+
+    test('options() with query params', async () => {
+      const result = await service.options('/resource', { page: 1 });
+
+      expect(result).toBeDefined();
+    });
+
+    test('options() with config fields', async () => {
+      const result = await service.options('/resource', { timeout: 3000 });
+
+      expect(result).toBeDefined();
+    });
+
+    test('options() with both query and config', async () => {
+      const result = await service.options('/resource', { page: 1 }, { timeout: 3000 });
+
+      expect(result).toBeDefined();
+    });
+
+    test('putEffect() resolves with unwrapped result', async () => {
+      const result = await Effect.runPromise(service.putEffect('/resource/1', { name: 'Updated' }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('patchEffect() resolves with unwrapped result', async () => {
+      const result = await Effect.runPromise(service.patchEffect('/resource/1', { name: 'Patched' }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() with query object', async () => {
+      const result = await Effect.runPromise(service.deleteEffect('/resource', { ids: '1,2' }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() with config-like object (has config fields)', async () => {
+      const result = await Effect.runPromise(service.deleteEffect('/resource', { timeout: 3000 }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('deleteEffect() with query and config', async () => {
+      const result = await Effect.runPromise(
+        service.deleteEffect('/resource', { ids: '1,2' }, { timeout: 3000 }),
+      );
+
+      expect(result).toBeDefined();
+    });
+
+    test('headEffect() with query object resolves without throwing', async () => {
+      await Effect.runPromise(service.headEffect('/resource', { page: 1 }));
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('headEffect() with config-like object resolves without throwing', async () => {
+      await Effect.runPromise(service.headEffect('/resource', { timeout: 3000 }));
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('headEffect() with query and config resolves without throwing', async () => {
+      await Effect.runPromise(service.headEffect('/resource', { page: 1 }, { timeout: 3000 }));
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+
+    test('optionsEffect() with query object', async () => {
+      const result = await Effect.runPromise(service.optionsEffect('/resource', { page: 1 }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('optionsEffect() with config-like object', async () => {
+      const result = await Effect.runPromise(service.optionsEffect('/resource', { timeout: 3000 }));
+
+      expect(result).toBeDefined();
+    });
+
+    test('optionsEffect() with query and config', async () => {
+      const result = await Effect.runPromise(
+        service.optionsEffect('/resource', { page: 1 }, { timeout: 3000 }),
+      );
+
+      expect(result).toBeDefined();
     });
   });
 });

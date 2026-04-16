@@ -11,7 +11,12 @@ import {
   beforeEach,
   mock,
 } from 'bun:test';
-import { Effect } from 'effect';
+import {
+  Context,
+  Effect,
+  Layer,
+  pipe,
+} from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
 
@@ -23,7 +28,12 @@ import {
   type IConfig,
   type OneBunAppConfig,
 } from './config.interface';
-import { BaseService } from './service';
+import {
+  BaseService,
+  Service,
+  createServiceLayer,
+  getServiceTag,
+} from './service';
 
 function createMockLogger(): SyncLogger {
   // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -363,5 +373,188 @@ describe('BaseService', () => {
       const { instance: service } = createTestService(TestService);
       service.testStackTrace();
     });
+  });
+
+  describe('isInitialized getter', () => {
+    test('returns false before initialization', () => {
+      class TestService extends BaseService {}
+
+      BaseService.clearInitContext();
+      const service = new TestService();
+
+      expect(service.isInitialized).toBe(false);
+    });
+
+    test('returns true after initializeService', () => {
+      class TestService extends BaseService {}
+
+      const service = new TestService();
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+      service.initializeService(mockLogger, mockConfig);
+
+      expect(service.isInitialized).toBe(true);
+    });
+
+    test('returns true when constructed via static init context', () => {
+      class TestService extends BaseService {}
+
+      const mockLogger = createMockLogger();
+      const mockConfig = createMockConfig({});
+
+      BaseService.setInitContext(mockLogger, mockConfig);
+      let service: TestService;
+      try {
+        service = new TestService();
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      expect(service.isInitialized).toBe(true);
+    });
+  });
+
+  describe('span getter', () => {
+    test('returns undefined when no active span exists', () => {
+      class TestService extends BaseService {
+        getSpan() {
+          return this.span;
+        }
+      }
+
+      const { instance: service } = createTestService(TestService);
+      // Outside of any tracing context there is no active span
+      expect(service.getSpan()).toBeUndefined();
+    });
+  });
+
+  describe('runEffect()', () => {
+    class EffectTestService extends BaseService {
+      async run<A>(effect: Effect.Effect<A, never, never>): Promise<A> {
+        return await this.runEffect(effect as any);
+      }
+    }
+
+    let service: EffectTestService;
+
+    beforeEach(() => {
+      const result = createTestService(EffectTestService);
+      service = result.instance;
+    });
+
+    test('resolves to the value of a successful Effect', async () => {
+      const result = await service.run(Effect.succeed('hello'));
+      expect(result).toBe('hello');
+    });
+
+    test('resolves to a numeric value', async () => {
+      const result = await service.run(Effect.succeed(42));
+      expect(result).toBe(42);
+    });
+
+    test('resolves to an object value', async () => {
+      const expected = { key: 'value', count: 3 };
+      const result = await service.run(Effect.succeed(expected));
+      expect(result).toBe(expected);
+    });
+
+    test('rejects with the formatted error on Effect failure', async () => {
+      const error = new Error('effect failed');
+      const effect = Effect.fail(error) as unknown as Effect.Effect<never, never, never>;
+
+      await expect(service.run(effect)).rejects.toThrow('effect failed');
+    });
+
+    test('wraps non-Error failures into Error instances', async () => {
+      const effect = Effect.fail('string failure') as unknown as Effect.Effect<never, never, never>;
+
+      await expect(service.run(effect)).rejects.toThrow('string failure');
+    });
+
+    test('resolves with mapped value from Effect.map pipeline', async () => {
+      const effect = pipe(
+        Effect.succeed(10),
+        Effect.map((n) => n * 2),
+      );
+      const result = await service.run(effect);
+      expect(result).toBe(20);
+    });
+  });
+});
+
+describe('createServiceLayer()', () => {
+  test('throws when the service class has no @Service decorator', () => {
+    class UndecoratedService extends BaseService {}
+
+    expect(() => createServiceLayer(UndecoratedService)).toThrow(
+      'Service UndecoratedService does not have @Service decorator',
+    );
+  });
+
+  test('creates a layer for a decorated service', () => {
+    @Service()
+    class LayerTestService extends BaseService {}
+
+    const layer = createServiceLayer(LayerTestService);
+    expect(layer).toBeDefined();
+  });
+
+  test('layer provides the service instance via its Context tag', async () => {
+    @Service()
+    class TaggedService extends BaseService {
+      readonly name = 'tagged';
+    }
+
+    const layer = createServiceLayer(TaggedService);
+    const tag = getServiceTag(TaggedService);
+
+    const effect = pipe(
+      tag,
+      Effect.map((instance) => instance.name),
+    );
+
+    const result = await Effect.runPromise(Effect.provide(effect, layer as Layer.Layer<TaggedService>));
+    expect(result).toBe('tagged');
+  });
+
+  test('service instance accessible through layer is an instance of the service class', async () => {
+    @Service()
+    class InstanceCheckService extends BaseService {}
+
+    const layer = createServiceLayer(InstanceCheckService);
+    const tag = getServiceTag(InstanceCheckService);
+
+    const effect = tag;
+    const instance = await Effect.runPromise(
+      Effect.provide(effect, layer as Layer.Layer<InstanceCheckService>),
+    );
+
+    expect(instance).toBeInstanceOf(InstanceCheckService);
+    expect(instance).toBeInstanceOf(BaseService);
+  });
+
+  test('uses a provided custom Context tag when one was passed to @Service()', async () => {
+    interface ICustomService {
+      value: string;
+    }
+
+    const CustomTag = Context.GenericTag<ICustomService>('CustomTagForTest');
+
+    @Service(CustomTag)
+    class CustomTagService extends BaseService implements ICustomService {
+      readonly value = 'custom-tag-value';
+    }
+
+    const layer = createServiceLayer(CustomTagService);
+
+    const effect = pipe(
+      CustomTag,
+      Effect.map((s) => s.value),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.provide(effect, layer as Layer.Layer<ICustomService>),
+    );
+    expect(result).toBe('custom-tag-value');
   });
 });

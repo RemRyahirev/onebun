@@ -2,6 +2,7 @@
    @typescript-eslint/no-empty-function,
    @typescript-eslint/no-explicit-any,
    @typescript-eslint/no-unused-vars,
+   jest/unbound-method,
    no-console */
 import {
   describe,
@@ -11,7 +12,7 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 import { register } from 'prom-client';
 
  
@@ -574,9 +575,289 @@ describe('Metrics Decorators', () => {
     test('should create an Effect that requires MetricsService', () => {
       const testEffect = Effect.succeed(42);
       const measuredEffect = measureExecutionTime('test_metric', testEffect);
-      
+
       expect(measuredEffect).toBeDefined();
-      expect(typeof measuredEffect).toBe('object');
+      expect(Effect.isEffect(measuredEffect)).toBe(true);
+    });
+  });
+
+  describe('WithMetrics class decorator (extended)', () => {
+    test('should log initialization with no prefix option', () => {
+      @WithMetrics({})
+      class EmptyOptionsService {
+        run(): string {
+          return 'ok';
+        }
+      }
+
+      const svc = new EmptyOptionsService();
+      expect(svc.run()).toBe('ok');
+      expect(capturedLogs).toContain('WithMetrics applied to EmptyOptionsService with prefix: none');
+    });
+
+    test('should support subclassing the decorated class', () => {
+      @WithMetrics({ prefix: 'base_' })
+      class BaseService {
+        baseMethod(): number {
+          return 1;
+        }
+      }
+
+      class ChildService extends BaseService {
+        childMethod(): number {
+          return 2;
+        }
+      }
+
+      const child = new ChildService();
+      expect(child.baseMethod()).toBe(1);
+      expect(child.childMethod()).toBe(2);
+    });
+
+    test('should call constructor logic before logging', () => {
+      const order: string[] = [];
+
+      @WithMetrics({ prefix: 'order_' })
+      class OrderedService {
+        constructor() {
+          order.push('constructor');
+        }
+      }
+
+      new OrderedService();
+      // constructor runs first, then WithMetrics logs
+      expect(order).toEqual(['constructor']);
+      expect(capturedLogs.some(log => log.includes('WithMetrics applied to OrderedService'))).toBe(true);
+    });
+  });
+
+  describe('measureExecutionTime Effect function (extended)', () => {
+    test('should record duration on successful execution', async () => {
+      const observeMock = mock(() => {});
+      const mockHistogram = { observe: observeMock };
+      const mockService: MetricsService = {
+        getMetric: mock(() => mockHistogram) as MetricsService['getMetric'],
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+      const innerEffect = Effect.succeed(42);
+      const measured = measureExecutionTime('my_metric', innerEffect);
+
+      const result = await Effect.runPromise(Effect.provide(measured, serviceLayer));
+
+      expect(result).toBe(42);
+      expect(mockService.getMetric).toHaveBeenCalledWith('my_metric');
+      expect(observeMock).toHaveBeenCalledWith({}, expect.any(Number));
+    });
+
+    test('should record non-negative duration on successful execution', async () => {
+      let recordedDuration: number | undefined;
+      const mockService: MetricsService = {
+        getMetric: mock(() => ({
+          observe(_labels: object, duration: number) {
+            recordedDuration = duration;
+          },
+        })) as MetricsService['getMetric'],
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+      await Effect.runPromise(Effect.provide(measureExecutionTime('dur_metric', Effect.succeed('x')), serviceLayer));
+
+      expect(recordedDuration).toBeGreaterThanOrEqual(0);
+    });
+
+    test('should record error duration on Effect failure and propagate the error', async () => {
+      const observeMock = mock(() => {});
+      const mockService: MetricsService = {
+        getMetric: mock(() => ({ observe: observeMock })) as MetricsService['getMetric'],
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+      const failingEffect = Effect.fail(new Error('something went wrong'));
+      const measured = measureExecutionTime('err_metric', failingEffect);
+
+      await expect(
+        Effect.runPromise(Effect.provide(measured, serviceLayer)),
+      ).rejects.toThrow('something went wrong');
+
+      // With Effect.pipe + tapError, error duration IS correctly recorded
+      expect(observeMock).toHaveBeenCalledWith({ status: 'error' }, expect.any(Number));
+    });
+
+    test('should propagate the original failure cause through Effect channel', async () => {
+      const observeMock = mock(() => {});
+      const mockService: MetricsService = {
+        getMetric: mock(() => ({ observe: observeMock })) as MetricsService['getMetric'],
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+      const measured = measureExecutionTime('rethrow_metric', Effect.fail(new Error('original error payload')));
+
+      const caughtError = await Effect.runPromise(
+        Effect.provide(measured, serviceLayer),
+      ).catch(e => e);
+
+      expect(caughtError).toBeInstanceOf(Error);
+      expect((caughtError as Error).message).toBe('original error payload');
+      // Error duration also recorded
+      expect(observeMock).toHaveBeenCalledWith({ status: 'error' }, expect.any(Number));
+    });
+
+    test('should still succeed when getMetric returns undefined', async () => {
+      const mockService: MetricsService = {
+        getMetric: mock(() => undefined) as MetricsService['getMetric'],
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+      const result = await Effect.runPromise(
+        Effect.provide(measureExecutionTime('no_histogram', Effect.succeed('value')), serviceLayer),
+      );
+
+      expect(result).toBe('value');
+    });
+
+    test('should still fail when effect fails and getMetric returns undefined', async () => {
+      const getMetricMock = mock(() => undefined);
+      const mockService: MetricsService = {
+        getMetric: getMetricMock,
+        getMetrics: async () => '',
+        getContentType: () => '',
+        recordHttpRequest() {},
+        createCounter() {
+          throw new Error('not needed'); 
+        },
+        createGauge() {
+          throw new Error('not needed'); 
+        },
+        createHistogram() {
+          throw new Error('not needed'); 
+        },
+        createSummary() {
+          throw new Error('not needed'); 
+        },
+        clear() {},
+        getRegistry() {
+          throw new Error('not needed'); 
+        },
+        startSystemMetricsCollection() {},
+        stopSystemMetricsCollection() {},
+      };
+
+      const serviceLayer = Layer.succeed(MetricsService, mockService);
+
+      await expect(
+        Effect.runPromise(
+          Effect.provide(measureExecutionTime('no_histogram_fail', Effect.fail(new Error('fail'))), serviceLayer),
+        ),
+      ).rejects.toThrow('fail');
+
+      // tapError still calls getMetric even if it returns undefined
+      expect(getMetricMock).toHaveBeenCalledWith('no_histogram_fail');
     });
   });
 
