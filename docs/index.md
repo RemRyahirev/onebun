@@ -86,7 +86,7 @@ my-app/
 | `@Service()` | Mark class as injectable service | `@Service()` |
 | `@Get()`, `@Post()`, etc. | Define HTTP endpoints | `@Get('/:id')` |
 | `@Body()`, `@Param()`, `@Query()` | Parameter injection | `@Param('id') id: string` |
-| `@Inject()` | Explicit DI (edge cases only) | `@Inject(AbstractService)` |
+| `@Inject()` | Explicit DI — rarely needed; prefer constructor params | `@Inject(AbstractService)` |
 | `@WebSocketGateway()` | Define WebSocket gateway | `@WebSocketGateway({ path: '/ws' })` |
 | `@OnMessage()`, `@OnConnect()`, etc. | WebSocket event handlers | `@OnMessage('chat:*')` |
 
@@ -112,6 +112,7 @@ import {
   Post,
   Body,
   Service,
+  type InferConfigType,
 } from '@onebun/core';
 
 // ============================================================================
@@ -123,6 +124,12 @@ const envSchema = {
     host: Env.string({ default: '0.0.0.0' }),
   },
 };
+
+type AppConfig = InferConfigType<typeof envSchema>;
+
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
 
 // ============================================================================
 // 2. Service Layer (src/counter.service.ts)
@@ -177,13 +184,21 @@ class AppModule {}
 // 5. Application Entry Point (src/index.ts)
 // ============================================================================
 const app = new OneBunApplication(AppModule, {
-  port: 3000,
   envSchema,
   metrics: { enabled: true },
   tracing: { enabled: true },
 });
 
-app.start();
+app
+  .start()
+  .then(() => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.info('Application started');
+  })
+  .catch((error: unknown) => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+  });
 ```
 
 ## Key Patterns
@@ -217,16 +232,24 @@ export class UserController extends BaseController {
 ### Validation with ArkType
 
 ```typescript
+// src/user.schema.ts — schema + inferred type in one file
 import { type } from '@onebun/core';
 
-const createUserSchema = type({
+export const createUserSchema = type({
   name: 'string',
   email: 'string.email',
   age: 'number > 0',
 });
 
+export type CreateUserDto = typeof createUserSchema.infer;
+```
+
+```typescript
+// In controller — import named type, don't use typeof inline
+import { createUserSchema, type CreateUserDto } from './user.schema';
+
 @Post('/')
-async createUser(@Body(createUserSchema) user: typeof createUserSchema.infer) {
+async createUser(@Body(createUserSchema) user: CreateUserDto) {
   // user is validated and typed
 }
 ```
@@ -250,19 +273,23 @@ bun lint              # Check lint errors
 
 ## Package Dependencies
 
+Only `@onebun/core` is required — it includes `logger`, `envs`, `requests`, `metrics`, `trace`, `effect`, and `arktype` as transitive dependencies.
+
 ```json
 {
   "dependencies": {
-    "@onebun/core": "^0.3.0",
-    "@onebun/logger": "^0.3.0",
-    "@onebun/envs": "^0.3.0",
-    "@onebun/requests": "^0.3.0",
-    "@onebun/metrics": "^0.3.0",
-    "@onebun/trace": "^0.3.0",
-    "@onebun/cache": "^0.3.0",
-    "@onebun/drizzle": "^0.3.0",
-    "effect": "^3.x",
-    "arktype": "^2.x"
+    "@onebun/core": "^0.3.0"
   }
+}
+```
+
+Add optional packages as needed:
+
+```json
+{
+  "@onebun/drizzle": "^0.3.0",
+  "@onebun/cache": "^0.3.0",
+  "@onebun/nats": "^0.3.0",
+  "@onebun/docs": "^0.3.0"
 }
 ```

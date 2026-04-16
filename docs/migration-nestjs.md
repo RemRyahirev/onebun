@@ -150,33 +150,45 @@ export class UserController {
 **OneBun:**
 
 ```typescript
+// src/users/user.schema.ts — schemas live in separate files
+import { type } from '@onebun/core';
+
+export const createUserSchema = type({
+  name: 'string',
+  email: 'string.email',
+  'age?': 'number > 0',
+});
+export type CreateUserBody = typeof createUserSchema.infer;
+
+export const updateUserSchema = type({
+  'name?': 'string',
+  'email?': 'string.email',
+  'age?': 'number > 0',
+});
+export type UpdateUserBody = typeof updateUserSchema.infer;
+
+export const userSchema = type({
+  id: 'string',
+  name: 'string',
+  email: 'string.email',
+});
+```
+
+```typescript
+// src/users/user.controller.ts
 import {
   BaseController, Controller, Get, Post, Put, Delete,
-  Param, Body, Query, UseGuards, HttpException, ApiResponse, type,
+  Param, Body, Query, UseGuards, HttpException, ApiResponse,
 } from '@onebun/core';
 import { ApiTags, ApiOperation } from '@onebun/docs';
 
 import { AuthGuard } from './auth.guard';
 import { UserService } from './user.service';
-
-// ArkType schema = TypeScript type + runtime validation + OpenAPI spec
-const createUserSchema = type({
-  name: 'string',
-  email: 'string.email',
-  'age?': 'number > 0',
-});
-
-const updateUserSchema = type({
-  'name?': 'string',
-  'email?': 'string.email',
-  'age?': 'number > 0',
-});
-
-const userSchema = type({
-  id: 'string',
-  name: 'string',
-  email: 'string.email',
-});
+import {
+  createUserSchema, type CreateUserBody,
+  updateUserSchema, type UpdateUserBody,
+  userSchema,
+} from './user.schema';
 
 @ApiTags('Users')
 @Controller('/users')
@@ -206,9 +218,7 @@ export class UserController extends BaseController {
   @Post('/')
   @UseGuards(AuthGuard)
   @ApiResponse(201, { schema: userSchema })
-  async create(
-    @Body(createUserSchema) body: typeof createUserSchema.infer,
-  ) {
+  async create(@Body(createUserSchema) body: CreateUserBody) {
     return this.userService.create(body);
   }
 
@@ -216,7 +226,7 @@ export class UserController extends BaseController {
   @UseGuards(AuthGuard)
   async update(
     @Param('id') id: string,
-    @Body(updateUserSchema) body: typeof updateUserSchema.infer,
+    @Body(updateUserSchema) body: UpdateUserBody,
   ) {
     return this.userService.update(id, body);
   }
@@ -235,6 +245,7 @@ export class UserController extends BaseController {
 - Route handlers return plain objects (auto-wrapped to `{ success: true, result: data }`), throw `HttpException` for errors
 - Validation is declarative: pass ArkType schema to `@Body(schema)` instead of DTO classes with `class-validator`
 - One schema gives you TypeScript types, runtime validation, and OpenAPI spec -- no duplication
+- Schemas live in separate files; controllers import named types (not inline `typeof schema.infer`)
 
 ### Service
 
@@ -429,7 +440,16 @@ const app = new OneBunApplication(AppModule, {
   tracing: { enabled: true, serviceName: 'my-app' },
 });
 
-app.start();
+app
+  .start()
+  .then(() => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.info('Application started');
+  })
+  .catch((error: unknown) => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+  });
 ```
 
 No separate validation pipe is needed -- pass ArkType schemas directly to `@Body()` decorators.
@@ -452,14 +472,16 @@ serves three purposes at once:
 
 ```typescript
 // This one definition gives you:
-// 1. TypeScript type (typeof schema.infer)
+// 1. TypeScript type (CreateUserBody)
 // 2. Runtime validation (@Body(schema))
 // 3. OpenAPI 3.1 schema (auto-generated docs)
-const createUserSchema = type({
+export const createUserSchema = type({
   name: 'string',
   email: 'string.email',
   'age?': 'number > 0',
 });
+
+export type CreateUserBody = typeof createUserSchema.infer;
 ```
 
 No DTO classes, no `class-validator` decorators, no `@ApiProperty()` annotations.
@@ -498,7 +520,7 @@ This provides a consistent API response envelope across all endpoints.
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |
 | Microservices (`@nestjs/microservices`) | Different approach | `MultiServiceApplication` for multi-service from single image |
 | Pipes (class-based) | Not available | ArkType schemas handle validation |
-| Dynamic modules (`forRoot`/`forAsync`) | Not available | Use env schema + module imports |
+| Dynamic modules (`forRoot`/`forAsync`) | Partial | `DrizzleModule.forRoot()`, `CacheModule.forRoot()` — no `forAsync`, use `getConfig()` for dynamic values |
 
 ## What is Unique to OneBun
 
@@ -516,8 +538,8 @@ These features are built into the framework -- no community packages needed:
 
 ## Quick Migration Checklist
 
-1. Install Bun.js 1.2.12+ and initialize your project with `bun init`
-2. Replace `@nestjs/*` packages with `@onebun/*` packages
+1. Install Bun.js 1.2.12+ and create project with `bun create @onebun my-app` (or `bun init -y && bun add @onebun/core`)
+2. Replace `@nestjs/*` packages with `@onebun/core` (includes logger, envs, metrics, trace, requests as transitive deps)
 3. Update `tsconfig.json` (ensure `experimentalDecorators` and `emitDecoratorMetadata` are `true`)
 4. Replace `@Injectable()` with `@Service()` and extend `BaseService`
 5. Update controllers to extend `BaseController` and add `super()` call

@@ -59,17 +59,25 @@ microservice orchestration (MultiServiceApplication), and graceful shutdown.
 
 ## Step 1: Project Setup
 
+The fastest way to start is with the CLI:
+
 ```bash
-# Create project directory
+bun create @onebun my-onebun-app
+cd my-onebun-app
+bun run dev
+```
+
+This creates a ready-to-run project with all files from this guide. If you prefer to set up manually:
+
+```bash
 mkdir my-onebun-app
 cd my-onebun-app
-
-# Initialize Bun project
 bun init -y
-
-# Install OneBun packages
-bun add @onebun/core @onebun/logger @onebun/envs @onebun/requests effect arktype
+bun add @onebun/core
 ```
+
+All other `@onebun/*` packages (`logger`, `envs`, `requests`, etc.) are transitive dependencies of `@onebun/core`.
+Add optional packages as needed: `@onebun/drizzle` for database, `@onebun/cache` for caching, `@onebun/nats` for NATS queues.
 
 ## Step 2: TypeScript Configuration
 
@@ -103,12 +111,8 @@ Create `tsconfig.json`:
 `src/config.ts`:
 
 ```typescript
-import { Env } from '@onebun/core';
+import { Env, type InferConfigType } from '@onebun/core';
 
-/**
- * Type-safe environment configuration schema
- * All env variables are validated and typed at startup
- */
 export const envSchema = {
   server: {
     port: Env.number({ default: 3000, env: 'PORT' }),
@@ -118,13 +122,14 @@ export const envSchema = {
     name: Env.string({ default: 'my-onebun-app', env: 'APP_NAME' }),
     debug: Env.boolean({ default: true, env: 'DEBUG' }),
   },
-  // Database example (optional)
-  database: {
-    url: Env.string({ env: 'DATABASE_URL', sensitive: true }),
-  },
 };
 
-export type AppConfig = typeof envSchema;
+// Required: enables typed this.config.get() in services and controllers
+export type AppConfig = InferConfigType<typeof envSchema>;
+
+declare module '@onebun/core' {
+  interface OneBunAppConfig extends AppConfig {}
+}
 ```
 
 ## Step 4: Create a Service
@@ -161,7 +166,24 @@ export class HelloService extends BaseService {
 - `BaseService` provides `this.logger` and `this.config`
 - Constructor receives dependencies automatically
 
-## Step 5: Create a Controller
+## Step 5: Create Validation Schema
+
+`src/hello.schema.ts`:
+
+```typescript
+import { type } from '@onebun/core';
+
+export const greetBodySchema = type({
+  name: 'string',
+  'message?': 'string',
+});
+
+export type GreetBody = typeof greetBodySchema.infer;
+```
+
+Schemas live in separate files. Export both the schema (for runtime validation) and the inferred type (for controller signatures).
+
+## Step 6: Create a Controller
 
 `src/hello.controller.ts`:
 
@@ -173,69 +195,44 @@ import {
   Post,
   Param,
   Body,
-  Query,
-  type,
 } from '@onebun/core';
 
 import { HelloService } from './hello.service';
-
-// Define validation schema
-const greetBodySchema = type({
-  name: 'string',
-  'message?': 'string',
-});
+import { greetBodySchema, type GreetBody } from './hello.schema';
 
 @Controller('/api/hello')
 export class HelloController extends BaseController {
-  // HelloService is automatically injected
   constructor(private helloService: HelloService) {
     super();
   }
 
-  /**
-   * GET /api/hello
-   * Basic hello endpoint
-   */
   @Get('/')
   async hello() {
     this.logger.info('Hello endpoint called');
     return { message: 'Hello from OneBun!' };
   }
 
-  /**
-   * GET /api/hello/:name
-   * Greet a specific person
-   */
+  // Static routes must come before parametric ones
+  @Get('/stats')
+  async stats() {
+    return {
+      totalGreets: this.helloService.getCount(),
+      uptime: process.uptime(),
+    };
+  }
+
   @Get('/:name')
   async greetByPath(@Param('name') name: string) {
     const greeting = this.helloService.greet(name);
     return { greeting };
   }
 
-  /**
-   * POST /api/hello/greet
-   * Greet with validated body
-   */
   @Post('/greet')
-  async greetWithBody(
-    @Body(greetBodySchema) body: typeof greetBodySchema.infer,
-  ) {
+  async greetWithBody(@Body(greetBodySchema) body: GreetBody) {
     const greeting = this.helloService.greet(body.name);
     return {
       greeting,
       customMessage: body.message,
-    };
-  }
-
-  /**
-   * GET /api/hello/stats
-   * Get service statistics
-   */
-  @Get('/stats')
-  async stats() {
-    return {
-      totalGreets: this.helloService.getCount(),
-      uptime: process.uptime(),
     };
   }
 }
@@ -246,9 +243,10 @@ export class HelloController extends BaseController {
 - `BaseController` provides `this.logger`, `this.config`, and response helpers
 - `@Param('name')` extracts path parameters
 - `@Body(schema)` validates and injects request body
+- Static routes (`/stats`) must be declared before parametric routes (`/:name`)
 - Constructor DI is automatic (just declare private property) — see [Architecture — DI](/architecture#dependency-injection-system) for details
 
-## Step 6: Create the Module
+## Step 7: Create the Module
 
 `src/app.module.ts`:
 
@@ -271,7 +269,7 @@ export class AppModule {}
 - `imports`: Array of other modules to import
 - `exports`: Array of services to export to parent modules
 
-## Step 7: Create Entry Point
+## Step 8: Create Entry Point
 
 `src/index.ts`:
 
@@ -303,18 +301,23 @@ const app = new OneBunApplication(AppModule, {
   },
 });
 
-app.start()
+app
+  .start()
   .then(() => {
-    const logger = app.getLogger({ className: 'Bootstrap' });
+    const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.info('Application started successfully');
   })
-  .catch((error) => {
-    console.error('Failed to start application:', error);
+  .catch((error: unknown) => {
+    const logger = app.getLogger({ className: 'AppBootstrap' });
+    logger.error(
+      'Failed to start application:',
+      error instanceof Error ? error : new Error(String(error)),
+    );
     process.exit(1);
   });
 ```
 
-## Step 8: Create .env File (Optional)
+## Step 9: Create .env File (Optional)
 
 `.env`:
 
@@ -325,7 +328,7 @@ APP_NAME=my-onebun-app
 DEBUG=true
 ```
 
-## Step 9: Add Scripts to package.json
+## Step 10: Add Scripts to package.json
 
 ```json
 {
@@ -338,7 +341,7 @@ DEBUG=true
 }
 ```
 
-## Step 10: Run the Application
+## Step 11: Run the Application
 
 ```bash
 # Start in development mode with hot reload
@@ -402,6 +405,7 @@ my-onebun-app/
 │   ├── index.ts           # Application entry point
 │   ├── app.module.ts      # Root module
 │   ├── config.ts          # Environment schema
+│   ├── hello.schema.ts    # Validation schemas
 │   ├── hello.controller.ts
 │   └── hello.service.ts
 ├── .env                   # Environment variables

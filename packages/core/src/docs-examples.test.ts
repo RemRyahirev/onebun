@@ -2931,12 +2931,12 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
     });
   });
 
-  describe('Controller Creation (docs/getting-started.md)', () => {
+  describe('Validation Schema (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-5-create-a-controller
+     * @source docs/getting-started.md#step-5-create-validation-schema
      */
-    it('should create controller with validation schema', () => {
-      // From docs: Validation schema
+    it('should create schema with exported type', () => {
+      // From docs: src/hello.schema.ts
       /* eslint-disable @typescript-eslint/naming-convention */
       const greetBodySchema = type({
         name: 'string',
@@ -2944,10 +2944,39 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
       });
       /* eslint-enable @typescript-eslint/naming-convention */
 
+      type GreetBody = typeof greetBodySchema.infer;
+
+      expect(greetBodySchema).toBeDefined();
+
+      const valid: GreetBody = { name: 'Alice' };
+
+      expect(valid.name).toBe('Alice');
+    });
+  });
+
+  describe('Controller Creation (docs/getting-started.md)', () => {
+    /**
+     * @source docs/getting-started.md#step-6-create-a-controller
+     */
+    it('should create controller with imported schema and named type', () => {
+      // From docs: src/hello.schema.ts (imported in controller)
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const greetBodySchema = type({
+        name: 'string',
+        'message?': 'string',
+      });
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      type GreetBody = typeof greetBodySchema.infer;
+
       @Service()
       class HelloService extends BaseService {
         greet(name: string) {
           return `Hello, ${name}!`;
+        }
+
+        getCount() {
+          return 0;
         }
       }
 
@@ -2959,22 +2988,31 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
         }
 
         @Get('/')
-        async hello(): Promise<Response> {
-          return this.success({ message: 'Hello, World!' });
+        async hello() {
+          return { message: 'Hello from OneBun!' };
+        }
+
+        // Static routes must come before parametric ones
+        @Get('/stats')
+        async stats() {
+          return {
+            totalGreets: this.helloService.getCount(),
+            uptime: process.uptime(),
+          };
         }
 
         @Get('/:name')
-        async greet(@Param('name') name: string): Promise<Response> {
+        async greetByPath(@Param('name') name: string) {
           const greeting = this.helloService.greet(name);
 
-          return this.success({ greeting });
+          return { greeting };
         }
 
         @Post('/greet')
-        async greetPost(@Body() body: typeof greetBodySchema.infer): Promise<Response> {
+        async greetWithBody(@Body(greetBodySchema) body: GreetBody) {
           const greeting = this.helloService.greet(body.name);
 
-          return this.success({ greeting, customMessage: body.message });
+          return { greeting, customMessage: body.message };
         }
       }
 
@@ -2985,7 +3023,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Module Definition (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-6-create-the-module
+     * @source docs/getting-started.md#step-7-create-the-module
      */
     it('should create module with controllers and providers', () => {
       @Service()
@@ -3007,7 +3045,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Application Entry Point (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-7-create-entry-point
+     * @source docs/getting-started.md#step-8-create-entry-point
      */
     it('should create OneBunApplication with all options', () => {
       @Module({ controllers: [] })

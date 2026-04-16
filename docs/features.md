@@ -13,14 +13,14 @@ inspired by NestJS architecture. It provides a complete ecosystem for building
 production-grade backend services.
 
 ### Core Capabilities
-- **Modules & DI**: NestJS-style @Module, @Controller, @Service, @Injectable with automatic constructor injection
+- **Modules & DI**: NestJS-style @Module, @Controller, @Service with automatic constructor injection
 - **HTTP Routing**: Decorator-based (@Get, @Post, @Put, @Delete, @Patch) with path params, query, body, headers
 - **Guards**: Custom route guards for authentication/authorization
 - **Middleware**: @UseMiddleware decorator with chaining support
 - **Graceful Shutdown**: Enabled by default, handles SIGTERM/SIGINT
 
 ### WebSocket
-- WebSocket Gateway with @WebSocketGateway, @SubscribeMessage decorators
+- WebSocket Gateway with @WebSocketGateway, @OnMessage decorators
 - Socket.IO adapter support (rooms, namespaces, broadcasting)
 - Auto-generated typed WebSocket client for frontend integration
 
@@ -44,7 +44,7 @@ production-grade backend services.
 - Drizzle ORM with PostgreSQL and SQLite (bun:sqlite) support
 - Schema-first approach with full type inference from schema
 - CLI migrations (onebun-drizzle generate/push/studio)
-- Auto-migrate on startup (autoMigrate: true)
+- Auto-migrate on startup (enabled by default)
 - BaseRepository with CRUD operations
 
 ### Queue & Scheduler
@@ -140,7 +140,7 @@ Configure `static.root`, optional `pathPrefix` and `fallbackFile` (e.g. `index.h
 ## WebSocket (@onebun/core)
 
 ### WebSocket Gateway
-Decorator-based WebSocket handlers with @WebSocketGateway, @SubscribeMessage.
+Decorator-based WebSocket handlers with @WebSocketGateway, @OnMessage.
 Built on Bun's native WebSocket support for maximum performance.
 
 ### Socket.IO Support
@@ -203,7 +203,7 @@ Supports PostgreSQL and SQLite (via bun:sqlite).
 ### Migrations
 - CLI: `bunx onebun-drizzle generate` / `push` / `studio`
 - Programmatic: `generateMigrations()`, `pushSchema()`
-- Auto-migrate on startup: `autoMigrate: true`
+- Auto-migrate on startup (enabled by default — no configuration needed)
 
 ### Repository Pattern
 BaseRepository with built-in CRUD operations,
