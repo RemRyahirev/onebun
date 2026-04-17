@@ -34,4 +34,4 @@ Dependencies are installed automatically via `bun install`.
 
 ## License
 
-MPL-2.0
+[MPL-2.0](../../LICENSE) 
