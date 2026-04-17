@@ -226,4 +226,4 @@ Convert ArkType schema to JSON Schema.
 
 ## License
 
-[LGPL-3.0](../../LICENSE)
+[MPL-2.0](../../LICENSE)

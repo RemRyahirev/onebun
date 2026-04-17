@@ -264,4 +264,4 @@ The module uses OpenTelemetry API and supports:
 
 ## License
 
-[LGPL-3.0](../../LICENSE) 
+[MPL-2.0](../../LICENSE) 

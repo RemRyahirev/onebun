@@ -246,4 +246,4 @@ The metrics endpoint is compatible with:
 
 ## License
 
-[LGPL-3.0](../../LICENSE) 
+[MPL-2.0](../../LICENSE) 

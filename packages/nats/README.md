@@ -143,4 +143,4 @@ interface JetStreamAdapterOptions extends NatsConnectionOptions {
 
 ## License
 
-LGPL-3.0
+[MPL-2.0](../../LICENSE) 
