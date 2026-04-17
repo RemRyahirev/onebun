@@ -10,6 +10,76 @@ adopting a few new conventions.
 
 This guide walks through the mapping of concepts, decorators, and code patterns.
 
+## Why Consider Migrating
+
+OneBun is not a port of NestJS to Bun. It is a separate framework that borrows NestJS's architecture (modules, DI, decorators) but makes different trade-offs — prioritizing convention over configuration, collapsing boilerplate, and shipping infrastructure features as built-in packages rather than community add-ons.
+
+Here are specific reasons a NestJS team might benefit from switching.
+
+### Performance you can verify
+
+OneBun is **~2× faster** than NestJS + Fastify on Node.js while performing **on par with Hono** on Bun. Benchmarks run in CI on every commit and are [published with full methodology](/benchmarks). Yes, OneBun is slower than Elysia (a lightweight Bun-native HTTP toolkit), but that is a different class of tool — no DI, no modules, no observability stack. The comparison that matters is against NestJS, and the gap is significant.
+
+### Zero build step
+
+Bun executes TypeScript directly. No `tsc`, no `swc`, no `ts-node`, no `tsup`. Your source code **is** your runtime code. `bun run --watch` for dev, `bun run src/main.ts` for production. One fewer thing to debug when something breaks between local and CI.
+
+### Less boilerplate where it counts
+
+**Logger and config injection disappear.** In NestJS, every service that needs logging or configuration must inject `Logger` and `ConfigService` through the constructor. In a project with 50+ services, that is a lot of repeated `private readonly logger = new Logger(MyService.name)`. In OneBun, `this.logger` and `this.config` are available on every `BaseService` and `BaseController` automatically — typed, structured, zero setup.
+
+**Validation, types, and API docs collapse into one artifact.** A single ArkType schema gives you a TypeScript type (via `infer`), runtime validation, and an OpenAPI 3.1 spec. In NestJS with `class-validator`, that is three separate things: a DTO class with validation decorators, `@ApiProperty()` annotations for Swagger, and a TypeScript interface. Even with Zod (which also does `infer`), you still need a separate DTO class for `@nestjs/swagger` to generate docs — two artifacts instead of one. In OneBun, adding a field to an endpoint means editing one schema. Types, validation, and docs update automatically.
+
+### Built-in infrastructure — not community packages
+
+NestJS's strength is its ecosystem, but that ecosystem means pulling in separate packages, each with its own configuration pattern, version matrix, and maintenance status. OneBun ships the most common infrastructure needs as first-party packages with a unified API:
+
+| What you need | NestJS approach | OneBun approach |
+|---|---|---|
+| **Caching** | `@nestjs/cache-manager` + `cache-manager` + store adapter | `@onebun/cache` — in-memory or Redis, TTL, batch ops, one import |
+| **Queues** | `@nestjs/bull` or `@nestjs/bullmq` + separate Redis | `@onebun/nats` — unified API for in-memory, Redis, and NATS JetStream backends |
+| **Scheduled jobs** | `@nestjs/schedule` (in-memory cron only) | Built into `@onebun/nats` — in-memory, Redis, or JetStream. Same decorator, three backends |
+| **Metrics** | `prom-client` + custom middleware or community package | `@onebun/metrics` — auto HTTP/system metrics, `@Timed()`, `@Counted()`, `@Gauged()`, `/metrics` endpoint |
+| **Tracing** | OpenTelemetry SDK + manual instrumentation | `@onebun/trace` — auto HTTP tracing, `@Span()`, `@TraceAll()`, configurable sampling |
+| **Typed HTTP clients** | Axios wrappers without type safety, or gRPC with code generation | `@onebun/requests` — `createServiceDefinition()` + `createServiceClient()`, typed, no codegen |
+| **Environment config** | `@nestjs/config` + manual validation (Joi/Zod) | `@onebun/envs` — schema-based, validated at startup, sensitive value masking in logs |
+
+### Shared Redis connection pool
+
+A typical NestJS project with BullMQ, caching, rate limiting, and sessions opens 4+ separate Redis connections. OneBun uses a **single shared Redis pool** for cache, WebSocket state, queues, and rate limiting. Fewer connections, less memory, simpler infrastructure.
+
+### Guards that work everywhere
+
+In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(AuthGuard)` works identically on HTTP routes, WebSocket message handlers, and queue consumers. One pattern, all transports.
+
+### Multi-service without the pain
+
+NestJS can technically run multiple services from one codebase, but wiring that up for local development (running some services together, others separately) is manual and fragile. OneBun's `MultiServiceApplication` lets you run all services in a single process during development and split them via `ONEBUN_SERVICES` env var in production — same code, same Docker image, no glue scripts.
+
+### Type-safe WebSocket clients
+
+In NestJS, the WebSocket client is a hope-based contract — you emit event names as strings and pray they match the server. OneBun generates a **typed client SDK** from your gateway decorators. If the server event changes, the client won't compile.
+
+## What is Unique to OneBun
+
+These features are built into the framework -- no community packages needed:
+
+- **Prometheus metrics** (`@onebun/metrics`) -- auto HTTP/system metrics, `@Timed()`, `@Counted()`, `@Gauged()`, custom counters/gauges/histograms at `/metrics`
+- **OpenTelemetry tracing** (`@onebun/trace`) -- auto HTTP tracing, `@Span()` decorator, configurable sampling and export
+- **Redis/in-memory cache** (`@onebun/cache`) -- `CacheModule` with TTL, batch operations, shared Redis connection
+- **Typed environment variables** (`@onebun/envs`) -- schema-based config with validation, defaults, sensitive value masking
+- **ArkType validation** -- one schema = TypeScript type + runtime validation + OpenAPI 3.1 spec
+- **Multi-service architecture** -- run all services in a single process during development, split by `ONEBUN_SERVICES` env var in production. Same code, same Docker image — no glue scripts or docker-compose hacks for local dev
+- **WebSocket guards and queue guards** -- guards work not only on HTTP routes but also on WebSocket messages and queue handlers
+- **Typed inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()` with Bearer/ApiKey/Basic auth, no code generation (HMAC auth planned)
+- **Auto-generated typed WebSocket client** -- type-safe frontend SDK generated from gateway decorators
+- **SSE (Server-Sent Events)** -- `@Sse()` decorator with heartbeat, per-route timeout, auto-abort on disconnect; `this.sse()` for programmatic streaming
+- **Static file serving with SPA fallback** -- serve frontend build from the same host/port as the API, with `fallbackFile` for client-side routing
+- **OTLP log export** -- structured logs sent to OpenTelemetry Collector alongside console output, batch-based with configurable flush
+- **Auto-trace all methods** -- `traceAll: true` in tracing config + `@TraceAll()`/`@NoTrace()` per-class overrides with filtering
+- **Shared Redis connection pool** -- single connection reused by cache, WebSocket storage, and queue — less memory, fewer connections
+- **Project scaffolding** -- `bun create @onebun my-app` creates ready-to-run project with TypeScript config, env schema, Docker Compose
+
 ## Concept Mapping
 
 | NestJS | OneBun | Notes |
@@ -598,7 +668,7 @@ await module.close();  // always close in afterEach
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Interceptors | Planned | No equivalent yet |
-| GraphQL (`@nestjs/graphql`) | Not available (post-1.0 consideration) | Use REST + OpenAPI |
+| GraphQL (`@nestjs/graphql`) | Planned (post-1.0) | Use REST + OpenAPI for now |
 | CQRS (`@nestjs/cqrs`) | Not available | -- |
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |
 | Microservices (`@nestjs/microservices`) | Different approach | `MultiServiceApplication` for multi-service from single image |
@@ -608,38 +678,18 @@ await module.close();  // always close in afterEach
 | Per-route module middleware (`forRoutes`) | Not available | Use `@UseMiddleware()` on controllers/routes |
 | Dynamic modules (`forRoot`/`forAsync`) | Partial | `DrizzleModule.forRoot()`, `CacheModule.forRoot()` — no `forAsync`, use `getConfig()` for dynamic values |
 
-## What is Unique to OneBun
-
-These features are built into the framework -- no community packages needed:
-
-- **Prometheus metrics** (`@onebun/metrics`) -- auto HTTP/system metrics, `@Timed()`, `@Counted()`, `@Gauged()`, custom counters/gauges/histograms at `/metrics`
-- **OpenTelemetry tracing** (`@onebun/trace`) -- auto HTTP tracing, `@Span()` decorator, configurable sampling and export
-- **Redis/in-memory cache** (`@onebun/cache`) -- `CacheModule` with TTL, batch operations, shared Redis connection
-- **Typed environment variables** (`@onebun/envs`) -- schema-based config with validation, defaults, sensitive value masking
-- **ArkType validation** -- one schema = TypeScript type + runtime validation + OpenAPI 3.1 spec
-- **Multi-service from single Docker image** -- `MultiServiceApplication` with `ONEBUN_SERVICES` env var to select which services to run
-- **WebSocket guards and queue guards** -- guards work not only on HTTP routes but also on WebSocket messages and queue handlers
-- **Typed inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()` with HMAC auth, no code generation
-- **Auto-generated typed WebSocket client** -- type-safe frontend SDK generated from gateway decorators
-- **SSE (Server-Sent Events)** -- `@Sse()` decorator with heartbeat, per-route timeout, auto-abort on disconnect; `this.sse()` for programmatic streaming
-- **Static file serving with SPA fallback** -- serve frontend build from the same host/port as the API, with `fallbackFile` for client-side routing
-- **OTLP log export** -- structured logs sent to OpenTelemetry Collector alongside console output, batch-based with configurable flush
-- **Auto-trace all methods** -- `traceAll: true` in tracing config + `@TraceAll()`/`@NoTrace()` per-class overrides with filtering
-- **Shared Redis connection pool** -- single connection reused by cache, WebSocket storage, and queue — less memory, fewer connections
-- **Project scaffolding** -- `bun create @onebun my-app` creates ready-to-run project with TypeScript config, env schema, Docker Compose
-
 ## Quick Migration Checklist
 
-1. Install Bun.js 1.2.12+ and create project with `bun create @onebun my-app` (or `bun init -y && bun add @onebun/core`)
+1. Install Bun.js 1.2.12+ and create project with `bun create @onebun my-app` (or `bun init -y && bun add @onebun/core`) — see [Getting Started](/getting-started)
 2. Replace `@nestjs/*` packages with `@onebun/core` (includes logger, envs, metrics, trace, requests as transitive deps)
 3. Update `tsconfig.json` (ensure `experimentalDecorators` and `emitDecoratorMetadata` are `true`)
-4. Replace `@Injectable()` with `@Service()` and extend `BaseService`
-5. Update controllers to extend `BaseController` and add `super()` call
-6. Replace DTO classes + `class-validator` with ArkType schemas
+4. Replace `@Injectable()` with `@Service()` and extend `BaseService` — see [Services](/api/services)
+5. Update controllers to extend `BaseController` and add `super()` call — see [Controllers](/api/controllers)
+6. Replace DTO classes + `class-validator` with ArkType schemas — see [Validation](/api/validation)
 7. Update route paths: `@Get(':id')` → `@Get('/:id')` (add leading slash)
 8. Update route handlers to return plain objects and throw `HttpException` for errors
 9. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
 10. Move `ConfigService` usage to `this.config` (from `BaseService`)
 11. Move `Logger` usage to `this.logger` (from `BaseService`)
-12. Update entry point from `NestFactory.create()` to `new OneBunApplication()`
+12. Update entry point from `NestFactory.create()` to `new OneBunApplication()` — see [Getting Started](/getting-started)
 13. Run `bun run typecheck` and `bun test` to verify everything works
