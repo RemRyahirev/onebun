@@ -1,7 +1,7 @@
 import { BaseService, Service } from '@onebun/core';
 import { DrizzleService, eq } from '@onebun/drizzle';
 
-import { users } from '../../shared/schema';
+import { users } from './schema';
 
 import type { CreateUserBody } from './schemas';
 

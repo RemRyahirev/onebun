@@ -6,6 +6,7 @@
     "@onebun/core": "workspace:^",
     "@onebun/drizzle": "workspace:^",
     "@onebun/cache": "workspace:^",
-    "@onebun/docs": "workspace:^"
+    "@onebun/docs": "workspace:^",
+    "drizzle-orm": "^0.44.7"
   }
 }

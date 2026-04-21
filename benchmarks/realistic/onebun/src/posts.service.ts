@@ -1,7 +1,7 @@
 import { BaseService, Service } from '@onebun/core';
 import { DrizzleService, eq } from '@onebun/drizzle';
 
-import { comments, posts, users } from '../../shared/schema';
+import { comments, posts, users } from './schema';
 
 import type { CreatePostBody } from './schemas';
 

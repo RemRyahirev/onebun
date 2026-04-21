@@ -75,6 +75,7 @@
         "@onebun/cache": "workspace:^",
         "@onebun/core": "workspace:^",
         "@onebun/drizzle": "workspace:^",
+        "drizzle-orm": "^0.44.7",
       },
     },
     "benchmarks/realistic-pg/onebun-full": {
@@ -143,6 +144,7 @@
         "@onebun/core": "workspace:^",
         "@onebun/docs": "workspace:^",
         "@onebun/drizzle": "workspace:^",
+        "drizzle-orm": "^0.44.7",
       },
     },
     "benchmarks/simple/competitors/elysia": {
