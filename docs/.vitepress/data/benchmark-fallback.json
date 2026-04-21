@@ -1,9 +1,397 @@
 {
-  "date": "",
-  "machine": { "cpu": "", "ram": "", "os": "", "bunVersion": "", "nodeVersion": "" },
+  "date": "2026-04-21T18:52:18.409Z",
+  "machine": {
+    "cpu": "x86_64",
+    "ram": "16 GB",
+    "os": "Linux 6.17.0-1011-azure",
+    "bunVersion": "1.3.13",
+    "nodeVersion": "v24.15.0"
+  },
   "settings": "50 connections, 10s duration",
-  "http": [],
-  "startup": [],
-  "realistic": [],
-  "realisticPg": []
+  "http": [
+    {
+      "name": "Elysia",
+      "reqPerSec": 58976.17,
+      "avgLatency": "845.93us",
+      "maxLatency": "7.06ms",
+      "p99Latency": "1.65ms",
+      "p95Latency": "1.16ms",
+      "throughput": "13.33MB/s"
+    },
+    {
+      "name": "Bun.serve (baseline)",
+      "reqPerSec": 56549.4,
+      "avgLatency": "0.88ms",
+      "maxLatency": "6.10ms",
+      "p99Latency": "1.72ms",
+      "p95Latency": "1.19ms",
+      "throughput": "12.03MB/s"
+    },
+    {
+      "name": "OneBun",
+      "reqPerSec": 44960.54,
+      "avgLatency": "1.11ms",
+      "maxLatency": "7.45ms",
+      "p99Latency": "2.14ms",
+      "p95Latency": "1.73ms",
+      "throughput": "9.56MB/s"
+    },
+    {
+      "name": "Hono",
+      "reqPerSec": 37967.47,
+      "avgLatency": "1.31ms",
+      "maxLatency": "12.21ms",
+      "p99Latency": "2.49ms",
+      "p95Latency": "1.63ms",
+      "throughput": "8.07MB/s"
+    },
+    {
+      "name": "NestJS + Fastify (Bun)",
+      "reqPerSec": 22034.11,
+      "avgLatency": "2.27ms",
+      "maxLatency": "16.48ms",
+      "p99Latency": "4.66ms",
+      "p95Latency": "3.57ms",
+      "throughput": "5.00MB/s"
+    },
+    {
+      "name": "NestJS + Fastify (Node)",
+      "reqPerSec": 17522.27,
+      "avgLatency": "2.85ms",
+      "maxLatency": "176.89ms",
+      "p99Latency": "5.46ms",
+      "p95Latency": "3.82ms",
+      "throughput": "4.78MB/s"
+    }
+  ],
+  "startup": [
+    {
+      "name": "Bun.serve (baseline)",
+      "meanMs": 14,
+      "minMs": 14,
+      "maxMs": 15
+    },
+    {
+      "name": "OneBun",
+      "meanMs": 469,
+      "minMs": 457,
+      "maxMs": 481
+    },
+    {
+      "name": "Hono",
+      "meanMs": 23,
+      "minMs": 23,
+      "maxMs": 24
+    },
+    {
+      "name": "Elysia",
+      "meanMs": 67,
+      "minMs": 66,
+      "maxMs": 69
+    },
+    {
+      "name": "NestJS + Fastify (Bun)",
+      "meanMs": 340,
+      "minMs": 338,
+      "maxMs": 352
+    },
+    {
+      "name": "NestJS + Fastify (Node)",
+      "meanMs": 332,
+      "minMs": 327,
+      "maxMs": 340
+    }
+  ],
+  "realistic": [
+    {
+      "name": "NestJS + TypeORM (Node)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 2426.23,
+          "avgLatency": "20.58ms",
+          "maxLatency": "713.60ms",
+          "p99Latency": "38.03ms",
+          "p95Latency": "23.03ms",
+          "throughput": "18.55MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 2884.5,
+          "avgLatency": "17.32ms",
+          "maxLatency": "529.77ms",
+          "p99Latency": "31.35ms",
+          "p95Latency": "21.76ms",
+          "throughput": "1.70MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 2965.31,
+          "avgLatency": "16.84ms",
+          "maxLatency": "509.70ms",
+          "p99Latency": "31.87ms",
+          "p95Latency": "18.52ms",
+          "throughput": "3.83MB/s"
+        }
+      ]
+    },
+    {
+      "name": "NestJS + Fastify (Bun)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 3403.98,
+          "avgLatency": "14.68ms",
+          "maxLatency": "46.42ms",
+          "p99Latency": "26.67ms",
+          "p95Latency": "17.92ms",
+          "throughput": "25.93MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 2719.69,
+          "avgLatency": "18.37ms",
+          "maxLatency": "50.16ms",
+          "p99Latency": "27.75ms",
+          "p95Latency": "20.07ms",
+          "throughput": "3.34MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 3799.59,
+          "avgLatency": "13.15ms",
+          "maxLatency": "35.39ms",
+          "p99Latency": "21.61ms",
+          "p95Latency": "16.42ms",
+          "throughput": "2.06MB/s"
+        }
+      ]
+    },
+    {
+      "name": "NestJS + Fastify (Node)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 3519.93,
+          "avgLatency": "14.19ms",
+          "maxLatency": "548.35ms",
+          "p99Latency": "24.90ms",
+          "p95Latency": "15.94ms",
+          "throughput": "26.97MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 3662.43,
+          "avgLatency": "13.64ms",
+          "maxLatency": "376.48ms",
+          "p99Latency": "23.99ms",
+          "p95Latency": "19.63ms",
+          "throughput": "2.15MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 3125.06,
+          "avgLatency": "15.98ms",
+          "maxLatency": "447.30ms",
+          "p99Latency": "29.14ms",
+          "p95Latency": "17.72ms",
+          "throughput": "3.98MB/s"
+        }
+      ]
+    },
+    {
+      "name": "OneBun",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 3607.14,
+          "avgLatency": "13.85ms",
+          "maxLatency": "36.74ms",
+          "p99Latency": "24.30ms",
+          "p95Latency": "15.72ms",
+          "throughput": "4.47MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 5377.03,
+          "avgLatency": "9.29ms",
+          "maxLatency": "28.34ms",
+          "p99Latency": "16.68ms",
+          "p95Latency": "12.64ms",
+          "throughput": "2.95MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 4179.32,
+          "avgLatency": "11.96ms",
+          "maxLatency": "38.09ms",
+          "p99Latency": "22.35ms",
+          "p95Latency": "13.67ms",
+          "throughput": "31.87MB/s"
+        }
+      ]
+    }
+  ],
+  "realisticPg": [
+    {
+      "name": "NestJS + TypeORM (Node)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 1061.94,
+          "avgLatency": "46.98ms",
+          "maxLatency": "201.73ms",
+          "p99Latency": "62.27ms",
+          "p95Latency": "54.84ms",
+          "throughput": "1.30MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 2130.19,
+          "avgLatency": "23.45ms",
+          "maxLatency": "154.00ms",
+          "p99Latency": "35.40ms",
+          "p95Latency": "28.56ms",
+          "throughput": "1.25MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 4713.69,
+          "avgLatency": "10.59ms",
+          "maxLatency": "377.35ms",
+          "p99Latency": "65.15ms",
+          "p95Latency": "37.38ms",
+          "throughput": "30.04MB/s"
+        }
+      ]
+    },
+    {
+      "name": "OneBun",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 12786.68,
+          "avgLatency": "3.91ms",
+          "maxLatency": "15.26ms",
+          "p99Latency": "6.98ms",
+          "p95Latency": "5.77ms",
+          "throughput": "81.69MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 4369.84,
+          "avgLatency": "11.44ms",
+          "maxLatency": "32.11ms",
+          "p99Latency": "17.20ms",
+          "p95Latency": "13.89ms",
+          "throughput": "2.40MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 2161.89,
+          "avgLatency": "23.12ms",
+          "maxLatency": "95.97ms",
+          "p99Latency": "35.70ms",
+          "p95Latency": "28.31ms",
+          "throughput": "2.54MB/s"
+        }
+      ]
+    },
+    {
+      "name": "NestJS + Fastify (Bun)",
+      "endpoints": [
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 3401.96,
+          "avgLatency": "14.69ms",
+          "maxLatency": "33.88ms",
+          "p99Latency": "21.73ms",
+          "p95Latency": "17.97ms",
+          "throughput": "1.85MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 9087.79,
+          "avgLatency": "5.50ms",
+          "maxLatency": "21.17ms",
+          "p99Latency": "10.66ms",
+          "p95Latency": "6.92ms",
+          "throughput": "46.16MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 2019.39,
+          "avgLatency": "24.77ms",
+          "maxLatency": "84.60ms",
+          "p99Latency": "36.49ms",
+          "p95Latency": "30.13ms",
+          "throughput": "2.35MB/s"
+        }
+      ]
+    },
+    {
+      "name": "OneBun (full observability)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 10301.37,
+          "avgLatency": "4.85ms",
+          "maxLatency": "14.47ms",
+          "p99Latency": "8.46ms",
+          "p95Latency": "6.67ms",
+          "throughput": "52.44MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 4002.42,
+          "avgLatency": "12.49ms",
+          "maxLatency": "2.00s",
+          "p99Latency": "17.79ms",
+          "p95Latency": "14.89ms",
+          "throughput": "2.19MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 2040.91,
+          "avgLatency": "24.43ms",
+          "maxLatency": "2.03s",
+          "p99Latency": "34.19ms",
+          "p95Latency": "28.24ms",
+          "throughput": "2.38MB/s"
+        }
+      ]
+    },
+    {
+      "name": "NestJS + Fastify (Node)",
+      "endpoints": [
+        {
+          "endpoint": "GET /api/posts",
+          "reqPerSec": 10618.42,
+          "avgLatency": "4.71ms",
+          "maxLatency": "250.62ms",
+          "p99Latency": "9.15ms",
+          "p95Latency": "6.27ms",
+          "throughput": "67.60MB/s"
+        },
+        {
+          "endpoint": "POST /api/posts",
+          "reqPerSec": 3452.43,
+          "avgLatency": "14.48ms",
+          "maxLatency": "181.93ms",
+          "p99Latency": "21.55ms",
+          "p95Latency": "17.57ms",
+          "throughput": "2.03MB/s"
+        },
+        {
+          "endpoint": "GET /api/posts/:id",
+          "reqPerSec": 1557,
+          "avgLatency": "32.08ms",
+          "maxLatency": "130.47ms",
+          "p99Latency": "44.80ms",
+          "p95Latency": "37.31ms",
+          "throughput": "1.88MB/s"
+        }
+      ]
+    }
+  ]
 }

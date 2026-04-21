@@ -125,7 +125,9 @@ const onebunStartupMs = computed(() => {
 });
 
 // Realistic SQLite
-const realisticRows = computed(() => toCompactRows(data.value?.realistic ?? []));
+const realisticRows = computed(() =>
+  toCompactRows(data.value?.realistic ?? []).sort((a, b) => b.getList - a.getList),
+);
 
 const realisticOnebunGetList = computed(() => {
   const row = realisticRows.value.find((r) => r.name.toLowerCase().includes('onebun'));
@@ -133,7 +135,9 @@ const realisticOnebunGetList = computed(() => {
 });
 
 // Realistic PostgreSQL
-const realisticPgRows = computed(() => toCompactRows(data.value?.realisticPg ?? []));
+const realisticPgRows = computed(() =>
+  toCompactRows(data.value?.realisticPg ?? []).sort((a, b) => b.getList - a.getList),
+);
 
 const realisticPgOnebunRow = computed(() =>
   realisticPgRows.value.find((r) =>
@@ -196,7 +200,7 @@ onMounted(async () => {
     <div class="bm-cards">
       <div class="bm-card">
         <span class="bm-card-number">~2x</span>
-        <span class="bm-card-label">faster than NestJS&nbsp;(Node.js)</span>
+        <span class="bm-card-label">faster than canonical NestJS + TypeORM</span>
       </div>
       <div class="bm-card">
         <span class="bm-card-number">Zero</span>
@@ -300,8 +304,8 @@ onMounted(async () => {
       </div>
 
       <blockquote class="bm-commentary">
-        <p>SQLite results show smaller framework overhead differences. The bottleneck here is the <code>bun:sqlite</code> integration in Drizzle, which currently underperforms <code>better-sqlite3</code> on Node. OneBun leads on detail reads and writes, but NestJS + Drizzle on Node wins on list reads in this configuration.</p>
-        <p>For embedded and edge workloads, driver + runtime choice dominates framework overhead. If you're running SQLite in production today, the current <code>bun:sqlite</code> + Drizzle combination is not the fastest option, regardless of framework.</p>
+        <p>SQLite results show smaller framework overhead differences &mdash; driver and runtime choice dominate in embedded scenarios. OneBun leads across all endpoints, but margins are tighter than on Postgres: typically in the ~1.2&times;&ndash;1.5&times; range against NestJS + Drizzle stacks, and wider against canonical NestJS + TypeORM.</p>
+        <p>For embedded and edge workloads, the bottleneck shifts away from the framework layer. If you're running SQLite in production, driver choice (<code>bun:sqlite</code> vs <code>better-sqlite3</code>) matters more than framework choice.</p>
       </blockquote>
     </template>
 
@@ -344,7 +348,7 @@ onMounted(async () => {
 
         <div class="bm-commentary">
           <p>GET list uses in-memory cache (hot-path reads). GET detail hits Postgres directly with a JOIN (I/O-bound). POST is uncached write.</p>
-          <p>Against NestJS with the same ORM on the same runtime, OneBun is <strong>~2&times; faster on cached reads</strong> and <strong>~1.3&times; faster on writes</strong>. On uncached reads, framework overhead dissolves into database round-trip time &mdash; all frameworks land within noise. Against canonical NestJS + TypeORM, the gap widens to <strong>~4&times; on cached reads</strong> and <strong>~1.7&times; on writes</strong>.</p>
+          <p>Against NestJS with the same ORM on the same runtime, OneBun is <strong>~1.4&times; faster on cached reads</strong> and <strong>~1.3&times; faster on writes</strong>. On uncached reads, framework overhead dissolves into database round-trip time &mdash; all frameworks land within noise. Against canonical NestJS + TypeORM, the gap widens to <strong>~2.7&times; on cached reads</strong> and <strong>~2&times; on writes</strong>.</p>
         </div>
 
         <!-- Observability Overhead -->
@@ -370,16 +374,16 @@ onMounted(async () => {
               </tr>
               <tr>
                 <td>OneBun (full observability)</td>
-                <td>~29% slower</td>
-                <td>~9% slower</td>
-                <td>~13% slower</td>
+                <td>under 25% slower</td>
+                <td>under 10% slower</td>
+                <td>under 15% slower</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <div class="bm-commentary">
-          <p>At <strong>100% sampling</strong>, observability adds ~29% overhead on cache hits and near-zero on I/O-bound endpoints. With production-typical <strong>10% sampling</strong>, overhead scales roughly linearly to an estimated ~3&ndash;5% on cache hits.</p>
+          <p>At <strong>100% sampling</strong>, observability adds under 25% overhead on cache hits and near-zero on I/O-bound endpoints. With production-typical <strong>10% sampling</strong>, overhead scales roughly linearly to <strong>under 5% on cache hits</strong>.</p>
           <p>Even with full observability enabled, OneBun remains faster than NestJS + Drizzle on the same runtime for cached reads and writes. Setup cost is <code>bun add @onebun/metrics @onebun/trace</code> &mdash; no middleware wiring, no manual instrumentation.</p>
         </div>
       </div>
