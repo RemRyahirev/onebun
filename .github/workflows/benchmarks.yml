@@ -65,7 +65,7 @@ jobs:
           cd benchmarks/simple/competitors/hono-bun && bun install
           cd ../elysia && bun install
           cd ../nestjs-fastify && bun install && bun run build
-          cd ../../../../realistic/nestjs-fastify && bun install && npm install && bun run build
+          cd ../../../realistic/nestjs-fastify && bun install && npm install && bun run build
           cd ../../realistic-pg/nestjs-fastify && bun install && bun run build
           cd ../nestjs-typeorm && bun install && bun run build
 
