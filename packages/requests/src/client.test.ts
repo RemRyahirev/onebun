@@ -933,7 +933,10 @@ describe('retry backoff strategies', () => {
     sleepDelays = [];
     // Intercept setTimeout to capture delay values passed by Effect.sleep
     globalThis.setTimeout = ((fn: () => void, ms?: number) => {
-      if (ms !== undefined && ms > 0) sleepDelays.push(ms);
+      if (ms !== undefined && ms > 0) {
+        sleepDelays.push(ms);
+      }
+
       return originalSetTimeout(fn, ms);
     }) as typeof setTimeout;
   });
