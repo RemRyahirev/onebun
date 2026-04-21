@@ -63,16 +63,22 @@ run_pg_bench() {
 
   kill_port "$port"
 
-  # Start the server in the background
-  cd "$work_dir" && eval "DATABASE_URL=$DATABASE_URL BENCH_PORT=$port DB_HOST=$PG_HOST DB_PORT=$PG_PORT DB_USER=$PG_USER DB_PASSWORD=$PG_PASSWORD DB_NAME=$PG_DB $start_cmd" &>/dev/null &
+  # Start the server in the background, capture output for diagnostics
+  local server_log
+  server_log=$(mktemp)
+  cd "$work_dir" && eval "DATABASE_URL=$DATABASE_URL BENCH_PORT=$port DB_HOST=$PG_HOST DB_PORT=$PG_PORT DB_USER=$PG_USER DB_PASSWORD=$PG_PASSWORD DB_NAME=$PG_DB $start_cmd" >"$server_log" 2>&1 &
   local server_pid=$!
   cd "$REPO_ROOT"
 
   if ! wait_for_server "$port"; then
+    log "Server failed to start. Output:"
+    cat "$server_log" >&2
+    rm -f "$server_log"
     kill "$server_pid" 2>/dev/null || true
     kill_port "$port"
     return 1
   fi
+  rm -f "$server_log"
 
   log "Server ready. Running benchmarks..."
 

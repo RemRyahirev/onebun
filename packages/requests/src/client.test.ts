@@ -926,17 +926,24 @@ describe('HttpClient.req unexpected error wrapping', () => {
 });
 
 describe('retry backoff strategies', () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  let sleepDelays: number[];
+
+  beforeEach(() => {
+    sleepDelays = [];
+    // Intercept setTimeout to capture delay values passed by Effect.sleep
+    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
+      if (ms !== undefined && ms > 0) sleepDelays.push(ms);
+      return originalSetTimeout(fn, ms);
+    }) as typeof setTimeout;
+  });
+
   afterEach(() => {
+    globalThis.setTimeout = originalSetTimeout;
     globalThis.fetch = originalFetch;
   });
 
   it('exponential backoff: each retry waits delay * factor^(attempt-1)', async () => {
-    const delays: number[] = [];
-    const originalSetTimeout = globalThis.setTimeout;
-    // Intercept Effect.sleep by recording actual retry delays via fetch timing
-    // Instead, test behavior: with exponential backoff and factor=2, delay=10ms
-    // attempt 1: 10 * 2^0 = 10ms, attempt 2: 10 * 2^1 = 20ms
-    // We verify that 3 total calls happen for max=2 retries
     let callCount = 0;
     globalThis.fetch = (() => {
       callCount++;
@@ -944,24 +951,19 @@ describe('retry backoff strategies', () => {
       return Promise.resolve(textResponse('fail', { status: 503 }));
     }) as any;
 
-    const startTime = Date.now();
     await expect(
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/backoff' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'exponential', factor: 2, retryOn: [503], 
+            max: 2, delay: 5, backoff: 'exponential', factor: 2, retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
-    const elapsed = Date.now() - startTime;
-    // 1 initial + 2 retries = 3 calls total
     expect(callCount).toBe(3);
-    // Total minimum delay: 5ms (attempt 1) + 10ms (attempt 2) = 15ms
-    expect(elapsed).toBeGreaterThanOrEqual(15);
-    globalThis.setTimeout = originalSetTimeout;
-    void delays;
+    // attempt 1: 5 * 2^0 = 5ms, attempt 2: 5 * 2^1 = 10ms
+    expect(sleepDelays).toEqual([5, 10]);
   });
 
   it('linear backoff: each retry waits delay * attempt', async () => {
@@ -972,22 +974,19 @@ describe('retry backoff strategies', () => {
       return Promise.resolve(textResponse('fail', { status: 503 }));
     }) as any;
 
-    const startTime = Date.now();
     await expect(
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/linear' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'linear', retryOn: [503], 
+            max: 2, delay: 5, backoff: 'linear', retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
-    const elapsed = Date.now() - startTime;
-    // 1 initial + 2 retries = 3 calls total
     expect(callCount).toBe(3);
-    // Total minimum delay: 5ms * 1 + 5ms * 2 = 15ms
-    expect(elapsed).toBeGreaterThanOrEqual(15);
+    // attempt 1: 5 * 1 = 5ms, attempt 2: 5 * 2 = 10ms
+    expect(sleepDelays).toEqual([5, 10]);
   });
 
   it('fixed backoff: each retry waits the same delay', async () => {
@@ -998,22 +997,19 @@ describe('retry backoff strategies', () => {
       return Promise.resolve(textResponse('fail', { status: 503 }));
     }) as any;
 
-    const startTime = Date.now();
     await expect(
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/fixed' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'fixed', retryOn: [503], 
+            max: 2, delay: 5, backoff: 'fixed', retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
-    const elapsed = Date.now() - startTime;
-    // 1 initial + 2 retries = 3 calls total
     expect(callCount).toBe(3);
-    // Total minimum delay: 5ms + 5ms = 10ms
-    expect(elapsed).toBeGreaterThanOrEqual(10);
+    // fixed: both retries wait 5ms
+    expect(sleepDelays).toEqual([5, 5]);
   });
 
   it('stops exactly after max retries (max=3 means 4 total calls)', async () => {
