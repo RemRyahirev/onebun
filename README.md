@@ -75,12 +75,12 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 ```
 
-One schema (`CreateUser`) gives you the TypeScript type, runtime validation, and OpenAPI spec — no duplication.
+One schema (`CreateUser`) gives you the TypeScript type, runtime validation, and OpenAPI spec out of the box — no additional packages, no duplication.
 
 ## Key Features
 
 - **NestJS-style architecture** — modules, controllers, services with full dependency injection via Effect.ts
-- **ArkType validation** — one schema = TypeScript type + runtime check + OpenAPI spec
+- **ArkType validation** — one schema = TypeScript type + runtime check + OpenAPI spec, wired end-to-end
 - **Built-in Prometheus metrics & OpenTelemetry tracing** — no community packages needed
 - **Redis / in-memory caching** with decorator-driven TTL
 - **Typed environment variables** with validation and defaults

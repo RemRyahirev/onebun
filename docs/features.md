@@ -31,7 +31,7 @@ production-grade backend services.
 - HMAC authentication for service-to-service communication
 
 ### Validation (ArkType)
-- Single source of truth: one schema = TypeScript type + runtime validation + OpenAPI 3.1
+- Out-of-the-box pipeline: ArkType re-exported from @onebun/core — one schema = TypeScript type + runtime validation + OpenAPI 3.1, no additional packages or bridge libraries
 - @Body(schema) decorator for automatic request validation
 - Zero duplication between types, validation, and API documentation
 
@@ -171,13 +171,13 @@ single Docker image for all services.
 
 ## Validation (@onebun/core + ArkType)
 
-### Single Source of Truth
-One ArkType schema serves as:
+### Out-of-the-Box Validation
+ArkType is re-exported from `@onebun/core` — no additional packages, no bridge libraries, no Swagger patches. One schema gives you:
 - **TypeScript type** (compile-time safety)
 - **Runtime validation** (request body, query params)
 - **OpenAPI 3.1 schema** (auto-generated documentation)
 
-Zero duplication between types, validation rules, and API docs.
+Install the framework — validation and OpenAPI work. No `nestjs-zod`, no `patchNestJsSwagger()`, no setup.
 
 ### @Body() Validation
 Pass ArkType schema to @Body decorator for automatic validation
@@ -305,8 +305,8 @@ If you're coming from NestJS, here's what to expect:
 - Middleware support
 
 ### Improved in OneBun
-- **Validation**: ArkType schema = TypeScript type = OpenAPI spec = runtime validation
-  (vs class-validator + Swagger decorators + separate TS types in NestJS)
+- **Validation**: ArkType schema = TypeScript type = OpenAPI spec = runtime validation, wired out of the box
+  (NestJS teams can achieve similar workflows with `nestjs-zod` — OneBun ships it without extra packages)
 - **Microservices**: Single Docker image, env-based service selection
   (vs separate entry points in NestJS)
 - **Observability**: Prometheus metrics + OpenTelemetry tracing built-in

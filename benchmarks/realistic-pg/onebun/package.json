@@ -1,0 +1,10 @@
+{
+  "name": "bench-realistic-pg-onebun",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@onebun/core": "workspace:^",
+    "@onebun/drizzle": "workspace:^",
+    "@onebun/cache": "workspace:^"
+  }
+}

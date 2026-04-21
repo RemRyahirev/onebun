@@ -7,13 +7,14 @@
 
 import { DEFAULT_HTTP_DURATION_BUCKETS, DEFAULT_SYSTEM_METRICS_INTERVAL } from './types';
 
-// Re-export commonly used prom-client types
+// Re-export commonly used prom-client types and registry
 export type {
   Counter,
   Gauge,
   Histogram,
   Summary,
 } from 'prom-client';
+export { register } from 'prom-client';
 // Decorators
 export {
   Counted,

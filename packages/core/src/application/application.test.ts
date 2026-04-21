@@ -10,8 +10,6 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
-// eslint-disable-next-line import/no-extraneous-dependencies
-import { register } from 'prom-client';
 
 import type { QueueAdapter, Subscription } from '../queue/types';
 import type { ApplicationOptions, ModuleInstance } from '../types';
@@ -21,6 +19,8 @@ import type {
   OneBunResponse,
 } from '../types';
 import type { OnModuleConfigure } from '../types';
+
+import { register } from '@onebun/metrics';
 
 import {
   Module,
@@ -3389,8 +3389,10 @@ describe('OneBunApplication', () => {
       });
 
       const mockTraceService = {
-        extractFromHeaders: mock(),
-        setContext: mock(),
+        extractFromHeadersSync: mock(),
+        generateTraceContextSync: mock(),
+        startHttpTraceSync: mock(),
+        endHttpTraceSync: mock(),
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).traceService = mockTraceService;
@@ -3404,7 +3406,7 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await (mockServer as any).fetchHandler(request);
 
-      expect(mockTraceService.extractFromHeaders).not.toHaveBeenCalled();
+      expect(mockTraceService.extractFromHeadersSync).not.toHaveBeenCalled();
     });
   });
 

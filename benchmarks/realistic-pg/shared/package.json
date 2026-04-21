@@ -1,0 +1,7 @@
+{
+  "name": "realistic-pg-shared",
+  "private": true,
+  "dependencies": {
+    "pg": "^8.20.0"
+  }
+}

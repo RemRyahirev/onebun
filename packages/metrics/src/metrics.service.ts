@@ -50,7 +50,23 @@ const DEFAULT_SUMMARY_AGE_BUCKETS = 5;
  * Microseconds to seconds conversion factor
  */
 const MICROSECONDS_TO_SECONDS = 1000000;
- 
+
+/**
+ * Cached status code strings to avoid toString() per request.
+ * Populated lazily on first use of each code.
+ */
+const statusCodeCache = new Map<number, string>();
+
+function getStatusCodeString(code: number): string {
+  let str = statusCodeCache.get(code);
+  if (str === undefined) {
+    str = code.toString();
+    statusCodeCache.set(code, str);
+  }
+
+  return str;
+}
+
 
 /**
  * Metrics service interface
@@ -239,9 +255,9 @@ class MetricsServiceImpl implements MetricsService {
     }
 
     const labels = {
-      method: data.method.toUpperCase(),
+      method: data.method,
       route: data.route,
-      status_code: data.statusCode.toString(),
+      status_code: getStatusCodeString(data.statusCode),
       controller: data.controller || 'unknown',
       action: data.action || 'unknown',
     };

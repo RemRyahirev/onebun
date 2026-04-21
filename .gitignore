@@ -38,5 +38,6 @@ secrets.json
 
 # Benchmark results
 benchmarks/results/
+benchmarks/**/*.db
 
 press-kit/

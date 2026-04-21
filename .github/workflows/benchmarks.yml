@@ -13,6 +13,9 @@ on:
       - 'packages/trace/src/**'
       - 'packages/metrics/src/**'
       - 'packages/envs/src/**'
+      - 'packages/drizzle/src/**'
+      - 'packages/cache/src/**'
+      - 'packages/docs/src/**'
       - 'benchmarks/**'
       - '!**/*.test.ts'
       - '!**/testing/**'
@@ -20,7 +23,23 @@ on:
 jobs:
   benchmark:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: bench
+          POSTGRES_PASSWORD: bench
+          POSTGRES_DB: bench
+        ports:
+          - 5499:5432
+        options: >-
+          --tmpfs /var/lib/postgresql/data
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -43,15 +62,15 @@ jobs:
 
       - name: Install benchmark dependencies
         run: |
-          cd benchmarks/competitors/hono-bun && bun install
+          cd benchmarks/simple/competitors/hono-bun && bun install
           cd ../elysia && bun install
           cd ../nestjs-fastify && bun install && bun run build
+          cd ../../../../realistic/nestjs-fastify && bun install && npm install && bun run build
+          cd ../../realistic-pg/nestjs-fastify && bun install && bun run build
+          cd ../nestjs-typeorm && bun install && bun run build
 
-      - name: Run HTTP benchmarks
-        run: ./benchmarks/run-http.sh
-
-      - name: Run startup benchmarks
-        run: ./benchmarks/startup.sh
+      - name: Run all benchmarks
+        run: ./benchmarks/run-all.sh
 
       - name: Parse results
         run: bun run benchmarks/parse-results.ts

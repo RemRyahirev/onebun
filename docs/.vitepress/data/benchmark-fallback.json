@@ -1,0 +1,9 @@
+{
+  "date": "",
+  "machine": { "cpu": "", "ram": "", "os": "", "bunVersion": "", "nodeVersion": "" },
+  "settings": "50 connections, 10s duration",
+  "http": [],
+  "startup": [],
+  "realistic": [],
+  "realisticPg": []
+}

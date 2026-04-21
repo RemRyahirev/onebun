@@ -63,6 +63,10 @@ function makeMockTraceService(): { mockSvc: TraceService; layer: Layer.Layer<Tra
     startHttpTrace: mock(() => Effect.succeed(mockSpan)),
     endHttpTrace: mock(() => Effect.void),
     shutdown: mock(async () => {}),
+    extractFromHeadersSync: mock(() => null),
+    generateTraceContextSync: mock(() => mockCtx),
+    startHttpTraceSync: mock(() => mockSpan),
+    endHttpTraceSync: mock(() => {}),
   };
 
   const layer = Layer.succeed(traceService, mockSvc);

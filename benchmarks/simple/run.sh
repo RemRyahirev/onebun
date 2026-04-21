@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BENCH_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Use node directly in CI (set up via actions/setup-node), fnm locally
 if [ -n "${CI:-}" ]; then
@@ -13,19 +14,17 @@ fi
 
 BOMBARDIER_CONNECTIONS=50
 BOMBARDIER_DURATION="10s"
-RESULTS_DIR="$SCRIPT_DIR/results"
+RESULTS_DIR="$BENCH_ROOT/results"
 
-rm -rf "$RESULTS_DIR"
 mkdir -p "$RESULTS_DIR"
 
 # Colors for output
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 log() {
-  echo -e "${CYAN}[bench]${NC} $1"
+  echo -e "${CYAN}[simple]${NC} $1"
 }
 
 wait_for_server() {
@@ -92,7 +91,7 @@ run_bench() {
 }
 
 echo "============================================"
-echo "  OneBun HTTP Benchmark Suite"
+echo "  OneBun Simple HTTP Benchmark Suite"
 echo "============================================"
 echo ""
 echo "Settings: ${BOMBARDIER_CONNECTIONS} connections, ${BOMBARDIER_DURATION} duration"
@@ -134,53 +133,5 @@ run_bench "nestjs-fastify-node" 3204 \
 
 echo ""
 echo "============================================"
-echo "  Benchmark Complete"
+echo "  Simple Benchmark Complete"
 echo "============================================"
-echo ""
-echo "Raw results saved in: $RESULTS_DIR/"
-echo ""
-
-# Print summary table sorted by req/sec with comparison vs OneBun
-# bombardier output format:
-#   Reqs/sec     99779.50    7634.85  113100.00
-#   Latency      499.91us    31.43us     4.94ms
-#   Throughput:    18.75MB/s
-echo "=== Summary (sorted by req/sec) ==="
-
-# Collect results into temp file for sorting
-tmp_results=$(mktemp)
-
-# Get OneBun req/sec for comparison
-onebun_rps=""
-if [ -f "$RESULTS_DIR/onebun.txt" ]; then
-  onebun_rps=$(grep 'Reqs/sec' "$RESULTS_DIR/onebun.txt" 2>/dev/null | awk '{print $2}')
-fi
-
-for result_file in "$RESULTS_DIR"/*.txt; do
-  name=$(basename "$result_file" .txt)
-  rps=$(grep 'Reqs/sec' "$result_file" 2>/dev/null | awk '{print $2}' || echo "0")
-  avg_lat=$(grep '  Latency ' "$result_file" 2>/dev/null | head -1 | awk '{print $2}' || echo "N/A")
-  max_lat=$(grep '  Latency ' "$result_file" 2>/dev/null | head -1 | awk '{print $4}' || echo "N/A")
-  throughput=$(grep 'Throughput:' "$result_file" 2>/dev/null | awk '{print $2}' || echo "N/A")
-
-  # Calculate comparison vs OneBun
-  vs_onebun="—"
-  if [ -n "$onebun_rps" ] && [ "$onebun_rps" != "0" ]; then
-    if [ "$name" = "onebun" ]; then
-      vs_onebun="baseline"
-    else
-      vs_onebun=$(awk "BEGIN { ratio = $rps / $onebun_rps; if (ratio >= 1) printf \"+%.0f%%\", (ratio - 1) * 100; else printf \"-%.0f%%\", (1 - ratio) * 100 }")
-    fi
-  fi
-
-  echo "$rps|$name|$avg_lat|$max_lat|$throughput|$vs_onebun" >> "$tmp_results"
-done
-
-printf "%-20s %12s %12s %12s %12s %14s\n" "Framework" "Req/sec" "Avg Latency" "Max Latency" "Throughput" "vs OneBun"
-printf "%-20s %12s %12s %12s %12s %14s\n" "--------------------" "------------" "------------" "------------" "------------" "--------------"
-
-sort -t'|' -k1 -rn "$tmp_results" | while IFS='|' read -r rps name avg_lat max_lat throughput vs_onebun; do
-  printf "%-20s %12s %12s %12s %12s %14s\n" "$name" "$rps" "$avg_lat" "$max_lat" "$throughput" "$vs_onebun"
-done
-
-rm -f "$tmp_results"

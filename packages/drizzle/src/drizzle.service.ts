@@ -237,6 +237,80 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   }
 
   /**
+   * Patch bun:sqlite for optimal performance with drizzle-orm:
+   * 1. Statement caching — drizzle calls .prepare() without caching; we add a cache.
+   * 2. Optimized .get() on drizzle's PreparedQuery — the default implementation uses
+   *    stmt.values(...)[0] which materializes all rows as arrays then takes the first.
+   *    We patch to use stmt.get() (native single-row fetch) + Object.values() conversion.
+   */
+  private patchSQLiteStatementCaching(): void {
+    const client = this.sqliteClient;
+    if (!client) {
+      return;
+    }
+
+    // Patch 1: Statement cache for .prepare()
+    const cache = new Map<string, ReturnType<typeof client.prepare>>();
+    const originalPrepare = client.prepare.bind(client);
+
+    client.prepare = ((sql: string) => {
+      let stmt = cache.get(sql);
+      if (!stmt) {
+        stmt = originalPrepare(sql);
+        cache.set(sql, stmt);
+      }
+
+      return stmt;
+    }) as typeof client.prepare;
+
+    // Patch 2: Monkey-patch drizzle's session to use optimized .get()
+    // We intercept the session's prepareQuery to override .get() on each PreparedQuery.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = this.db as any;
+    const session = db?.session;
+    if (!session) {
+      return;
+    }
+
+    const originalPrepareQuery = session.prepareQuery.bind(session);
+    session.prepareQuery = function (...args: unknown[]) {
+      const pq = originalPrepareQuery(...args);
+
+      pq.get = function (placeholderValues: unknown) {
+        // Access private fields via 'this' context
+        const {
+          stmt, fields, joinsNotNullableMap, customResultMapper, query: q, logger, 
+        } = pq;
+        const { fillPlaceholders } = require('drizzle-orm/sql');
+
+        const params = fillPlaceholders(q.params, placeholderValues ?? {});
+        logger.logQuery(q.sql, params);
+
+        // Use native .get() — returns one row as object (or null)
+        const obj = stmt.get(...params);
+        if (!obj) {
+          return undefined;
+        }
+
+        if (!fields && !customResultMapper) {
+          // No JOIN mapping needed — return object values as array (drizzle expects this)
+          return Object.values(obj);
+        }
+
+        if (customResultMapper) {
+          return customResultMapper([Object.values(obj)]);
+        }
+
+        const { mapResultRow } = require('drizzle-orm/utils');
+
+        return mapResultRow(fields, Object.values(obj), joinsNotNullableMap);
+      };
+
+      return pq;
+    };
+  }
+
+  /**
    * Register process exit handler to flush buffered logs to console.error on crash
    */
   private registerExitHandler(): void {
@@ -452,7 +526,15 @@ export class DrizzleService extends BaseService implements OnModuleInit {
     if (options.type === DatabaseType.SQLITE) {
       const sqliteOptions = options.options;
       this.sqliteClient = new Database(sqliteOptions.url, sqliteOptions.options);
+
+      // Apply SQLite pragmas before creating drizzle instance
+      const pragmas = sqliteOptions.pragmas ?? ['journal_mode = WAL', 'synchronous = NORMAL'];
+      for (const pragma of pragmas) {
+        this.sqliteClient.run(`PRAGMA ${pragma}`);
+      }
+
       this.db = drizzleSQLite(this.sqliteClient);
+      this.patchSQLiteStatementCaching();
       this.safeLog('info', 'SQLite database initialized', { url: sqliteOptions.url });
     } else if (options.type === DatabaseType.POSTGRESQL) {
       const pgOptions = options.options;

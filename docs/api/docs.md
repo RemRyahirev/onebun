@@ -58,7 +58,7 @@ OneBun automatically generates OpenAPI 3.1 documentation from your controllers, 
 
 **Key features:**
 - Automatic OpenAPI 3.1 spec generation from route metadata
-- ArkType schemas → JSON Schema conversion (single source of truth)
+- ArkType schemas → JSON Schema conversion (one schema = type + validation + docs)
 - Swagger UI served at `/docs`
 - OpenAPI JSON spec served at `/openapi.json`
 - `@ApiTags`, `@ApiOperation`, `@ApiResponse` decorators for additional metadata
@@ -257,7 +257,7 @@ export class UserController extends BaseController {
 
 ## ArkType to OpenAPI Schema
 
-ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to OpenAPI-compatible JSON Schema. This provides a **single source of truth**: one schema definition serves as TypeScript type, runtime validation, and OpenAPI documentation.
+ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to OpenAPI-compatible JSON Schema. This means one schema definition serves as TypeScript type, runtime validation, and OpenAPI documentation — no separate declarations to keep in sync.
 
 ```typescript
 import { type } from '@onebun/core';

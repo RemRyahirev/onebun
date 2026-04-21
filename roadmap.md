@@ -1,17 +1,17 @@
 # OneBun — Роадмап
 
-> Приоритизированный план развития на основе внешнего ревью и внутреннего бэклога.
-> Последнее обновление: 2026-02-28
+> Приоритизированный план развития.
+> Последнее обновление: 2026-04-21
 
 ---
 
 ## Фаза 1: Production-Ready (критичные блокеры) ✅
 
 ### HTTP Guards / Auth
-- [x] Интерфейс `CanActivate` для HTTP (по аналогии с `WsGuard`)
+- [x] Интерфейс `CanActivate` для HTTP
 - [x] Декоратор `@UseGuards(...guards)` для контроллеров и роутов
 - [x] Встроенные guards: `AuthGuard`, `RolesGuard` (RBAC)
-- [x] Фабрика `createGuard(fn)` (как в WS/Queue)
+- [x] Фабрика `createHttpGuard(fn)`
 - [x] Интеграция в request pipeline между middleware и handler
 
 ### Exception Filters
@@ -31,12 +31,12 @@
 - [x] `RateLimitMiddleware` (in-memory + Redis бэкенды)
 - [x] `SecurityHeadersMiddleware` (аналог helmet)
 
-### Документация (пробелы Фазы 1)
-- [x] Раздел про graceful shutdown в docs (уже реализован в коде)
-- [x] Документирование SSE (уже реализовано в коде)
-- [x] Документация для Guards (`docs/api/guards.md`)
-- [x] Документация для Exception Filters (`docs/api/exception-filters.md`)
-- [x] Документация для Security Middleware (`docs/api/security.md`)
+### Документация
+- [x] Graceful shutdown
+- [x] SSE
+- [x] Guards
+- [x] Exception Filters
+- [x] Security Middleware
 
 ---
 
@@ -54,15 +54,24 @@
 
 ### CLI / Scaffolding
 - [x] Пакет `create-onebun` / `@onebun/cli`
-- [x] `bun create @onebun my-app` — создание проекта из шаблона
+- [x] `bun create @onebun my-app`
 - [ ] `bunx onebun generate module/controller/service`
 
 ### DX-улучшения
-- [ ] Необязательный ведущий слэш в route decorators: `@Get(':id')` как алиас для `@Get('/:id')` (NestJS-совместимость)
-- [ ] Scoped providers: `REQUEST` и `TRANSIENT` scope (как в NestJS)
-- [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами маршрутов (аналог NestJS `forRoutes()`)
+- [ ] Необязательный ведущий слэш в route decorators: `@Get(':id')`
+- [ ] Scoped providers: `REQUEST` и `TRANSIENT` scope
+- [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами
 
-### Документация (пробелы Фазы 2)
+### Performance: Observability hot path
+- [x] Объединить 4-5 последовательных `Effect.runPromise()` в request tracing pipeline в один `Effect.pipe()` с одним `runPromise` (packages/core/src/application/application.ts:740-766)
+- [x] Skip span creation когда нет OTLP exporter endpoint (избежать аллокаций без пользы)
+- [ ] Buffered async logger transport (замена синхронного `console.log()` в `ConsoleTransport`)
+
+### Performance: Drizzle/SQLite
+- [ ] Пропозал в drizzle-orm: заменить `stmt.values()[0]` на `stmt.get()` в bun-sqlite adapter `.get()` метода
+- [ ] Пропозал в drizzle-orm: использовать `Database.query()` (cached) вместо `Database.prepare()` (uncached)
+
+### Документация
 - [x] Migration guide: NestJS → OneBun
 - [ ] Deployment guide: Docker, k8s, CI/CD
 - [ ] Testing guide: unit, integration, e2e
@@ -71,51 +80,65 @@
 
 ---
 
-## Фаза 3: Ecosystem (после 1.0)
+## Фаза 3: Road to 1.0
 
-### Функциональность
-- [x] Performance benchmarks vs Hono, Elysia, NestJS+Fastify
-- [ ] GraphQL + Drizzle интеграция (@pothos/plugin-drizzle)
-- [ ] Config validation at build time (документирование паттерна с ArkType)
+### Framework features
+- [ ] Unified application entry point (merge `OneBunApplication` и `MultiServiceApplication`)
+- [ ] Scoped providers (`REQUEST`, `TRANSIENT`)
+- [ ] Provider-not-found suggestions ("did you mean X?")
+
+### Tooling & scaffolding
+- [ ] Multi-service starter template (`--template multi-service`)
+- [ ] Observability stack template (`--with-observability`: docker-compose с Prometheus, Grafana, Jaeger, Loki)
+- [ ] `@onebun/tsconfig` — shareable TS config
+- [ ] `@onebun/eslint-config` — shareable lint rules
+
+### Документация
+- [ ] Deployment guide (Docker, k8s, CI/CD)
+- [ ] Testing guide (unit, integration, e2e)
+- [ ] Expanded Troubleshooting / FAQ
+
+---
+
+## In Design — Experimental tracks
+
+- **Remote Modules** — cross-process service calls via DI, deploy-time topology
+- **@onebun/devtools** — visual project explorer (DI graph, module topology, route map, metric overlay)
+- **Autonomous fault isolation for root-modules** — failing root-module в dev не роняет siblings
+
+---
+
+## Post-1.0 Ecosystem
+
+### Framework & integrations
+- [ ] GraphQL integration (`@pothos/plugin-drizzle`)
 - [ ] Plugin system — формальный API для расширений
-- [x] Рассмотреть переход на MPL-2.0 лицензию
+- [ ] Build-time config validation (ArkType at build time)
+- [ ] HashiCorp Vault integration
+- [ ] ClickHouse integration
+- [ ] Real-time shared config via WebSocket (feature flags, shared settings)
+- [ ] Client-facing authentication (Passport-style: JWT, OAuth, sessions)
+- [ ] Redoc-style static API documentation
+
+### Scaffolding templates
+- [ ] Admin template (auth, RBAC, endpoint discovery, web UI scaffold)
+- [ ] Library (shared config) template
+- [ ] Inter-service auth template (key rotation, runtime permissions)
 
 ---
 
-## Отдельный бэклог (из plan.md)
+## Under consideration (demand-driven)
 
-### Модули
-- [ ] TimescaleDB поддержка в Drizzle
-- [ ] Redis модуль
-- [ ] Kafka: сервис и декораторы
-- [ ] ClickHouse модуль
-- [ ] WS: легковесные diff-ы для обновлений
-
-### Инфраструктура
-- [ ] Шаблоны: single app, multi app
-- [ ] Базовые конфиги: tsconfig, eslint, werf
-- [ ] Локальная инфраструктура и CI
-- [ ] Оптимизация `getNextRun` в cron-parser: пропускать неподходящие месяцы/дни/часы целиком вместо посекундного перебора (~31M итераций для невозможных расписаний)
-
-### Auth (расширенная)
-- [ ] Межсервисная авторизация
-- [ ] Криптографические подписи
-- [ ] Уникальные credentials для вызывающих сервисов
-
-### Интеграции
-- [ ] HashiCorp Vault
-- [ ] Temporal
-- [ ] Template services (library, inter-service auth, admin)
+- **TimescaleDB integration** — по запросу
+- **Dynamic DI modules** — not planned unless concrete use cases emerge
+- **Temporal integration** — undecided, demand-driven
 
 ---
 
-## Уже реализовано (но не замечено при ревью)
+## Not planned
 
-Следующие фичи уже есть в коде, но были пропущены в ревью — проблема discoverability документации:
-
-- **Graceful shutdown** — полная реализация с SIGTERM/SIGINT, drain HTTP/WS/Queue, lifecycle hooks
-- **Swagger UI** — `@onebun/docs`, OpenAPI 3.1, CDN-based Swagger UI
-- **WS Guards** — 6 встроенных + `createGuard()` + `@UseWsGuards()`
-- **Queue Guards** — 4 встроенных + `createMessageGuard()` + `@UseMessageGuards()`
-- **ArkType валидация** — заменяет pipes через `@Body(schema)`, `@Query(schema)` и т.д.
-- **SSE (Server-Sent Events)** — встроенная поддержка
+- **Node.js compatibility** — Bun-only
+- **Kafka / RabbitMQ** — NATS + JetStream only
+- **Alternative ORMs** — Drizzle only
+- **Runtime DI container manipulation** — no monkey-patching
+- **Plugin ecosystem breadth** — deep integration > wide ecosystem

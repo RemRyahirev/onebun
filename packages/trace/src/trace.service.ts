@@ -30,6 +30,11 @@ import {
 const TRACE_FLAGS_MATCH_INDEX = 3;
 
 /**
+ * Pre-compiled W3C traceparent header regex (avoids re-compilation per request)
+ */
+const TRACEPARENT_REGEX = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+
+/**
  * Trace service interface
  */
 export interface TraceService {
@@ -95,6 +100,28 @@ export interface TraceService {
    * Shutdown the trace service, flushing pending spans
    */
   shutdown(): Promise<void>;
+
+  // --- Sync hot-path methods (avoid Effect.runPromise overhead) ---
+
+  /**
+   * Extract trace context from HTTP headers (sync, for hot path)
+   */
+  extractFromHeadersSync(headers: TraceHeaders): TraceContext | null;
+
+  /**
+   * Generate new trace context (sync, for hot path)
+   */
+  generateTraceContextSync(): TraceContext;
+
+  /**
+   * Start HTTP request tracing (sync, for hot path)
+   */
+  startHttpTraceSync(data: Partial<HttpTraceData>): TraceSpan;
+
+  /**
+   * End HTTP request tracing (sync, for hot path)
+   */
+  endHttpTraceSync(span: TraceSpan, data: Partial<HttpTraceData>): void;
 }
 
 /**
@@ -120,6 +147,8 @@ export class TraceServiceImpl implements TraceService {
   private readonly tracer;
   private readonly options: Required<TraceOptions>;
   private readonly providerResult: TracerProviderResult | null = null;
+  private readonly hasExporter: boolean;
+  private readonly hasDefaultAttributes: boolean;
 
   constructor(options: TraceOptions = {}) {
     this.options = {
@@ -133,6 +162,9 @@ export class TraceServiceImpl implements TraceService {
       exportOptions: {},
       ...options,
     };
+
+    this.hasExporter = !!this.options.exportOptions?.endpoint;
+    this.hasDefaultAttributes = Object.keys(this.options.defaultAttributes).length > 0;
 
     // Initialize TracerProvider BEFORE creating the tracer
     // so trace.getTracer() returns a real tracer, not NoopTracer
@@ -282,44 +314,7 @@ export class TraceServiceImpl implements TraceService {
   }
 
   extractFromHeaders(headers: TraceHeaders): Effect.Effect<TraceContext | null> {
-    if (!this.options.enabled) {
-      return Effect.succeed(null);
-    }
-
-    // Try W3C traceparent header first
-    const TRACE_ID_LENGTH = 32;
-    const SPAN_ID_LENGTH = 16;
-    const FLAGS_LENGTH = 2;
-    const HEX_BASE = 16;
-    const traceparent = headers['traceparent'];
-    if (traceparent) {
-      const match = traceparent.match(
-        new RegExp(
-          `^00-([0-9a-f]{${TRACE_ID_LENGTH}})-([0-9a-f]{${SPAN_ID_LENGTH}})-([0-9a-f]{${FLAGS_LENGTH}})$`,
-        ),
-      );
-      if (match) {
-        return Effect.succeed({
-          traceId: match[1],
-          spanId: match[2],
-          traceFlags: parseInt(match[TRACE_FLAGS_MATCH_INDEX], HEX_BASE),
-        });
-      }
-    }
-
-    // Fallback to custom headers
-    const traceId = headers['x-trace-id'];
-    const spanId = headers['x-span-id'];
-
-    if (traceId && spanId) {
-      return Effect.succeed({
-        traceId,
-        spanId,
-        traceFlags: 1,
-      });
-    }
-
-    return Effect.succeed(null);
+    return Effect.succeed(this.extractFromHeadersSync(headers));
   }
 
   injectIntoHeaders(traceContext: TraceContext): Effect.Effect<TraceHeaders> {
@@ -401,14 +396,149 @@ export class TraceServiceImpl implements TraceService {
     return Effect.flatMap(this.setAttributes(attributes), () => this.endSpan(span, status));
   }
 
-  private generateId(length: number): string {
-    const chars = '0123456789abcdef';
-    let result = '';
-    for (let i = 0; i < length; i++) {
-      result += chars[Math.floor(Math.random() * chars.length)];
+  // --- Sync hot-path implementations ---
+
+  extractFromHeadersSync(headers: TraceHeaders): TraceContext | null {
+    if (!this.options.enabled) {
+      return null;
     }
 
-    return result;
+    const HEX_BASE = 16;
+    const traceparent = headers['traceparent'];
+    if (traceparent) {
+      const match = traceparent.match(TRACEPARENT_REGEX);
+      if (match) {
+        return {
+          traceId: match[1],
+          spanId: match[2],
+          traceFlags: parseInt(match[TRACE_FLAGS_MATCH_INDEX], HEX_BASE),
+        };
+      }
+    }
+
+    const traceId = headers['x-trace-id'];
+    const spanId = headers['x-span-id'];
+
+    if (traceId && spanId) {
+      return { traceId, spanId, traceFlags: 1 };
+    }
+
+    return null;
+  }
+
+  generateTraceContextSync(): TraceContext {
+    const TRACE_ID_LENGTH = 32;
+    const SPAN_ID_LENGTH = 16;
+
+    return {
+      traceId: this.generateId(TRACE_ID_LENGTH),
+      spanId: this.generateId(SPAN_ID_LENGTH),
+      traceFlags: Math.random() < this.options.samplingRate ? 1 : 0,
+    };
+  }
+
+  startHttpTraceSync(data: Partial<HttpTraceData>): TraceSpan {
+    const spanName = `HTTP ${data.method || 'REQUEST'} ${data.route || data.url || '/'}`;
+
+    let traceContext: TraceContext;
+
+    if (this.hasExporter) {
+      // Full OTel span path — only when spans will be exported
+      const currentOtelContext = context.active();
+      const otelSpan = this.tracer.startSpan(
+        spanName,
+        {
+          kind: SpanKind.INTERNAL,
+          attributes: this.options.defaultAttributes,
+        },
+        currentOtelContext,
+      );
+
+      const spanCtx = otelSpan.spanContext();
+      traceContext = {
+        traceId: spanCtx.traceId,
+        spanId: spanCtx.spanId,
+        traceFlags: spanCtx.traceFlags,
+      };
+
+      // Set HTTP attributes on OTel span
+      const attributes: Record<string, string | number | boolean> = {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.method': data.method || 'UNKNOWN',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.url': data.url || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.route': data.route || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.user_agent': data.userAgent || '',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'http.remote_addr': data.remoteAddr || '',
+      };
+      if (data.requestSize !== undefined) {
+        attributes['http.request_content_length'] = data.requestSize;
+      }
+      otelSpan.setAttributes(attributes);
+    } else {
+      // Lightweight path — no OTel span creation, just context propagation
+      traceContext = this.generateTraceContextSync();
+    }
+
+    return {
+      context: traceContext,
+      name: spanName,
+      startTime: Date.now(),
+      attributes: this.hasDefaultAttributes ? { ...this.options.defaultAttributes } : {},
+      events: [],
+      status: { code: SpanStatusCode.OK },
+    };
+  }
+
+  endHttpTraceSync(span: TraceSpan, data: Partial<HttpTraceData>): void {
+    if (!this.options.enabled) {
+      return;
+    }
+
+    span.endTime = Date.now();
+
+    const HTTP_ERROR_THRESHOLD = HttpStatusCode.BAD_REQUEST;
+    if (data.statusCode && data.statusCode >= HTTP_ERROR_THRESHOLD) {
+      span.status = { code: SpanStatusCode.ERROR, message: `HTTP ${data.statusCode}` };
+    }
+
+    // Only interact with OTel when spans are being exported
+    if (this.hasExporter) {
+      const attributes: Record<string, string | number | boolean> = {};
+
+      if (data.statusCode !== undefined) {
+        attributes['http.status_code'] = data.statusCode;
+      }
+
+      if (data.responseSize !== undefined) {
+        attributes['http.response_content_length'] = data.responseSize;
+      }
+
+      if (data.duration !== undefined) {
+        attributes['http.duration'] = data.duration;
+      }
+
+      Object.assign(span.attributes, attributes);
+
+      const activeSpan = trace.getActiveSpan();
+      if (activeSpan && activeSpan.spanContext().spanId === span.context.spanId) {
+        activeSpan.setAttributes(attributes);
+        if (span.status.code === SpanStatusCode.ERROR) {
+          activeSpan.setStatus({ code: OtelSpanStatusCode.ERROR, message: span.status.message });
+        }
+        activeSpan.end();
+      }
+    }
+  }
+
+  private generateId(length: number): string {
+    const bytes = new Uint8Array(length / 2);
+    crypto.getRandomValues(bytes);
+
+    return Buffer.from(bytes).toString('hex');
   }
 }
 

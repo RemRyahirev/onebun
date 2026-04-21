@@ -11,79 +11,111 @@ Reproducible benchmarks for comparing OneBun framework performance against compe
 brew install bombardier
 
 # Linux (download binary)
-wget https://github.com/codesenberg/bombardier/releases/latest/download/bombardier-linux-amd64 -O bombardier
+curl -L https://github.com/codesenberg/bombardier/releases/download/v1.2.6/bombardier-linux-amd64 -o bombardier
 chmod +x bombardier && sudo mv bombardier /usr/local/bin/
 ```
 
-### hyperfine (startup time measurement)
+### Docker (for PostgreSQL benchmarks)
 
-```bash
-# macOS
-brew install hyperfine
-
-# Linux
-sudo apt install hyperfine
-# or
-wget https://github.com/sharkdp/hyperfine/releases/latest/download/hyperfine_1.18.0_amd64.deb
-sudo dpkg -i hyperfine_1.18.0_amd64.deb
-```
+Required only for `realistic-pg` benchmarks. Install from [docker.com](https://docs.docker.com/get-docker/).
 
 ### Bun
 
 Bun v1.2.12+ is required. Install from [bun.sh](https://bun.sh).
 
+### Node.js 24
+
+Required for NestJS (Node) benchmarks. Use [fnm](https://github.com/Schniz/fnm) locally or `actions/setup-node` in CI.
+
 ### Competitor dependencies
 
 ```bash
-cd benchmarks/competitors/hono-bun && bun install
-cd benchmarks/competitors/elysia && bun install
-cd benchmarks/competitors/nestjs-fastify && bun install
+# Simple HTTP competitors
+cd benchmarks/simple/competitors/hono-bun && bun install
+cd ../elysia && bun install
+cd ../nestjs-fastify && bun install && bun run build
+
+# Realistic SQLite competitors
+cd benchmarks/realistic/nestjs-fastify && bun install && bun run build
+cd ../nestjs-typeorm && bun install && bun run build
+
+# Realistic PostgreSQL competitors
+cd benchmarks/realistic-pg/nestjs-fastify && bun install && bun run build
+cd ../nestjs-typeorm && bun install && bun run build
 ```
 
 ## Running Benchmarks
 
-### HTTP throughput (bombardier)
+### All benchmarks
 
 ```bash
-./benchmarks/run-http.sh
+./benchmarks/run-all.sh
 ```
 
-Runs each server with 50 concurrent connections for 10 seconds and produces a comparison table.
+Runs simple + realistic (SQLite) + realistic-pg (if Docker available) + startup.
 
-### Cold startup time (hyperfine)
+### Simple HTTP throughput
+
+```bash
+./benchmarks/simple/run.sh
+```
+
+Single endpoint returning static JSON. 50 concurrent connections, 10 seconds.
+
+### Realistic CRUD (SQLite)
+
+```bash
+./benchmarks/realistic/run.sh
+```
+
+Tests OneBun vs NestJS with SQLite and Swagger docs.
+
+### Realistic CRUD (PostgreSQL)
+
+```bash
+./benchmarks/realistic-pg/run.sh
+```
+
+Tests OneBun vs NestJS with PostgreSQL, in-memory cache, request validation, and Swagger docs. Includes OneBun with full observability (metrics + tracing). Requires Docker.
+
+### Startup time
 
 ```bash
 ./benchmarks/startup.sh
 ```
 
-Measures cold start time using hyperfine with 10 runs per framework.
+Measures cold start time using custom bash timing with 5ms Bun fetch polling, 10 runs per framework.
+
+## Parsing & Publishing Results
+
+```bash
+# Parse bombardier output + startup.json into structured JSON
+bun run benchmarks/parse-results.ts
+
+# Upload to GitHub Gist (requires GIST_TOKEN and BENCHMARK_GIST_ID env vars)
+bun run benchmarks/upload-gist.ts
+```
+
+Results are written to `benchmarks/results/benchmark-results.json`.
 
 ## Methodology
 
-- **HTTP throughput**: bombardier with `-c 50 -d 10s -p r` (50 connections, 10 seconds, results printed)
-- **Startup time**: hyperfine with `--warmup 3 --runs 10` and `--cleanup` to kill the process
-- Each server returns the same `{ "message": "Hello, World!" }` JSON payload on `GET /`
-- Servers are given 2 seconds to start before benchmarking begins
+- **HTTP throughput**: bombardier with `-c 50 -d 10s -p r -l` (50 connections, 10 seconds, latency distribution)
+- **Startup time**: custom bash timing (`date +%s%N`) with Bun HTTP polling at 5ms intervals
 - All benchmarks run sequentially to avoid resource contention
+- Servers are warmed up with 1-2 requests before benchmarking begins
 
-> **Note:** CI runs on shared GitHub Actions runners; results vary ±15–20% between runs due to noisy-neighbor effects. Published numbers reflect a single representative run. Raw data from all CI runs is available via [Gist revisions](https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265).
-
-## Recording Results
-
-When publishing benchmark results, always record:
-
-- **Machine**: CPU model, core count, RAM
-- **OS**: name and version
-- **Bun version**: `bun --version`
-- **Date**: when the benchmarks were run
-- **Commit**: git SHA of the OneBun repo
+> **Note:** CI runs on shared GitHub Actions runners; results vary ±15–20% between runs due to noisy-neighbor effects. Relative ranking between frameworks is consistent. Raw data from all CI runs is available via [Gist revisions](https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265).
 
 ## Frameworks Compared
 
-| Framework | Description |
-|-----------|-------------|
-| **OneBun** | Full-featured framework (DI, decorators, middleware, Effect.ts) |
-| **Bun.serve** | Raw Bun HTTP server (baseline, no framework overhead) |
-| **Hono** | Lightweight web framework for Bun/Deno/Node |
-| **Elysia** | Bun-native web framework focused on performance |
-| **NestJS + Fastify** | Enterprise Node.js framework (closest feature comparison) |
+| Framework | Scenario | Description |
+|-----------|----------|-------------|
+| **OneBun** | all | Full-featured framework (DI, decorators, middleware, Effect.ts) |
+| **OneBun (full obs)** | realistic-pg | OneBun + `@onebun/metrics` + `@onebun/trace` |
+| **Bun.serve** | simple | Raw Bun HTTP server (baseline, no framework overhead) |
+| **Hono** | simple | Lightweight web framework for Bun/Deno/Node |
+| **Elysia** | simple | Bun-native web framework focused on performance |
+| **NestJS + Fastify (Bun)** | simple, realistic, realistic-pg | NestJS on Bun runtime with Fastify adapter |
+| **NestJS + Fastify (Node)** | simple, realistic, realistic-pg | NestJS on Node.js 24 with Fastify adapter |
+| **NestJS + TypeORM (Node)** | realistic, realistic-pg | Canonical NestJS stack with TypeORM |

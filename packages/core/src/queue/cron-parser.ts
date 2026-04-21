@@ -181,48 +181,150 @@ export function parseCronExpression(expression: string): CronSchedule {
 }
 
 /**
- * Check if a date matches a cron schedule
+ * Find the smallest value in a sorted array that is >= target.
+ * Returns null if no such value exists.
  */
-function matchesSchedule(date: Date, schedule: CronSchedule): boolean {
-  return (
-    schedule.seconds.includes(date.getSeconds()) &&
-    schedule.minutes.includes(date.getMinutes()) &&
-    schedule.hours.includes(date.getHours()) &&
-    schedule.daysOfMonth.includes(date.getDate()) &&
-    schedule.months.includes(date.getMonth() + 1) &&
-    schedule.daysOfWeek.includes(date.getDay())
-  );
-}
-
-/**
- * Get the next run time for a cron schedule
- *
- * @param schedule - Parsed cron schedule
- * @param from - Start time (defaults to now)
- * @param maxIterations - Maximum iterations to prevent infinite loops
- * @returns Next run time, or null if no match found within maxIterations
- */
-export function getNextRun(
-  schedule: CronSchedule,
-  from: Date = new Date(),
-  maxIterations: number = 366 * 24 * 60 * 60, // eslint-disable-line @typescript-eslint/no-magic-numbers -- 1 year in seconds
-): Date | null {
-  // Start from the next second
-  const current = new Date(from);
-  current.setMilliseconds(0);
-  current.setSeconds(current.getSeconds() + 1);
-
-  for (let i = 0; i < maxIterations; i++) {
-    if (matchesSchedule(current, schedule)) {
-      return current;
+function findNextInSorted(values: number[], target: number): number | null {
+  for (const v of values) {
+    if (v >= target) {
+      return v;
     }
-
-    // Increment by one second
-    current.setSeconds(current.getSeconds() + 1);
   }
 
   return null;
 }
+
+/**
+ * Get the number of days in a given month (1-12) for a given year.
+ */
+function daysInMonth(year: number, month: number): number {
+  return new Date(year, month, 0).getDate();
+}
+ 
+
+/**
+ * Get the next run time for a cron schedule
+ *
+ * Uses field-level skipping instead of second-by-second iteration
+ * for O(maxYears * 12 * 31) worst case instead of O(31M).
+ *
+ * @param schedule - Parsed cron schedule
+ * @param from - Start time (defaults to now)
+ * @param maxYears - Maximum years to search ahead (defaults to 4 to cover leap year cycles)
+ * @returns Next run time, or null if no match found within maxYears
+ */
+export function getNextRun(
+  schedule: CronSchedule,
+  from: Date = new Date(),
+  maxYears: number = 4,
+): Date | null {
+  const current = new Date(from);
+  current.setMilliseconds(0);
+  current.setSeconds(current.getSeconds() + 1);
+
+  const endYear = current.getFullYear() + maxYears;
+
+  while (current.getFullYear() <= endYear) {
+    // Step 1: Month
+    const month = current.getMonth() + 1;
+    const nextMonth = findNextInSorted(schedule.months, month);
+
+    if (nextMonth === null) {
+      // No matching month left this year -> January next year
+      current.setFullYear(current.getFullYear() + 1, 0, 1);
+      current.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    if (nextMonth > month) {
+      current.setMonth(nextMonth - 1, 1);
+      current.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    // Step 2: Day of month + Day of week
+    const maxDays = daysInMonth(current.getFullYear(), month);
+    let dayFound = false;
+
+    for (let d = current.getDate(); d <= maxDays; d++) {
+      if (!schedule.daysOfMonth.includes(d)) {
+        continue;
+      }
+
+      // Check day of week for this specific date
+      const testDate = new Date(current.getFullYear(), month - 1, d);
+      if (!schedule.daysOfWeek.includes(testDate.getDay())) {
+        continue;
+      }
+
+      // Found a valid day
+      if (d > current.getDate()) {
+        // Moved to a later day, reset time
+        current.setDate(d);
+        current.setHours(0, 0, 0, 0);
+      }
+
+      dayFound = true;
+      break;
+    }
+
+    if (!dayFound) {
+      // No valid day in this month -> first day of next month
+      current.setMonth(current.getMonth() + 1, 1);
+      current.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    // Step 3: Hour
+    const nextHour = findNextInSorted(schedule.hours, current.getHours());
+
+    if (nextHour === null) {
+      // No matching hour left today -> next day
+      current.setDate(current.getDate() + 1);
+      current.setHours(0, 0, 0, 0);
+      continue;
+    }
+
+    if (nextHour > current.getHours()) {
+      current.setHours(nextHour, 0, 0, 0);
+      continue;
+    }
+
+    // Step 4: Minute
+    const nextMinute = findNextInSorted(schedule.minutes, current.getMinutes());
+
+    if (nextMinute === null) {
+      // No matching minute left this hour -> next hour
+      current.setHours(current.getHours() + 1, 0, 0, 0);
+      continue;
+    }
+
+    if (nextMinute > current.getMinutes()) {
+      current.setMinutes(nextMinute, 0, 0);
+      continue;
+    }
+
+    // Step 5: Second
+    const nextSecond = findNextInSorted(schedule.seconds, current.getSeconds());
+
+    if (nextSecond === null) {
+      // No matching second left this minute -> next minute
+      current.setMinutes(current.getMinutes() + 1, 0, 0);
+      continue;
+    }
+
+    if (nextSecond > current.getSeconds()) {
+      current.setSeconds(nextSecond, 0);
+      continue;
+    }
+
+    // All fields match
+    return current;
+  }
+
+  return null;
+}
+ 
 
 /**
  * Get multiple future run times for a cron schedule

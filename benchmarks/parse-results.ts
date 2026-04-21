@@ -5,8 +5,9 @@
  * Parses bombardier output files and startup results into structured JSON.
  *
  * Reads:
- *   benchmarks/results/*.txt      — bombardier HTTP benchmark output
- *   benchmarks/results/startup.json — startup timing results
+ *   benchmarks/results/*.txt              — bombardier HTTP benchmark output
+ *   benchmarks/results/realistic-*.txt    — realistic benchmark output
+ *   benchmarks/results/startup.json       — startup timing results
  *
  * Writes:
  *   benchmarks/results/benchmark-results.json
@@ -36,6 +37,21 @@ interface StartupResult {
   maxMs: number;
 }
 
+interface RealisticEndpointResult {
+  endpoint: string;
+  reqPerSec: number;
+  avgLatency: string;
+  maxLatency: string;
+  p99Latency: string;
+  p95Latency: string;
+  throughput: string;
+}
+
+interface RealisticFrameworkResult {
+  name: string;
+  endpoints: RealisticEndpointResult[];
+}
+
 interface BenchmarkResults {
   date: string;
   machine: {
@@ -48,6 +64,8 @@ interface BenchmarkResults {
   settings: string;
   http: HttpResult[];
   startup: StartupResult[];
+  realistic: RealisticFrameworkResult[];
+  realisticPg: RealisticFrameworkResult[];
 }
 
 // Display name mapping for benchmark files
@@ -58,6 +76,15 @@ const DISPLAY_NAMES: Record<string, string> = {
   'elysia': 'Elysia',
   'nestjs-fastify-bun': 'NestJS + Fastify (Bun)',
   'nestjs-fastify-node': 'NestJS + Fastify (Node)',
+  'nestjs-typeorm-node': 'NestJS + TypeORM (Node)',
+  'onebun-full': 'OneBun (full observability)',
+};
+
+// Endpoint slug → display name
+const ENDPOINT_NAMES: Record<string, string> = {
+  'posts-list': 'GET /api/posts',
+  'post-detail': 'GET /api/posts/:id',
+  'post-create': 'POST /api/posts',
 };
 
 function parseBombardierOutput(content: string): Omit<HttpResult, 'name'> | null {
@@ -125,18 +152,60 @@ function getSystemInfo() {
   };
 }
 
+function parseRealisticResults(txtFiles: string[], prefix: string): RealisticFrameworkResult[] {
+  // Group files by framework: {prefix}-{framework}-{endpoint}.txt
+  const frameworkMap = new Map<string, RealisticEndpointResult[]>();
+  const pattern = new RegExp(`^${prefix}-(.+?)-(posts-list|post-detail|post-create)$`);
+
+  for (const file of txtFiles) {
+    const slug = basename(file, '.txt');
+    const match = slug.match(pattern);
+    if (!match) continue;
+
+    const [, framework, endpointSlug] = match;
+    const content = readFileSync(join(RESULTS_DIR, file), 'utf-8');
+    const parsed = parseBombardierOutput(content);
+
+    if (!parsed) {
+      console.warn(`Warning: Could not parse ${file}`);
+      continue;
+    }
+
+    const endpoints = frameworkMap.get(framework) || [];
+    endpoints.push({
+      endpoint: ENDPOINT_NAMES[endpointSlug] || endpointSlug,
+      ...parsed,
+    });
+    frameworkMap.set(framework, endpoints);
+  }
+
+  const results: RealisticFrameworkResult[] = [];
+  for (const [framework, endpoints] of frameworkMap) {
+    results.push({
+      name: DISPLAY_NAMES[framework] || framework,
+      endpoints,
+    });
+  }
+
+  return results;
+}
+
 function main() {
   if (!existsSync(RESULTS_DIR)) {
     console.error(`Results directory not found: ${RESULTS_DIR}`);
-    console.error('Run the benchmarks first (run-http.sh and/or startup.sh).');
+    console.error('Run the benchmarks first (run-all.sh).');
     process.exit(1);
   }
 
-  // Parse HTTP benchmark results
-  const httpResults: HttpResult[] = [];
-  const txtFiles = readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.txt'));
+  const allFiles = readdirSync(RESULTS_DIR).filter((f) => f.endsWith('.txt'));
+  const simpleFiles = allFiles.filter((f) => !f.startsWith('realistic-'));
+  const realisticFiles = allFiles.filter((f) => f.startsWith('realistic-') && !f.startsWith('realistic-pg-'));
+  const realisticPgFiles = allFiles.filter((f) => f.startsWith('realistic-pg-'));
 
-  for (const file of txtFiles) {
+  // Parse simple HTTP benchmark results
+  const httpResults: HttpResult[] = [];
+
+  for (const file of simpleFiles) {
     const content = readFileSync(join(RESULTS_DIR, file), 'utf-8');
     const slug = basename(file, '.txt');
     const parsed = parseBombardierOutput(content);
@@ -153,6 +222,12 @@ function main() {
 
   // Sort by req/sec descending
   httpResults.sort((a, b) => b.reqPerSec - a.reqPerSec);
+
+  // Parse realistic benchmark results (SQLite)
+  const realisticResults = parseRealisticResults(realisticFiles, 'realistic');
+
+  // Parse realistic PostgreSQL benchmark results
+  const realisticPgResults = parseRealisticResults(realisticPgFiles, 'realistic-pg');
 
   // Parse startup results
   let startupResults: StartupResult[] = [];
@@ -175,12 +250,16 @@ function main() {
     settings: sysInfo.settings,
     http: httpResults,
     startup: startupResults,
+    realistic: realisticResults,
+    realisticPg: realisticPgResults,
   };
 
   const outputPath = join(RESULTS_DIR, 'benchmark-results.json');
   writeFileSync(outputPath, JSON.stringify(results, null, 2) + '\n');
   console.log(`Benchmark results written to ${outputPath}`);
   console.log(`  HTTP results: ${httpResults.length} frameworks`);
+  console.log(`  Realistic (SQLite) results: ${realisticResults.length} frameworks`);
+  console.log(`  Realistic (PostgreSQL) results: ${realisticPgResults.length} frameworks`);
   console.log(`  Startup results: ${startupResults.length} frameworks`);
 }
 

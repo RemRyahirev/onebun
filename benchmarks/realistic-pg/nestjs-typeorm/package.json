@@ -1,0 +1,27 @@
+{
+  "name": "bench-realistic-pg-nestjs-typeorm",
+  "private": true,
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-fastify": "^11.1.0",
+    "@nestjs/swagger": "^11.0.0",
+    "@nestjs/typeorm": "^11.0.0",
+    "@nestjs/cache-manager": "2.3.0",
+    "cache-manager": "5",
+    "@fastify/static": "^8.0.0",
+    "class-validator": "^0.14.1",
+    "class-transformer": "^0.5.1",
+    "typeorm": "^0.3.20",
+    "pg": "^8.13.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0",
+    "@types/node": "^22.9.0"
+  }
+}

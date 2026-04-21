@@ -22,7 +22,7 @@ export interface SQLiteConnectionOptions {
    * Path to SQLite database file or ':memory:' for in-memory database
    */
   url: string;
-  
+
   /**
    * Additional options for Bun SQLite connection
    */
@@ -31,12 +31,19 @@ export interface SQLiteConnectionOptions {
      * Create database if it doesn't exist
      */
     create?: boolean;
-    
+
     /**
      * Read-only mode
      */
     readonly?: boolean;
   };
+
+  /**
+   * SQLite PRAGMA statements to execute immediately after opening the connection.
+   * Common pragmas: 'journal_mode = WAL', 'synchronous = NORMAL', 'foreign_keys = ON'.
+   * @default ['journal_mode = WAL', 'synchronous = NORMAL']
+   */
+  pragmas?: string[];
 }
 
 /**

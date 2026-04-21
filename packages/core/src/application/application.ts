@@ -126,12 +126,8 @@ try {
 
 // Import tracing modules directly
 
-// Global trace context for current request
-let globalCurrentTraceContext: unknown = null;
-
 // Helper function to clear trace context
 function clearGlobalTraceContext(): void {
-  globalCurrentTraceContext = null;
   if (typeof globalThis !== 'undefined') {
     (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = null;
   }
@@ -726,56 +722,37 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             }
             if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
               try {
-              // Extract trace headers
-                const headers = Object.fromEntries(req.headers.entries());
-                const traceHeaders = {
-                  traceparent: headers.traceparent,
-                  tracestate: headers.tracestate,
+                // Extract only the trace propagation headers we need
+                const traceparent = req.headers.get('traceparent') ?? undefined;
+                const xTraceId = req.headers.get('x-trace-id') ?? undefined;
+                const xSpanId = req.headers.get('x-span-id') ?? undefined;
+
+                // Sync hot path: no Effect.runPromise overhead
+                traceContext = app.traceService.extractFromHeadersSync({
+                  traceparent,
                   // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'x-trace-id': headers['x-trace-id'],
+                  'x-trace-id': xTraceId,
                   // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'x-span-id': headers['x-span-id'],
-                };
+                  'x-span-id': xSpanId,
+                }) || app.traceService.generateTraceContextSync();
 
-                // Extract or generate trace context
-                const extractedContext = await Effect.runPromise(
-                  app.traceService.extractFromHeaders(traceHeaders),
-                );
-
-                if (extractedContext) {
-                  traceContext = extractedContext;
-                  await Effect.runPromise(app.traceService.setContext(extractedContext));
-                } else {
-                // Generate new trace context
-                  traceContext = await Effect.runPromise(app.traceService.generateTraceContext());
-                  await Effect.runPromise(app.traceService.setContext(traceContext));
-                }
-
-                // Start HTTP trace span
-                const httpData = {
+                const contentLengthHeader = req.headers.get('content-length');
+                traceSpan = app.traceService.startHttpTraceSync({
                   method,
                   url: req.url,
                   route: fullPath,
-                  userAgent: headers['user-agent'],
-                  remoteAddr: headers['x-forwarded-for'] || headers['x-real-ip'],
-                  requestSize: headers['content-length']
-                    ? parseInt(headers['content-length'], 10)
+                  userAgent: req.headers.get('user-agent') ?? undefined,
+                  remoteAddr: req.headers.get('x-forwarded-for')
+                    || req.headers.get('x-real-ip')
+                    || undefined,
+                  requestSize: contentLengthHeader
+                    ? parseInt(contentLengthHeader, 10)
                     : undefined,
-                };
+                });
 
-                traceSpan = await Effect.runPromise(app.traceService.startHttpTrace(httpData));
-
-                // Set global trace context for this request
-                globalCurrentTraceContext = {
-                  traceId: traceContext.traceId,
-                  spanId: traceContext.spanId,
-                  parentSpanId: traceContext.parentSpanId,
-                };
-
-                // Also set it globally for logger
+                // Set global trace context for logger integration
                 if (typeof globalThis !== 'undefined') {
-                  (globalThis as Record<string, unknown>).__onebunCurrentTraceContext =
-                    globalCurrentTraceContext;
+                  (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = traceContext;
                 }
               } catch (error) {
                 app.logger.error(
@@ -961,18 +938,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 });
               }
 
-              // End trace
+              // End trace (sync — no Effect.runPromise overhead)
               if (traceSpan && app.traceService) {
                 try {
-                  await Effect.runPromise(
-                    app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: response?.status || HttpStatusCode.OK,
-                      responseSize: response?.headers?.get('content-length')
-                        ? parseInt(response.headers.get('content-length')!, 10)
-                        : undefined,
-                      duration,
-                    }),
-                  );
+                  app.traceService.endHttpTraceSync(traceSpan, {
+                    statusCode: response?.status || HttpStatusCode.OK,
+                    responseSize: response?.headers?.get('content-length')
+                      ? parseInt(response.headers.get('content-length')!, 10)
+                      : undefined,
+                    duration,
+                  });
                 } catch (traceError) {
                   app.logger.error(
                     'Failed to end trace:',
@@ -1011,21 +986,21 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 });
               }
 
-              // End trace with error
+              // End trace with error (sync)
               if (traceSpan && app.traceService) {
                 try {
-                  await Effect.runPromise(
-                    app.traceService.addEvent('error', {
+                  traceSpan.events.push({
+                    name: 'error',
+                    timestamp: Date.now(),
+                    attributes: {
                       errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
                       errorMessage: error instanceof Error ? error.message : String(error),
-                    }),
-                  );
-                  await Effect.runPromise(
-                    app.traceService.endHttpTrace(traceSpan, {
-                      statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                      duration,
-                    }),
-                  );
+                    },
+                  });
+                  app.traceService.endHttpTraceSync(traceSpan, {
+                    statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
+                    duration,
+                  });
                 } catch (traceError) {
                   app.logger.error(
                     'Failed to end trace with error:',

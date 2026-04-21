@@ -28,7 +28,7 @@ Bun executes TypeScript directly. No `tsc`, no `swc`, no `ts-node`, no `tsup`. Y
 
 **Logger and config injection disappear.** In NestJS, every service that needs logging or configuration must inject `Logger` and `ConfigService` through the constructor. In a project with 50+ services, that is a lot of repeated `private readonly logger = new Logger(MyService.name)`. In OneBun, `this.logger` and `this.config` are available on every `BaseService` and `BaseController` automatically — typed, structured, zero setup.
 
-**Validation, types, and API docs collapse into one artifact.** A single ArkType schema gives you a TypeScript type (via `infer`), runtime validation, and an OpenAPI 3.1 spec. In NestJS with `class-validator`, that is three separate things: a DTO class with validation decorators, `@ApiProperty()` annotations for Swagger, and a TypeScript interface. Even with Zod (which also does `infer`), you still need a separate DTO class for `@nestjs/swagger` to generate docs — two artifacts instead of one. In OneBun, adding a field to an endpoint means editing one schema. Types, validation, and docs update automatically.
+**Validation, types, and API docs collapse into one artifact.** A single ArkType schema gives you a TypeScript type (via `infer`), runtime validation, and an OpenAPI 3.1 spec. In canonical NestJS with `class-validator`, that is three separate things: a DTO class with validation decorators, `@ApiProperty()` annotations for Swagger, and a TypeScript interface. With `nestjs-zod` and `patchNestJsSwagger()`, NestJS teams can achieve a similar one-schema workflow. OneBun ships this wired out of the box — ArkType is re-exported from `@onebun/core`, no additional packages, no bridge libraries, no patching. Adding a field to an endpoint means editing one schema. Types, validation, and docs update automatically.
 
 ### Built-in infrastructure — not community packages
 
@@ -536,11 +536,11 @@ As an application developer, you write normal classes and constructors -- the Ef
 machinery is invisible. You only interact with Effect directly if you choose to for
 advanced async composition.
 
-### ArkType Replaces class-validator + class-transformer
+### ArkType Instead of class-validator
 
-In NestJS, you typically define DTO classes with `class-validator` decorators, then duplicate
-those types for Swagger with `@nestjs/swagger` decorators. In OneBun, a single ArkType schema
-serves three purposes at once:
+In canonical NestJS with `class-validator`, you define DTO classes with validation decorators,
+then duplicate those types for Swagger with `@nestjs/swagger` decorators. In OneBun, a single
+ArkType schema serves three purposes at once:
 
 ```typescript
 // This one definition gives you:
@@ -557,6 +557,8 @@ export type CreateUserBody = typeof createUserSchema.infer;
 ```
 
 No DTO classes, no `class-validator` decorators, no `@ApiProperty()` annotations.
+
+NestJS teams using `nestjs-zod` already have a similar one-schema pattern. The difference in OneBun: ArkType is re-exported from `@onebun/core` — no bridge packages, no `patchNestJsSwagger()`, no setup.
 
 ### Bun-Only
 

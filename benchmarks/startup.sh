@@ -111,34 +111,34 @@ measure_startup() {
 
 # --- Bun.serve (baseline) ---
 measure_startup "Bun.serve (baseline)" \
-  "bun run $SCRIPT_DIR/competitors/bun-serve/hello.ts" \
+  "bun run $SCRIPT_DIR/simple/competitors/bun-serve/hello.ts" \
   3200 "$RUNS"
 
 # --- OneBun ---
 measure_startup "OneBun" \
-  "bun run $SCRIPT_DIR/onebun-hello.ts" \
+  "bun run $SCRIPT_DIR/simple/onebun-hello.ts" \
   3100 "$RUNS"
 
 # --- Hono ---
 measure_startup "Hono" \
-  "bun run $SCRIPT_DIR/competitors/hono-bun/hello.ts" \
+  "bun run $SCRIPT_DIR/simple/competitors/hono-bun/hello.ts" \
   3201 "$RUNS"
 
 # --- Elysia ---
 measure_startup "Elysia" \
-  "bun run $SCRIPT_DIR/competitors/elysia/hello.ts" \
+  "bun run $SCRIPT_DIR/simple/competitors/elysia/hello.ts" \
   3202 "$RUNS"
 
 # --- NestJS + Fastify (Bun) ---
 measure_startup "NestJS + Fastify (Bun)" \
-  "cd $SCRIPT_DIR/competitors/nestjs-fastify && bun run src/main.ts" \
+  "cd $SCRIPT_DIR/simple/competitors/nestjs-fastify && bun run src/main.ts" \
   3203 "$RUNS"
 
 # --- NestJS + Fastify (Node 24) ---
 # Build first, then measure compiled JS on Node
-(cd "$SCRIPT_DIR/competitors/nestjs-fastify" && bun run build) 2>/dev/null
+(cd "$SCRIPT_DIR/simple/competitors/nestjs-fastify" && bun run build) 2>/dev/null
 measure_startup "NestJS + Fastify (Node)" \
-  "BENCH_PORT=3204 $NODE_CMD $SCRIPT_DIR/competitors/nestjs-fastify/dist/main.js" \
+  "BENCH_PORT=3204 $NODE_CMD $SCRIPT_DIR/simple/competitors/nestjs-fastify/dist/main.js" \
   3204 "$RUNS"
 
 # Write JSON results
