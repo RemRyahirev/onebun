@@ -224,7 +224,7 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.3.6",
+      "version": "0.3.7",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -270,7 +270,7 @@
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "bin": {
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
@@ -314,7 +314,7 @@
     },
     "packages/metrics": {
       "name": "@onebun/metrics",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "effect": "^3.13.10",
@@ -354,7 +354,7 @@
     },
     "packages/trace": {
       "name": "@onebun/trace",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "@opentelemetry/api": "^1.8.0",

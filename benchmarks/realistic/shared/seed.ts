@@ -6,14 +6,13 @@
  *
  * Usage: bun run benchmarks/realistic/shared/seed.ts [output-path]
  * Default output: benchmarks/realistic/shared/bench.db
+ *
+ * Uses raw bun:sqlite to avoid drizzle-orm dependency (shared/ is not a workspace).
  */
 
 import { Database } from 'bun:sqlite';
-import { drizzle } from 'drizzle-orm/bun-sqlite';
 import { join } from 'node:path';
 import { unlinkSync, existsSync } from 'node:fs';
-
-import { users, posts, comments } from './schema';
 
 const SCRIPT_DIR = import.meta.dir;
 const DB_PATH = process.argv[2] || join(SCRIPT_DIR, 'bench.db');
@@ -27,12 +26,12 @@ if (existsSync(DB_PATH)) {
   unlinkSync(DB_PATH);
 }
 
-const sqlite = new Database(DB_PATH);
-sqlite.run('PRAGMA journal_mode = WAL');
-sqlite.run('PRAGMA synchronous = NORMAL');
+const db = new Database(DB_PATH);
+db.run('PRAGMA journal_mode = WAL');
+db.run('PRAGMA synchronous = NORMAL');
 
 // Create tables
-sqlite.run(`
+db.run(`
   CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
@@ -42,7 +41,7 @@ sqlite.run(`
   )
 `);
 
-sqlite.run(`
+db.run(`
   CREATE TABLE posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -53,7 +52,7 @@ sqlite.run(`
   )
 `);
 
-sqlite.run(`
+db.run(`
   CREATE TABLE comments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     body TEXT NOT NULL,
@@ -63,52 +62,62 @@ sqlite.run(`
   )
 `);
 
-sqlite.run('CREATE INDEX idx_posts_author ON posts(author_id)');
-sqlite.run('CREATE INDEX idx_comments_post ON comments(post_id)');
-sqlite.run('CREATE INDEX idx_comments_author ON comments(author_id)');
+db.run('CREATE INDEX idx_posts_author ON posts(author_id)');
+db.run('CREATE INDEX idx_comments_post ON comments(post_id)');
+db.run('CREATE INDEX idx_comments_author ON comments(author_id)');
 
-const db = drizzle(sqlite);
+const now = new Date().toISOString();
 
 // Seed users
-const now = new Date().toISOString();
-const userValues = Array.from({ length: USER_COUNT }, (_, i) => ({
-  name: `User ${i + 1}`,
-  email: `user${i + 1}@example.com`,
-  bio: `Bio for user ${i + 1}. Software engineer with ${i + 1} years of experience.`,
-  createdAt: now,
-}));
-
-db.insert(users).values(userValues).run();
+const insertUser = db.prepare('INSERT INTO users (name, email, bio, created_at) VALUES (?, ?, ?, ?)');
+const insertUsers = db.transaction(() => {
+  for (let i = 0; i < USER_COUNT; i++) {
+    insertUser.run(
+      `User ${i + 1}`,
+      `user${i + 1}@example.com`,
+      `Bio for user ${i + 1}. Software engineer with ${i + 1} years of experience.`,
+      now,
+    );
+  }
+});
+insertUsers();
 
 // Seed posts
-const postValues = Array.from({ length: POST_COUNT }, (_, i) => ({
-  title: `Post Title ${i + 1}: A Comprehensive Guide`,
-  body: `This is the body of post ${i + 1}. It contains detailed information about the topic at hand. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.`,
-  authorId: (i % USER_COUNT) + 1,
-  published: true,
-  createdAt: now,
-}));
-
-// Insert in batches of 100 to avoid SQLite limits
-for (let i = 0; i < postValues.length; i += 100) {
-  db.insert(posts).values(postValues.slice(i, i + 100)).run();
-}
+const insertPost = db.prepare(
+  'INSERT INTO posts (title, body, author_id, published, created_at) VALUES (?, ?, ?, ?, ?)',
+);
+const insertPosts = db.transaction(() => {
+  for (let i = 0; i < POST_COUNT; i++) {
+    insertPost.run(
+      `Post Title ${i + 1}: A Comprehensive Guide`,
+      `This is the body of post ${i + 1}. It contains detailed information about the topic at hand. Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.`,
+      (i % USER_COUNT) + 1,
+      1,
+      now,
+    );
+  }
+});
+insertPosts();
 
 // Seed comments
-const commentValues = Array.from({ length: COMMENT_COUNT }, (_, i) => ({
-  body: `Comment ${i + 1}: Great post! I really enjoyed reading this. Here are my thoughts on the matter.`,
-  postId: (i % POST_COUNT) + 1,
-  authorId: (i % USER_COUNT) + 1,
-  createdAt: now,
-}));
-
-for (let i = 0; i < commentValues.length; i += 100) {
-  db.insert(comments).values(commentValues.slice(i, i + 100)).run();
-}
+const insertComment = db.prepare(
+  'INSERT INTO comments (body, post_id, author_id, created_at) VALUES (?, ?, ?, ?)',
+);
+const insertComments = db.transaction(() => {
+  for (let i = 0; i < COMMENT_COUNT; i++) {
+    insertComment.run(
+      `Comment ${i + 1}: Great post! I really enjoyed reading this. Here are my thoughts on the matter.`,
+      (i % POST_COUNT) + 1,
+      (i % USER_COUNT) + 1,
+      now,
+    );
+  }
+});
+insertComments();
 
 // Checkpoint WAL to consolidate data into main .db file for safe copying
-sqlite.run('PRAGMA wal_checkpoint(TRUNCATE)');
-sqlite.close();
+db.run('PRAGMA wal_checkpoint(TRUNCATE)');
+db.close();
 
 /* eslint-disable no-console */
 console.log(`Database seeded at: ${DB_PATH}`);

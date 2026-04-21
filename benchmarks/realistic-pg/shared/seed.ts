@@ -4,14 +4,12 @@
  * Seeds the PostgreSQL database with test data for the realistic-pg benchmark.
  * Creates: 100 users, 500 posts, 2000 comments.
  *
- * Requires DATABASE_URL env var (e.g. postgres://bench:bench@localhost:5432/bench)
+ * Requires DATABASE_URL env var (e.g. postgres://bench:bench@localhost:5499/bench)
+ *
+ * Uses Bun.sql (built-in) to avoid drizzle-orm/pg dependency (shared/ is not a workspace).
  */
 
-import { drizzle } from 'drizzle-orm/node-postgres';
-import pg from 'pg';
-import { sql } from 'drizzle-orm';
-
-import { users, posts, comments } from './schema';
+import { SQL } from 'bun';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
@@ -22,11 +20,10 @@ const USER_COUNT = 100;
 const POST_COUNT = 500;
 const COMMENT_COUNT = 2000;
 
-const pool = new pg.Pool({ connectionString: DATABASE_URL });
-const db = drizzle(pool);
+const sql = new SQL(DATABASE_URL);
 
 // Create tables
-await pool.query(`
+await sql.unsafe(`
   DROP TABLE IF EXISTS comments CASCADE;
   DROP TABLE IF EXISTS posts CASCADE;
   DROP TABLE IF EXISTS users CASCADE;
@@ -61,43 +58,40 @@ await pool.query(`
   CREATE INDEX idx_comments_author ON comments(author_id);
 `);
 
-// Seed users
 const now = new Date().toISOString();
-const userValues = Array.from({ length: USER_COUNT }, (_, i) => ({
-  name: `User ${i + 1}`,
-  email: `user${i + 1}@example.com`,
-  bio: `Bio for user ${i + 1}. Software engineer with ${i + 1} years of experience.`,
-  createdAt: now,
-}));
 
-await db.insert(users).values(userValues);
+// Seed users
+for (let i = 0; i < USER_COUNT; i++) {
+  await sql`INSERT INTO users (name, email, bio, created_at) VALUES (
+    ${`User ${i + 1}`},
+    ${`user${i + 1}@example.com`},
+    ${`Bio for user ${i + 1}. Software engineer with ${i + 1} years of experience.`},
+    ${now}
+  )`;
+}
 
 // Seed posts
-const postValues = Array.from({ length: POST_COUNT }, (_, i) => ({
-  title: `Post Title ${i + 1}: A Comprehensive Guide`,
-  body: `This is the body of post ${i + 1}. It contains detailed information about the topic at hand. Lorem ipsum dolor sit amet, consectetur adipiscing elit.`,
-  authorId: (i % USER_COUNT) + 1,
-  published: true,
-  createdAt: now,
-}));
-
-for (let i = 0; i < postValues.length; i += 100) {
-  await db.insert(posts).values(postValues.slice(i, i + 100));
+for (let i = 0; i < POST_COUNT; i++) {
+  await sql`INSERT INTO posts (title, body, author_id, published, created_at) VALUES (
+    ${`Post Title ${i + 1}: A Comprehensive Guide`},
+    ${`This is the body of post ${i + 1}. It contains detailed information about the topic at hand. Lorem ipsum dolor sit amet, consectetur adipiscing elit.`},
+    ${(i % USER_COUNT) + 1},
+    ${true},
+    ${now}
+  )`;
 }
 
 // Seed comments
-const commentValues = Array.from({ length: COMMENT_COUNT }, (_, i) => ({
-  body: `Comment ${i + 1}: Great post! I really enjoyed reading this. Here are my thoughts on the matter.`,
-  postId: (i % POST_COUNT) + 1,
-  authorId: (i % USER_COUNT) + 1,
-  createdAt: now,
-}));
-
-for (let i = 0; i < commentValues.length; i += 100) {
-  await db.insert(comments).values(commentValues.slice(i, i + 100));
+for (let i = 0; i < COMMENT_COUNT; i++) {
+  await sql`INSERT INTO comments (body, post_id, author_id, created_at) VALUES (
+    ${`Comment ${i + 1}: Great post! I really enjoyed reading this. Here are my thoughts on the matter.`},
+    ${(i % POST_COUNT) + 1},
+    ${(i % USER_COUNT) + 1},
+    ${now}
+  )`;
 }
 
-await pool.end();
+await sql.close();
 
 /* eslint-disable no-console */
 console.log(`PostgreSQL database seeded at: ${DATABASE_URL}`);
