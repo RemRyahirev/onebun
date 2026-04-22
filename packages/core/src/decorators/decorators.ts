@@ -324,7 +324,7 @@ function createRouteDecorator(method: HttpMethod) {
       const filters: ExceptionFilter[] =
         Reflect.getMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey) || [];
 
-      // Get response schemas metadata if exists
+      // Get response schemas metadata if exists (also read at spec generation time for order independence)
       const responseSchemas: Array<{
         statusCode: number;
         schema?: Type<unknown>;
@@ -1226,4 +1226,29 @@ export function ApiResponse(
 
     Reflect.defineMetadata(RESPONSE_SCHEMAS_METADATA, existingSchemas, target, propertyKey);
   };
+}
+
+/**
+ * Get response schemas metadata for a method.
+ * Walks up the prototype chain (needed because @Controller wraps classes).
+ */
+export function getResponseSchemasMetadata(
+  target: object,
+  propertyKey: string | symbol,
+): Array<{ statusCode: number; schema?: Type<unknown>; description?: string }> {
+  let result = Reflect.getMetadata(RESPONSE_SCHEMAS_METADATA, target, propertyKey);
+  if (result) {
+    return result;
+  }
+
+  let proto = Object.getPrototypeOf(target);
+  while (proto && proto !== Object.prototype) {
+    result = Reflect.getMetadata(RESPONSE_SCHEMAS_METADATA, proto, propertyKey);
+    if (result) {
+      return result;
+    }
+    proto = Object.getPrototypeOf(proto);
+  }
+
+  return [];
 }

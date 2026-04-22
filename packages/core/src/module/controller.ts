@@ -7,7 +7,6 @@ import type {
   SseOptions,
 } from '../types';
 import type { Span } from '@opentelemetry/api';
-import type { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
 import { HttpStatusCode, createErrorResponse } from '@onebun/requests';
@@ -56,10 +55,6 @@ export const DEFAULT_SSE_TIMEOUT = 600;
  * ```
  */
 export class Controller {
-  // Store service instances
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private services: Map<Context.Tag<any, any>, unknown> = new Map();
-
   // Logger instance with controller class name as context
   protected logger!: SyncLogger;
   // Configuration instance for accessing environment variables
@@ -161,64 +156,6 @@ export class Controller {
     }
 
     return undefined;
-  }
-
-  /**
-   * Get a service instance by tag
-   * @param tag - The service tag
-   * @returns The service instance
-   */
-  protected getService<T>(tag: Context.Tag<T, T>): T;
-  /**
-   * Get a service instance by class
-   * @param serviceClass - The service class
-   * @returns The service instance
-   */
-  protected getService<T>(serviceClass: new (...args: unknown[]) => T): T;
-  /**
-   * Implementation of getService
-   */
-  protected getService<T>(tagOrClass: Context.Tag<T, T> | (new (...args: unknown[]) => T)): T {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let tag: Context.Tag<any, any>;
-
-    // If it's a class, get the tag from metadata
-    if (typeof tagOrClass === 'function') {
-      // Import here to avoid circular dependency
-      const { getServiceTag } = require('./service');
-      tag = getServiceTag(tagOrClass);
-    } else {
-      tag = tagOrClass;
-    }
-
-    // Try to get the service by tag
-    let service = this.services.get(tag);
-
-    // If not found, try to find by Identifier
-    if (!service && 'Identifier' in tag) {
-      for (const [key, value] of this.services.entries()) {
-        if ('Identifier' in key && key.Identifier === tag.Identifier) {
-          service = value;
-          break;
-        }
-      }
-    }
-
-    if (!service) {
-      const id = 'Identifier' in tag ? tag.Identifier : (tagOrClass as Function).name;
-      throw new Error(`Service ${id} not found. Make sure it's registered in the module.`);
-    }
-
-    return service as T;
-  }
-
-  /**
-   * Set a service instance
-   * @param tag - The service tag
-   * @param instance - The service instance
-   */
-  setService<T>(tag: Context.Tag<T, T>, instance: T): void {
-    this.services.set(tag, instance);
   }
 
   /**

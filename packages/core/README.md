@@ -292,19 +292,19 @@ import { UserService } from './user.service';
 
 @Controller('/users')
 export class UserController extends BaseController {
+  constructor(private readonly userService: UserService) {
+    super();
+  }
+
   @Get()
   getAllUsers() {
-    // Get the service using dependency injection
-    const userService = this.getService(UserService);
-
     // Return plain data (auto-wrapped to { success: true, result: data })
-    return userService.findAll();
+    return this.userService.findAll();
   }
 
   @Post()
   createUser(@Body() userData: any) {
-    const userService = this.getService(UserService);
-    const user = userService.create(userData);
+    const user = this.userService.create(userData);
     return this.success({ user }, 201);  // this.success() only when custom status needed
   }
 }

@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-04-22
+
+### Bug Fixes
+
+- **Guard rejection now returns HTTP 403** — guard reject responses previously returned `200 OK` regardless of `httpEnvelope` setting; now returns `403 Forbidden` by default (`200 OK` when `httpEnvelope: true`), consistent with exception filter behavior (`@onebun/core`)
+
+### Breaking Changes
+
+- **Removed `getService()` / `setService()` from `Controller`** — legacy service-access methods and the internal `services` Map have been removed; use constructor injection instead. `app.getService()` on `OneBunApplication` is unaffected (`@onebun/core`)
+
+### Improvements
+
+- **Decorator order independence** — `@ApiTags`, `@ApiOperation`, and `@ApiResponse` now work correctly regardless of their position relative to `@Controller` or route decorators. The OpenAPI spec generator reads response schemas via `getResponseSchemasMetadata()` (new export) with prototype chain walk, so `@ApiResponse` above `@Get` is now picked up in generated specs (`@onebun/core`, `@onebun/docs`)
+- **Removed `__decorate` polyfill** — Bun handles `emitDecoratorMetadata` natively since v1.0.3; the `Reflect.metadata` polyfill is retained as it is still required (`@onebun/core`)
+
+### Documentation
+
+- **AuthGuard** — `docs/roadmap.md` corrected from "token verification" to "Bearer header presence check"; added "Not a Token Validator" warning in `docs/api/guards.md`
+- **Guard rejection** — `docs/api/guards.md` llm-only section updated to reflect 403 default
+- **Decorator order** — removed all "Decorator Order" warning boxes from `docs/api/docs.md` and `docs/api/decorators.md`
+- **Controller API** — removed "Via getService() (Legacy)" section; SSE examples rewritten with constructor injection (`docs/api/controllers.md`, `packages/core/README.md`)
+
+### Tests
+
+- Added 2 integration tests for guard rejection HTTP status codes (403 / 200 with `httpEnvelope`)
+- Added 7 tests for decorator order independence (`@ApiTags`, `@ApiOperation`, `@ApiResponse` in both positions)
+- Removed 6 obsolete tests (4 `__decorate` polyfill, 1 `getService` controller, 1 `getService` docs-example)
+
 ## 2026-04-21
 
 ### Package Versions

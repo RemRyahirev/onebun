@@ -157,44 +157,6 @@ export function setConstructorParamTypes(target: Function, types: Function[]): v
 }
 
 /**
- * Hook into TypeScript's decorator metadata emission
- * This function gets called by TypeScript when emitDecoratorMetadata is enabled
- */
-if (typeof (globalThis as any).__decorate === 'undefined') {
-  (globalThis as any).__decorate = (decorators: any[], target: any, propertyKey?: any, descriptor?: any) => {
-    // Debug: __decorate called
-    // console.log('__decorate', decorators, target, propertyKey, descriptor);
-    // This is where TypeScript would normally call Reflect.decorate
-    // We can intercept and store metadata here
-    const argsLength = propertyKey === undefined && descriptor === undefined ? 2 : 4;
-    if (argsLength === 2 && typeof target === 'function') {
-      // This is a class decorator, capture constructor parameter types
-      const paramTypes = (globalThis as any).__param || [];
-      if (paramTypes.length > 0) {
-        defineMetadata('design:paramtypes', paramTypes, target);
-      }
-    }
-
-    // Apply decorators normally
-    let result = target;
-    for (let i = decorators.length - 1; i >= 0; i--) {
-      const decorator = decorators[i];
-      if (decorator) {
-        if (typeof decorator === 'function') {
-          if (argsLength === 2) {
-            result = decorator(result) || result;
-          } else {
-            result = decorator(target, propertyKey, descriptor) || descriptor;
-          }
-        }
-      }
-    }
-
-    return result;
-  };
-}
-
-/**
  * Minimal Reflect polyfill for design:paramtypes support in Bun
  * Only adds what's needed for TypeScript's emitDecoratorMetadata
  */

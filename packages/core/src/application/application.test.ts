@@ -34,8 +34,10 @@ import {
   Cookie,
   Req,
   UseMiddleware,
+  UseGuards,
   Middleware,
 } from '../decorators/decorators';
+import { createHttpGuard } from '../http-guards/http-guards';
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
 import { clearGlobalServicesRegistry } from '../module/module';
@@ -4628,6 +4630,68 @@ describe('OneBunApplication', () => {
       expect(jobs.length).toBe(2);
 
       await app.stop();
+    });
+  });
+
+  describe('Guard rejection HTTP status code', () => {
+    test('should return 403 when guard rejects and httpEnvelope is false', async () => {
+      const rejectGuard = createHttpGuard(() => false);
+
+      @UseGuards(rejectGuard)
+      @Controller('/api')
+      class GuardedController extends BaseController {
+        @Get('/protected')
+        async getProtected() {
+          return { data: 'secret' };
+        }
+      }
+
+      @Module({ controllers: [GuardedController] })
+      class TestModule {}
+
+      const port = 44_301;
+      const app = createTestApp(TestModule, { port });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${port}/api/protected`);
+
+        expect(response.status).toBe(403);
+        const body = await response.json();
+        expect(body).toMatchObject({ success: false, error: 'Forbidden', code: 403 });
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('should return 200 when guard rejects and httpEnvelope is true', async () => {
+      const rejectGuard = createHttpGuard(() => false);
+
+      @UseGuards(rejectGuard)
+      @Controller('/api')
+      class GuardedController extends BaseController {
+        @Get('/protected')
+        async getProtected() {
+          return { data: 'secret' };
+        }
+      }
+
+      @Module({ controllers: [GuardedController] })
+      class TestModule {}
+
+      const port = 44_302;
+      const app = createTestApp(TestModule, { port, httpEnvelope: true });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${port}/api/protected`);
+
+        expect(response.status).toBe(200);
+        const body = await response.json();
+        expect(body).toMatchObject({ success: false, error: 'Forbidden', code: 403 });
+      } finally {
+        await app.stop();
+      }
     });
   });
 });

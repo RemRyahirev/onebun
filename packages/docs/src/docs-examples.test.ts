@@ -24,11 +24,13 @@ import { type } from '@onebun/core';
 import {
   ApiResponse,
   BaseController,
-  Body,
   Controller,
   Get,
+  getControllerMetadata,
+  getResponseSchemasMetadata,
   Param,
   Post,
+  Body,
 } from '@onebun/core';
 
 import {
@@ -119,12 +121,9 @@ describe('Docs README Examples', () => {
         email: 'string.email',
       });
 
-      // Note: @ApiTags must be ABOVE @Controller because @Controller wraps the class
-      // Decorators are applied bottom-to-top, so @ApiTags runs last and gets the wrapped class
       @ApiTags('Users')
       @Controller('/users')
       class UserController extends BaseController {
-        // Note: @ApiOperation must be ABOVE @Get for the same reason
         @ApiOperation({
           summary: 'Get all users',
           description: 'Returns a list of all users',
@@ -209,7 +208,6 @@ describe('Docs README Examples', () => {
 describe('OpenAPI Generation', () => {
   describe('generateOpenApiSpec', () => {
     it('should generate spec from controllers', () => {
-      // Note: @ApiTags must be ABOVE @Controller
       @ApiTags('Users')
       @Controller('/users')
       class UserController extends BaseController {
@@ -303,8 +301,6 @@ describe('OpenAPI Generation', () => {
 
       @Controller('/products')
       class ProductController extends BaseController {
-        // Note: @Get must be ABOVE @ApiResponse because @Get reads response schemas when it runs
-        // and decorators apply bottom-to-top
         @Get('/:id')
         @ApiResponse(200, {
           schema: productSchema,
@@ -573,8 +569,6 @@ describe('Best Practices (README)', () => {
   });
 
   it('should use @ApiTags for grouping', () => {
-    // Note: @ApiTags MUST be placed ABOVE @Controller
-    // because @Controller wraps the class and decorators apply bottom-to-top
     @ApiTags('Users')
     @Controller('/users')
     class UsersController extends BaseController {
@@ -620,5 +614,106 @@ describe('Best Practices (README)', () => {
     }
 
     expect(UserController).toBeDefined();
+  });
+});
+
+describe('Decorator order independence', () => {
+  describe('@ApiTags', () => {
+    it('should work above @Controller', () => {
+      @ApiTags('Above')
+      @Controller('/above')
+      class AboveController extends BaseController {
+        @Get('/') async get() {
+          return {}; 
+        }
+      }
+
+      expect(getApiTagsMetadata(AboveController)).toEqual(['Above']);
+    });
+
+    it('should work below @Controller', () => {
+      @Controller('/below')
+      @ApiTags('Below')
+      class BelowController extends BaseController {
+        @Get('/') async get() {
+          return {}; 
+        }
+      }
+
+      expect(getApiTagsMetadata(BelowController)).toEqual(['Below']);
+    });
+  });
+
+  describe('@ApiOperation', () => {
+    it('should work above route decorator', () => {
+      @Controller('/op-above')
+      class OpAbove extends BaseController {
+        @ApiOperation({ summary: 'Above' })
+        @Get('/')
+        async get() {
+          return {}; 
+        }
+      }
+
+      expect(getApiOperationMetadata(OpAbove.prototype, 'get')).toMatchObject({ summary: 'Above' });
+    });
+
+    it('should work below route decorator', () => {
+      @Controller('/op-below')
+      class OpBelow extends BaseController {
+        @Get('/')
+        @ApiOperation({ summary: 'Below' })
+        async get() {
+          return {}; 
+        }
+      }
+
+      expect(getApiOperationMetadata(OpBelow.prototype, 'get')).toMatchObject({ summary: 'Below' });
+    });
+  });
+
+  describe('@ApiResponse', () => {
+    it('should appear in route metadata when below route decorator', () => {
+      @Controller('/resp-below')
+      class RespBelow extends BaseController {
+        @Get('/')
+        @ApiResponse(200, { description: 'Below' })
+        async get() {
+          return {}; 
+        }
+      }
+
+      const route = getControllerMetadata(RespBelow)?.routes[0];
+      expect(route?.responseSchemas).toEqual([{ statusCode: 200, description: 'Below' }]);
+    });
+
+    it('should be found via getResponseSchemasMetadata regardless of order', () => {
+      @Controller('/resp-above')
+      class RespAbove extends BaseController {
+        @ApiResponse(200, { description: 'Above' })
+        @Get('/')
+        async get() {
+          return {}; 
+        }
+      }
+
+      const schemas = getResponseSchemasMetadata(RespAbove.prototype, 'get');
+      expect(schemas).toEqual([{ statusCode: 200, description: 'Above' }]);
+    });
+
+    it('should include @ApiResponse in generated spec regardless of order', () => {
+      @Controller('/spec-test')
+      class SpecTest extends BaseController {
+        @ApiResponse(201, { description: 'Created' })
+        @Get('/')
+        async get() {
+          return {}; 
+        }
+      }
+
+      const spec = generateOpenApiSpec([SpecTest]);
+      const operation = spec.paths['/spec-test/']?.get;
+      expect(operation?.responses?.['201']).toMatchObject({ description: 'Created' });
+    });
   });
 });

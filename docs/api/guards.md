@@ -23,7 +23,7 @@ import { HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } from '@on
 
 **Order of execution:** global middleware → controller middleware → route middleware → guards → handler
 
-**If a guard returns `false` or rejects:** responds with `{ success: false, error: 'Forbidden', code: 403 }` (HTTP 200, consistent with framework error response pattern).
+**If a guard returns `false` or rejects:** responds with `{ success: false, error: 'Forbidden', code: 403 }` (HTTP 403, or HTTP 200 when `httpEnvelope` mode is enabled).
 
 **HttpExecutionContext:**
 ```typescript
@@ -169,6 +169,11 @@ import { AuthGuard } from '@onebun/core';
 @Controller('/secure')
 class SecureController extends BaseController { /* ... */ }
 ```
+
+::: warning Not a Token Validator
+`AuthGuard` checks only that an `Authorization: Bearer ...` header is present.
+It does **not** validate or decode the token. Combine with a custom guard or middleware for JWT verification, token expiry checks, etc.
+:::
 
 ### RolesGuard
 

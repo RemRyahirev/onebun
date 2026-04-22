@@ -11,7 +11,6 @@ import {
   expect,
   mock,
 } from 'bun:test';
-import { Context } from 'effect';
 
 import type { SyncLogger } from '@onebun/logger';
 
@@ -89,22 +88,6 @@ describe('Controller', () => {
   });
 
   describe('Controller service access', () => {
-    test('should provide getService method', () => {
-      class TestController extends Controller {
-        testGetService() {
-          // Create a mock service tag
-          const ServiceTag = Context.GenericTag<{ value: string }>('TestService');
-
-          return this.getService(ServiceTag);
-        }
-      }
-
-      const { instance: controller } = createTestController(TestController);
-
-      // The method should exist and be callable
-      expect(typeof controller.testGetService).toBe('function');
-    });
-
     test('should provide all necessary properties after initialization', () => {
       class TestController extends Controller {
         getLoggerInfo() {
@@ -237,59 +220,6 @@ describe('Controller', () => {
       expect(newMockLogger.debug).not.toHaveBeenCalled();
       // Should still have original config
       expect((controller as any).config).toBe(config);
-    });
-  });
-
-  describe('Service management', () => {
-    test('should set and get service successfully', () => {
-      class TestController extends Controller {
-        testSetAndGetService() {
-          const ServiceTag = Context.GenericTag<{ value: string }>('TestService');
-          const mockService = { value: 'test-value' };
-
-          this.setService(ServiceTag, mockService);
-
-          return this.getService(ServiceTag);
-        }
-      }
-
-      const { instance: controller } = createTestController(TestController);
-
-      const result = controller.testSetAndGetService();
-      expect(result).toEqual({ value: 'test-value' });
-    });
-
-    test('should throw error when service not found', () => {
-      class TestController extends Controller {
-        testGetMissingService() {
-          const ServiceTag = Context.GenericTag<{ value: string }>('MissingService');
-
-          return this.getService(ServiceTag);
-        }
-      }
-
-      const { instance: controller } = createTestController(TestController);
-
-      expect(() => controller.testGetMissingService()).toThrow('Service undefined not found');
-    });
-
-    test('should handle service lookup correctly', () => {
-      class TestController extends Controller {
-        testServiceLookup() {
-          const ServiceTag = Context.GenericTag<string>('TestService');
-          const mockService = 'test-service-value';
-
-          // Set and immediately get the same service
-          this.setService(ServiceTag, mockService);
-
-          return this.getService(ServiceTag);
-        }
-      }
-
-      const { instance: controller } = createTestController(TestController);
-
-      const result = controller.testServiceLookup();
-      expect(result).toBe('test-service-value');
     });
   });
 
@@ -489,20 +419,6 @@ describe('Controller', () => {
       expect(response.status).toBe(200);
     });
 
-    test('should handle service lookup with class tag', () => {
-      class TestController extends Controller {
-        testGetServiceByClass() {
-          class MockServiceClass {}
-
-          // This will throw because the class is not registered
-          expect(() => this.getService(MockServiceClass)).toThrow();
-        }
-      }
-
-      const { instance: controller } = createTestController(TestController);
-
-      controller.testGetServiceByClass();
-    });
 
     test('should handle malformed JSON parsing gracefully', async () => {
       class TestController extends Controller {

@@ -843,10 +843,6 @@ Define response schema for documentation and validation.
 })
 ```
 
-::: tip Decorator Order
-`@ApiResponse` must be placed **below** the route decorator (`@Get`, `@Post`, etc.) because the route decorator reads response schemas when it runs.
-:::
-
 **Example:**
 
 ```typescript
@@ -860,7 +856,6 @@ const userResponseSchema = type({
 
 @Controller('/users')
 export class UserController extends BaseController {
-  // @ApiResponse must be BELOW @Get
   @Get('/:id')
   @ApiResponse(200, {
     schema: userResponseSchema,
@@ -881,13 +876,6 @@ export class UserController extends BaseController {
 Package: `@onebun/docs`
 
 These decorators add metadata for OpenAPI/Swagger documentation generation.
-
-::: warning Decorator Order Matters
-Due to how TypeScript decorators work with the `@Controller` wrapper:
-- `@ApiTags` must be placed **above** `@Controller`
-- `@ApiOperation` must be placed **above** route decorators (`@Get`, `@Post`, etc.)
-- `@ApiResponse` must be placed **below** route decorators
-:::
 
 ### @ApiTags()
 

@@ -6,7 +6,7 @@ import type {
 } from '../types';
 
 import type { HttpMethod, RouteMetadata } from '@onebun/core';
-import { getControllerMetadata } from '@onebun/core';
+import { getControllerMetadata, getResponseSchemasMetadata } from '@onebun/core';
 
 import { getApiOperationMetadata, getApiTagsMetadata } from '../decorators';
 
@@ -173,9 +173,10 @@ function routeToOperation(
     }
   }
 
-  // Process response schemas
-  if (route.responseSchemas) {
-    for (const responseSchema of route.responseSchemas) {
+  // Process response schemas (read from Reflect metadata for decorator order independence)
+  const responseSchemas = getResponseSchemasMetadata(controllerClass.prototype, handlerName);
+  if (responseSchemas.length > 0) {
+    for (const responseSchema of responseSchemas) {
       const response: Response = {
         description: responseSchema.description || `HTTP ${responseSchema.statusCode} response`,
       };

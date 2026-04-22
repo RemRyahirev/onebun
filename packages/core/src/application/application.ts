@@ -840,7 +840,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                           ),
                         ),
                         {
-                          status: HttpStatusCode.OK,
+                          status: app.options.httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.FORBIDDEN,
                           headers: {
                           // eslint-disable-next-line @typescript-eslint/naming-convention
                             'Content-Type': 'application/json',
@@ -902,7 +902,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                         ),
                       ),
                       {
-                        status: HttpStatusCode.OK,
+                        status: app.options.httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.FORBIDDEN,
                         headers: {
                         // eslint-disable-next-line @typescript-eslint/naming-convention
                           'Content-Type': 'application/json',

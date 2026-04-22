@@ -551,66 +551,6 @@ describe('Metadata System', () => {
       expect((globalThis as any).Reflect.existingMethod()).toBe('exists');
     });
 
-    test('should handle __decorate polyfill for class decorators', () => {
-      // Remove __decorate temporarily
-      delete (globalThis as any).__decorate;
-      
-      // Re-import the module to trigger initialization
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      expect((globalThis as any).__decorate).toBeDefined();
-      expect(typeof (globalThis as any).__decorate).toBe('function');
-      
-      // Test class decorator scenario
-      const mockDecorator = mock((target) => target);
-      class TestClass {}
-      
-      const result = (globalThis as any).__decorate([mockDecorator], TestClass);
-      expect(mockDecorator).toHaveBeenCalledWith(TestClass);
-      expect(result).toBe(TestClass);
-    });
-
-    test('should handle __decorate polyfill for method decorators', () => {
-      delete (globalThis as any).__decorate;
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      const mockDescriptor = {
-        value() {}, configurable: true, enumerable: false, writable: true, 
-      };
-      const mockDecorator = mock((target, key, descriptor) => descriptor);
-      class TestClass {
-        testMethod() {}
-      }
-      
-      const result = (globalThis as any).__decorate([mockDecorator], TestClass, 'testMethod', mockDescriptor);
-      expect(mockDecorator).toHaveBeenCalledWith(TestClass, 'testMethod', mockDescriptor);
-      expect(result).toBe(mockDescriptor);
-    });
-
-    test('should handle empty decorators array', () => {
-      delete (globalThis as any).__decorate;
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      class TestClass {}
-      const result = (globalThis as any).__decorate([], TestClass);
-      expect(result).toBe(TestClass);
-    });
-
-    test('should handle null/undefined decorators in array', () => {
-      delete (globalThis as any).__decorate;
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      class TestClass {}
-      const validDecorator = mock((target) => target);
-      
-      const result = (globalThis as any).__decorate([null, validDecorator, undefined], TestClass);
-      expect(validDecorator).toHaveBeenCalledWith(TestClass);
-      expect(result).toBe(TestClass);
-    });
   });
 
   describe('getConstructorParamTypes edge cases', () => {

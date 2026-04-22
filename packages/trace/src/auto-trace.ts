@@ -31,8 +31,6 @@ const EXCLUDED_METHODS = new Set([
   'formatError',
   // BaseController
   'initializeController',
-  'getService',
-  'setService',
   'isJson',
   'parseJson',
   'success',

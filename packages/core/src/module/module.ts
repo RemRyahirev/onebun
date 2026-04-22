@@ -677,14 +677,6 @@ export class OneBunModule implements ModuleInstance {
 
       this.controllerInstances.set(controllerClass, controller);
 
-      // Inject all services into controller (for legacy compatibility)
-      // Skip for WebSocket gateways which don't have setService
-      if (!isWebSocketGateway(controllerClass) && typeof controller.setService === 'function') {
-        for (const [tag, serviceInstance] of this.serviceInstances.entries()) {
-          controller.setService(tag, serviceInstance);
-        }
-      }
-
       if (paramTypes && paramTypes.length > 0) {
         this.logger.debug(
           `Controller ${controllerClass.name} created with ${paramTypes.length} injected dependencies`,

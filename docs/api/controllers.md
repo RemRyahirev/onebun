@@ -20,13 +20,6 @@ export class Controller {
   /** Initialize controller with logger and config (called by framework) */
   initializeController(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void;
 
-  /** Get a service instance by tag or class */
-  protected getService<T>(tag: Context.Tag<T, T>): T;
-  protected getService<T>(serviceClass: new (...args: unknown[]) => T): T;
-
-  /** Set a service instance (used internally) */
-  setService<T>(tag: Context.Tag<T, T>, instance: T): void;
-
   /** Check if request has JSON content type */
   protected isJson(req: OneBunRequest | Request): boolean;
 
@@ -227,24 +220,6 @@ export class UserController extends BaseController {
     const users = await this.userService.findAll();
     await this.cacheService.set('users', users, { ttl: 60 });
     return users;
-  }
-}
-```
-
-### Via getService() (Legacy)
-
-```typescript
-@Controller('/users')
-export class UserController extends BaseController {
-  @Get('/')
-  async findAll() {
-    // By class
-    const userService = this.getService(UserService);
-
-    // By tag
-    const userService = this.getService(UserServiceTag);
-
-    return userService.findAll();
   }
 }
 ```
@@ -1031,6 +1006,13 @@ import {
 
 @Controller('/events')
 export class EventsController extends BaseController {
+  constructor(
+    private readonly dataService: DataService,
+    private readonly notificationService: NotificationService,
+  ) {
+    super();
+  }
+
   /**
    * Simple SSE endpoint
    * Client: new EventSource('/events/stream')
@@ -1057,7 +1039,7 @@ export class EventsController extends BaseController {
 
     // Infinite stream - client can disconnect anytime
     while (true) {
-      const update = await this.getService(DataService).waitForUpdate();
+      const update = await this.dataService.waitForUpdate();
       yield { event: 'update', data: update };
     }
   }
@@ -1071,7 +1053,7 @@ export class EventsController extends BaseController {
     let eventId = 0;
 
     while (true) {
-      const notification = await this.getService(NotificationService).poll();
+      const notification = await this.notificationService.poll();
       eventId++;
       yield {
         event: 'notification',

@@ -18,10 +18,7 @@ bun add @onebun/docs
 3. `generateOpenApiSpec()` builds OpenAPI 3.1 spec from metadata
 4. Swagger UI HTML is served at `/docs`, JSON spec at `/openapi.json`
 
-**Decorator order matters**:
-- `@ApiTags` → ABOVE `@Controller`
-- `@ApiOperation` → ABOVE route decorator (`@Get`, `@Post`, etc.)
-- `@ApiResponse` → BELOW route decorator
+**Decorator order does not matter**: `@ApiTags`, `@ApiOperation`, and `@ApiResponse` work correctly regardless of their position relative to `@Controller` or route decorators.
 
 **ArkType → OpenAPI**: ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to JSON Schema via `arktypeToJsonSchema()` which uses ArkType's built-in `toJsonSchema()`.
 
@@ -41,8 +38,6 @@ interface DocsApplicationOptions {
 ```
 
 **Common mistakes**:
-- Placing `@ApiTags` below `@Controller` — tags won't be read
-- Placing `@ApiResponse` above `@Get`/`@Post` — response schemas won't be attached to the route
 - Forgetting to install `@onebun/docs` — no error, docs silently disabled
 - Not passing ArkType schema to `@Body()` — request body won't appear in OpenAPI spec
 
@@ -163,15 +158,10 @@ const app = new OneBunApplication(AppModule, {
 
 Group endpoints under tags in the Swagger UI. Imported from `@onebun/docs`.
 
-::: warning Decorator Order
-`@ApiTags` must be placed **above** `@Controller` because the controller decorator reads tag metadata when it runs.
-:::
-
 ```typescript
 import { Controller, BaseController, Get } from '@onebun/core';
 import { ApiTags } from '@onebun/docs';
 
-// @ApiTags ABOVE @Controller
 @ApiTags('Users', 'User Management')
 @Controller('/users')
 export class UserController extends BaseController {
@@ -198,17 +188,12 @@ async getAdmins() {
 
 Describe an API operation with summary, description, and additional tags. Imported from `@onebun/docs`.
 
-::: warning Decorator Order
-`@ApiOperation` must be placed **above** route decorators (`@Get`, `@Post`, etc.).
-:::
-
 ```typescript
 import { Controller, BaseController, Get, Post, Param, Body, type } from '@onebun/core';
 import { ApiOperation } from '@onebun/docs';
 
 @Controller('/users')
 export class UserController extends BaseController {
-  // @ApiOperation ABOVE @Get
   @ApiOperation({
     summary: 'Get user by ID',
     description: 'Returns a single user by their unique identifier. Returns 404 if not found.',
@@ -224,10 +209,6 @@ export class UserController extends BaseController {
 ### @ApiResponse()
 
 Define response schemas for documentation and validation. Imported from `@onebun/core`.
-
-::: warning Decorator Order
-`@ApiResponse` must be placed **below** route decorators (`@Get`, `@Post`, etc.) because the route decorator reads response schemas when it runs.
-:::
 
 ```typescript
 import { Controller, BaseController, Get, Param, ApiResponse, type } from '@onebun/core';

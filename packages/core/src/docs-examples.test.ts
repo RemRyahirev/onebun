@@ -845,37 +845,6 @@ describe('Controllers API Documentation Examples', () => {
     });
   });
 
-  describe('Accessing Services (docs/api/controllers.md)', () => {
-    /**
-     * @source docs/api/controllers.md#via-getservice-legacy
-     */
-    it('should have getService() method', () => {
-      @Service()
-      class UserService extends BaseService {
-        findAll() {
-          return [];
-        }
-      }
-
-      @Controller('/users')
-      class UserController extends BaseController {
-        @Get('/')
-        async findAll(): Promise<Response> {
-          // From docs: getService() example
-          const userService = this.getService(UserService);
-          const users = userService.findAll();
-
-          return this.success(users);
-        }
-      }
-
-      expect(UserController).toBeDefined();
-      // Verify getService method exists on prototype
-      const controller = new UserController();
-      expect(typeof controller['getService']).toBe('function');
-    });
-  });
-
   describe('Accessing Logger (docs/api/controllers.md)', () => {
     /**
      * @source docs/api/controllers.md#accessing-logger
