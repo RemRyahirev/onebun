@@ -469,7 +469,7 @@ onMounted(async () => {
       <li><strong>Uncached reads hitting Postgres</strong> &mdash; I/O dominates, parity with other frameworks expected.</li>
       <li><strong>Cold startup</strong> &mdash; ~477ms reflects DI graph construction. Optimized for long-running services, not serverless.</li>
     </ul>
-    <p>Performance is a nice bonus, not the main pitch. The pitch is <strong>enterprise practices without the integration work</strong> &mdash; structured logging, metrics, tracing, typed config, validation, and OpenAPI generation all wired from the first line of code. Validation in particular: <code>type({...})</code> in your code, and you get TypeScript types, runtime validation, and OpenAPI spec from one declaration &mdash; no bridge packages, no Swagger patches.</p>
+    <p>Performance matters, but it's a bonus — not why we built OneBun. The core pitch is <strong>enterprise practices without the integration work</strong> &mdash; structured logging, metrics, tracing, typed config, validation, and OpenAPI generation all wired from the first line of code. Validation in particular: <code>type({...})</code> in your code, and you get TypeScript types, runtime validation, and OpenAPI spec from one declaration &mdash; no bridge packages, no Swagger patches.</p>
   </div>
 </template>
 
