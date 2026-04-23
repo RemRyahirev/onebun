@@ -153,9 +153,9 @@ These features are built into the framework -- no community packages needed:
 
 | NestJS (`@nestjs/swagger`) | OneBun (`@onebun/docs`) | Notes |
 |---|---|---|
-| `@ApiTags()` | `@ApiTags()` | Must be above `@Controller` |
-| `@ApiOperation()` | `@ApiOperation()` | Must be above route decorator |
-| `@ApiResponse()` | `@ApiResponse()` | Must be below route decorator |
+| `@ApiTags()` | `@ApiTags()` | Order independent |
+| `@ApiOperation()` | `@ApiOperation()` | Order independent |
+| `@ApiResponse()` | `@ApiResponse()` | Order independent |
 | `@ApiProperty()` | -- | Not needed: ArkType schema generates OpenAPI automatically |
 
 ### Observability

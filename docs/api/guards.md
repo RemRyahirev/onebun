@@ -202,7 +202,7 @@ const guard = new RolesGuard(
 
 ## Guard Response
 
-When a guard returns `false`, the framework responds with HTTP 200 and a JSON error body (consistent with the framework's error envelope):
+When a guard returns `false`, the framework responds with HTTP 403 and a JSON error body. With `httpEnvelope: true`, the HTTP status is 200 while the error details remain in the body:
 
 ```json
 {

@@ -44,8 +44,6 @@ microservice orchestration (OneBunApplication multi-service mode), and graceful 
 * Using Node.js APIs instead of Bun.js
 * Using Effect.gen instead of Effect.pipe
 * Not registering services in @Module providers array
-* Placing @ApiResponse above route decorator (must be below)
-* Placing @ApiTags below @Controller (must be above)
 
 </llm-only>
 

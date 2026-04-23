@@ -899,13 +899,11 @@ Can be used on controller class or individual methods:
 import { Controller, BaseController, Get } from '@onebun/core';
 import { ApiTags } from '@onebun/docs';
 
-// @ApiTags must be ABOVE @Controller
 @ApiTags('Users', 'User Management')
 @Controller('/users')
 export class UserController extends BaseController {
   // All endpoints tagged with 'Users' and 'User Management'
 
-  // For method-level tags, place above the route decorator
   @ApiTags('Admin')
   @Get('/admins')
   async getAdmins() {
@@ -936,7 +934,6 @@ import { ApiOperation } from '@onebun/docs';
 
 @Controller('/users')
 export class UserController extends BaseController {
-  // @ApiOperation must be ABOVE the route decorator
   @ApiOperation({
     summary: 'Get user by ID',
     description: 'Returns a single user by their unique identifier. Returns 404 if user not found.',
@@ -970,7 +967,6 @@ const createUserSchema = type({
 
 type CreateUserBody = typeof createUserSchema.infer;
 
-// @ApiTags must be ABOVE @Controller
 @ApiTags('Users')
 @Controller('/users')
 export class UserController extends BaseController {

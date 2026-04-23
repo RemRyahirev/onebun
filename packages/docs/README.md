@@ -22,10 +22,7 @@ bun add @onebun/docs
 
 The `@onebun/docs` package provides decorators for adding documentation metadata to your controllers. Note that `@ApiResponse` for response validation is provided by `@onebun/core`.
 
-**Important: Decorator Order Matters!**
-- `@ApiTags` must be placed **above** `@Controller` (because `@Controller` wraps the class)
-- `@ApiOperation` must be placed **above** route decorators (`@Get`, `@Post`, etc.)
-- `@ApiResponse` must be placed **below** route decorators
+**Decorator order does not matter**: `@ApiTags`, `@ApiOperation`, and `@ApiResponse` work correctly regardless of their position relative to `@Controller` or route decorators.
 
 ```typescript
 import { Controller, Get, Post, Body, BaseController, ApiResponse, type } from '@onebun/core';
