@@ -1,5 +1,5 @@
 ---
-description: OneBunApplication, MultiServiceApplication classes. Bootstrap options, graceful shutdown, metrics and tracing configuration.
+description: OneBunApplication class, single-service and multi-service modes. Bootstrap options, graceful shutdown, metrics and tracing configuration.
 ---
 
 <llm-only>
@@ -91,7 +91,7 @@ await app.start();
 - `beforeApplicationDestroy(signal?)` - start of shutdown
 - `onApplicationDestroy(signal?)` - end of shutdown
 
-**MultiServiceApplication** - for running multiple services in one process, useful for local development or monolith deployment.
+**Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process.
 
 </llm-only>
 
@@ -106,9 +106,15 @@ Main application class that bootstraps and runs the HTTP server.
 ### Constructor
 
 ```typescript
+// Single-service mode
 new OneBunApplication(
   moduleClass: new (...args: unknown[]) => object,
   options?: Partial<ApplicationOptions>
+)
+
+// Multi-service mode
+new OneBunApplication(
+  options: MultiServiceApplicationOptions
 )
 ```
 
@@ -305,6 +311,18 @@ class OneBunApplication {
 
   /** Get a service instance by class from the module container */
   getService<T>(serviceClass: new (...args: unknown[]) => T): T;
+
+  /** Get a child OneBunApplication instance by service name (multi-service mode only) */
+  getApplication(name: string): OneBunApplication | undefined;
+
+  /** Get URL for a service — local if running, external if configured (multi-service mode only) */
+  getServiceUrl(name: string): string;
+
+  /** Get all running service names (multi-service mode only) */
+  getRunningServices(): string[];
+
+  /** Check if a specific service is running (multi-service mode only) */
+  isServiceRunning(name: string): boolean;
 }
 ```
 
@@ -412,14 +430,14 @@ Services and controllers can implement lifecycle hooks to execute code at specif
 
 See [Services API](./services.md#lifecycle-hooks) for detailed usage examples.
 
-## MultiServiceApplication
+## Multi-Service Mode
 
-Run multiple services in a single process.
+Run multiple services in a single process using the unified `OneBunApplication` constructor.
 
 ### Constructor
 
 ```typescript
-new MultiServiceApplication(options: MultiServiceApplicationOptions)
+new OneBunApplication(options: MultiServiceApplicationOptions)
 ```
 
 ### MultiServiceApplicationOptions
@@ -431,7 +449,7 @@ interface MultiServiceApplicationOptions {
   envOptions?: EnvLoadOptions;
   metrics?: MetricsOptions;
   tracing?: TracingOptions;
-  queue?: QueueApplicationOptions;  // applied to all services
+  queue?: QueueApplicationOptions;
   enabledServices?: string[];
   excludedServices?: string[];
   externalServiceUrls?: Record<string, string>;
@@ -442,7 +460,7 @@ interface ServiceConfig {
   port: number;
   host?: string;
   basePath?: string;
-  routePrefix?: string;
+  routePrefix?: boolean;
   envOverrides?: EnvOverrides;
 }
 
@@ -452,38 +470,38 @@ type ServicesMap = Record<string, ServiceConfig>;
 ### Usage Example
 
 ```typescript
-import { MultiServiceApplication } from '@onebun/core';
+import { OneBunApplication } from '@onebun/core';
 import { UsersModule } from './users/users.module';
 import { OrdersModule } from './orders/orders.module';
 import { envSchema } from './config';
 
-const multiApp = new MultiServiceApplication({
+const app = new OneBunApplication({
   services: {
     users: {
       module: UsersModule,
       port: 3001,
-      routePrefix: true, // Uses 'users' as route prefix
+      routePrefix: true,
     },
     orders: {
       module: OrdersModule,
       port: 3002,
-      routePrefix: true, // Uses 'orders' as route prefix
+      routePrefix: true,
       envOverrides: {
         DB_NAME: { value: 'orders_db' },
       },
     },
   },
   envSchema,
-  enabledServices: ['users', 'orders'],
+  metrics: { enabled: true },
+  tracing: { enabled: true },
 });
 
-await multiApp.start();
+await app.start();
+console.log('Running:', app.getRunningServices());
+console.log('Users URL:', app.getServiceUrl('users'));
 
-console.log('Running services:', multiApp.getRunningServices());
-// ['users', 'orders']
-
-// Stop all services
-multiApp.stop();
+// Access child application
+const usersApp = app.getApplication('users');
 ```
 
 ## OneBunModule

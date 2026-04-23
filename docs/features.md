@@ -25,7 +25,7 @@ production-grade backend services.
 - Auto-generated typed WebSocket client for frontend integration
 
 ### Microservices
-- MultiServiceApplication: run multiple services from single codebase/image
+- OneBunApplication multi-service mode: run multiple services from single codebase/image
 - Dev: all services in one process. Prod: ONEBUN_SERVICES=name selects services
 - Typed inter-service HTTP clients with createServiceDefinition/createServiceClient
 - HMAC authentication for service-to-service communication
@@ -154,7 +154,7 @@ WebSocket communication.
 
 ## Microservices (@onebun/core)
 
-### MultiServiceApplication
+### OneBunApplication Multi-Service Mode
 Run multiple services from a single codebase and Docker image:
 - **Development**: all services in one process (`bun run src/index.ts`)
 - **Production**: one service per process (`ONEBUN_SERVICES=users bun run src/index.ts`)
@@ -276,7 +276,7 @@ type-safe inter-service REST communication without code generation.
 - Validation, defaults, transforms
 - Sensitive value masking in logs
 - .env file support
-- Per-service overrides in MultiServiceApplication
+- Per-service overrides in OneBunApplication multi-service mode
 → [API Reference](/api/envs)
 
 ## Production Features

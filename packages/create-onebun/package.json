@@ -1,6 +1,6 @@
 {
   "name": "@onebun/create",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Scaffold a new OneBun project",
   "license": "MPL-2.0",
   "bin": {

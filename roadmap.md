@@ -58,7 +58,7 @@
 - [ ] `bunx onebun generate module/controller/service`
 
 ### DX-улучшения
-- [ ] Необязательный ведущий слэш в route decorators: `@Get(':id')`
+- [x] Необязательный ведущий слэш в route decorators: `@Get(':id')`
 - [ ] Scoped providers: `REQUEST` и `TRANSIENT` scope
 - [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами
 
@@ -83,9 +83,11 @@
 ## Фаза 3: Road to 1.0
 
 ### Framework features
-- [ ] Unified application entry point (merge `OneBunApplication` и `MultiServiceApplication`)
+- [x] Unified application entry point (merge `OneBunApplication` и `MultiServiceApplication`)
 - [ ] Scoped providers (`REQUEST`, `TRANSIENT`)
 - [ ] Provider-not-found suggestions ("did you mean X?")
+- [ ] Eager service initialization fix
+- [ ] Inter-service auth: bearer, api key (query/header/body), basic auth, hmac signature, e2e encryption
 
 ### Tooling & scaffolding
 - [ ] Multi-service starter template (`--template multi-service`)

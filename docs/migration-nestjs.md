@@ -54,7 +54,7 @@ In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages?
 
 ### Multi-service without the pain
 
-NestJS can technically run multiple services from one codebase, but wiring that up for local development (running some services together, others separately) is manual and fragile. OneBun's `MultiServiceApplication` lets you run all services in a single process during development and split them via `ONEBUN_SERVICES` env var in production — same code, same Docker image, no glue scripts.
+NestJS can technically run multiple services from one codebase, but wiring that up for local development (running some services together, others separately) is manual and fragile. OneBun's `OneBunApplication` multi-service mode lets you run all services in a single process during development and split them via `ONEBUN_SERVICES` env var in production — same code, same Docker image, no glue scripts.
 
 ### Type-safe WebSocket clients
 
@@ -596,16 +596,18 @@ async create(@Body(createUserSchema) body: CreateUserBody) {
 
 ### Route Path Format
 
-NestJS uses `@Get(':id')` — OneBun requires a leading slash: `@Get('/:id')`. Both formats are normalized internally, but the idiomatic style is with slash:
+OneBun supports both path styles out of the box. `@Get(':id')` and `@Get('/:id')` are equivalent — the framework normalizes paths automatically. No migration step needed:
 
 ```typescript
 // NestJS
 @Get(':id')
 @Post()
 
-// OneBun
-@Get('/:id')
-@Post('/')
+// OneBun — both styles work identically
+@Get(':id')     // NestJS-compatible, no change needed
+@Get('/:id')    // explicit slash style
+@Post()         // omit path for root
+@Post('/')      // explicit root — also fine
 ```
 
 ### Singleton Services Only
@@ -673,7 +675,7 @@ await module.close();  // always close in afterEach
 | GraphQL (`@nestjs/graphql`) | Planned (post-1.0) | Use REST + OpenAPI for now |
 | CQRS (`@nestjs/cqrs`) | Not available | -- |
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |
-| Microservices (`@nestjs/microservices`) | Different approach | `MultiServiceApplication` for multi-service from single image |
+| Microservices (`@nestjs/microservices`) | Different approach | `OneBunApplication` multi-service mode — pass `{ services: ... }` for multi-service from single image |
 | Pipes (class-based) | Not available | ArkType schemas handle validation |
 | Scoped providers (`REQUEST`, `TRANSIENT`) | Not available | All services are singletons |
 | `useFactory` / `useExisting` providers | Not available | Class-based `@Service()` only; `useValue`/`useClass` in tests only |
@@ -688,7 +690,7 @@ await module.close();  // always close in afterEach
 4. Replace `@Injectable()` with `@Service()` and extend `BaseService` — see [Services](/api/services)
 5. Update controllers to extend `BaseController` and add `super()` call — see [Controllers](/api/controllers)
 6. Replace DTO classes + `class-validator` with ArkType schemas — see [Validation](/api/validation)
-7. Update route paths: `@Get(':id')` → `@Get('/:id')` (add leading slash)
+7. ~~Update route paths~~ — not needed, `@Get(':id')` works as-is in OneBun
 8. Update route handlers to return plain objects and throw `HttpException` for errors
 9. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
 10. Move `ConfigService` usage to `this.config` (from `BaseService`)

@@ -633,7 +633,7 @@ DEBUG=false
 Override environment variables per service:
 
 ```typescript
-const multiApp = new MultiServiceApplication({
+const multiApp = new OneBunApplication({
   services: {
     users: {
       module: UsersModule,

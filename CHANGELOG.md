@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.0 — 2026-04-23
+
+### Package Versions
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.3.8 | 0.4.0 |
+| `@onebun/cache` | 0.3.2 | 0.4.0 |
+| `@onebun/docs` | 0.3.4 | 0.4.0 |
+| `@onebun/drizzle` | 0.3.3 | 0.4.0 |
+| `@onebun/envs` | 0.3.1 | 0.4.0 |
+| `@onebun/logger` | 0.3.1 | 0.4.0 |
+| `@onebun/metrics` | 0.3.4 | 0.4.0 |
+| `@onebun/requests` | 0.3.4 | 0.4.0 |
+| `@onebun/trace` | 0.3.4 | 0.4.0 |
+| `@onebun/nats` | 0.3.2 | 0.4.0 |
+| `@onebun/create` | 0.3.3 | 0.4.0 |
+
+### Breaking Changes
+
+- **`MultiServiceApplication` removed** — replaced by `OneBunApplication` multi-service mode. Pass `{ services: ... }` to the constructor instead of using a separate class. The internal implementation moved to `MultiServiceOrchestrator` (`@onebun/core`)
+
+### Improvements
+
+- **Unified application entry point** — `OneBunApplication` now handles both single-service and multi-service modes via constructor overloads. New methods in multi-service mode: `getApplication(name)`, `getServiceUrl(name)`, `getRunningServices()`, `isServiceRunning(name)` (`@onebun/core`)
+- **Optional leading slash in route decorators** — `@Controller('users')` equals `@Controller('/users')`, `@Get(':id')` equals `@Get('/:id')`. NestJS-style paths work out of the box without migration (`@onebun/core`)
+- **Version bump script: peerDependencies support** — `bun version:bump` now updates `peerDependencies` alongside `dependencies` and `devDependencies` for `@onebun/*` internal packages
+
+### Documentation
+
+- All docs and examples updated: `MultiServiceApplication` → `OneBunApplication` multi-service mode
+- Added leading-slash-optional notes in controllers and decorators docs
+- Migration guide: route path format no longer requires changes (step 7 removed)
+- `docs/api/core.md` updated with multi-service constructor signature and new methods
+
 ## 2026-04-22
 
 ### Bug Fixes

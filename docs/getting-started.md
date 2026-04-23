@@ -6,7 +6,7 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 
 ## Technical Context for AI Agents
 
-**Framework Version**: 0.3.0
+**Framework Version**: 0.4.0
 **Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)
 **TypeScript**: strict mode required
 
@@ -16,11 +16,11 @@ DI, REST, WebSocket (Socket.IO + typed client), database (Drizzle ORM),
 cache (memory + Redis), queues (memory/Redis/NATS/JetStream), scheduler,
 Prometheus metrics, OpenTelemetry tracing, typed HTTP clients with inter-service
 HMAC auth, auto-generated OpenAPI docs, ArkType validation (schema = types = docs),
-microservice orchestration (MultiServiceApplication), and graceful shutdown.
+microservice orchestration (OneBunApplication multi-service mode), and graceful shutdown.
 
 **Package Structure**:
 * @onebun/core - DI, modules, controllers, services, guards, middleware,
-  WebSocket gateway, queue system, MultiServiceApplication, graceful shutdown
+  WebSocket gateway, queue system, multi-service mode, graceful shutdown
 * @onebun/cache - in-memory + Redis caching with DI, shared Redis connection
 * @onebun/drizzle - Drizzle ORM (PostgreSQL, SQLite), schema-first, auto-migrations, BaseRepository
 * @onebun/docs - auto-generated OpenAPI 3.1 from ArkType schemas and decorators
@@ -430,7 +430,7 @@ You've built a basic OneBun application. Here's what else the framework offers:
 - **[HTTP Client](/api/requests)** — Typed clients with retries, auth schemes, inter-service HMAC
 
 ### Scale to Microservices
-- **[Multi-Service](/examples/multi-service)** — Run multiple services from one codebase with MultiServiceApplication
+- **[Multi-Service](/examples/multi-service)** — Run multiple services from one codebase with OneBunApplication
 - **[OpenAPI Docs](/api/decorators#documentation-decorators)** — Auto-generated API documentation from schemas
 
 ### Complete Examples

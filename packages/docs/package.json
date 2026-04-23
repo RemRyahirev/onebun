@@ -1,6 +1,6 @@
 {
   "name": "@onebun/docs",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Documentation generation for OneBun framework - OpenAPI, Swagger UI",
   "license": "MPL-2.0",
   "author": "RemRyahirev",
@@ -40,7 +40,7 @@
     "swagger-ui-dist": "^5.17.14"
   },
   "peerDependencies": {
-    "@onebun/core": ">=0.2.0"
+    "@onebun/core": "^0.4.0"
   },
   "devDependencies": {
     "@onebun/core": "workspace:^",

@@ -35,7 +35,7 @@ const packageJson = `{
     "start": "bun run src/index.ts"
   },
   "dependencies": {
-    "@onebun/core": "^0.3.0"
+    "@onebun/core": "^0.4.0"
   },
   "devDependencies": {
     "bun-types": "^1.3.8"
@@ -128,13 +128,13 @@ const appControllerTs = `import {
 
 import { AppService } from './app.service';
 
-@Controller('/')
+@Controller()
 export class AppController extends BaseController {
   constructor(private appService: AppService) {
     super();
   }
 
-  @Get('/')
+  @Get()
   async getHello() {
     return { message: this.appService.getHello() };
   }

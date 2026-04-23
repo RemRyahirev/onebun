@@ -1,4 +1,4 @@
-import { getConfig, MultiServiceApplication } from '@onebun/core';
+import { getConfig, OneBunApplication } from '@onebun/core';
 
 import { type AppConfig, envSchema } from './config';
 import { OrderModule } from './orders/orders.module';
@@ -6,7 +6,7 @@ import { UserModule } from './users/users.module';
 
 const config = getConfig<AppConfig>(envSchema);
 
-const app = new MultiServiceApplication({
+const app = new OneBunApplication({
   services: {
     users: {
       module: UserModule,

@@ -7,7 +7,7 @@ Complete example applications built with the OneBun framework. Each example is a
 | Example | Description |
 |---------|-------------|
 | [crud-api](./crud-api) | REST API with CRUD operations, ArkType validation, layered architecture (Controller → Service → Repository), tracing |
-| [multi-service](./multi-service) | Multiple microservices from a single process with `MultiServiceApplication`, inter-service HTTP communication, per-service config |
+| [multi-service](./multi-service) | Multiple microservices from a single process with `OneBunApplication` multi-service mode, inter-service HTTP communication, per-service config |
 | [websocket-chat](./websocket-chat) | Real-time chat with WebSocket gateway, rooms, authentication guards, message history |
 
 ## Running

@@ -568,7 +568,7 @@ OneBun provides standardized error responses via `throw new HttpException(status
 ### Single Process, Multiple Services
 
 ```typescript
-const multiApp = new MultiServiceApplication({
+const multiApp = new OneBunApplication({
   services: {
     users: {
       module: UsersModule,

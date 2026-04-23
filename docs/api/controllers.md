@@ -77,6 +77,10 @@ export class UserController extends BaseController {
 }
 ```
 
+::: tip Leading Slash is Optional
+The leading slash in `@Controller()` and route decorators is optional. `@Controller('users')` equals `@Controller('/users')`, and `@Get(':id')` equals `@Get('/:id')`. This makes NestJS-style paths work out of the box.
+:::
+
 The framework automatically wraps plain return values into `{ success: true, result: <data> }`. For errors, throw `HttpException` — the exception filter converts it to `{ success: false, error: <message>, code: <statusCode> }` with the matching HTTP status code.
 
 ## Response Formats
@@ -590,14 +594,14 @@ const app = new OneBunApplication(AppModule, {
 
 Application-wide middleware runs **before** any module-level, controller-level or route-level middleware.
 
-### Application-Wide Middleware with MultiServiceApplication
+### Application-Wide Middleware with OneBunApplication (Multi-Service)
 
 For multi-service setups, middleware can be defined at the application level (shared by all services) or per service:
 
 ```typescript
-import { MultiServiceApplication } from '@onebun/core';
+import { OneBunApplication } from '@onebun/core';
 
-const app = new MultiServiceApplication({
+const app = new OneBunApplication({
   services: {
     users: { module: UsersModule, port: 3001 },
     orders: {

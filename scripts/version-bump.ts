@@ -149,6 +149,19 @@ async function updateInternalDependencies(packages: Array<{ name: string; dir: s
       }
     }
 
+    // Update peerDependencies
+    if (pkgJson.peerDependencies) {
+      for (const dep of Object.keys(pkgJson.peerDependencies)) {
+        if (dep.startsWith('@onebun/') && versionMap[dep]) {
+          const currentDep = pkgJson.peerDependencies[dep];
+          if (!currentDep.startsWith('workspace:')) {
+            pkgJson.peerDependencies[dep] = `^${versionMap[dep]}`;
+            updated = true;
+          }
+        }
+      }
+    }
+
     if (updated) {
       await Bun.write(pkg.path, JSON.stringify(pkgJson, null, 2) + '\n');
     }

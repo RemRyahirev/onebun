@@ -210,7 +210,7 @@
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "effect": "^3.13.10",
@@ -221,12 +221,12 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": ">=0.2.0",
+        "@onebun/core": "^0.4.0",
       },
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.3.7",
+      "version": "0.4.0",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -250,14 +250,14 @@
     },
     "packages/create-onebun": {
       "name": "@onebun/create",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "bin": {
         "create-onebun": "./src/index.ts",
       },
     },
     "packages/docs": {
       "name": "@onebun/docs",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "dependencies": {
         "swagger-ui-dist": "^5.17.14",
       },
@@ -267,12 +267,12 @@
         "bun-types": "^1.3.8",
       },
       "peerDependencies": {
-        "@onebun/core": ">=0.2.0",
+        "@onebun/core": "^0.4.0",
       },
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "bin": {
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
@@ -291,12 +291,12 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": ">=0.2.0",
+        "@onebun/core": "^0.4.0",
       },
     },
     "packages/envs": {
       "name": "@onebun/envs",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -306,7 +306,7 @@
     },
     "packages/logger": {
       "name": "@onebun/logger",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -316,7 +316,7 @@
     },
     "packages/metrics": {
       "name": "@onebun/metrics",
-      "version": "0.3.4",
+      "version": "0.4.0",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "effect": "^3.13.10",
@@ -329,7 +329,7 @@
     },
     "packages/nats": {
       "name": "@onebun/nats",
-      "version": "0.3.2",
+      "version": "0.4.0",
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",
@@ -341,12 +341,12 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": ">=0.2.0",
+        "@onebun/core": "^0.4.0",
       },
     },
     "packages/requests": {
       "name": "@onebun/requests",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "dependencies": {
         "effect": "^3.13.10",
       },
@@ -356,7 +356,7 @@
     },
     "packages/trace": {
       "name": "@onebun/trace",
-      "version": "0.3.3",
+      "version": "0.4.0",
       "dependencies": {
         "@onebun/requests": "workspace:^",
         "@opentelemetry/api": "^1.8.0",

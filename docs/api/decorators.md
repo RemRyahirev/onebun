@@ -27,7 +27,7 @@ export class DbModule {}
 
 **Controller with Routes**:
 ```typescript
-@Controller('/api/users')
+@Controller('/api/users')   // or @Controller('api/users') — leading slash is optional
 export class UserController extends BaseController {
   constructor(private userService: UserService) { super(); }
 
@@ -231,6 +231,8 @@ export class UserController extends BaseController {
 }
 ```
 
+> **Note:** Leading slash is optional. `@Controller('api/users')` and `@Controller('/api/users')` are equivalent — the framework normalizes the path automatically.
+
 ## HTTP Method Decorators
 
 ### @Get(), @Post(), @Put(), @Delete(), @Patch(), @Options(), @Head(), @All()
@@ -252,6 +254,8 @@ interface RouteOptions {
   timeout?: number;
 }
 ```
+
+> **Note:** The leading slash in the path argument is optional. `@Get('users')` and `@Get('/users')` are equivalent. Similarly, `@Get(':id')` is the same as `@Get('/:id')`. This makes migration from NestJS seamless — NestJS-style paths work out of the box.
 
 **Per-request timeout:**
 

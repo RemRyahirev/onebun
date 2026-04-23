@@ -1,5 +1,5 @@
 ---
-description: Running multiple microservices from single process. MultiServiceApplication, shared config, service communication.
+description: Running multiple microservices from single process. OneBunApplication multi-service mode, shared config, service communication.
 ---
 
 # Multi-Service Application Example
@@ -72,18 +72,18 @@ declare module '@onebun/core' {
 
 ## Application Entry Point
 
-The core of multi-service — `MultiServiceApplication` with `getConfig` for typed port access and `getServiceUrl` for runtime URLs:
+The core of multi-service — `OneBunApplication` with `getConfig` for typed port access and `getServiceUrl` for runtime URLs:
 
 ```typescript
 // src/index.ts
-import { getConfig, MultiServiceApplication } from '@onebun/core';
+import { getConfig, OneBunApplication } from '@onebun/core';
 import { type AppConfig, envSchema } from './config';
 import { OrderModule } from './orders/orders.module';
 import { UserModule } from './users/users.module';
 
 const config = getConfig<AppConfig>(envSchema);
 
-const app = new MultiServiceApplication({
+const app = new OneBunApplication({
   services: {
     users: {
       module: UserModule,
@@ -208,7 +208,7 @@ curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
 
 ## Graceful Shutdown
 
-`MultiServiceApplication` supports graceful shutdown out of the box. When the process receives SIGTERM or SIGINT, it calls `stop()` on each running service, which triggers lifecycle hooks in order.
+`OneBunApplication` in multi-service mode supports graceful shutdown out of the box. When the process receives SIGTERM or SIGINT, it calls `stop()` on each running service, which triggers lifecycle hooks in order.
 
 ### Shutdown Sequence
 
@@ -267,7 +267,7 @@ export class OrderService extends BaseService
 ### Programmatic Shutdown
 
 ```typescript
-const app = new MultiServiceApplication({
+const app = new OneBunApplication({
   services: {
     users: { module: UserModule, port: 3001 },
     orders: { module: OrderModule, port: 3002 },
@@ -282,7 +282,7 @@ await app.stop();
 ```
 
 ::: tip
-`MultiServiceApplication.stop()` calls `stop()` on each `OneBunApplication` instance. Individual `OneBunApplication.stop()` accepts `{ closeSharedRedis?: boolean; signal?: string }` if you need more control when stopping services directly.
+`OneBunApplication.stop()` in multi-service mode calls `stop()` on each child `OneBunApplication` instance. Individual child `OneBunApplication.stop()` accepts `{ closeSharedRedis?: boolean; signal?: string }` if you need more control when stopping services directly.
 :::
 
 ### Lifecycle Hook Reference
@@ -297,7 +297,7 @@ await app.stop();
 
 ## Key Patterns
 
-1. **MultiServiceApplication**: Run multiple services in one process
+1. **OneBunApplication multi-service mode**: Run multiple services in one process
 2. **Service Isolation**: Each service has its own module, port, and route prefix
 3. **Environment Overrides**: Per-service environment variable customization
 4. **Inter-service Communication**: Use `createHttpClient` with typed config URLs
@@ -308,7 +308,7 @@ await app.stop();
 
 ## Production: Service Selection via Environment
 
-`MultiServiceApplication` has built-in support for selecting which services to run via environment variables. No need for separate entry files — use the same code everywhere.
+`OneBunApplication` in multi-service mode has built-in support for selecting which services to run via environment variables. No need for separate entry files — use the same code everywhere.
 
 ### Built-in Options
 

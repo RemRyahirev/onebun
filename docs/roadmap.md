@@ -2,9 +2,9 @@
 
 OneBun is actively developed. This page outlines what is already shipped, what is coming next, and our longer-term vision.
 
-## Current Status (v0.3.x)
+## Current Status (v0.4.x)
 
-OneBun is at **v0.3.x** — a pre-1.0 release focused on API stabilization and production readiness. The core framework, DI system, and all listed packages are functional and tested. Most features needed for production HTTP services are already implemented.
+OneBun is at **v0.4.x** — a pre-1.0 release focused on API stabilization and production readiness. The core framework, DI system, and all listed packages are functional and tested. Most features needed for production HTTP services are already implemented.
 
 ---
 
@@ -23,7 +23,8 @@ All features below are shipped, tested, and documented. If something looks missi
 | Lifecycle hooks (`OnModuleInit`, `OnApplicationDestroy`, etc.) | `@onebun/core` | [Core](/api/core) |
 | Graceful shutdown (SIGTERM/SIGINT handling) | `@onebun/core` | [Core](/api/core) |
 | Static file serving with SPA fallback | `@onebun/core` | [Core](/api/core) |
-| Multi-service applications | `@onebun/core` | [Multi-Service example](/examples/multi-service) |
+| Multi-service applications (unified entry point) | `@onebun/core` | [Core](/api/core), [Multi-Service example](/examples/multi-service) |
+| Optional leading slash in route decorators | `@onebun/core` | [Controllers](/api/controllers), [Decorators](/api/decorators) |
 
 ### HTTP Guards & Authentication
 
