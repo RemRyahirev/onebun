@@ -9,7 +9,9 @@
 export * from './auth.js';
 // HTTP client
 // Export the createHttpClient function specifically to avoid conflicts
-export { createHttpClient, executeRequest, HttpClient } from './client.js';
+export {
+  calculateRetryDelay, createHttpClient, executeRequest, HttpClient, 
+} from './client.js';
 
 // Service for dependency injection
 export {

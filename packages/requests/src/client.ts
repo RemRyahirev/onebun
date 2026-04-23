@@ -53,7 +53,7 @@ const buildUrl = (
 /**
  * Calculate retry delay based on configuration
  */
-const calculateRetryDelay = (attempt: number, config: RetryConfig): number => {
+export const calculateRetryDelay = (attempt: number, config: RetryConfig): number => {
   const { delay, backoff, factor = 2 } = config;
 
   switch (backoff) {

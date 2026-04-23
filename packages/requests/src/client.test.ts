@@ -11,7 +11,11 @@ import { Effect } from 'effect';
 
 import type { RequestConfig, RequestsOptions } from './types.js';
 
-import { executeRequest, HttpClient } from './client.js';
+import {
+  calculateRetryDelay,
+  executeRequest,
+  HttpClient,
+} from './client.js';
 import {
   createErrorResponse,
   DEFAULT_REQUESTS_OPTIONS,
@@ -925,28 +929,56 @@ describe('HttpClient.req unexpected error wrapping', () => {
   });
 });
 
-describe('retry backoff strategies', () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  let sleepDelays: number[];
-
-  beforeEach(() => {
-    sleepDelays = [];
-    // Intercept setTimeout to capture delay values passed by Effect.sleep
-    globalThis.setTimeout = ((fn: () => void, ms?: number) => {
-      if (ms !== undefined && ms > 0) {
-        sleepDelays.push(ms);
-      }
-
-      return originalSetTimeout(fn, ms);
-    }) as typeof setTimeout;
+describe('calculateRetryDelay', () => {
+  it('exponential: delay * factor^(attempt-1)', () => {
+    const config = {
+      max: 3, delay: 5, backoff: 'exponential' as const, factor: 2, retryOn: [503], 
+    };
+    expect(calculateRetryDelay(1, config)).toBe(5);   // 5 * 2^0
+    expect(calculateRetryDelay(2, config)).toBe(10);  // 5 * 2^1
+    expect(calculateRetryDelay(3, config)).toBe(20);  // 5 * 2^2
   });
 
+  it('exponential with custom factor', () => {
+    const config = {
+      max: 3, delay: 10, backoff: 'exponential' as const, factor: 3, retryOn: [503], 
+    };
+    expect(calculateRetryDelay(1, config)).toBe(10);  // 10 * 3^0
+    expect(calculateRetryDelay(2, config)).toBe(30);  // 10 * 3^1
+    expect(calculateRetryDelay(3, config)).toBe(90);  // 10 * 3^2
+  });
+
+  it('linear: delay * attempt', () => {
+    const config = {
+      max: 3, delay: 5, backoff: 'linear' as const, retryOn: [503], 
+    };
+    expect(calculateRetryDelay(1, config)).toBe(5);   // 5 * 1
+    expect(calculateRetryDelay(2, config)).toBe(10);  // 5 * 2
+    expect(calculateRetryDelay(3, config)).toBe(15);  // 5 * 3
+  });
+
+  it('fixed: always returns delay', () => {
+    const config = {
+      max: 3, delay: 5, backoff: 'fixed' as const, retryOn: [503], 
+    };
+    expect(calculateRetryDelay(1, config)).toBe(5);
+    expect(calculateRetryDelay(2, config)).toBe(5);
+    expect(calculateRetryDelay(3, config)).toBe(5);
+  });
+
+  it('defaults to fixed when backoff is undefined', () => {
+    const config = { max: 3, delay: 7, retryOn: [503] } as any;
+    expect(calculateRetryDelay(1, config)).toBe(7);
+    expect(calculateRetryDelay(2, config)).toBe(7);
+  });
+});
+
+describe('retry backoff strategies', () => {
   afterEach(() => {
-    globalThis.setTimeout = originalSetTimeout;
     globalThis.fetch = originalFetch;
   });
 
-  it('exponential backoff: each retry waits delay * factor^(attempt-1)', async () => {
+  it('exponential backoff retries the correct number of times', async () => {
     let callCount = 0;
     globalThis.fetch = (() => {
       callCount++;
@@ -958,18 +990,16 @@ describe('retry backoff strategies', () => {
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/backoff' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'exponential', factor: 2, retryOn: [503],
+            max: 2, delay: 1, backoff: 'exponential', factor: 2, retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
     expect(callCount).toBe(3);
-    // attempt 1: 5 * 2^0 = 5ms, attempt 2: 5 * 2^1 = 10ms
-    expect(sleepDelays).toEqual([5, 10]);
   });
 
-  it('linear backoff: each retry waits delay * attempt', async () => {
+  it('linear backoff retries the correct number of times', async () => {
     let callCount = 0;
     globalThis.fetch = (() => {
       callCount++;
@@ -981,18 +1011,16 @@ describe('retry backoff strategies', () => {
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/linear' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'linear', retryOn: [503],
+            max: 2, delay: 1, backoff: 'linear', retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
     expect(callCount).toBe(3);
-    // attempt 1: 5 * 1 = 5ms, attempt 2: 5 * 2 = 10ms
-    expect(sleepDelays).toEqual([5, 10]);
   });
 
-  it('fixed backoff: each retry waits the same delay', async () => {
+  it('fixed backoff retries the correct number of times', async () => {
     let callCount = 0;
     globalThis.fetch = (() => {
       callCount++;
@@ -1004,15 +1032,13 @@ describe('retry backoff strategies', () => {
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/fixed' }, {
           retries: {
-            max: 2, delay: 5, backoff: 'fixed', retryOn: [503],
+            max: 2, delay: 1, backoff: 'fixed', retryOn: [503],
           },
         }),
       ),
     ).rejects.toBeDefined();
 
     expect(callCount).toBe(3);
-    // fixed: both retries wait 5ms
-    expect(sleepDelays).toEqual([5, 5]);
   });
 
   it('stops exactly after max retries (max=3 means 4 total calls)', async () => {
@@ -1028,7 +1054,7 @@ describe('retry backoff strategies', () => {
       Effect.runPromise(
         executeRequest({ method: HttpMethod.GET, url: '/maxretries' }, {
           retries: {
-            max: maxRetries, delay: 1, backoff: 'fixed', retryOn: [503], 
+            max: maxRetries, delay: 1, backoff: 'fixed', retryOn: [503],
           },
         }),
       ),
