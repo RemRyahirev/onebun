@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.4.1 — 2026-04-24
+
+### Package Versions
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.4.0 | 0.4.1 |
+| `@onebun/cache` | 0.4.0 | 0.4.1 |
+| `@onebun/docs` | 0.4.1 | 0.4.2 |
+| `@onebun/drizzle` | 0.4.0 | 0.4.1 |
+| `@onebun/nats` | 0.4.0 | 0.4.1 |
+
+### Breaking Changes
+
+- **⚠️ Intra-minor breaking change (rare case)** — `getService()` → `getApplication()` technically breaks semver within 0.4.x. Justified because 0.4.0 shipped less than 24h ago, no known deployments exist, and the rename completes the unified-entry-point breaking change already announced in 0.4.0. Users who already migrated to 0.4.0 must also rename the method call.
+- **`getService()` renamed to `getApplication()`** — in multi-service mode, `app.getService(name)` is now `app.getApplication(name)` to avoid confusion with DI service resolution (`@onebun/core`)
+
+### Improvements
+
+- **Interceptors across all transports** — new `Interceptor` interface with `intercept(context, next)` method, `BaseInterceptor` base class with DI support, and `@UseInterceptors()` decorator. Works on HTTP controllers, WebSocket gateways, and queue handlers. Supports global (via `ApplicationOptions.interceptors`), controller/gateway-level, and route/handler-level interceptors with onion-model execution order (`@onebun/core`)
+- **Built-in interceptors** — `createInterceptor()` factory for inline interceptors, `LoggingInterceptor` (request timing), `TimeoutInterceptor` (configurable deadline), `TransformInterceptor` (response mapping) (`@onebun/core`)
+- **`CacheInterceptor`** — caches HTTP GET 2xx responses via `CacheService`; non-GET and non-HTTP transports pass through. Apply with `@UseInterceptors(CacheInterceptor)` (`@onebun/cache`)
+- **`ExecutionContext` type discriminant** — `HttpExecutionContext.type = 'http'`, `WsExecutionContext.type = 'ws'`, `MessageExecutionContext.type = 'queue'` for type-safe narrowing in universal interceptors; `isHttpContext()` / `isWsContext()` / `isQueueContext()` type guards exported (`@onebun/core`)
+- **Multi-service mode guards** — single-service methods (`getPort()`, `getConfig()`, etc.) now throw a clear error when called on a multi-service app, and vice versa (`@onebun/core`)
+- **Removed `effect` from example dependencies** — examples no longer list `effect` as a direct dependency; it is provided transitively by `@onebun/core`
+- **Test script runs examples** — `bun test` now also runs `bun test examples/`
+
+### Documentation
+
+- New `docs/api/interceptors.md` page (468 lines) with full guide: interface, base class, built-in interceptors, execution order, transport-specific usage, DI examples
+- Updated request pipeline diagram in `docs/api/controllers.md` to include interceptors step
+- `docs/api/core.md`, `docs/api/websocket.md`, `docs/api/queue.md` updated with interceptor references
+- `docs/architecture.md` and `docs/features.md` updated to reflect interceptor support
+- `docs/migration-nestjs.md` updated with interceptor migration notes
+- `docs/roadmap.md` — interceptor items marked as complete; new items added for filters and guard unification across transports
+- Navigation sidebar updated with Interceptors page
+
+### Tests
+
+- Added 23 unit tests for interceptor core (`composeInterceptors`, `createInterceptor`, `BaseInterceptor`, `LoggingInterceptor`, `TimeoutInterceptor`, `TransformInterceptor`, context type guards)
+- Added 9 HTTP interceptor integration tests (route-level, controller-level, global, short-circuit, onion order, guard+interceptor interaction, guard rejection bypass)
+- Added 14 multi-service mode tests (mode detection, mode guards, start/stop integration with filtering by options and ENV)
+- Added 7 docs-example tests for interceptor documentation code samples
+- Hardcoded ports in guard rejection tests replaced with `port: 0`
+
+### Other
+
+- Removed direct `effect` dependency from `@onebun/cache`, `@onebun/docs`, `@onebun/drizzle`, and example `package.json` files (provided transitively)
+- Updated `peerDependencies` in `@onebun/cache`, `@onebun/docs`, `@onebun/drizzle`, `@onebun/nats` to `@onebun/core@^0.4.1`
+- `scripts/publish.ts` — minor publish script adjustments
+
 ## 0.4.0 — 2026-04-23
 
 ### Package Versions
