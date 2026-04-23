@@ -7,6 +7,9 @@ import {
 } from 'effect';
 
 import type { Controller } from '../module/controller';
+import type { ResolvedInterceptor } from '../types';
+import type { MultiServiceOrchestrator } from './multi-service-orchestrator';
+import type { MultiServiceApplicationOptions, ServicesMap } from './multi-service.types';
 import type { WsClientData } from '../websocket/ws.types';
 
 import {
@@ -32,6 +35,7 @@ import {
 import {
   getControllerFilters,
   getControllerGuards,
+  getControllerInterceptors,
   getControllerMetadata,
   getControllerMiddleware,
   getSseMetadata,
@@ -41,6 +45,7 @@ import { createDefaultExceptionFilter, type ExceptionFilter } from '../exception
 import { HttpException } from '../exception-filters/http-exception';
 import { OneBunFile, validateFile } from '../file/onebun-file';
 import { executeHttpGuards, HttpExecutionContextImpl } from '../http-guards/http-guards';
+import { composeInterceptors } from '../interceptors/interceptors';
 import {
   NotInitializedConfig,
   type IConfig,
@@ -288,15 +293,18 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
  * OneBun Application
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export class OneBunApplication<QA extends import('../queue/types').QueueAdapterConstructor<any> = import('../queue/types').QueueAdapterConstructor> {
+export class OneBunApplication<QA extends import('../queue/types').QueueAdapterConstructor<any> = import('../queue/types').QueueAdapterConstructor, TServices extends ServicesMap = ServicesMap> {
   private rootModule: ModuleInstance | null = null;
   private server: ReturnType<typeof Bun.serve> | null = null;
   private options: ApplicationOptions;
   private logger: SyncLogger;
   private config: IConfig<OneBunAppConfig>;
   private configService: ConfigServiceImpl | null = null;
-  private moduleClass: new (...args: unknown[]) => object;
+  private moduleClass: (new (...args: unknown[]) => object) | null;
   private loggerLayer: Layer.Layer<never, never, unknown>;
+  // Multi-service mode
+  private readonly multiServiceMode: boolean = false;
+  private orchestrator: MultiServiceOrchestrator<TServices> | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -312,13 +320,55 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private profilingReports: import('../profiler').ProfileReport[] = [];
 
   /**
-   * Create application instance
+   * Create single-service application instance
    */
   constructor(
     moduleClass: new (...args: unknown[]) => object,
     options?: Partial<ApplicationOptions<QA>>,
+  );
+  /**
+   * Create multi-service application instance
+   */
+  constructor(options: MultiServiceApplicationOptions<TServices>);
+  constructor(
+    moduleClassOrOptions: (new (...args: unknown[]) => object) | MultiServiceApplicationOptions<TServices>,
+    options?: Partial<ApplicationOptions<QA>>,
   ) {
-    this.moduleClass = moduleClass;
+    if (typeof moduleClassOrOptions !== 'function') {
+      // Multi-service mode
+      this.multiServiceMode = true;
+      this.moduleClass = null;
+      this.options = {} as ApplicationOptions;
+      this.config = new NotInitializedConfig();
+
+      // Initialize logger (simplified — no config/metrics/tracing at parent level)
+      this.loggerLayer = makeLogger();
+      const effectLogger = Effect.runSync(
+        Effect.provide(
+          Effect.map(LoggerService, (logger: Logger) =>
+            logger.child({ className: 'OneBunApplication[multi]' }),
+          ),
+          this.loggerLayer,
+        ) as Effect.Effect<Logger, never, never>,
+      ) as Logger;
+      this.logger = createSyncLogger(effectLogger);
+
+      // Eagerly create orchestrator (allows pre-start calls like getRunningServices())
+      const { MultiServiceOrchestrator: orchestratorClass } = require('./multi-service-orchestrator') as {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        MultiServiceOrchestrator: new (
+          opts: MultiServiceApplicationOptions<TServices>,
+          log: SyncLogger,
+        ) => MultiServiceOrchestrator<TServices>;
+      };
+      this.orchestrator = new orchestratorClass(moduleClassOrOptions, this.logger);
+
+      return;
+    }
+
+    // Single-service mode
+    this.multiServiceMode = false;
+    this.moduleClass = moduleClassOrOptions;
 
     // Resolve port and host with priority: explicit > env > default
     this.options = {
@@ -464,6 +514,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * const port = config.get('server.port'); // number
    */
   getConfig(): IConfig<OneBunAppConfig> {
+    this.ensureSingleServiceMode('getConfig');
     if (!this.configService) {
       throw new Error('Configuration not initialized. Provide envSchema in ApplicationOptions.');
     }
@@ -490,6 +541,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /** Fallback for dynamic paths */
   getConfigValue<T = unknown>(pathKey: string): T;
   getConfigValue(pathKey: string): unknown {
+    this.ensureSingleServiceMode('getConfigValue');
+
     return this.getConfig().get(pathKey);
   }
 
@@ -509,6 +562,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Get root module layer
    */
   getLayer(): Layer.Layer<never, never, unknown> {
+    this.ensureSingleServiceMode('getLayer');
+
     return this.ensureModule().getLayer();
   }
 
@@ -552,6 +607,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * This method now handles all the Effect.js calls internally
    */
   async start(): Promise<void> {
+    if (this.multiServiceMode) {
+      await this.orchestrator!.startAll();
+
+      return;
+    }
+
     // Default exception filter respects httpEnvelope option
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
       httpEnvelope: this.options.httpEnvelope,
@@ -587,7 +648,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         profileMark = getProfiler()!.start('bootstrap', 'module:create');
       }
       this.rootModule = OneBunModule.create(
-        this.moduleClass, this.loggerLayer, this.config,
+        this.moduleClass!, this.loggerLayer, this.config,
         this.options.tracing?.traceAll
           ? { traceAll: true, traceFilter: this.options.tracing.traceFilter }
           : undefined,
@@ -630,7 +691,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         if (isWebSocketGateway(controllerClass)) {
           const instance = this.ensureModule().getControllerInstance?.(controllerClass);
           if (instance) {
-            this.wsHandler.registerGateway(controllerClass, instance as import('../websocket/ws-base-gateway').BaseWebSocketGateway);
+            const ownerModule = this.ensureModule().getOwnerModuleForController?.(controllerClass) ?? this.ensureModule();
+            this.wsHandler.registerGateway(
+              controllerClass,
+              instance as import('../websocket/ws-base-gateway').BaseWebSocketGateway,
+              ownerModule.resolveInterceptors?.bind(ownerModule),
+            );
             this.logger.info(`Registered WebSocket gateway: ${controllerClass.name}`);
           }
         }
@@ -679,6 +745,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         controller: Controller,
         fullPath: string,
         method: string,
+        resolvedInterceptors?: ResolvedInterceptor[],
       ): (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => Promise<Response> {
         // Determine the effective timeout for this route:
         // SSE endpoints check @Sse({ timeout }) first, then route-level, then DEFAULT_SSE_TIMEOUT
@@ -813,6 +880,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   sseDecoratorOptions, req, queryParams, profiler,
                 );
 
+              // Wrap callHandler with interceptors if any (zero-cost when absent)
+              const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
+                ? (): Promise<Response> => {
+                  const interceptorCtx = new HttpExecutionContextImpl(
+                    req,
+                    routeMeta.handler,
+                    controller.constructor.name,
+                  );
+
+                  return composeInterceptors(resolvedInterceptors, interceptorCtx, callHandler)() as Promise<Response>;
+                }
+                : callHandler;
+
               // Execute middleware chain if any, then guards + handler
               if (routeMeta.middleware && routeMeta.middleware.length > 0) {
                 const guardedHandler = async (): Promise<Response> => {
@@ -850,7 +930,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     }
                   }
 
-                  return await callHandler();
+                  return await interceptedHandler();
                 };
 
                 const next = async (index: number): Promise<Response> => {
@@ -910,10 +990,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       },
                     );
                   } else {
-                    response = await callHandler();
+                    response = await interceptedHandler();
                   }
                 } else {
-                  response = await callHandler();
+                  response = await interceptedHandler();
                 }
               }
 
@@ -1148,6 +1228,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           const routeFilters = route.filters ?? [];
           const mergedFilters = [...globalFilters, ...ctrlFilters, ...routeFilters];
 
+          // Merge interceptors: global → controller → route (global wraps outermost)
+          const globalInterceptorClasses = this.options.interceptors ?? [];
+          const ctrlInterceptors = getControllerInterceptors(controllerClass);
+          const routeInterceptors = route.interceptors ?? [];
+          const mergedInterceptorClasses = [...globalInterceptorClasses, ...ctrlInterceptors, ...routeInterceptors];
+          const resolvedInterceptors = mergedInterceptorClasses.length > 0
+            ? (ownerModule.resolveInterceptors?.(mergedInterceptorClasses) ?? [])
+            : [];
+
           const routeWithMergedMiddleware: RouteMetadata = {
             ...route,
             middleware: mergedMiddleware.length > 0 ? mergedMiddleware : undefined,
@@ -1156,7 +1245,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           };
 
           // Create wrapped handler with full OneBun lifecycle (tracing, metrics, middleware)
-          const wrappedHandler = createRouteHandler(routeWithMergedMiddleware, handler, controller, fullPath, method);
+          const wrappedHandler = createRouteHandler(
+            routeWithMergedMiddleware, handler, controller, fullPath, method,
+            resolvedInterceptors.length > 0 ? resolvedInterceptors : undefined,
+          );
 
           // Add to bunRoutes grouped by path and method
           if (!bunRoutes[fullPath]) {
@@ -1970,6 +2062,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @param options - Shutdown options
    */
   async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
+    if (this.multiServiceMode) {
+      if (this.orchestrator) {
+        await this.orchestrator.stopAll();
+      }
+
+      return;
+    }
+
     const closeRedis = options?.closeSharedRedis ?? true;
     const signal = options?.signal;
 
@@ -2144,9 +2244,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const registrationClass = hasQueueDecorators(controllerClass)
           ? controllerClass
           : instance.constructor;
+        const queueOwnerModule = this.ensureModule().getOwnerModuleForController?.(controllerClass) ?? this.ensureModule();
         await this.queueService.registerService(
           instance,
           registrationClass as new (...args: unknown[]) => unknown,
+          queueOwnerModule.resolveInterceptors?.bind(queueOwnerModule),
         );
         this.logger.debug(`Registered queue handlers for controller: ${controllerClass.name}`);
       } else {
@@ -2167,6 +2269,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @returns The queue service or null if not enabled
    */
   getQueueService(): QueueService | null {
+    this.ensureSingleServiceMode('getQueueService');
+
     return this.queueService;
   }
 
@@ -2241,6 +2345,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @returns The OpenAPI spec or null if not generated
    */
   getOpenApiSpec(): Record<string, unknown> | null {
+    this.ensureSingleServiceMode('getOpenApiSpec');
+
     return this.openApiSpec;
   }
 
@@ -2287,6 +2393,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @returns Actual listening port, or the configured port if not yet started
    */
   getPort(): number {
+    this.ensureSingleServiceMode('getPort');
+
     return this.server?.port ?? this.options.port ?? 3000;
   }
 
@@ -2314,6 +2422,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @internal
    */
   getServer(): ReturnType<typeof Bun.serve> | null {
+    this.ensureSingleServiceMode('getServer');
+
     return this.server;
   }
 
@@ -2322,16 +2432,102 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * @returns The HTTP URL
    */
   getHttpUrl(): string {
+    this.ensureSingleServiceMode('getHttpUrl');
+
     return `http://${this.options.host ?? '0.0.0.0'}:${this.getPort()}`;
+  }
+
+  /**
+   * Ensure the application is in multi-service mode.
+   * @throws Error if called in single-service mode
+   */
+  private ensureMultiServiceMode(methodName: string): void {
+    if (!this.multiServiceMode) {
+      throw new Error(
+        `${methodName}() is only available in multi-service mode. ` +
+        'Pass { services: ... } to the OneBunApplication constructor.',
+      );
+    }
+  }
+
+  /**
+   * Ensure the application is in single-service mode.
+   * @throws Error if called in multi-service mode
+   */
+  private ensureSingleServiceMode(methodName: string): void {
+    if (this.multiServiceMode) {
+      throw new Error(
+        `${methodName}() is only available in single-service mode. ` +
+        `Use getApplication(name).${methodName}() instead.`,
+      );
+    }
+  }
+
+  /**
+   * Get a child OneBunApplication instance by service name.
+   * Only available in multi-service mode.
+   *
+   * @param name - Service name
+   * @returns OneBunApplication instance or undefined if not running
+   * @throws Error if called in single-service mode
+   */
+  getApplication(name: string & keyof TServices): OneBunApplication | undefined {
+    this.ensureMultiServiceMode('getApplication');
+
+    return this.orchestrator!.getApplication(name);
+  }
+
+  /**
+   * Get URL for a service.
+   * Returns local URL if service is running in this process,
+   * otherwise looks in externalServiceUrls option.
+   * Only available in multi-service mode.
+   *
+   * @param name - Service name
+   * @returns Service URL
+   * @throws Error if called in single-service mode or service not available
+   */
+  getServiceUrl(name: string & keyof TServices): string {
+    this.ensureMultiServiceMode('getServiceUrl');
+
+    return this.orchestrator!.getServiceUrl(name);
+  }
+
+  /**
+   * Get all running service names.
+   * Only available in multi-service mode.
+   *
+   * @returns Array of running service names
+   * @throws Error if called in single-service mode
+   */
+  getRunningServices(): string[] {
+    this.ensureMultiServiceMode('getRunningServices');
+
+    return this.orchestrator!.getRunningServices();
+  }
+
+  /**
+   * Check if a specific service is running.
+   * Only available in multi-service mode.
+   *
+   * @param name - Service name
+   * @returns true if service is running
+   * @throws Error if called in single-service mode
+   */
+  isServiceRunning(name: string & keyof TServices): boolean {
+    this.ensureMultiServiceMode('isServiceRunning');
+
+    return this.orchestrator!.isServiceRunning(name);
   }
 
   /**
    * Get a service instance by class from the module container.
    * Useful for accessing services outside of the request context.
+   * Only available in single-service mode.
    *
    * @param serviceClass - The service class to get
    * @returns The service instance
-   * @throws Error if service is not found
+   * @throws Error if service is not found or called in multi-service mode
    *
    * @example
    * ```typescript
@@ -2343,6 +2539,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * ```
    */
   getService<T>(serviceClass: new (...args: unknown[]) => T): T {
+    this.ensureSingleServiceMode('getService');
     if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');
     }

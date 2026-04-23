@@ -45,6 +45,9 @@ export { SharedRedisProvider, createRedisClient } from '@onebun/core';
 export { CacheModule } from './cache.module';
 export { CacheService } from './cache.service';
 
+// HTTP Interceptor
+export { CacheInterceptor } from './cache-interceptor';
+
 // Effect.js integration (suffix only for module and service to avoid name conflicts)
 export type {
   CacheService as CacheServiceEffect,

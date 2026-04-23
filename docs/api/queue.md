@@ -448,6 +448,24 @@ const customGuard = createMessageGuard((context) => {
 async handleCustom(message: Message) {}
 ```
 
+## Interceptors
+
+`@UseInterceptors()` works on queue handlers — same decorator as HTTP and WebSocket. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
+
+```typescript
+@UseInterceptors(LoggingInterceptor)
+@Controller('/processor')
+class EventProcessor extends BaseController {
+  @Subscribe('events.created')
+  @UseInterceptors(new TimeoutInterceptor(10000))
+  async handleEvent(message: Message<{ id: string }>) {
+    // handler code
+  }
+}
+```
+
+See [Interceptors](/api/interceptors) for full documentation.
+
 ## Lifecycle Decorators
 
 Lifecycle handlers run only when the class is registered as a **controller** (in a module's `controllers` array).

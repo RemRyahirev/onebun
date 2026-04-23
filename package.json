@@ -21,7 +21,7 @@
     "ex1": "bun run examples/crud-api/src/index.ts",
     "ex2": "bun run examples/multi-service/src/index.ts",
     "ex3": "bun run examples/websocket-chat/src/index.ts",
-    "test": "bun test",
+    "test": "bun test && bun test examples/",
     "lint": "eslint --fix",
     "typecheck": "bunx tsc --noEmit",
     "publish:check": "bun scripts/publish.ts --dry-run",

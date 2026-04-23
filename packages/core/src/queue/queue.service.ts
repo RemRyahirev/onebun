@@ -26,8 +26,11 @@ import type {
   MessageHandler,
   BuiltInAdapterType,
 } from './types';
+import type { ResolvedInterceptor } from '../types';
 
+import { getControllerInterceptors } from '../decorators/decorators';
 import { getMetadata } from '../decorators/metadata';
+import { composeInterceptors } from '../interceptors/interceptors';
 
 import {
   getSubscribeMetadata,
@@ -35,6 +38,7 @@ import {
   getIntervalMetadata,
   getTimeoutMetadata,
   getMessageGuards,
+  getMessageInterceptors,
   QUEUE_METADATA,
 } from './decorators';
 import { executeMessageGuards, MessageExecutionContextImpl } from './guards';
@@ -299,8 +303,12 @@ export class QueueService {
   async registerService(
     serviceInstance: any,
     serviceClass: new (...args: any[]) => any,
+    resolveInterceptorsFn?: (classes: (Function | import('../types').Interceptor)[]) => ResolvedInterceptor[],
   ): Promise<void> {
   /* eslint-enable @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types */
+    // Collect class-level interceptors
+    const classInterceptors = getControllerInterceptors(serviceClass);
+
     // Register subscribe handlers
     const subscriptions = getSubscribeMetadata(serviceClass);
     for (const sub of subscriptions) {
@@ -309,7 +317,14 @@ export class QueueService {
       ) => unknown;
       const guards = getMessageGuards(serviceClass, sub.propertyKey);
 
-      // Wrap handler with guards
+      // Merge interceptors: class-level + method-level, resolve via DI
+      const methodInterceptors = getMessageInterceptors(serviceClass, sub.propertyKey);
+      const mergedInterceptorClasses = [...classInterceptors, ...methodInterceptors];
+      const resolvedInterceptors = mergedInterceptorClasses.length > 0 && resolveInterceptorsFn
+        ? resolveInterceptorsFn(mergedInterceptorClasses)
+        : [];
+
+      // Wrap handler with guards and interceptors
       const wrappedHandler = async (message: Message) => {
         if (guards.length > 0) {
           const context = new MessageExecutionContextImpl(
@@ -323,6 +338,13 @@ export class QueueService {
           if (!passed) {
             return; // Guard rejected the message
           }
+        }
+
+        if (resolvedInterceptors.length > 0) {
+          const ctx = new MessageExecutionContextImpl(message, sub.pattern, method, serviceClass);
+          await composeInterceptors(resolvedInterceptors, ctx, async () => await method(message))();
+
+          return;
         }
 
         await method(message);

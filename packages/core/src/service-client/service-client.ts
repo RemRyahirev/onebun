@@ -142,10 +142,10 @@ export function createServiceClient<TDef extends ServiceDefinition>(
 }
 
 /**
- * Get the base URL for a service from MultiServiceApplication
+ * Get the base URL for a service from OneBunApplication in multi-service mode.
  * This is a convenience function for getting service URLs.
  *
- * @param app - MultiServiceApplication instance
+ * @param app - OneBunApplication instance (multi-service mode)
  * @param serviceName - Name of the service
  * @returns Service URL
  */

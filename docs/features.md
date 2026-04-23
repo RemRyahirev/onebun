@@ -16,6 +16,7 @@ production-grade backend services.
 - **Modules & DI**: NestJS-style @Module, @Controller, @Service with automatic constructor injection
 - **HTTP Routing**: Decorator-based (@Get, @Post, @Put, @Delete, @Patch) with path params, query, body, headers
 - **Guards**: Custom route guards for authentication/authorization
+- **Interceptors**: Universal handler wrapping across HTTP/WS/Queue for logging, caching, timeouts
 - **Middleware**: @UseMiddleware decorator with chaining support
 - **Graceful Shutdown**: Enabled by default, handles SIGTERM/SIGINT
 
@@ -75,7 +76,7 @@ production-grade backend services.
 ### Packages
 | Package | Key Features |
 |---------|-------------|
-| @onebun/core | Modules, DI, Controllers, Services, WebSocket Gateway, Queue, Scheduler, Guards, Middleware, Graceful Shutdown |
+| @onebun/core | Modules, DI, Controllers, Services, WebSocket Gateway, Queue, Scheduler, Guards, Interceptors, Middleware, Graceful Shutdown |
 | @onebun/docs | OpenAPI 3.1 auto-generation, Swagger UI, @ApiTags, @ApiOperation |
 | @onebun/drizzle | Drizzle ORM, PostgreSQL + SQLite, migrations, BaseRepository, schema-first types |
 | @onebun/cache | In-memory + Redis caching, shared connections, batch operations |
@@ -114,7 +115,12 @@ Standardized ApiResponse format across the application.
 ### Guards
 Custom guard support for authentication and authorization.
 Write guard functions and apply them via decorators to protect routes.
-→ [API Reference](/api/decorators)
+→ [API Reference](/api/guards)
+
+### Interceptors
+Universal handler wrapping across HTTP, WebSocket, and Queue transports.
+Use `@UseInterceptors()` at any level. Built-in: LoggingInterceptor, TimeoutInterceptor, CacheInterceptor.
+→ [API Reference](/api/interceptors)
 
 ### Middleware
 Request/response middleware with @UseMiddleware decorator.
@@ -322,7 +328,6 @@ If you're coming from NestJS, here's what to expect:
 - Bun.js runtime only (not Node.js compatible)
 
 ### Not yet available
-- Interceptors and Pipes (planned)
 - GraphQL integration (post-1.0 consideration)
 - CQRS module
 - Extensive third-party ecosystem
@@ -354,7 +359,7 @@ How OneBun compares to other TypeScript backend frameworks.
 | **Multi-service** | ✅ Single image | ❌ | ❌ | ❌ |
 | **Graceful shutdown** | ✅ | 🔌 | ❌ | ❌ |
 | **GraphQL** | ❌ (post-1.0) | 🔌 @nestjs/graphql | 👥 | 👥 |
-| **Interceptors / Pipes** | ❌ (planned) | ✅ | ❌ | ✅ hooks |
+| **Interceptors / Pipes** | ✅ | ✅ | ❌ | ✅ hooks |
 | **CQRS** | ❌ | 🔌 @nestjs/cqrs | ❌ | ❌ |
 | **Node.js support** | ❌ Bun only | ✅ | ✅ | ❌ Bun only |
 | **Third-party ecosystem** | 🆕 Growing | ✅ Mature | ✅ Growing | 👥 Growing |

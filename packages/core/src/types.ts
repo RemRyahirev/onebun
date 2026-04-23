@@ -1,5 +1,7 @@
 import type { BaseMiddleware } from './module/middleware';
+import type { MessageExecutionContext } from './queue/types';
 import type { QueueAdapterConstructor } from './queue/types';
+import type { WsExecutionContext } from './websocket/ws.types';
 import type { Type } from 'arktype';
 import type {
   Context,
@@ -181,6 +183,12 @@ export interface ModuleInstance {
    * using this module's DI scope (services + logger + config).
    */
   resolveMiddleware?(classes: Function[]): Function[];
+
+  /**
+   * Resolve interceptor class constructors (or instances) into bound `intercept()` functions
+   * using this module's DI scope (services + logger + config).
+   */
+  resolveInterceptors?(classes: (Function | Interceptor)[]): ResolvedInterceptor[];
 
   /**
    * Register a service instance by tag (e.g. before setup() for application-provided services like QueueService proxy).
@@ -527,6 +535,20 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
    * ```
    */
   filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+
+  /**
+   * Global interceptors applied to all routes.
+   * Controller-level and route-level interceptors wrap inside global ones.
+   * Pass class constructors (resolved via DI) or instances.
+   *
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   interceptors: [LoggingInterceptor],
+   * });
+   * ```
+   */
+  interceptors?: (Function | Interceptor)[];
 
   /**
    * When true, all error responses use HTTP 200 with the error code in the JSON body (envelope mode).
@@ -898,16 +920,39 @@ export interface RouteOptions {
 }
 
 /**
- * HTTP Execution Context provided to HTTP guards.
+ * HTTP Execution Context provided to guards, interceptors, and exception filters.
  * Gives read-only access to the incoming request and routing information.
  */
 export interface HttpExecutionContext {
+  /** Transport discriminant for type narrowing in universal handlers */
+  readonly type: 'http';
   /** Returns the incoming request object */
   getRequest(): OneBunRequest;
   /** Returns the handler method name (e.g. 'getUser') */
   getHandler(): string;
   /** Returns the controller class name (e.g. 'UserController') */
   getController(): string;
+}
+
+/**
+ * Universal execution context — discriminated union across HTTP, WebSocket, and Queue transports.
+ * Use `isHttpContext()`, `isWsContext()`, `isQueueContext()` for type-safe narrowing.
+ */
+export type ExecutionContext = HttpExecutionContext | WsExecutionContext | MessageExecutionContext;
+
+/** Type guard: narrows ExecutionContext to HTTP */
+export function isHttpContext(ctx: ExecutionContext): ctx is HttpExecutionContext {
+  return ctx.type === 'http';
+}
+
+/** Type guard: narrows ExecutionContext to WebSocket */
+export function isWsContext(ctx: ExecutionContext): ctx is WsExecutionContext {
+  return ctx.type === 'ws';
+}
+
+/** Type guard: narrows ExecutionContext to Queue/Message */
+export function isQueueContext(ctx: ExecutionContext): ctx is MessageExecutionContext {
+  return ctx.type === 'queue';
 }
 
 /**
@@ -927,6 +972,43 @@ export interface HttpGuard {
 }
 
 /**
+ * Universal Interceptor interface — works across HTTP, WebSocket, and Queue handlers.
+ * Interceptors wrap handler execution to transform results, measure timing,
+ * cache responses, or short-circuit by returning without calling next().
+ *
+ * Use `isHttpContext(context)` / `isWsContext(context)` / `isQueueContext(context)`
+ * for transport-specific logic.
+ *
+ * @example
+ * ```typescript
+ * class TimingInterceptor implements Interceptor {
+ *   async intercept(ctx: ExecutionContext, next: () => Promise<unknown>): Promise<unknown> {
+ *     const start = Date.now();
+ *     const result = await next();
+ *     console.log(`Took ${Date.now() - start}ms`);
+ *     return result;
+ *   }
+ * }
+ * ```
+ */
+export interface Interceptor {
+  intercept(
+    context: ExecutionContext,
+    next: () => Promise<unknown>,
+  ): Promise<unknown>;
+}
+
+/**
+ * Resolved interceptor function — a bound `intercept()` method of an
+ * instantiated Interceptor. Used internally by the execution pipeline.
+ * @internal
+ */
+export type ResolvedInterceptor = (
+  context: ExecutionContext,
+  next: () => Promise<unknown>,
+) => Promise<unknown>;
+
+/**
  * Route metadata
  */
 export interface RouteMetadata {
@@ -939,6 +1021,8 @@ export interface RouteMetadata {
   guards?: (Function | HttpGuard)[];
   /** Exception filters to apply when the route handler throws. */
   filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+  /** Interceptors to wrap the route handler. Supports class constructors and instances. */
+  interceptors?: (Function | Interceptor)[];
   /**
    * Response schemas for validation
    * Key is HTTP status code (e.g., 200, 201, 404)

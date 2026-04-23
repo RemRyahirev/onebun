@@ -1,6 +1,6 @@
 {
   "name": "@onebun/nats",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "NATS and JetStream integration for OneBun framework",
   "license": "MPL-2.0",
   "author": "RemRyahirev",
@@ -43,7 +43,7 @@
     "effect": "^3.13.10"
   },
   "peerDependencies": {
-    "@onebun/core": "^0.4.0"
+    "@onebun/core": "^0.4.1"
   },
   "devDependencies": {
     "@onebun/core": "workspace:^",

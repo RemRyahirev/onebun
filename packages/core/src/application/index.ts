@@ -6,4 +6,3 @@
 
 export * from './multi-service.types';
 export * from './application';
-export * from './multi-service-application';

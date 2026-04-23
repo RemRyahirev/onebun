@@ -105,9 +105,9 @@ Transform requests/responses in the pipeline (logging, mapping, caching).
 
 | Feature | Status |
 |---------|--------|
-| `Interceptor` interface | Planned |
-| `@UseInterceptors()` decorator | Planned |
-| Built-in: Logging, Cache, Timeout interceptors | Planned |
+| `Interceptor` interface | Done |
+| `@UseInterceptors()` decorator | Done |
+| Built-in: Logging, Cache, Timeout interceptors | Done |
 
 ### Health Checks
 

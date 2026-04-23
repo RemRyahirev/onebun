@@ -137,6 +137,8 @@ export interface WsHandlerMetadata {
   params: WsParamMetadata[];
   /** Guard functions to apply */
   guards?: Function[];
+  /** Resolved interceptor functions to apply */
+  interceptors?: import('../types').ResolvedInterceptor[];
 }
 
 /**
@@ -261,6 +263,8 @@ export interface PatternMatch {
  * Execution context for WebSocket guards
  */
 export interface WsExecutionContext {
+  /** Transport discriminant for type narrowing in universal handlers */
+  readonly type: 'ws';
   /** Get client data */
   getClient(): WsClientData;
   /** Get raw socket */

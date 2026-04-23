@@ -21,6 +21,8 @@ import type { ServerWebSocket } from 'bun';
  * Implementation of WsExecutionContext
  */
 export class WsExecutionContextImpl implements WsExecutionContext {
+  readonly type = 'ws' as const;
+
   constructor(
     private client: WsClientData,
     private socket: ServerWebSocket<WsClientData>,

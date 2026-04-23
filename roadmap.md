@@ -43,9 +43,9 @@
 ## Фаза 2: Developer Experience (adoption)
 
 ### HTTP Interceptors
-- [ ] Интерфейс `Interceptor` с методом `intercept(context, next)`
-- [ ] Декоратор `@UseInterceptors(...interceptors)`
-- [ ] Встроенные: `LoggingInterceptor`, `CacheInterceptor`, `TimeoutInterceptor`
+- [x] Интерфейс `Interceptor` с методом `intercept(context, next)`
+- [x] Декоратор `@UseInterceptors(...interceptors)`
+- [x] Встроенные: `LoggingInterceptor`, `CacheInterceptor`, `TimeoutInterceptor`
 
 ### Health Checks
 - [ ] `HealthModule` с `HealthController` (`/health`, `/ready`)
@@ -61,6 +61,11 @@
 - [x] Необязательный ведущий слэш в route decorators: `@Get(':id')`
 - [ ] Scoped providers: `REQUEST` и `TRANSIENT` scope
 - [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами
+- [ ] Проверить унификацию guards по контекстам
+- [x] Расширить interceptors на WebSockets и Queue
+- [ ] Расширить exception filters на WebSockets и Queue
+- [ ] Настройка middlewares, interceptors, filters, guard на уровне приложения
+- [ ] Настройка shared middlewares, interceptors, filters, guard на уровне всего проекта (мульти-сервис сетап)
 
 ### Performance: Observability hot path
 - [x] Объединить 4-5 последовательных `Effect.runPromise()` в request tracing pipeline в один `Effect.pipe()` с одним `runPromise` (packages/core/src/application/application.ts:740-766)

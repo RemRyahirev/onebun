@@ -90,7 +90,7 @@ These features are built into the framework -- no community packages needed:
 | Pipe (`@UsePipes`) | ArkType schema in `@Body()` | Declarative schema, not class-based. One schema = type + validation + OpenAPI |
 | Guard (`@UseGuards`) | Guard (`@UseGuards`) | Same `CanActivate`-style pattern via `HttpGuard` interface |
 | Exception Filter (`@UseFilters`) | Exception Filter (`@UseFilters`) | Same pattern. `HttpException` for throwing, `ExceptionFilter` for catching |
-| Interceptor | -- | Not yet available (planned) |
+| Interceptor (`@UseInterceptors`) | Interceptor (`@UseInterceptors`) | Same pattern, works across HTTP/WS/Queue. Promise-based `next()` instead of Observable. Universal `ExecutionContext` with type guards |
 | Middleware | Middleware | Class-based with `@Middleware()` decorator and full constructor DI |
 | `@Global()` | `@Global()` | Same behavior: exports available everywhere without explicit import |
 | `ConfigService` | `this.config` | Built-in on `BaseService`/`BaseController`, type-safe env schema |
@@ -145,7 +145,7 @@ These features are built into the framework -- no community packages needed:
 |--------|--------|-------|
 | `@UseGuards()` | `@UseGuards()` | Same. Supports class-level and method-level |
 | `@UseFilters()` | `@UseFilters()` | Same. Supports class-level and method-level |
-| `@UseInterceptors()` | -- | Not yet available |
+| `@UseInterceptors()` | `@UseInterceptors()` | Same. Supports class-level and method-level |
 | `@UsePipes()` | -- | Replaced by ArkType schemas in `@Body()` / `@Param()` |
 | `@UseMiddleware()` (custom) | `@UseMiddleware()` | Built-in. Class-level and method-level |
 
@@ -671,7 +671,6 @@ await module.close();  // always close in afterEach
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Interceptors | Planned | No equivalent yet |
 | GraphQL (`@nestjs/graphql`) | Planned (post-1.0) | Use REST + OpenAPI for now |
 | CQRS (`@nestjs/cqrs`) | Not available | -- |
 | Multiple transport layers | Partial | NATS/JetStream + Redis supported; no RabbitMQ, Kafka, gRPC |

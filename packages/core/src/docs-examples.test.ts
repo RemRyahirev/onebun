@@ -10,6 +10,7 @@
  * - docs/api/validation.md
  * - docs/api/websocket.md
  * - docs/api/guards.md
+ * - docs/api/interceptors.md
  * - docs/api/exception-filters.md
  * - docs/api/security.md
  * - docs/examples/basic-app.md
@@ -46,7 +47,7 @@ import type {
   OnModuleConfigure,
   QueueApplicationOptions,
 } from './types';
-import type { HttpExecutionContext } from './types';
+import type { ExecutionContext, HttpExecutionContext } from './types';
 import type { ServerWebSocket } from 'bun';
 
 import { type } from '@onebun/core';
@@ -82,7 +83,6 @@ import {
   Env,
   validate,
   validateOrThrow,
-  MultiServiceApplication,
   OneBunApplication,
   createServiceDefinition,
   createServiceClient,
@@ -143,6 +143,11 @@ import {
   createExceptionFilter,
   defaultExceptionFilter,
   HttpException,
+  UseInterceptors,
+  createInterceptor,
+  BaseInterceptor,
+  LoggingInterceptor,
+  TimeoutInterceptor,
   CorsMiddleware,
   RateLimitMiddleware,
   MemoryRateLimitStore,
@@ -2488,7 +2493,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 });
 
-describe('MultiServiceApplication (docs/api/core.md)', () => {
+describe('OneBunApplication multi-service mode (docs/api/core.md)', () => {
   /**
    * @source docs/api/core.md#multiserviceapplication
    */
@@ -2528,16 +2533,16 @@ describe('MultiServiceApplication (docs/api/core.md)', () => {
   /**
    * @source docs/api/core.md#usage-example-1
    */
-  it('should create MultiServiceApplication with service config', () => {
+  it('should create OneBunApplication in multi-service mode', () => {
     @Module({ controllers: [] })
     class UsersModule {}
 
     @Module({ controllers: [] })
     class OrdersModule {}
 
-    // From docs: MultiServiceApplication usage example
+    // From docs: OneBunApplication multi-service usage example
     // Note: routePrefix is boolean (true = use service name as prefix)
-    const multiApp = new MultiServiceApplication({
+    const multiApp = new OneBunApplication({
       services: {
         users: {
           module: UsersModule,
@@ -4799,6 +4804,68 @@ describe('File Upload API Documentation (docs/api/controllers.md)', () => {
     }
 
     expect(FileController).toBeDefined();
+  });
+});
+
+// ============================================================================
+// docs/api/interceptors.md examples
+// ============================================================================
+
+describe('docs/api/interceptors.md', () => {
+  it('createInterceptor — function-based interceptor returns a class constructor', () => {
+    const timingInterceptor = createInterceptor(async (_ctx, next) => {
+      const response = await next();
+
+      return response;
+    });
+
+    expect(typeof timingInterceptor).toBe('function');
+    const instance = new timingInterceptor();
+    expect(typeof instance.intercept).toBe('function');
+  });
+
+  it('class-based interceptor implements Interceptor', () => {
+    class AddHeaderInterceptor extends BaseInterceptor {
+      async intercept(
+        _context: ExecutionContext,
+        next: () => Promise<unknown>,
+      ): Promise<unknown> {
+        const response = await next() as Response;
+
+        return new Response(await response.text(), {
+          status: response.status,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { ...Object.fromEntries(response.headers.entries()), 'x-custom': 'true' },
+        });
+      }
+    }
+
+    expect(typeof AddHeaderInterceptor).toBe('function');
+    expect(new AddHeaderInterceptor()).toBeInstanceOf(BaseInterceptor);
+  });
+
+  it('UseInterceptors can be applied to class or method', () => {
+    @UseInterceptors(LoggingInterceptor)
+    @Controller('/api')
+    class InterceptedController extends BaseController {
+      @Get('/data')
+      @UseInterceptors(new TimeoutInterceptor(5000))
+      async getData() {
+        return { value: 42 };
+      }
+    }
+
+    expect(InterceptedController).toBeDefined();
+  });
+
+  it('LoggingInterceptor is a class', () => {
+    expect(typeof LoggingInterceptor).toBe('function');
+    expect(new LoggingInterceptor()).toBeInstanceOf(BaseInterceptor);
+  });
+
+  it('TimeoutInterceptor accepts timeout in constructor', () => {
+    const interceptor = new TimeoutInterceptor(3000);
+    expect(interceptor).toBeInstanceOf(BaseInterceptor);
   });
 });
 

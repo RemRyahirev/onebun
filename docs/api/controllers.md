@@ -654,11 +654,18 @@ HTTP Request
     │
     ▼
 ┌─────────────────────────────────────────────┐
-│ 6. Controller Handler                       │
+│ 6. Interceptors (@UseInterceptors)          │
+│    Global → controller → route (onion wrap) │
 └─────────────────────────────────────────────┘
     │
     ▼
-  Response (flows back through the chain)
+┌─────────────────────────────────────────────┐
+│ 7. Controller Handler                       │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+  Response (flows back through interceptors,
+  then through the middleware chain)
 ```
 
 Each middleware can perform **pre-processing** (before `next()`) and **post-processing** (after `next()`) — similar to the "onion model."

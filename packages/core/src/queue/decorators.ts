@@ -13,7 +13,9 @@ import type {
   MessageGuard,
   MessageGuardConstructor,
 } from './types';
+import type { Interceptor } from '../types';
 
+import { INTERCEPTORS_METADATA } from '../decorators/decorators';
 import { defineMetadata, getMetadata } from '../decorators/metadata';
 
 // ============================================================================
@@ -468,6 +470,17 @@ export function getMessageGuards(
   propertyKey: string | symbol,
 ): Array<MessageGuard | MessageGuardConstructor> {
   return getMetadata(QUEUE_METADATA.GUARDS, target, propertyKey) || [];
+}
+
+/**
+ * Get interceptors for a queue handler method.
+ * Reads from the shared `onebun:interceptors` key used by @UseInterceptors().
+ */
+export function getMessageInterceptors(
+  target: object,
+  propertyKey: string | symbol,
+): Array<Function | Interceptor> {
+  return getMetadata(INTERCEPTORS_METADATA, target, propertyKey) || [];
 }
 
 /**

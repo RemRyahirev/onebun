@@ -34,10 +34,12 @@ description: System architecture overview. Module hierarchy, DI container, reque
 2. TraceMiddleware adds trace context
 3. Middleware chain executes (global → module → controller → route)
 4. Guards execute (@UseGuards — controller-level, then route-level)
-5. Parameter decorators extract @Param, @Query, @Body
-6. Controller method executes with injected services
-7. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
-8. MetricsMiddleware records metrics
+5. Interceptors wrap handler (@UseInterceptors — global → controller → route, onion order)
+6. Parameter decorators extract @Param, @Query, @Body
+7. Controller method executes with injected services
+8. Response flows back through interceptors (onion exit)
+9. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
+10. MetricsMiddleware records metrics
 
 **Module Metadata Storage**:
 - Reflect.metadata stores decorator info

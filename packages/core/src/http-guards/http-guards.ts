@@ -19,6 +19,8 @@ import type {
  * Implementation of HttpExecutionContext
  */
 export class HttpExecutionContextImpl implements HttpExecutionContext {
+  readonly type = 'http' as const;
+
   constructor(
     private readonly request: OneBunRequest,
     private readonly handlerName: string,

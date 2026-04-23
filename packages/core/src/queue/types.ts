@@ -515,6 +515,9 @@ export interface TimeoutDecoratorOptions {
  * Message execution context for guards
  */
 export interface MessageExecutionContext {
+  /** Transport discriminant for type narrowing in universal handlers */
+  readonly type: 'queue';
+
   /** Get the message */
   getMessage<T>(): Message<T>;
 

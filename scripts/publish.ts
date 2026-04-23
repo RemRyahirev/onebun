@@ -87,9 +87,9 @@ async function validateLockfile(): Promise<boolean> {
     // Check for actual lockfile issues (not optional dependency failures)
     // "Failed to install N package" with optional deps is OK
     // "lockfile is out of date" or "lockfile has changed" is NOT OK
-    const lockfileOutOfDate = output.includes('lockfile') && 
+    const lockfileOutOfDate = output.includes('lockfile') &&
       (output.includes('out of date') || output.includes('has changed') || output.includes('frozen'));
-    
+
     // If exit code is 0, everything is fine
     if (result.exitCode === 0) {
       log.success('bun.lock is up to date');
@@ -99,9 +99,9 @@ async function validateLockfile(): Promise<boolean> {
     // If exit code is non-zero, check if it's just optional dependency failure
     // Optional dep failures show "Failed to install N package" but also have
     // "deleting optional dependency" warnings
-    const isOptionalDepFailure = output.includes('optional dependency') || 
+    const isOptionalDepFailure = output.includes('optional dependency') ||
       output.includes('Failed to install 1 package');
-    
+
     if (isOptionalDepFailure && !lockfileOutOfDate) {
       log.success('bun.lock is up to date (optional dependency build failed, but lockfile is valid)');
       return true;
@@ -122,7 +122,7 @@ async function runTests(): Promise<boolean> {
   log.step('Running all tests...');
 
   try {
-    const result = await $`bun test`.nothrow();
+    const result = await $`bun run test`.nothrow();
     const output = result.stderr.toString() + result.stdout.toString();
 
     // Check if tests passed by looking for "0 fail" in output

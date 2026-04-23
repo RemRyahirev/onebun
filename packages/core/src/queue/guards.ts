@@ -21,6 +21,8 @@ import type {
  * Implementation of MessageExecutionContext
  */
 export class MessageExecutionContextImpl implements MessageExecutionContext {
+  readonly type = 'queue' as const;
+
   constructor(
     private readonly message: Message,
     private readonly pattern: string,

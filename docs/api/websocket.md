@@ -376,6 +376,22 @@ getRoomsByPattern(pattern: string): Promise<WsRoom[]>;
 
 Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissionGuard`, `WsAnyPermissionGuard`, `WsRoomGuard`, `WsServiceGuard`. Custom: `createGuard((ctx) => boolean)`.
 
+## Interceptors
+
+`@UseInterceptors()` works on WebSocket gateways and individual message handlers — same decorator as HTTP. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
+
+```typescript
+@UseInterceptors(LoggingInterceptor)
+@WebSocketGateway({ path: '/ws' })
+class ChatGateway extends BaseWebSocketGateway {
+  @OnMessage('chat:*')
+  @UseInterceptors(new TimeoutInterceptor(5000))
+  handleMessage(@MessageData() data: unknown) { ... }
+}
+```
+
+See [Interceptors](/api/interceptors) for full documentation.
+
 ## Storage adapters
 
 Default is in-memory. For Redis, set `websocket.storage: { type: 'redis', redis: { url, prefix } }` and use `createRedisWsStorage(redisClient)` when providing a custom storage to the handler.

@@ -19,6 +19,9 @@ import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
 
+import { getControllerInterceptors } from '../decorators/decorators';
+import { composeInterceptors } from '../interceptors/interceptors';
+
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import { getGatewayMetadata, isWebSocketGateway } from './ws-decorators';
 import { WsExecutionContextImpl, executeGuards } from './ws-guards';
@@ -95,7 +98,11 @@ export class WsHandler {
   /**
    * Register a gateway instance
    */
-  registerGateway(gatewayClass: Function, instance: BaseWebSocketGateway): void {
+  registerGateway(
+    gatewayClass: Function,
+    instance: BaseWebSocketGateway,
+    resolveInterceptors?: (classes: (Function | import('../types').Interceptor)[]) => import('../types').ResolvedInterceptor[],
+  ): void {
     const metadata = getGatewayMetadata(gatewayClass);
     if (!metadata) {
       return;
@@ -107,7 +114,24 @@ export class WsHandler {
       handlers.set(type as WsHandlerType, []);
     }
 
+    // Collect gateway-level interceptors
+    const gatewayInterceptors = getControllerInterceptors(gatewayClass) as Function[];
+
     for (const handler of metadata.handlers) {
+      // Merge interceptors: gateway-level + handler-level
+      const handlerInterceptors = handler.interceptors ?? [];
+      const mergedClasses = [...gatewayInterceptors, ...handlerInterceptors];
+
+      // Resolve interceptor classes via DI
+      if (mergedClasses.length > 0 && resolveInterceptors) {
+        handler.interceptors = resolveInterceptors(mergedClasses);
+      } else if (mergedClasses.length > 0) {
+        // No resolver available — clear unresolved classes to avoid runtime errors
+        handler.interceptors = undefined;
+      } else {
+        handler.interceptors = undefined;
+      }
+
       const typeHandlers = handlers.get(handler.type) || [];
       typeHandlers.push(handler);
       handlers.set(handler.type, typeHandlers);
@@ -580,13 +604,21 @@ export class WsHandler {
       }
     }
 
-    // Call handler
+    // Call handler (with interceptors if any)
     const method = (instance as unknown as Record<string, Function>)[handler.handler];
-    if (typeof method === 'function') {
-      return await method.apply(instance, args);
+    if (typeof method !== 'function') {
+      return undefined;
     }
 
-    return undefined;
+    const handlerFn = async (): Promise<unknown> => await method.apply(instance, args);
+
+    if (handler.interceptors && handler.interceptors.length > 0) {
+      const ctx = new WsExecutionContextImpl(client, ws, data, handler, patternParams);
+
+      return await composeInterceptors(handler.interceptors, ctx, handlerFn)();
+    }
+
+    return await handlerFn();
   }
 
   /**

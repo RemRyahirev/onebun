@@ -51,11 +51,12 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-**Guards and Filters**:
+**Guards, Interceptors, and Filters**:
 - Use `@UseGuards(AuthGuard)` on a controller or route method to add authorization
+- Use `@UseInterceptors(LoggingInterceptor)` to wrap handler execution (logging, caching, timeouts)
 - Use `@UseFilters(myFilter)` on a controller or route method to add error handling
-- Both decorators merge with parent-level (controller + route, global + controller + route)
-- See [Guards](./guards.md) and [Exception Filters](./exception-filters.md) for full docs
+- All three decorators merge with parent-level (controller + route, global + controller + route)
+- See [Guards](./guards.md), [Interceptors](./interceptors.md), and [Exception Filters](./exception-filters.md) for full docs
 
 **Security Middleware shorthand**:
 ```typescript

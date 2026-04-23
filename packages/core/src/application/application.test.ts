@@ -35,9 +35,11 @@ import {
   Req,
   UseMiddleware,
   UseGuards,
+  UseInterceptors,
   Middleware,
 } from '../decorators/decorators';
 import { createHttpGuard } from '../http-guards/http-guards';
+import { createInterceptor } from '../interceptors/interceptors';
 import { Controller as BaseController } from '../module/controller';
 import { BaseMiddleware } from '../module/middleware';
 import { clearGlobalServicesRegistry } from '../module/module';
@@ -4633,6 +4635,345 @@ describe('OneBunApplication', () => {
     });
   });
 
+  describe('HTTP Interceptors', () => {
+    test('route-level interceptor wraps handler', async () => {
+      const addHeaderInterceptor = createInterceptor(async (_ctx, next) => {
+        const response = await next() as Response;
+        const body = await response.text();
+
+        return new Response(body, {
+          status: response.status,
+          headers: {
+            ...Object.fromEntries(response.headers.entries()),
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'x-intercepted': 'true',
+          },
+        });
+      });
+
+      @Controller('/api')
+      class InterceptedController extends BaseController {
+        @Get('/data')
+        @UseInterceptors(addHeaderInterceptor)
+        async getData() {
+          return { value: 42 };
+        }
+      }
+
+      @Module({ controllers: [InterceptedController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/data`);
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-intercepted')).toBe('true');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body = await response.json() as any;
+        expect(body.result.value).toBe(42);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('controller-level interceptor applies to all routes', async () => {
+      const addCtrlInterceptor = createInterceptor(async (_ctx, next) => {
+        const response = await next() as Response;
+        const body = await response.text();
+
+        return new Response(body, {
+          status: response.status,
+          headers: {
+            ...Object.fromEntries(response.headers.entries()),
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'x-ctrl-interceptor': 'yes',
+          },
+        });
+      });
+
+      @UseInterceptors(addCtrlInterceptor)
+      @Controller('/api')
+      class InterceptedController extends BaseController {
+        @Get('/one')
+        async one() {
+          return { route: 'one' };
+        }
+
+        @Get('/two')
+        async two() {
+          return { route: 'two' };
+        }
+      }
+
+      @Module({ controllers: [InterceptedController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const res1 = await fetch(`http://localhost:${app.getPort()}/api/one`);
+        expect(res1.headers.get('x-ctrl-interceptor')).toBe('yes');
+
+        const res2 = await fetch(`http://localhost:${app.getPort()}/api/two`);
+        expect(res2.headers.get('x-ctrl-interceptor')).toBe('yes');
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('global interceptor via ApplicationOptions applies to all routes', async () => {
+      const addGlobalInterceptor = createInterceptor(async (_ctx, next) => {
+        const response = await next() as Response;
+        const body = await response.text();
+
+        return new Response(body, {
+          status: response.status,
+          headers: {
+            ...Object.fromEntries(response.headers.entries()),
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'x-global': 'true',
+          },
+        });
+      });
+
+      @Controller('/api')
+      class PlainController extends BaseController {
+        @Get('/hello')
+        async hello() {
+          return { message: 'hello' };
+        }
+      }
+
+      @Module({ controllers: [PlainController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, {
+        port: 0,
+        interceptors: [addGlobalInterceptor],
+      });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/hello`);
+        expect(response.headers.get('x-global')).toBe('true');
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('interceptor can short-circuit without calling handler', async () => {
+      const shortCircuit = createInterceptor(async () => new Response(
+        JSON.stringify({ cached: true }),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ));
+
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      const handlerCalled = mock(() => {});
+
+      @Controller('/api')
+      class ShortCircuitController extends BaseController {
+        @Get('/cached')
+        @UseInterceptors(shortCircuit)
+        async getCached() {
+          handlerCalled();
+
+          return { cached: false };
+        }
+      }
+
+      @Module({ controllers: [ShortCircuitController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/cached`);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body = await response.json() as any;
+
+        expect(body.cached).toBe(true);
+        expect(handlerCalled).not.toHaveBeenCalled();
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('interceptors execute in onion order (global → controller → route)', async () => {
+      const order: string[] = [];
+
+      const globalInterceptor = createInterceptor(async (_ctx, next) => {
+        order.push('global:before');
+        const res = await next();
+        order.push('global:after');
+
+        return res;
+      });
+
+      const ctrlInterceptor = createInterceptor(async (_ctx, next) => {
+        order.push('ctrl:before');
+        const res = await next();
+        order.push('ctrl:after');
+
+        return res;
+      });
+
+      const routeInterceptor = createInterceptor(async (_ctx, next) => {
+        order.push('route:before');
+        const res = await next();
+        order.push('route:after');
+
+        return res;
+      });
+
+      @UseInterceptors(ctrlInterceptor)
+      @Controller('/api')
+      class OrderController extends BaseController {
+        @Get('/test')
+        @UseInterceptors(routeInterceptor)
+        async test() {
+          order.push('handler');
+
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [OrderController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, {
+        port: 0,
+        interceptors: [globalInterceptor],
+      });
+      await app.start();
+
+      try {
+        await fetch(`http://localhost:${app.getPort()}/api/test`);
+
+        expect(order).toEqual([
+          'global:before', 'ctrl:before', 'route:before',
+          'handler',
+          'route:after', 'ctrl:after', 'global:after',
+        ]);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('interceptor works together with guards', async () => {
+      const allowGuard = createHttpGuard(() => true);
+      const addInterceptor = createInterceptor(async (_ctx, next) => {
+        const response = await next() as Response;
+        const body = await response.text();
+
+        return new Response(body, {
+          status: response.status,
+          headers: {
+            ...Object.fromEntries(response.headers.entries()),
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            'x-intercepted': 'true',
+          },
+        });
+      });
+
+      @UseGuards(allowGuard)
+      @UseInterceptors(addInterceptor)
+      @Controller('/api')
+      class GuardedInterceptedController extends BaseController {
+        @Get('/data')
+        async getData() {
+          return { secure: true };
+        }
+      }
+
+      @Module({ controllers: [GuardedInterceptedController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/data`);
+
+        expect(response.status).toBe(200);
+        expect(response.headers.get('x-intercepted')).toBe('true');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body = await response.json() as any;
+        expect(body.result.secure).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('guard rejection bypasses interceptor', async () => {
+      const rejectGuard = createHttpGuard(() => false);
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
+      const interceptorCalled = mock(() => {});
+      const trackInterceptor = createInterceptor(async (_ctx, next) => {
+        interceptorCalled();
+
+        return await next();
+      });
+
+      @UseGuards(rejectGuard)
+      @UseInterceptors(trackInterceptor)
+      @Controller('/api')
+      class RejectController extends BaseController {
+        @Get('/protected')
+        async getProtected() {
+          return { secret: true };
+        }
+      }
+
+      @Module({ controllers: [RejectController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/protected`);
+
+        expect(response.status).toBe(403);
+        expect(interceptorCalled).not.toHaveBeenCalled();
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('no interceptors — handler called directly without overhead', async () => {
+      @Controller('/api')
+      class PlainController extends BaseController {
+        @Get('/fast')
+        async fast() {
+          return { fast: true };
+        }
+      }
+
+      @Module({ controllers: [PlainController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/fast`);
+
+        expect(response.status).toBe(200);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body = await response.json() as any;
+        expect(body.result.fast).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
   describe('Guard rejection HTTP status code', () => {
     test('should return 403 when guard rejects and httpEnvelope is false', async () => {
       const rejectGuard = createHttpGuard(() => false);
@@ -4649,12 +4990,11 @@ describe('OneBunApplication', () => {
       @Module({ controllers: [GuardedController] })
       class TestModule {}
 
-      const port = 44_301;
-      const app = createTestApp(TestModule, { port });
+      const app = createTestApp(TestModule, { port: 0 });
       await app.start();
 
       try {
-        const response = await fetch(`http://localhost:${port}/api/protected`);
+        const response = await fetch(`http://localhost:${app.getPort()}/api/protected`);
 
         expect(response.status).toBe(403);
         const body = await response.json();
@@ -4679,12 +5019,11 @@ describe('OneBunApplication', () => {
       @Module({ controllers: [GuardedController] })
       class TestModule {}
 
-      const port = 44_302;
-      const app = createTestApp(TestModule, { port, httpEnvelope: true });
+      const app = createTestApp(TestModule, { port: 0, httpEnvelope: true });
       await app.start();
 
       try {
-        const response = await fetch(`http://localhost:${port}/api/protected`);
+        const response = await fetch(`http://localhost:${app.getPort()}/api/protected`);
 
         expect(response.status).toBe(200);
         const body = await response.json();

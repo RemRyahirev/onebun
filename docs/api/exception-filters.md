@@ -41,7 +41,7 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 
 # Exception Filters
 
-Exception filters provide centralized, type-safe error handling for HTTP routes. When a route handler (or a guard) throws, the filter chain catches the error and converts it to a response.
+Exception filters provide centralized, type-safe error handling for HTTP routes. When a route handler, guard, or interceptor throws, the filter chain catches the error and converts it to a response.
 
 ## Interface
 

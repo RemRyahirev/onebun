@@ -5,7 +5,7 @@ import {
 } from 'effect';
 
 import type { ModuleInstance } from '../types';
-
+import type { Interceptor, ResolvedInterceptor } from '../types';
 
 import {
   createSyncLogger,
@@ -23,6 +23,7 @@ import {
   registerControllerDependencies,
 } from '../decorators/decorators';
 import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
+import { BaseInterceptor } from '../interceptors/interceptors';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -566,6 +567,64 @@ export class OneBunModule implements ModuleInstance {
       // Preserve class name for profiling and debugging
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (bound as any)._middlewareName = cls.name;
+
+      return bound;
+    });
+  }
+
+  /**
+   * Instantiate interceptor classes with DI from this module's service scope.
+   * Resolves constructor dependencies, calls initializeInterceptor(), and
+   * returns bound intercept() functions ready for the execution pipeline.
+   *
+   * Accepts both class constructors (resolved via DI) and instances (used as-is).
+   */
+  resolveInterceptors(classes: (Function | Interceptor)[]): ResolvedInterceptor[] {
+    return classes.map((cls) => {
+      // If already an instance (not a constructor), bind intercept() directly
+      if (typeof cls !== 'function') {
+        const instance = cls;
+        if ('initializeInterceptor' in instance) {
+          (instance as BaseInterceptor).initializeInterceptor(this.logger, this.config);
+        }
+
+        return instance.intercept.bind(instance);
+      }
+
+      // Resolve constructor dependencies (same logic as for middleware)
+      const paramTypes = getConstructorParamTypes(cls);
+      const deps: unknown[] = [];
+
+      if (paramTypes && paramTypes.length > 0) {
+        for (const paramType of paramTypes) {
+          const dep = this.resolveDependencyByType(paramType);
+          if (dep) {
+            deps.push(dep);
+          } else {
+            this.logger.warn(
+              `Could not resolve dependency ${paramType.name} for interceptor ${cls.name}`,
+            );
+          }
+        }
+      }
+
+      const interceptorConstructor = cls as new (...args: unknown[]) => Interceptor;
+
+      // Set ambient init context so BaseInterceptor constructor can pick up logger/config
+      BaseInterceptor.setInitContext(this.logger, this.config);
+      let instance: Interceptor;
+      try {
+        instance = new interceptorConstructor(...deps);
+      } finally {
+        BaseInterceptor.clearInitContext();
+      }
+
+      // Fallback initialization for interceptors extending BaseInterceptor
+      if ('initializeInterceptor' in instance) {
+        (instance as BaseInterceptor).initializeInterceptor(this.logger, this.config);
+      }
+
+      const bound = instance.intercept.bind(instance);
 
       return bound;
     });

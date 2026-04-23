@@ -151,5 +151,8 @@ export * from './http-guards';
 // Exception Filters
 export * from './exception-filters';
 
+// HTTP Interceptors
+export * from './interceptors';
+
 // Security Middleware
 export * from './security';

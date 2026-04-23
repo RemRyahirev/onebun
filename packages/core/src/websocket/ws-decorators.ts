@@ -15,9 +15,11 @@ import type {
   WsGuard,
 } from './ws.types';
 
+import { INTERCEPTORS_METADATA } from '../decorators/decorators';
 import { Reflect } from '../decorators/metadata';
 
 import { WsHandlerType, WsParamType } from './ws.types';
+
 
 // ============================================================================
 // Metadata Keys
@@ -111,6 +113,10 @@ function createWsHandlerDecorator(type: WsHandlerType, pattern?: string) {
     const guards: Function[] =
       Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey) || [];
 
+    // Get interceptors metadata (shared key with HTTP/Queue via @UseInterceptors)
+    const interceptors: Function[] =
+      Reflect.getMetadata(INTERCEPTORS_METADATA, target, propertyKey) || [];
+
     // Create handler metadata
     const handlerMetadata: WsHandlerMetadata = {
       type,
@@ -118,6 +124,8 @@ function createWsHandlerDecorator(type: WsHandlerType, pattern?: string) {
       handler: propertyKey,
       params,
       guards,
+      // Interceptors stored as unresolved here; resolved at gateway registration time
+      ...(interceptors.length > 0 ? { interceptors: interceptors as unknown as import('../types').ResolvedInterceptor[] } : {}),
     };
 
     metadata.handlers.push(handlerMetadata);

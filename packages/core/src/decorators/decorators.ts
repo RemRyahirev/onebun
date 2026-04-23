@@ -2,6 +2,7 @@ import './metadata'; // Import polyfill first
 import { type, type Type } from 'arktype';
 
 import type { ExceptionFilter } from '../exception-filters/exception-filters';
+import type { Interceptor } from '../interceptors/interceptors';
 
 import {
   type ControllerMetadata,
@@ -199,6 +200,18 @@ export function controllerDecorator(basePath: string = '') {
       );
     }
 
+    // Copy controller-level interceptors from original class to wrapped class
+    // This ensures @UseInterceptors works regardless of decorator order
+    const existingControllerInterceptors: (Function | Interceptor)[] | undefined =
+      Reflect.getMetadata(CONTROLLER_INTERCEPTORS_METADATA, target);
+    if (existingControllerInterceptors) {
+      Reflect.defineMetadata(
+        CONTROLLER_INTERCEPTORS_METADATA,
+        existingControllerInterceptors,
+        WrappedController,
+      );
+    }
+
     return WrappedController as T;
   };
 }
@@ -324,6 +337,10 @@ function createRouteDecorator(method: HttpMethod) {
       const filters: ExceptionFilter[] =
         Reflect.getMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey) || [];
 
+      // Get HTTP interceptors metadata if exists
+      const interceptors: (Function | Interceptor)[] =
+        Reflect.getMetadata(INTERCEPTORS_METADATA, target, propertyKey) || [];
+
       // Get response schemas metadata if exists (also read at spec generation time for order independence)
       const responseSchemas: Array<{
         statusCode: number;
@@ -339,6 +356,7 @@ function createRouteDecorator(method: HttpMethod) {
         middleware,
         guards,
         filters,
+        interceptors,
         responseSchemas: responseSchemas.map((rs) => ({
           statusCode: rs.statusCode,
           schema: rs.schema,
@@ -696,6 +714,16 @@ const EXCEPTION_FILTERS_METADATA = 'onebun:exception_filters';
 const CONTROLLER_EXCEPTION_FILTERS_METADATA = 'onebun:controller_exception_filters';
 
 /**
+ * Metadata key for method-level interceptors (shared across HTTP, WS, Queue)
+ */
+export const INTERCEPTORS_METADATA = 'onebun:interceptors';
+
+/**
+ * Metadata key for class-level interceptors (shared across HTTP, WS, Queue)
+ */
+const CONTROLLER_INTERCEPTORS_METADATA = 'onebun:controller_interceptors';
+
+/**
  * Middleware decorator — can be applied to both controllers (class) and individual routes (method).
  *
  * Pass middleware **class constructors** (extending `BaseMiddleware`), not instances.
@@ -929,6 +957,79 @@ export function UseFilters(...filters: ExceptionFilter[]): any {
     Reflect.defineMetadata(
       EXCEPTION_FILTERS_METADATA,
       [...existingFilters, ...filters],
+      target,
+      propertyKey,
+    );
+
+    return descriptor;
+  };
+}
+
+/**
+ * Get controller-level interceptors for a controller class.
+ * Returns interceptors registered via @UseInterceptors() applied to the class.
+ *
+ * @param target - Controller class (constructor)
+ * @returns Array of interceptor class constructors or instances
+ */
+export function getControllerInterceptors(target: Function): (Function | Interceptor)[] {
+  return Reflect.getMetadata(CONTROLLER_INTERCEPTORS_METADATA, target) || [];
+}
+
+/**
+ * Interceptors decorator — can be applied to both controllers (class) and individual routes (method).
+ *
+ * Pass interceptor **class constructors** (resolved via DI at startup) or **instances**
+ * (used as-is, e.g. `new TimeoutInterceptor(5000)`).
+ *
+ * Interceptors wrap the handler in onion order: global → controller → route.
+ * The first interceptor in the list wraps outermost.
+ *
+ * Execution order: middleware → guards → interceptors(handler) → response
+ *
+ * @example Class-level (all routes)
+ * ```typescript
+ * \@Controller('/api')
+ * \@UseInterceptors(LoggingInterceptor)
+ * class ApiController extends BaseController { ... }
+ * ```
+ *
+ * @example Method-level (single route)
+ * ```typescript
+ * \@Get('/slow')
+ * \@UseInterceptors(new TimeoutInterceptor(5000))
+ * slowRoute() { ... }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function UseInterceptors(...interceptors: (Function | Interceptor)[]): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return function useInterceptorsDecorator(...args: any[]): any {
+    // ---- Class decorator: target is a constructor function ----
+    if (args.length === 1 && typeof args[0] === 'function') {
+      const target = args[0] as Function;
+      const existing: (Function | Interceptor)[] =
+        Reflect.getMetadata(CONTROLLER_INTERCEPTORS_METADATA, target) || [];
+      Reflect.defineMetadata(
+        CONTROLLER_INTERCEPTORS_METADATA,
+        [...existing, ...interceptors],
+        target,
+      );
+
+      return target;
+    }
+
+    // ---- Method decorator: (target, propertyKey, descriptor) ----
+    const [target, propertyKey, descriptor] = args as [
+      object,
+      string | symbol,
+      PropertyDescriptor,
+    ];
+    const existingInterceptors: (Function | Interceptor)[] =
+      Reflect.getMetadata(INTERCEPTORS_METADATA, target, propertyKey) || [];
+    Reflect.defineMetadata(
+      INTERCEPTORS_METADATA,
+      [...existingInterceptors, ...interceptors],
       target,
       propertyKey,
     );
