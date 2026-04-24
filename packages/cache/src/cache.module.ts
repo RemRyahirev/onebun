@@ -92,11 +92,11 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  * ```typescript
  * import { Controller, Get } from '@onebun/core';
  * import { CacheService } from '@onebun/cache';
- * 
+ *
  * @Controller('/api')
  * export class MyController {
  *   constructor(private cacheService: CacheService) {}
- *   
+ *
  *   @Get('/cached')
  *   async getCached() {
  *     const value = await this.cacheService.get('key');
@@ -104,6 +104,8 @@ const CACHE_MODULE_OPTIONS = Symbol('CACHE_MODULE_OPTIONS');
  *   }
  * }
  * ```
+ *
+ * @see docs:api/cache.md
  */
 @Global()
 @Module({

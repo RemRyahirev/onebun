@@ -33,6 +33,7 @@ import { isHttpContext, isWsContext } from '../types';
  * @param context - Execution context for this request/message/event
  * @param handler - The inner handler to wrap
  * @returns A function that executes the full interceptor chain
+ * @see docs:api/interceptors.md
  */
 export function composeInterceptors(
   interceptors: ResolvedInterceptor[],
@@ -60,6 +61,7 @@ export function composeInterceptors(
  *
  * @param fn - Interceptor function receiving the execution context and next handler
  * @returns Interceptor class constructor
+ * @see docs:api/interceptors.md
  *
  * @example
  * ```typescript
@@ -104,6 +106,8 @@ export function createInterceptor(
  *
  * Interceptors are instantiated **once** at application startup and reused
  * for every matching request/message.
+ *
+ * @see docs:api/interceptors.md
  *
  * @example
  * ```typescript
@@ -223,6 +227,8 @@ function getContextLabel(context: ExecutionContext): string {
  * Logs `Incoming <label>` before and `Completed <label> DURATIONms` after
  * handler execution. On error, logs `Failed <label> DURATIONms` and re-throws.
  *
+ * @see docs:api/interceptors.md
+ *
  * @example
  * ```typescript
  * // HTTP controller
@@ -275,6 +281,8 @@ export class LoggingInterceptor extends BaseInterceptor {
  * For HTTP, throws `HttpException(408)`. For other transports, throws a generic `Error`.
  *
  * Pass as an **instance** since it requires a constructor argument.
+ *
+ * @see docs:api/interceptors.md
  *
  * @example
  * ```typescript

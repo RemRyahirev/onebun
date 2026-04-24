@@ -25,6 +25,8 @@ import { spawnSync } from 'bun';
  *   dialect: 'postgresql',
  * });
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 export async function generateMigrations(options?: {
   schemaPath?: string | string[];
@@ -86,6 +88,8 @@ export default {
  *   connectionString: 'postgresql://user:pass@localhost/db',
  * });
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 export async function pushSchema(options?: {
   schemaPath?: string | string[];

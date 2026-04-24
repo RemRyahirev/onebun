@@ -5,6 +5,8 @@ import { BaseMiddleware } from '../module/middleware';
 /**
  * Configuration for each security header directive.
  * Set to `false` to disable a specific header entirely.
+ *
+ * @see docs:api/security.md
  */
 export interface SecurityHeadersOptions {
   /**
@@ -149,6 +151,8 @@ const HEADER_MAP: Record<keyof SecurityHeadersOptions, string> = {
  *   ],
  * });
  * ```
+ *
+ * @see docs:api/security.md
  */
 export class SecurityHeadersMiddleware extends BaseMiddleware {
   private readonly resolvedHeaders: Array<[string, string]>;

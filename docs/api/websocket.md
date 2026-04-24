@@ -354,8 +354,8 @@ Every gateway automatically receives `this.logger` (a child logger scoped to the
 emit(clientId: string, event: string, data: unknown): void;
 broadcast(event: string, data: unknown, excludeClientIds?: string[]): void;
 emitToRoom(room: string, event: string, data: unknown, excludeClientIds?: string[]): void;
-emitToRooms(rooms: string[], event: string, data: unknown): Promise<void>;
-emitToRoomPattern(pattern: string, event: string, data: unknown): Promise<void>;
+emitToRooms(rooms: string[], event: string, data: unknown, excludeClientIds?: string[]): Promise<void>;
+emitToRoomPattern(pattern: string, event: string, data: unknown, excludeClientIds?: string[]): Promise<void>;
 ```
 
 ### Connection and room management
@@ -364,6 +364,7 @@ emitToRoomPattern(pattern: string, event: string, data: unknown): Promise<void>;
 disconnectClient(clientId: string, reason?: string): void;
 disconnectAll(reason?: string): void;
 disconnectRoom(room: string, reason?: string): Promise<void>;
+disconnectRoomPattern(pattern: string, reason?: string): Promise<void>;
 joinRoom(clientId: string, room: string): Promise<void>;
 leaveRoom(clientId: string, room: string): Promise<void>;
 getClient(clientId: string): Promise<WsClientData | undefined>;

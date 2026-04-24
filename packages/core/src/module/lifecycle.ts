@@ -24,6 +24,7 @@
 /**
  * Interface for hook called after module initialization.
  * Called after the service/controller is instantiated and dependencies are injected.
+ * @see docs:api/services.md
  */
 export interface OnModuleInit {
   /**
@@ -36,6 +37,7 @@ export interface OnModuleInit {
 /**
  * Interface for hook called after application initialization.
  * Called after all modules are initialized and before the HTTP server starts.
+ * @see docs:api/services.md
  */
 export interface OnApplicationInit {
   /**
@@ -48,6 +50,7 @@ export interface OnApplicationInit {
 /**
  * Interface for hook called when module is being destroyed.
  * Called during application shutdown, after HTTP server stops.
+ * @see docs:api/services.md
  */
 export interface OnModuleDestroy {
   /**
@@ -60,6 +63,7 @@ export interface OnModuleDestroy {
 /**
  * Interface for hook called before application shutdown begins.
  * Called at the very start of the shutdown process.
+ * @see docs:api/services.md
  */
 export interface BeforeApplicationDestroy {
   /**
@@ -73,6 +77,7 @@ export interface BeforeApplicationDestroy {
 /**
  * Interface for hook called after application shutdown completes.
  * Called at the very end of the shutdown process.
+ * @see docs:api/services.md
  */
 export interface OnApplicationDestroy {
   /**

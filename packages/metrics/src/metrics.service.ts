@@ -70,6 +70,8 @@ function getStatusCodeString(code: number): string {
 
 /**
  * Metrics service interface
+ *
+ * @see docs:api/metrics.md
  */
 export interface MetricsService {
   /**
@@ -381,6 +383,8 @@ export const makeMetricsService = (
 
 /**
  * Create metrics service with configuration
+ *
+ * @see docs:api/metrics.md
  */
 export const createMetricsService = (
   options?: MetricsOptions,

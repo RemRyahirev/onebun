@@ -50,6 +50,7 @@ import type { SyncLogger } from '@onebun/logger';
  *   }
  * }
  * ```
+ * @see docs:api/security.md
  */
 export abstract class BaseMiddleware {
   /** Logger instance scoped to the middleware class name */

@@ -177,7 +177,7 @@ It does **not** validate or decode the token. Combine with a custom guard or mid
 
 ### RolesGuard
 
-Reads a comma-separated list of roles from the `x-user-roles` request header and verifies that at least one required role is present.
+Reads a comma-separated list of roles from the `x-user-roles` request header and verifies that **all** required roles are present (AND logic).
 
 ```typescript
 import { RolesGuard, UseGuards } from '@onebun/core';

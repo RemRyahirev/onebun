@@ -36,6 +36,8 @@ const TRACEPARENT_REGEX = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
 
 /**
  * Trace service interface
+ *
+ * @see docs:api/trace.md
  */
 export interface TraceService {
   /**
@@ -544,6 +546,8 @@ export class TraceServiceImpl implements TraceService {
 
 /**
  * Create TraceService layer
+ *
+ * @see docs:api/trace.md
  */
 export const makeTraceService = (options?: TraceOptions): Layer.Layer<TraceService> =>
   Layer.succeed(traceService, new TraceServiceImpl(options));

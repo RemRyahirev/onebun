@@ -48,6 +48,8 @@ export interface NatsMessage {
  * NATS Client
  *
  * Simplified wrapper around the NATS.js client.
+ *
+ * @see docs:api/queue.md
  */
 export class NatsClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -194,6 +196,8 @@ export class NatsClient {
 
 /**
  * Create a NATS client
+ *
+ * @see docs:api/queue.md
  */
 export function createNatsClient(options: NatsConnectionOptions): NatsClient {
   return new NatsClient(options);

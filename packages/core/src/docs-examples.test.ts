@@ -1,21 +1,20 @@
 /**
  * Documentation Examples Tests for @onebun/core
  *
- * This file tests code examples from:
  * - packages/core/README.md
- * - docs/api/core.md
- * - docs/api/controllers.md
- * - docs/api/decorators.md
- * - docs/api/services.md
- * - docs/api/validation.md
- * - docs/api/websocket.md
- * - docs/api/guards.md
- * - docs/api/interceptors.md
- * - docs/api/exception-filters.md
- * - docs/api/security.md
- * - docs/examples/basic-app.md
- * - docs/examples/crud-api.md
- * - docs/examples/websocket-chat.md
+ * @source docs:api/core.md
+ * @source docs:api/controllers.md
+ * @source docs:api/decorators.md
+ * @source docs:api/services.md
+ * @source docs:api/validation.md
+ * @source docs:api/websocket.md
+ * @source docs:api/guards.md
+ * @source docs:api/interceptors.md
+ * @source docs:api/exception-filters.md
+ * @source docs:api/security.md
+ * @source docs:examples/basic-app.md
+ * @source docs:examples/crud-api.md
+ * @source docs:examples/websocket-chat.md
  */
 
 import {
@@ -156,7 +155,7 @@ import {
 
 
 /**
- * @source docs/index.md#minimal-working-example
+ * @source docs:index.md#minimal-working-example
  */
 describe('Minimal Working Example (docs/index.md)', () => {
   it('should define complete counter application in single block', () => {
@@ -722,7 +721,7 @@ describe('Controllers API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/controllers.md#constructor-access
+     * @source docs:api/controllers.md#constructor-access
      * Controllers have this.config and this.logger available immediately after super()
      */
     it('should have config and logger available in controller constructor after super()', () => {
@@ -783,7 +782,7 @@ describe('Controllers API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/controllers.md#text
+     * @source docs:api/controllers.md#text
      */
     it('should have text() method', () => {
       @Controller('/test')
@@ -801,7 +800,7 @@ describe('Controllers API Documentation Examples', () => {
 
   describe('Request Helpers (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#isjson
+     * @source docs:api/controllers.md#isjson
      */
     it('should have isJson() method', () => {
       @Controller('/test')
@@ -824,7 +823,7 @@ describe('Controllers API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/controllers.md#parsejson
+     * @source docs:api/controllers.md#parsejson
      */
     it('should have parseJson() method', () => {
       interface CreateUserDto {
@@ -852,7 +851,7 @@ describe('Controllers API Documentation Examples', () => {
 
   describe('Accessing Logger (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#accessing-logger
+     * @source docs:api/controllers.md#accessing-logger
      */
     it('should have access to logger', () => {
       @Controller('/users')
@@ -874,7 +873,7 @@ describe('Controllers API Documentation Examples', () => {
 
   describe('Accessing Configuration (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#accessing-configuration
+     * @source docs:api/controllers.md#accessing-configuration
      */
     it('should have access to config', () => {
       @Controller('/users')
@@ -895,7 +894,7 @@ describe('Controllers API Documentation Examples', () => {
 
   describe('HTTP Status Codes (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#http-status-codes
+     * @source docs:api/controllers.md#http-status-codes
      */
     it('should use HttpStatusCode enum', () => {
       @Controller('/users')
@@ -924,7 +923,7 @@ describe('Controllers API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/controllers.md#available-status-codes
+     * @source docs:api/controllers.md#available-status-codes
      */
     it('should have all documented status codes', () => {
       // From docs: Available Status Codes
@@ -1412,7 +1411,7 @@ describe('Services API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/services.md#constructor-access
+     * @source docs:api/services.md#constructor-access
      * Services have this.config and this.logger available immediately after super()
      */
     it('should have config and logger available in service constructor after super()', () => {
@@ -1436,7 +1435,7 @@ describe('Services API Documentation Examples', () => {
 
   describe('getServiceTag (docs/api/services.md)', () => {
     /**
-     * @source docs/api/services.md#service-tags-advanced
+     * @source docs:api/services.md#service-tags-advanced
      */
     it('should get service tag from class', () => {
       @Service()
@@ -1449,7 +1448,7 @@ describe('Services API Documentation Examples', () => {
 
   describe('BaseService Methods (docs/api/services.md)', () => {
     /**
-     * @source docs/api/services.md#class-definition
+     * @source docs:api/services.md#class-definition
      */
     it('should have runEffect method', () => {
       // From docs: BaseService has runEffect method for Effect.js integration
@@ -1459,7 +1458,7 @@ describe('Services API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/services.md#class-definition
+     * @source docs:api/services.md#class-definition
      */
     it('should have formatError method', () => {
       // From docs: BaseService has formatError method
@@ -1471,7 +1470,7 @@ describe('Services API Documentation Examples', () => {
 
   describe('Service Logger (docs/api/services.md)', () => {
     /**
-     * @source docs/api/services.md#log-levels
+     * @source docs:api/services.md#log-levels
      */
     it('should support all log levels', () => {
       @Service()
@@ -1495,7 +1494,7 @@ describe('Services API Documentation Examples', () => {
 describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', () => {
   describe('OnModuleInit Interface', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement OnModuleInit interface', () => {
       // From docs: OnModuleInit example
@@ -1523,7 +1522,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('OnApplicationInit Interface', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement OnApplicationInit interface', () => {
       // From docs: OnApplicationInit example
@@ -1543,7 +1542,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('OnModuleDestroy Interface', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement OnModuleDestroy interface', () => {
       // From docs: OnModuleDestroy example
@@ -1563,7 +1562,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('BeforeApplicationDestroy Interface', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement BeforeApplicationDestroy interface', () => {
       // From docs: BeforeApplicationDestroy example
@@ -1583,7 +1582,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('OnApplicationDestroy Interface', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement OnApplicationDestroy interface', () => {
       // From docs: OnApplicationDestroy example
@@ -1603,7 +1602,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('Multiple Lifecycle Hooks', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      */
     it('should implement multiple lifecycle interfaces', () => {
       // From docs: Complete lifecycle example
@@ -1644,7 +1643,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('Controller Lifecycle Hooks', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks (controllers support the same hooks)
+     * @source docs:api/services.md#lifecycle-hooks (controllers support the same hooks)
      */
     it('should implement lifecycle hooks in controllers', () => {
       // From docs: Controller lifecycle hooks example
@@ -1761,7 +1760,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
   describe('Standalone Service Pattern (docs/api/services.md)', () => {
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      * Standalone services (not injected anywhere) still have their
      * onModuleInit called. This is useful for background workers,
      * cron jobs, event listeners, etc.
@@ -1797,7 +1796,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
     });
 
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      * onModuleInit is called sequentially in dependency order:
      * dependencies complete their init before dependents start theirs.
      */
@@ -1853,7 +1852,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
     });
 
     /**
-     * @source docs/api/services.md#lifecycle-hooks
+     * @source docs:api/services.md#lifecycle-hooks
      * onModuleInit is called for services in ALL modules across the entire
      * import tree, not just the root module. Deeply nested modules are
      * initialized in depth-first order.
@@ -1917,7 +1916,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
 
 describe('getService API Documentation Examples (docs/api/core.md)', () => {
   /**
-   * @source docs/api/core.md#accessing-services-outside-of-requests
+   * @source docs:api/core.md#accessing-services-outside-of-requests
    */
   it('should have getService method on OneBunApplication', () => {
     @Module({ controllers: [] })
@@ -1931,7 +1930,7 @@ describe('getService API Documentation Examples (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#accessing-services-outside-of-requests
+   * @source docs:api/core.md#accessing-services-outside-of-requests
    */
   it('should get service instance by class', async () => {
     @Service()
@@ -1962,7 +1961,7 @@ describe('getService API Documentation Examples (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#accessing-services-outside-of-requests
+   * @source docs:api/core.md#accessing-services-outside-of-requests
    */
   it('should throw error for non-existent service', async () => {
     @Service()
@@ -1989,7 +1988,7 @@ describe('getService API Documentation Examples (docs/api/core.md)', () => {
 describe('Validation API Documentation Examples', () => {
   describe('validate function (docs/api/validation.md)', () => {
     /**
-     * @source docs/api/validation.md#basic-usage
+     * @source docs:api/validation.md#basic-usage
      */
     it('should validate data against schema', () => {
       // From docs: validate() requires arktype schema, not plain object
@@ -2007,7 +2006,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#basic-usage
+     * @source docs:api/validation.md#basic-usage
      */
     it('should return errors for invalid data', () => {
       const userSchema = type({
@@ -2024,7 +2023,7 @@ describe('Validation API Documentation Examples', () => {
 
   describe('validateOrThrow function (docs/api/validation.md)', () => {
     /**
-     * @source docs/api/validation.md#validateorthrow
+     * @source docs:api/validation.md#validateorthrow
      */
     it('should throw on invalid data', () => {
       const schema = type({
@@ -2046,7 +2045,7 @@ describe('Validation API Documentation Examples', () => {
 
   describe('Schema Types (docs/api/validation.md)', () => {
     /**
-     * @source docs/api/validation.md#primitives
+     * @source docs:api/validation.md#primitives
      */
     it('should define primitive schemas', () => {
       // From docs: Primitives
@@ -2060,7 +2059,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#string-constraints
+     * @source docs:api/validation.md#string-constraints
      */
     it('should define string constraints', () => {
       // From docs: String Constraints
@@ -2076,7 +2075,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#number-constraints
+     * @source docs:api/validation.md#number-constraints
      */
     it('should define number constraints', () => {
       // From docs: Number Constraints
@@ -2092,7 +2091,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#arrays
+     * @source docs:api/validation.md#arrays
      */
     it('should define array schemas', () => {
       // From docs: Arrays
@@ -2105,7 +2104,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#objects
+     * @source docs:api/validation.md#objects
      */
     it('should define object schemas', () => {
       // From docs: Objects
@@ -2127,7 +2126,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#using-in-controllers
+     * @source docs:api/validation.md#using-in-controllers
      */
     it('should infer TypeScript type from schema', () => {
       // From docs: Type inference
@@ -2152,7 +2151,7 @@ describe('Validation API Documentation Examples', () => {
 
   describe('Common Patterns (docs/api/validation.md)', () => {
     /**
-     * @source docs/api/validation.md#create-update-dtos-pattern
+     * @source docs:api/validation.md#create-update-dtos-pattern
      */
     it('should define create/update DTOs', () => {
       // From docs: Create/Update DTOs pattern
@@ -2174,7 +2173,7 @@ describe('Validation API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/validation.md#pagination-schema
+     * @source docs:api/validation.md#pagination-schema
      */
     it('should define pagination schema', () => {
       // From docs: Pagination Schema
@@ -2342,7 +2341,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
 
 describe('OneBunApplication (docs/api/core.md)', () => {
   /**
-   * @source docs/api/core.md#onebunapplication
+   * @source docs:api/core.md#onebunapplication
    */
   it('should create application instance', () => {
     @Controller('/api')
@@ -2375,7 +2374,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#applicationoptions
+   * @source docs:api/core.md#applicationoptions
    */
   it('should accept full application options', () => {
     @Module({ controllers: [] })
@@ -2410,7 +2409,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#metrics-options
+   * @source docs:api/core.md#metrics-options
    */
   it('should accept metrics configuration', () => {
     @Module({ controllers: [] })
@@ -2434,7 +2433,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#tracing-options
+   * @source docs:api/core.md#tracing-options
    */
   it('should accept tracing configuration', () => {
     @Module({ controllers: [] })
@@ -2465,7 +2464,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#staticapplicationoptions
+   * @source docs:api/core.md#staticapplicationoptions
    */
   it('should accept static file serving configuration (SPA on same host)', async () => {
     const fs = await import('node:fs');
@@ -2495,7 +2494,7 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
 describe('OneBunApplication multi-service mode (docs/api/core.md)', () => {
   /**
-   * @source docs/api/core.md#multiserviceapplication
+   * @source docs:api/core.md#multiserviceapplication
    */
   it('should define multi-service configuration type', () => {
     // From docs: MultiServiceApplicationOptions
@@ -2531,7 +2530,7 @@ describe('OneBunApplication multi-service mode (docs/api/core.md)', () => {
   });
 
   /**
-   * @source docs/api/core.md#usage-example-1
+   * @source docs:api/core.md#usage-example-1
    */
   it('should create OneBunApplication in multi-service mode', () => {
     @Module({ controllers: [] })
@@ -2574,7 +2573,7 @@ describe('OneBunApplication multi-service mode (docs/api/core.md)', () => {
 
 describe('Basic App Example (docs/examples/basic-app.md)', () => {
   /**
-   * @source docs/examples/basic-app.md#srcconfigts
+   * @source docs:examples/basic-app.md#srcconfigts
    */
   it('should define environment schema', () => {
     // From docs: src/config.ts
@@ -2596,7 +2595,7 @@ describe('Basic App Example (docs/examples/basic-app.md)', () => {
   });
 
   /**
-   * @source docs/examples/basic-app.md#srchelloservicets
+   * @source docs:examples/basic-app.md#srchelloservicets
    */
   it('should define HelloService', () => {
     // From docs: src/hello.service.ts
@@ -2623,7 +2622,7 @@ describe('Basic App Example (docs/examples/basic-app.md)', () => {
   });
 
   /**
-   * @source docs/examples/basic-app.md#srchellocontrollerts
+   * @source docs:examples/basic-app.md#srchellocontrollerts
    */
   it('should define HelloController', () => {
     @Service()
@@ -2682,7 +2681,7 @@ describe('Basic App Example (docs/examples/basic-app.md)', () => {
   });
 
   /**
-   * @source docs/examples/basic-app.md#srcappmodulets
+   * @source docs:examples/basic-app.md#srcappmodulets
    */
   it('should define AppModule', () => {
     @Service()
@@ -2713,7 +2712,7 @@ describe('Basic App Example (docs/examples/basic-app.md)', () => {
 describe('Architecture Documentation (docs/architecture.md)', () => {
   describe('DI Resolution Flow (docs/architecture.md)', () => {
     /**
-     * @source docs/architecture.md#di-resolution-flow
+     * @source docs:architecture.md#di-resolution-flow
      */
     it('should demonstrate DI resolution flow', () => {
       // From docs: DI Resolution Flow example
@@ -2750,7 +2749,7 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
     });
 
     /**
-     * @source docs/architecture.md#automatic-injection
+     * @source docs:architecture.md#automatic-injection
      */
     it('should demonstrate automatic DI without @Inject', () => {
       // From docs: Automatic DI example
@@ -2779,7 +2778,7 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
 
   describe('Module System (docs/architecture.md)', () => {
     /**
-     * @source docs/architecture.md#module-assembly
+     * @source docs:architecture.md#module-assembly
      */
     it('should demonstrate module export/import pattern', () => {
       // From docs: Module Assembly
@@ -2855,7 +2854,7 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
 describe('Getting Started Documentation (docs/getting-started.md)', () => {
   describe('Environment Schema (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-3-create-environment-schema
+     * @source docs:getting-started.md#step-3-create-environment-schema
      */
     it('should define type-safe environment schema', () => {
       // From docs: src/config.ts
@@ -2882,7 +2881,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Service Creation (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-4-create-a-service
+     * @source docs:getting-started.md#step-4-create-a-service
      */
     it('should create service with logger access', () => {
       // From docs: src/hello.service.ts
@@ -2907,7 +2906,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Validation Schema (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-5-create-validation-schema
+     * @source docs:getting-started.md#step-5-create-validation-schema
      */
     it('should create schema with exported type', () => {
       // From docs: src/hello.schema.ts
@@ -2930,7 +2929,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Controller Creation (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-6-create-a-controller
+     * @source docs:getting-started.md#step-6-create-a-controller
      */
     it('should create controller with imported schema and named type', () => {
       // From docs: src/hello.schema.ts (imported in controller)
@@ -2997,7 +2996,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Module Definition (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-7-create-the-module
+     * @source docs:getting-started.md#step-7-create-the-module
      */
     it('should create module with controllers and providers', () => {
       @Service()
@@ -3019,7 +3018,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 
   describe('Application Entry Point (docs/getting-started.md)', () => {
     /**
-     * @source docs/getting-started.md#step-8-create-entry-point
+     * @source docs:getting-started.md#step-8-create-entry-point
      */
     it('should create OneBunApplication with all options', () => {
       @Module({ controllers: [] })
@@ -3066,7 +3065,7 @@ describe('Getting Started Documentation (docs/getting-started.md)', () => {
 describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
   describe('@WebSocketGateway decorator', () => {
     /**
-     * @source docs/api/websocket.md#websocketgateway-decorator
+     * @source docs:api/websocket.md#websocketgateway-decorator
      */
     it('should define gateway with path and namespace', () => {
       // From docs: WebSocketGateway Decorator example
@@ -3081,7 +3080,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Event Decorators', () => {
     /**
-     * @source docs/api/websocket.md#onconnect
+     * @source docs:api/websocket.md#onconnect
      */
     it('should handle @OnConnect decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3098,7 +3097,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#ondisconnect
+     * @source docs:api/websocket.md#ondisconnect
      */
     it('should handle @OnDisconnect decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3113,7 +3112,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#onjoinroom
+     * @source docs:api/websocket.md#onjoinroom
      */
     it('should handle @OnJoinRoom decorator with pattern', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3134,7 +3133,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#onleaveroom
+     * @source docs:api/websocket.md#onleaveroom
      */
     it('should handle @OnLeaveRoom decorator with wildcard', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3149,7 +3148,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#onmessage
+     * @source docs:api/websocket.md#onmessage
      */
     it('should handle @OnMessage decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3166,7 +3165,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Pattern Syntax', () => {
     /**
-     * @source docs/api/websocket.md#pattern-syntax
+     * @source docs:api/websocket.md#pattern-syntax
      */
     it('should match exact patterns', () => {
       const match = matchPattern('chat:message', 'chat:message');
@@ -3193,7 +3192,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Parameter Decorators', () => {
     /**
-     * @source docs/api/websocket.md#client
+     * @source docs:api/websocket.md#client
      */
     it('should use @Client() decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3209,7 +3208,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#socket
+     * @source docs:api/websocket.md#socket
      */
     it('should use @Socket() decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3224,7 +3223,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#messagedata
+     * @source docs:api/websocket.md#messagedata
      */
     it('should use @MessageData() decorator with property', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3246,7 +3245,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#roomname
+     * @source docs:api/websocket.md#roomname
      */
     it('should use @RoomName() decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3261,7 +3260,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#patternparams
+     * @source docs:api/websocket.md#patternparams
      */
     it('should use @PatternParams() decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3276,7 +3275,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#wsserver
+     * @source docs:api/websocket.md#wsserver
      */
     it('should use @WsServer() decorator', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3293,7 +3292,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Guards', () => {
     /**
-     * @source docs/api/websocket.md#built-in-guards
+     * @source docs:api/websocket.md#built-in-guards
      */
     it('should use WsAuthGuard', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3309,7 +3308,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#built-in-guards
+     * @source docs:api/websocket.md#built-in-guards
      */
     it('should use WsPermissionGuard', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3325,7 +3324,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#built-in-guards
+     * @source docs:api/websocket.md#built-in-guards
      */
     it('should use WsAnyPermissionGuard', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3341,7 +3340,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#custom-guards
+     * @source docs:api/websocket.md#custom-guards
      */
     it('should create custom guard', () => {
       // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -3365,7 +3364,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Storage Adapters', () => {
     /**
-     * @source docs/api/websocket.md#in-memory-storage-default
+     * @source docs:api/websocket.md#in-memory-storage-default
      */
     it('should create in-memory storage', () => {
       const storage = createInMemoryWsStorage();
@@ -3376,7 +3375,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#redis-storage
+     * @source docs:api/websocket.md#redis-storage
      */
     it('should configure SharedRedisProvider', () => {
       // From docs: Redis Storage example
@@ -3388,7 +3387,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('WebSocket Client', () => {
     /**
-     * @source docs/api/websocket.md#creating-a-client
+     * @source docs:api/websocket.md#creating-a-client
      */
     it('should create typed client from definition', () => {
       @WebSocketGateway({ path: '/chat' })
@@ -3452,7 +3451,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     });
 
     /**
-     * @source docs/api/websocket.md#standalone-client-no-definition
+     * @source docs:api/websocket.md#standalone-client-no-definition
      */
     it('should create standalone client without definition', () => {
       const client = createNativeWsClient({
@@ -3470,7 +3469,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('Application Configuration', () => {
     /**
-     * @source docs/api/websocket.md#application-options
+     * @source docs:api/websocket.md#application-options
      */
     it('should accept WebSocket configuration', () => {
       @WebSocketGateway({ path: '/ws' })
@@ -3505,7 +3504,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
 describe('WebSocket Gateway DI (docs/api/websocket.md#basewebsocketgateway)', () => {
   /**
-   * @source docs/api/websocket.md#basewebsocketgateway
+   * @source docs:api/websocket.md#basewebsocketgateway
    * Gateways receive this.logger and this.config just like controllers.
    */
   it('should inject logger and config into WebSocket gateway via module DI', async () => {
@@ -3549,7 +3548,7 @@ describe('WebSocket Gateway DI (docs/api/websocket.md#basewebsocketgateway)', ()
   });
 
   /**
-   * @source docs/api/websocket.md#constructor-access
+   * @source docs:api/websocket.md#constructor-access
    * Gateways have this.config and this.logger available immediately after super()
    */
   it('should have config and logger available in WS gateway constructor after super()', () => {
@@ -3581,7 +3580,7 @@ describe('WebSocket Gateway DI (docs/api/websocket.md#basewebsocketgateway)', ()
 describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)', () => {
   describe('SseEvent Type (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#sseevent-type
+     * @source docs:api/controllers.md#sseevent-type
      */
     it('should define SseEvent interface', () => {
       // From docs: SseEvent interface
@@ -3610,7 +3609,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
 
   describe('@Sse() Decorator (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#sse-decorator
+     * @source docs:api/controllers.md#sse-decorator
      */
     it('should mark method as SSE endpoint', () => {
       // Test @Sse decorator independently (without @Controller wrapping)
@@ -3629,7 +3628,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
     });
 
     /**
-     * @source docs/api/controllers.md#sse-with-heartbeat
+     * @source docs:api/controllers.md#sse-with-heartbeat
      */
     it('should support heartbeat option', () => {
       // Test @Sse decorator with options independently
@@ -3649,7 +3648,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
     });
 
     /**
-     * @source docs/api/controllers.md#sse-decorator-with-controller
+     * @source docs:api/controllers.md#sse-decorator-with-controller
      */
     it('should work with @Controller decorator', () => {
       // From docs: @Sse() decorator example with full controller
@@ -3674,7 +3673,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
 
   describe('formatSseEvent Function', () => {
     /**
-     * @source docs/api/controllers.md#sse-wire-format
+     * @source docs:api/controllers.md#sse-wire-format
      */
     it('should format event with all fields', () => {
       const event: SseEvent = {
@@ -3740,7 +3739,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
 
   describe('createSseStream Function', () => {
     /**
-     * @source docs/api/controllers.md#sse-method
+     * @source docs:api/controllers.md#sse-method
      */
     it('should create ReadableStream from async generator', async () => {
       async function* testGenerator(): SseGenerator {
@@ -3901,7 +3900,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
 
   describe('Controller.sse() Method', () => {
     /**
-     * @source docs/api/controllers.md#sse-method
+     * @source docs:api/controllers.md#sse-method
      */
     it('should have sse() method on BaseController', () => {
       const controller = new BaseController();
@@ -3911,7 +3910,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
     });
 
     /**
-     * @source docs/api/controllers.md#sse-method-example
+     * @source docs:api/controllers.md#sse-method-example
      */
     it('should define controller using sse() method', () => {
       // From docs: Using sse() method example
@@ -4005,7 +4004,7 @@ describe('SSE (Server-Sent Events) API Documentation (docs/api/controllers.md)',
 
   describe('Complete SSE Controller Example (docs/api/controllers.md)', () => {
     /**
-     * @source docs/api/controllers.md#server-sent-events-sse
+     * @source docs:api/controllers.md#server-sent-events-sse
      */
     it('should define complete SSE controller', () => {
       // From docs: Complete SSE Controller example
@@ -4228,7 +4227,7 @@ describe('Per-request timeout via route decorators (docs/api/decorators.md)', ()
 
 describe('@Cookie Decorator (docs/api/decorators.md)', () => {
   /**
-   * @source docs/api/decorators.md#cookie
+   * @source docs:api/decorators.md#cookie
    */
   it('should define @Cookie decorator with optional parameter', () => {
     // From docs: @Cookie('session_id') - optional
@@ -4251,7 +4250,7 @@ describe('@Cookie Decorator (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#cookie-required
+   * @source docs:api/decorators.md#cookie-required
    */
   it('should define @Cookie decorator with required option', () => {
     // From docs: @Cookie('session_id', { required: true }) - required
@@ -4269,7 +4268,7 @@ describe('@Cookie Decorator (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#cookie-with-validation
+   * @source docs:api/decorators.md#cookie-with-validation
    */
   it('should define @Cookie decorator with validation schema', () => {
     // From docs: @Cookie('session_id', schema) - optional with validation
@@ -4289,7 +4288,7 @@ describe('@Cookie Decorator (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#cookie-combined-example
+   * @source docs:api/decorators.md#cookie-combined-example
    */
   it('should combine @Cookie with other parameter decorators', () => {
     // From docs: combining @Cookie, @Param, @Header, @Query
@@ -4316,7 +4315,7 @@ describe('@Cookie Decorator (docs/api/decorators.md)', () => {
 
 describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
   /**
-   * @source docs/api/decorators.md#req-onebunrequest
+   * @source docs:api/decorators.md#req-onebunrequest
    */
   it('should define @Req() handler with OneBunRequest type', () => {
     // From docs: @Req() with OneBunRequest type
@@ -4338,7 +4337,7 @@ describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#req-cookies-access
+   * @source docs:api/decorators.md#req-cookies-access
    */
   it('should define handler accessing cookies via req.cookies', () => {
     // From docs: reading cookies through @Req()
@@ -4359,7 +4358,7 @@ describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
 
 describe('OneBunRequest and OneBunResponse Types (docs/api/decorators.md)', () => {
   /**
-   * @source docs/api/decorators.md#onebunrequest-type
+   * @source docs:api/decorators.md#onebunrequest-type
    */
   it('should use OneBunRequest as type alias for BunRequest', () => {
     // OneBunRequest is an alias for BunRequest
@@ -4369,7 +4368,7 @@ describe('OneBunRequest and OneBunResponse Types (docs/api/decorators.md)', () =
   });
 
   /**
-   * @source docs/api/decorators.md#onebunresponse-type
+   * @source docs:api/decorators.md#onebunresponse-type
    */
   it('should use OneBunResponse as type alias for Response', () => {
     // OneBunResponse is an alias for Response
@@ -4380,7 +4379,7 @@ describe('OneBunRequest and OneBunResponse Types (docs/api/decorators.md)', () =
 
 describe('Custom Response Headers (docs/api/controllers.md)', () => {
   /**
-   * @source docs/api/controllers.md#custom-response-headers
+   * @source docs:api/controllers.md#custom-response-headers
    */
   it('should define handler returning Response with custom headers', () => {
     // From docs: returning Response with custom headers
@@ -4404,7 +4403,7 @@ describe('Custom Response Headers (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#set-cookie-header
+   * @source docs:api/controllers.md#set-cookie-header
    */
   it('should define handler returning Response with Set-Cookie header', () => {
     // From docs: setting cookies via Set-Cookie header
@@ -4431,7 +4430,7 @@ describe('Custom Response Headers (docs/api/controllers.md)', () => {
 
 describe('Working with Cookies (docs/api/controllers.md)', () => {
   /**
-   * @source docs/api/controllers.md#reading-cookies-via-decorator
+   * @source docs:api/controllers.md#reading-cookies-via-decorator
    */
   it('should define handler reading cookies via @Cookie decorator', () => {
     // From docs: reading cookies via @Cookie('name')
@@ -4453,7 +4452,7 @@ describe('Working with Cookies (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#reading-cookies-via-req
+   * @source docs:api/controllers.md#reading-cookies-via-req
    */
   it('should define handler reading cookies via req.cookies', () => {
     // From docs: reading cookies through @Req() with req.cookies.get()
@@ -4471,7 +4470,7 @@ describe('Working with Cookies (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#setting-cookies-via-req
+   * @source docs:api/controllers.md#setting-cookies-via-req
    */
   it('should define handler setting cookies via req.cookies', () => {
     // From docs: setting cookies using req.cookies.set()
@@ -4495,7 +4494,7 @@ describe('Working with Cookies (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#deleting-cookies-via-req
+   * @source docs:api/controllers.md#deleting-cookies-via-req
    */
   it('should define handler deleting cookies via req.cookies', () => {
     // From docs: deleting cookies using req.cookies.delete()
@@ -4519,7 +4518,7 @@ describe('Working with Cookies (docs/api/controllers.md)', () => {
 
 describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   /**
-   * @source docs/api/decorators.md#uploadedfile
+   * @source docs:api/decorators.md#uploadedfile
    */
   describe('Single File Upload (docs/api/decorators.md#uploadedfile)', () => {
     it('should define controller with @UploadedFile decorator', () => {
@@ -4556,7 +4555,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#uploadedfiles
+   * @source docs:api/decorators.md#uploadedfiles
    */
   describe('Multiple File Upload (docs/api/decorators.md#uploadedfiles)', () => {
     it('should define controller with @UploadedFiles decorator', () => {
@@ -4605,7 +4604,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#formfield
+   * @source docs:api/decorators.md#formfield
    */
   describe('Form Field (docs/api/decorators.md#formfield)', () => {
     it('should define controller with @FormField decorator', () => {
@@ -4649,7 +4648,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#onebunfile
+   * @source docs:api/decorators.md#onebunfile
    */
   describe('OneBunFile Class (docs/api/decorators.md#onebunfile)', () => {
     it('should create OneBunFile from File and support all methods', async () => {
@@ -4685,7 +4684,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#mimetype-enum
+   * @source docs:api/decorators.md#mimetype-enum
    */
   describe('MimeType Enum (docs/api/decorators.md#mimetype-enum)', () => {
     it('should provide common MIME type constants', () => {
@@ -4707,7 +4706,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
   });
 
   /**
-   * @source docs/api/decorators.md#json-base64-upload-format
+   * @source docs:api/decorators.md#json-base64-upload-format
    */
   describe('JSON Base64 Upload (docs/api/decorators.md#json-base64-upload-format)', () => {
     it('should parse full JSON base64 format', () => {
@@ -4731,7 +4730,7 @@ describe('File Upload API Documentation (docs/api/decorators.md)', () => {
 
 describe('File Upload API Documentation (docs/api/controllers.md)', () => {
   /**
-   * @source docs/api/controllers.md#single-file-upload
+   * @source docs:api/controllers.md#single-file-upload
    */
   it('should define single file upload controller', () => {
     @Controller('/api/files')
@@ -4761,7 +4760,7 @@ describe('File Upload API Documentation (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#multiple-file-upload
+   * @source docs:api/controllers.md#multiple-file-upload
    */
   it('should define multiple file upload controller', () => {
     @Controller('/api/files')
@@ -4786,7 +4785,7 @@ describe('File Upload API Documentation (docs/api/controllers.md)', () => {
   });
 
   /**
-   * @source docs/api/controllers.md#file-with-form-fields
+   * @source docs:api/controllers.md#file-with-form-fields
    */
   it('should define file with form fields controller', () => {
     @Controller('/api/files')

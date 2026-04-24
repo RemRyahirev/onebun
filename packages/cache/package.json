@@ -1,6 +1,6 @@
 {
   "name": "@onebun/cache",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Caching module for OneBun framework - in-memory and Redis support",
   "license": "MPL-2.0",
   "author": "RemRyahirev",
@@ -41,7 +41,7 @@
     "effect": "^3.13.10"
   },
   "peerDependencies": {
-    "@onebun/core": "^0.4.1"
+    "@onebun/core": "^0.4.2"
   },
   "devDependencies": {
     "@onebun/core": "workspace:^",

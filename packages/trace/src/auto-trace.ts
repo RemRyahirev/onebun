@@ -262,6 +262,8 @@ export function applyAutoTrace(
  * class UserService extends BaseService {
  *   async findAll() { ... } // auto-traced
  * }
+ *
+ * @see docs:api/trace.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function TraceAll(): ClassDecorator {
@@ -289,6 +291,8 @@ export function TraceAll(): ClassDecorator {
  *   async importantWork() { ... }
  * }
  * ```
+ *
+ * @see docs:api/trace.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function NoTrace(): ClassDecorator & MethodDecorator {

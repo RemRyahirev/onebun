@@ -14,6 +14,8 @@ import { arktypeToJsonSchema } from './json-schema-converter';
 
 /**
  * Generate OpenAPI 3.1 specification from controller metadata
+ *
+ * @see docs:api/docs.md
  */
 export function generateOpenApiSpec(
   controllers: Function[],

@@ -291,6 +291,8 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
 
 /**
  * OneBun Application
+ * @see docs:api/core.md
+ * @see docs:getting-started.md
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export class OneBunApplication<QA extends import('../queue/types').QueueAdapterConstructor<any> = import('../queue/types').QueueAdapterConstructor, TServices extends ServicesMap = ServicesMap> {

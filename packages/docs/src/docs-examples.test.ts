@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for \@onebun/docs
  *
- * This file tests code examples from:
- * - docs/api/docs.md
+ * @source docs:api/docs.md
  *
  * The \@onebun/docs package provides:
  * - \@ApiTags - for grouping endpoints
@@ -399,7 +398,7 @@ describe('OpenAPI Generation', () => {
 describe('docs/api/docs.md Examples', () => {
   describe('Complete Example with full documentation decorators', () => {
     /**
-     * @source docs/api/docs.md#complete-example
+     * @source docs:api/docs.md#complete-example
      */
     it('should generate spec for controller with @ApiTags, @ApiOperation, @ApiResponse', () => {
       const userSchema = type({
@@ -482,7 +481,7 @@ describe('docs/api/docs.md Examples', () => {
 
   describe('DocsApplicationOptions validation', () => {
     /**
-     * @source docs/api/docs.md#configuration
+     * @source docs:api/docs.md#configuration
      */
     it('should accept all configuration options from docs/api/docs.md', () => {
       // From docs/api/docs.md: Configuration section
@@ -521,7 +520,7 @@ describe('docs/api/docs.md Examples', () => {
 
   describe('Programmatic usage from docs/api/docs.md', () => {
     /**
-     * @source docs/api/docs.md#programmatic-usage
+     * @source docs:api/docs.md#programmatic-usage
      */
     it('should convert ArkType schema to JSON Schema', () => {
       // From docs/api/docs.md: Programmatic Usage section

@@ -60,6 +60,8 @@ function applySpanAttributes(
  *
  * @param name - The span attribute name (e.g. 'user.id', 'db.operation')
  *
+ * @see docs:api/trace.md
+ *
  * @example
  * ```typescript
  * \@Traced()
@@ -87,6 +89,8 @@ export function SpanAttribute(name: string): ParameterDecorator {
 
 /**
  * HTTP trace middleware for OneBun applications
+ *
+ * @see docs:api/trace.md
  */
 export class TraceMiddleware {
   /**
@@ -270,6 +274,8 @@ export const createTraceMiddleware = (): TraceMiddleware => {
  *
  * @param operationName - Custom span name. Defaults to `ClassName.methodName`
  *
+ * @see docs:api/trace.md
+ *
  * @example
  * ```typescript
  * class WorkspaceService extends BaseService {
@@ -325,6 +331,8 @@ export function trace(operationName?: string): MethodDecorator {
  * enrichment. Best for internal methods where you want basic span tracking.
  *
  * @param name - Custom span name. Defaults to `ClassName.methodName`
+ *
+ * @see docs:api/trace.md
  */
 export function span(name?: string): MethodDecorator {
   return (target: unknown, propertyKey: string | symbol, descriptor: PropertyDescriptor) => {

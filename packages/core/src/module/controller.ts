@@ -53,6 +53,7 @@ export const DEFAULT_SSE_TIMEOUT = 600;
  *   }
  * }
  * ```
+ * @see docs:api/controllers.md
  */
 export class Controller {
   // Logger instance with controller class name as context

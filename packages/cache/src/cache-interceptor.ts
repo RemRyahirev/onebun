@@ -38,6 +38,8 @@ interface CachedResponse {
  * Only caches responses with 2xx status codes. Non-GET requests
  * and non-HTTP transports pass through without caching.
  *
+ * @see docs:api/cache.md
+ *
  * @example
  * ```typescript
  * @Module({

@@ -29,6 +29,8 @@ let configCache = new WeakMap<object, ConfigProxy<any>>();
  *   cors: { origin: config.get('server.corsOrigin') },
  * });
  * ```
+ *
+ * @see docs:api/envs.md
  */
 export function getConfig<T>(
   schema: EnvSchema<T>,

@@ -192,6 +192,8 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
 /**
  * Cache service implementation that can be used with the Module decorator
  * This service extends BaseService and can be injected into controllers
+ *
+ * @see docs:api/cache.md
  */
 @Service()
 export class CacheService extends BaseService implements ICacheService {

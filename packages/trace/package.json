@@ -1,6 +1,6 @@
 {
   "name": "@onebun/trace",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "OpenTelemetry-compatible tracing for OneBun framework - distributed tracing support",
   "license": "MPL-2.0",
   "author": "RemRyahirev",

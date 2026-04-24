@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/requests
  *
- * This file tests code examples from:
- * - docs/api/requests.md
+ * @source docs:api/requests.md
  */
 
 import {
@@ -245,7 +244,7 @@ describe('Requests API Documentation Examples', () => {
 
   describe('Retry Configuration (docs/api/requests.md)', () => {
     /**
-     * @source docs/api/requests.md#retry-configuration
+     * @source docs:api/requests.md#retry-configuration
      */
     it('should accept retry configuration', () => {
       // From docs: Retry Configuration
@@ -271,7 +270,7 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/requests.md#retry-strategies
+     * @source docs:api/requests.md#retry-strategies
      */
     it('should accept fixed delay strategy', () => {
       // From docs: Retry Strategies - Fixed delay
@@ -284,7 +283,7 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/requests.md#retry-strategies
+     * @source docs:api/requests.md#retry-strategies
      */
     it('should accept linear backoff strategy', () => {
       // From docs: Retry Strategies - Linear backoff
@@ -297,7 +296,7 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/requests.md#retry-strategies
+     * @source docs:api/requests.md#retry-strategies
      */
     it('should accept exponential backoff strategy', () => {
       // From docs: Retry Strategies - Exponential backoff

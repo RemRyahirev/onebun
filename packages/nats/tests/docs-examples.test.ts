@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/nats
  *
- * This file tests code examples from:
- * - docs/api/queue.md (NATS/JetStream sections)
+ * @source docs:api/queue.md
  *
  * Each test case corresponds to a code block in the documentation.
  * Keep these tests in sync with the documentation!
@@ -27,7 +26,7 @@ import {
 
 
 /**
- * @source docs/api/queue.md#natsqueueadapter
+ * @source docs:api/queue.md#natsqueueadapter
  */
 describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
   it('should create NatsQueueAdapter with options', () => {
@@ -44,7 +43,7 @@ describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#jetstreamqueueadapter
+ * @source docs:api/queue.md#jetstreamqueueadapter
  */
 describe('JetStream (Persistent) Example (README.md)', () => {
   it('should create JetStreamQueueAdapter with multi-stream configuration', () => {
@@ -66,7 +65,7 @@ describe('JetStream (Persistent) Example (README.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#feature-support-matrix
+ * @source docs:api/queue.md#feature-support-matrix
  */
 describe('Feature Comparison (README.md)', () => {
   it('should report correct NatsQueueAdapter features', () => {
@@ -103,7 +102,7 @@ describe('Feature Comparison (README.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#configuration-options
+ * @source docs:api/queue.md#configuration-options
  */
 describe('Configuration Options (README.md)', () => {
   it('should accept NatsConnectionOptions', () => {
@@ -155,7 +154,7 @@ describe('Configuration Options (README.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#natsqueueadapter
+ * @source docs:api/queue.md#natsqueueadapter
  */
 describe('NatsQueueAdapter (docs/api/queue.md)', () => {
   it('should create adapter for pub/sub', () => {
@@ -170,7 +169,7 @@ describe('NatsQueueAdapter (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#jetstreamqueueadapter
+ * @source docs:api/queue.md#jetstreamqueueadapter
  */
 describe('JetStreamQueueAdapter (docs/api/queue.md)', () => {
   it('should create adapter for persistent messaging with multi-stream', () => {
@@ -207,7 +206,7 @@ describe('JetStreamQueueAdapter (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#natsclient
+ * @source docs:api/queue.md#natsclient
  */
 describe('NatsClient', () => {
   it('should create client instance', () => {
@@ -222,7 +221,7 @@ describe('NatsClient', () => {
 });
 
 /**
- * @source docs/api/queue.md#feature-support-matrix (NATS column)
+ * @source docs:api/queue.md#feature-support-matrix (NATS column)
  */
 describe('Feature Support Matrix - NATS (docs/api/queue.md)', () => {
   it('NATS adapter supports correct features', () => {

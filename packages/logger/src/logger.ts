@@ -32,6 +32,8 @@ export type Logger = {
 
 /**
  * Synchronous logger interface for convenience
+ *
+ * @see docs:api/logger.md
  */
 export type SyncLogger = {
   trace(message: string, ...args: unknown[]): void;
@@ -45,6 +47,8 @@ export type SyncLogger = {
 
 /**
  * Context tag for the Logger service
+ *
+ * @see docs:api/logger.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const LoggerService = Context.GenericTag<Logger>('LoggerService');
@@ -242,6 +246,8 @@ class LoggerImpl implements Logger {
 
 /**
  * Creates a development logger with pretty console output
+ *
+ * @see docs:api/logger.md
  */
 export const makeDevLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> => {
   return Layer.succeed(
@@ -326,6 +332,8 @@ class SyncLoggerImpl implements SyncLogger {
 
 /**
  * Create a synchronous logger from async logger
+ *
+ * @see docs:api/logger.md
  */
 export const createSyncLogger = (logger: Logger): SyncLogger => {
   return new SyncLoggerImpl(logger);
@@ -425,15 +433,17 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
 
 /**
  * Create a logger based on NODE_ENV and environment variables.
- * 
+ *
  * Priority: config > env variables > NODE_ENV defaults
- * 
+ *
  * Environment variables:
  * - LOG_LEVEL: trace, debug, info, warn/warning, error, fatal, none
  * - LOG_FORMAT: json, pretty
- * 
+ *
  * @param config - Optional partial logger configuration
  * @returns Layer providing Logger service
+ *
+ * @see docs:api/logger.md
  */
 export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> => {
   const isDev = process.env.NODE_ENV !== 'production';

@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for Queue Module
  *
- * This file tests code examples from:
- * - docs/api/queue.md
+ * @source docs:api/queue.md
  *
  * Each test case corresponds to a code block in the documentation.
  * Keep these tests in sync with the documentation!
@@ -54,7 +53,7 @@ import {
 } from './index';
 
 /**
- * @source docs/api/queue.md#setup
+ * @source docs:api/queue.md#setup
  */
 describe('Setup Section Examples (docs/api/queue.md)', () => {
   it('should register controller with queue decorators in module controllers', () => {
@@ -113,7 +112,7 @@ describe('Setup Section Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#quick-start
+ * @source docs:api/queue.md#quick-start
  */
 describe('Quick Start Example (docs/api/queue.md)', () => {
   it('should define controller with queue decorators', () => {
@@ -178,7 +177,7 @@ describe('Quick Start Example (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#subscribe-decorator
+ * @source docs:api/queue.md#subscribe-decorator
  */
 describe('Subscribe Decorator Examples (docs/api/queue.md)', () => {
   it('should match wildcard patterns', () => {
@@ -233,7 +232,7 @@ describe('Subscribe Decorator Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#scheduling-decorators
+ * @source docs:api/queue.md#scheduling-decorators
  */
 describe('Scheduling Decorators Examples (docs/api/queue.md)', () => {
   it('should define cron job with expression', () => {
@@ -298,7 +297,7 @@ describe('Scheduling Decorators Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#cronexpression-constants
+ * @source docs:api/queue.md#cronexpression-constants
  */
 describe('CronExpression Constants (docs/api/queue.md)', () => {
   it('should have valid cron expressions', () => {
@@ -322,7 +321,7 @@ describe('CronExpression Constants (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#message-guards
+ * @source docs:api/queue.md#message-guards
  */
 describe('Message Guards Examples (docs/api/queue.md)', () => {
   it('should use built-in guards', () => {
@@ -389,7 +388,7 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#lifecycle-decorators
+ * @source docs:api/queue.md#lifecycle-decorators
  */
 describe('Lifecycle Decorators Examples (docs/api/queue.md)', () => {
   it('should define lifecycle handlers on controller', () => {
@@ -427,7 +426,7 @@ describe('Lifecycle Decorators Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#custom-adapter-nats-jetstream
+ * @source docs:api/queue.md#custom-adapter-nats-jetstream
  */
 describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
   it('should use custom adapter constructor with options', async () => {
@@ -479,7 +478,7 @@ describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#inmemoryqueueadapter
+ * @source docs:api/queue.md#inmemoryqueueadapter
  */
 describe('InMemoryQueueAdapter Examples (docs/api/queue.md)', () => {
   let adapter: InMemoryQueueAdapter;
@@ -509,7 +508,7 @@ describe('InMemoryQueueAdapter Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#cron-parser
+ * @source docs:api/queue.md#cron-parser
  */
 describe('Cron Parser Examples (docs/api/queue.md)', () => {
   it('should parse cron expression', () => {
@@ -541,7 +540,7 @@ describe('Cron Parser Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#pattern-matcher
+ * @source docs:api/queue.md#pattern-matcher
  */
 describe('Pattern Matcher Examples (docs/api/queue.md)', () => {
   it('should match with parameter extraction', () => {
@@ -569,7 +568,7 @@ describe('Pattern Matcher Examples (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#feature-support-matrix
+ * @source docs:api/queue.md#feature-support-matrix
  */
 describe('Feature Support Matrix (docs/api/queue.md)', () => {
   it('should report correct feature support for InMemoryQueueAdapter', () => {
@@ -588,7 +587,7 @@ describe('Feature Support Matrix (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#setup (scheduled-only tip)
+ * @source docs:api/queue.md#setup (scheduled-only tip)
  */
 describe('Scheduled-only Controllers (docs/api/queue.md)', () => {
   it('should auto-detect queue decorators on controller with only @Interval', () => {
@@ -634,7 +633,7 @@ describe('Scheduled-only Controllers (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#setup (error handling info)
+ * @source docs:api/queue.md#setup (error handling info)
  */
 describe('Scheduled Job Error Handling (docs/api/queue.md)', () => {
   let adapter: InMemoryQueueAdapter;
@@ -677,7 +676,7 @@ describe('Scheduled Job Error Handling (docs/api/queue.md)', () => {
 });
 
 /**
- * @source docs/api/queue.md#dynamic-job-management
+ * @source docs:api/queue.md#dynamic-job-management
  */
 describe('Dynamic Job Management (docs/api/queue.md)', () => {
   let queueService: QueueService;

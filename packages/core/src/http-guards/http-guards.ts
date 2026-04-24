@@ -17,6 +17,8 @@ import type {
 
 /**
  * Implementation of HttpExecutionContext
+ *
+ * @see docs:api/guards.md
  */
 export class HttpExecutionContextImpl implements HttpExecutionContext {
   readonly type = 'http' as const;
@@ -51,6 +53,7 @@ export class HttpExecutionContextImpl implements HttpExecutionContext {
  * @param guards - Array of guard class constructors or instances
  * @param context - Execution context for this request
  * @returns Whether all guards passed
+ * @see docs:api/guards.md
  */
 export async function executeHttpGuards(
   guards: (Function | HttpGuard)[],
@@ -80,6 +83,8 @@ export async function executeHttpGuards(
  *
  * @param fn - Guard function receiving the execution context
  * @returns Guard class constructor
+ *
+ * @see docs:api/guards.md
  *
  * @example
  * ```typescript
@@ -111,6 +116,8 @@ export function createHttpGuard(
  * Does NOT validate the token — only checks that the header is present.
  * Combine with a custom middleware or guard to validate the token itself.
  *
+ * @see docs:api/guards.md
+ *
  * @example
  * ```typescript
  * @UseGuards(AuthGuard)
@@ -141,6 +148,8 @@ function defaultRolesExtractor(ctx: HttpExecutionContext): string[] {
  * By default reads roles from the `x-user-roles` header (comma-separated).
  * Provide a custom `rolesExtractor` to read roles from a different source
  * (e.g. a JWT claim decoded by a preceding auth middleware).
+ *
+ * @see docs:api/guards.md
  *
  * @example
  * ```typescript

@@ -22,6 +22,8 @@ import {
 
 /**
  * RequestsService interface for dependency injection
+ *
+ * @see docs:api/requests.md
  */
 export interface RequestsService {
   /**
@@ -512,6 +514,8 @@ class RequestsServiceImpl implements RequestsService {
 
 /**
  * RequestsService context tag for dependency injection
+ *
+ * @see docs:api/requests.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const RequestsService = Context.GenericTag<RequestsService>(

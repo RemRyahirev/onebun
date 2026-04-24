@@ -31,7 +31,8 @@
     "redis:cli": "docker-compose exec redis redis-cli -a $REDIS_PASSWORD",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "docs:preview": "vitepress preview docs",
+    "docs:xref": "bun scripts/docs-xref.ts"
   },
   "workspaces": [
     "packages/*",

@@ -8,6 +8,8 @@ import { MetricsService } from './metrics.service';
 
 /**
  * Metrics middleware for automatic HTTP metrics collection
+ *
+ * @see docs:api/metrics.md
  */
 export class MetricsMiddleware {
   constructor(private metricsService: MetricsService) {}

@@ -104,6 +104,8 @@ function forceMetadataEmission(
 /**
  * Controller decorator with automatic dependency detection and constructor wrapping
  * @param basePath - Base path for all routes in controller
+ * @see docs:api/controllers.md
+ * @see docs:api/decorators.md
  */
 export function controllerDecorator(basePath: string = '') {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -219,6 +221,7 @@ export function controllerDecorator(basePath: string = '') {
 /**
  * Decorator for explicit dependency injection (for complex cases)
  * Usage: constructor(\@Inject(CounterService) private counterService: CounterService)
+ * @see docs:api/decorators.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
 export function Inject<T>(serviceType: new (...args: any[]) => T) {
@@ -243,6 +246,8 @@ export function Inject<T>(serviceType: new (...args: any[]) => T) {
  * Class decorator for middleware. Apply to classes that extend BaseMiddleware so that
  * TypeScript emits design:paramtypes and constructor dependencies are resolved automatically
  * by the framework (no need for @Inject on each parameter). You can still use @Inject when needed.
+ *
+ * @see docs:api/decorators.md
  *
  * @example
  * ```ts
@@ -510,6 +515,7 @@ function createParamDecorator(paramType: ParamType) {
 /**
  * Path parameter decorator
  * Path parameters are always required per OpenAPI spec
+ * @see docs:api/decorators.md
  * @example \@Param('id')
  * @example \@Param('id', idSchema) - with validation
  */
@@ -519,6 +525,7 @@ export const Param = createParamDecorator(ParamType.PATH);
 /**
  * Query parameter decorator
  * Optional by default, use { required: true } for required parameters
+ * @see docs:api/decorators.md
  * @example \@Query('filter') - optional
  * @example \@Query('filter', { required: true }) - required
  * @example \@Query('filter', schema) - optional with validation
@@ -530,6 +537,8 @@ export const Query = createParamDecorator(ParamType.QUERY);
 /**
  * Body parameter decorator
  * Required is determined from schema (accepts undefined = optional)
+ * @see docs:api/decorators.md
+ * @see docs:api/validation.md
  * @example \@Body(schema) - required if schema doesn't accept undefined
  * @example \@Body(schema.or(type.undefined)) - optional (schema accepts undefined)
  * @example \@Body(schema, { required: false }) - explicitly optional
@@ -541,6 +550,7 @@ export const Body = createParamDecorator(ParamType.BODY);
 /**
  * Header parameter decorator
  * Optional by default, use { required: true } for required parameters
+ * @see docs:api/decorators.md
  * @example \@Header('Authorization') - optional
  * @example \@Header('Authorization', { required: true }) - required
  * @example \@Header('Authorization', schema) - optional with validation
@@ -553,6 +563,7 @@ export const Header = createParamDecorator(ParamType.HEADER);
  * Cookie parameter decorator.
  * Extracts a cookie value by name using BunRequest.cookies (CookieMap).
  * Optional by default, use { required: true } for required cookies.
+ * @see docs:api/decorators.md
  * @example \@Cookie('session_id') - optional
  * @example \@Cookie('session_id', { required: true }) - required
  * @example \@Cookie('session_id', schema) - optional with validation
@@ -563,6 +574,7 @@ export const Cookie = createParamDecorator(ParamType.COOKIE);
 
 /**
  * Request object decorator
+ * @see docs:api/decorators.md
  * @example \@Req()
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -570,6 +582,7 @@ export const Req = createParamDecorator(ParamType.REQUEST);
 
 /**
  * Response object decorator
+ * @see docs:api/decorators.md
  * @example \@Res()
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -586,6 +599,7 @@ export const Res = createParamDecorator(ParamType.RESPONSE);
  *
  * @param fieldName - Form field name to extract file from
  * @param options - File upload options (maxSize, mimeTypes, required)
+ * @see docs:api/decorators.md
  *
  * @example \@UploadedFile('avatar')
  * @example \@UploadedFile('avatar', { maxSize: 5 * 1024 * 1024 })
@@ -624,6 +638,7 @@ export function UploadedFile(fieldName?: string, options?: FileUploadOptions): P
  *
  * @param fieldName - Form field name to extract files from. If omitted, extracts all files.
  * @param options - File upload options (maxSize, mimeTypes, maxCount, required)
+ * @see docs:api/decorators.md
  *
  * @example \@UploadedFiles('documents')
  * @example \@UploadedFiles('documents', { maxCount: 5 })
@@ -663,6 +678,7 @@ export function UploadedFiles(fieldName?: string, options?: FilesUploadOptions):
  *
  * @param fieldName - Form field name to extract
  * @param options - Options (required)
+ * @see docs:api/decorators.md
  *
  * @example \@FormField('name')
  * @example \@FormField('name', { required: true })
@@ -735,6 +751,9 @@ const CONTROLLER_INTERCEPTORS_METADATA = 'onebun:controller_interceptors';
  * When applied to a method, the middleware runs after controller-level middleware.
  *
  * Execution order: global → controller → route → handler
+ *
+ * @see docs:api/decorators.md
+ * @see docs:api/security.md
  *
  * @example Class-level (all routes)
  * ```typescript
@@ -831,6 +850,9 @@ export function getControllerGuards(target: Function): (Function | HttpGuard)[] 
  *
  * Execution order: middleware → guards → handler
  *
+ * @see docs:api/guards.md
+ * @see docs:api/decorators.md
+ *
  * @example Class-level (all routes)
  * ```typescript
  * \@Controller('/admin')
@@ -914,6 +936,9 @@ export function getControllerFilters(target: Function): ExceptionFilter[] {
  * The first filter in the combined list catches the error.
  * If no filters are registered, the default filter handles the error.
  *
+ * @see docs:api/exception-filters.md
+ * @see docs:api/decorators.md
+ *
  * @example Class-level (all routes)
  * ```typescript
  * \@Controller('/api')
@@ -987,6 +1012,9 @@ export function getControllerInterceptors(target: Function): (Function | Interce
  *
  * Execution order: middleware → guards → interceptors(handler) → response
  *
+ * @see docs:api/interceptors.md
+ * @see docs:api/decorators.md
+ *
  * @example Class-level (all routes)
  * ```typescript
  * \@Controller('/api')
@@ -1040,48 +1068,64 @@ export function UseInterceptors(...interceptors: (Function | Interceptor)[]): an
 
 /**
  * HTTP GET decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Get = createRouteDecorator(HttpMethod.GET);
 
 /**
  * HTTP POST decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Post = createRouteDecorator(HttpMethod.POST);
 
 /**
  * HTTP PUT decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Put = createRouteDecorator(HttpMethod.PUT);
 
 /**
  * HTTP DELETE decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Delete = createRouteDecorator(HttpMethod.DELETE);
 
 /**
  * HTTP PATCH decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Patch = createRouteDecorator(HttpMethod.PATCH);
 
 /**
  * HTTP OPTIONS decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Options = createRouteDecorator(HttpMethod.OPTIONS);
 
 /**
  * HTTP HEAD decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Head = createRouteDecorator(HttpMethod.HEAD);
 
 /**
  * All HTTP methods decorator
+ * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const All = createRouteDecorator(HttpMethod.ALL);
@@ -1124,6 +1168,7 @@ export interface SseDecoratorOptions {
  *
  * @param options - SSE configuration options
  * @returns Method decorator
+ * @see docs:api/decorators.md
  *
  * @example Simple SSE endpoint
  * ```typescript
@@ -1201,6 +1246,7 @@ const META_MODULES: Map<
 
 /**
  * Module decorator
+ * @see docs:api/decorators.md
  */
 export function Module(options: {
   imports?: Function[];
@@ -1244,7 +1290,9 @@ const globalModules: Set<Function> = ((globalThis as any)[Symbol.for('onebun:glo
  * @Global() decorator - marks module as global
  * Global modules export their providers to all modules automatically without explicit import.
  * This is useful for modules that provide cross-cutting concerns like database access.
- * 
+ *
+ * @see docs:api/decorators.md
+ *
  * @example
  * ```typescript
  * @Global()
@@ -1295,6 +1343,7 @@ export function clearGlobalModules(): void {
  * Response schema decorator for API documentation and validation
  * @param statusCode - HTTP status code (e.g., 200, 201, 404)
  * @param options - Response schema options
+ * @see docs:api/decorators.md
  * @example
  * ```typescript
  * @Get('/users')

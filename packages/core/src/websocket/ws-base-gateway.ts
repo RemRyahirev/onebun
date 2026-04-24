@@ -56,6 +56,7 @@ export function _resetClientSocketsForTesting(): void {
  *   }
  * }
  * ```
+ * @see docs:api/websocket.md
  */
 export abstract class BaseWebSocketGateway {
   /** Logger instance with gateway class name as context */

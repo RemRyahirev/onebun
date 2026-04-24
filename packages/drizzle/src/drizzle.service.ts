@@ -217,6 +217,8 @@ interface BufferedLogEntry {
  *   }
  * }
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 @Service()
 export class DrizzleService extends BaseService implements OnModuleInit {

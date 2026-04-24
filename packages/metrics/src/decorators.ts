@@ -14,6 +14,8 @@ import { MetricsService } from './metrics.service';
  * Decorator for measuring method execution time.
  * Records duration in a histogram metric.
  * Default metric name: `{ClassName}_{methodName}_duration`
+ *
+ * @see docs:api/metrics.md
  */
 export function Timed(metricName?: string, labels?: string[]): MethodDecorator {
   return (
@@ -60,6 +62,8 @@ export function Timed(metricName?: string, labels?: string[]): MethodDecorator {
  * Decorator for counting method calls.
  * Increments a counter metric on each call.
  * Default metric name: `{ClassName}_{methodName}_calls_total`
+ *
+ * @see docs:api/metrics.md
  */
 export function Counted(metricName?: string, labels?: string[]): MethodDecorator {
   return (
@@ -91,6 +95,8 @@ export function Counted(metricName?: string, labels?: string[]): MethodDecorator
  * @Gauged('queue_depth', (self) => self.pendingItems.length)
  * @Gauged('db_count', async (self) => self.repo.count())
  * ```
+ *
+ * @see docs:api/metrics.md
  */
 export function Gauged<T extends object>(
   metricName: string,

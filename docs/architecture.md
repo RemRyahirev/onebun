@@ -8,13 +8,13 @@ description: System architecture overview. Module hierarchy, DI container, reque
 
 **DI Resolution Order**:
 1. Module imports resolved first (depth-first)
-2. Providers instantiated in declaration order
+2. Providers instantiated in dependency order (dependencies first)
 3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
 1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
-2. Controllers created → `onModuleInit()` called on each controller
+2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all`)
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
 4. Shutdown signal → `beforeApplicationDestroy(signal?)` called
 5. HTTP server stops → `onModuleDestroy()` called
@@ -31,7 +31,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 
 **Request Flow**:
 1. Bun.serve receives HTTP request
-2. TraceMiddleware adds trace context
+2. Trace context extracted directly in fetch handler (traceService.extractFromHeadersSync / startHttpTraceSync)
 3. Middleware chain executes (global → module → controller → route)
 4. Guards execute (@UseGuards — controller-level, then route-level)
 5. Interceptors wrap handler (@UseInterceptors — global → controller → route, onion order)
@@ -39,14 +39,15 @@ description: System architecture overview. Module hierarchy, DI container, reque
 7. Controller method executes with injected services
 8. Response flows back through interceptors (onion exit)
 9. Response serialized (plain return auto-wrapped, or throw HttpException for errors)
-10. MetricsMiddleware records metrics
+10. Exception filters catch errors (@UseFilters — route → controller → global, last filter wins)
+11. Metrics recorded in response processing phase
+12. Trace span ended
 
 **Module Metadata Storage**:
-- Reflect.metadata stores decorator info
-- MODULE_METADATA_KEY for @Module options
-- CONTROLLER_METADATA_KEY for route paths
-- METHOD_METADATA_KEY for HTTP methods
-- PARAM_METADATA_KEY for parameter extraction
+- Custom WeakMap-based metadata system (polyfill in `packages/core/src/decorators/metadata.ts`)
+- `META_CONTROLLERS` Map — controller metadata (routes, path, middleware, guards)
+- `META_CONSTRUCTOR_PARAMS` Map — explicit constructor dependencies (@Inject, @Service)
+- String keys via `defineMetadata()`: `onebun:params`, `onebun:middleware`, `onebun:http_guards`, `onebun:controller_http_guards`, `onebun:interceptors`, `onebun:controller_interceptors`, `onebun:exception_filters`, `onebun:controller_exception_filters`, `onebun:responseSchemas`, `onebun:sse`
 
 </llm-only>
 
@@ -118,16 +119,14 @@ export class UserModule {}
 
 ### Auto-Detection Algorithm
 
-The framework uses multiple strategies to detect dependencies:
+The framework uses TypeScript metadata to detect dependencies:
 
 ```typescript
-// Priority 1: TypeScript design:paramtypes (when emitDecoratorMetadata is true)
+// Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true)
 const designTypes = Reflect.getMetadata('design:paramtypes', target);
 
-// Priority 2: Constructor source code analysis (fallback)
-// Matches patterns like: "private userService: UserService"
-const constructorStr = target.toString();
-const typeMatch = param.match(/:\s*([A-Za-z][A-Za-z0-9]*)/);
+// Fallback: Custom metadata storage (WeakMap-based, in decorators/metadata.ts)
+// Populated by @Service(), @Inject(), and other decorators via META_CONSTRUCTOR_PARAMS Map
 
 // Note: Classes MUST have a decorator (@Service, @Controller, etc.) for
 // design:paramtypes to be emitted. Without a decorator, DI will not work.
@@ -261,6 +260,13 @@ HTTP Request
     │
     ▼
 ┌─────────────────────────────────────────────┐
+│ Interceptors (@UseInterceptors)             │
+│  ├── Global → Controller → Route            │
+│  └── Onion order (wrap handler execution)   │
+└─────────────────────────────────────────────┘
+    │
+    ▼
+┌─────────────────────────────────────────────┐
 │ Parameter Extraction & Validation           │
 │  ├── Path params (@Param)                   │
 │  ├── Query params (@Query)                  │
@@ -279,9 +285,18 @@ HTTP Request
 ┌─────────────────────────────────────────────┐
 │ Response Processing                         │
 │  ├── Response validation (if schema)        │
+│  ├── Response flows back through            │
+│  │   interceptors (onion exit)              │
 │  ├── Record metrics                         │
 │  ├── End trace span                         │
 │  └── Return to client                       │
+└─────────────────────────────────────────────┘
+    │ (on error)
+    ▼
+┌─────────────────────────────────────────────┐
+│ Exception Filters (@UseFilters)             │
+│  ├── Route → Controller → Global            │
+│  └── Last matching filter wins              │
 └─────────────────────────────────────────────┘
 ```
 
@@ -542,10 +557,11 @@ const childLogger = this.logger.child({ requestId: '123' });
 ### Metrics (Prometheus)
 
 ```
-http_request_duration_seconds{method, route, status_code}
-http_requests_total{method, route, status_code}
-process_cpu_seconds_total
-process_memory_bytes{type}
+{prefix}http_request_duration_seconds{method, route, status_code, controller, action}
+{prefix}http_requests_total{method, route, status_code, controller, action}
+{prefix}memory_usage_bytes{type}
+{prefix}cpu_usage_ratio
+{prefix}uptime_seconds
 ```
 
 ### Tracing (OpenTelemetry-compatible)

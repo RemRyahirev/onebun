@@ -463,6 +463,8 @@ export const executeRequest = <
 
 /**
  * HTTP Client class for making requests with configuration
+ *
+ * @see docs:api/requests.md
  */
 export class HttpClient {
   constructor(private clientOptions: RequestsOptions = {}) {}
@@ -961,6 +963,8 @@ export class HttpClient {
 
 /**
  * Create a new HTTP client instance
+ *
+ * @see docs:api/requests.md
  */
 export const createHttpClient = (clientOptions: RequestsOptions = {}): HttpClient => {
   return new HttpClient(clientOptions);

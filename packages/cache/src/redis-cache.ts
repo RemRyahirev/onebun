@@ -27,6 +27,8 @@ import { DEFAULT_REDIS_CACHE_OPTIONS } from './types';
 /**
  * Redis-based cache implementation using @onebun/core RedisClient
  * Implements CacheService interface with Redis as the backing store
+ *
+ * @see docs:api/cache.md
  */
 export class RedisCache implements CacheService {
   private client: RedisClient | null = null;
@@ -380,6 +382,8 @@ export class RedisCache implements CacheService {
  * Create a new Redis cache instance
  * @param optionsOrClient - Redis cache configuration options or existing RedisClient
  * @returns RedisCache instance
+ *
+ * @see docs:api/cache.md
  */
 export function createRedisCache(optionsOrClient: RedisCacheOptions | RedisClient = {}): RedisCache {
   return new RedisCache(optionsOrClient);

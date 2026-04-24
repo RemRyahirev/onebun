@@ -4,6 +4,8 @@ import { EnvValidationError, type EnvVariableConfig } from './types';
 
 /**
  * Helpers for creating environment variable configurations
+ *
+ * @see docs:api/envs.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const Env = {

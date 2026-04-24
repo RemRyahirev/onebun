@@ -51,6 +51,7 @@ const META_GATEWAYS = new Map<Function, GatewayMetadata>();
  *   // ...
  * }
  * ```
+ * @see docs:api/websocket.md
  */
 export function WebSocketGateway(options?: WebSocketGatewayOptions) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -138,6 +139,7 @@ function createWsHandlerDecorator(type: WsHandlerType, pattern?: string) {
 /**
  * Decorator for handling client connection events
  *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnConnect()
@@ -154,6 +156,7 @@ export function OnConnect() {
 /**
  * Decorator for handling client disconnection events
  *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnDisconnect()
@@ -170,7 +173,7 @@ export function OnDisconnect() {
  * Decorator for handling room join events
  *
  * @param pattern - Optional pattern for room name matching
- *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnJoinRoom('room:{roomId}')
@@ -187,7 +190,7 @@ export function OnJoinRoom(pattern?: string) {
  * Decorator for handling room leave events
  *
  * @param pattern - Optional pattern for room name matching
- *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnLeaveRoom('room:*')
@@ -204,7 +207,7 @@ export function OnLeaveRoom(pattern?: string) {
  * Decorator for handling incoming messages
  *
  * @param pattern - Event pattern to match (supports wildcards and parameters)
- *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnMessage('chat:message')
@@ -251,6 +254,7 @@ function createWsParamDecorator(type: WsParamType, property?: string) {
 /**
  * Decorator to inject client data into handler
  *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnMessage('chat:message')
@@ -282,7 +286,7 @@ export function Socket() {
  * Decorator to inject message data into handler
  *
  * @param property - Optional property path to extract from message data
- *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnMessage('chat:message')
@@ -303,6 +307,7 @@ export function MessageData(property?: string) {
 /**
  * Decorator to inject room name into handler
  *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnJoinRoom('room:{roomId}')
@@ -318,6 +323,7 @@ export function RoomName() {
 /**
  * Decorator to inject pattern parameters into handler
  *
+ * @see docs:api/websocket.md
  * @example
  * ```typescript
  * @OnMessage('chat:{roomId}:message')

@@ -71,6 +71,8 @@ type OverrideBuilder = {
  * Result of `TestingModule.compile()`.
  * Provides `inject()` for HTTP calls and `get()` for service access.
  * Call `close()` when done to release the underlying server.
+ *
+ * @see docs:testing.md
  */
 export class CompiledTestingModule {
   constructor(
@@ -198,6 +200,8 @@ export class CompiledTestingModule {
  *   .overrideProvider(UserService).useValue(mockService)
  *   .compile();
  * ```
+ *
+ * @see docs:testing.md
  */
 export class TestingModule {
   private readonly options: TestingModuleCreateOptions;

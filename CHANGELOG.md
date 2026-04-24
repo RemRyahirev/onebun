@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.2 — 2026-04-24
+
+### Package Versions
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.4.1 | 0.4.2 |
+| `@onebun/cache` | 0.4.1 | 0.4.2 |
+| `@onebun/docs` | 0.4.2 | 0.4.3 |
+| `@onebun/drizzle` | 0.4.1 | 0.4.2 |
+| `@onebun/envs` | 0.4.0 | 0.4.1 |
+| `@onebun/logger` | 0.4.0 | 0.4.1 |
+| `@onebun/metrics` | 0.4.0 | 0.4.1 |
+| `@onebun/nats` | 0.4.1 | 0.4.2 |
+| `@onebun/requests` | 0.4.1 | 0.4.2 |
+| `@onebun/trace` | 0.4.0 | 0.4.1 |
+
+### Improvements
+
+- **Documentation cross-reference system** — new `@see docs:<path>` JSDoc tags link exported symbols to their documentation pages, and `@source docs:<path>#<section>` tags in `docs-examples.test.ts` link tests to the doc snippets they validate. New `bun run docs:xref` script builds forward and reverse maps, validates links, and detects unreferenced or untested doc pages. Supports `--json`, `--markdown`, `--check` (for CI) output modes
+- **163 `@see docs:` tags** added across all packages — every exported decorator, class, interface, and factory function now references its documentation page(s)
+- **Unified test doc-reference format** — 12 `docs-examples.test.ts` files migrated from ad-hoc `* - docs/api/...` bullet lists and `@source docs/...` to the standardized `@source docs:...` format (198 test references total)
+
+### Documentation
+
+- **`docs/api/guards.md`** — fixed `RolesGuard` description: documented as "at least one required role" (OR logic) but the implementation uses `every()` requiring **all** roles (AND logic)
+- **`docs/api/websocket.md`** — added missing `excludeClientIds?: string[]` parameter to `emitToRooms()` and `emitToRoomPattern()` signatures; documented previously undocumented `disconnectRoomPattern(pattern, reason?)` method
+- **`docs/api/cache.md`** — fixed `CacheStats` interface: `keys`/`size` corrected to `entries`/`hitRate` matching the actual type definition
+- **`docs/architecture.md`** — corrected provider instantiation order (dependency order, not declaration order), controller `onModuleInit` execution (parallel via `Promise.all`), request flow (trace context extraction, exception filter placement, metrics recording), metadata storage description (WeakMap-based system, not Reflect.metadata keys), and DI auto-detection algorithm (removed non-existent constructor source analysis fallback)
+- **`docs/getting-started.md`** and **`docs/api/controllers.md`** — removed incorrect "static routes must come before parametric" comments; clarified that Bun's router resolves by specificity
+
+### Other
+
+- New `scripts/docs-xref.ts` cross-reference scanner and `docs:xref` script in `package.json`
+- Updated `peerDependencies` in `@onebun/cache`, `@onebun/docs`, `@onebun/drizzle`, `@onebun/nats` to `@onebun/core@^0.4.2`
+
 ## 0.4.1 — 2026-04-24
 
 ### Package Versions

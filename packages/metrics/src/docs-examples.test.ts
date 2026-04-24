@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/metrics
  *
- * This file tests code examples from:
- * - docs/api/metrics.md
+ * @source docs:api/metrics.md
  */
 
 import {
@@ -121,7 +120,7 @@ describe('Metrics API Documentation Examples', () => {
 
   describe('MetricsService (docs/api/metrics.md)', () => {
     /**
-     * @source docs/api/metrics.md#metricsservice
+     * @source docs:api/metrics.md#metricsservice
      */
     it('should create metrics service instance', () => {
       // From docs: MetricsService usage
@@ -137,7 +136,7 @@ describe('Metrics API Documentation Examples', () => {
 
   describe('Counter (docs/api/metrics.md)', () => {
     /**
-     * @source docs/api/metrics.md#counter
+     * @source docs:api/metrics.md#counter
      */
     it('should create and use counter', async () => {
       // From docs: Counter example
@@ -158,7 +157,7 @@ describe('Metrics API Documentation Examples', () => {
 
   describe('Gauge (docs/api/metrics.md)', () => {
     /**
-     * @source docs/api/metrics.md#gauge
+     * @source docs:api/metrics.md#gauge
      */
     it('should create and use gauge', async () => {
       // From docs: Gauge example
@@ -180,7 +179,7 @@ describe('Metrics API Documentation Examples', () => {
 
   describe('Histogram (docs/api/metrics.md)', () => {
     /**
-     * @source docs/api/metrics.md#histogram
+     * @source docs:api/metrics.md#histogram
      */
     it('should create and use histogram', async () => {
       // From docs: Histogram example
@@ -226,7 +225,7 @@ describe('Metrics API Documentation Examples', () => {
 
   describe('Service Metrics Pattern (docs/api/metrics.md)', () => {
     /**
-     * @source docs/api/metrics.md#service-metrics-pattern
+     * @source docs:api/metrics.md#service-metrics-pattern
      */
     it('should implement payment service metrics pattern', async () => {
       // From docs: Service Metrics Pattern
@@ -287,14 +286,11 @@ describe('Metrics API Documentation Examples', () => {
 
     it('should describe System metrics format', () => {
       // From docs: Built-in Metrics - System Metrics
+      // These match the actual metric names created in MetricsService.initializeSystemMetrics()
       const expectedMetrics = [
-        'process_cpu_seconds_total',
-        'process_cpu_user_seconds_total',
-        'process_cpu_system_seconds_total',
-        'process_memory_bytes',
-        'nodejs_eventloop_lag_seconds',
-        'nodejs_active_handles_total',
-        'nodejs_active_requests_total',
+        'memory_usage_bytes',
+        'cpu_usage_ratio',
+        'uptime_seconds',
       ];
 
       // Just verifying the expected metric names

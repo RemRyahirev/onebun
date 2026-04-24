@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/drizzle
  *
- * This file tests code examples from:
- * - docs/api/drizzle.md
+ * @source docs:api/drizzle.md
  */
 
 import {
@@ -188,7 +187,7 @@ describe('Drizzle README Examples', () => {
 
 describe('Drizzle API Documentation Examples', () => {
   /**
-   * @source docs/api/drizzle.md#schema-definition
+   * @source docs:api/drizzle.md#schema-definition
    */
   describe('Schema Definition (docs/api/drizzle.md)', () => {
     it('should define SQLite schema with timestamps', () => {
@@ -224,7 +223,7 @@ describe('Drizzle API Documentation Examples', () => {
   });
 
   /**
-   * @source docs/api/drizzle.md#baserepository
+   * @source docs:api/drizzle.md#baserepository
    */
   describe('BaseRepository Interface (docs/api/drizzle.md)', () => {
     it('should define BaseRepository class with expected methods', () => {
@@ -245,7 +244,7 @@ describe('Drizzle API Documentation Examples', () => {
   });
 
   /**
-   * @source docs/api/drizzle.md#migrations
+   * @source docs:api/drizzle.md#migrations
    */
   describe('Migration Functions (docs/api/drizzle.md)', () => {
     it('should have generateMigrations function', () => {

@@ -14,6 +14,8 @@ const API_TAGS_METADATA = 'onebun:apiTags';
  * Decorator for API operation metadata
  * @param options - Operation metadata (summary, description, tags)
  *
+ * @see docs:api/docs.md
+ *
  * @example
  * ```typescript
  * @Get('/users')
@@ -39,6 +41,8 @@ export function ApiOperation(options: {
  * Can be used on controller class or method
  *
  * @param tags - Array of tags
+ *
+ * @see docs:api/docs.md
  *
  * @example
  * ```typescript

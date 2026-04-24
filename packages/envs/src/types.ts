@@ -29,6 +29,8 @@ export interface EnvVariableConfig<T = unknown> {
 
 /**
  * Environment variables schema supporting nested objects
+ *
+ * @see docs:api/envs.md
  */
 export type EnvSchema<T> = {
   [K in keyof T]: T[K] extends string | number | boolean | string[] | number[] | boolean[]
@@ -133,6 +135,8 @@ export interface EnvLoadOptions {
  * };
  * type Config = InferConfigType<typeof schema>;
  * // { server: { port: number; host: string }; database: { connection: { host: string; ssl: { enabled: boolean } } } }
+ *
+ * @see docs:api/envs.md
  */
 export type InferConfigType<S> = {
   [K in keyof S]: S[K] extends EnvVariableConfig<infer T>

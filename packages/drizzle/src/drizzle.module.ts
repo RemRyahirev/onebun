@@ -95,11 +95,11 @@ const DRIZZLE_MODULE_OPTIONS = Symbol('DRIZZLE_MODULE_OPTIONS');
  * ```typescript
  * import { Controller, Get } from '@onebun/core';
  * import { DrizzleService } from '@onebun/drizzle';
- * 
+ *
  * @Controller('/api')
  * export class MyController {
  *   constructor(private drizzleService: DrizzleService) {}
- *   
+ *
  *   @Get('/users')
  *   async getUsers() {
  *     const db = this.drizzleService.getDatabase();
@@ -108,6 +108,8 @@ const DRIZZLE_MODULE_OPTIONS = Symbol('DRIZZLE_MODULE_OPTIONS');
  *   }
  * }
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 @Global()
 @Module({

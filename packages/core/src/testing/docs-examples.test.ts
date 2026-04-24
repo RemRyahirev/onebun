@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/core testing utilities
  *
- * This file tests code examples from:
- * - docs/testing.md
+ * @source docs:testing.md
  */
 
 import {
@@ -76,7 +75,7 @@ class UserController extends BaseController {
 
 describe('docs/testing.md — createTestService', () => {
   /**
-   * @source docs/testing.md#createtestservice
+   * @source docs:testing.md#createtestservice
    */
   it('basic usage — creates service with mock logger and config', () => {
     const { instance, logger, config } = createTestService(UserService);
@@ -90,7 +89,7 @@ describe('docs/testing.md — createTestService', () => {
   });
 
   /**
-   * @source docs/testing.md#with-config-and-dependencies
+   * @source docs:testing.md#with-config-and-dependencies
    */
   it('with config — config.get returns provided values', () => {
     const { instance } = createTestService(ServiceWithConfig, {
@@ -103,7 +102,7 @@ describe('docs/testing.md — createTestService', () => {
   });
 
   /**
-   * @source docs/testing.md#with-config-and-dependencies
+   * @source docs:testing.md#with-config-and-dependencies
    */
   it('with deps — passes constructor dependencies', () => {
     const mockRepo = { find: () => 'mock-data' };
@@ -121,7 +120,7 @@ describe('docs/testing.md — createTestService', () => {
 
 describe('docs/testing.md — createTestController', () => {
   /**
-   * @source docs/testing.md#createtestcontroller
+   * @source docs:testing.md#createtestcontroller
    */
   it('basic usage — creates controller with mock logger and config', () => {
     const mockUserService = { findById: (id: string) => ({ id, name: 'Mock' }) };
@@ -141,7 +140,7 @@ describe('docs/testing.md — createTestController', () => {
 
 describe('docs/testing.md — TestingModule', () => {
   /**
-   * @source docs/testing.md#basic-usage-1
+   * @source docs:testing.md#basic-usage-1
    */
   it('basic compile / inject / close flow', async () => {
     let module: CompiledTestingModule | undefined;
@@ -167,7 +166,7 @@ describe('docs/testing.md — TestingModule', () => {
   });
 
   /**
-   * @source docs/testing.md#overrideproviderserviceclass
+   * @source docs:testing.md#overrideproviderserviceclass
    */
   it('overrideProvider — replaces service with mock value', async () => {
     const mockUser = { id: '1', name: 'MockUser' };
@@ -191,7 +190,7 @@ describe('docs/testing.md — TestingModule', () => {
   });
 
   /**
-   * @source docs/testing.md#setoptionsoptions
+   * @source docs:testing.md#setoptionsoptions
    */
   it('setOptions — applies basePath to routes', async () => {
     let module: CompiledTestingModule | undefined;
@@ -217,7 +216,7 @@ describe('docs/testing.md — TestingModule', () => {
 
 describe('docs/testing.md — useFakeTimers', () => {
   /**
-   * @source docs/testing.md#usefaketimers
+   * @source docs:testing.md#usefaketimers
    */
   it('basic usage — advance time and trigger setTimeout', () => {
     const timers = useFakeTimers();
@@ -245,7 +244,7 @@ describe('docs/testing.md — useFakeTimers', () => {
 
 describe('docs/testing.md — createMockLogger', () => {
   /**
-   * @source docs/testing.md#createmocklogger
+   * @source docs:testing.md#createmocklogger
    */
   it('basic usage — creates silent async logger', () => {
     const logger = createMockLogger();
@@ -263,7 +262,7 @@ describe('docs/testing.md — createMockLogger', () => {
 
 describe('docs/testing.md — createMockConfig', () => {
   /**
-   * @source docs/testing.md#createmockconfig
+   * @source docs:testing.md#createmockconfig
    */
   it('basic usage — returns values from provided map', () => {
     const config = createMockConfig({

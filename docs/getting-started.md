@@ -210,7 +210,6 @@ export class HelloController extends BaseController {
     return { message: 'Hello from OneBun!' };
   }
 
-  // Static routes must come before parametric ones
   @Get('/stats')
   async stats() {
     return {
@@ -241,7 +240,7 @@ export class HelloController extends BaseController {
 - `BaseController` provides `this.logger`, `this.config`, and response helpers
 - `@Param('name')` extracts path parameters
 - `@Body(schema)` validates and injects request body
-- Static routes (`/stats`) must be declared before parametric routes (`/:name`)
+- Route declaration order does not matter — Bun's router resolves by specificity (static > parametric > wildcard)
 - Constructor DI is automatic (just declare private property) — see [Architecture — DI](/architecture#dependency-injection-system) for details
 
 ## Step 7: Create the Module

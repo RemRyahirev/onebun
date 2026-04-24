@@ -5,6 +5,8 @@ import { BaseMiddleware } from '../module/middleware';
 /**
  * CORS (Cross-Origin Resource Sharing) configuration options.
  * Passed via `ApplicationOptions.cors`.
+ *
+ * @see docs:api/security.md
  */
 export interface CorsOptions {
   /**
@@ -112,6 +114,8 @@ function isOriginAllowed(
  *   middleware: [CorsMiddleware.configure({ origin: /example\.com$/ })],
  * });
  * ```
+ *
+ * @see docs:api/security.md
  */
 export class CorsMiddleware extends BaseMiddleware {
   private readonly options: Required<

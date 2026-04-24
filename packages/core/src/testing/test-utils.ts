@@ -21,6 +21,8 @@ export interface TimerHandle {
 /**
  * Fake timers implementation for testing
  * Allows controlling time and timer execution in tests
+ *
+ * @see docs:testing.md
  */
 export class FakeTimers {
   private currentTime: number = Date.now();
@@ -224,6 +226,8 @@ export class FakeTimers {
 /**
  * Global instance of FakeTimers
  * Use this in tests for consistent timer mocking
+ *
+ * @see docs:testing.md
  */
 export const fakeTimers = new FakeTimers();
 
@@ -247,6 +251,8 @@ export const fakeTimers = new FakeTimers();
  *   });
  * });
  * ```
+ *
+ * @see docs:testing.md
  */
 export function useFakeTimers(): {
   advanceTime: (ms: number) => void;
@@ -294,6 +300,8 @@ export function useFakeTimers(): {
 /**
  * Create a silent mock logger that doesn't output anything
  * Useful for tests to avoid cluttering the output
+ *
+ * @see docs:testing.md
  */
 export function createMockLogger(): Logger {
   const noOp = Effect.succeed(undefined);
@@ -314,6 +322,8 @@ export function createMockLogger(): Logger {
 /**
  * Create a silent mock sync logger that doesn't output anything
  * Useful for tests to avoid cluttering the output
+ *
+ * @see docs:testing.md
  */
 export function createMockSyncLogger(): SyncLogger {
   // eslint-disable-next-line @typescript-eslint/no-empty-function
@@ -335,6 +345,8 @@ export function createMockSyncLogger(): SyncLogger {
 /**
  * Create a mock logger layer for testing
  * Returns an Effect Layer that provides a silent logger
+ *
+ * @see docs:testing.md
  */
 export function makeMockLoggerLayer(): Layer.Layer<Logger, never, never> {
   return Layer.succeed(LoggerService, createMockLogger());
@@ -348,9 +360,11 @@ export function makeMockLoggerLayer(): Layer.Layer<Logger, never, never> {
  * @param options - Optional configuration options
  * @returns An IConfig-compatible mock object
  * 
+ * @see docs:testing.md
+ *
  * @example
  * ```typescript
- * const mockConfig = createMockConfig({ 
+ * const mockConfig = createMockConfig({
  *   'server.port': 3000,
  *   'server.host': '0.0.0.0'
  * });

@@ -1,5 +1,7 @@
 /**
  * Generate Swagger UI HTML page
+ *
+ * @see docs:api/docs.md
  */
 export function generateSwaggerUiHtml(specUrl: string): string {
   return `<!DOCTYPE html>

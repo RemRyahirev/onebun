@@ -903,7 +903,6 @@ export class UserController extends BaseController {
     };
   }
 
-  // Static routes must come before parametric ones
   @Get('/search')
   async search(
     @Query('q') query: string,

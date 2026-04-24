@@ -8,6 +8,8 @@ import { BaseMiddleware } from '../module/middleware';
 /**
  * Rate limiting storage backend interface.
  * Implement this to provide a custom backend (e.g. NATS KV, DynamoDB, etc.).
+ *
+ * @see docs:api/security.md
  */
 export interface RateLimitStore {
   /**
@@ -30,6 +32,8 @@ interface MemoryEntry {
 /**
  * Simple in-memory rate limit store.
  * Not suitable for multi-process or multi-instance deployments — use `RedisRateLimitStore` instead.
+ *
+ * @see docs:api/security.md
  */
 export class MemoryRateLimitStore implements RateLimitStore {
   private readonly map = new Map<string, MemoryEntry>();
@@ -64,6 +68,8 @@ export class MemoryRateLimitStore implements RateLimitStore {
  * Redis-backed rate limit store.
  * Atomic via Lua script — safe for multi-instance deployments.
  * Requires a connected `RedisClient`.
+ *
+ * @see docs:api/security.md
  */
 export class RedisRateLimitStore implements RateLimitStore {
   constructor(private readonly redis: RedisClient) {}
@@ -103,6 +109,8 @@ export class RedisRateLimitStore implements RateLimitStore {
 
 /**
  * Configuration for `RateLimitMiddleware`.
+ *
+ * @see docs:api/security.md
  */
 export interface RateLimitOptions {
   /**
@@ -184,6 +192,8 @@ function defaultKeyGenerator(req: OneBunRequest): string {
  *   ],
  * });
  * ```
+ *
+ * @see docs:api/security.md
  */
 export class RateLimitMiddleware extends BaseMiddleware {
   private readonly windowMs: number;

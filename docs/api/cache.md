@@ -468,8 +468,8 @@ interface CacheSetOptions {
 interface CacheStats {
   hits: number;
   misses: number;
-  keys: number;
-  size: number;
+  entries: number;
+  hitRate: number;
 }
 ```
 

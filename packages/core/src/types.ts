@@ -18,6 +18,7 @@ import type { Logger, LoggerOptions } from '@onebun/logger';
  * - `.cookies` (CookieMap) for reading/setting cookies
  * - `.params` for accessing route parameters
  * @see https://bun.sh/docs/api/http#bunsrequest
+ * @see docs:api/core.md
  */
 export type OneBunRequest = import('bun').BunRequest;
 
@@ -49,6 +50,7 @@ export type ResolvedMiddleware = (
 /**
  * HTTP Response type used in OneBun controllers.
  * Standard Web API Response.
+ * @see docs:api/core.md
  */
 export type OneBunResponse = Response;
 
@@ -205,6 +207,7 @@ export interface TypedEnvSchema {
 
 /**
  * Application options
+ * @see docs:api/core.md
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = QueueAdapterConstructor> {
@@ -922,6 +925,8 @@ export interface RouteOptions {
 /**
  * HTTP Execution Context provided to guards, interceptors, and exception filters.
  * Gives read-only access to the incoming request and routing information.
+ * @see docs:api/guards.md
+ * @see docs:api/interceptors.md
  */
 export interface HttpExecutionContext {
   /** Transport discriminant for type narrowing in universal handlers */
@@ -937,6 +942,8 @@ export interface HttpExecutionContext {
 /**
  * Universal execution context — discriminated union across HTTP, WebSocket, and Queue transports.
  * Use `isHttpContext()`, `isWsContext()`, `isQueueContext()` for type-safe narrowing.
+ * @see docs:api/guards.md
+ * @see docs:api/interceptors.md
  */
 export type ExecutionContext = HttpExecutionContext | WsExecutionContext | MessageExecutionContext;
 
@@ -958,6 +965,8 @@ export function isQueueContext(ctx: ExecutionContext): ctx is MessageExecutionCo
 /**
  * HTTP Guard interface — implement to protect routes via `@UseGuards()`.
  *
+ * @see docs:api/guards.md
+ *
  * @example
  * ```typescript
  * class MyGuard implements HttpGuard {
@@ -978,6 +987,8 @@ export interface HttpGuard {
  *
  * Use `isHttpContext(context)` / `isWsContext(context)` / `isQueueContext(context)`
  * for transport-specific logic.
+ *
+ * @see docs:api/interceptors.md
  *
  * @example
  * ```typescript

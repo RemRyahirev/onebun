@@ -11,6 +11,8 @@ import { DEFAULT_CACHE_OPTIONS } from './types';
 /**
  * In-memory cache implementation
  * Implements CacheService interface with automatic cleanup and statistics
+ *
+ * @see docs:api/cache.md
  */
 export class InMemoryCache implements CacheService {
   private readonly cache = new Map<string, CacheEntry>();
@@ -240,6 +242,8 @@ export class InMemoryCache implements CacheService {
  * Create a new in-memory cache instance
  * @param options - Cache configuration options
  * @returns InMemoryCache instance
+ *
+ * @see docs:api/cache.md
  */
 export function createInMemoryCache(options: CacheOptions = {}): InMemoryCache {
   return new InMemoryCache(options);

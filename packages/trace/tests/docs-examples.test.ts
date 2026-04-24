@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/trace
  *
- * This file tests code examples from:
- * - docs/api/trace.md
+ * @source docs:api/trace.md
  */
 
 import {
@@ -29,7 +28,7 @@ import {
 describe('Trace README Examples', () => {
   describe('Decorators (README)', () => {
     /**
-     * @source docs/api/trace.md#decorators
+     * @source docs:api/trace.md#decorators
      */
     it('should have @Trace decorator available', () => {
       // From README: @Trace decorator
@@ -39,7 +38,7 @@ describe('Trace README Examples', () => {
     });
 
     /**
-     * @source docs/api/trace.md#decorators
+     * @source docs:api/trace.md#decorators
      */
     it('should have @Span decorator available', () => {
       // From README: @Span decorator

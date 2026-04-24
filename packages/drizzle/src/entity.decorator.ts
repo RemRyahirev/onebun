@@ -21,6 +21,8 @@
  *   // Business logic methods here
  * }
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 import type { DrizzleService } from './drizzle.service';
 import type { BaseRepository } from './repository';

@@ -23,6 +23,8 @@ import { HttpException } from './http-exception';
 /**
  * Exception Filter interface — implement to handle errors thrown by route handlers.
  *
+ * @see docs:api/exception-filters.md
+ *
  * @example
  * ```typescript
  * class HttpExceptionFilter implements ExceptionFilter {
@@ -49,6 +51,8 @@ export interface ExceptionFilter {
  *
  * @param fn - Filter function receiving the error and execution context
  * @returns An ExceptionFilter instance
+ *
+ * @see docs:api/exception-filters.md
  *
  * @example
  * ```typescript
@@ -77,6 +81,7 @@ export function createExceptionFilter(
  *
  * @param options.httpEnvelope - When true, all error responses use HTTP 200 (envelope mode).
  *   When false (default), proper HTTP status codes are used.
+ * @see docs:api/exception-filters.md
  */
 export function createDefaultExceptionFilter(
   options: { httpEnvelope?: boolean } = {},
@@ -135,5 +140,7 @@ export function createDefaultExceptionFilter(
 /**
  * Default exception filter instance with proper HTTP status codes.
  * For envelope mode (always HTTP 200), use `createDefaultExceptionFilter({ httpEnvelope: true })`.
+ *
+ * @see docs:api/exception-filters.md
  */
 export const defaultExceptionFilter: ExceptionFilter = createDefaultExceptionFilter();

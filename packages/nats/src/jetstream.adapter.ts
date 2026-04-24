@@ -196,6 +196,8 @@ class JetStreamSubscription implements Subscription {
  *
  * await adapter.publish('events.created', { id: 123 });
  * ```
+ *
+ * @see docs:api/queue.md
  */
 export class JetStreamQueueAdapter implements QueueAdapter {
   readonly name = 'jetstream';
@@ -623,6 +625,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
 /**
  * Create a JetStream queue adapter
+ *
+ * @see docs:api/queue.md
  */
 export function createJetStreamQueueAdapter(options: JetStreamAdapterOptions): JetStreamQueueAdapter {
   return new JetStreamQueueAdapter(options);

@@ -26,6 +26,7 @@ const META_SERVICES = new Map<
  * as well as through the initializeService fallback method.
  *
  * @param tag - Optional Effect Context tag for the service
+ * @see docs:api/services.md
  */
 export function Service<T>(tag?: Context.Tag<T, T>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -54,6 +55,7 @@ export function getServiceMetadata(
 
 /**
  * Get the service tag for a service class
+ * @see docs:api/services.md
  */
 export function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): Context.Tag<T, T> {
   const metadata = getServiceMetadata(serviceClass);
@@ -85,6 +87,7 @@ export function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): C
  *   }
  * }
  * ```
+ * @see docs:api/services.md
  */
 export class BaseService {
   // Logger instance with service class name as context
@@ -239,6 +242,7 @@ export class BaseService {
  * @param logger - The logger to inject into the service
  * @param config - The configuration to inject into the service
  * @returns A layer for the service
+ * @see docs:api/services.md
  */
 export function createServiceLayer<T>(
   serviceClass: new (...args: unknown[]) => T,

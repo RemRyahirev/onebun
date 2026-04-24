@@ -207,7 +207,7 @@
     },
     "packages/cache": {
       "name": "@onebun/cache",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "effect": "^3.13.10",
@@ -218,12 +218,12 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": "^0.4.0",
+        "@onebun/core": "^0.4.1",
       },
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -254,7 +254,7 @@
     },
     "packages/docs": {
       "name": "@onebun/docs",
-      "version": "0.4.1",
+      "version": "0.4.2",
       "dependencies": {
         "swagger-ui-dist": "^5.17.14",
       },
@@ -264,12 +264,12 @@
         "bun-types": "^1.3.8",
       },
       "peerDependencies": {
-        "@onebun/core": "^0.4.0",
+        "@onebun/core": "^0.4.1",
       },
     },
     "packages/drizzle": {
       "name": "@onebun/drizzle",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "bin": {
         "onebun-drizzle": "./bin/drizzle-kit.ts",
       },
@@ -288,7 +288,7 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": "^0.4.0",
+        "@onebun/core": "^0.4.1",
       },
     },
     "packages/envs": {
@@ -326,7 +326,7 @@
     },
     "packages/nats": {
       "name": "@onebun/nats",
-      "version": "0.4.0",
+      "version": "0.4.1",
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",
@@ -338,7 +338,7 @@
         "testcontainers": "^11.7.1",
       },
       "peerDependencies": {
-        "@onebun/core": "^0.4.0",
+        "@onebun/core": "^0.4.1",
       },
     },
     "packages/requests": {

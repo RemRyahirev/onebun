@@ -156,6 +156,8 @@ class NatsSubscription implements Subscription {
  *
  * await adapter.publish('orders.created', { orderId: 123 });
  * ```
+ *
+ * @see docs:api/queue.md
  */
 export class NatsQueueAdapter implements QueueAdapter {
   readonly name = 'nats';
@@ -419,6 +421,8 @@ export class NatsQueueAdapter implements QueueAdapter {
 
 /**
  * Create a NATS queue adapter
+ *
+ * @see docs:api/queue.md
  */
 export function createNatsQueueAdapter(options: NatsAdapterOptions): NatsQueueAdapter {
   return new NatsQueueAdapter(options);

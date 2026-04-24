@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/envs
  *
- * This file tests code examples from:
- * - docs/api/envs.md
+ * @source docs:api/envs.md
  */
 
 import {
@@ -84,7 +83,7 @@ describe('Envs README Examples', () => {
     });
 
     /**
-     * @source docs/api/envs.md#quick-start
+     * @source docs:api/envs.md#quick-start
      */
     it('should create typed configuration', async () => {
       // From README: Create typed configuration
@@ -108,7 +107,7 @@ describe('Envs README Examples', () => {
     });
 
     /**
-     * @source docs/api/envs.md#quick-start
+     * @source docs:api/envs.md#quick-start
      */
     it('should access values with full type safety', async () => {
       const schema: EnvSchema<{
@@ -136,7 +135,7 @@ describe('Envs README Examples', () => {
     });
 
     /**
-     * @source docs/api/envs.md#quick-start
+     * @source docs:api/envs.md#quick-start
      */
     it('should get safe config for logging', async () => {
       const schema: EnvSchema<{
@@ -479,7 +478,7 @@ describe('Envs API Documentation Examples', () => {
     });
 
     /**
-     * @source docs/api/envs.md#pre-init-config-access
+     * @source docs:api/envs.md#pre-init-config-access
      */
     it('should access config synchronously before app bootstrap', () => {
       // From docs: Pre-init Config Access

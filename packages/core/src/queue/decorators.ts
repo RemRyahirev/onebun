@@ -80,6 +80,7 @@ export interface SubscribeMetadata {
  *   console.log('Event:', message.pattern, message.data);
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function Subscribe(pattern: string, options?: SubscribeOptions): MethodDecorator {
@@ -139,6 +140,7 @@ export interface CronMetadata {
  *   return { status: 'ok', timestamp: Date.now() };
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function Cron(expression: string, options: CronDecoratorOptions): MethodDecorator {
@@ -191,6 +193,7 @@ export interface IntervalMetadata {
  *   return { cpu: process.cpuUsage(), memory: process.memoryUsage() };
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function Interval(milliseconds: number, options: IntervalDecoratorOptions): MethodDecorator {
@@ -238,6 +241,7 @@ export interface TimeoutMetadata {
  *   return { startedAt: this.startTime };
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function Timeout(milliseconds: number, options: TimeoutDecoratorOptions): MethodDecorator {

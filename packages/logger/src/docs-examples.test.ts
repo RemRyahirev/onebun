@@ -1,8 +1,7 @@
 /**
  * Documentation Examples Tests for @onebun/logger
  *
- * This file tests code examples from:
- * - docs/api/logger.md
+ * @source docs:api/logger.md
  */
 
 import {
@@ -44,7 +43,7 @@ afterEach(() => {
 describe('Logger README Examples', () => {
   describe('Basic Usage (README)', () => {
     /**
-     * @source docs/api/logger.md#basic-usage
+     * @source docs:api/logger.md#basic-usage
      */
     it('should create logger based on NODE_ENV', () => {
       // From README: Create a logger based on NODE_ENV

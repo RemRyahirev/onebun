@@ -88,6 +88,8 @@ export interface QueryBuilder {
  *   }
  * }
  * ```
+ *
+ * @see docs:api/drizzle.md
  */
 export class BaseRepository<
   TTable extends PgTable<any> | SQLiteTable<any>,
