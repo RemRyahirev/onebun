@@ -152,6 +152,7 @@ function parseField(field: string, min: number, max: number): number[] {
  * // At 9:00 AM on weekdays
  * parseCronExpression('0 9 * * 1-5');
  * ```
+ * @see docs:api/queue.md
  */
 export function parseCronExpression(expression: string): CronSchedule {
   const parts = expression.trim().split(/\s+/);
@@ -212,6 +213,7 @@ function daysInMonth(year: number, month: number): number {
  * @param from - Start time (defaults to now)
  * @param maxYears - Maximum years to search ahead (defaults to 4 to cover leap year cycles)
  * @returns Next run time, or null if no match found within maxYears
+ * @see docs:api/queue.md
  */
 export function getNextRun(
   schedule: CronSchedule,
@@ -380,6 +382,7 @@ export function getMillisecondsUntilNextRun(
  *
  * @param expression - Cron expression to validate
  * @returns true if valid, false otherwise
+ * @see docs:api/queue.md
  */
 export function isValidCronExpression(expression: string): boolean {
   try {

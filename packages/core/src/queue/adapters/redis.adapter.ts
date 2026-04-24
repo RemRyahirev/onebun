@@ -182,6 +182,7 @@ class RedisSubscription implements Subscription {
  * });
  * await adapter.connect();
  * ```
+ * @see docs:api/queue.md
  */
 export class RedisQueueAdapter implements QueueAdapter {
   readonly name = 'redis';

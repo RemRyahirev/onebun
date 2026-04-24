@@ -123,7 +123,7 @@ Errors thrown inside `@Cron`, `@Interval`, and `@Timeout` handlers are caught an
 - `@Interval` handlers fire immediately on scheduler start, then repeat at the configured interval
 - Scheduler error handler logs warnings for failed jobs via `QueueScheduler.setErrorHandler()`
 - Message guards (`@UseMessageGuards`) are applied as wrappers around the actual handler
-- The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `SKIP`, `QUEUE`, `REPLACE`
+- The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `'skip'` (default — skip execution if previous is still running), `'queue'` (publish as regular message even if previous is running)
 - Queue shutdown sequence: `queueService.stop()` → `queueAdapter.disconnect()`
 - Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
 - Dynamic job management: `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` on `QueueService` — all synchronous, delegate to `QueueScheduler`

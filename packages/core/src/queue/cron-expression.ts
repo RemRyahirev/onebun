@@ -17,6 +17,7 @@
  *   return { status: 'ok' };
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export const CronExpression = {

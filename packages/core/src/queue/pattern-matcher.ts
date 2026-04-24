@@ -128,6 +128,7 @@ export function parseQueuePattern(pattern: string): {
  * matchQueuePattern('events.#', 'events.user.created')
  * // { matched: true, params: {} }
  * ```
+ * @see docs:api/queue.md
  */
 export function matchQueuePattern(pattern: string, topic: string): QueuePatternMatch {
   // Exact match fast path
@@ -159,6 +160,7 @@ export function matchQueuePattern(pattern: string, topic: string): QueuePatternM
 
 /**
  * Check if a pattern matches a topic (without extracting parameters)
+ * @see docs:api/queue.md
  */
 export function isQueuePatternMatch(pattern: string, topic: string): boolean {
   return matchQueuePattern(pattern, topic).matched;
@@ -170,6 +172,7 @@ export function isQueuePatternMatch(pattern: string, topic: string): boolean {
  *
  * @param pattern - Pattern string
  * @returns Function that matches topics against the pattern
+ * @see docs:api/queue.md
  */
 export function createQueuePatternMatcher(pattern: string): (topic: string) => QueuePatternMatch {
   // Exact match fast path

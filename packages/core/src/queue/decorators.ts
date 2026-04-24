@@ -287,6 +287,7 @@ export function Timeout(milliseconds: number, options: TimeoutDecoratorOptions):
  *   // Requires both auth and service check
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export function UseMessageGuards(
   ...guards: Array<MessageGuard | MessageGuardConstructor>
@@ -319,6 +320,7 @@ export interface LifecycleMetadata {
  *   console.log('Queue connected and ready');
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function OnQueueReady(): MethodDecorator {
@@ -344,6 +346,7 @@ export function OnQueueReady(): MethodDecorator {
  *   console.error('Queue error:', error);
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function OnQueueError(): MethodDecorator {
@@ -369,6 +372,7 @@ export function OnQueueError(): MethodDecorator {
  *   console.error(`Message ${message.id} failed:`, error);
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function OnMessageFailed(): MethodDecorator {
@@ -394,6 +398,7 @@ export function OnMessageFailed(): MethodDecorator {
  *   console.log(`Message received: ${message.id}`);
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function OnMessageReceived(): MethodDecorator {
@@ -419,6 +424,7 @@ export function OnMessageReceived(): MethodDecorator {
  *   console.log(`Message processed: ${message.id}`);
  * }
  * ```
+ * @see docs:api/queue.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export function OnMessageProcessed(): MethodDecorator {

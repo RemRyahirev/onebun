@@ -66,6 +66,7 @@ export class MessageExecutionContextImpl implements MessageExecutionContext {
  *   // Only messages with authorization token will be processed
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageAuthGuard implements MessageGuard {
   canActivate(context: MessageExecutionContext): boolean {
@@ -88,6 +89,7 @@ export class MessageAuthGuard implements MessageGuard {
  *   // Only messages from allowed services will be processed
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageServiceGuard implements MessageGuard {
   constructor(private readonly allowedServices: string[]) {}
@@ -117,6 +119,7 @@ export class MessageServiceGuard implements MessageGuard {
  *   // Only messages with x-api-key header will be processed
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageHeaderGuard implements MessageGuard {
   constructor(
@@ -157,6 +160,7 @@ export class MessageHeaderGuard implements MessageGuard {
  *   // Only messages with trace context will be processed
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageTraceGuard implements MessageGuard {
   canActivate(context: MessageExecutionContext): boolean {
@@ -186,6 +190,7 @@ export class MessageTraceGuard implements MessageGuard {
  *   // Requires both auth and service check to pass
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageAllGuards implements MessageGuard {
   private readonly guards: MessageGuard[];
@@ -228,6 +233,7 @@ export class MessageAllGuards implements MessageGuard {
  *   // Requires either service check OR auth to pass
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export class MessageAnyGuard implements MessageGuard {
   private readonly guards: MessageGuard[];
@@ -299,6 +305,7 @@ export async function executeMessageGuards(
  *   // Custom guard logic
  * }
  * ```
+ * @see docs:api/queue.md
  */
 export function createMessageGuard(
   checkFn: (context: MessageExecutionContext) => boolean | Promise<boolean>,

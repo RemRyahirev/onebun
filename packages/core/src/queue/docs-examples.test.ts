@@ -15,6 +15,10 @@ import {
   afterEach,
 } from 'bun:test';
 
+import { UseInterceptors } from '../decorators/decorators';
+
+import { getMessageInterceptors } from './decorators';
+
 import {
   Subscribe,
   Cron,
@@ -801,5 +805,90 @@ describe('Dynamic Job Management (docs/api/queue.md)', () => {
     expect(queueService.removeJob('job-b')).toBe(true);
     expect(queueService.hasJob('job-b')).toBe(false);
     expect(queueService.getJobs().length).toBe(2);
+  });
+});
+
+/**
+ * @source docs:api/queue.md#publishing-messages
+ */
+describe('Publishing Messages (docs/api/queue.md)', () => {
+  it('should publish with options via QueueService', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const queueService = new QueueService({ adapter: 'memory' });
+    await queueService.initialize(adapter);
+
+    const received: unknown[] = [];
+    await adapter.subscribe('orders.created', async (message) => {
+      received.push(message.data);
+    });
+
+    await queueService.publish('orders.created', { orderId: 1 }, {
+      priority: 10,
+      messageId: 'custom-id',
+      metadata: {
+        authorization: 'Bearer token',
+        serviceId: 'order-service',
+        traceId: 'trace-123',
+      },
+    });
+
+    expect(received.length).toBe(1);
+    expect(received[0]).toEqual({ orderId: 1 });
+
+    await queueService.stop();
+    await adapter.disconnect();
+  });
+
+  it('should batch publish via QueueService', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const queueService = new QueueService({ adapter: 'memory' });
+    await queueService.initialize(adapter);
+
+    const received: unknown[] = [];
+    await adapter.subscribe('orders.created', async (message) => {
+      received.push(message.data);
+    });
+
+    await queueService.publishBatch([
+      { pattern: 'orders.created', data: { orderId: 1 } },
+      { pattern: 'orders.created', data: { orderId: 2 } },
+    ]);
+
+    expect(received.length).toBe(2);
+
+    await queueService.stop();
+    await adapter.disconnect();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#interceptors
+ */
+describe('Interceptors on queue handlers (docs/api/queue.md)', () => {
+  it('should store interceptor metadata on @Subscribe methods', () => {
+    class LoggingInterceptor {
+      intercept() {
+        return undefined;
+      }
+    }
+
+    class EventProcessor {
+      @Subscribe('events.created')
+      @UseInterceptors(LoggingInterceptor)
+      handleEvent() {
+        // handler
+      }
+    }
+
+    const interceptors = getMessageInterceptors(
+      EventProcessor.prototype,
+      'handleEvent',
+    );
+    expect(interceptors.length).toBe(1);
+    expect(interceptors[0]).toBe(LoggingInterceptor);
   });
 });

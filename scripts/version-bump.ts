@@ -108,7 +108,13 @@ async function bumpPackageVersion(pkgPath: string, type: BumpType): Promise<{ na
 /**
  * Update internal dependencies to use new versions
  */
-async function updateInternalDependencies(packages: Array<{ name: string; dir: string; path: string }>): Promise<void> {
+async function updateInternalDependencies(packages: Array<{ name: string; dir: string; path: string }>, type: BumpType): Promise<void> {
+  // For patch bumps, ^ prefix already covers the new version (e.g. ^0.5.0 covers 0.5.1)
+  if (type === 'patch') {
+    log.info('Skipping dependency updates for patch bump (^ prefix covers patch versions)');
+    return;
+  }
+
   // Build a map of package names to their current versions
   const versionMap: Record<string, string> = {};
 
@@ -225,7 +231,7 @@ async function main(): Promise<void> {
 
     // Update internal dependencies
     log.info('\nUpdating internal dependencies...');
-    await updateInternalDependencies(allPackages);
+    await updateInternalDependencies(allPackages, type);
     log.success('Internal dependencies updated');
 
     console.log(`\n✨ Bumped ${results.length} package(s)\n`);
@@ -244,7 +250,7 @@ async function main(): Promise<void> {
 
     // Update internal dependencies in other packages that depend on this one
     log.info('\nUpdating internal dependencies...');
-    await updateInternalDependencies(allPackages);
+    await updateInternalDependencies(allPackages, type);
     log.success('Internal dependencies updated');
 
     console.log('\n✨ Done!\n');

@@ -169,6 +169,7 @@ class InMemorySubscription implements Subscription {
  *
  * await adapter.publish('orders.created', { orderId: 123 });
  * ```
+ * @see docs:api/queue.md
  */
 export class InMemoryQueueAdapter implements QueueAdapter {
   readonly name = 'memory';

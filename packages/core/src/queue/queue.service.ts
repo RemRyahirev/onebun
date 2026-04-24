@@ -53,6 +53,8 @@ import { QueueScheduler } from './scheduler';
  *
  * Provides a unified API for queue operations, handles adapter lifecycle,
  * and integrates with the scheduler for cron/interval/timeout jobs.
+ *
+ * @see docs:api/queue.md
  */
 export class QueueService {
   private adapter: QueueAdapter | null = null;
