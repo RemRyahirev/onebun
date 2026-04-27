@@ -33,6 +33,13 @@ const META_CONTROLLERS = new Map<Function, ControllerMetadata>();
 const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
 
 /**
+ * Metadata storage for optional constructor parameters.
+ * Parameters marked with @Optional() will receive undefined instead of
+ * causing a DependencyResolutionError when their dependency cannot be resolved.
+ */
+const META_OPTIONAL_PARAMS = new Map<Function, Set<number>>();
+
+/**
  * Injectable decorator for controllers and services
  * This decorator enables automatic dependency injection by registering the class for DI
  */
@@ -166,6 +173,12 @@ export function controllerDecorator(basePath: string = '') {
       META_CONSTRUCTOR_PARAMS.set(WrappedController, existingDeps);
     }
 
+    // Copy optional params metadata from original class to wrapped class
+    const existingOptional = META_OPTIONAL_PARAMS.get(target);
+    if (existingOptional) {
+      META_OPTIONAL_PARAMS.set(WrappedController, existingOptional);
+    }
+
     // Copy controller-level middleware from original class to wrapped class
     // This ensures @UseMiddleware works regardless of decorator order
     const existingControllerMiddleware: Function[] | undefined =
@@ -240,6 +253,40 @@ export function Inject<T>(serviceType: new (...args: any[]) => T) {
     existingDeps[parameterIndex] = serviceType;
     META_CONSTRUCTOR_PARAMS.set(target, existingDeps);
   };
+}
+
+/**
+ * Marks a constructor parameter as optional for dependency injection.
+ * When the dependency cannot be resolved, `undefined` is injected instead of
+ * throwing a DependencyResolutionError.
+ *
+ * @see docs:api/decorators.md
+ *
+ * @example
+ * ```typescript
+ * @Service()
+ * class MyService extends BaseService {
+ *   constructor(@Optional() private cache?: CacheService) {
+ *     super();
+ *   }
+ * }
+ * ```
+ */
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export function Optional() {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
+  return (target: any, _propertyKey: string | symbol | undefined, parameterIndex: number): void => {
+    const existing = META_OPTIONAL_PARAMS.get(target) || new Set<number>();
+    existing.add(parameterIndex);
+    META_OPTIONAL_PARAMS.set(target, existing);
+  };
+}
+
+/**
+ * Check if a constructor parameter is marked as @Optional()
+ */
+export function isOptionalParam(target: Function, parameterIndex: number): boolean {
+  return META_OPTIONAL_PARAMS.get(target)?.has(parameterIndex) ?? false;
 }
 
 /**
@@ -1276,6 +1323,16 @@ export function getModuleMetadata(target: Function):
   const metadata = META_MODULES.get(target);
 
   return metadata;
+}
+
+/**
+ * Iterate over all registered modules and their metadata.
+ * Used by DI diagnostics to find where a missing dependency lives.
+ */
+export function getRegisteredModules(): IterableIterator<
+  [Function, { imports?: Function[]; controllers?: Function[]; providers?: unknown[]; exports?: unknown[] }]
+> {
+  return META_MODULES.entries();
 }
 
 /**

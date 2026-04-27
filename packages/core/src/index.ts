@@ -156,3 +156,9 @@ export * from './interceptors';
 
 // Security Middleware
 export * from './security';
+
+// Bootstrap Errors
+export * from './errors';
+
+// Request Context (AsyncLocalStorage)
+export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';

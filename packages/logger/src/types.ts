@@ -61,6 +61,12 @@ export interface LoggerConfig {
   formatter: LogFormatter;
   transport: LogTransport;
   defaultContext?: Record<string, unknown>;
+  /**
+   * Optional getter for per-request trace context from AsyncLocalStorage.
+   * When provided, replaces globalThis fallback for trace context resolution.
+   * Set by the framework at logger creation time.
+   */
+  traceContextGetter?: () => TraceInfo | null;
 }
 
 /**

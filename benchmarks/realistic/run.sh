@@ -133,6 +133,46 @@ run_realistic_bench() {
   rm -f "$db_path" "${db_path}-wal" "${db_path}-shm"
 }
 
+# Test that better-sqlite3 native addon actually works (not just require — that
+# only loads the JS wrapper; the native binary is loaded on `new Database()`).
+test_node_sqlite() {
+  local dir=$1
+  (cd "$dir" && $NODE_CMD -e "new (require('better-sqlite3'))(':memory:')" 2>/dev/null)
+}
+
+# Rebuild better-sqlite3 for the Node version used by benchmarks.
+# bun install provides Bun-ABI bindings that Node can't use.
+# On NixOS, build tools (make, g++) may be absent from PATH — use nix-shell.
+ensure_node_sqlite() {
+  local dir=$1
+  local label=$2
+
+  if test_node_sqlite "$dir"; then
+    return 0
+  fi
+
+  log "Rebuilding better-sqlite3 for Node.js ($label)..."
+
+  local rebuild_cmd="$NODE_CMD $(which npm) rebuild better-sqlite3"
+  if command -v make >/dev/null 2>&1; then
+    (cd "$dir" && eval "$rebuild_cmd") 2>&1 | tail -5
+  elif command -v nix-shell >/dev/null 2>&1; then
+    log "make not found, using nix-shell for build tools..."
+    (cd "$dir" && nix-shell -p gnumake stdenv.cc --run "$rebuild_cmd") 2>&1 | tail -5
+  else
+    log "ERROR: make not found and nix-shell not available."
+    log "Install build tools: make, g++ (e.g. apt install build-essential)"
+    return 1
+  fi
+
+  if ! test_node_sqlite "$dir"; then
+    log "WARNING: better-sqlite3 still not loadable after rebuild ($label)."
+    return 1
+  fi
+
+  return 0
+}
+
 echo "============================================"
 echo "  OneBun Realistic Benchmark Suite"
 echo "============================================"
@@ -164,46 +204,29 @@ run_realistic_bench "nestjs-fastify-bun" 3301 \
   "$SCRIPT_DIR/nestjs-fastify/bench.db"
 
 # --- NestJS + Fastify (Node.js) ---
-# Build TS, ensure native modules for Node, then run compiled JS with Node 24 LTS
 log "Building NestJS for Node.js..."
 (cd "$SCRIPT_DIR/nestjs-fastify" && bun run build) 2>/dev/null
 
-# Ensure better-sqlite3 is compiled for Node (bun installs its own ABI)
-if ! (cd "$SCRIPT_DIR/nestjs-fastify" && $NODE_CMD -e "require('better-sqlite3')" 2>/dev/null); then
-  log "Rebuilding better-sqlite3 for Node.js (requires make, gcc, g++)..."
-  (cd "$SCRIPT_DIR/nestjs-fastify" && npm install 2>&1 | tail -1) || {
-    log "WARNING: Failed to build better-sqlite3 for Node. Skipping Node benchmark."
-    echo ""
-    echo "============================================"
-    echo "  Realistic Benchmark Complete (Node skipped)"
-    echo "============================================"
-    rm -f "$SCRIPT_DIR/shared/bench.db"
-    exit 0
-  }
+if ensure_node_sqlite "$SCRIPT_DIR/nestjs-fastify" "nestjs-fastify"; then
+  run_realistic_bench "nestjs-fastify-node" 3302 \
+    "$NODE_CMD $SCRIPT_DIR/nestjs-fastify/dist/main.js" \
+    "$SCRIPT_DIR/nestjs-fastify" \
+    "$SCRIPT_DIR/nestjs-fastify/bench.db"
+else
+  log "Skipping nestjs-fastify-node benchmark."
 fi
-
-run_realistic_bench "nestjs-fastify-node" 3302 \
-  "$NODE_CMD $SCRIPT_DIR/nestjs-fastify/dist/main.js" \
-  "$SCRIPT_DIR/nestjs-fastify" \
-  "$SCRIPT_DIR/nestjs-fastify/bench.db"
 
 # --- NestJS + TypeORM (Node.js) — canonical NestJS approach ---
 log "Building NestJS TypeORM for Node.js..."
 (cd "$SCRIPT_DIR/nestjs-typeorm" && bun run build) 2>/dev/null
 
-# Ensure better-sqlite3 is compiled for Node
-if ! (cd "$SCRIPT_DIR/nestjs-typeorm" && $NODE_CMD -e "require('better-sqlite3')" 2>/dev/null); then
-  log "Rebuilding better-sqlite3 for Node.js (TypeORM)..."
-  (cd "$SCRIPT_DIR/nestjs-typeorm" && npm install 2>&1 | tail -1) || {
-    log "WARNING: Failed to build better-sqlite3 for TypeORM. Skipping."
-  }
-fi
-
-if (cd "$SCRIPT_DIR/nestjs-typeorm" && $NODE_CMD -e "require('better-sqlite3')" 2>/dev/null); then
+if ensure_node_sqlite "$SCRIPT_DIR/nestjs-typeorm" "nestjs-typeorm"; then
   run_realistic_bench "nestjs-typeorm-node" 3303 \
     "$NODE_CMD $SCRIPT_DIR/nestjs-typeorm/dist/main.js" \
     "$SCRIPT_DIR/nestjs-typeorm" \
     "$SCRIPT_DIR/nestjs-typeorm/bench.db"
+else
+  log "Skipping nestjs-typeorm-node benchmark."
 fi
 
 # Clean up seed database

@@ -41,6 +41,7 @@ import {
   getSseMetadata,
   type SseDecoratorOptions,
 } from '../decorators/decorators';
+import { OneBunBootstrapError } from '../errors/dependency-errors';
 import { createDefaultExceptionFilter, type ExceptionFilter } from '../exception-filters/exception-filters';
 import { HttpException } from '../exception-filters/http-exception';
 import { OneBunFile, validateFile } from '../file/onebun-file';
@@ -78,6 +79,7 @@ import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { hasQueueDecorators } from '../queue/decorators';
 import { SharedRedisProvider } from '../redis/shared-redis';
+import { getCurrentTraceContext, requestContextStore } from '../request-context';
 import { CorsMiddleware } from '../security/cors-middleware';
 import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
@@ -130,13 +132,6 @@ try {
 }
 
 // Import tracing modules directly
-
-// Helper function to clear trace context
-function clearGlobalTraceContext(): void {
-  if (typeof globalThis !== 'undefined') {
-    (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = null;
-  }
-}
 
 /**
  * Normalize URL path by removing trailing slashes (except for root path).
@@ -353,7 +348,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           this.loggerLayer,
         ) as Effect.Effect<Logger, never, never>,
       ) as Logger;
-      this.logger = createSyncLogger(effectLogger);
+      this.logger = createSyncLogger(effectLogger, getCurrentTraceContext);
 
       // Eagerly create orchestrator (allows pre-start calls like getRunningServices())
       const { MultiServiceOrchestrator: orchestratorClass } = require('./multi-service-orchestrator') as {
@@ -421,7 +416,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.loggerLayer,
       ) as Effect.Effect<Logger, never, never>,
     ) as Logger;
-    this.logger = createSyncLogger(effectLogger);
+    this.logger = createSyncLogger(effectLogger, getCurrentTraceContext);
 
     // Create configuration service eagerly if config exists (it stores a reference,
     // doesn't call config.get(), so safe before initialization)
@@ -766,138 +761,202 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
 
         return async (req, server) => {
+          return await requestContextStore.run({ traceContext: null }, async () => {
           // Capture outermost timestamp before any closure/ALS overhead
-          const profiler = PROFILING_ENABLED ? getProfiler() : null;
-          const outerStartNs = profiler ? Bun.nanoseconds() : 0;
+            const profiler = PROFILING_ENABLED ? getProfiler() : null;
+            const outerStartNs = profiler ? Bun.nanoseconds() : 0;
 
-          const requestHandler = async (): Promise<Response> => {
+            const requestHandler = async (): Promise<Response> => {
             // Only measure time when metrics or tracing need it
-            const startTime = (app.metricsService || app.traceService) ? Date.now() : 0;
+              const startTime = (app.metricsService || app.traceService) ? Date.now() : 0;
 
-            // Apply per-request idle timeout if configured
-            if (effectiveTimeout !== undefined) {
-              server.timeout(req, effectiveTimeout);
-            }
+              // Apply per-request idle timeout if configured
+              if (effectiveTimeout !== undefined) {
+                server.timeout(req, effectiveTimeout);
+              }
 
-            // Setup tracing context if available and enabled
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            let traceSpan: any = null;
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            let traceContext: any = null;
+              // Setup tracing context if available and enabled
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              let traceSpan: any = null;
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              let traceContext: any = null;
 
-            let pMark: ProfileMark | undefined;
-            if (profiler && app.traceService) {
-              pMark = profiler.start('framework', 'trace:setup');
-            }
-            if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
-              try {
+              let pMark: ProfileMark | undefined;
+              if (profiler && app.traceService) {
+                pMark = profiler.start('framework', 'trace:setup');
+              }
+              if (app.traceService && app.options.tracing?.traceHttpRequests !== false) {
+                try {
                 // Extract only the trace propagation headers we need
-                const traceparent = req.headers.get('traceparent') ?? undefined;
-                const xTraceId = req.headers.get('x-trace-id') ?? undefined;
-                const xSpanId = req.headers.get('x-span-id') ?? undefined;
+                  const traceparent = req.headers.get('traceparent') ?? undefined;
+                  const xTraceId = req.headers.get('x-trace-id') ?? undefined;
+                  const xSpanId = req.headers.get('x-span-id') ?? undefined;
 
-                // Sync hot path: no Effect.runPromise overhead
-                traceContext = app.traceService.extractFromHeadersSync({
-                  traceparent,
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'x-trace-id': xTraceId,
-                  // eslint-disable-next-line @typescript-eslint/naming-convention
-                  'x-span-id': xSpanId,
-                }) || app.traceService.generateTraceContextSync();
+                  // Sync hot path: no Effect.runPromise overhead
+                  traceContext = app.traceService.extractFromHeadersSync({
+                    traceparent,
+                    // eslint-disable-next-line @typescript-eslint/naming-convention
+                    'x-trace-id': xTraceId,
+                    // eslint-disable-next-line @typescript-eslint/naming-convention
+                    'x-span-id': xSpanId,
+                  }) || app.traceService.generateTraceContextSync();
 
-                const contentLengthHeader = req.headers.get('content-length');
-                traceSpan = app.traceService.startHttpTraceSync({
-                  method,
-                  url: req.url,
-                  route: fullPath,
-                  userAgent: req.headers.get('user-agent') ?? undefined,
-                  remoteAddr: req.headers.get('x-forwarded-for')
+                  const contentLengthHeader = req.headers.get('content-length');
+                  traceSpan = app.traceService.startHttpTraceSync({
+                    method,
+                    url: req.url,
+                    route: fullPath,
+                    userAgent: req.headers.get('user-agent') ?? undefined,
+                    remoteAddr: req.headers.get('x-forwarded-for')
                     || req.headers.get('x-real-ip')
                     || undefined,
-                  requestSize: contentLengthHeader
-                    ? parseInt(contentLengthHeader, 10)
-                    : undefined,
-                });
-
-                // Set global trace context for logger integration
-                if (typeof globalThis !== 'undefined') {
-                  (globalThis as Record<string, unknown>).__onebunCurrentTraceContext = traceContext;
-                }
-              } catch (error) {
-                app.logger.error(
-                  'Failed to setup tracing:',
-                  error instanceof Error ? error : new Error(String(error)),
-                );
-              }
-            }
-
-            if (pMark) {
-              profiler!.end(pMark);
-            }
-
-            // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
-            if (profiler && needsQueryParams) {
-              pMark = profiler.start('framework', 'url:parse');
-            }
-            const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
-            if (pMark) {
-              profiler!.end(pMark);
-            }
-
-            try {
-              let response: Response;
-
-              // Fast path: no params, no response schemas — inline handler call, skip executeHandler entirely
-              // Full path: delegate to executeHandler for param extraction, validation, response wrapping
-              const callHandler = isFastPath
-                ? async (): Promise<Response> => {
-                  let hMark: ProfileMark | undefined;
-                  if (profiler) {
-                    hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
-                  }
-                  const result = await boundHandler(req);
-                  if (hMark) {
-                    profiler!.end(hMark);
-                  }
-                  if (sseDecoratorOptions) {
-                    return createSseResponseFromResult(result, sseDecoratorOptions);
-                  }
-
-                  if (result instanceof Response) {
-                    return result;
-                  }
-
-                  const successResponse = createSuccessResponse(result);
-
-                  return new Response(JSON.stringify(successResponse), {
-                    status: HttpStatusCode.OK,
-                    headers: {
-                      // eslint-disable-next-line @typescript-eslint/naming-convention
-                      'Content-Type': 'application/json',
-                    },
+                    requestSize: contentLengthHeader
+                      ? parseInt(contentLengthHeader, 10)
+                      : undefined,
                   });
-                }
-                : (): Promise<Response> => executeHandler(
-                  boundHandler, routeMeta, controller, controllerName,
-                  sseDecoratorOptions, req, queryParams, profiler,
-                );
 
-              // Wrap callHandler with interceptors if any (zero-cost when absent)
-              const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
-                ? (): Promise<Response> => {
-                  const interceptorCtx = new HttpExecutionContextImpl(
-                    req,
-                    routeMeta.handler,
-                    controller.constructor.name,
+                  // Store trace context in AsyncLocalStorage for per-request isolation
+                  const store = requestContextStore.getStore();
+                  if (store) {
+                    store.traceContext = traceContext;
+                  }
+                } catch (error) {
+                  app.logger.error(
+                    'Failed to setup tracing:',
+                    error instanceof Error ? error : new Error(String(error)),
+                  );
+                }
+              }
+
+              if (pMark) {
+                profiler!.end(pMark);
+              }
+
+              // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
+              if (profiler && needsQueryParams) {
+                pMark = profiler.start('framework', 'url:parse');
+              }
+              const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
+              if (pMark) {
+                profiler!.end(pMark);
+              }
+
+              try {
+                let response: Response;
+
+                // Fast path: no params, no response schemas — inline handler call, skip executeHandler entirely
+                // Full path: delegate to executeHandler for param extraction, validation, response wrapping
+                const callHandler = isFastPath
+                  ? async (): Promise<Response> => {
+                    let hMark: ProfileMark | undefined;
+                    if (profiler) {
+                      hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+                    }
+                    const result = await boundHandler(req);
+                    if (hMark) {
+                      profiler!.end(hMark);
+                    }
+                    if (sseDecoratorOptions) {
+                      return createSseResponseFromResult(result, sseDecoratorOptions);
+                    }
+
+                    if (result instanceof Response) {
+                      return result;
+                    }
+
+                    const successResponse = createSuccessResponse(result);
+
+                    return new Response(JSON.stringify(successResponse), {
+                      status: HttpStatusCode.OK,
+                      headers: {
+                      // eslint-disable-next-line @typescript-eslint/naming-convention
+                        'Content-Type': 'application/json',
+                      },
+                    });
+                  }
+                  : (): Promise<Response> => executeHandler(
+                    boundHandler, routeMeta, controller, controllerName,
+                    sseDecoratorOptions, req, queryParams, profiler,
                   );
 
-                  return composeInterceptors(resolvedInterceptors, interceptorCtx, callHandler)() as Promise<Response>;
-                }
-                : callHandler;
+                // Wrap callHandler with interceptors if any (zero-cost when absent)
+                const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
+                  ? (): Promise<Response> => {
+                    const interceptorCtx = new HttpExecutionContextImpl(
+                      req,
+                      routeMeta.handler,
+                      controller.constructor.name,
+                    );
 
-              // Execute middleware chain if any, then guards + handler
-              if (routeMeta.middleware && routeMeta.middleware.length > 0) {
-                const guardedHandler = async (): Promise<Response> => {
+                    return composeInterceptors(resolvedInterceptors, interceptorCtx, callHandler)() as Promise<Response>;
+                  }
+                  : callHandler;
+
+                // Execute middleware chain if any, then guards + handler
+                if (routeMeta.middleware && routeMeta.middleware.length > 0) {
+                  const guardedHandler = async (): Promise<Response> => {
+                    if (routeMeta.guards && routeMeta.guards.length > 0) {
+                      let guardMark: ProfileMark | undefined;
+                      if (profiler) {
+                        guardMark = profiler.start('guard', fullPath);
+                      }
+                      const guardCtx = new HttpExecutionContextImpl(
+                        req,
+                        routeMeta.handler,
+                        controller.constructor.name,
+                      );
+                      const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                      if (guardMark) {
+                        profiler!.end(guardMark);
+                      }
+
+                      if (!allowed) {
+                        return new Response(
+                          JSON.stringify(
+                            createErrorResponse(
+                              'Forbidden',
+                              HttpStatusCode.FORBIDDEN,
+                            ),
+                          ),
+                          {
+                            status: app.options.httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.FORBIDDEN,
+                            headers: {
+                              // eslint-disable-next-line @typescript-eslint/naming-convention
+                              'Content-Type': 'application/json',
+                            },
+                          },
+                        );
+                      }
+                    }
+
+                    return await interceptedHandler();
+                  };
+
+                  const next = async (index: number): Promise<Response> => {
+                    if (index >= routeMeta.middleware!.length) {
+                      return await guardedHandler();
+                    }
+
+                    const middleware = routeMeta.middleware![index];
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    const mwName = (middleware as any)._middlewareName
+                  || middleware.name
+                  || `middleware[${index}]`;
+
+                    if (profiler) {
+                      const mwMark = profiler.start('middleware', mwName);
+                      const result = await middleware(req, () => next(index + 1));
+                      profiler.end(mwMark);
+
+                      return result;
+                    }
+
+                    return await middleware(req, () => next(index + 1));
+                  };
+
+                  response = await next(0);
+                } else {
+                // No middleware — run guards inline (no extra closure)
                   if (routeMeta.guards && routeMeta.guards.length > 0) {
                     let guardMark: ProfileMark | undefined;
                     if (profiler) {
@@ -914,7 +973,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     }
 
                     if (!allowed) {
-                      return new Response(
+                      response = new Response(
                         JSON.stringify(
                           createErrorResponse(
                             'Forbidden',
@@ -924,211 +983,148 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                         {
                           status: app.options.httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.FORBIDDEN,
                           headers: {
-                          // eslint-disable-next-line @typescript-eslint/naming-convention
+                            // eslint-disable-next-line @typescript-eslint/naming-convention
                             'Content-Type': 'application/json',
                           },
                         },
                       );
+                    } else {
+                      response = await interceptedHandler();
                     }
-                  }
-
-                  return await interceptedHandler();
-                };
-
-                const next = async (index: number): Promise<Response> => {
-                  if (index >= routeMeta.middleware!.length) {
-                    return await guardedHandler();
-                  }
-
-                  const middleware = routeMeta.middleware![index];
-                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const mwName = (middleware as any)._middlewareName
-                  || middleware.name
-                  || `middleware[${index}]`;
-
-                  if (profiler) {
-                    const mwMark = profiler.start('middleware', mwName);
-                    const result = await middleware(req, () => next(index + 1));
-                    profiler.end(mwMark);
-
-                    return result;
-                  }
-
-                  return await middleware(req, () => next(index + 1));
-                };
-
-                response = await next(0);
-              } else {
-                // No middleware — run guards inline (no extra closure)
-                if (routeMeta.guards && routeMeta.guards.length > 0) {
-                  let guardMark: ProfileMark | undefined;
-                  if (profiler) {
-                    guardMark = profiler.start('guard', fullPath);
-                  }
-                  const guardCtx = new HttpExecutionContextImpl(
-                    req,
-                    routeMeta.handler,
-                    controller.constructor.name,
-                  );
-                  const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
-                  if (guardMark) {
-                    profiler!.end(guardMark);
-                  }
-
-                  if (!allowed) {
-                    response = new Response(
-                      JSON.stringify(
-                        createErrorResponse(
-                          'Forbidden',
-                          HttpStatusCode.FORBIDDEN,
-                        ),
-                      ),
-                      {
-                        status: app.options.httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.FORBIDDEN,
-                        headers: {
-                        // eslint-disable-next-line @typescript-eslint/naming-convention
-                          'Content-Type': 'application/json',
-                        },
-                      },
-                    );
                   } else {
                     response = await interceptedHandler();
                   }
-                } else {
-                  response = await interceptedHandler();
                 }
-              }
 
-              // Skip Date.now() when neither metrics nor tracing need duration
-              const duration = (app.metricsService || traceSpan)
-                ? Date.now() - startTime
-                : 0;
+                // Skip Date.now() when neither metrics nor tracing need duration
+                const duration = (app.metricsService || traceSpan)
+                  ? Date.now() - startTime
+                  : 0;
 
-              // Record metrics and end trace
-              if (profiler) {
-                pMark = profiler.start('framework', 'metrics+trace');
-              }
-              if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const durationSeconds = duration / 1000;
-                app.metricsService.recordHttpRequest({
-                  method,
-                  route: fullPath,
-                  statusCode: response?.status || HttpStatusCode.OK,
-                  duration: durationSeconds,
-                  controller: controller.constructor.name,
-                  action: 'unknown',
-                });
-              }
-
-              // End trace (sync — no Effect.runPromise overhead)
-              if (traceSpan && app.traceService) {
-                try {
-                  app.traceService.endHttpTraceSync(traceSpan, {
+                // Record metrics and end trace
+                if (profiler) {
+                  pMark = profiler.start('framework', 'metrics+trace');
+                }
+                if (app.metricsService && app.metricsService.recordHttpRequest) {
+                  const durationSeconds = duration / 1000;
+                  app.metricsService.recordHttpRequest({
+                    method,
+                    route: fullPath,
                     statusCode: response?.status || HttpStatusCode.OK,
-                    responseSize: response?.headers?.get('content-length')
-                      ? parseInt(response.headers.get('content-length')!, 10)
-                      : undefined,
-                    duration,
+                    duration: durationSeconds,
+                    controller: controller.constructor.name,
+                    action: 'unknown',
                   });
-                } catch (traceError) {
-                  app.logger.error(
-                    'Failed to end trace:',
-                    traceError instanceof Error ? traceError : new Error(String(traceError)),
-                  );
                 }
-              }
 
-              // Clear trace context after request
-              clearGlobalTraceContext();
-              if (pMark) {
-                profiler!.end(pMark);
-              }
+                // End trace (sync — no Effect.runPromise overhead)
+                if (traceSpan && app.traceService) {
+                  try {
+                    app.traceService.endHttpTraceSync(traceSpan, {
+                      statusCode: response?.status || HttpStatusCode.OK,
+                      responseSize: response?.headers?.get('content-length')
+                        ? parseInt(response.headers.get('content-length')!, 10)
+                        : undefined,
+                      duration,
+                    });
+                  } catch (traceError) {
+                    app.logger.error(
+                      'Failed to end trace:',
+                      traceError instanceof Error ? traceError : new Error(String(traceError)),
+                    );
+                  }
+                }
 
-              return response;
-            } catch (error) {
-              app.logger.error(
-                'Request handling error:',
-                error instanceof Error ? error : new Error(String(error)),
-              );
-              const response = new Response('Internal Server Error', {
-                status: HttpStatusCode.INTERNAL_SERVER_ERROR,
-              });
-              const duration = Date.now() - startTime;
+                // Trace context is automatically scoped by requestContextStore.run()
+                if (pMark) {
+                  profiler!.end(pMark);
+                }
 
-              // Record error metrics
-              if (app.metricsService && app.metricsService.recordHttpRequest) {
-                const durationSeconds = duration / 1000;
-                app.metricsService.recordHttpRequest({
-                  method,
-                  route: fullPath,
-                  statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                  duration: durationSeconds,
-                  controller: controller.constructor.name,
-                  action: 'unknown',
+                return response;
+              } catch (error) {
+                app.logger.error(
+                  'Request handling error:',
+                  error instanceof Error ? error : new Error(String(error)),
+                );
+                const response = new Response('Internal Server Error', {
+                  status: HttpStatusCode.INTERNAL_SERVER_ERROR,
                 });
-              }
+                const duration = Date.now() - startTime;
 
-              // End trace with error (sync)
-              if (traceSpan && app.traceService) {
-                try {
-                  traceSpan.events.push({
-                    name: 'error',
-                    timestamp: Date.now(),
-                    attributes: {
-                      errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
-                      errorMessage: error instanceof Error ? error.message : String(error),
-                    },
-                  });
-                  app.traceService.endHttpTraceSync(traceSpan, {
+                // Record error metrics
+                if (app.metricsService && app.metricsService.recordHttpRequest) {
+                  const durationSeconds = duration / 1000;
+                  app.metricsService.recordHttpRequest({
+                    method,
+                    route: fullPath,
                     statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                    duration,
+                    duration: durationSeconds,
+                    controller: controller.constructor.name,
+                    action: 'unknown',
                   });
-                } catch (traceError) {
-                  app.logger.error(
-                    'Failed to end trace with error:',
-                    traceError instanceof Error ? traceError : new Error(String(traceError)),
-                  );
                 }
+
+                // End trace with error (sync)
+                if (traceSpan && app.traceService) {
+                  try {
+                    traceSpan.events.push({
+                      name: 'error',
+                      timestamp: Date.now(),
+                      attributes: {
+                        errorType: error instanceof Error ? error.constructor.name : 'UnknownError',
+                        errorMessage: error instanceof Error ? error.message : String(error),
+                      },
+                    });
+                    app.traceService.endHttpTraceSync(traceSpan, {
+                      statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
+                      duration,
+                    });
+                  } catch (traceError) {
+                    app.logger.error(
+                      'Failed to end trace with error:',
+                      traceError instanceof Error ? traceError : new Error(String(traceError)),
+                    );
+                  }
+                }
+
+                // Trace context is automatically scoped by requestContextStore.run()
+
+                return response;
               }
+            };
 
-              // Clear trace context after error
-              clearGlobalTraceContext();
+            // Wrap in profiling scope for per-request mark isolation
+            let response: Response;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            let innerReport: any = null;
+            if (profiler) {
+              response = await runProfileScope(async () => {
+                const res = await requestHandler();
+                // Flush inside ALS scope to capture request-scoped marks
+                innerReport = profiler.flush({ route: fullPath, method });
 
-              return response;
-            }
-          };
-
-          // Wrap in profiling scope for per-request mark isolation
-          let response: Response;
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let innerReport: any = null;
-          if (profiler) {
-            response = await runProfileScope(async () => {
-              const res = await requestHandler();
-              // Flush inside ALS scope to capture request-scoped marks
-              innerReport = profiler.flush({ route: fullPath, method });
-
-              return res;
-            });
-            // Inject outer total mark that spans everything (ALS overhead + requestHandler)
-            const outerEndNs = Bun.nanoseconds();
-            const totalDurationNs = outerEndNs - outerStartNs;
-            if (innerReport) {
-              innerReport.marks.unshift({
-                category: 'request',
-                label: 'total',
-                startNs: outerStartNs,
-                endNs: outerEndNs,
-                durationNs: totalDurationNs,
+                return res;
               });
-              innerReport.totalNs = totalDurationNs;
-              app.handleProfileReport(innerReport);
+              // Inject outer total mark that spans everything (ALS overhead + requestHandler)
+              const outerEndNs = Bun.nanoseconds();
+              const totalDurationNs = outerEndNs - outerStartNs;
+              if (innerReport) {
+                innerReport.marks.unshift({
+                  category: 'request',
+                  label: 'total',
+                  startNs: outerStartNs,
+                  endNs: outerEndNs,
+                  durationNs: totalDurationNs,
+                });
+                innerReport.totalNs = totalDurationNs;
+                app.handleProfileReport(innerReport);
+              }
+            } else {
+              response = await requestHandler();
             }
-          } else {
-            response = await requestHandler();
-          }
 
-          return response;
+            return response;
+          }); // end requestContextStore.run()
         };
       }
 
@@ -1163,22 +1159,29 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       for (const controllerClass of controllers) {
         const controllerMetadata = getControllerMetadata(controllerClass);
         if (!controllerMetadata) {
-          this.logger.warn(`No metadata found for controller: ${controllerClass.name}`);
-          continue;
+          // WebSocket gateways are in the controllers array but have no @Controller metadata — skip them.
+          // Non-gateway classes without metadata indicate a missing @Controller decorator.
+          if (isWebSocketGateway(controllerClass)) {
+            continue;
+          }
+          throw new OneBunBootstrapError(
+            `No metadata found for controller: ${controllerClass.name}. Ensure the @Controller decorator is applied.`,
+          );
         }
 
         // Get controller instance from module
         if (!this.ensureModule().getControllerInstance) {
-          this.logger.warn(
-            `Module does not support getControllerInstance for ${controllerClass.name}`,
+          throw new OneBunBootstrapError(
+            `Module does not support getControllerInstance for ${controllerClass.name}.`,
           );
-          continue;
         }
 
         const controller = this.ensureModule().getControllerInstance!(controllerClass) as Controller;
         if (!controller) {
-          this.logger.warn(`Controller instance not found for ${controllerClass.name}`);
-          continue;
+          throw new OneBunBootstrapError(
+            `Controller instance not found for ${controllerClass.name}. ` +
+              'Ensure it is listed in the module providers or controllers.',
+          );
         }
 
         const controllerPath = controllerMetadata.path;
@@ -1430,7 +1433,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (PROFILING_ENABLED && this.options.profiling?.endpoint) {
         const profilePath = this.options.profiling.endpoint;
         bunRoutes[profilePath] = {
-           
+
           GET: () => new Response(JSON.stringify(this.profilingReports), {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             headers: { 'Content-Type': 'application/json' },

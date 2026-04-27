@@ -149,36 +149,36 @@ class LoggerImpl implements Logger {
     }
 
     return Effect.flatMap(FiberRef.get(CurrentLoggerTraceContext), (traceInfo) => {
-      // Try to get trace context from global context or trace service
+      // Try to get trace context from various sources
       let currentTraceInfo = traceInfo;
+
+      // 1. Try AsyncLocalStorage-based getter (per-request, concurrent-safe)
+      if (!currentTraceInfo && this.config.traceContextGetter) {
+        const fromAls = this.config.traceContextGetter();
+        if (fromAls?.traceId) {
+          currentTraceInfo = fromAls;
+        }
+      }
+
+      // 2. Fallback to global trace service (for non-HTTP contexts: WebSocket, Queue)
       if (!currentTraceInfo && typeof globalThis !== 'undefined') {
-        // Try global trace context first
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
-        if (globalTraceContext && globalTraceContext.traceId) {
-          currentTraceInfo = globalTraceContext;
-        } else {
-          // Fallback to trace service
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const globalTraceService = (globalThis as any).__onebunTraceService;
-          if (globalTraceService && globalTraceService.getCurrentTraceContext) {
-            try {
-              // Extract current trace context from global trace service
-               
-              const currentContext = Effect.runSync(
-                globalTraceService.getCurrentTraceContext(),
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              ) as any;
-              if (currentContext && currentContext.traceId) {
-                currentTraceInfo = {
-                  traceId: currentContext.traceId,
-                  spanId: currentContext.spanId,
-                  parentSpanId: currentContext.parentSpanId,
-                };
-              }
-            } catch {
-              // Ignore errors getting trace context
+        const globalTraceService = (globalThis as any).__onebunTraceService;
+        if (globalTraceService && globalTraceService.getCurrentTraceContext) {
+          try {
+            const currentContext = Effect.runSync(
+              globalTraceService.getCurrentTraceContext(),
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ) as any;
+            if (currentContext && currentContext.traceId) {
+              currentTraceInfo = {
+                traceId: currentContext.traceId,
+                spanId: currentContext.spanId,
+                parentSpanId: currentContext.parentSpanId,
+              };
             }
+          } catch {
+            // Ignore errors getting trace context
           }
         }
       }
@@ -282,20 +282,20 @@ export const makeProdLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logg
  * Synchronous logger wrapper
  */
 class SyncLoggerImpl implements SyncLogger {
-  constructor(private logger: Logger) {}
+  constructor(
+    private logger: Logger,
+    private traceContextGetter?: () => TraceInfo | null,
+  ) {}
 
   private runWithTraceContext<T>(effect: Effect.Effect<T>): T {
-    // Try to get trace context from global context
+    // Try to get trace context from ALS-based getter
     let traceEffect = effect;
-    if (typeof globalThis !== 'undefined') {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const globalTraceContext = (globalThis as any).__onebunCurrentTraceContext;
-      if (globalTraceContext && globalTraceContext.traceId) {
-        traceEffect = Effect.provide(
-          Effect.flatMap(FiberRef.set(CurrentLoggerTraceContext, globalTraceContext), () => effect),
-          Layer.empty,
-        );
-      }
+    const traceContext = this.traceContextGetter?.();
+    if (traceContext?.traceId) {
+      traceEffect = Effect.provide(
+        Effect.flatMap(FiberRef.set(CurrentLoggerTraceContext, traceContext), () => effect),
+        Layer.empty,
+      );
     }
 
     return Effect.runSync(traceEffect);
@@ -326,7 +326,7 @@ class SyncLoggerImpl implements SyncLogger {
   }
 
   child(context: Record<string, unknown>): SyncLogger {
-    return new SyncLoggerImpl(this.logger.child(context));
+    return new SyncLoggerImpl(this.logger.child(context), this.traceContextGetter);
   }
 }
 
@@ -335,8 +335,11 @@ class SyncLoggerImpl implements SyncLogger {
  *
  * @see docs:api/logger.md
  */
-export const createSyncLogger = (logger: Logger): SyncLogger => {
-  return new SyncLoggerImpl(logger);
+export const createSyncLogger = (
+  logger: Logger,
+  traceContextGetter?: () => TraceInfo | null,
+): SyncLogger => {
+  return new SyncLoggerImpl(logger, traceContextGetter);
 };
 
 /**

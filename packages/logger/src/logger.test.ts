@@ -226,7 +226,7 @@ describe('Logger + SyncLogger basic flow', () => {
     expect(outputs[0]).toMatch(/\n {2}.*a.*:/);
   });
 
-  it('child adds context and uses global trace context in SyncLogger', () => {
+  it('child adds context and uses traceContextGetter in SyncLogger', () => {
     const outputs: LogEntry[] = [];
     const transport = new (class extends ConsoleTransport {
       override log(_formattedEntry: string, entry: LogEntry) {
@@ -238,11 +238,8 @@ describe('Logger + SyncLogger basic flow', () => {
 
     const layer = makeDevLogger({ transport });
     const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
-    const sync = createSyncLogger(logger);
-
-    // set global trace for SyncLogger path
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__onebunCurrentTraceContext = { traceId: 't123456789', spanId: 's123456789' };
+    const traceContext = { traceId: 't123456789', spanId: 's123456789' };
+    const sync = createSyncLogger(logger, () => traceContext);
 
     const child = sync.child({ className: 'Child' });
     child.info('hi');

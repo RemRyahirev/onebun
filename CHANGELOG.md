@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.4.4 — 2026-04-25
+
+### Package Versions
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.4.3 | 0.4.4 |
+| `@onebun/logger` | 0.4.1 | 0.4.2 |
+
+### Breaking Changes
+
+- **⚠️ Fail-fast dependency resolution** — unresolved DI dependencies now throw `DependencyResolutionError` at bootstrap instead of silently injecting `undefined`. Services, controllers, middleware, and interceptors with missing required dependencies will crash immediately with an actionable error message that names the missing dependency and suggests which module to import or export. Use the new `@Optional()` decorator to opt into the previous behavior for intentionally optional dependencies (`@onebun/core`)
+- **⚠️ Circular dependencies throw** — circular dependency detection now throws `CircularDependencyError` instead of logging an error and continuing with broken wiring. The error includes the full dependency chain for debugging (`@onebun/core`)
+- **⚠️ Missing controller metadata throws** — controllers listed in a module's `controllers` array without a `@Controller()` decorator now throw `OneBunBootstrapError` at startup instead of being silently skipped. WebSocket gateways (`@WebSocketGateway()`) are correctly excluded from this check (`@onebun/core`)
+
+### Improvements
+
+- **`DependencyResolutionError` with diagnostic suggestions** — when a dependency cannot be resolved, the error message searches all registered modules to find where the missing type is provided: suggests adding the module to imports, adding the type to exports, or notes when a global module should have auto-resolved it (`@onebun/core`)
+- **`@Optional()` decorator** — marks constructor parameters as optional for DI. When the dependency cannot be resolved, `undefined` is injected instead of throwing. Works with services, controllers, middleware, and interceptors (`@onebun/core`)
+- **Per-request trace context isolation** — HTTP request trace context is now stored in `AsyncLocalStorage` instead of `globalThis`, eliminating a race condition where concurrent requests could overwrite each other's trace IDs. Each request gets its own isolated trace context scope via `requestContextStore.run()` (`@onebun/core`)
+- **`traceContextGetter` in logger** — `SyncLogger` and `LoggerImpl` now accept a `traceContextGetter` callback for reading per-request trace context from `AsyncLocalStorage`, replacing the `globalThis.__onebunCurrentTraceContext` fallback. The `globalThis.__onebunTraceService` fallback is preserved for non-HTTP contexts (WebSocket, queues) (`@onebun/logger`)
+- **Bootstrap error propagation** — `OneBunBootstrapError` and its subclasses (`DependencyResolutionError`, `CircularDependencyError`) are now re-thrown from the service creation catch block instead of being swallowed (`@onebun/core`)
+
+### New Exports
+
+- `DependencyResolutionError`, `CircularDependencyError`, `OneBunBootstrapError` — bootstrap error classes (`@onebun/core`)
+- `@Optional()`, `isOptionalParam()` — optional DI parameter decorator and checker (`@onebun/core`)
+- `getRegisteredModules()` — iterator over all `@Module()`-registered modules and their metadata (`@onebun/core`)
+- `requestContextStore`, `getCurrentTraceContext()`, `RequestContext` — per-request `AsyncLocalStorage` for trace context isolation (`@onebun/core`)
+- `LoggerConfig.traceContextGetter` — optional callback for per-request trace context resolution (`@onebun/logger`)
+
+### Tests
+
+- 3 circular dependency tests: direct A↔B cycle, three-way A→B→C→A chain, self-dependency A→A
+- 3 fail-fast DI tests: missing required dep throws with error details, suggestion includes module name, `@Optional()` allows graceful undefined
+- Updated logger test from `globalThis` trace context to `traceContextGetter` callback
+- Fixed 2 existing tests that relied on warn-and-continue behavior for missing controller metadata
+
 ## 0.4.2 — 2026-04-24
 
 ### Package Versions

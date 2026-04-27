@@ -321,18 +321,18 @@ describe('OneBunApplication', () => {
       (app as any).config = mockConfig;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).configService = {
-        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true, 
+        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true,
       };
 
       // getConfig() returns IConfig<OneBunAppConfig> which provides typed .get() method
       const config = app.getConfig();
       expect(config).toBeDefined();
-      
+
       // Access values through the typed interface
       // TypeScript will infer the correct types based on module augmentation
       const port = config.get('server.port');
       const host = config.get('server.host');
-      
+
       expect(port).toBe(9991);
       expect(host).toBe('localhost');
     });
@@ -369,14 +369,14 @@ describe('OneBunApplication', () => {
       (app as any).config = mockConfig;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (app as any).configService = {
-        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true, 
+        get: mockConfig.get, values: mockConfig.values, getSafeConfig: mockConfig.getSafeConfig, isInitialized: true,
       };
 
       // getConfigValue() is a convenience method that delegates to getConfig().get()
       // It also provides typed access based on OneBunAppConfig module augmentation
       const appName = app.getConfigValue('app.name');
       const debug = app.getConfigValue('app.debug');
-      
+
       expect(appName).toBe('test-app');
       expect(debug).toBe(true);
     });
@@ -411,6 +411,7 @@ describe('OneBunApplication', () => {
     });
 
     test('should return layer for complex module structure', async () => {
+      @Controller()
       class TestController {}
       class TestService {}
 
@@ -1397,7 +1398,7 @@ describe('OneBunApplication', () => {
           @Query('prompt') prompt?: string,
         ) {
           return {
-            state, code, scope, authuser, prompt, 
+            state, code, scope, authuser, prompt,
           };
         }
       }
@@ -3773,7 +3774,7 @@ describe('OneBunApplication', () => {
           @Cookie('session') session?: string,
         ) {
           return {
-            id: parseInt(id), sort, auth, session, 
+            id: parseInt(id), sort, auth, session,
           };
         }
       }
@@ -4175,7 +4176,7 @@ describe('OneBunApplication', () => {
     });
 
     test('auto-enables queue when controller has @Interval', async () => {
-       
+
       const intervalMs = 5000;
 
       @Controller('/auto-interval')
@@ -4198,7 +4199,7 @@ describe('OneBunApplication', () => {
     });
 
     test('auto-enables queue when controller has @Timeout', async () => {
-       
+
       const timeoutMs = 1000;
 
       @Controller('/auto-timeout')

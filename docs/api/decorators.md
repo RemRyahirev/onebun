@@ -745,6 +745,40 @@ export class UserController extends BaseController {
 }
 ```
 
+### @Optional()
+
+Marks a constructor parameter as optional for dependency injection. When the dependency cannot be resolved, `undefined` is injected instead of throwing `DependencyResolutionError`.
+
+```typescript
+@Optional()
+```
+
+**When to use @Optional:**
+- Feature-gated dependencies (e.g., caching that may not be configured)
+- Graceful degradation when an optional module is not imported
+
+**Example:**
+
+```typescript
+@Service()
+export class NotificationService extends BaseService {
+  constructor(
+    private userService: UserService,                  // required — throws if missing
+    @Optional() private emailService?: EmailService,   // optional — undefined if missing
+  ) {
+    super();
+  }
+
+  async notify(userId: string, message: string) {
+    if (this.emailService) {
+      await this.emailService.send(userId, message);
+    } else {
+      this.logger.warn('EmailService not available, skipping email notification');
+    }
+  }
+}
+```
+
 ## Middleware Decorators
 
 ### @Middleware()

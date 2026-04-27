@@ -19,10 +19,13 @@ import type { TraceFilterOptions } from '@onebun/trace';
 import {
   getConstructorParamTypes,
   getModuleMetadata,
+  getRegisteredModules,
   isGlobalModule,
+  isOptionalParam,
   registerControllerDependencies,
 } from '../decorators/decorators';
 import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
+import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
 import { BaseInterceptor } from '../interceptors/interceptors';
 import {
   type ProfileMark,
@@ -30,6 +33,7 @@ import {
   getProfiler,
 } from '../profiler';
 import { QueueService, QueueServiceTag } from '../queue';
+import { getCurrentTraceContext } from '../request-context';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { isWebSocketGateway } from '../websocket/ws-decorators';
 
@@ -155,7 +159,7 @@ export class OneBunModule implements ModuleInstance {
         this.loggerLayer || makeLogger(),
       ) as Effect.Effect<Logger, never, never>,
     ) as Logger;
-    this.logger = createSyncLogger(effectLogger);
+    this.logger = createSyncLogger(effectLogger, getCurrentTraceContext);
     this.config = config ?? new NotInitializedConfig();
     this.tracingOptions = tracingOptions;
     this.ancestorMiddlewareClasses = ancestorMiddleware ?? [];
@@ -374,7 +378,8 @@ export class OneBunModule implements ModuleInstance {
       let allDependenciesResolved = true;
 
       if (detectedDeps && detectedDeps.length > 0) {
-        for (const depType of detectedDeps) {
+        for (let i = 0; i < detectedDeps.length; i++) {
+          const depType = detectedDeps[i];
           const dependency = this.resolveDependencyByType(depType);
           if (dependency) {
             dependencies.push(dependency);
@@ -392,10 +397,11 @@ export class OneBunModule implements ModuleInstance {
               allDependenciesResolved = false;
               pendingProviders.push(provider);
               break;
+            } else if (isOptionalParam(provider, i)) {
+              dependencies.push(undefined);
             } else {
-              this.logger.warn(
-                `Could not resolve dependency ${depType.name} for service ${provider.name}`,
-              );
+              const suggestions = this.buildResolutionSuggestions(depType);
+              throw new DependencyResolutionError(provider.name, depType.name, 'service', suggestions);
             }
           }
         }
@@ -466,6 +472,10 @@ export class OneBunModule implements ModuleInstance {
         if (diMark) {
           getProfiler()!.end(diMark);
         }
+        // Re-throw bootstrap errors (DI resolution, circular deps) so they propagate
+        if (error instanceof Error && error.name.startsWith('OneBun')) {
+          throw error;
+        }
         this.logger.error(`Failed to create service ${provider.name}: ${error}`);
       }
     }
@@ -486,11 +496,13 @@ export class OneBunModule implements ModuleInstance {
 
       const dependencyChain = this.buildDependencyChain(unresolvedDeps, unresolvedServices);
 
-      this.logger.error(
+      const errorMessage =
         `Circular dependency detected in module ${this.moduleClass.name}!\n` +
-          `Unresolved services:\n${details}\n` +
-          `Dependency chain: ${dependencyChain}`,
-      );
+        `Unresolved services:\n${details}\n` +
+        `Dependency chain: ${dependencyChain}`;
+
+      this.logger.error(errorMessage);
+      throw new CircularDependencyError(this.moduleClass.name, dependencyChain, unresolvedServices);
     }
   }
 
@@ -535,14 +547,16 @@ export class OneBunModule implements ModuleInstance {
       const deps: unknown[] = [];
 
       if (paramTypes && paramTypes.length > 0) {
-        for (const paramType of paramTypes) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
           const dep = this.resolveDependencyByType(paramType);
           if (dep) {
             deps.push(dep);
+          } else if (isOptionalParam(cls, i)) {
+            deps.push(undefined);
           } else {
-            this.logger.warn(
-              `Could not resolve dependency ${paramType.name} for middleware ${cls.name}`,
-            );
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(cls.name, paramType.name, 'middleware', suggestions);
           }
         }
       }
@@ -596,14 +610,16 @@ export class OneBunModule implements ModuleInstance {
       const deps: unknown[] = [];
 
       if (paramTypes && paramTypes.length > 0) {
-        for (const paramType of paramTypes) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
           const dep = this.resolveDependencyByType(paramType);
           if (dep) {
             deps.push(dep);
+          } else if (isOptionalParam(cls, i)) {
+            deps.push(undefined);
           } else {
-            this.logger.warn(
-              `Could not resolve dependency ${paramType.name} for interceptor ${cls.name}`,
-            );
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(cls.name, paramType.name, 'interceptor', suggestions);
           }
         }
       }
@@ -675,13 +691,17 @@ export class OneBunModule implements ModuleInstance {
 
       if (paramTypes && paramTypes.length > 0) {
         // Resolve dependencies based on registered parameter types
-        for (const paramType of paramTypes) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
           const dependency = this.resolveDependencyByType(paramType);
           if (dependency) {
             dependencies.push(dependency);
+          } else if (isOptionalParam(controllerClass, i)) {
+            dependencies.push(undefined);
           } else {
-            this.logger.warn(
-              `Could not resolve dependency ${paramType.name} for ${controllerClass.name}`,
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(
+              controllerClass.name, paramType.name, 'controller', suggestions,
             );
           }
         }
@@ -722,7 +742,6 @@ export class OneBunModule implements ModuleInstance {
         controller.initializeController(this.logger, this.config);
       }
 
-      // Apply auto-tracing if enabled
       // Apply auto-tracing if enabled (lazy require to avoid loading OTEL when tracing is off)
       if (this.tracingOptions) {
         const { shouldAutoTrace, applyAutoTrace } = require('@onebun/trace');
@@ -840,8 +859,80 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Setup the module and its dependencies
+   * Build actionable suggestions when a dependency cannot be resolved.
+   * Searches child modules and all registered modules to find where the
+   * missing type is provided and whether it is exported/imported correctly.
    */
+  private buildResolutionSuggestions(missingType: Function): string[] {
+    const suggestions: string[] = [];
+    const metadata = getModuleMetadata(this.moduleClass);
+    const currentImports = new Set((metadata?.imports ?? []).map((m) => m.name));
+
+    // 1. Search imported child modules
+    for (const child of this.childModules) {
+      const childMeta = getModuleMetadata(child.moduleClass);
+      const childProviders = (childMeta?.providers ?? []) as Function[];
+      const childExports = (childMeta?.exports ?? []) as Function[];
+
+      const isProvided = childProviders.some((p) => typeof p === 'function' && p.name === missingType.name);
+      const isExported = childExports.some((e) => typeof e === 'function' && e.name === missingType.name);
+
+      if (isProvided && isExported) {
+        suggestions.push(
+          `${missingType.name} is exported from ${child.moduleClass.name} (already imported) — ` +
+            'check if the service was created successfully.',
+        );
+      } else if (isProvided && !isExported) {
+        suggestions.push(
+          `${missingType.name} exists in ${child.moduleClass.name} but is not exported. ` +
+            'Add it to the exports array.',
+        );
+      }
+    }
+
+    // 2. Search all registered modules that are NOT imported
+    for (const [moduleClass, moduleMeta] of getRegisteredModules()) {
+      if (moduleClass === this.moduleClass) {
+        continue;
+      }
+      if (currentImports.has(moduleClass.name)) {
+        continue;
+      }
+
+      const providers = (moduleMeta.providers ?? []) as Function[];
+      const exports = (moduleMeta.exports ?? []) as Function[];
+      const hasProvider = providers.some((p) => typeof p === 'function' && p.name === missingType.name);
+      const hasExport = exports.some((e) => typeof e === 'function' && e.name === missingType.name);
+
+      if (hasProvider && hasExport) {
+        if (isGlobalModule(moduleClass)) {
+          suggestions.push(
+            `${missingType.name} is available in global module ${moduleClass.name} — ` +
+              'it should be auto-resolved. Check module initialization order.',
+          );
+        } else {
+          suggestions.push(
+            `${missingType.name} is exported from ${moduleClass.name}. ` +
+              `Add ${moduleClass.name} to imports of ${this.moduleClass.name}.`,
+          );
+        }
+      } else if (hasProvider && !hasExport) {
+        suggestions.push(
+          `${missingType.name} exists in ${moduleClass.name} but is not exported. ` +
+            `Add it to exports and import ${moduleClass.name}.`,
+        );
+      }
+    }
+
+    // 3. Fallback
+    if (suggestions.length === 0) {
+      suggestions.push(`Ensure ${missingType.name} is decorated with @Service() and listed in a module's providers.`);
+      suggestions.push('If the dependency is optional, use @Optional() on the constructor parameter.');
+    }
+
+    return suggestions;
+  }
+
   /**
    * Collect all descendant modules in depth-first order (leaves first).
    * This ensures that deeply nested modules are initialized before their parents.

@@ -135,6 +135,46 @@ import { UserRepository } from './user.repository';
 export class UserModule {}
 ```
 
+## Dependency Resolution Errors
+
+The framework validates all dependencies at bootstrap. If a required dependency cannot be resolved, `DependencyResolutionError` is thrown with diagnostic suggestions:
+
+```
+DependencyResolutionError: Could not resolve dependency CacheService for service UserService.
+  - CacheService is exported from CacheModule. Add CacheModule to imports of UserModule.
+```
+
+The error message searches all registered modules and reports:
+- Whether the dependency exists in another module and needs to be imported
+- Whether the dependency exists but is not exported from its module
+- Whether a global module should have auto-resolved it
+
+### Circular Dependencies
+
+Circular dependencies (A → B → A) are detected and throw `CircularDependencyError` with the full chain:
+
+```
+CircularDependencyError: Circular dependency detected in module AppModule!
+Dependency chain: ServiceA -> ServiceB -> ServiceA
+```
+
+Restructure your code to break the cycle — e.g., extract the shared logic into a third service.
+
+### Optional Dependencies
+
+Use `@Optional()` to allow a dependency to be `undefined` when not available:
+
+```typescript
+@Service()
+export class AnalyticsService extends BaseService {
+  constructor(@Optional() private metrics?: MetricsCollector) {
+    super();
+  }
+}
+```
+
+See [@Optional()](/api/decorators#optional) for details.
+
 ## Lifecycle Hooks
 
 Services can implement lifecycle hooks to execute code at specific points in the application lifecycle.

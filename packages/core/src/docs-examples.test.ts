@@ -51,6 +51,8 @@ import type { ServerWebSocket } from 'bun';
 
 import { type } from '@onebun/core';
 
+import { registerDependencies } from './decorators/decorators';
+import { OneBunModule } from './module/module';
 import { makeMockLoggerLayer } from './testing';
 
 import {
@@ -151,6 +153,9 @@ import {
   RateLimitMiddleware,
   MemoryRateLimitStore,
   SecurityHeadersMiddleware,
+  Optional,
+  CircularDependencyError,
+  DependencyResolutionError,
 } from './';
 
 
@@ -5234,5 +5239,74 @@ describe('docs/api/queue.md — type-safe adapter options', () => {
     });
 
     expect(app).toBeDefined();
+  });
+});
+
+/**
+ * @source docs:api/services.md#dependency-resolution-errors
+ */
+describe('Dependency Resolution Errors (docs/api/services.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+
+  it('should throw DependencyResolutionError for missing required dependency', () => {
+    @Service()
+    class CacheService extends BaseService {}
+
+    @Service()
+    class UserService extends BaseService {}
+
+    registerDependencies(UserService, [CacheService]);
+
+    @Module({
+      providers: [UserService], // CacheService NOT provided
+    })
+    class UserModule {}
+
+    expect(() => new OneBunModule(UserModule, mockLoggerLayer)).toThrow(DependencyResolutionError);
+  });
+
+  it('should throw CircularDependencyError for circular dependencies', () => {
+    @Service()
+    class ServiceA extends BaseService {}
+
+    @Service()
+    class ServiceB extends BaseService {}
+
+    registerDependencies(ServiceA, [ServiceB]);
+    registerDependencies(ServiceB, [ServiceA]);
+
+    @Module({
+      providers: [ServiceA, ServiceB],
+    })
+    class CircularModule {}
+
+    expect(() => new OneBunModule(CircularModule, mockLoggerLayer)).toThrow(CircularDependencyError);
+  });
+});
+
+/**
+ * @source docs:api/decorators.md#optional
+ */
+describe('@Optional() decorator (docs/api/decorators.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+
+  it('should allow optional dependency to be undefined', () => {
+    @Service()
+    class EmailService extends BaseService {}
+
+    @Service()
+    class NotificationService extends BaseService {}
+
+    registerDependencies(NotificationService, [EmailService]);
+    Optional()(NotificationService, undefined, 0);
+
+    @Module({
+      providers: [NotificationService], // EmailService NOT provided
+    })
+    class NotifModule {}
+
+    // Should NOT throw — @Optional allows undefined
+    const mod = new OneBunModule(NotifModule, mockLoggerLayer);
+    expect(mod).toBeInstanceOf(OneBunModule);
   });
 });

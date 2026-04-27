@@ -29,9 +29,11 @@ import {
   Middleware,
   Module,
 } from '../decorators/decorators';
+import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { WebSocketGateway } from '../websocket/ws-decorators';
+
 
 import { Controller as CtrlBase } from './controller';
 import { BaseMiddleware } from './middleware';
@@ -175,30 +177,9 @@ describe('OneBunModule', () => {
       expect(() => new OneBunModule(TestClass, mockLoggerLayer)).toThrow();
     });
 
-    test('should detect circular dependencies and provide detailed error message', () => {
+    test('should throw CircularDependencyError for A -> B -> C -> A cycle', () => {
       const { registerDependencies } = require('../decorators/decorators');
-      const { LoggerService } = require('@onebun/logger');
 
-      // Collect error messages
-      const errorMessages: string[] = [];
-
-      // Create mock logger that captures error messages
-      // Using Effect.sync to ensure the message is captured synchronously when Effect.runSync is called
-      const captureLogger = {
-        trace: () => Effect.sync(() => undefined),
-        debug: () => Effect.sync(() => undefined),
-        info: () => Effect.sync(() => undefined),
-        warn: () => Effect.sync(() => undefined),
-        error: (msg: string) =>
-          Effect.sync(() => {
-            errorMessages.push(msg);
-          }),
-        fatal: () => Effect.sync(() => undefined),
-        child: () => captureLogger,
-      };
-      const captureLoggerLayer = Layer.succeed(LoggerService, captureLogger);
-
-      // Create services - define all classes first
       @Service()
       class CircularServiceA {
         getValue() {
@@ -220,7 +201,7 @@ describe('OneBunModule', () => {
         }
       }
 
-      // Now register circular dependencies manually: A -> B -> C -> A
+      // Register circular dependencies: A -> C -> B -> A
       registerDependencies(CircularServiceA, [CircularServiceC]);
       registerDependencies(CircularServiceB, [CircularServiceA]);
       registerDependencies(CircularServiceC, [CircularServiceB]);
@@ -230,36 +211,196 @@ describe('OneBunModule', () => {
       })
       class CircularModule {}
 
-      // Initialize module - should detect circular dependency
-      new OneBunModule(CircularModule, captureLoggerLayer);
-
-      // Verify error message was logged
-      expect(errorMessages.length).toBeGreaterThan(0);
-
-      // Find the circular dependency error message
-      const circularError = errorMessages.find((msg) =>
-        msg.includes('Circular dependency detected'),
+      expect(() => new OneBunModule(CircularModule, mockLoggerLayer)).toThrow(
+        CircularDependencyError,
       );
-      expect(circularError).toBeDefined();
 
-      // Should contain module name
-      expect(circularError).toContain('CircularModule');
+      try {
+        new OneBunModule(CircularModule, mockLoggerLayer);
+      } catch (error) {
+        expect(error).toBeInstanceOf(CircularDependencyError);
+        const cde = error as CircularDependencyError;
+        expect(cde.moduleName).toBe('CircularModule');
+        expect(cde.message).toContain('Circular dependency detected');
+        expect(cde.message).toContain('Dependency chain');
+        expect(cde.unresolvedServices.length).toBeGreaterThan(0);
 
-      // Should contain "Unresolved services" section
-      expect(circularError).toContain('Unresolved services');
+        const hasServiceInfo =
+          cde.message.includes('CircularServiceA') ||
+          cde.message.includes('CircularServiceB') ||
+          cde.message.includes('CircularServiceC');
+        expect(hasServiceInfo).toBe(true);
+      }
+    });
 
-      // Should contain at least one of the service names with their dependencies
-      const hasServiceInfo =
-        circularError!.includes('CircularServiceA') ||
-        circularError!.includes('CircularServiceB') ||
-        circularError!.includes('CircularServiceC');
-      expect(hasServiceInfo).toBe(true);
+    test('should throw CircularDependencyError for direct A <-> B cycle', () => {
+      const { registerDependencies } = require('../decorators/decorators');
 
-      // Should contain "needs:" showing what dependencies are required
-      expect(circularError).toContain('needs:');
+      @Service()
+      class DirectA {
+        getValue() {
+          return 'A';
+        }
+      }
 
-      // Should contain "Dependency chain" showing the cycle
-      expect(circularError).toContain('Dependency chain');
+      @Service()
+      class DirectB {
+        getValue() {
+          return 'B';
+        }
+      }
+
+      registerDependencies(DirectA, [DirectB]);
+      registerDependencies(DirectB, [DirectA]);
+
+      @Module({
+        providers: [DirectA, DirectB],
+      })
+      class DirectCycleModule {}
+
+      expect(() => new OneBunModule(DirectCycleModule, mockLoggerLayer)).toThrow(
+        CircularDependencyError,
+      );
+    });
+
+    test('should throw CircularDependencyError for self-dependency A -> A', () => {
+      const { registerDependencies } = require('../decorators/decorators');
+
+      @Service()
+      class SelfDepService {
+        getValue() {
+          return 'self';
+        }
+      }
+
+      registerDependencies(SelfDepService, [SelfDepService]);
+
+      @Module({
+        providers: [SelfDepService],
+      })
+      class SelfDepModule {}
+
+      expect(() => new OneBunModule(SelfDepModule, mockLoggerLayer)).toThrow(
+        CircularDependencyError,
+      );
+    });
+  });
+
+  describe('Fail-fast dependency resolution', () => {
+    test('should throw DependencyResolutionError for unresolved required service dependency', () => {
+      const { registerDependencies } = require('../decorators/decorators');
+
+      @Service()
+      class MissingDep {
+        getValue() {
+          return 'missing';
+        }
+      }
+
+      @Service()
+      class NeedsDep {
+        getValue() {
+          return 'needs';
+        }
+      }
+
+      // NeedsDep depends on MissingDep, but MissingDep is NOT in providers
+      registerDependencies(NeedsDep, [MissingDep]);
+
+      @Module({
+        providers: [NeedsDep],
+      })
+      class FailFastModule {}
+
+      expect(() => new OneBunModule(FailFastModule, mockLoggerLayer)).toThrow(
+        DependencyResolutionError,
+      );
+
+      try {
+        new OneBunModule(FailFastModule, mockLoggerLayer);
+      } catch (error) {
+        expect(error).toBeInstanceOf(DependencyResolutionError);
+        const dre = error as DependencyResolutionError;
+        expect(dre.targetName).toBe('NeedsDep');
+        expect(dre.dependencyName).toBe('MissingDep');
+        expect(dre.targetType).toBe('service');
+        expect(dre.message).toContain('MissingDep');
+        expect(dre.message).toContain('NeedsDep');
+      }
+    });
+
+    test('should throw DependencyResolutionError with suggestion when dep exists in another module', () => {
+      const { registerDependencies } = require('../decorators/decorators');
+
+      @Service()
+      class SharedService {
+        getValue() {
+          return 'shared';
+        }
+      }
+
+      @Module({
+        providers: [SharedService],
+        exports: [SharedService],
+      })
+      class SharedModule {}
+
+      @Service()
+      class ConsumerService {
+        getValue() {
+          return 'consumer';
+        }
+      }
+
+      registerDependencies(ConsumerService, [SharedService]);
+
+      @Module({
+        providers: [ConsumerService],
+        // SharedModule is NOT imported!
+      })
+      class ConsumerModule {}
+
+      try {
+        new OneBunModule(ConsumerModule, mockLoggerLayer);
+      } catch (error) {
+        expect(error).toBeInstanceOf(DependencyResolutionError);
+        const dre = error as DependencyResolutionError;
+        expect(dre.message).toContain('SharedModule');
+        expect(dre.message).toContain('imports');
+      }
+    });
+
+    test('should allow @Optional() dependency to resolve as undefined', () => {
+      const { registerDependencies, Optional } = require('../decorators/decorators');
+
+      @Service()
+      class OptionalDep {
+        getValue() {
+          return 'optional';
+        }
+      }
+
+      @Service()
+      class WithOptional {
+        getValue() {
+          return 'with-optional';
+        }
+      }
+
+      // WithOptional depends on OptionalDep, but it is marked as @Optional
+      registerDependencies(WithOptional, [OptionalDep]);
+
+      // Mark parameter 0 as optional
+      Optional()(WithOptional, undefined, 0);
+
+      @Module({
+        providers: [WithOptional],
+      })
+      class OptionalModule {}
+
+      // Should NOT throw — optional dependency is allowed to be undefined
+      const mod = new OneBunModule(OptionalModule, mockLoggerLayer);
+      expect(mod).toBeInstanceOf(OneBunModule);
     });
   });
 
