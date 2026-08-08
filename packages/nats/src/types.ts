@@ -85,9 +85,13 @@ export interface JetStreamAdapterOptions extends NatsConnectionOptions {
    * subscription overrides it.
    */
   consumerConfig?: {
-    /** Acknowledgment wait time in nanoseconds */
+    /**
+     * Acknowledgment wait time in NANOSECONDS, applied to every consumer this adapter
+     * creates. `SubscribeOptions.ackTimeout` — which is in milliseconds — overrides it
+     * per subscription.
+     */
     ackWait?: number;
-    /** Maximum number of deliveries before moving to DLQ. `retry.attempts` overrides it. */
+    /** Maximum deliveries before the message is dead-lettered. `retry.attempts`, then `deadLetter.maxRetries`, override it. */
     maxDeliver?: number;
     /** Maximum pending acknowledgments. `prefetch` on the subscription overrides it. */
     maxAckPending?: number;

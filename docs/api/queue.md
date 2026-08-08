@@ -384,8 +384,8 @@ Everything that depends on the broker tracking delivery state goes inert with it
 | `ackTimeout` | ignored — no effect under `ackMode: 'none'` |
 | `ack_wait` | not sent to the server |
 | `max_deliver` | not sent to the server |
-| `Message.attempt` | never populated |
-| `Message.maxAttempts` | never populated |
+| `Message.attempt` | reported but inert — stays 1, nothing is redelivered |
+| `Message.maxAttempts` | reported but inert — no attempt can be the last |
 | `Message.redelivered` | always `false` |
 
 A handler that throws still emits `onMessageFailed`, so failures remain observable — the
@@ -886,7 +886,7 @@ const app = new OneBunApplication(AppModule, {
 Per-subscription options win over these defaults, field by field:
 
 - **`max_ack_pending`** — the rule is *prefetch overrides consumerConfig.maxAckPending*, and `100` applies when neither is set. The pull batch is the smaller of the resolved `max_ack_pending` and `prefetch` (`10` when `prefetch` is absent), so a batch can never outrun the acknowledgement window.
-- **`max_deliver`** — `retry.attempts` on `@Subscribe` overrides `consumerConfig.maxDeliver`, and `3` applies when neither is set.
+- **`max_deliver`** — `retry.attempts` on `@Subscribe`, then `deadLetter.maxRetries`, override `consumerConfig.maxDeliver`, and `3` applies when none is set. `retry.attempts` stays ahead of `deadLetter.maxRetries` so every configuration that predates the dead-letter queue keeps the `max_deliver` it had.
 - **`ack_wait`** — `ackTimeout` on `@Subscribe` overrides `consumerConfig.ackWait`, and 30 seconds (`30_000_000_000` nanoseconds) applies when neither is set.
 
 **`ackTimeout`: how long a handler may hold a message.** It is the per-subscription form of `ack_wait` — the window the server waits for an acknowledgement before it assumes the consumer died and redelivers. Mind the units: `ackTimeout` is in milliseconds, like every other duration in `@onebun/core`, while `consumerConfig.ackWait` is in nanoseconds, because it is a NATS-native value passed through untouched. The adapter converts, so `ackTimeout: 30_000` and `ackWait: 30 * 1e9` describe the same window.
@@ -910,7 +910,9 @@ Changing `ackTimeout` does not require deleting anything. It belongs to the hash
 
 </llm-only>
 
-Consumers are always created with an explicit acknowledgement policy, under both `ackMode: 'auto'` and `ackMode: 'manual'`. `ackMode` selects *who* acknowledges — the adapter on the handler's behalf, or the handler itself — never whether the server tracks acknowledgements. Server-side tracking is what makes `ackWait`, `maxDeliver`, `maxAckPending`, `message.ack()`, `message.nack()`, retries and the dead-letter queue work at all.
+Consumers are created with an explicit acknowledgement policy under `ackMode: 'auto'` and `ackMode: 'manual'`, and with `ack_policy: none` under `ackMode: 'none'`. Between the first two, `ackMode` selects *who* acknowledges — the adapter on the handler's behalf, or the handler itself. `'none'` is the one that decides *whether* the server tracks acknowledgements at all, and server-side tracking is what makes `ackWait`, `maxDeliver`, `maxAckPending`, `message.ack()`, `message.nack()`, retries and the dead-letter queue work.
+
+The policy is fixed when the consumer is created and cannot be changed in place, so a durable whose stored policy disagrees with the mode its subscription now declares fails startup naming both — in either direction. Changing a subscription's `ackMode` between `'none'` and the other two therefore requires `nats consumer rm` on its durable.
 
 **Negative acknowledgement.** `nack(true)` asks the server to redeliver the message immediately; it counts against `maxDeliver`, and once that is exhausted the message stops. `nack(false)`, and the bare `nack()`, terminate the message instead: the server drops it permanently, it is never redelivered, and the delivery does not consume a `maxDeliver` attempt. Terminating does not move the payload anywhere — publish it yourself first if you need it kept.
 
@@ -970,9 +972,10 @@ nats consumer rm <STREAM> <CONSUMER>
 <llm-only>
 
 **Technical details for AI agents:**
-- Wire values are resolved once per subscription by `resolveConsumerConfig(ackPolicy, deliverPolicy, options, consumerConfig)` in `packages/nats/src/jetstream.adapter.ts` — the single source of truth. `maxAckPending = options?.prefetch ?? consumerConfig?.maxAckPending ?? 100`; `maxDeliver = options?.retry?.attempts ?? consumerConfig?.maxDeliver ?? 3`; `ackWait = options?.ackTimeout !== undefined ? options.ackTimeout * 1_000_000 : consumerConfig?.ackWait ?? 30_000_000_000`; `consumeBatch = Math.min(maxAckPending, options?.prefetch ?? 10)`
+- Wire values are resolved once per subscription by `resolveConsumerConfig(ackPolicy, deliverPolicy, options, consumerConfig)` in `packages/nats/src/jetstream.adapter.ts` — the single source of truth. `maxAckPending = options?.prefetch ?? consumerConfig?.maxAckPending ?? 100`; `maxDeliver = options?.retry?.attempts ?? options?.deadLetter?.maxRetries ?? consumerConfig?.maxDeliver ?? 3`; `ackWait = options?.ackTimeout !== undefined ? options.ackTimeout * 1_000_000 : consumerConfig?.ackWait ?? 30_000_000_000`; `consumeBatch = Math.min(maxAckPending, options?.prefetch ?? 10)`
 - `consumerConfig.maxAckPending` was declared but read nowhere before this change — it is now wired through `resolveConsumerConfig()`
-- `ackPolicy` is always `AckPolicy.Explicit`, passed into `resolveConsumerConfig()` from `subscribe()` for both `ackMode: 'auto'` and `ackMode: 'manual'`. It arrives as a parameter, together with `deliverPolicy`, so the function stays synchronous and needs no access to the dynamically imported client module. Previously any mode other than `'manual'` produced `ack_policy: none`, under which the server tracks no acknowledgements and every ack-dependent feature is inert
+- `ackPolicy` is `AckPolicy.Explicit` for `ackMode: 'auto'` and `'manual'`, and `AckPolicy.None` for `'none'`, resolved at the single site `resolveAckMode(options) === 'none' ? AckPolicy.None : AckPolicy.Explicit` in `subscribe()`. It arrives at `resolveConsumerConfig()` as a parameter, together with `deliverPolicy`, so the function stays synchronous and needs no access to the dynamically imported client module. Previously any mode other than `'manual'` produced `ack_policy: none`, under which the server tracks no acknowledgements and every ack-dependent feature is inert
+- `ensureConsumer()` compares the stored `ack_policy` against `resolved.ackPolicy`, NOT against `Explicit` outright. Asserting Explicit rejected on the second boot the very consumer a `'none'` subscription had created on the first — permanently, because `ack_policy` is create-only and the recreated one is `none` again
 - `Message.nack(true)` calls `jsMsg.nak()` with NO argument — `nak(millis?: number)` takes a delay, and passing anything non-numeric reaches the wire as a null delay, which is a plain nak. `nack(false)` and the bare `nack()` call `jsMsg.term()`. `term(reason?)` accepts a reason string only on nats-server 2.11+, so the adapter deliberately calls it bare
 - `ensureConsumer()` is probe-first: it calls `jsm.consumers.info(stream, consumer)` before anything else, never a blind `consumers.add()` inside a bare `catch {}`
 - Rejections are classified by NUMERIC API code via `isNotFoundError(err, jsModule.JetStreamApiCodes.ConsumerNotFound)` (`ConsumerNotFound` = `10014`). Only that code means absence → `addConsumer()` creates the consumer and stamps the desired hash. Every other rejection emits `onError` and is rethrown as itself. `code` is read by plain property access, not `Object.hasOwn` — the client exposes it as a prototype getter over a private field, so own-property checks, spreading and JSON round-trips lose it

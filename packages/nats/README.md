@@ -158,8 +158,8 @@ interface JetStreamAdapterOptions extends NatsConnectionOptions {
     duplicateWindow?: number;  // Nanoseconds
   }>;
   consumerConfig?: {
-    ackWait?: number;          // Ack timeout in nanoseconds, default 30s
-    maxDeliver?: number;       // Max delivery attempts, default 3; retry.attempts overrides it
+    ackWait?: number;          // Ack timeout in NANOSECONDS, default 30s; @Subscribe({ ackTimeout }) (ms) overrides it
+    maxDeliver?: number;       // Max delivery attempts, default 3; retry.attempts, then deadLetter.maxRetries, override it
     maxAckPending?: number;    // Max unacknowledged messages in flight, default 100; prefetch overrides it
   };
 }

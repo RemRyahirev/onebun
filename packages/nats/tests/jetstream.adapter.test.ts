@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 396
+// NATS-SUITE-FLOOR: 399
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -1780,6 +1780,37 @@ describe('ensureConsumer: migration and error classification', () => {
     await expect(
       adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' }),
     ).rejects.toThrow(/nats consumer rm/);
+    expect(mockJsm.consumers.update).not.toHaveBeenCalled();
+  });
+
+  it("accepts an ack_policy none consumer when the subscription declares ackMode 'none'", async () => {
+    // The restart path. A durable created under 'none' IS ack_policy none, and asserting
+    // Explicit outright rejected on the second boot the very consumer the first boot
+    // created — permanently, since ack_policy is create-only and a recreated one is 'none'
+    // again. The guard compares against what this subscription wants.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    seedConsumerInfo(mockJsm, {
+      ack_policy: realJetStream.AckPolicy.None,
+      metadata: nonExplicitMetadata(),
+    });
+
+    const subscription = await adapter.subscribe('test.topic', async () => undefined, {
+      group: 'test-group',
+      ackMode: 'none',
+    });
+
+    expect(subscription.isActive).toBe(true);
+  });
+
+  it("refuses an ack_policy explicit consumer when the subscription declares ackMode 'none'", async () => {
+    // The reverse direction, reachable only once the guard is scoped: the existing
+    // consumer would keep tracking acknowledgements nobody sends.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    seedConsumerInfo(mockJsm, { ack_policy: realJetStream.AckPolicy.Explicit, metadata: {} });
+
+    await expect(
+      adapter.subscribe('test.topic', async () => undefined, { group: 'test-group', ackMode: 'none' }),
+    ).rejects.toThrow(/needs ack_policy=none/);
     expect(mockJsm.consumers.update).not.toHaveBeenCalled();
   });
 
@@ -3703,6 +3734,27 @@ describe("ackMode 'none': the loop acknowledges nothing", () => {
 
     expect(jsMsg.nak).not.toHaveBeenCalled();
     expect(jsMsg.ack).not.toHaveBeenCalled();
+    expect(jsMsg.term).not.toHaveBeenCalled();
+  });
+
+  it('routes nothing to the dead-letter queue, even when one is configured', async () => {
+    // The mode promises no dead-letter routing on any adapter. The AUTOMATIC path is
+    // gated by acknowledgesAutomatically, but a handler calling nack(false) itself
+    // reaches the router closure directly — so the closure is what has to be gated.
+    const jsMsg = makeMockJsMsg({
+      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      info: { redelivered: false, deliveryCount: 1 },
+    });
+    const { adapter, mockJs } = makeConnectedAdapter();
+    const consumer = makeMockConsumer([jsMsg]);
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+    await adapter.subscribe('test.topic', async (message) => {
+      await message.nack(false);
+    }, { ackMode: 'none', deadLetter: { queue: DLQ } } as AnyRecord);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    expect(asAny(mockJs.publish).mock.calls.some((c: unknown[]) => c[0] === DLQ)).toBe(false);
     expect(jsMsg.term).not.toHaveBeenCalled();
   });
 });

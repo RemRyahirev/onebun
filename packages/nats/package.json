@@ -43,7 +43,7 @@
     "effect": "^3.13.10"
   },
   "peerDependencies": {
-    "@onebun/core": "^0.4.2"
+    "@onebun/core": "^0.4.5"
   },
   "devDependencies": {
     "@onebun/core": "workspace:^",

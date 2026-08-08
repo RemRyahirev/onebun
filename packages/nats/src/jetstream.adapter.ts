@@ -300,8 +300,17 @@ function describeCause(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
-function ackPolicyMigrationMessage(consumerName: string, streamName: string, observed: string): string {
-  return `JetStream consumer "${consumerName}" on stream "${streamName}" has ack_policy=${observed || 'unset'}, but OneBun requires an explicit ack policy — under anything else acknowledgements, ack_wait, max_deliver, max_ack_pending, retries and the dead-letter queue are inert. ack_policy cannot be changed on an existing consumer. Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}`;
+function ackPolicyMigrationMessage(
+  consumerName: string,
+  streamName: string,
+  observed: string,
+  expected: string,
+): string {
+  const why = expected === 'explicit'
+    ? 'under anything else acknowledgements, ack_wait, max_deliver, max_ack_pending, retries and the dead-letter queue are inert'
+    : 'this subscription declares ackMode: \'none\', which needs ack_policy=none — the existing consumer would keep tracking acknowledgements nobody sends and redeliver every message once ack_wait expired';
+
+  return `JetStream consumer "${consumerName}" on stream "${streamName}" has ack_policy=${observed || 'unset'}, but this subscription needs ack_policy=${expected} — ${why}. ack_policy cannot be changed on an existing consumer. Either align the subscription's ackMode with the consumer, or delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}`;
 }
 
 function cycleMessage(
@@ -420,6 +429,13 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
    * terminates, so `nack(false)` must not `term()` on its own when this is present.
    */
   private readonly deadLetter?: (error?: Error) => Promise<void>;
+  /**
+   * False under `ackMode: 'none'`, where `ack()` and `nack()` are documented no-ops.
+   * The server tracks nothing under `ack_policy: none`, so an ack, a nak or a term is a
+   * round trip it discards — and a `term()` in particular would contradict the mode's
+   * promise that a handler cannot influence delivery at all.
+   */
+  private readonly tracksDelivery: boolean;
 
   constructor(
     id: string,
@@ -430,6 +446,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
     jsMsg: JsMsg,
     maxAttempts?: number,
     deadLetter?: (error?: Error) => Promise<void>,
+    serverTracksDelivery = true,
   ) {
     this.id = id;
     this.pattern = pattern;
@@ -444,6 +461,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
     this.attempt = jsMsg?.info?.deliveryCount;
     this.maxAttempts = maxAttempts;
     this.deadLetter = deadLetter;
+    this.tracksDelivery = serverTracksDelivery;
   }
 
   /**
@@ -461,7 +479,9 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
       return;
     }
     this.acked = true;
-    if (this.jsMsg?.ack) {
+    // Recorded but not sent under 'none': the disposition still decides which lifecycle
+    // event the loop emits, it just never reaches a server that is tracking nothing.
+    if (this.tracksDelivery && this.jsMsg?.ack) {
       this.jsMsg.ack();
     }
   }
@@ -471,6 +491,10 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
       return;
     }
     this.nacked = true;
+
+    if (!this.tracksDelivery) {
+      return;
+    }
 
     if (requeue) {
       // `nak()` with no delay asks the server to redeliver immediately, up to max_deliver.
@@ -999,10 +1023,19 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
     // Before decideStamp: a legacy consumer could carry a matching hash, in which case
     // a stamp-first order would return noop and leave acknowledgements disabled.
-    // Asserted positively against Explicit so no other policy slips through either.
-    if (config.ack_policy !== jsModule.AckPolicy.Explicit) {
+    //
+    // Compared against what THIS subscription wants, not against Explicit outright. A
+    // durable created under `ackMode: 'none'` is legitimately `ack_policy: none`, and
+    // asserting Explicit here rejected the consumer the previous boot had just created —
+    // permanently, because ack_policy is create-only and the recreated one is `none` again.
+    if (config.ack_policy !== resolved.ackPolicy) {
       throw this.failConsumer(
-        ackPolicyMigrationMessage(consumerName, streamName, String(config.ack_policy ?? '')),
+        ackPolicyMigrationMessage(
+          consumerName,
+          streamName,
+          String(config.ack_policy ?? ''),
+          String(resolved.ackPolicy),
+        ),
       );
     }
 
@@ -1669,9 +1702,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         const messagePattern = messageData.pattern || msg.subject;
         const metadata = messageData.metadata || {};
 
-        // Built only when the subscription configured a dead-letter queue, so `nack(false)`
-        // keeps its bare `term()` behaviour everywhere else.
-        const toDeadLetter = entry.options?.deadLetter === undefined
+        // Built only when the subscription configured a dead-letter queue AND the broker
+        // tracks delivery, so `nack(false)` keeps its bare `term()` behaviour everywhere
+        // else. Under `ackMode: 'none'` the mode promises no dead-letter routing at all —
+        // the automatic path is already gated by `acknowledgesAutomatically`, but a handler
+        // calling `nack(false)` itself reaches this closure directly, so gating the closure
+        // is what makes the promise true. Redis gates the same way in `onNack`.
+        const toDeadLetter = entry.options?.deadLetter === undefined || !tracksDelivery(entry.options)
           ? undefined
           : (failure?: Error): Promise<void> => this.routeToDeadLetter(
             entry,
@@ -1691,6 +1728,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           msg,
           entry.maxDeliver,
           toDeadLetter,
+          entry.resolved.tracksDelivery,
         );
 
         // Emit received event
