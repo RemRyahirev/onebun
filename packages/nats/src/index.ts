@@ -25,3 +25,6 @@ export { NatsQueueAdapter, createNatsQueueAdapter } from './nats.adapter';
 
 // JetStream Queue Adapter (persistent)
 export { JetStreamQueueAdapter, createJetStreamQueueAdapter } from './jetstream.adapter';
+
+// Pattern translation
+export { toNatsSubject } from './subject';

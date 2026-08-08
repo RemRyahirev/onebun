@@ -105,20 +105,12 @@ describe('nats-types', () => {
       expect(stream.replicas).toBe(3);
     });
 
-    it('should accept consumer configuration', () => {
-      const options: JetStreamAdapterOptions = {
-        servers: 'nats://localhost:4222',
-        streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
-        consumerConfig: {
-          ackWait: 30000000000,
-          maxDeliver: 5,
-          maxAckPending: 100,
-        },
-      };
-
-      expect(options.consumerConfig?.ackWait).toBe(30000000000);
-      expect(options.consumerConfig?.maxDeliver).toBe(5);
-      expect(options.consumerConfig?.maxAckPending).toBe(100);
-    });
+    // NOTE: the former 'should accept consumer configuration' case was deleted here.
+    // It built a `JetStreamAdapterOptions` literal and then asserted that literal
+    // against itself, which proves nothing at runtime — the type is already enforced
+    // by `bun run typecheck`, and the behavioural coverage (that `consumerConfig`
+    // reaches the `jsm.consumers.add` payload) now lives in
+    // `docs-examples.test.ts` and in the `baseline: pre-change wire format` block of
+    // `jetstream.adapter.test.ts`.
   });
 });

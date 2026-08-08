@@ -36,6 +36,8 @@ export interface NatsConnectionOptions {
 
 /**
  * Stream definition for JetStream multi-stream configuration
+ *
+ * @see docs:api/queue.md
  */
 export interface StreamDefinition {
   /** Stream name */
@@ -52,12 +54,24 @@ export interface StreamDefinition {
   maxAge?: number;
   /** Storage type */
   storage?: 'file' | 'memory';
+  /**
+   * How far back the server looks for a repeated `Nats-Msg-Id` when deduplicating, in
+   * NANOSECONDS — the same unit as `maxAge`. Omit it and the server applies its own
+   * default of two minutes, which is usually too short for an outbox that has to survive
+   * a crash and a restart. Only sent when declared, so a window an operator configured out
+   * of band is never reset.
+   *
+   * @see docs:api/queue.md
+   */
+  duplicateWindow?: number;
   /** Number of replicas */
   replicas?: number;
 }
 
 /**
  * JetStream adapter options
+ *
+ * @see docs:api/queue.md
  */
 export interface JetStreamAdapterOptions extends NatsConnectionOptions {
   /** Stream definitions — all are created/ensured during connect() */
@@ -66,13 +80,16 @@ export interface JetStreamAdapterOptions extends NatsConnectionOptions {
   /** Default stream config merged into every stream definition */
   streamDefaults?: Omit<StreamDefinition, 'name' | 'subjects'>;
 
-  /** Default consumer configuration */
+  /**
+   * Default consumer configuration, applied to every subscription unless the
+   * subscription overrides it.
+   */
   consumerConfig?: {
     /** Acknowledgment wait time in nanoseconds */
     ackWait?: number;
-    /** Maximum number of deliveries before moving to DLQ */
+    /** Maximum number of deliveries before moving to DLQ. `retry.attempts` overrides it. */
     maxDeliver?: number;
-    /** Maximum pending acknowledgments */
+    /** Maximum pending acknowledgments. `prefetch` on the subscription overrides it. */
     maxAckPending?: number;
   };
 }
