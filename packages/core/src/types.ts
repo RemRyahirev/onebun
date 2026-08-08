@@ -640,7 +640,14 @@ export type QueueAdapterType = 'memory' | 'redis';
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface QueueApplicationOptions<A extends QueueAdapterConstructor<any> = QueueAdapterConstructor> {
-  /** Enable/disable queue (default: auto - enabled if handlers exist) */
+  /**
+   * Enable/disable queue.
+   *
+   * Left undefined (the default) the queue auto-enables when a controller carries a queue
+   * decorator OR when a backend is configured via `adapter`, `options` or `redis`.
+   * `true` forces it on; `false` forces it off even when a backend is configured, in which
+   * case the application logs a single warning naming the contradiction.
+   */
   enabled?: boolean;
   /** Adapter type, or custom adapter constructor (e.g. for NATS JetStream) */
   adapter?: QueueAdapterType | A;

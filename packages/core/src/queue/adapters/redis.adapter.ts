@@ -26,6 +26,13 @@ import type {
 
 import { RedisClient } from '../../redis/redis-client';
 import { SharedRedisProvider } from '../../redis/shared-redis';
+import {
+  acknowledgesAutomatically,
+  nackedError,
+  tracksDelivery,
+  wasNacked,
+  type NackAwareMessage,
+} from '../ack-mode';
 import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
 import { QueueScheduler } from '../scheduler';
 
@@ -66,7 +73,7 @@ interface RedisSubscriptionEntry {
 /**
  * Redis message implementation
  */
-class RedisMessage<T> implements Message<T> {
+class RedisMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
   data: T;
@@ -105,6 +112,15 @@ class RedisMessage<T> implements Message<T> {
     this.maxAttempts = options?.maxAttempts;
     this.onAck = options?.onAck;
     this.onNack = options?.onNack;
+  }
+
+  /**
+   * True once `nack()` has been called, so the consume loop can report the message as
+   * failed rather than processed. Not on the public `Message` interface — see
+   * `NackAwareMessage`.
+   */
+  get wasNacked(): boolean {
+    return this.nacked;
   }
 
   async ack(): Promise<void> {
@@ -496,6 +512,12 @@ export class RedisQueueAdapter implements QueueAdapter {
           }
         },
         onNack: async (requeue) => {
+          // Under 'none' the broker tracks nothing, so neither requeue nor dead-letter
+          // routing can be honoured without inventing delivery state that does not exist.
+          if (!tracksDelivery(entry.options)) {
+            return;
+          }
+
           if (requeue) {
             // Re-queue the message
             await this.client!.raw(
@@ -521,19 +543,24 @@ export class RedisQueueAdapter implements QueueAdapter {
     try {
       await entry.handler(message);
 
-      // Auto-ack if not manual mode
-      if (entry.options?.ackMode !== 'manual') {
+      // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
+      if (acknowledgesAutomatically(entry.options)) {
         await message.ack();
       }
 
-      // Emit processed event
-      this.emit('onMessageProcessed', message);
+      // A handler that catches its own exception and nacks returns normally, so control
+      // flow alone cannot tell the drop apart from a success.
+      if (wasNacked(message)) {
+        this.emit('onMessageFailed', message, nackedError(message));
+      } else {
+        this.emit('onMessageProcessed', message);
+      }
     } catch (error) {
-      // Emit failed event
+      // A throw is the failure, whether or not the handler also nacked — one event either way.
       this.emit('onMessageFailed', message, error as Error);
 
-      // Auto-nack if not manual mode
-      if (entry.options?.ackMode !== 'manual') {
+      // Same rule on the failure side. Under 'none' the message is simply gone.
+      if (acknowledgesAutomatically(entry.options)) {
         await message.nack(false);
       }
     }

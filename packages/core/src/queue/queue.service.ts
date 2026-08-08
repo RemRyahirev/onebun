@@ -75,7 +75,12 @@ export class QueueService {
   async initialize(adapter: QueueAdapter): Promise<void> {
     this.adapter = adapter;
     this.scheduler = new QueueScheduler(adapter);
-    await adapter.connect();
+
+    // Guarded exactly as in start(): the application already connects the adapter in
+    // initializeQueue(), so an unconditional connect here opens the backend twice per boot.
+    if (!adapter.isConnected()) {
+      await adapter.connect();
+    }
   }
 
   /**

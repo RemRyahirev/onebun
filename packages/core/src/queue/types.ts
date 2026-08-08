@@ -12,8 +12,17 @@
  * Message acknowledgment mode
  * - 'auto': Message is automatically acknowledged after successful handler execution
  * - 'manual': Handler must call message.ack() or message.nack() explicitly
+ * - 'none': Fire-and-forget. The message is delivered exactly once and nothing is
+ *   acknowledged, so there is **no redelivery** and **no dead-letter routing** on any
+ *   adapter. Everything that depends on the broker tracking delivery state goes inert
+ *   with it: `retry` (including `retry.attempts`), `deadLetter`, `ack_wait`,
+ *   `max_deliver`, and the `attempt`, `maxAttempts` and `redelivered` fields on
+ *   `Message`. A failing handler still emits `onMessageFailed`; the message is simply
+ *   gone. Choose it when losing a message is cheaper than processing it twice.
+ *
+ * @see docs:api/queue.md
  */
-export type AckMode = 'auto' | 'manual';
+export type AckMode = 'auto' | 'manual' | 'none';
 
 // ============================================================================
 // Message Types
@@ -79,8 +88,18 @@ export interface Message<T = unknown> {
   ack(): Promise<void>;
 
   /**
-   * Negative acknowledge the message (for manual ack mode)
-   * @param requeue - Whether to requeue the message for reprocessing
+   * Negative acknowledge the message (for manual ack mode).
+   *
+   * `requeue: true` asks for the message to be delivered again. `requeue: false` — the
+   * default — says it must NOT be delivered again. Every adapter that can redeliver honours
+   * that, but where the message then goes differs: JetStream terminates it server-side, Redis
+   * moves it to the dead-letter queue only when `deadLetter` is configured and otherwise drops
+   * it, the in-memory adapter always drops it, and the plain NATS adapter does nothing at all
+   * because core NATS has no acknowledgement.
+   *
+   * @param requeue - Whether to deliver the message again. Defaults to `false`.
+   *
+   * @see docs:api/queue.md
    */
   nack(requeue?: boolean): Promise<void>;
 }
@@ -91,6 +110,8 @@ export interface Message<T = unknown> {
 
 /**
  * Options for publishing messages
+ *
+ * @see docs:api/queue.md
  */
 export interface PublishOptions {
   /** Delay before the message is delivered (ms) */
@@ -99,7 +120,18 @@ export interface PublishOptions {
   /** Message priority (higher = more important) */
   priority?: number;
 
-  /** Custom message ID */
+  /**
+   * Custom message ID.
+   *
+   * On JetStream this is sent as the `Nats-Msg-Id` header and enables server-side
+   * deduplication: a second message carrying an id the stream has already seen inside its
+   * deduplication window is dropped, while `publish()` still resolves. An omitted or empty
+   * value means no deduplication — the adapter generates an id and sends no header. On the
+   * memory, Redis and core-NATS adapters the id is echoed back as `Message.id` and nothing
+   * more.
+   *
+   * @see docs:api/queue.md
+   */
   messageId?: string;
 
   /** Metadata for inter-service communication */
@@ -151,11 +183,46 @@ export interface SubscribeOptions {
   /** Acknowledgment mode ('auto' by default) */
   ackMode?: AckMode;
 
-  /** Number of messages to process in parallel */
+  /**
+   * Maximum number of messages allowed in flight for one subscription.
+   *
+   * On JetStream this is the in-flight unacknowledged ceiling: it becomes the consumer's
+   * `max_ack_pending`, so the server delivers nothing further once that many messages are
+   * awaiting acknowledgement, and it also caps the size of each pull batch. Adapters with no
+   * server-side acknowledgement window — in-memory, Redis, plain NATS — ignore it.
+   */
   prefetch?: number;
 
-  /** Consumer group (for load balancing between instances) */
+  /**
+   * Consumer group: the name instances share to split one subscription's workload.
+   *
+   * On JetStream it selects a durable consumer identified per (group, pattern), so instances
+   * subscribing with the same group AND the same pattern attach to that one consumer and divide
+   * its messages, while the same group paired with a different pattern is a separate consumer with
+   * its own delivery and acknowledgement state. Omitted, the subscription becomes an ephemeral
+   * consumer under a generated name and receives everything on its own. On plain NATS it becomes a
+   * stateless NATS queue group — the broker round-robins each message between the members connected
+   * at that moment, and nothing of the group outlives them. The in-memory adapter ignores it, and
+   * Redis uses it only to name an internal processing set; under both, every subscriber still
+   * receives every message.
+   */
   group?: string;
+
+  /**
+   * How long, in milliseconds, a handler may hold a message before the broker redelivers it.
+   *
+   * On JetStream it becomes the consumer's `ack_wait`, converted to the nanoseconds the
+   * server expects. It takes precedence over the adapter-wide `consumerConfig.ackWait` and
+   * falls back to it, then to 30 seconds. Because it belongs to the hashed consumer config
+   * subset rather than to the durable name, changing it reconciles an existing durable
+   * consumer in place on the next start instead of splitting the load across two consumers.
+   * It is inert under `ackMode: 'none'`, where the server tracks no acknowledgements and
+   * therefore never redelivers. Adapters with no server-side acknowledgement window —
+   * in-memory, Redis, plain NATS — ignore it.
+   *
+   * @see docs:api/queue.md
+   */
+  ackTimeout?: number;
 
   /** Retry settings (optional extension) */
   retry?: RetryOptions;
@@ -196,7 +263,18 @@ export interface QueueEvents {
  * Subscription handle returned by subscribe()
  */
 export interface Subscription {
-  /** Unsubscribe from the pattern */
+  /**
+   * Detach this client from the pattern.
+   *
+   * Unsubscribing detaches; it never destroys durable server-side state. Durable consumers
+   * survive it, deliberately: `QueueService.stop()` unsubscribes every subscription on
+   * graceful shutdown, so deleting a durable here would discard its position on every
+   * deploy and redeliver everything it had already acknowledged. Resources the framework
+   * itself created and nothing else can reach — an ephemeral JetStream consumer, for
+   * instance — are released.
+   *
+   * @see docs:api/queue.md
+   */
   unsubscribe(): Promise<void>;
 
   /** Pause receiving messages */

@@ -69,6 +69,21 @@ describe('InMemoryQueueAdapter', () => {
       expect(received[0].pattern).toBe('orders.created');
     });
 
+    it('should accept ackTimeout and ignore it', async () => {
+      // The documented contract for adapters with no server-side acknowledgement
+      // window: the option is accepted and has no effect, it never throws.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push(message);
+      }, { ackTimeout: 30_000 });
+
+      await adapter.publish('orders.created', { orderId: 123 });
+
+      expect(received.length).toBe(1);
+    });
+
     it('should match wildcard patterns', async () => {
       await adapter.connect();
 
@@ -291,6 +306,65 @@ describe('InMemoryQueueAdapter', () => {
     });
   });
 
+  describe("ackMode 'none'", () => {
+    it('delivers a failing handler exactly once and still reports the failure', async () => {
+      // Fire-and-forget: nothing is acknowledged, so there is nothing to redeliver.
+      await adapter.connect();
+
+      let calls = 0;
+      const failures: Error[] = [];
+      adapter.on('onMessageFailed', (_message, error) => {
+        failures.push(error);
+      });
+
+      await adapter.subscribe('test', async () => {
+        calls += 1;
+        throw new Error('handler failed');
+      }, { ackMode: 'none' });
+
+      await adapter.publish('test', { data: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(calls).toBe(1);
+      expect(failures).toHaveLength(1);
+    });
+
+    it('suppresses nack(true), which would otherwise resurrect the message', async () => {
+      // 'none' is the one mode that promises a single delivery; honouring a requeue here
+      // would break exactly that promise.
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('test', async (message) => {
+        calls += 1;
+        await message.nack(true);
+      }, { ackMode: 'none' });
+
+      await adapter.publish('test', { data: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(calls).toBe(1);
+    });
+
+    it('still requeues on nack(true) under manual mode', async () => {
+      // The contrast that proves the suppression is mode-scoped, not global.
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('test', async (message) => {
+        calls += 1;
+        if (calls === 1) {
+          await message.nack(true);
+        }
+      }, { ackMode: 'manual' });
+
+      await adapter.publish('test', { data: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(calls).toBeGreaterThan(1);
+    });
+  });
+
   describe('events', () => {
     it('should emit onReady event on connect', async () => {
       let readyEmitted = false;
@@ -331,6 +405,30 @@ describe('InMemoryQueueAdapter', () => {
       await adapter.publish('test', { data: 'test' });
 
       expect(processed).toBe(true);
+    });
+
+    it('should emit onMessageFailed, not onMessageProcessed, for a nacked message', async () => {
+      // A handler that catches its own exception and nacks RESOLVES, so the dispatch loop
+      // used to read it as a success and every queue metric counted a drop as throughput.
+      await adapter.connect();
+
+      let processed = 0;
+      const failures: Error[] = [];
+      adapter.on('onMessageProcessed', () => {
+        processed += 1;
+      });
+      adapter.on('onMessageFailed', (_message, error) => {
+        failures.push(error as Error);
+      });
+
+      await adapter.subscribe('test', async (message) => {
+        await message.nack(false);
+      });
+      await adapter.publish('test', { data: 'test' });
+
+      expect(processed).toBe(0);
+      expect(failures.length).toBe(1);
+      expect(failures[0].message).toContain('nacked by its handler');
     });
 
     it('should emit onMessageFailed event on error', async () => {
