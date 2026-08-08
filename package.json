@@ -22,6 +22,7 @@
     "ex2": "bun run examples/multi-service/src/index.ts",
     "ex3": "bun run examples/websocket-chat/src/index.ts",
     "test": "bun test && bun test examples/",
+    "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-reporter=text",
     "lint": "eslint --fix",
     "typecheck": "bunx tsc --noEmit",
     "publish:check": "bun scripts/publish.ts --dry-run",
