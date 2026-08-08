@@ -59,7 +59,6 @@
 
 ### DX-улучшения
 - [x] Необязательный ведущий слэш в route decorators: `@Get(':id')`
-- [ ] --Scoped providers: `REQUEST` и `TRANSIENT` scope-- wontfix
 - [ ] Per-route middleware на уровне модуля: `configureMiddleware()` с паттернами
 - [ ] Проверить унификацию guards по контекстам
 - [x] Расширить interceptors на WebSockets и Queue
@@ -82,7 +81,8 @@
 - [ ] Deployment guide: Docker, k8s, CI/CD
 - [ ] Testing guide: unit, integration, e2e
 - [ ] Расширенный Troubleshooting / FAQ
-- [ ] Changelog на сайте документации
+- [x] Changelog на сайте документации
+- [ ] Написать, что "Scoped providers (`REQUEST`, `TRANSIENT`)" не будет реализован
 
 ---
 
@@ -90,8 +90,7 @@
 
 ### Framework features
 - [x] Unified application entry point (merge `OneBunApplication` и `MultiServiceApplication`)
-- [ ] Scoped providers (`REQUEST`, `TRANSIENT`)
-- [ ] Provider-not-found suggestions ("did you mean X?")
+- [x] Provider-not-found suggestions ("did you mean X?")
 - [ ] Eager service initialization fix
 - [ ] Inter-service auth: bearer, api key (query/header/body), basic auth, hmac signature, e2e encryption
 

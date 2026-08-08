@@ -507,11 +507,20 @@ describe('Envs API Documentation Examples', () => {
       expect(natsUrl).toBe('nats://localhost:4222');
       expect(config.isInitialized).toBe(true);
 
-      // Can be used to configure ApplicationOptions:
+      // Can be used to configure ApplicationOptions. Note that `adapter` takes the adapter
+      // CLASS, not an instance — the framework constructs it with `options` during start() —
+      // and JetStream requires at least one `streams` entry or its constructor throws.
+      // Passing `adapter` is by itself enough to enable the queue; no @Subscribe is needed.
       // const app = new OneBunApplication(AppModule, {
       //   envSchema,
       //   cors: { origin: config.get('server.host') },
-      //   queue: { adapter: new JetStreamQueueAdapter({ servers: config.get('nats.url') }) },
+      //   queue: {
+      //     adapter: JetStreamQueueAdapter,
+      //     options: {
+      //       servers: config.get('nats.url'),
+      //       streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+      //     },
+      //   },
       // });
     });
   });
