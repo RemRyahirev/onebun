@@ -14,6 +14,7 @@ import {
   Module,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { Subscribe } from '../queue/decorators';
 
 import { OneBunApplication } from './application';
 
@@ -247,17 +248,133 @@ describe('OneBunApplication multi-service mode', () => {
   });
 
   describe('queue option', () => {
-    test('should accept queue option and pass it to child applications', () => {
-      const app = new OneBunApplication({
+    @Controller('/queue-health')
+    class QueueHealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Controller('/queue-consumer')
+    class QueueConsumerController extends BaseController {
+      @Subscribe('multi.service.event')
+      async handle(): Promise<void> {
+        // no-op consumer; its presence is what auto-enables the queue
+      }
+    }
+
+    @Module({ controllers: [QueueHealthController] })
+    class ProducerServiceModule {}
+
+    @Module({ controllers: [QueueHealthController] })
+    class PlainServiceModule {}
+
+    @Module({ controllers: [QueueConsumerController] })
+    class ConsumerServiceModule {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any>;
+
+    afterEach(async () => {
+      await app?.stop();
+      TypedEnv.clear();
+    });
+
+    function twoServices(): {
+      svcA: { module: typeof ProducerServiceModule; port: number };
+      svcB: { module: typeof PlainServiceModule; port: number };
+    } {
+      return {
+        svcA: { module: ProducerServiceModule, port: 0 },
+        svcB: { module: PlainServiceModule, port: 0 },
+      };
+    }
+
+    function queueServiceOf(name: string): unknown {
+      return app.getApplication(name as never)!.getQueueService();
+    }
+
+    test('should accept queue option and pass it to child applications', async () => {
+      // Row (e): an explicit enabled:true reaches every child, including ones with no
+      // queue decorator. Asserted on observable state, not on the option being accepted.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: true, adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).not.toBeNull();
+    });
+
+    test('an adapter configured without `enabled` enables the queue in every child', async () => {
+      // Row (a) — the bug this item fixes.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).not.toBeNull();
+    });
+
+    test('queue.enabled: false with no backend keeps every child disabled but still started', async () => {
+      // Row (b): disabled, and no contradiction — the warning count is pinned in
+      // multi-service-orchestrator.test.ts, which can substitute a capturing logger.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: false },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+      expect(app.getRunningServices()).toHaveLength(2);
+    });
+
+    test('queue.enabled: false with a configured adapter keeps every child disabled but still started', async () => {
+      // Row (c): the override wins over the backend config, and startAll() does not throw.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: false, adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+      expect(app.getRunningServices()).toHaveLength(2);
+    });
+
+    test('a child carrying a queue decorator still auto-enables when no queue option is set', async () => {
+      // Row (d): the orchestrator must forward `undefined` untouched. Materialising an
+      // explicit `enabled: false` here would silently kill decorator auto-detection.
+      app = new OneBunApplication({
         services: {
-          serviceA: { module: TestModuleA, port: 3001 },
-        },
-        queue: {
-          enabled: true,
-          adapter: 'memory',
+          svcA: { module: ConsumerServiceModule, port: 0 },
+          svcB: { module: PlainServiceModule, port: 0 },
         },
       });
-      expect(app).toBeDefined();
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+    });
+
+    test('no queue option and no queue decorator leaves every child disabled', async () => {
+      // Row (f): the unchanged baseline.
+      app = new OneBunApplication({ services: twoServices() });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
     });
   });
 

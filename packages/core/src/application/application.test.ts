@@ -10,6 +10,7 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
+import { Effect, Layer } from 'effect';
 
 import type { QueueAdapter, Subscription } from '../queue/types';
 import type { ApplicationOptions, ModuleInstance } from '../types';
@@ -20,6 +21,7 @@ import type {
 } from '../types';
 import type { OnModuleConfigure } from '../types';
 
+import { LoggerService, type Logger } from '@onebun/logger';
 import { register } from '@onebun/metrics';
 
 import {
@@ -53,10 +55,11 @@ import {
   Subscribe,
   Timeout,
 } from '../queue/decorators';
-import { makeMockLoggerLayer } from '../testing/test-utils';
+import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
 
 
 import { OneBunApplication } from './application';
+import { QUEUE_DISABLED_WITH_ADAPTER_WARNING } from './queue-enablement';
 
 // Helper function to create app with mock logger to suppress logs in tests
 function createTestApp(
@@ -4344,6 +4347,248 @@ describe('OneBunApplication', () => {
 
       const queueService = app.getQueueService();
       expect(queueService).toBeNull();
+
+      await app.stop();
+    });
+
+    // ------------------------------------------------------------------
+    // Enabling via an explicit backend config (no queue decorators anywhere)
+    // ------------------------------------------------------------------
+
+    /** Adapter that counts constructions and connections, so "never built" is assertable. */
+    /* eslint-disable @typescript-eslint/no-empty-function */
+    class SpyQueueAdapter implements QueueAdapter {
+      static constructCount = 0;
+      static connectCount = 0;
+      static published: Array<{ pattern: string; data: unknown }> = [];
+
+      readonly name = 'spy';
+      readonly type = 'jetstream';
+      private connected = false;
+
+      constructor(_options?: unknown) {
+        SpyQueueAdapter.constructCount++;
+      }
+
+      static reset(): void {
+        SpyQueueAdapter.constructCount = 0;
+        SpyQueueAdapter.connectCount = 0;
+        SpyQueueAdapter.published = [];
+      }
+
+      async connect(): Promise<void> {
+        SpyQueueAdapter.connectCount++;
+        this.connected = true;
+      }
+
+      async disconnect(): Promise<void> {
+        this.connected = false;
+      }
+
+      isConnected(): boolean {
+        return this.connected;
+      }
+
+      async publish(pattern: string, data: unknown): Promise<string> {
+        SpyQueueAdapter.published.push({ pattern, data });
+
+        return 'spy-id';
+      }
+
+      async publishBatch(): Promise<string[]> {
+        return [];
+      }
+
+      async subscribe(): Promise<Subscription> {
+        return {
+          async unsubscribe() {},
+          pause() {},
+          resume() {},
+          pattern: '',
+          isActive: true,
+        };
+      }
+
+      supports(): boolean {
+        return false;
+      }
+      on(): void {}
+      off(): void {}
+    }
+    /* eslint-enable @typescript-eslint/no-empty-function */
+
+    @Controller('/producer-only')
+    class ProducerOnlyController extends BaseController {
+      @Get('/')
+      async index(): Promise<OneBunResponse> {
+        return this.success({});
+      }
+    }
+
+    @Module({ controllers: [ProducerOnlyController] })
+    class ProducerOnlyModule {}
+
+    /**
+     * A logger layer that records `warn` messages.
+     *
+     * Built here rather than via `createTestApp`, which spreads caller options first and
+     * then unconditionally overwrites `loggerLayer` — any layer passed through it is
+     * discarded and the capture silently observes nothing.
+     *
+     * `child` must return this same object: the application calls
+     * `logger.child({ className: 'OneBunApplication' })` before use, and the spread copy
+     * from `createMockLogger()` would otherwise hand back the unpatched original.
+     */
+    function makeCapturingLoggerLayer(warnings: string[]): ReturnType<typeof makeMockLoggerLayer> {
+      const logger: Logger = {
+        ...createMockLogger(),
+        warn: (message: string) => Effect.sync(() => {
+          warnings.push(message);
+        }),
+        child: () => logger,
+      };
+
+      return Layer.succeed(LoggerService, logger);
+    }
+
+    beforeEach(() => {
+      SpyQueueAdapter.reset();
+    });
+
+    test('enables queue when queue.adapter is configured without any queue decorator', async () => {
+      const app = createTestApp(ProducerOnlyModule, { port: 0, queue: { adapter: 'memory' } });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('producer-only app publishes through the configured custom adapter', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+      await app.start();
+
+      expect(SpyQueueAdapter.constructCount).toBe(1);
+      expect(SpyQueueAdapter.connectCount).toBe(1);
+
+      await app.getQueueService()!.publish('order.created', { id: 1 });
+
+      expect(SpyQueueAdapter.published).toHaveLength(1);
+      expect(SpyQueueAdapter.published[0].pattern).toBe('order.created');
+      expect(SpyQueueAdapter.published[0].data).toEqual({ id: 1 });
+
+      await app.stop();
+    });
+
+    test('enables queue when only queue.options is present', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { options: { anything: true } },
+      } as Partial<ApplicationOptions>);
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('enables queue when only queue.redis is present', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { redis: { useSharedProvider: true } },
+      });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('queue.enabled: false keeps the queue disabled despite a configured adapter, and warns once', async () => {
+      const warnings: string[] = [];
+      const app = new OneBunApplication(ProducerOnlyModule, {
+        port: 0,
+        loggerLayer: makeCapturingLoggerLayer(warnings),
+        queue: { enabled: false, adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+      expect(SpyQueueAdapter.constructCount).toBe(0);
+      expect(SpyQueueAdapter.connectCount).toBe(0);
+      // Filter by exact equality: other subsystems warn during start() too.
+      expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(1);
+
+      await app.stop();
+    });
+
+    test('queue.enabled: false without a backend config emits no contradiction warning', async () => {
+      @Controller('/silent-off')
+      class SilentOffController extends BaseController {
+        @Subscribe('silent.off')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [SilentOffController] })
+      class SilentOffModule {}
+
+      const warnings: string[] = [];
+      const app = new OneBunApplication(SilentOffModule, {
+        port: 0,
+        loggerLayer: makeCapturingLoggerLayer(warnings),
+        queue: { enabled: false },
+      });
+
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+      expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(0);
+
+      await app.stop();
+    });
+
+    test('injected QueueService no longer throws in a producer-only app', async () => {
+      let publishError: unknown = null;
+
+      @Controller('/injected-producer')
+      class InjectedProducerController extends BaseController {
+        constructor(private queueService: QueueService) {
+          super();
+        }
+
+        @Get('/')
+        async index(): Promise<OneBunResponse> {
+          return this.success({});
+        }
+
+        async publishTest(): Promise<string | null> {
+          try {
+            return await this.queueService.publish('injected.event', { ok: true });
+          } catch (error) {
+            publishError = error;
+
+            return null;
+          }
+        }
+      }
+
+      @Module({ controllers: [InjectedProducerController] })
+      class InjectedProducerModule {}
+
+      const app = createTestApp(InjectedProducerModule, {
+        port: 0,
+        queue: { adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+      await app.start();
+
+      await app.getQueueService()!.publish('injected.event', { ok: true });
+
+      expect(publishError).toBeNull();
+      expect(SpyQueueAdapter.published.map(p => p.pattern)).toContain('injected.event');
 
       await app.stop();
     });

@@ -5160,16 +5160,27 @@ describe('docs/api/queue.md — type-safe adapter options', () => {
   }
 
   class CustomAdapter implements QueueAdapter {
+    static connectCount = 0;
+    static published: Array<{ pattern: string; data: unknown }> = [];
+
     readonly name = 'custom';
     readonly type = 'jetstream' as const;
+    private connected = false;
     constructor(private opts: CustomAdapterOptions) {}
-    async connect() { /* noop */ }
-    async disconnect() { /* noop */ }
-    isConnected() {
-      return true; 
+    async connect() {
+      CustomAdapter.connectCount++;
+      this.connected = true;
     }
-    async publish() {
-      return ''; 
+    async disconnect() {
+      this.connected = false;
+    }
+    isConnected() {
+      return this.connected;
+    }
+    async publish(pattern: string, data: unknown) {
+      CustomAdapter.published.push({ pattern, data });
+
+      return 'custom-id';
     }
     async publishBatch() {
       return []; 
@@ -5239,6 +5250,46 @@ describe('docs/api/queue.md — type-safe adapter options', () => {
     });
 
     expect(app).toBeDefined();
+  });
+
+  /**
+   * @source docs:api/queue.md#queueapplicationoptions
+   */
+  it('a producer-only app enables the queue from the adapter config alone and publishes through it', async () => {
+    // The documented producer-only configuration: an adapter is configured, no controller
+    // carries a queue decorator, and `enabled` is not set. Asserted on observable behaviour
+    // — the adapter is connected and the payload reaches it — not on the app merely booting.
+    @Module({ controllers: [] })
+    class ProducerOnlyDocsModule {}
+
+    CustomAdapter.connectCount = 0;
+    CustomAdapter.published = [];
+
+    const app = new OneBunApplication(ProducerOnlyDocsModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      queue: {
+        adapter: CustomAdapter,
+        options: {
+          servers: 'nats://localhost:4222',
+          streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+        },
+      },
+    });
+
+    await app.start();
+
+    const queueService = app.getQueueService();
+    expect(queueService).not.toBeNull();
+    expect(CustomAdapter.connectCount).toBe(1);
+
+    await queueService!.publish('events.created', { id: 'e-1' });
+
+    expect(CustomAdapter.published).toHaveLength(1);
+    expect(CustomAdapter.published[0].pattern).toBe('events.created');
+    expect(CustomAdapter.published[0].data).toEqual({ id: 'e-1' });
+
+    await app.stop();
   });
 });
 

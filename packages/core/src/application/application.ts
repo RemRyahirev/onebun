@@ -94,6 +94,8 @@ import {
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
+import { QUEUE_DISABLED_WITH_ADAPTER_WARNING, resolveQueueEnablement } from './queue-enablement';
+
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let createMetricsService: any;
@@ -2161,10 +2163,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return hasQueueDecorators(controller) || hasQueueDecorators(instance.constructor);
     });
 
-    // Determine if queue should be enabled
-    const shouldEnableQueue = queueOptions?.enabled ?? hasQueueHandlers;
-    if (!shouldEnableQueue) {
-      this.logger.debug('Queue system not enabled (no handlers detected or explicitly disabled)');
+    // Determine if queue should be enabled: a queue decorator on a controller, OR
+    // queue.enabled === true, OR an explicit queue.adapter/options/redis backend config.
+    // An explicit queue.enabled === false overrides all three, and warns once when it
+    // contradicts a configured backend.
+    const enablement = resolveQueueEnablement(queueOptions, hasQueueHandlers);
+    if (!enablement.enabled) {
+      if (enablement.contradiction) {
+        this.logger.warn(QUEUE_DISABLED_WITH_ADAPTER_WARNING);
+      } else {
+        this.logger.debug(
+          'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
+        );
+      }
 
       return;
     }

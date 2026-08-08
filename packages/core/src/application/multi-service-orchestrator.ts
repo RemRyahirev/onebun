@@ -4,11 +4,14 @@ import type {
   MultiServiceApplicationOptions,
   ServicesMap,
 } from './multi-service.types';
+import type { ApplicationOptions } from '../types';
 
 import { type EnvSchema, TypedEnv } from '@onebun/envs';
 import { parseLogLevel, type SyncLogger } from '@onebun/logger';
 
 import { resolveEnvOverrides } from '../service-client/env-resolver';
+
+import { hasExplicitQueueAdapterConfig, QUEUE_DISABLED_WITH_ADAPTER_WARNING } from './queue-enablement';
 
 
 /**
@@ -119,6 +122,27 @@ export class MultiServiceOrchestrator<TServices extends ServicesMap = ServicesMa
   }
 
   /**
+   * Resolve the queue options handed to every child application.
+   *
+   * The final enable answer stays per-child, because rule 1 — a queue decorator on a
+   * controller — is only knowable once a child's module is instantiated. So this returns
+   * the app-level options UNCHANGED in every case but one: when `enabled: false`
+   * contradicts a configured backend it warns once for the whole process and strips the
+   * backend keys, so no child re-detects the contradiction and warns again.
+   */
+  private resolveChildQueueOptions(): ApplicationOptions['queue'] {
+    const queueOptions = this.options.queue;
+
+    if (queueOptions?.enabled !== false || !hasExplicitQueueAdapterConfig(queueOptions)) {
+      return queueOptions;
+    }
+
+    this.logger.warn(QUEUE_DISABLED_WITH_ADAPTER_WARNING);
+
+    return { enabled: false };
+  }
+
+  /**
    * Start all (or filtered) services
    */
   async startAll(): Promise<void> {
@@ -136,6 +160,10 @@ export class MultiServiceOrchestrator<TServices extends ServicesMap = ServicesMa
     };
 
     await this.initFilterConfig();
+
+    // Resolved ONCE, outside the service loop, so the contradiction warning fires exactly
+    // once regardless of how many services are configured or filtered out.
+    const resolvedQueue = this.resolveChildQueueOptions();
 
     const startPromises: Promise<void>[] = [];
     const serviceNames = Object.keys(this.options.services);
@@ -195,7 +223,7 @@ export class MultiServiceOrchestrator<TServices extends ServicesMap = ServicesMa
           ...mergedOptions.tracing,
           serviceName: name,
         },
-        queue: this.options.queue,
+        queue: resolvedQueue,
         static: mergedOptions.static ?? serviceConfig.static,
       });
 
