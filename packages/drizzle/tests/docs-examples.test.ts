@@ -15,6 +15,8 @@ import {
 } from 'bun:test';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
+import type { PostgreSQLConnectionOptions } from '../src/types';
+
 import {
   DrizzleModule,
   DatabaseType,
@@ -262,6 +264,36 @@ describe('Drizzle API Documentation Examples', () => {
       const { pushSchema } = require('../src/migrations');
       expect(pushSchema).toBeDefined();
       expect(typeof pushSchema).toBe('function');
+    });
+
+    /**
+     * @source docs:api/drizzle.md#postgresql-connection
+     */
+    it('accepts either connection shape and refuses a mix', async () => {
+      // From docs: "either a connectionString or the five discrete fields — never a mix"
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+
+      const urlForm: PostgreSQLConnectionOptions = {
+        connectionString: 'postgresql://user:password@host:5432/database',
+      };
+      const discreteForm: PostgreSQLConnectionOptions = {
+        host: 'localhost',
+        port: 5432,
+        user: 'postgres',
+        password: 'secret',
+        database: 'app',
+      };
+
+      expect(urlForm.connectionString).toBeDefined();
+      expect(discreteForm.host).toBeDefined();
+
+      // A mix is a compile error; from an untyped source it is a runtime one.
+      await expect(new Service().initialize({
+        type: DatabaseType.POSTGRESQL,
+        options: { connectionString: 'postgresql://u:p@h:5432/d', host: 'other' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any)).rejects.toThrow(/both connectionString and discrete field/);
     });
 
     /**

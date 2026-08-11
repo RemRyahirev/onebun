@@ -49,52 +49,102 @@ export interface SQLiteConnectionOptions {
 /**
  * PostgreSQL connection options
  */
-export interface PostgreSQLConnectionOptions {
+/**
+ * Connection pool options, shared by both PostgreSQL connection shapes.
+ */
+export interface PostgreSQLPoolOptions {
+  /**
+   * Maximum number of connections in the pool
+   */
+  max?: number;
+
+  /**
+   * Minimum number of connections in the pool
+   */
+  min?: number;
+
+  /**
+   * Connection timeout in milliseconds
+   */
+  timeout?: number;
+}
+
+/**
+ * PostgreSQL connection given as a single URL.
+ *
+ * The discrete fields are `never` here rather than absent, so supplying both forms is a
+ * compile error instead of a silent precedence question.
+ */
+export interface PostgreSQLUrlConnection {
+  /**
+   * Full connection URL, e.g. `postgresql://user:password@host:5432/database`.
+   */
+  connectionString: string;
+
+  host?: never;
+  port?: never;
+  user?: never;
+  password?: never;
+  database?: never;
+
+  /**
+   * Connection pool options
+   */
+  pool?: PostgreSQLPoolOptions;
+}
+
+/**
+ * PostgreSQL connection given as discrete fields.
+ *
+ * All five are required together: a partially filled object cannot describe a reachable
+ * server, and accepting one would only defer the failure to connect time.
+ */
+export interface PostgreSQLDiscreteConnection {
+  connectionString?: never;
+
   /**
    * PostgreSQL server host
    */
   host: string;
-  
+
   /**
    * PostgreSQL server port
    */
   port: number;
-  
+
   /**
    * PostgreSQL user name
    */
   user: string;
-  
+
   /**
    * PostgreSQL user password
    */
   password: string;
-  
+
   /**
    * PostgreSQL database name
    */
   database: string;
-  
+
   /**
    * Connection pool options
    */
-  pool?: {
-    /**
-     * Maximum number of connections in the pool
-     */
-    max?: number;
-    
-    /**
-     * Minimum number of connections in the pool
-     */
-    min?: number;
-    
-    /**
-     * Connection timeout in milliseconds
-     */
-    timeout?: number;
-  };
+  pool?: PostgreSQLPoolOptions;
 }
+
+/**
+ * PostgreSQL connection options — a URL, or the five discrete fields, never a mix.
+ *
+ * Discriminated on purpose. The documentation described `connectionString` for a long time
+ * while the type had no such field and `initialize()` ignored it, so a reader who followed
+ * the docs got a connection built from undefined discrete fields and no error naming the
+ * cause. Making the two shapes mutually exclusive means a half-filled object fails at the
+ * call site rather than at connect time.
+ */
+export type PostgreSQLConnectionOptions =
+  | PostgreSQLUrlConnection
+  | PostgreSQLDiscreteConnection;
 
 /**
  * Database connection options (union type)

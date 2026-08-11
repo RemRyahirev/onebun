@@ -56,35 +56,54 @@ import {
  * Default environment variable prefix
  */
 const DEFAULT_ENV_PREFIX = 'DB';
-const DEFAULT_PG_PORT = 5432;
 
 /**
- * Parse PostgreSQL connection URL into separate fields
- * Supports format: postgresql://user:password\@host:port/database
+ * Resolve PostgreSQL connection options to a URL.
+ *
+ * Accepts either shape and validates the one it was given. The type makes a mix a compile
+ * error, but options also arrive from untyped places — a JSON config, a cast, an older
+ * build — so the runtime states the same rule rather than picking a winner silently.
  */
-function parsePostgreSQLUrl(url: string): PostgreSQLConnectionOptions {
-  try {
-    const parsedUrl = new URL(url);
-
-    return {
-      host: parsedUrl.hostname,
-      port: parsedUrl.port ? parseInt(parsedUrl.port, 10) : DEFAULT_PG_PORT,
-      user: parsedUrl.username,
-      password: parsedUrl.password,
-      database: parsedUrl.pathname.slice(1), // Remove leading '/'
-    };
-  } catch (error) {
-    throw new Error(`Invalid PostgreSQL connection URL: ${url}. Error: ${error}`);
-  }
-}
-
-/**
- * Build PostgreSQL connection URL from separate fields
- */
-function buildPostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
+function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
   const {
-    host, port, user, password, database,
-  } = options;
+    connectionString, host, port, user, password, database,
+  } = options as {
+    connectionString?: string;
+    host?: string;
+    port?: number;
+    user?: string;
+    password?: string;
+    database?: string;
+  };
+
+  const discrete = {
+    host, port, user, password, database, 
+  };
+  const supplied = Object.entries(discrete).filter(([, value]) => value !== undefined);
+
+  if (connectionString !== undefined) {
+    if (supplied.length > 0) {
+      throw new Error(
+        'PostgreSQL connection options carry both connectionString and discrete field(s) '
+        + `(${supplied.map(([key]) => key).join(', ')}). Supply one shape or the other — a mix `
+        + 'has no correct interpretation, so neither is used.',
+      );
+    }
+
+    return connectionString;
+  }
+
+  const missing = Object.entries(discrete)
+    .filter(([, value]) => value === undefined)
+    .map(([key]) => key);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `PostgreSQL connection options are incomplete: ${missing.join(', ')} missing. Supply all `
+      + 'of host, port, user, password and database, or a single connectionString instead. A '
+      + 'partially filled object cannot describe a reachable server.',
+    );
+  }
 
   return `postgresql://${user}:${password}@${host}:${port}/${database}`;
 }
@@ -517,7 +536,10 @@ export class DrizzleService extends BaseService implements OnModuleInit {
           }
           : {
             type: DatabaseType.POSTGRESQL,
-            options: parsePostgreSQLUrl(envConfig.url),
+            // Passed through, not parsed into fields and reassembled: that round trip
+            // dropped everything after the path, so a DB_URL carrying `?sslmode=require`
+            // silently connected without SSL.
+            options: { connectionString: envConfig.url },
           };
 
       this.safeLog('debug', `Auto-initializing database service with type: ${connectionOptions.type}`, {
@@ -605,8 +627,8 @@ export class DrizzleService extends BaseService implements OnModuleInit {
     } else if (options.type === DatabaseType.POSTGRESQL) {
       const pgOptions = options.options;
 
-      // Build connection URL from separate fields
-      const connectionUrl = buildPostgreSQLUrl(pgOptions);
+      // Either shape: a connectionString is used as given, discrete fields are assembled.
+      const connectionUrl = resolvePostgreSQLUrl(pgOptions);
 
       // Use Bun.SQL - recommended way according to Drizzle docs
       // Pass connection string directly to drizzle()

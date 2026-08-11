@@ -51,19 +51,48 @@ DrizzleModule.forRoot({
   connection: {
     type: DatabaseType.POSTGRESQL,
     options: {
+      // A URL…
       connectionString: config.get('database.url'),
-      // Or individual options:
-      host: 'localhost',
-      port: 5432,
-      database: 'myapp',
-      user: 'postgres',
-      password: 'password',
+
+      // …or the five discrete fields. Not both — see PostgreSQL Connection below.
+      // host: 'localhost',
+      // port: 5432,
+      // database: 'myapp',
+      // user: 'postgres',
+      // password: 'password',
     },
   },
   // autoMigrate defaults to true — omit unless you need to disable it
   migrationsFolder: './drizzle',
 })
 ```
+
+#### PostgreSQL Connection
+
+`options` takes **either** a `connectionString` **or** the five discrete fields — never a
+mix, and never a subset. The two shapes are mutually exclusive at the type level, so a
+half-filled object is a compile error rather than a connection built from `undefined` that
+surfaces later as an unreachable server:
+
+```typescript
+// A URL
+options: { connectionString: 'postgresql://user:password@host:5432/database' }
+
+// Or every discrete field
+options: { host: 'localhost', port: 5432, user: 'postgres', password: 'secret', database: 'app' }
+```
+
+Prefer the URL when the value comes from configuration. A `connectionString` is passed to
+the driver untouched, so query parameters it carries — `?sslmode=require`,
+`?application_name=…` — reach the server. Assembling the URL from discrete fields cannot
+express them.
+
+Options arriving from an untyped source (a JSON config, a cast) are validated at
+`initialize()` and rejected with an error naming the problem: which discrete fields
+accompanied a `connectionString`, or which of the five are missing. Neither case is resolved
+by picking a winner.
+
+`pool` is accepted alongside either shape.
 
 ### Global Module (Default Behavior)
 
@@ -758,6 +787,8 @@ Migrations whose entries end up neither applied nor already recorded are reporte
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `DB_TYPE` | `sqlite` or `postgresql` | `sqlite` |
+| `DB_URL` | Connection URL — a file path for SQLite, a full `postgresql://…` for PostgreSQL | `:memory:` |
 | `DB_AUTO_MIGRATE` | Auto-run migrations on startup | `true` |
 | `DB_MIGRATIONS_FOLDER` | Path to migrations folder | `'./drizzle'` |
 | `DB_MIGRATIONS_TABLE` | Journal table recording applied migrations | `'__drizzle_migrations'` |
@@ -766,6 +797,11 @@ Migrations whose entries end up neither applied nor already recorded are reporte
 
 `migrationsTable` and `migrationsSchema` are also accepted by `DrizzleModule.forRoot()` and
 are forwarded on every path that runs migrations, including automatic ones.
+
+`DB_TYPE` and `DB_URL` are the environment equivalent of `connection` in
+`DrizzleModule.forRoot()`: set them and the service initializes itself with no module
+configuration at all. On PostgreSQL the URL reaches the driver untouched, so its query
+parameters are preserved.
 
 ### Migration Tracking
 

@@ -12,6 +12,7 @@
 import { eq } from 'drizzle-orm';
 
 import type { DialectOf } from '../src/builders/dialect';
+import type { PostgreSQLConnectionOptions } from '../src/types';
 
 import { UniversalSelectBuilder, UniversalSelectDistinctBuilder } from '../src/builders';
 import { DrizzleService } from '../src/drizzle.service';
@@ -54,6 +55,7 @@ const liteDialect: 'sqlite' = null as never as DialectOf<typeof liteUsers>;
 // ============================================================================
 
 const PAGE_SIZE = 10;
+const PG_PORT = 5432;
 const OFFSET = 5;
 
 const pgChain = builder.from(pgUsers);
@@ -141,4 +143,45 @@ export {
   pgRows,
   liteWhereLimit,
   liteRows,
+};
+
+// ============================================================================
+// PostgreSQL connection options are a discriminated union
+//
+// Runtime tests cover what the resolver rejects; these cover what the compiler
+// rejects, which is the point of the shape — a half-filled object should fail at
+// the call site, not at connect time.
+// ============================================================================
+
+const urlForm: PostgreSQLConnectionOptions = {
+  connectionString: 'postgresql://me:pw@host:5432/app',
+};
+
+const discreteForm: PostgreSQLConnectionOptions = {
+  host: 'localhost',
+  port: PG_PORT,
+  user: 'postgres',
+  password: 'password',
+  database: 'app',
+};
+
+// A mix has no correct interpretation, so it must not typecheck.
+// @ts-expect-error connectionString and discrete fields are mutually exclusive
+const mixedForm: PostgreSQLConnectionOptions = {
+  connectionString: 'postgresql://me:pw@host:5432/app',
+  host: 'localhost',
+};
+
+// All five discrete fields are required together.
+// @ts-expect-error a partially filled discrete shape cannot describe a server
+const partialForm: PostgreSQLConnectionOptions = {
+  host: 'localhost',
+  port: PG_PORT,
+};
+
+export {
+  urlForm,
+  discreteForm,
+  mixedForm,
+  partialForm,
 };

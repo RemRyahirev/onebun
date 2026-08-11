@@ -710,3 +710,56 @@ describe('DrizzleService', () => {
     });
   });
 });
+
+describe('PostgreSQL connection options', () => {
+  // `initialize()` reaches the resolver before it touches a socket, so a rejected shape
+  // throws without needing a server. A shape it accepts is not exercised here — that
+  // needs a real PostgreSQL and lives in the integration suite.
+  function initPg(options: unknown): Promise<void> {
+    const service = new DrizzleService();
+
+    return service.initialize({
+      type: DatabaseType.POSTGRESQL,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      options: options as any,
+    });
+  }
+
+  test('refuses a mix of connectionString and discrete fields', async () => {
+    // A compile error under the discriminated type, but options also arrive from untyped
+    // places — a JSON config, a cast — so the runtime states the same rule rather than
+    // silently picking a winner.
+    await expect(initPg({
+      connectionString: 'postgresql://me:pw@host:5432/app',
+      host: 'other-host',
+    })).rejects.toThrow(/both connectionString and discrete field/);
+  });
+
+  test('names which discrete fields were supplied alongside the URL', async () => {
+    let thrown: Error | undefined;
+    try {
+      await initPg({
+        connectionString: 'postgresql://me:pw@host:5432/app',
+        host: 'other-host',
+        port: 5433,
+      });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain('host');
+    expect(thrown!.message).toContain('port');
+  });
+
+  test('refuses a partially filled discrete shape, naming what is missing', async () => {
+    // The failure this replaces was a connection built from undefined fields, which
+    // surfaced as an unreachable server rather than as a configuration mistake.
+    await expect(initPg({ host: 'localhost', port: 5432 }))
+      .rejects.toThrow(/incomplete: user, password, database missing/);
+  });
+
+  test('refuses an empty shape rather than assembling a URL from nothing', async () => {
+    await expect(initPg({})).rejects.toThrow(/incomplete/);
+  });
+});
