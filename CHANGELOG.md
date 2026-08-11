@@ -8,6 +8,7 @@
 |---------|----------|-----|
 | `@onebun/core` | 0.4.4 | 0.4.5 |
 | `@onebun/nats` | 0.4.2 | 0.4.3 |
+| `@onebun/drizzle` | 0.4.2 | 0.4.3 |
 
 ### Breaking Changes
 

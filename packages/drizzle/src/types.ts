@@ -123,6 +123,18 @@ export interface DrizzleModuleOptions {
    * Default: './drizzle'
    */
   migrationsFolder?: string;
+
+  /**
+   * Journal table recording which migrations have run. Defaults to drizzle's
+   * `__drizzle_migrations`. See `MigrationOptions.migrationsTable` — a package that ships
+   * its own migrations needs its own journal, or one of the two sets is silently skipped.
+   */
+  migrationsTable?: string;
+
+  /**
+   * Schema holding the journal table. PostgreSQL only. Defaults to drizzle's `drizzle`.
+   */
+  migrationsSchema?: string;
   
   /**
    * Environment variable prefix
@@ -226,7 +238,25 @@ export interface MigrationOptions {
    * Migration folder path
    */
   migrationsFolder?: string;
-  
+
+  /**
+   * Journal table recording which migrations have run. Defaults to drizzle's
+   * `__drizzle_migrations`.
+   *
+   * Set it when a package ships migrations of its own. Drizzle decides what to apply by
+   * comparing a migration's folder timestamp against the NEWEST row in the journal — not
+   * by hash — so two folders sharing one journal silently skip whichever set was
+   * generated earlier, with no error and nothing logged. A private journal per migration
+   * set removes that coupling entirely.
+   */
+  migrationsTable?: string;
+
+  /**
+   * Schema holding the journal table. PostgreSQL only; ignored on SQLite, which has no
+   * schemas. Defaults to drizzle's `drizzle`.
+   */
+  migrationsSchema?: string;
+
   /**
    * Whether to apply migrations
    */

@@ -385,3 +385,193 @@ describe('runMigrations integration tests', () => {
     await testService.close();
   });
 });
+
+// ============================================================================
+// Journal isolation: migrationsTable / migrationsSchema
+//
+// Drizzle decides what to apply by comparing a folder's timestamp against the
+// NEWEST row in the journal, never by hash. Two folders sharing one journal
+// therefore skip whichever set was generated earlier — silently, until the first
+// query against a table that was never created.
+// ============================================================================
+
+describe('migrationsTable and migrationsSchema', () => {
+  const testMigrationsFolder = join(__dirname, 'test-migrations');
+  let service: DrizzleService;
+
+  beforeEach(async () => {
+    delete process.env.DB_URL;
+    delete process.env.DB_TYPE;
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+  });
+
+  afterEach(async () => {
+    try {
+      await service.close();
+    } catch {
+      // Ignore cleanup errors
+    }
+  });
+
+  test('records the journal in the configured table, not the default one', async () => {
+    await service.runMigrations({
+      migrationsFolder: testMigrationsFolder,
+      migrationsTable: 'journal_alpha',
+    });
+
+    const client = service.getSQLiteClient()!;
+    const tables = client.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%migrations%' OR name = 'journal_alpha'",
+    ).all() as Array<{ name: string }>;
+    const names = tables.map(t => t.name);
+
+    expect(names).toContain('journal_alpha');
+    expect(names).not.toContain('__drizzle_migrations');
+  });
+
+  test('refuses a second folder that would share one journal', async () => {
+    // The defect this option exists to fix. The guard fires before anything touches
+    // disk, so the second folder need not exist.
+    await service.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    await expect(
+      service.runMigrations({ migrationsFolder: join(__dirname, 'other-migrations') }),
+    ).rejects.toThrow(/would share the journal/);
+  });
+
+  test('names both folders and the remedy when it refuses', async () => {
+    await service.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    let thrown: Error | undefined;
+    try {
+      await service.runMigrations({ migrationsFolder: join(__dirname, 'other-migrations') });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown!.message).toContain('other-migrations');
+    expect(thrown!.message).toContain('test-migrations');
+    expect(thrown!.message).toContain('migrationsTable');
+  });
+
+  test('allows several journals in one process — that is the supported shape', async () => {
+    await service.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    // Same folder, different journal: a package re-running its own set under its own
+    // table. Nothing is shared, so nothing is refused.
+    await service.runMigrations({
+      migrationsFolder: testMigrationsFolder,
+      migrationsTable: 'journal_beta',
+    });
+
+    const client = service.getSQLiteClient()!;
+    const tables = client.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_beta'",
+    ).all() as Array<{ name: string }>;
+
+    expect(tables.length).toBe(1);
+  });
+
+  test('re-running the SAME folder against its own journal is idempotent', async () => {
+    await service.runMigrations({ migrationsFolder: testMigrationsFolder });
+
+    await expect(
+      service.runMigrations({ migrationsFolder: testMigrationsFolder }),
+    ).resolves.toBeUndefined();
+  });
+
+  test('rejects a journal name that is not a plain identifier', async () => {
+    // The table name reaches the query as text, because an identifier cannot be bound.
+    await expect(
+      service.runMigrations({
+        migrationsFolder: testMigrationsFolder,
+        migrationsTable: 'x"; DROP TABLE users; --',
+      }),
+    ).rejects.toThrow(/must be a plain SQL identifier/);
+
+    await expect(
+      service.runMigrations({
+        migrationsFolder: testMigrationsFolder,
+        migrationsSchema: 'public; DROP SCHEMA drizzle',
+      }),
+    ).rejects.toThrow(/must be a plain SQL identifier/);
+  });
+});
+
+describe('migrationsTable reaches both auto-initialize paths', () => {
+  const testMigrationsFolder = join(__dirname, 'test-migrations');
+  const saved: Record<string, string | undefined> = {};
+  const envKeys = ['DB_TYPE', 'DB_URL', 'DB_AUTO_MIGRATE', 'DB_MIGRATIONS_FOLDER', 'DB_MIGRATIONS_TABLE'];
+
+  beforeEach(() => {
+    for (const key of envKeys) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const { DrizzleModule } = require('../src/drizzle.module');
+    DrizzleModule.clearOptions();
+  });
+
+  afterEach(() => {
+    for (const key of envKeys) {
+      if (saved[key] !== undefined) {
+        process.env[key] = saved[key];
+      } else {
+        delete process.env[key];
+      }
+    }
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const { DrizzleModule } = require('../src/drizzle.module');
+    DrizzleModule.clearOptions();
+  });
+
+  test('forwards it from module options', async () => {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const { DrizzleModule } = require('../src/drizzle.module');
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: true,
+      migrationsFolder: testMigrationsFolder,
+      migrationsTable: 'journal_from_module',
+    });
+
+    const { instance } = createTestService(DrizzleService);
+    await instance.onModuleInit();
+
+    const client = instance.getSQLiteClient();
+    expect(client).not.toBeNull();
+    const tables = client!.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_from_module'",
+    ).all() as Array<{ name: string }>;
+
+    expect(tables.length).toBe(1);
+    await instance.close();
+  });
+
+  test('forwards it from the environment', async () => {
+    process.env.DB_TYPE = 'sqlite';
+    process.env.DB_URL = ':memory:';
+    process.env.DB_AUTO_MIGRATE = 'true';
+    process.env.DB_MIGRATIONS_FOLDER = testMigrationsFolder;
+    process.env.DB_MIGRATIONS_TABLE = 'journal_from_env';
+
+    const { instance } = createTestService(DrizzleService);
+    await instance.onModuleInit();
+
+    const client = instance.getSQLiteClient();
+    expect(client).not.toBeNull();
+    const tables = client!.query(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name = 'journal_from_env'",
+    ).all() as Array<{ name: string }>;
+
+    expect(tables.length).toBe(1);
+    await instance.close();
+  });
+});

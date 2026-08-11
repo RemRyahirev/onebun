@@ -97,6 +97,8 @@ interface DatabaseEnvSchema {
   url: string;
   schemaPath?: string;
   migrationsFolder?: string;
+  migrationsTable?: string;
+  migrationsSchema?: string;
   autoMigrate?: boolean;
   logQueries?: boolean;
 }
@@ -120,6 +122,12 @@ function createDatabaseEnvSchema(prefix: string = DEFAULT_ENV_PREFIX) {
     }),
     migrationsFolder: Env.string({
       env: `${prefix}_MIGRATIONS_FOLDER`,
+    }),
+    migrationsTable: Env.string({
+      env: `${prefix}_MIGRATIONS_TABLE`,
+    }),
+    migrationsSchema: Env.string({
+      env: `${prefix}_MIGRATIONS_SCHEMA`,
     }),
     autoMigrate: Env.boolean({
       env: `${prefix}_AUTO_MIGRATE`,
@@ -163,6 +171,26 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<Databas
     )
     : undefined;
 
+  const migrationsTable = rawEnv[`${prefix}_MIGRATIONS_TABLE`]
+    ? await Effect.runPromise(
+      EnvParser.parse(
+        `${prefix}_MIGRATIONS_TABLE`,
+        rawEnv[`${prefix}_MIGRATIONS_TABLE`],
+        schema.migrationsTable!,
+      ),
+    )
+    : undefined;
+
+  const migrationsSchema = rawEnv[`${prefix}_MIGRATIONS_SCHEMA`]
+    ? await Effect.runPromise(
+      EnvParser.parse(
+        `${prefix}_MIGRATIONS_SCHEMA`,
+        rawEnv[`${prefix}_MIGRATIONS_SCHEMA`],
+        schema.migrationsSchema!,
+      ),
+    )
+    : undefined;
+
   const autoMigrate = await Effect.runPromise(
     EnvParser.parse(`${prefix}_AUTO_MIGRATE`, rawEnv[`${prefix}_AUTO_MIGRATE`], schema.autoMigrate),
   );
@@ -176,9 +204,30 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<Databas
     url,
     schemaPath,
     migrationsFolder,
+    migrationsTable,
+    migrationsSchema,
     autoMigrate,
     logQueries,
   };
+}
+
+const DEFAULT_MIGRATIONS_TABLE = '__drizzle_migrations';
+const DEFAULT_MIGRATIONS_SCHEMA = 'drizzle';
+
+/** A journal identifier is interpolated into SQL, so it may only be an identifier. */
+const SAFE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_$]*$/;
+
+/**
+ * A table or schema name cannot be a bound parameter, so it reaches the query as text.
+ * Rejecting anything that is not a plain identifier is what makes that interpolation safe.
+ */
+function assertSafeIdentifier(value: string, option: string): void {
+  if (!SAFE_IDENTIFIER.test(value)) {
+    throw new Error(
+      `Invalid ${option} "${value}": a journal table or schema name must be a plain SQL `
+      + 'identifier — letters, digits, underscores and $, not starting with a digit.',
+    );
+  }
 }
 
 /**
@@ -229,6 +278,13 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   private initPromise: Promise<void> | null = null;
   private sqliteClient: Database | null = null;
   private postgresClient: SQL | null = null;
+  /**
+   * Which folder claimed each journal, keyed by `schema.table`.
+   *
+   * Two migration folders sharing one journal is the defect this option exists to fix, so
+   * the option ships with the guard that makes the mistake impossible to hit silently.
+   */
+  private readonly journalOwners = new Map<string, string>();
   private logBuffer: BufferedLogEntry[] = [];
   private exitHandlerRegistered = false;
 
@@ -417,7 +473,11 @@ export class DrizzleService extends BaseService implements OnModuleInit {
           this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
           try {
             // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-            await this.runMigrations({ migrationsFolder }, true);
+            await this.runMigrations({
+              migrationsFolder,
+              migrationsTable: moduleOptions.migrationsTable,
+              migrationsSchema: moduleOptions.migrationsSchema,
+            }, true);
             this.safeLog('debug', 'Auto-migrations completed successfully');
           } catch (migrationError) {
             this.safeLog('warn', 'Auto-migration failed, database initialized without migrations', {
@@ -471,7 +531,11 @@ export class DrizzleService extends BaseService implements OnModuleInit {
       if (envConfig.autoMigrate) {
         const migrationsFolder = envConfig.migrationsFolder ?? './drizzle';
         // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-        await this.runMigrations({ migrationsFolder }, true);
+        await this.runMigrations({
+          migrationsFolder,
+          migrationsTable: envConfig.migrationsTable,
+          migrationsSchema: envConfig.migrationsSchema,
+        }, true);
       }
 
       this.initialized = true;
@@ -646,6 +710,43 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   }
 
   /**
+   * Refuse a second migration folder that would share a journal with the first.
+   *
+   * Drizzle decides what to apply by comparing a folder's timestamp against the NEWEST row
+   * in the journal, never by hash. So when two folders share one journal, whichever set was
+   * generated earlier is skipped entirely — no error, no log, and the application starts
+   * and then fails at the first query against a table that was never created.
+   *
+   * Several journals in one process is the SUPPORTED shape, and the point of
+   * `migrationsTable`: a package that ships its own migrations owns its own journal. What
+   * is refused is several folders sharing ONE journal, which cannot work by construction.
+   */
+  private assertJournalNotShared(
+    migrationsFolder: string,
+    migrationsTable: string,
+    migrationsSchema: string,
+  ): void {
+    const journalKey = `${migrationsSchema}.${migrationsTable}`;
+    const owner = this.journalOwners.get(journalKey);
+
+    if (owner === undefined) {
+      this.journalOwners.set(journalKey, migrationsFolder);
+
+      return;
+    }
+
+    if (owner !== migrationsFolder) {
+      throw new Error(
+        `Migration folder "${migrationsFolder}" would share the journal "${journalKey}" with `
+        + `"${owner}". Drizzle applies a migration only when its folder timestamp is newer than `
+        + 'the newest row in the journal, so whichever set was generated earlier would be skipped '
+        + 'silently and its tables would never be created. Give this set its own journal: '
+        + `runMigrations({ migrationsFolder: "${migrationsFolder}", migrationsTable: "..." }).`,
+      );
+    }
+  }
+
+  /**
    * Read migration journal and compute hashes for each migration file
    * Returns a map of hash -> migration filename
    */
@@ -682,22 +783,34 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   }
 
   /**
-   * Get set of applied migration hashes from __drizzle_migrations table
+   * Read the hashes already recorded in the journal table.
+   *
+   * ASYNC deliberately. Bun's SQL template returns a lazy thenable, so the previous
+   * synchronous version read `.length` off a promise — always `undefined`, always an
+   * empty set, so PostgreSQL reported "0 migrations applied" no matter what ran. That
+   * count is exactly the signal an operator would use to notice a silently skipped set.
+   *
+   * The table name is interpolated rather than bound because a table identifier cannot be
+   * a query parameter. Both parts are validated by `assertSafeIdentifier` at the call
+   * site, which is what keeps that safe.
    */
-  private getAppliedMigrationHashes(): Set<string> {
+  private async getAppliedMigrationHashes(
+    migrationsTable: string,
+    migrationsSchema: string,
+  ): Promise<Set<string>> {
     const hashes = new Set<string>();
 
     try {
       if (this.connectionOptions?.type === DatabaseType.SQLITE && this.sqliteClient) {
-        // Check if table exists
+        // SQLite has no schemas, so the journal is a bare table name.
         const tableExists = this.sqliteClient.query(`
-          SELECT name FROM sqlite_master 
-          WHERE type='table' AND name='__drizzle_migrations'
+          SELECT name FROM sqlite_master
+          WHERE type='table' AND name='${migrationsTable}'
         `).all();
 
         if (tableExists.length > 0) {
           const migrations = this.sqliteClient.query(`
-            SELECT hash FROM __drizzle_migrations
+            SELECT hash FROM "${migrationsTable}"
           `).all() as Array<{ hash: string }>;
 
           for (const m of migrations) {
@@ -705,18 +818,18 @@ export class DrizzleService extends BaseService implements OnModuleInit {
           }
         }
       } else if (this.connectionOptions?.type === DatabaseType.POSTGRESQL && this.postgresClient) {
-        // Check if table exists using Bun.SQL template literal syntax
-        // Cast through unknown as Bun.SQL types don't fully reflect runtime behavior
-        const tableExistsResult = this.postgresClient`
+        // Schema-qualified: drizzle puts the journal in its own schema ('drizzle' by
+        // default), so an unqualified name matched nothing here.
+        const tableExistsResult = await this.postgresClient`
           SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_name = '__drizzle_migrations'
+            SELECT FROM information_schema.tables
+            WHERE table_schema = ${migrationsSchema} AND table_name = ${migrationsTable}
           ) as exists
         ` as unknown as Array<{ exists: boolean }>;
 
         if (tableExistsResult.length > 0 && tableExistsResult[0]?.exists) {
-          const migrationsResult = this.postgresClient`
-            SELECT hash FROM __drizzle_migrations
+          const migrationsResult = await this.postgresClient`
+            SELECT hash FROM ${this.postgresClient(migrationsSchema)}.${this.postgresClient(migrationsTable)}
           ` as unknown as Array<{ hash: string }>;
 
           for (const m of migrationsResult) {
@@ -724,8 +837,14 @@ export class DrizzleService extends BaseService implements OnModuleInit {
           }
         }
       }
-    } catch {
-      // If query fails, return empty set (table might not exist yet)
+    } catch (error) {
+      // Absence is normal on a first run; anything else is worth seeing, where the old
+      // bare `catch {}` hid a broken query behind a plausible-looking empty result.
+      this.safeLog('debug', 'Could not read the migration journal', {
+        migrationsTable,
+        migrationsSchema,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
 
     return hashes;
@@ -755,19 +874,27 @@ export class DrizzleService extends BaseService implements OnModuleInit {
     }
 
     const migrationsFolder = options?.migrationsFolder ?? './drizzle';
+    const migrationsTable = options?.migrationsTable ?? DEFAULT_MIGRATIONS_TABLE;
+    const migrationsSchema = options?.migrationsSchema ?? DEFAULT_MIGRATIONS_SCHEMA;
+
+    assertSafeIdentifier(migrationsTable, 'migrationsTable');
+    assertSafeIdentifier(migrationsSchema, 'migrationsSchema');
+    this.assertJournalNotShared(migrationsFolder, migrationsTable, migrationsSchema);
 
     // Read migration journal to get hash -> filename mapping
     const hashToFilename = this.readMigrationJournal(migrationsFolder);
 
     // Get already applied migrations before running
-    const appliedBefore = this.getAppliedMigrationHashes();
+    const appliedBefore = await this.getAppliedMigrationHashes(migrationsTable, migrationsSchema);
 
     if (this.connectionOptions.type === DatabaseType.SQLITE) {
       if (!this.db) {
         throw new Error('Database not initialized');
       }
+      // migrationsSchema is omitted: SQLite has no schemas and drizzle rejects it there.
       await migrate(this.db as BunSQLiteDatabase<Record<string, SQLiteTable>>, {
         migrationsFolder,
+        migrationsTable,
       });
     } else if (this.connectionOptions.type === DatabaseType.POSTGRESQL) {
       if (!this.db) {
@@ -775,11 +902,13 @@ export class DrizzleService extends BaseService implements OnModuleInit {
       }
       await migratePostgres(this.db as BunSQLDatabase<Record<string, PgTable>>, {
         migrationsFolder,
+        migrationsTable,
+        migrationsSchema,
       });
     }
 
     // Get applied migrations after running
-    const appliedAfter = this.getAppliedMigrationHashes();
+    const appliedAfter = await this.getAppliedMigrationHashes(migrationsTable, migrationsSchema);
 
     // Find newly applied migrations
     const newlyApplied: string[] = [];
@@ -795,6 +924,30 @@ export class DrizzleService extends BaseService implements OnModuleInit {
     // Log each applied migration
     for (const filename of newlyApplied) {
       this.safeLog('info', `Applied migration: ${filename}`);
+    }
+
+    // A journal entry that is neither already applied nor applied just now was skipped.
+    // Drizzle decides by comparing folder timestamps against the newest journal row, so
+    // this is what a set generated earlier than another set's head looks like — silently,
+    // until the first query against a table that was never created.
+    const skipped: string[] = [];
+    for (const [hash, filename] of hashToFilename) {
+      if (!appliedAfter.has(hash)) {
+        skipped.push(filename);
+      }
+    }
+
+    if (skipped.length > 0) {
+      this.safeLog(
+        'warn',
+        `${skipped.length} migration(s) in "${migrationsFolder}" were neither applied nor already `
+        + 'recorded. Drizzle applies a migration only when its folder timestamp is newer than the '
+        + 'newest row in the journal, so a set generated before another set that shares this journal '
+        + 'is skipped in silence. Give this set its own journal with migrationsTable.',
+        {
+          migrationsFolder, migrationsTable, migrationsSchema, skipped, 
+        },
+      );
     }
 
     // Log summary

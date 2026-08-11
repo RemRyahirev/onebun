@@ -4,6 +4,8 @@
  * @source docs:api/drizzle.md
  */
 
+import { join } from 'path';
+
 import {
   describe,
   it,
@@ -32,6 +34,8 @@ import {
   text,
   integer,
 } from '../src/sqlite';
+
+const migrationsFixture = join(__dirname, 'test-migrations');
 
 
 describe('Drizzle README Examples', () => {
@@ -258,6 +262,42 @@ describe('Drizzle API Documentation Examples', () => {
       const { pushSchema } = require('../src/migrations');
       expect(pushSchema).toBeDefined();
       expect(typeof pushSchema).toBe('function');
+    });
+
+    /**
+     * @source docs:api/drizzle.md#one-journal-per-migration-set
+     */
+    it('gives each migration set its own journal, as the docs show', async () => {
+      // From docs: "One Journal Per Migration Set" — the application's set on the default
+      // journal, a package's set on its own. Both folders here are the same fixture; what
+      // the example is about is the journal, not the contents.
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service();
+      await service.initialize({
+        type: DatabaseType.SQLITE,
+        options: { url: ':memory:' },
+      });
+
+      try {
+        await service.runMigrations({ migrationsFolder: migrationsFixture });
+        await service.runMigrations({
+          migrationsFolder: migrationsFixture,
+          migrationsTable: '__drizzle_migrations_durable',
+        });
+
+        const client = service.getSQLiteClient()!;
+        const tables = client.query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '__drizzle_migrations%'",
+        ).all() as Array<{ name: string }>;
+
+        expect(tables.map(t => t.name).sort()).toEqual([
+          '__drizzle_migrations',
+          '__drizzle_migrations_durable',
+        ]);
+      } finally {
+        await service.close();
+      }
     });
 
     it('generateMigrations should accept documented options', async () => {

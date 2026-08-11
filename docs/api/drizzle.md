@@ -683,17 +683,55 @@ DrizzleModule.forRoot({
 })
 ```
 
+### One Journal Per Migration Set
+
+A package that ships migrations of its own needs its own journal table:
+
+```typescript
+// The application's own set — default journal
+await drizzleService.runMigrations({ migrationsFolder: './drizzle' });
+
+// A package's set — its own journal, independent of the application's
+await drizzleService.runMigrations({
+  migrationsFolder: './node_modules/@acme/durable/migrations',
+  migrationsTable: '__drizzle_migrations_durable',
+});
+```
+
+**Why this is not optional.** Drizzle decides whether to apply a migration by comparing the
+timestamp baked into its folder against the **newest row** in the journal — never by hash.
+So when two folders share one journal, whichever set was generated earlier is skipped
+entirely: no error, no log, and the application starts and then fails at the first query
+against a table that was never created.
+
+To make that impossible to hit by accident, a second migration folder that would share a
+journal with the first is refused at the point of the call, naming both folders and the
+option that separates them. Several journals in one process is the supported shape; several
+**folders** sharing one journal is not.
+
+`migrationsSchema` names the schema holding the journal (PostgreSQL only — SQLite has no
+schemas and the option is ignored there). Both default to drizzle's own
+`drizzle.__drizzle_migrations`.
+
+Migrations whose entries end up neither applied nor already recorded are reported with a
+`warn` naming each file, so a skipped set is visible even where it is legitimate.
+
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DB_AUTO_MIGRATE` | Auto-run migrations on startup | `true` |
 | `DB_MIGRATIONS_FOLDER` | Path to migrations folder | `'./drizzle'` |
+| `DB_MIGRATIONS_TABLE` | Journal table recording applied migrations | `'__drizzle_migrations'` |
+| `DB_MIGRATIONS_SCHEMA` | Schema holding the journal (PostgreSQL only) | `'drizzle'` |
 | `DB_SCHEMA_PATH` | Path to schema files | - |
+
+`migrationsTable` and `migrationsSchema` are also accepted by `DrizzleModule.forRoot()` and
+are forwarded on every path that runs migrations, including automatic ones.
 
 ### Migration Tracking
 
-Drizzle automatically tracks applied migrations in the `__drizzle_migrations` table. This ensures:
+Drizzle automatically tracks applied migrations in the journal table. This ensures:
 - Migrations are only applied once (idempotency)
 - Running `runMigrations()` multiple times is safe
 - No duplicate table creation errors
@@ -720,10 +758,14 @@ info: SQLite migrations applied { migrationsFolder: './drizzle', newMigrations: 
 - `pushSchema()` runs `bunx drizzle-kit push:sqlite` or `push:pg` depending on dialect
 - `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
 - Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
-- The `__drizzle_migrations` table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
+- The journal table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
 - Migration hash is SHA-256 of the SQL file content, used to match applied migrations with journal entries
 - `readMigrationJournal()` reads `meta/_journal.json` and computes hashes for each migration file
-- `getAppliedMigrationHashes()` queries `__drizzle_migrations` table before and after running migrations to determine which were newly applied
+- `getAppliedMigrationHashes(table, schema)` queries the configured journal before and after running migrations to determine which were newly applied. It is ASYNC: Bun's SQL template returns a lazy thenable, and the earlier synchronous version read `.length` off a promise, so the PostgreSQL path always reported zero applied migrations regardless of what ran
+- On PostgreSQL the existence probe is schema-qualified against `information_schema.tables`; an unqualified name never matched, because drizzle puts the journal in its own schema
+- `migrationsTable`/`migrationsSchema` are validated against `/^[A-Za-z_][A-Za-z0-9_$]*$/` before use — an identifier cannot be a bound parameter, so it reaches the query as text
+- `assertJournalNotShared()` keys a per-service map on `schema.table` and throws when a second, different `migrationsFolder` claims a journal another folder already owns. Re-running the SAME folder is idempotent and does not throw
+- Drizzle's own selection rule is `!lastDbMigration || Number(lastDbMigration.created_at) < migration.folderMillis` against the single newest journal row — the hash is written but never used for filtering, which is why journal sharing loses migrations rather than merely reordering them
 </llm-only>
 
 ## Complete Example
