@@ -2338,7 +2338,18 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
+      // `throwError` declares no parameter decorators, so it takes the fast path.
+      // Asserting the status alone passed both before and after the filters were
+      // applied here — a code-less Error maps to 500 either way — so the envelope
+      // and the content type are what actually pin the behaviour.
       expect(response.status).toBe(500);
+      expect(response.headers.get('content-type')).toContain('application/json');
+
+      const body = await response.json() as { success: boolean; error: string; code: number };
+
+      expect(body.success).toBe(false);
+      expect(body.error).toBe('Test error');
+      expect(body.code).toBe(500);
     });
 
     test('should handle complex route patterns with multiple parameters', async () => {

@@ -104,6 +104,11 @@ The framework automatically wraps plain return values into `{ success: true, res
 }
 ```
 
+Error handling does not depend on whether a handler declares parameter decorators. A
+handler written `async findAll()` and one written `async findAll(@Query('q') q?: string)`
+produce identical responses for the same throw — same status, same content type, same
+envelope. See [Exception Filters](./exception-filters.md#what-filters-cover).
+
 ## Response Methods (Alternative)
 
 These methods are available on `BaseController` but are not the recommended default. Prefer returning plain data and throwing `HttpException`.

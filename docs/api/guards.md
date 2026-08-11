@@ -23,7 +23,7 @@ import { HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } from '@on
 
 **Order of execution:** global middleware → controller middleware → route middleware → guards → handler
 
-**If a guard returns `false` or rejects:** responds with `{ success: false, error: 'Forbidden', code: 403 }` (HTTP 403, or HTTP 200 when `httpEnvelope` mode is enabled).
+**If a guard returns `false`:** responds with `{ success: false, error: 'Forbidden', code: 403 }` (HTTP 403, or HTTP 200 when `httpEnvelope` mode is enabled). **If a guard throws or rejects:** the error goes through the route's exception filters, so `throw new HttpException(401, 'Token expired')` produces that status and message instead of the fixed Forbidden envelope.
 
 **HttpExecutionContext:**
 ```typescript
@@ -212,12 +212,29 @@ When a guard returns `false`, the framework responds with HTTP 403 and a JSON er
 }
 ```
 
+Returning `false` and throwing are different tools. `false` is a plain refusal and always
+produces exactly the envelope above — a route-level exception filter cannot change it, so
+the contract is stable. Throwing lets the guard choose the status and message:
+
+```typescript
+const authGuard = createHttpGuard((ctx) => {
+  const token = ctx.getRequest().headers.get('authorization');
+  if (!token) {
+    return false;                                          // 403 Forbidden
+  }
+  if (isExpired(token)) {
+    throw new HttpException(401, 'Token expired');          // 401, through the filters
+  }
+
+  return true;
+});
+```
+
 ## Execution Order
 
 ```
 Request → [Global Middleware] → [Module Middleware] → [Controller Middleware] → [Route Middleware]
-       → [Controller Guards] → [Route Guards]
-       → Route Handler
-       → [Exception Filters on error]
+       → [Controller Guards] → [Route Guards]   → [Exception Filters if a guard throws]
+       → Route Handler                          → [Exception Filters on error]
        → Response
 ```

@@ -30,6 +30,7 @@ import {
   createErrorResponse,
   createSuccessResponse,
   HttpStatusCode,
+  OneBunBaseError,
 } from '@onebun/requests';
 
 import {
@@ -616,6 +617,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
       httpEnvelope: this.options.httpEnvelope,
     });
+    // `applyExceptionFilters` is a function declaration at method-body scope, so it
+    // cannot see `const app = this` — that one is block-scoped inside the try below.
+    const appLogger = this.logger;
 
     try {
       // Initialize configuration if schema was provided
@@ -759,6 +763,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const effectiveTimeout: number | undefined = isSse
           ? (sseDecoratorOptions?.timeout ?? routeMeta.timeout ?? DEFAULT_SSE_TIMEOUT)
           : routeMeta.timeout;
+        // MEASURED optimisation, not incidental duplication: routing zero-param,
+        // no-schema routes through executeHandler regresses the hot path. Do NOT collapse
+        // the two arms — they also differ observably, the fast arm calling
+        // boundHandler(req) where executeHandler calls boundHandler(...args).
         const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
 
@@ -850,31 +858,37 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 // Full path: delegate to executeHandler for param extraction, validation, response wrapping
                 const callHandler = isFastPath
                   ? async (): Promise<Response> => {
-                    let hMark: ProfileMark | undefined;
-                    if (profiler) {
-                      hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
-                    }
-                    const result = await boundHandler(req);
-                    if (hMark) {
-                      profiler!.end(hMark);
-                    }
-                    if (sseDecoratorOptions) {
-                      return createSseResponseFromResult(result, sseDecoratorOptions);
-                    }
+                    // Filtered here rather than in the outer catch, which sits above the
+                    // middleware chain — see applyExceptionFilters.
+                    try {
+                      let hMark: ProfileMark | undefined;
+                      if (profiler) {
+                        hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+                      }
+                      const result = await boundHandler(req);
+                      if (hMark) {
+                        profiler!.end(hMark);
+                      }
+                      if (sseDecoratorOptions) {
+                        return createSseResponseFromResult(result, sseDecoratorOptions);
+                      }
 
-                    if (result instanceof Response) {
-                      return result;
+                      if (result instanceof Response) {
+                        return result;
+                      }
+
+                      const successResponse = createSuccessResponse(result);
+
+                      return new Response(JSON.stringify(successResponse), {
+                        status: HttpStatusCode.OK,
+                        headers: {
+                        // eslint-disable-next-line @typescript-eslint/naming-convention
+                          'Content-Type': 'application/json',
+                        },
+                      });
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
-
-                    const successResponse = createSuccessResponse(result);
-
-                    return new Response(JSON.stringify(successResponse), {
-                      status: HttpStatusCode.OK,
-                      headers: {
-                      // eslint-disable-next-line @typescript-eslint/naming-convention
-                        'Content-Type': 'application/json',
-                      },
-                    });
                   }
                   : (): Promise<Response> => executeHandler(
                     boundHandler, routeMeta, controller, controllerName,
@@ -883,14 +897,22 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
                 // Wrap callHandler with interceptors if any (zero-cost when absent)
                 const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
-                  ? (): Promise<Response> => {
+                  ? async (): Promise<Response> => {
                     const interceptorCtx = new HttpExecutionContextImpl(
                       req,
-                      routeMeta.handler,
-                      controller.constructor.name,
+                      routeMeta.handler ?? '',
+                      controllerName,
                     );
 
-                    return composeInterceptors(resolvedInterceptors, interceptorCtx, callHandler)() as Promise<Response>;
+                    // callHandler already returns a filtered Response, so this only ever
+                    // sees a throw from the interceptors themselves.
+                    try {
+                      return await (composeInterceptors(
+                        resolvedInterceptors, interceptorCtx, callHandler,
+                      )() as Promise<Response>);
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                    }
                   }
                   : callHandler;
 
@@ -904,10 +926,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       }
                       const guardCtx = new HttpExecutionContextImpl(
                         req,
-                        routeMeta.handler,
-                        controller.constructor.name,
+                        routeMeta.handler ?? '',
+                        controllerName,
                       );
-                      const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                      let allowed: boolean;
+                      try {
+                        allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                      } catch (error) {
+                        if (guardMark) {
+                          profiler!.end(guardMark);
+                        }
+
+                        return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                      }
                       if (guardMark) {
                         profiler!.end(guardMark);
                       }
@@ -966,15 +997,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     }
                     const guardCtx = new HttpExecutionContextImpl(
                       req,
-                      routeMeta.handler,
-                      controller.constructor.name,
+                      routeMeta.handler ?? '',
+                      controllerName,
                     );
-                    const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                    let allowed = false;
+                    let guardError: { error: unknown } | null = null;
+                    try {
+                      allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                    } catch (error) {
+                      guardError = { error };
+                    }
                     if (guardMark) {
                       profiler!.end(guardMark);
                     }
 
-                    if (!allowed) {
+                    if (guardError) {
+                      response = await applyExceptionFilters(guardError.error, req, routeMeta, controllerName);
+                    } else if (!allowed) {
                       response = new Response(
                         JSON.stringify(
                           createErrorResponse(
@@ -1048,9 +1087,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   'Request handling error:',
                   error instanceof Error ? error : new Error(String(error)),
                 );
-                const response = new Response('Internal Server Error', {
-                  status: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                });
+                // Reachable only when framework code itself failed: a throwing
+                // middleware, a metrics/profiler throw, or the default filter throwing.
+                // Everything a route can throw is filtered below the middleware chain.
+                const response = new Response(
+                  JSON.stringify(
+                    createErrorResponse('Internal Server Error', HttpStatusCode.INTERNAL_SERVER_ERROR),
+                  ),
+                  {
+                    status: app.options.httpEnvelope
+                      ? HttpStatusCode.OK
+                      : HttpStatusCode.INTERNAL_SERVER_ERROR,
+                    headers: {
+                      // eslint-disable-next-line @typescript-eslint/naming-convention
+                      'Content-Type': 'application/json',
+                    },
+                  },
+                );
                 const duration = Date.now() - startTime;
 
                 // Record error metrics
@@ -1616,6 +1669,74 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * Query parameters are extracted separately from the URL.
      */
     /**
+     * Apply the route's exception filters to a thrown error.
+     *
+     * SINGLE SOURCE OF FILTER APPLICATION. Every execution path that can throw while
+     * producing a route response must sit inside a `try` that delegates here. A path
+     * added outside one is silently unfiltered — that was the original defect, where a
+     * handler with no decorated parameters took the fast path and its `HttpException`
+     * left the framework as a bare 500 `text/plain`. Call sites, `grep` for the name and
+     * expect five:
+     *   1. `executeHandler`'s catch                        — full-path handler
+     *   2. the `isFastPath` arm of the `callHandler` ternary — fast-path handler
+     *   3. the `interceptedHandler` arm                     — throwing interceptors
+     *   4. the guard call inside `guardedHandler`           — throwing guards, with middleware
+     *   5. the inline guard call                            — throwing guards, without
+     *
+     * DELIBERATELY NOT applied to the middleware chain. Middleware post-processes the
+     * Response that `next()` returns — `CorsMiddleware`, `SecurityHeadersMiddleware` and
+     * `RateLimitMiddleware` all set headers AFTER `await next()`. Filtering above the
+     * chain would unwind past those blocks and strip the headers from every error
+     * response. All five sites sit BELOW the chain, so a filtered response still flows
+     * back out through it. A throwing middleware is therefore not filtered by design and
+     * falls to the last-resort outer catch.
+     *
+     * Only the last filter runs — route-level filters are appended last and win. A filter
+     * that throws, or returns something other than a Response, degrades to the default
+     * filter instead of escaping: applying filters on more paths widens the blast radius
+     * of a buggy user filter, so the fallback is part of the fix rather than a bonus.
+     */
+    async function applyExceptionFilters(
+      error: unknown,
+      req: OneBunRequest,
+      routeMeta: RouteMetadata,
+      controllerName: string,
+    ): Promise<Response> {
+      // Log the unexpected bucket only: HttpException and OneBunBaseError carry a
+      // deliberate status and are ordinary control flow, not incidents.
+      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+
+      const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
+      const filters = routeMeta.filters;
+
+      if (filters && filters.length > 0) {
+        try {
+          const filtered = await filters[filters.length - 1].catch(error, ctx);
+          if (filtered instanceof Response) {
+            return filtered;
+          }
+
+          appLogger.error(
+            'Exception filter returned a non-Response; falling back to the default filter',
+            new Error(`${controllerName}.${routeMeta.handler ?? 'unknown'}`),
+          );
+        } catch (filterError) {
+          appLogger.error(
+            'Exception filter threw; falling back to the default filter',
+            filterError instanceof Error ? filterError : new Error(String(filterError)),
+          );
+        }
+      }
+
+      return await appDefaultExceptionFilter.catch(error, ctx);
+    }
+
+    /**
      * Execute route handler with parameter injection, validation, and response wrapping.
      * Called only for routes with params or response schemas (full path).
      * Simple routes use the inline fast path in createRouteHandler.
@@ -1996,25 +2117,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
         return resp;
       } catch (error) {
-        // Run through exception filters (route → controller → global), then default
-        const filters = routeMeta.filters ?? [];
-
-        if (filters.length > 0) {
-          const guardCtx = new HttpExecutionContextImpl(
-            req,
-            routeMeta.handler ?? '',
-            controllerName,
-          );
-
-          // Last filter wins (route-level filters were appended last and take highest priority)
-          return await filters[filters.length - 1].catch(error, guardCtx);
-        }
-
-        return await appDefaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
-          req,
-          routeMeta.handler ?? '',
-          controllerName,
-        ));
+        return await applyExceptionFilters(error, req, routeMeta, controllerName);
       }
     }
 

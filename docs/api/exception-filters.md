@@ -159,19 +159,49 @@ class UploadController extends BaseController {
 }
 ```
 
+## What Filters Cover
+
+Filters are applied at the innermost point that can throw, so a filtered response still
+flows back out through the interceptor and middleware chains and still receives CORS,
+security and rate-limit headers.
+
+| throws | filtered |
+|---|---|
+| route handler — with or without parameter decorators | yes |
+| guard (`canActivate` throws or rejects) | yes |
+| interceptor (before or after `next()`) | yes |
+| middleware | **no** — see below |
+
+**Error handling does not depend on whether a handler declares parameter decorators.** A
+handler written `async findAll()` and one written `async findAll(@Query('q') q?: string)`
+produce identical responses for the same throw.
+
+Middleware is deliberately not filtered. A middleware wraps `next()` and may modify the
+response after it resolves — `cors`, `security` and `rateLimit` all set headers that way —
+so catching a middleware error above the chain would skip the post-`next()` work of every
+outer middleware and drop those headers from the response. A middleware that throws
+produces `{ success: false, error: 'Internal Server Error', code: 500 }`. Handle errors
+inside the middleware, or move the logic into a guard.
+
+A guard that returns `false` is not an error: it produces
+`{ success: false, error: 'Forbidden', code: 403 }` directly and never reaches a filter, so
+a route-level filter cannot override that contract. A guard that *throws* is filtered.
+
 ## Filter Priority
 
-Filters are applied in priority order, from most specific to least specific:
+Filters merge global → controller → route, and **the last one wins**. A route-level filter
+fully shadows controller-level and global filters, which in turn shadow the built-in
+default filter:
 
 ```
-Route-level filter → Controller-level filter → Global filter → Default filter
+Route-level filter ▸ shadows ▸ Controller-level ▸ shadows ▸ Global ▸ shadows ▸ Default
 ```
 
-Each filter may:
-- Return a `Response` to short-circuit and send that response
-- `throw error` to pass the error to the next filter in the chain
+Exactly one filter runs per error. There is no fallthrough between user filters.
 
-The built-in **default filter** is always the final fallback and never throws.
+A filter that re-throws, or returns anything other than a `Response`, falls back to the
+built-in **default filter** — which never throws and is therefore always the terminal
+handler.
 
 ## Default Filter Behaviour
 
@@ -189,7 +219,7 @@ The `defaultExceptionFilter` is always active. It handles:
 const loggingFilter = createExceptionFilter((error, ctx) => {
   const req = ctx.getRequest();
   console.error(`Error on ${req.method} ${new URL(req.url).pathname}:`, error);
-  throw error; // let the next filter handle the response
+  throw error; // delegate to the default filter
 });
 ```
 
@@ -211,10 +241,8 @@ const auditFilter = createExceptionFilter(async (error, ctx) => {
 ## Execution Order
 
 ```
-Route Handler throws
-→ Route-level filters (if any)
-→ Controller-level filters (if any)
-→ Global filters (if any)
-→ Default filter (always present)
-→ Response sent
+Handler, guard or interceptor throws
+→ the route's effective filter (route ▸ controller ▸ global, last one wins)
+→ Default filter, if that filter re-threw or returned a non-Response
+→ Response sent, back out through the interceptor and middleware chains
 ```

@@ -55,7 +55,7 @@ Use `isHttpContext(ctx)`, `isWsContext(ctx)`, `isQueueContext(ctx)` for type-saf
 **Key differences from NestJS:** No RxJS — uses `next: () => Promise<unknown>` instead of Observable.
 
 **Execution order:**
-- HTTP: middleware → guards → interceptors(handler) → exception filters → response
+- HTTP: middleware → guards[→filters] → interceptors[→filters] → handler[→filters] → response. Filters sit INSIDE the interceptor chain, not after it: an interceptor wrapping `await next()` in a try/catch will not see handler errors, because the handler is already filtered by the time it returns. An error the interceptor itself throws IS filtered.
 - WS: guards → interceptors(handler)
 - Queue: guards → interceptors(handler)
 
