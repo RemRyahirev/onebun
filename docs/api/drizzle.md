@@ -484,6 +484,44 @@ export class UserRepository extends BaseRepository<typeof users, User, InsertUse
 
 ## Query Examples
 
+### Dialect Resolution
+
+`select()`, `selectDistinct()`, `insert()`, `update()` and `delete()` accept a table of
+either dialect and resolve to that dialect's own query builder. On PostgreSQL that means the
+whole chain is typed and reachable:
+
+```typescript
+await this.db.select().from(runs).where(eq(runs.id, id)).limit(1);
+await this.db.select({ id: outbox.id }).from(outbox).limit(10).for('update', { skipLocked: true });
+await this.db.update(runs).set({ status: 'running' }).where(eq(runs.id, id)).returning({ id: runs.id });
+```
+
+`.limit()`, `.offset()`, `.orderBy()`, `.for()`, `.$dynamic()` and a projected `.returning(fields)`
+are all available on the PostgreSQL path, and SQLite tables continue to resolve to the SQLite
+builders.
+
+For anything the universal surface does not model — a PostgreSQL-only feature, or a raw
+`sql` construction against the typed schema — `getPostgreSQLDatabase()` and
+`getSQLiteDatabase()` return the underlying dialect-specific drizzle instance. Both throw if
+the configured database is of the other type.
+
+```typescript
+const pg = this.db.getPostgreSQLDatabase();
+await pg.execute(sql`REFRESH MATERIALIZED VIEW ${sql.identifier('run_stats')}`);
+```
+
+<llm-only>
+
+**Technical details for AI agents — dialect resolution:**
+- `SQLiteTable<any>` and `PgTable<any>` do NOT discriminate: a `pgTable` satisfies `SQLiteTable<any>` and a `sqliteTable` satisfies `PgTable<any>`. Overload ordering therefore cannot separate them where the constraint carries `<any>` — whichever is declared first captures every table
+- The BARE constraints behave differently and asymmetrically: bare `PgTable` is dialect-branded and rejects a SQLite table, while bare `SQLiteTable` accepts a PostgreSQL one. That asymmetry is what makes declaration order work for `insert`/`update`/`delete`, whose overloads use the bare forms — PostgreSQL is declared FIRST there on purpose
+- `select().from()` cannot be fixed that way, because its constraints are the `<any>` forms. It uses ONE generic signature with a conditional return type instead, keyed on `DialectOf<TTable>` — which reads the `dialect` brand ('pg' | 'sqlite') off the table's own column map
+- `PgSelectQueryResult` is instantiated to match what `BunSQLDatabase.select().from()` returns, so the PostgreSQL chain is drizzle's real `PgSelectBase` rather than the previous hand-written `Promise & { where }`, which ended the chain after one call
+- The regression guard is `packages/drizzle/tests/dialect-resolution.test-d.ts`, gated by `bun run typecheck`. It is named `.test-d.ts` so `bun test` does not collect it: the defect is invisible at runtime, since the queries ran correctly while the API was untypeable
+- `getPostgreSQLDatabase()` / `getSQLiteDatabase()` are supported escape hatches, not internal.
+
+</llm-only>
+
 ### Basic Queries
 
 ```typescript

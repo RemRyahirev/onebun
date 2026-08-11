@@ -662,9 +662,16 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   }
 
   /**
-   * Get PostgreSQL database instance (internal use only - not exported in public API)
-   * Throws if database is not PostgreSQL
-   * @internal
+   * Get the dialect-specific PostgreSQL database instance. Throws if the database is not
+   * PostgreSQL.
+   *
+   * A supported escape hatch, not internal. `select()`, `insert()`, `update()` and
+   * `delete()` resolve to the PostgreSQL builders and cover the ordinary query surface,
+   * including `.limit()`, `.for()` and a projected `.returning()`. Reach for this only when
+   * you need something the universal surface does not model at all — a PostgreSQL-only
+   * feature, or a raw `sql` construction against the typed schema.
+   *
+   * @see docs:api/drizzle.md
    */
   getPostgreSQLDatabase(): BunSQLDatabase<Record<string, PgTable>> {
     if (!this.isPostgreSQL()) {
@@ -1084,11 +1091,20 @@ export class DrizzleService extends BaseService implements OnModuleInit {
    *   .returning();
    * ```
    */
-  insert<TTable extends SQLiteTable>(table: TTable): SQLiteInsertBuilder<TTable, 'sync', void>;
   /**
    * Create an INSERT query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload and a projected `.returning({ id })` failed with
+   * `PgColumn is not assignable to SQLiteColumn`.
    */
   insert<TTable extends PgTable>(table: TTable): PgInsertBuilder<TTable, BunSQLQueryResultHKT>;
+  /**
+   * Create an INSERT query for SQLite table
+   */
+  insert<TTable extends SQLiteTable>(table: TTable): SQLiteInsertBuilder<TTable, 'sync', void>;
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   insert(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
@@ -1114,11 +1130,20 @@ export class DrizzleService extends BaseService implements OnModuleInit {
    *   .returning();
    * ```
    */
-  update<TTable extends SQLiteTable>(table: TTable): SQLiteUpdateBuilder<TTable, 'sync', void>;
   /**
    * Create an UPDATE query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload and a projected `.returning({ id })` failed with
+   * `PgColumn is not assignable to SQLiteColumn`.
    */
   update<TTable extends PgTable>(table: TTable): PgUpdateBuilder<TTable, BunSQLQueryResultHKT>;
+  /**
+   * Create an UPDATE query for SQLite table
+   */
+  update<TTable extends SQLiteTable>(table: TTable): SQLiteUpdateBuilder<TTable, 'sync', void>;
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   update(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
@@ -1141,11 +1166,20 @@ export class DrizzleService extends BaseService implements OnModuleInit {
    *   .returning();
    * ```
    */
-  delete<TTable extends SQLiteTable>(table: TTable): SQLiteDeleteBase<TTable, 'sync', void>;
   /**
    * Create a DELETE query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload and a projected `.returning({ id })` failed with
+   * `PgColumn is not assignable to SQLiteColumn`.
    */
   delete<TTable extends PgTable>(table: TTable): PgDeleteBase<TTable, BunSQLQueryResultHKT>;
+  /**
+   * Create a DELETE query for SQLite table
+   */
+  delete<TTable extends SQLiteTable>(table: TTable): SQLiteDeleteBase<TTable, 'sync', void>;
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
   delete(table: SQLiteTable | PgTable) {
     const db = this.getDatabase();
