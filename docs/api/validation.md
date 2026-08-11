@@ -456,13 +456,11 @@ const userSchema = type({
   age: 'number > 0',
 });
 
-// Basic conversion
+// Strict: throws if any part of the type cannot be represented
 const jsonSchema = toJsonSchema(userSchema);
 
-// With fallback for unsupported types
-const jsonSchemaWithFallback = getJsonSchema(userSchema, {
-  fallback: (ctx) => ({ ...ctx.base, description: 'Custom fallback' }),
-});
+// Best-effort: converts as much as possible and marks what it could not
+const lenient = getJsonSchema(userSchema);
 
 // Result:
 // {
@@ -474,6 +472,64 @@ const jsonSchemaWithFallback = getJsonSchema(userSchema, {
 //   required: ['name', 'age'],
 // }
 ```
+
+### Types JSON Schema Cannot Express
+
+JSON Schema has no representation for a `Date`, for a `.narrow()` predicate, or for a
+`.pipe()` morph — eleven ArkType codes in all. `Date` alone makes this ordinary rather than
+exotic.
+
+The two helpers differ only in what they do about it:
+
+| | unrepresentable part |
+|---|---|
+| `toJsonSchema(schema, options?)` | **throws** ArkType's `ToJsonSchemaError` — you decide |
+| `getJsonSchema(schema, options?)` | converts everything else and **marks** the result |
+
+`getJsonSchema` keeps what ArkType did manage to build. A schema of
+`{ when: 'Date', name: 'string' }` yields the full object with `name` typed and `when` left
+as an empty schema — not a bare `{ type: 'object' }`.
+
+A partial result carries the `x-onebun-partial` key (exported as `JSON_SCHEMA_PARTIAL`)
+listing the ArkType codes responsible:
+
+```typescript
+import { getJsonSchema, JSON_SCHEMA_PARTIAL, type } from '@onebun/core';
+
+const schema = getJsonSchema(type({ when: 'Date', name: 'string' }));
+
+schema[JSON_SCHEMA_PARTIAL];  // { codes: ['date'] }
+```
+
+**Check for that key rather than trusting the shape.** A partial conversion is a
+structurally valid JSON Schema, so nothing downstream — an OpenAPI document, a form
+generator, a graph validator — can otherwise tell it from a schema for a genuinely
+unconstrained value. A schema that converts cleanly carries no marker at all.
+
+Both helpers forward ArkType's own options (`fallback`, `dialect`, `target`). Supplying a
+`fallback` gives you the real conversion context, including the partially built schema in
+`ctx.base`, and suppresses the marker for the codes you handle:
+
+```typescript
+const withDates = getJsonSchema(type({ when: 'Date', name: 'string' }), {
+  fallback: { date: () => ({ type: 'string', format: 'date-time' }) },
+});
+// properties.when is { type: 'string', format: 'date-time' }, and no marker is added
+```
+
+<llm-only>
+
+**Technical details for AI agents — JSON Schema conversion:**
+- `toJsonSchema` is a pure passthrough to ArkType's `Type.toJsonSchema(options)`; it throws exactly what ArkType throws
+- `getJsonSchema` does NOT catch and stub. It passes `fallback: { default: ctx => ctx.base }` INTO the conversion, so ArkType keeps every node it could build and only the unrepresentable one becomes `{}`
+- That order is forced, not stylistic: the thrown `ToJsonSchemaError` carries `code` but NOT the partially built schema, so a caught error can only ever produce a stub. The partial schema exists only inside the fallback context
+- The fallback context is `{ code, base }`, plus the constraint itself for some codes (e.g. `predicate`)
+- A caller's `fallback` takes precedence in both ArkType shapes — an object keyed by code, or a universal function — and the codes it handles are not marked, because the caller has handled them
+- The outer `catch` remains reachable only when the per-code mechanism cannot repair the failure, e.g. a caller's fallback that itself throws. It binds the error and reports its `code` in the marker; the previous bare `catch {}` discarded the one value that said what was unrepresentable
+- `JSON_SCHEMA_PARTIAL` is `'x-onebun-partial'` — an `x-` prefixed key, so it passes through OpenAPI tooling as a vendor extension rather than being rejected
+- `@onebun/docs`'s `arktypeToJsonSchema()` delegates straight to `getJsonSchema`, so the marker reaches the generated OpenAPI document.
+
+</llm-only>
 
 ## Best Practices
 

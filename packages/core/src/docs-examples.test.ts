@@ -2048,6 +2048,48 @@ describe('Validation API Documentation Examples', () => {
     });
   });
 
+  describe('JSON Schema conversion (docs/api/validation.md)', () => {
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('marks a partial conversion with the codes responsible', () => {
+      // From docs: `schema[JSON_SCHEMA_PARTIAL]` is `{ codes: ['date'] }`
+       
+      const { getJsonSchema, JSON_SCHEMA_PARTIAL } = require('./validation/json-schema');
+      const schema = getJsonSchema(type({ when: 'Date', name: 'string' }));
+
+      expect(schema[JSON_SCHEMA_PARTIAL]).toEqual({ codes: ['date'] });
+      // …and everything ArkType could build is still there
+      expect(schema.properties.name).toEqual({ type: 'string' });
+    });
+
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('suppresses the marker for codes a caller handles', () => {
+      // From docs: properties.when is { type: 'string', format: 'date-time' }, no marker
+       
+      const { getJsonSchema, JSON_SCHEMA_PARTIAL } = require('./validation/json-schema');
+      const withDates = getJsonSchema(type({ when: 'Date', name: 'string' }), {
+        fallback: { date: () => ({ type: 'string', format: 'date-time' }) },
+      });
+
+      expect(withDates.properties.when).toEqual({ type: 'string', format: 'date-time' });
+      expect(withDates[JSON_SCHEMA_PARTIAL]).toBeUndefined();
+    });
+
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('throws from the strict helper where the lenient one degrades', () => {
+      // From docs: the table contrasting toJsonSchema and getJsonSchema
+       
+      const { toJsonSchema: strict } = require('./validation/json-schema');
+
+      expect(() => strict(type({ when: 'Date' }))).toThrow();
+    });
+  });
+
   describe('Schema Types (docs/api/validation.md)', () => {
     /**
      * @source docs:api/validation.md#primitives
