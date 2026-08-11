@@ -286,6 +286,174 @@ describe('TestingModule', () => {
       }
     });
   });
+
+  describe('overrideProvider() reach', () => {
+    /**
+     * Overrides used to be applied by patching the ROOT module after the whole tree had
+     * been built, which reached root-module controllers only. A service — or anything
+     * inside an imported module — silently kept the real instance: the mock was not
+     * rejected, it was IGNORED, which is the mode that lets a real DI bug ship green.
+     */
+    @Service()
+    class ReachDep extends BaseService {
+      who(): string {
+        return 'REAL';
+      }
+    }
+
+    @Service()
+    class ReachConsumer extends BaseService {
+      constructor(private dep: ReachDep) {
+        super();
+      }
+
+      saw(): string {
+        return this.dep.who();
+      }
+    }
+
+    @Module({ providers: [ReachDep, ReachConsumer], exports: [ReachDep, ReachConsumer] })
+    class ReachInnerModule {}
+
+    it('reaches a SERVICE, not only a controller (previously saw REAL)', async () => {
+      const module = await TestingModule
+        .create({ providers: [ReachDep, ReachConsumer] })
+        .overrideProvider(ReachDep).useValue({ who: () => 'MOCK' })
+        .compile();
+
+      try {
+        expect(module.get(ReachConsumer).saw()).toBe('MOCK');
+      } finally {
+        await module.close();
+      }
+    });
+
+    it('reaches a service inside an IMPORTED module that provides the overridden class', async () => {
+      // Pre-fix baseline was a silent REAL here, not a throw — the mock was accepted and
+      // then quietly bypassed by the imported module's own provider.
+      const module = await TestingModule
+        .create({ imports: [ReachInnerModule] })
+        .overrideProvider(ReachDep).useValue({ who: () => 'MOCK' })
+        .compile();
+
+      try {
+        expect(module.get(ReachConsumer).saw()).toBe('MOCK');
+        expect((module.get(ReachDep) as { who(): string }).who()).toBe('MOCK');
+      } finally {
+        await module.close();
+      }
+    });
+
+    it('still throws when the overridden class is provided NOWHERE', async () => {
+      @Service()
+      class Unprovided extends BaseService {
+        value(): string {
+          return 'x';
+        }
+      }
+
+      @Service()
+      class NeedsUnprovided extends BaseService {
+        constructor(private dep: Unprovided) {
+          super();
+        }
+
+        value(): string {
+          return this.dep.value();
+        }
+      }
+
+      // Only NeedsUnprovided is a provider; Unprovided is not, and no override is set for
+      // it — the resolution error must survive, it is the loud mode worth keeping.
+      let error: unknown;
+      try {
+        await TestingModule.create({ providers: [NeedsUnprovided] }).compile();
+      } catch (thrown) {
+        error = thrown;
+      }
+
+      expect((error as Error | undefined)?.message).toContain('Could not resolve dependency');
+    });
+
+    it('useClass() reaches an imported module and fires lifecycle hooks exactly once', async () => {
+      let inits = 0;
+
+      @Service()
+      class HookedMock extends BaseService {
+        async onApplicationInit(): Promise<void> {
+          inits++;
+        }
+
+        who(): string {
+          return 'CLASS-MOCK';
+        }
+      }
+
+      const module = await TestingModule
+        .create({ imports: [ReachInnerModule] })
+        .overrideProvider(ReachDep).useClass(HookedMock)
+        .compile();
+
+      try {
+        expect(module.get(ReachConsumer).saw()).toBe('CLASS-MOCK');
+        // Seeding the override into every module makes an undeduplicated lifecycle
+        // recursion fire this once per module.
+        expect(inits).toBe(1);
+      } finally {
+        await module.close();
+      }
+    });
+
+    it('two compiled modules in one file each see their own configuration', async () => {
+      const first = await TestingModule
+        .create({ imports: [ReachInnerModule] })
+        .overrideProvider(ReachDep).useValue({ who: () => 'FIRST' })
+        .compile();
+
+      let firstSaw: string;
+      try {
+        firstSaw = first.get(ReachConsumer).saw();
+      } finally {
+        await first.close();
+      }
+
+      const second = await TestingModule
+        .create({ imports: [ReachInnerModule] })
+        .overrideProvider(ReachDep).useValue({ who: () => 'SECOND' })
+        .compile();
+
+      let secondSaw: string;
+      try {
+        secondSaw = second.get(ReachConsumer).saw();
+      } finally {
+        await second.close();
+      }
+
+      expect(firstSaw).toBe('FIRST');
+      expect(secondSaw).toBe('SECOND');
+    });
+
+    it('a mock is not retained by a later TestingModule that sets no override', async () => {
+      const mocked = await TestingModule
+        .create({ imports: [ReachInnerModule] })
+        .overrideProvider(ReachDep).useValue({ who: () => 'MOCK' })
+        .compile();
+
+      try {
+        expect(mocked.get(ReachConsumer).saw()).toBe('MOCK');
+      } finally {
+        await mocked.close();
+      }
+
+      const clean = await TestingModule.create({ imports: [ReachInnerModule] }).compile();
+
+      try {
+        expect(clean.get(ReachConsumer).saw()).toBe('REAL');
+      } finally {
+        await clean.close();
+      }
+    });
+  });
 });
 
 // ============================================================================

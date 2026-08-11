@@ -24,13 +24,15 @@ import type {
 } from '../types';
 
 
+import { LoggerService } from '@onebun/logger';
+
 import {
   Controller as CtrlDeco,
   Middleware,
   Module,
 } from '../decorators/decorators';
 import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
-import { makeMockLoggerLayer } from '../testing/test-utils';
+import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { WebSocketGateway } from '../websocket/ws-decorators';
 
@@ -825,6 +827,535 @@ describe('OneBunModule', () => {
 
       // Should be empty now
       expect(getGlobalServicesRegistry().size).toBe(0);
+    });
+  });
+
+  describe('Per-application GlobalScope', () => {
+    const { Global, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry, createGlobalScope, resolveScopedModuleOptions } = require('./module');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    test('two scopes importing one @Global() module each construct their own instance', () => {
+      let constructed = 0;
+
+      @Service()
+      class ScopedDb {
+        readonly id = ++constructed;
+      }
+
+      @Global()
+      @Module({ providers: [ScopedDb], exports: [ScopedDb] })
+      class ScopedDbModule {}
+
+      @Module({ imports: [ScopedDbModule] })
+      class RootModule {}
+
+      const scopeA = createGlobalScope();
+      const scopeB = createGlobalScope();
+
+      const moduleA = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scopeA);
+      const moduleB = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scopeB);
+
+      const instA = moduleA.getServiceByClass(ScopedDb as any);
+      const instB = moduleB.getServiceByClass(ScopedDb as any);
+
+      // Identity, not registry contents: the registry getter returns a copy, so reading it
+      // could never tell these two apart.
+      expect(instA).toBeDefined();
+      expect(instB).toBeDefined();
+      expect(instA).not.toBe(instB);
+
+      // The provider constructor really ran twice — the processedModules short-circuit did
+      // not fire for the second scope, which is the whole defect.
+      expect(constructed).toBe(2);
+      expect(scopeA.processedModules.has(ScopedDbModule)).toBe(true);
+      expect(scopeB.processedModules.has(ScopedDbModule)).toBe(true);
+    });
+
+    test('a @Global() module is still constructed once WITHIN one scope', () => {
+      let constructed = 0;
+
+      @Service()
+      class OnceService {
+        readonly id = ++constructed;
+      }
+
+      @Global()
+      @Module({ providers: [OnceService], exports: [OnceService] })
+      class OnceModule {}
+
+      @Module({ imports: [OnceModule] })
+      class ChildA {}
+
+      @Module({ imports: [OnceModule] })
+      class ChildB {}
+
+      @Module({ imports: [OnceModule, ChildA, ChildB] })
+      class RootModule {}
+
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(constructed).toBe(1);
+    });
+
+    test('an object provider throws instead of being silently discarded', () => {
+      @Service()
+      class RealService {
+        value(): string {
+          return 'real';
+        }
+      }
+
+      @Module({ providers: [{ provide: RealService, useValue: { value: () => 'fake' } } as any] })
+      class ObjectProviderModule {}
+
+      // Previously the entry was dropped by the `typeof p === 'function'` filters and the
+      // failure surfaced later as an unrelated unresolved dependency.
+      expect(() => new OneBunModule(ObjectProviderModule, mockLoggerLayer))
+        .toThrow(/declares an object provider/);
+
+      try {
+        new OneBunModule(ObjectProviderModule, mockLoggerLayer);
+      } catch (error) {
+        expect((error as Error).name).toBe('OneBunInvalidProviderError');
+        expect((error as Error).message).toContain('ObjectProviderModule');
+        expect((error as Error).message).toContain('RealService');
+      }
+    });
+
+    test('a stub that EXTENDS the real service still resolves via the instanceof fallback', () => {
+      @Service()
+      class RealDb {
+        query(): string {
+          return 'real';
+        }
+      }
+
+      class StubDb extends RealDb {
+        override query(): string {
+          return 'stub';
+        }
+      }
+
+      @Service()
+      class Consumer {
+        constructor(public db: RealDb) {}
+      }
+
+      @Module({ providers: [Consumer] })
+      class RootModule {}
+
+      // Seed the stub into the scope the way a @Global() module would, under a tag the
+      // consumer does not ask for; resolution has to fall through to the instanceof check.
+      const scope = createGlobalScope();
+      scope.services.set(Context.GenericTag<unknown>('stub-db'), new StubDb());
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scope);
+      const consumer = module.getServiceByClass(Consumer as any) as Consumer;
+
+      expect(consumer.db).toBeInstanceOf(StubDb);
+      expect(consumer.db.query()).toBe('stub');
+    });
+
+    test('a @Global() service is destroyed and app-initialized exactly ONCE in a deep tree', async () => {
+      let appInits = 0;
+      let destroys = 0;
+
+      @Service()
+      class HookService {
+        async onApplicationInit(): Promise<void> {
+          appInits++;
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          destroys++;
+        }
+      }
+
+      @Global()
+      @Module({ providers: [HookService], exports: [HookService] })
+      class HookModule {}
+
+      @Module({ imports: [HookModule] })
+      class LevelOne {}
+
+      @Module({ imports: [LevelOne] })
+      class LevelTwo {}
+
+      @Module({ imports: [LevelTwo] })
+      class LevelThree {}
+
+      @Module({ imports: [HookModule, LevelThree] })
+      class RootModule {}
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      await module.callOnApplicationInit();
+      await module.callOnModuleDestroy();
+
+      // A @Global() instance sits in the serviceInstances map of every module that can see
+      // it, so an undeduplicated recursion fired these once per module (5 in this tree).
+      expect(appInits).toBe(1);
+      expect(destroys).toBe(1);
+    });
+
+    test('dynamic-module options are snapshotted per scope, not shared through the class', () => {
+      let currentOptions: unknown = { db: 'a' };
+
+      @Service()
+      class OptionsReader {
+        value(): string {
+          return 'x';
+        }
+      }
+
+      class DynamicModule {
+        static getOptions(): unknown {
+          return currentOptions;
+        }
+      }
+      Module({ providers: [OptionsReader], exports: [OptionsReader] })(DynamicModule);
+
+      @Module({ imports: [DynamicModule] })
+      class RootModule {}
+
+      const scopeA = createGlobalScope();
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scopeA);
+
+      // The second forRoot() overwrites the class slot for the whole process...
+      currentOptions = { db: 'b' };
+      const scopeB = createGlobalScope();
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scopeB);
+
+      // ...but each scope kept the value its own import saw.
+      expect(resolveScopedModuleOptions(scopeA, DynamicModule)).toEqual({ db: 'a' });
+      expect(resolveScopedModuleOptions(scopeB, DynamicModule)).toEqual({ db: 'b' });
+      expect(resolveScopedModuleOptions(undefined, DynamicModule)).toBeUndefined();
+    });
+
+    test('an override in the scope reaches an imported module and suppresses the real provider', () => {
+      let realConstructed = 0;
+
+      @Service()
+      class Dep {
+        constructor() {
+          realConstructed++;
+        }
+
+        who(): string {
+          return 'REAL';
+        }
+      }
+
+      @Service()
+      class Consumer {
+        constructor(private dep: Dep) {}
+
+        saw(): string {
+          return this.dep.who();
+        }
+      }
+
+      @Module({ providers: [Dep, Consumer], exports: [Dep, Consumer] })
+      class InnerModule {}
+
+      @Module({ imports: [InnerModule] })
+      class RootModule {}
+
+      const scope = createGlobalScope();
+      const { getServiceTag } = require('./service');
+      scope.overrides.set(getServiceTag(Dep), { who: () => 'MOCK' });
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, scope);
+      const consumer = module.getServiceByClass(Consumer as any) as Consumer;
+
+      expect(consumer.saw()).toBe('MOCK');
+      // The real provider is not built at all — constructing it would run its own
+      // dependencies for an instance nothing receives.
+      expect(realConstructed).toBe(0);
+    });
+  });
+
+  describe('Import order independence (FB-6)', () => {
+    const { Global, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry, createGlobalScope } = require('./module');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    /**
+     * Builds the reported shape. `@Global()` is LOAD-BEARING and the original report omits
+     * it: without it both orders boot, so the reported reproduction pasted verbatim would
+     * pass and close this as unreproducible.
+     */
+    const buildTree = () => {
+      let constructed = 0;
+
+      @Service()
+      class Svc {
+        constructor() {
+          constructed++;
+        }
+
+        value(): string {
+          return 'ok';
+        }
+      }
+
+      @Global()
+      @Module({ providers: [Svc], exports: [Svc] })
+      class CoreModule {}
+
+      @Module({ imports: [CoreModule] })
+      class FeatureModule {}
+
+      @Service()
+      class Consumer {
+        constructor(public svc: Svc) {}
+      }
+
+      return {
+        Svc,
+        CoreModule,
+        FeatureModule,
+        Consumer,
+        count: () => constructed,
+      };
+    };
+
+    test('a module listed AFTER a sibling that already initialized it still contributes', () => {
+      const {
+        Svc, CoreModule, FeatureModule, Consumer, count, 
+      } = buildTree();
+
+      @Module({ imports: [FeatureModule, CoreModule], providers: [Consumer] })
+      class FeatureFirst {}
+
+      // FeatureModule initializes CoreModule as its own child, so by the time the second
+      // import is reached CoreModule is already processed and the loop skips it. This threw
+      // `Could not resolve dependency Svc` while `[CoreModule, FeatureModule]` booted.
+      const module = new OneBunModule(FeatureFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      const consumer = module.getServiceByClass(Consumer as any) as { svc: unknown };
+
+      expect(consumer.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('the working order still works and still constructs once', () => {
+      const {
+        Svc, CoreModule, FeatureModule, Consumer, count, 
+      } = buildTree();
+
+      @Module({ imports: [CoreModule, FeatureModule], providers: [Consumer] })
+      class CoreFirst {}
+
+      const module = new OneBunModule(CoreFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      const consumer = module.getServiceByClass(Consumer as any) as { svc: unknown };
+
+      expect(consumer.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('a @Global() module reaches a grandparent that does not import it at all', () => {
+      const {
+        Svc, FeatureModule, Consumer, count, 
+      } = buildTree();
+
+      @Module({ imports: [FeatureModule], providers: [Consumer] })
+      class FeatureOnly {}
+
+      // The stronger form of the same defect: the global was registered by a descendant
+      // AFTER this module's first pass over the scope, and nothing read it again.
+      const module = new OneBunModule(FeatureOnly, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      const consumer = module.getServiceByClass(Consumer as any) as { svc: unknown };
+
+      expect(consumer.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('the module is still constructed ONCE, not re-constructed per importer', () => {
+      const {
+        CoreModule, FeatureModule, Consumer, count, 
+      } = buildTree();
+
+      @Module({ imports: [FeatureModule, CoreModule], providers: [Consumer] })
+      class FeatureFirst {}
+
+      new OneBunModule(FeatureFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      // The fix seeds from the scope; it does not drop the already-processed short-circuit.
+      expect(count()).toBe(1);
+    });
+
+    test('re-seeding an already-initialized global module is logged with a count', () => {
+      const { CoreModule, FeatureModule, Consumer } = buildTree();
+
+      @Module({ imports: [FeatureModule, CoreModule], providers: [Consumer] })
+      class FeatureFirst {}
+
+      const messages: string[] = [];
+      // `createMockLogger().child()` returns the ORIGINAL mock, so spreading it and
+      // overriding `debug` loses the override the moment OneBunModule calls `.child()`.
+      // This one returns itself.
+      const capturing: any = {
+        ...createMockLogger(),
+        debug(message: string) {
+          messages.push(message);
+
+          return Effect.succeed(undefined);
+        },
+      };
+      capturing.child = () => capturing;
+      const capturingLayer = Layer.succeed(LoggerService, capturing);
+
+      new OneBunModule(FeatureFirst, capturingLayer as any, undefined, undefined, undefined, createGlobalScope());
+
+      // The silence is what made this cost a month of debugging, so the line has to name
+      // both modules and how many services actually crossed over.
+      const reseedLine = messages.find(m => m.includes('re-seeded') && m.includes('CoreModule'));
+      expect(reseedLine).toBeDefined();
+      expect(reseedLine).toContain('FeatureFirst');
+      expect(reseedLine).toMatch(/re-seeded [1-9]\d* service/);
+    });
+
+    test('exporting a MODULE throws instead of silently contributing nothing', () => {
+      @Service()
+      class Svc {
+        value(): string {
+          return 'ok';
+        }
+      }
+
+      @Module({ providers: [Svc], exports: [Svc] })
+      class CoreModule {}
+
+      // The NestJS re-export idiom, which the original report's own reproduction uses.
+      @Module({ imports: [CoreModule], exports: [CoreModule] })
+      class ReExportingModule {}
+
+      @Module({ imports: [ReExportingModule] })
+      class RootModule {}
+
+      expect(() => new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope()))
+        .toThrow(/exports the module CoreModule/);
+
+      try {
+        new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      } catch (error) {
+        expect((error as Error).name).toBe('OneBunInvalidExportError');
+        expect((error as Error).message).toContain('ReExportingModule');
+      }
+    });
+
+    test('the reported shape boots end to end through a real application', async () => {
+      const { OneBunApplication } = require('../application/application');
+      const { Get } = require('../decorators/decorators');
+
+      let constructed = 0;
+
+      @Service()
+      class Svc {
+        constructor() {
+          constructed++;
+        }
+
+        value(): string {
+          return 'ok';
+        }
+      }
+
+      @Global()
+      @Module({ providers: [Svc], exports: [Svc] })
+      class CoreModule {}
+
+      @Module({ imports: [CoreModule] })
+      class FeatureModule {}
+
+      // Declared here rather than built by the helper so TypeScript emits a real
+      // `design:paramtypes` for `svc`. With an `any` annotation it emits `Object`, the tag
+      // lookup misses, and the instanceof fallback hands back whatever service happens to be
+      // first in the map — the test would pass without resolution ever working.
+      @CtrlDeco('/probe')
+      class ProbeController extends CtrlBase {
+        constructor(private svc: Svc) {
+          super();
+        }
+
+        @Get('/')
+        value() {
+          return { value: this.svc.value() };
+        }
+      }
+
+      const count = (): number => constructed;
+
+      @Module({ imports: [FeatureModule, CoreModule], controllers: [ProbeController] })
+      class AppModule {}
+
+      // The reporter's failure was at boot, through the container — not reproducible from a
+      // hand-wired controller, which is exactly why their integration suite stayed green.
+      const app = new OneBunApplication(AppModule, {
+        port: 0,
+        loggerLayer: makeMockLoggerLayer(),
+        metrics: { enabled: false },
+      });
+
+      try {
+        await app.start();
+
+        // Not just "it booted": the controller has to have RECEIVED the global service,
+        // which is the thing that used to throw here.
+        const injected = (app as any).rootModule.getControllerInstance(ProbeController);
+        expect(injected.svc).toBeInstanceOf(Svc);
+
+        const response = await fetch(`http://127.0.0.1:${app.getPort()}/probe`);
+        const body = await response.json() as { result: { value: string } };
+        expect(body.result.value).toBe('ok');
+        expect(count()).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('exporting a SERVICE is untouched', () => {
+      @Service()
+      class Svc {
+        value(): string {
+          return 'ok';
+        }
+      }
+
+      @Module({ providers: [Svc], exports: [Svc] })
+      class CoreModule {}
+
+      @Service()
+      class Consumer {
+        constructor(public svc: Svc) {}
+      }
+
+      @Module({ imports: [CoreModule], providers: [Consumer] })
+      class RootModule {}
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      const consumer = module.getServiceByClass(Consumer as any) as { svc: unknown };
+
+      expect(consumer.svc).toBeInstanceOf(Svc);
     });
   });
 

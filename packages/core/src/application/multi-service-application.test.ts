@@ -11,12 +11,17 @@ import { TypedEnv } from '@onebun/envs';
 import {
   Controller,
   Get,
+  Global,
   Module,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { BaseService, Service } from '../module/service';
+import { QueueService } from '../queue';
 import { Subscribe } from '../queue/decorators';
 
 import { OneBunApplication } from './application';
+
+const HTTP_OK = 200;
 
 // Test modules
 @Module({
@@ -547,6 +552,119 @@ describe('OneBunApplication multi-service mode', () => {
 
       await app.stop();
       expect(app.getRunningServices()).toEqual([]);
+    });
+  });
+
+  describe('per-sub-application GlobalScope', () => {
+    let constructed = 0;
+
+    @Service()
+    class ScopedGlobalService extends BaseService {
+      readonly id: number;
+
+      constructor() {
+        super();
+        constructed++;
+        this.id = constructed;
+      }
+    }
+
+    @Global()
+    @Module({ providers: [ScopedGlobalService], exports: [ScopedGlobalService] })
+    class ScopedGlobalModule {}
+
+    /** Resolves QueueService through the ordinary DI path, by tag. */
+    @Service()
+    class QueueProbeService extends BaseService {
+      constructor(readonly queue: QueueService) {
+        super();
+      }
+    }
+
+    @Controller('/scoped')
+    class ScopedController extends BaseController {
+      constructor(private svc: ScopedGlobalService) {
+        super();
+      }
+
+      @Get('/')
+      id() {
+        return { id: this.svc.id };
+      }
+    }
+
+    @Module({
+      imports: [ScopedGlobalModule],
+      controllers: [ScopedController],
+      providers: [QueueProbeService],
+    })
+    class ScopedModuleOne {}
+
+    @Module({
+      imports: [ScopedGlobalModule],
+      controllers: [ScopedController],
+      providers: [QueueProbeService],
+    })
+    class ScopedModuleTwo {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any> | undefined;
+
+    const startPair = async (): Promise<void> => {
+      app = new OneBunApplication({
+        services: {
+          one: { module: ScopedModuleOne, port: 0 },
+          two: { module: ScopedModuleTwo, port: 0 },
+        },
+        metrics: { enabled: false },
+      });
+      await app.start();
+    };
+
+    beforeEach(() => {
+      constructed = 0;
+    });
+
+    afterEach(async () => {
+      await app?.stop();
+      app = undefined;
+      TypedEnv.clear();
+    });
+
+    test('each sub-application holds its OWN @Global() instance', async () => {
+      await startPair();
+
+      const first = app!.getApplication('one')!.getService(ScopedGlobalService);
+      const second = app!.getApplication('two')!.getService(ScopedGlobalService);
+
+      // One global service instance per SUB-APPLICATION, not per process.
+      expect(first).not.toBe(second);
+      expect(constructed).toBe(2);
+    });
+
+    test('stopping one sub-application leaves the other fully functional', async () => {
+      await startPair();
+
+      const two = app!.getApplication('two')!;
+      // Disposing sub-app one's scope must not empty a scope its sibling is still using.
+      await app!.getApplication('one')!.stop();
+
+      const response = await fetch(`${two.getHttpUrl()}/scoped`);
+      expect(response.status).toBe(HTTP_OK);
+      expect(two.getService(ScopedGlobalService)).toBeDefined();
+    });
+
+    test('each sub-application resolves QueueService to the proxy its own start() wrote', async () => {
+      await startPair();
+
+      // Sub-apps start concurrently; with a process-wide registry the proxy each one wrote
+      // could be captured by a sibling still in PHASE 0 of its own module tree.
+      const probeOne = app!.getApplication('one')!.getService(QueueProbeService);
+      const probeTwo = app!.getApplication('two')!.getService(QueueProbeService);
+
+      expect(probeOne.queue).toBeDefined();
+      expect(probeTwo.queue).toBeDefined();
+      expect(probeOne.queue).not.toBe(probeTwo.queue);
     });
   });
 });

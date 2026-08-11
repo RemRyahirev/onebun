@@ -25,6 +25,12 @@ export class MyModule {}
 export class DbModule {}
 ```
 
+**Module resolution rules**:
+- `exports` accepts SERVICES only. `exports: [SomeModule]` throws `OneBunInvalidExportError` naming both modules — a re-exported module never contributed anything. Import the providing module directly where its services are needed
+- A `@Global()` module's services reach every module regardless of its position in an `imports` array, and whether the importing module lists it at all — import order is not semantic
+- One `@Global()` service instance per application (per sub-application in multi-service mode), not per process
+- Object providers (`{ provide: X, useValue: v }`) throw `OneBunInvalidProviderError`; providers are classes
+
 **Controller with Routes**:
 ```typescript
 @Controller('/api/users')   // or @Controller('api/users') — leading slash is optional
@@ -161,6 +167,18 @@ import { UserService } from './user.service';
   exports: [UserService],
 })
 export class UserModule {}
+```
+
+**`exports` accepts services only.** Listing a MODULE there — the NestJS re-export idiom — throws `OneBunInvalidExportError` naming both modules. It never worked: a re-exported module contributed nothing to the importer, so either the importer failed at a controller with no mention of the export, or it also imported the module directly and got a second copy of every provider. Import the module that provides the service directly wherever the service is needed:
+
+```typescript
+// Does not work — throws OneBunInvalidExportError at boot
+@Module({ imports: [CoreModule], exports: [CoreModule] })
+export class FeatureModule {}
+
+// Import the providing module where the service is needed
+@Module({ imports: [CoreModule], providers: [UserService] })
+export class FeatureModule {}
 ```
 
 ### @Global()

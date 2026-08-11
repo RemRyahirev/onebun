@@ -16,10 +16,10 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 **TestingModule** (integration/e2e testing):
 - Creates a real HTTP server on port 0 (OS picks free port)
 - Uses `makeMockLoggerLayer()` for silent logging
-- `overrideProvider()` injects mock via Effect.Context tag before `setup()`
+- `overrideProvider()` registers the mock under the service's Effect.Context tag in the application's `GlobalScope`, which PHASE -1 of module init seeds into EVERY module before any provider is constructed — so it reaches services and imported modules, not only root-module controllers, and the real provider is skipped rather than built and discarded
 - `inject()` makes real HTTP requests via `undici.fetch` (bypasses global fetch mocks)
 - Always call `close()` in `afterEach` to prevent port leaks
-- `_testProviders` is an internal option used to pass overrides to the application
+- `_testProviders` is an internal option; the application copies it into its `GlobalScope.overrides` before building the module tree (there is no post-hoc pass over the root module any more)
 
 **Testcontainers** (`createRedisContainer`, `createNatsContainer`):
 - `testcontainers` is a REQUIRED peer dependency of `@onebun/core`, declared without `peerDependenciesMeta.optional`. The `@onebun/core/testing` barrel value-imports it, so it must be installed for any import from that subpath, not only for the container helpers. That is the intended contract: integration tests are the default, and the subpath is a boundary of concern rather than a way to make the peer conditional
@@ -192,6 +192,8 @@ module = await TestingModule
   .overrideProvider(UserService).useClass(MockUserService)
   .compile();
 ```
+
+The override is applied to every module before any provider is constructed, so it reaches controllers, **services** that inject the overridden class, and imported modules — including an imported module that provides the overridden class itself. The real provider is then not constructed at all.
 
 #### `.setOptions(options)`
 

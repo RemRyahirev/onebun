@@ -622,6 +622,18 @@ NestJS supports `useFactory`, `useValue`, `useClass`, and `useExisting` in modul
 
 If you used `useFactory` for dynamic providers, use `getConfig()` for pre-init config or `onModuleInit()` for async initialization.
 
+An object entry such as `{ provide: X, useValue: v }` in `@Module({ providers })` **throws an error naming the module** and the entry. It was previously discarded without a word, and the failure surfaced later as an unrelated `Could not resolve dependency` on whichever service expected it:
+
+```typescript
+// Does not work — throws OneBunInvalidProviderError at boot
+@Module({ providers: [{ provide: UserService, useValue: mockUserService }] })
+export class UserModule {}
+
+// OneBun equivalent
+@Module({ providers: [UserService] })
+export class UserModule {}
+```
+
 ### Module Middleware Configuration
 
 NestJS uses `configure(consumer: MiddlewareConsumer)` with a fluent API to apply middleware to routes. OneBun uses `configureMiddleware()` which returns an array of middleware classes applied to all routes in the module:

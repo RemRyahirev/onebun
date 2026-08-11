@@ -60,7 +60,11 @@ import {
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
 } from '../module/controller';
-import { OneBunModule, registerGlobalService } from '../module/module';
+import {
+  createGlobalScope,
+  type GlobalScope,
+  OneBunModule,
+} from '../module/module';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -313,6 +317,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
+  /**
+   * DI state owned by THIS application: `@Global()` service instances, the modules already
+   * processed, test overrides and dynamic-module option snapshots. Not on `ApplicationOptions`
+   * on purpose — it is package-internal state, not something a caller configures.
+   */
+  private globalScope: GlobalScope | null = null;
   // Docs (OpenAPI/Swagger) - generated on start()
   private openApiSpec: Record<string, unknown> | null = null;
   private swaggerHtml: string | null = null;
@@ -635,12 +645,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         getProfiler()!.end(profileMark);
       }
 
-      // Register QueueService proxy in global registry BEFORE creating the root module,
+      // This application's own DI scope. Everything below writes into it rather than into a
+      // process-wide registry, which is what keeps a second application's @Global() services
+      // — and a second DrizzleModule.forRoot() — from being the first one's.
+      this.globalScope = createGlobalScope();
+
+      // Test provider overrides are seeded BEFORE the tree is built, so PHASE -1 of every
+      // module picks them up. Patching the root module afterwards, as this used to, reached
+      // root-module controllers only: services and imported modules silently kept the real
+      // instance, so a mock could be ignored without a word.
+      if (this.options._testProviders) {
+        for (const { tag, value } of this.options._testProviders) {
+          this.globalScope.overrides.set(tag as Context.Tag<unknown, unknown>, value);
+        }
+      }
+
+      // Register QueueService proxy in the scope BEFORE creating the root module,
       // so all modules (including child modules) pick it up via PHASE 0 of initModule().
       // After initializeQueue(), setDelegate(real) is called when queue is enabled.
       this.queueServiceProxy = new QueueServiceProxy();
-      registerGlobalService(
-        QueueServiceTag as Context.Tag<unknown, QueueService>,
+      this.globalScope.services.set(
+        QueueServiceTag as unknown as Context.Tag<unknown, unknown>,
         this.queueServiceProxy as unknown as QueueService,
       );
 
@@ -655,16 +680,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.options.tracing?.traceAll
           ? { traceAll: true, traceFilter: this.options.tracing.traceFilter }
           : undefined,
+        this.globalScope,
       );
       if (profileMark) {
         getProfiler()!.end(profileMark);
-      }
-
-      // Register test provider overrides (must happen before setup() so controllers receive mocks)
-      if (this.options._testProviders) {
-        for (const { tag, value } of this.options._testProviders) {
-          this.ensureModule().registerService?.(tag, value);
-        }
       }
 
       // Start metrics collection if enabled
@@ -2244,6 +2263,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       await this.rootModule.callOnApplicationDestroy(signal);
     }
 
+    // Dispose this application's DI scope AFTER every destroy hook has run — the hooks read
+    // service instances, and a later application must not inherit any of them.
+    if (this.globalScope) {
+      this.globalScope.services.clear();
+      this.globalScope.processedModules.clear();
+      this.globalScope.overrides.clear();
+      this.globalScope.moduleOptions.clear();
+      this.globalScope = null;
+    }
+
     this.logger.info('OneBun application stopped');
 
     // Shutdown logger transport LAST — flush OTLP log batches after final log message
@@ -2657,7 +2686,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * await userService.performBackgroundTask();
    * ```
    */
-  getService<T>(serviceClass: new (...args: unknown[]) => T): T {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getService<T>(serviceClass: new (...args: any[]) => T): T {
     this.ensureSingleServiceMode('getService');
     if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');

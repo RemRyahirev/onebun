@@ -60,47 +60,107 @@ import {
 
 
 /**
- * Global services registry
- * Stores services from modules marked with @Global() decorator
- * These services are automatically available in all modules without explicit import.
- * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
+ * The DI state that a single application owns for the whole of its module tree.
+ *
+ * Everything here used to live on `globalThis` behind `Symbol.for()`, which meant one
+ * process held exactly one copy no matter how many applications ran in it: a second
+ * `DrizzleModule.forRoot()` silently reused the first application's connection, and a test
+ * suite could talk to — and drop — the wrong database. The scope is threaded BY REFERENCE
+ * through module construction instead, so two applications never see each other's services.
+ *
+ * In multi-service mode each sub-application gets its own scope: one global service instance
+ * per sub-application, not one per process.
+ *
+ * @see docs:api/core.md
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const globalServicesRegistry: Map<Context.Tag<unknown, unknown>, unknown> = ((globalThis as any)[Symbol.for('onebun:global_services_registry')] ??= new Map());
+export interface GlobalScope {
+  /** Instances contributed by `@Global()` modules, visible to every module in this tree. */
+  services: Map<Context.Tag<unknown, unknown>, unknown>;
+  /** `@Global()` modules already constructed in this tree, so they are constructed once. */
+  processedModules: Set<Function>;
+  /** Test overrides, seeded into EVERY module before any provider is constructed. */
+  overrides: Map<Context.Tag<unknown, unknown>, unknown>;
+  /** Dynamic-module options captured at import-processing time, keyed by module class. */
+  moduleOptions: Map<Function, unknown>;
+}
 
 /**
- * Registry of processed global modules to avoid duplicate initialization.
- * Stored on globalThis via Symbol.for() to survive package duplication in node_modules.
+ * Create an empty {@link GlobalScope} for one application.
+ *
+ * @see docs:api/core.md
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const processedGlobalModules: Set<Function> = ((globalThis as any)[Symbol.for('onebun:processed_global_modules')] ??= new Set());
+export function createGlobalScope(): GlobalScope {
+  return {
+    services: new Map(),
+    processedModules: new Set(),
+    overrides: new Map(),
+    moduleOptions: new Map(),
+  };
+}
 
 /**
- * Clear global services registry (useful for testing)
+ * The scope used when a module is constructed without one — a direct `new OneBunModule(...)`
+ * in a unit test, or the deprecated registry helpers below.
+ *
+ * Still on `globalThis` via `Symbol.for()` so it survives package duplication in
+ * `node_modules`. Applications never use it; they each create their own.
+ */
+const processDefaultScope: GlobalScope = {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  services: ((globalThis as any)[Symbol.for('onebun:global_services_registry')] ??= new Map()),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  processedModules: ((globalThis as any)[Symbol.for('onebun:processed_global_modules')] ??= new Set()),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  overrides: ((globalThis as any)[Symbol.for('onebun:global_overrides')] ??= new Map()),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  moduleOptions: ((globalThis as any)[Symbol.for('onebun:global_module_options')] ??= new Map()),
+};
+
+/**
+ * Read a dynamic module's options as they were when this application imported it.
+ *
+ * `DrizzleModule.forRoot()` and friends store their options on the module CLASS, which is
+ * shared by every application in the process, so a second `forRoot()` overwrites the first.
+ * The snapshot is taken while the importing module is being initialized and read back from
+ * the application's own scope.
+ *
+ * @see docs:api/core.md
+ */
+export function resolveScopedModuleOptions<T>(
+  scope: GlobalScope | undefined,
+  moduleClass: Function,
+): T | undefined {
+  return scope?.moduleOptions.get(moduleClass) as T | undefined;
+}
+
+/**
+ * Clear the process-default global services registry (useful for testing).
+ *
+ * @deprecated Applications own a {@link GlobalScope} each; this reaches only the
+ * process-default scope used by a direct `new OneBunModule(...)`, never an application's own.
+ * Assert on resolved instances instead.
  * @internal
  */
 export function clearGlobalServicesRegistry(): void {
-  globalServicesRegistry.clear();
-  processedGlobalModules.clear();
+  processDefaultScope.services.clear();
+  processDefaultScope.processedModules.clear();
+  processDefaultScope.overrides.clear();
+  processDefaultScope.moduleOptions.clear();
   OneBunModule.resetDecoratorMetadataDiagnosis();
 }
 
 /**
- * Register a service instance in the global services registry so it is available
- * in all modules (including child modules) via PHASE 0 of module initialization.
- * Must be called BEFORE creating the root module.
- * @internal
- */
-export function registerGlobalService<T>(tag: Context.Tag<unknown, T>, instance: T): void {
-  globalServicesRegistry.set(tag as Context.Tag<unknown, unknown>, instance);
-}
-
-/**
- * Get all global services (useful for debugging)
+ * Get all services in the process-default scope (useful for debugging).
+ *
+ * Returns a COPY: mutating it changes nothing, and an "after stop() it no longer contains X"
+ * assertion against it passes vacuously.
+ *
+ * @deprecated Applications own a {@link GlobalScope} each; this reaches only the
+ * process-default scope used by a direct `new OneBunModule(...)`, never an application's own.
  * @internal
  */
 export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, unknown> {
-  return new Map(globalServicesRegistry);
+  return new Map(processDefaultScope.services);
 }
 
 /**
@@ -143,13 +203,21 @@ export class OneBunModule implements ModuleInstance {
    */
   private readonly tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions };
 
+  /**
+   * The owning application's DI scope, shared BY REFERENCE with every child module.
+   * Defaults to the process-default scope for a direct `new OneBunModule(...)`.
+   */
+  private readonly scope: GlobalScope;
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: IConfig<OneBunAppConfig>,
     ancestorMiddleware?: Function[],
     tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
+    scope?: GlobalScope,
   ) {
+    this.scope = scope ?? processDefaultScope;
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -221,16 +289,20 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
-    // PHASE 0: Add global services from registry first
-    // Global services are available in all modules without explicit import
-    for (const [tag, instance] of globalServicesRegistry) {
-      if (!this.serviceInstances.has(tag)) {
-        this.serviceInstances.set(tag, instance);
-        this.logger.debug(
-          `Added global service ${(instance as object).constructor?.name || 'unknown'} to ${this.moduleClass.name}`,
-        );
-      }
+    // PHASE -1: Seed test overrides into EVERY module before anything is constructed.
+    // They are applied here rather than patched into the root module afterwards, which is
+    // why overrideProvider() now reaches services and imported modules instead of only
+    // root-module controllers. Later phases must not overwrite them.
+    for (const [tag, instance] of this.scope.overrides) {
+      this.serviceInstances.set(tag, instance);
+      this.logger.debug(
+        `Applied test override ${(instance as object)?.constructor?.name || 'unknown'} to ${this.moduleClass.name}`,
+      );
     }
+
+    // PHASE 0: Add global services from the application's scope first
+    // Global services are available in all modules without explicit import
+    this.seedGlobalServices();
 
     // PHASE 1: Import child modules FIRST and collect their exported services
     if (metadata.imports) {
@@ -238,19 +310,30 @@ export class OneBunModule implements ModuleInstance {
         // Check if this is a global module that was already processed
         const isGlobal = isGlobalModule(importModule);
 
-        if (isGlobal && processedGlobalModules.has(importModule)) {
-          // Global module already processed, just use services from global registry
+        // Capture a dynamic module's options BEFORE any of its providers is constructed.
+        // The whole tree is built in one synchronous span, so this cannot interleave with a
+        // concurrently starting sub-application overwriting the module class's static slot.
+        this.captureModuleOptions(importModule);
+
+        if (isGlobal && this.scope.processedModules.has(importModule)) {
+          // Global module already processed — take its services from the scope rather than
+          // constructing it again. Seeding HERE rather than relying on PHASE 0 is the point:
+          // PHASE 0 ran before this loop, so a module registered by an earlier import in the
+          // same loop would otherwise contribute nothing to the module that declared it.
+          const reseeded = this.seedGlobalServices();
           this.logger.debug(
-            `Global module ${importModule.name} already initialized, using services from global registry`,
+            `Global module ${importModule.name} already initialized; ` +
+            `re-seeded ${reseeded} service(s) into ${this.moduleClass.name} from the application scope`,
           );
           continue;
         }
 
-        // Pass the logger layer, config, and accumulated middleware class refs to child modules
+        // Pass the logger layer, config, accumulated middleware class refs and — by
+        // reference — this application's scope to child modules
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
         const childModule = new OneBunModule(
           importModule, this.loggerLayer, this.config,
-          accumulatedMiddleware, this.tracingOptions,
+          accumulatedMiddleware, this.tracingOptions, this.scope,
         );
         this.childModules.push(childModule);
 
@@ -260,14 +343,17 @@ export class OneBunModule implements ModuleInstance {
         // Get exported services from child module and register them for DI
         const exportedServices = childModule.getExportedServices();
         for (const [tag, instance] of exportedServices) {
-          this.serviceInstances.set(tag, instance);
-          this.logger.debug(
-            `Imported service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
-          );
+          // An override wins over the real provider, whichever module declared it.
+          if (!this.scope.overrides.has(tag)) {
+            this.serviceInstances.set(tag, instance);
+            this.logger.debug(
+              `Imported service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
+            );
+          }
 
-          // If this is a global module, also register services in global registry
+          // If this is a global module, also register services in the scope
           if (isGlobal) {
-            globalServicesRegistry.set(tag, instance);
+            this.scope.services.set(tag, instance);
             this.logger.debug(
               `Registered global service ${(instance as object).constructor?.name || 'unknown'} from ${importModule.name}`,
             );
@@ -276,10 +362,19 @@ export class OneBunModule implements ModuleInstance {
 
         // Mark global module as processed
         if (isGlobal) {
-          processedGlobalModules.add(importModule);
+          this.scope.processedModules.add(importModule);
         }
       }
     }
+
+    // PHASE 0 (again): a sibling import may have registered a @Global() module's services
+    // DURING the loop above, i.e. after this module's first pass over the scope and after
+    // the `continue` that skips an already-processed module. Without this second pass the
+    // importer declares the import and receives nothing, and `imports: [Feature, Core]`
+    // fails where `imports: [Core, Feature]` boots — import order becomes silently
+    // load-bearing, and the failure surfaces at a controller far from the module that
+    // caused it. Re-reading here costs one Map walk and makes order irrelevant.
+    this.seedGlobalServices();
 
     // PHASE 2: Create services of THIS module with DI (can now access imported services)
     this.createServicesWithDI(metadata);
@@ -291,6 +386,83 @@ export class OneBunModule implements ModuleInstance {
     }
 
     return { layer, controllers };
+  }
+
+  /**
+   * Copy the application scope's `@Global()` services into this module.
+   *
+   * Never overwrites: an override seeded in PHASE -1, or a service this module already
+   * imported, wins over the scope. Runs twice — once before the import loop and once after
+   * it — because an import can register a global module mid-loop.
+   *
+   * @returns The number of services this call added.
+   */
+  private seedGlobalServices(): number {
+    let added = 0;
+
+    for (const [tag, instance] of this.scope.services) {
+      if (!this.serviceInstances.has(tag)) {
+        this.serviceInstances.set(tag, instance);
+        added++;
+        this.logger.debug(
+          `Added global service ${(instance as object).constructor?.name || 'unknown'} to ${this.moduleClass.name}`,
+        );
+      }
+    }
+
+    return added;
+  }
+
+  /**
+   * Snapshot a dynamic module's options into this application's scope.
+   *
+   * `forRoot()` stores its options on the module CLASS, which every application in the
+   * process shares — so a second `forRoot()` overwrites the first for everyone. Reading them
+   * here, while the importing module is being initialized, pins the value this application
+   * imported. Consumers read it back through `resolveScopedModuleOptions`.
+   */
+  private captureModuleOptions(importModule: Function): void {
+    const getOptions = (importModule as { getOptions?: unknown }).getOptions;
+    if (typeof getOptions !== 'function') {
+      return;
+    }
+
+    try {
+      const options = (getOptions as () => unknown).call(importModule);
+      if (options !== undefined) {
+        this.scope.moduleOptions.set(importModule, options);
+      }
+    } catch (error) {
+      this.logger.debug(`Could not capture options for module ${importModule.name}: ${error}`);
+    }
+  }
+
+  /**
+   * Reject NestJS-style object providers, which were silently discarded.
+   *
+   * `@Module({ providers: [{ provide: X, useValue: v }] })` typechecks against the metadata
+   * shape but every later filter drops anything that is not a function, so the provider
+   * simply never existed and the failure surfaced as an unrelated unresolved dependency.
+   *
+   * @see docs:migration-nestjs.md
+   */
+  private validateProviderShapes(providers: readonly unknown[]): void {
+    for (const provider of providers) {
+      if (typeof provider === 'function' || provider === null || provider === undefined) {
+        continue;
+      }
+
+      if (typeof provider === 'object' && 'provide' in (provider as object)) {
+        const error = new Error(
+          `Module ${this.moduleClass.name} declares an object provider ` +
+          `{ provide: ${String((provider as { provide?: unknown }).provide)}, ... }. ` +
+          'OneBun supports class-based providers only: list the @Service()-decorated class ' +
+          'itself, and substitute implementations with TestingModule.overrideProvider().',
+        );
+        error.name = 'OneBunInvalidProviderError';
+        throw error;
+      }
+    }
   }
 
   /**
@@ -315,6 +487,10 @@ export class OneBunModule implements ModuleInstance {
     if (!metadata?.providers) {
       return;
     }
+
+    // Run before both `typeof p === 'function'` filters below, which is where an object
+    // provider used to disappear without a trace.
+    this.validateProviderShapes(metadata.providers as readonly unknown[]);
 
     // Build a map of available service classes for dependency resolution
     // Include both current module providers and imported services
@@ -372,6 +548,14 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
+      // An override replaces the provider outright: constructing the real one would run its
+      // constructor (and its dependencies') for an instance nothing would ever receive.
+      if (this.scope.overrides.has(serviceMetadata.tag as Context.Tag<unknown, unknown>)) {
+        createdServices.add(provider.name);
+        this.logger.debug(`Provider ${provider.name} replaced by a test override, not constructed`);
+        continue;
+      }
+
       // Use getConstructorParamTypes for @Inject and TypeScript design:paramtypes metadata
       const detectedDeps = getConstructorParamTypes(provider);
       const dependencies: unknown[] = [];
@@ -423,7 +607,7 @@ export class OneBunModule implements ModuleInstance {
       try {
         const serviceConstructor = provider as new (...args: unknown[]) => unknown;
 
-        BaseService.setInitContext(this.logger, this.config);
+        BaseService.setInitContext(this.logger, this.config, this.scope);
         let serviceInstance: unknown;
         try {
           serviceInstance = new serviceConstructor(...dependencies);
@@ -440,8 +624,10 @@ export class OneBunModule implements ModuleInstance {
           'initializeService' in serviceInstance &&
           typeof (serviceInstance as { initializeService: unknown }).initializeService === 'function'
         ) {
-          (serviceInstance as { initializeService: (logger: SyncLogger, config: unknown) => void })
-            .initializeService(this.logger, this.config);
+          (serviceInstance as {
+            initializeService: (logger: SyncLogger, config: unknown, scope?: GlobalScope) => void;
+          })
+            .initializeService(this.logger, this.config, this.scope);
         }
 
         // Track services that need lifecycle hooks (onModuleInit)
@@ -508,7 +694,11 @@ export class OneBunModule implements ModuleInstance {
 
   /**
    * Get exported services from this module
-   * Returns services that are listed in the module's exports array
+   * Returns services that are listed in the module's exports array.
+   *
+   * A MODULE listed there throws: `exports` accepts services only.
+   *
+   * @see docs:api/decorators.md
    */
   getExportedServices(): Map<Context.Tag<unknown, unknown>, unknown> {
     const metadata = getModuleMetadata(this.moduleClass);
@@ -519,16 +709,34 @@ export class OneBunModule implements ModuleInstance {
     }
 
     for (const exportedProvider of metadata.exports) {
-      if (typeof exportedProvider === 'function') {
-        try {
-          const tag = getServiceTag(exportedProvider as new (...args: unknown[]) => unknown);
-          const instance = this.serviceInstances.get(tag);
-          if (instance) {
-            exported.set(tag, instance);
-          }
-        } catch {
-          // Not a service with @Service decorator
+      if (typeof exportedProvider !== 'function') {
+        continue;
+      }
+
+      // A module class in `exports` is the NestJS re-export idiom, and it contributed
+      // NOTHING here: getServiceTag() throws for it and the throw was swallowed. An
+      // importer that also imported the re-exported module got a SECOND copy of every
+      // provider — two DrizzleServices, two connection pools — and an importer that relied
+      // on the re-export alone failed at a controller with no mention of the export.
+      if (getModuleMetadata(exportedProvider)) {
+        const error = new Error(
+          `Module ${this.moduleClass.name} exports the module ${exportedProvider.name}. ` +
+          'OneBun exports services, not modules: re-exporting a module has never made its ' +
+          `services reachable. Remove ${exportedProvider.name} from exports and import it ` +
+          'directly wherever its services are needed.',
+        );
+        error.name = 'OneBunInvalidExportError';
+        throw error;
+      }
+
+      try {
+        const tag = getServiceTag(exportedProvider as new (...args: unknown[]) => unknown);
+        const instance = this.serviceInstances.get(tag);
+        if (instance) {
+          exported.set(tag, instance);
         }
+      } catch {
+        // Not a service with @Service decorator
       }
     }
 
@@ -1044,10 +1252,18 @@ export class OneBunModule implements ModuleInstance {
 
   /**
    * Call onApplicationInit lifecycle hook for all services and controllers
+   *
+   * @param invoked - Identity set of instances already visited, threaded through the
+   *   recursion. A `@Global()` service is present in the `serviceInstances` map of every
+   *   module that can see it, so without this its hook fired once per module — five times in
+   *   a five-module tree. Test overrides seeded into every module amplify the same effect.
    */
-  async callOnApplicationInit(): Promise<void> {
+  async callOnApplicationInit(invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for services
     for (const [, instance] of this.serviceInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
       if (hasOnApplicationInit(instance)) {
         try {
           await instance.onApplicationInit();
@@ -1074,16 +1290,36 @@ export class OneBunModule implements ModuleInstance {
 
     // Call for child modules
     for (const childModule of this.childModules) {
-      await childModule.callOnApplicationInit();
+      await childModule.callOnApplicationInit(invoked);
     }
   }
 
   /**
-   * Call beforeApplicationDestroy lifecycle hook for all services and controllers
+   * Mark an instance as visited for a lifecycle pass.
+   *
+   * @returns `true` when this pass has not seen the instance before.
    */
-  async callBeforeApplicationDestroy(signal?: string): Promise<void> {
+  private markInvoked(invoked: Set<unknown>, instance: unknown): boolean {
+    if (invoked.has(instance)) {
+      return false;
+    }
+    invoked.add(instance);
+
+    return true;
+  }
+
+  /**
+   * Call beforeApplicationDestroy lifecycle hook for all services and controllers
+   *
+   * @param signal - Termination signal, when the shutdown was signal-driven.
+   * @param invoked - Identity set of instances already visited; see `callOnApplicationInit`.
+   */
+  async callBeforeApplicationDestroy(signal?: string, invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for services
     for (const [, instance] of this.serviceInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
       if (hasBeforeApplicationDestroy(instance)) {
         try {
           await instance.beforeApplicationDestroy(signal);
@@ -1108,14 +1344,17 @@ export class OneBunModule implements ModuleInstance {
 
     // Call for child modules
     for (const childModule of this.childModules) {
-      await childModule.callBeforeApplicationDestroy(signal);
+      await childModule.callBeforeApplicationDestroy(signal, invoked);
     }
   }
 
   /**
    * Call onModuleDestroy lifecycle hook for controllers first, then services
+   *
+   * @param invoked - Identity set of instances already visited; see `callOnApplicationInit`.
+   *   Without it a `@Global()` service's `close()` runs once per module that can see it.
    */
-  async callOnModuleDestroy(): Promise<void> {
+  async callOnModuleDestroy(invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for controllers first (reverse order of creation)
     const controllers = Array.from(this.controllerInstances.values()).reverse();
     for (const controller of controllers) {
@@ -1132,6 +1371,9 @@ export class OneBunModule implements ModuleInstance {
     // Call for services (reverse order of creation)
     const services = Array.from(this.serviceInstances.values()).reverse();
     for (const instance of services) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
       if (hasOnModuleDestroy(instance)) {
         try {
           await instance.onModuleDestroy();
@@ -1144,16 +1386,22 @@ export class OneBunModule implements ModuleInstance {
 
     // Call for child modules
     for (const childModule of this.childModules) {
-      await childModule.callOnModuleDestroy();
+      await childModule.callOnModuleDestroy(invoked);
     }
   }
 
   /**
    * Call onApplicationDestroy lifecycle hook for all services and controllers
+   *
+   * @param signal - Termination signal, when the shutdown was signal-driven.
+   * @param invoked - Identity set of instances already visited; see `callOnApplicationInit`.
    */
-  async callOnApplicationDestroy(signal?: string): Promise<void> {
+  async callOnApplicationDestroy(signal?: string, invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for services
     for (const [, instance] of this.serviceInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
       if (hasOnApplicationDestroy(instance)) {
         try {
           await instance.onApplicationDestroy(signal);
@@ -1178,7 +1426,7 @@ export class OneBunModule implements ModuleInstance {
 
     // Call for child modules
     for (const childModule of this.childModules) {
-      await childModule.callOnApplicationDestroy(signal);
+      await childModule.callOnApplicationDestroy(signal, invoked);
     }
   }
 
@@ -1287,7 +1535,8 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Get service instance by class
    */
-  getServiceByClass<T>(serviceClass: new (...args: unknown[]) => T): T | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getServiceByClass<T>(serviceClass: new (...args: any[]) => T): T | undefined {
     try {
       const tag = getServiceTag(serviceClass);
 
@@ -1324,15 +1573,19 @@ export class OneBunModule implements ModuleInstance {
    * @param moduleClass - The module class
    * @param loggerLayer - Optional logger layer to use
    * @param config - Optional configuration to inject
+   * @param tracingOptions - Optional auto-trace configuration
+   * @param scope - The owning application's DI scope, shared by reference with the whole
+   *   tree. Omit only outside an application; the process-default scope is used then.
    */
   static create(
     moduleClass: Function,
     loggerLayer?: Layer.Layer<never, never, unknown>,
     config?: IConfig<OneBunAppConfig>,
     tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
+    scope?: GlobalScope,
   ): ModuleInstance {
     // Using console.log here because we don't have access to the logger instance yet
     // The instance will create its own logger in the constructor
-    return new OneBunModule(moduleClass, loggerLayer, config, undefined, tracingOptions);
+    return new OneBunModule(moduleClass, loggerLayer, config, undefined, tracingOptions, scope);
   }
 }

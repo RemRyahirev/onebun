@@ -92,7 +92,7 @@ await app.start();
 - `beforeApplicationDestroy(signal?)` - start of shutdown
 - `onApplicationDestroy(signal?)` - end of shutdown
 
-**Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process.
+**Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process. Each sub-application owns its DI scope: one global service instance per sub-application, and dynamic-module options are captured per application at import time.
 
 </llm-only>
 
@@ -559,16 +559,18 @@ export class AppModule {}
 export class UserModule {}
 ```
 
+**Import order does not matter.** A `@Global()` module's services reach every module that can see it regardless of where it sits in an `imports` array — and whether or not the importing module lists it at all. A sibling import that happens to initialize the global module first no longer leaves the importer with nothing.
+
+**Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
+
+The options a dynamic module was imported with are **captured per application** at import time, so a later `forRoot()` in the same process cannot retroactively change what an already-running application is using.
+
 **Global Module Utilities:**
 
 ```typescript
 // Check if module is global
 import { isGlobalModule } from '@onebun/core';
 isGlobalModule(DatabaseModule); // true
-
-// Clear global registries (for testing)
-import { clearGlobalServicesRegistry } from '@onebun/core';
-clearGlobalServicesRegistry();
 ```
 
 ## Metrics Options

@@ -52,7 +52,7 @@ import type { ServerWebSocket } from 'bun';
 import { type } from '@onebun/core';
 
 import { registerDependencies } from './decorators/decorators';
-import { OneBunModule } from './module/module';
+import { createGlobalScope, OneBunModule } from './module/module';
 import { makeMockLoggerLayer } from './testing';
 
 import {
@@ -69,6 +69,8 @@ import {
   Req,
   Cookie,
   Module,
+  Global,
+  isGlobalModule,
   Service,
   BaseService,
   BaseController,
@@ -2453,6 +2455,145 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
     const app = new OneBunApplication(AppModule, options);
     expect(app).toBeDefined();
+  });
+
+  /**
+   * @source docs:migration-nestjs.md#provider-patterns
+   */
+  it('should throw naming the module when a NestJS-style object provider is used', () => {
+    @Service()
+    class UserService extends BaseService {
+      findAll(): string[] {
+        return [];
+      }
+    }
+
+    // From docs: an object entry throws an error naming the module and the entry
+    @Module({
+      providers: [
+        { provide: UserService, useValue: { findAll: () => [] } } as unknown as typeof UserService,
+      ],
+    })
+    class UserModule {}
+
+    expect(() => new OneBunModule(UserModule, makeMockLoggerLayer()))
+      .toThrow(/UserModule.*object provider/s);
+  });
+
+  /**
+   * @source docs:api/decorators.md#module
+   */
+  it('should throw when a module is listed in exports instead of a service', () => {
+    @Service()
+    class UserService extends BaseService {
+      findAll(): string[] {
+        return [];
+      }
+    }
+
+    @Module({ providers: [UserService], exports: [UserService] })
+    class CoreModule {}
+
+    // From docs: exports accepts services only — re-exporting a module throws
+    @Module({ imports: [CoreModule], exports: [CoreModule] })
+    class ReExportingModule {}
+
+    @Module({ imports: [ReExportingModule] })
+    class AppModule {}
+
+    expect(() => new OneBunModule(AppModule, makeMockLoggerLayer()))
+      .toThrow(/exports the module CoreModule/);
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should reach an importer regardless of its position in the imports array', () => {
+    @Service()
+    class SharedService extends BaseService {
+      value(): string {
+        return 'shared';
+      }
+    }
+
+    @Global()
+    @Module({ providers: [SharedService], exports: [SharedService] })
+    class CoreModule {}
+
+    @Module({ imports: [CoreModule] })
+    class FeatureModule {}
+
+    @Service()
+    class Consumer extends BaseService {
+      constructor(public shared: SharedService) {
+        super();
+      }
+    }
+
+    // From docs: "Import order does not matter" — FeatureModule initializes CoreModule
+    // first, so the second entry hits the already-processed path.
+    @Module({ imports: [FeatureModule, CoreModule], providers: [Consumer] })
+    class AppModule {}
+
+    const module = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+
+    expect(module.getServiceByClass(Consumer)?.shared.value()).toBe('shared');
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should report a @Global()-decorated module through isGlobalModule', () => {
+    @Service()
+    class DatabaseService extends BaseService {
+      query(_sql: string): string {
+        return 'rows';
+      }
+    }
+
+    @Global()
+    @Module({ providers: [DatabaseService], exports: [DatabaseService] })
+    class DatabaseModule {}
+
+    @Module({ providers: [] })
+    class PlainModule {}
+
+    // From docs: Global Module Utilities
+    expect(isGlobalModule(DatabaseModule)).toBe(true);
+    expect(isGlobalModule(PlainModule)).toBe(false);
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should give each application its own instance of a @Global() service', () => {
+    let constructed = 0;
+
+    @Service()
+    class ScopedDatabaseService extends BaseService {
+      readonly id = ++constructed;
+    }
+
+    @Global()
+    @Module({ providers: [ScopedDatabaseService], exports: [ScopedDatabaseService] })
+    class ScopedDatabaseModule {}
+
+    @Module({ imports: [ScopedDatabaseModule] })
+    class AppModule {}
+
+    // From docs: "A @Global() module contributes exactly one instance per application"
+    const first = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+    const second = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+
+    expect(first.getServiceByClass(ScopedDatabaseService))
+      .not.toBe(second.getServiceByClass(ScopedDatabaseService));
+    expect(constructed).toBe(2);
   });
 
   /**

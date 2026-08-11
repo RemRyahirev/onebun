@@ -164,7 +164,8 @@ export interface ModuleInstance {
   /**
    * Get service instance by class
    */
-  getServiceByClass?<T>(serviceClass: new (...args: unknown[]) => T): T | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getServiceByClass?<T>(serviceClass: new (...args: any[]) => T): T | undefined;
 
   /**
    * Get accumulated module-level middleware (resolved bound functions)
