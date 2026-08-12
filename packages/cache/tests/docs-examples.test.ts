@@ -14,11 +14,22 @@ import {
 import { Effect, pipe } from 'effect';
 
 import {
+  BaseController,
+  BaseService,
+  Controller,
+  Get,
+  Module,
+  OneBunApplication,
+  Service,
+} from '@onebun/core';
+
+import {
   createInMemoryCache,
   CacheType,
   createCacheModule,
   cacheServiceTag,
   CacheModule,
+  CacheService,
 } from '../src';
 
 describe('Cache README Examples', () => {
@@ -515,6 +526,68 @@ describe('CacheModule Global Mode Examples (docs/api/cache.md)', () => {
     const featureModule = CacheModule.forFeature();
 
     expect(featureModule).toBe(CacheModule);
+  });
+
+  /**
+   * @source docs:api/cache.md#non-global-mode
+   */
+  it('should give each importing module its own CacheService, not the root instance', async () => {
+    // From docs: "each importing module constructs its OWN CacheService rather than
+    // sharing the root's — state written through one is invisible through another".
+    // Pinned so that changing it (planned) has to be a deliberate edit here.
+    CacheModule.forRoot({ type: CacheType.MEMORY, isGlobal: false });
+
+    @Service()
+    class LeftService extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Service()
+    class RightService extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Module({ imports: [CacheModule.forFeature()], providers: [LeftService], exports: [LeftService] })
+    class LeftModule {}
+
+    @Module({ imports: [CacheModule.forFeature()], providers: [RightService], exports: [RightService] })
+    class RightModule {}
+
+    @Controller('/probe')
+    class ProbeController extends BaseController {
+      @Get('/')
+      get(): string {
+        return 'ok';
+      }
+    }
+
+    @Module({ imports: [LeftModule, RightModule], controllers: [ProbeController] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+
+      const left = app.getService(LeftService);
+      const right = app.getService(RightService);
+
+      expect(left.cache).not.toBe(right.cache);
+
+      await left.cache.set('shared-key', 'written-left');
+      expect(await right.cache.get('shared-key')).toBeUndefined();
+    } finally {
+      await app.stop();
+      CacheModule.clearOptions();
+    }
   });
 
   it('should support explicit isGlobal: true', () => {

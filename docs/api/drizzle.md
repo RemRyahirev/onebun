@@ -147,44 +147,39 @@ export class UserService extends BaseService {
 }
 ```
 
-### Non-Global Mode (Multiple Databases)
+### Non-Global Mode
 
-For scenarios where you need multiple database connections (e.g., main database + analytics database), you can disable global behavior:
+`isGlobal: false` stops `DrizzleService` from being ambiently available and gives each module that imports `DrizzleModule` its **own** `DrizzleService` instance — its own client, its own connection.
 
 ```typescript
-// Main database - global (available everywhere)
 @Module({
   imports: [
     DrizzleModule.forRoot({
       connection: {
         type: DatabaseType.POSTGRESQL,
-        options: { host: 'main-db', port: 5432, user: 'app', password: 'secret', database: 'main' },
+        options: { host: 'db', port: 5432, user: 'app', password: 'secret', database: 'app' },
       },
-      isGlobal: true, // Default, can be omitted
+      isGlobal: false,
     }),
   ],
+  providers: [ReportService],
 })
-export class AppModule {}
-
-// Analytics module with separate database - non-global
-@Module({
-  imports: [
-    DrizzleModule.forRoot({
-      connection: {
-        type: DatabaseType.POSTGRESQL,
-        options: { host: 'analytics-db', port: 5432, user: 'analytics', password: 'secret', database: 'analytics' },
-      },
-      isGlobal: false, // Each import creates new instance
-    }),
-  ],
-  providers: [AnalyticsService],
-})
-export class AnalyticsModule {}
+export class ReportModule {}
 ```
+
+::: danger Multiple databases are not supported yet
+Separate instances do **not** mean separate configuration. `forRoot()` stores its options on the `DrizzleModule` class, which the whole process shares, so every instance reads the same — last-written — configuration. Two `forRoot()` calls with two different databases give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently: nothing errors, and which one wins depends on module evaluation order.
+
+Earlier releases documented exactly that arrangement as the way to run a main and an analytics database. It never worked: both services end up on ONE of the two databases, and which one depends on the order the modules were evaluated in — not on the order you declared them, so it is not reliably the one you would guess. **If you followed it, audit both databases**: the writes are all in one of them.
+
+The boundary is the PROCESS, not the application. A second `OneBunApplication` does not help: each builds its own `DrizzleService`, but both read the same class-static options, so two applications declaring two different databases both connect to the last one — measured, including in multi-service mode.
+
+**If you need a second database today**, build the service yourself rather than through `forRoot()`: `new DrizzleService()` followed by `initialize(connection)` takes its options directly and is unaffected by the shared slot (see [Apply Migrations at Runtime](#apply-migrations-at-runtime) for the same construction). Such an instance is yours to hold — it is not injectable by type, since `DrizzleService` resolves to the module-configured one. A first-class mechanism for configuring a module more than once is being built; treat the manual route as the interim answer, not the destination.
+:::
 
 ### forFeature() Method
 
-When `DrizzleModule` is not global (`isGlobal: false`), submodules must explicitly import it using `forFeature()`:
+When `DrizzleModule` is not global (`isGlobal: false`), a submodule must import it to reach `DrizzleService`: a non-global service does not travel down the module tree, and `exports` travels up to the importing module rather than down to children. `forFeature()` is that import:
 
 ```typescript
 // Root module with non-global DrizzleModule
@@ -208,14 +203,29 @@ export class AppModule {}
 export class UserModule {}
 ```
 
+::: warning forFeature() does not share the root instance
+Each module importing it currently constructs its **own** `DrizzleService` — a separate connection, and no state in common with the root's. Two feature modules therefore mean two connections, not one shared pool. This is the opposite of what `forFeature()` means in NestJS, and it is being changed; today, prefer leaving the module global unless you specifically want per-module instances.
+
+If you want ONE shared instance without making `DrizzleModule` itself global, a `@Global()` module that imports it and re-exports the service does that — the re-exported instance then reaches modules that import neither:
+
+```typescript
+@Global()
+@Module({
+  imports: [DrizzleModule.forRoot({ connection: { /* ... */ }, isGlobal: false })],
+  exports: [DrizzleService],
+})
+export class DatabaseModule {}
+```
+:::
+
 <llm-only>
 **Technical details for AI agents:**
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
-- `isGlobal: true` (default) - singleton DrizzleService, one DB connection for entire app
-- `isGlobal: false` - each import creates new DrizzleService instance (useful for multi-DB scenarios)
-- `forFeature()` simply returns the DrizzleModule class for explicit imports in feature modules
-- Global services are stored in a registry and automatically injected into all modules
-- When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`
+- `isGlobal: true` (default) - one DrizzleService per application, one DB connection
+- `isGlobal: false` - each importing module constructs its own DrizzleService instance. NOT a multi-database mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration. Two `forRoot()` calls with different databases yield two instances both connected to the last one, silently
+- `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import and does NOT share the root's instance — each importing module gets its own. That inverts the NestJS meaning and is being changed
+- Global services are stored in the application's scope and automatically injected into all its modules
+- When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`, which is process-wide and permanent: one such call de-globalizes the module for every application in the process, and `forRoot({ isGlobal: true })` does not restore it
 </llm-only>
 
 ## Schema Definition

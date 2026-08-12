@@ -4,6 +4,8 @@
  * @source docs:api/drizzle.md
  */
 
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'path';
 
 import {
@@ -18,7 +20,14 @@ import {
 import type { PostgreSQLConnectionOptions } from '../src/types';
 
 import {
+  Global,
+  isGlobalModule,
+  Module,
+} from '@onebun/core';
+
+import {
   DrizzleModule,
+  DrizzleService as DrizzleServiceCtor,
   DatabaseType,
   Entity,
   BaseRepository,
@@ -1269,5 +1278,136 @@ describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
       expect(typeof user.name).toBe('string');
       expect(typeof user.email).toBe('string');
     });
+  });
+});
+
+/**
+ * The documentation used to present two `forRoot()` calls as a way to reach two databases.
+ * It never worked: `forRoot()` stores its options on the module CLASS, so every instance
+ * reads the same last-written configuration and every analytics write landed in the main
+ * database. The page now says so; this pins the behaviour it describes, so that changing it
+ * has to be a deliberate edit here.
+ */
+describe('Non-Global Mode (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('gives separate instances that nevertheless share ONE configuration', () => {
+    const first = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+
+    const second = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-second.db' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+
+    try {
+      // Both calls return the same module class, which is why the options collapse.
+      expect(first).toBe(second);
+
+      // From docs: "every instance reads the same — last-written — configuration".
+      const options = DrizzleModule.getOptions();
+      expect(options?.connection.options).toEqual({ url: '/tmp/onebun-docs-second.db' });
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  it('forFeature() returns the module class, so it does not hand back a shared instance', () => {
+    // From docs: forFeature() "is an ordinary import and does NOT share the root's instance".
+    expect(DrizzleModule.forFeature()).toBe(DrizzleModule);
+  });
+});
+
+/**
+ * The corrected page tells readers the boundary is the PROCESS, not the application.
+ * That sentence replaced an earlier draft which said a second application was "fine" —
+ * measured false in the same way the original defect was: two applications, two
+ * DrizzleService instances, one database. Pinned so the claim cannot rot back.
+ */
+describe('one configuration per process (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('a second forRoot anywhere in the process replaces the first for everyone', () => {
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-app-a.db' } },
+      autoMigrate: false,
+    });
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-app-b.db' } },
+      autoMigrate: false,
+    });
+
+    try {
+      // There is one options slot per module CLASS, which every application in the process
+      // shares — so "one database per application" is not reachable through forRoot().
+      expect(DrizzleModule.getOptions()?.connection.options).toEqual({ url: '/tmp/onebun-app-b.db' });
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+});
+
+/**
+ * Two claims the corrected page makes about what DOES work. Both were added after an
+ * independent audit found the first draft denied them — accuracy, not pessimism, was the
+ * point of the correction.
+ */
+describe('what the corrected page says still works (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('a manually built DrizzleService reaches a different database than the module-configured one', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'onebun-docs-manual-'));
+    const moduleDb = join(scratch, 'module.db');
+    const manualDb = join(scratch, 'manual.db');
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: moduleDb } },
+      autoMigrate: false,
+    });
+
+    try {
+      // From docs: "new DrizzleService() followed by initialize(connection) takes its
+      // options directly and is unaffected by the shared slot".
+      const manual = new DrizzleServiceCtor();
+      await manual.initialize({ type: DatabaseType.SQLITE, options: { url: manualDb } });
+
+      // Asserted on the resolved connection TARGET, not on instance identity: two instances
+      // pointing at one database is exactly the defect this page documents, and an identity
+      // assertion passes for it.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resolved = (manual as any).connectionOptions as { options?: { url?: string } } | null;
+      expect(resolved?.options?.url).toBe(manualDb);
+
+      // The module's own options are untouched, and the manual instance did not read them.
+      expect(DrizzleModule.getOptions()?.connection.options).toEqual({ url: moduleDb });
+
+      await manual.close?.();
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  it('a @Global() module re-exporting the service shares ONE instance with modules that import neither', () => {
+    // From docs: the re-exported instance "then reaches modules that import neither".
+    // Pinned at the metadata level: a module class listing a SERVICE in exports is valid,
+    // which is what makes the documented bridge legal (listing a MODULE there throws).
+    @Global()
+    @Module({ imports: [DrizzleModule.forFeature()], exports: [DrizzleServiceCtor] })
+    class DatabaseBridge {}
+
+    expect(isGlobalModule(DatabaseBridge)).toBe(true);
   });
 });

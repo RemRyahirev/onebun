@@ -15,7 +15,7 @@ OneBun provides a caching module with support for:
 
 ## CacheModule
 
-CacheModule is **global by default** — once imported in the root module, `CacheService` is automatically available in all submodules without explicit import. Use `isGlobal: false` to disable this behavior.
+CacheModule is **global by default** — once imported in the root module, `CacheService` is automatically available in all submodules without explicit import. Use `isGlobal: false` to disable this behavior and give each importing module its own `CacheService` instance. Note that separate instances still share one configuration; see [Non-Global Mode](#non-global-mode).
 
 ### Basic Setup
 
@@ -50,7 +50,7 @@ export class UserModule {}
 
 ### Non-Global Mode
 
-For multi-cache scenarios, disable global mode so each module can have its own CacheService instance:
+`isGlobal: false` stops `CacheService` from being ambiently available and gives each module that imports `CacheModule` its **own** `CacheService` instance — its own store.
 
 ```typescript
 // Root module: non-global cache
@@ -58,7 +58,7 @@ For multi-cache scenarios, disable global mode so each module can have its own C
   imports: [
     CacheModule.forRoot({
       type: CacheType.REDIS,
-      isGlobal: false, // Each import creates new instance
+      isGlobal: false,
     }),
   ],
 })
@@ -71,6 +71,16 @@ export class AppModule {}
 })
 export class OrderModule {}
 ```
+
+::: danger Multiple caches are not supported yet, and instances do not share state
+Separate instances do **not** mean separate configuration. `forRoot()` stores its options on the `CacheModule` class, which the whole process shares, so every instance reads the same — last-written — configuration. Two `forRoot()` calls with different settings give you instances that all use the last one, silently.
+
+Separate instances also do not share DATA: a value written through one module's `CacheService` is not visible through another's, and `forFeature()` does not hand back the root's instance — it constructs a new one, which is the opposite of the NestJS meaning. With an in-memory cache that means genuinely separate stores; with Redis the instances share a keyspace unless their key prefixes differ.
+
+The boundary is the PROCESS, not the application: a second `OneBunApplication` builds its own `CacheService` but reads the same class-static options, so two applications declaring different settings both get the last one.
+
+Unless you specifically want per-module isolation, leave the module global. A supported mechanism for configuring a module more than once is being built.
+:::
 
 ### Redis Configuration
 
@@ -172,8 +182,9 @@ If Redis connection fails during auto-initialization, CacheService **automatical
 
 **Technical details for AI agents:**
 - `CacheModule` is decorated with `@Global()` — by default `CacheService` is available in all modules without explicit import
-- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule
-- `CacheModule.forFeature()` returns the module class for explicit import in submodules when non-global mode is used
+- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. That call is process-wide and permanent: it de-globalizes the module for every application in the process, and `forRoot({ isGlobal: true })` does not restore it
+- NOT a multi-cache mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration
+- `CacheModule.forFeature()` returns the module class, so it is an ordinary import and each importing module constructs its OWN CacheService rather than sharing the root's — state written through one is invisible through another. That inverts the NestJS meaning and is being changed
 - `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`)
 - `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)
 - Auto-init flow: check `CacheModule.forRoot()` options → load env vars → merge (module > env > defaults) → create cache instance
