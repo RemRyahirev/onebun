@@ -194,6 +194,11 @@ export interface ModuleInstance {
   resolveInterceptors?(classes: (Function | Interceptor)[]): ResolvedInterceptor[];
 
   /**
+   * Resolve guard classes into instances with dependency injection, once at route-build time.
+   */
+  resolveGuards?(guards: (Function | HttpGuard)[]): HttpGuard[];
+
+  /**
    * Register a service instance by tag (e.g. before setup() for application-provided services like QueueService proxy).
    */
   registerService?<T>(tag: Context.Tag<unknown, T>, instance: T): void;

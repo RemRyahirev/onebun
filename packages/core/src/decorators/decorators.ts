@@ -353,6 +353,88 @@ const MIDDLEWARE_METADATA = 'onebun:middleware';
 const RESPONSE_SCHEMAS_METADATA = 'onebun:responseSchemas';
 
 /**
+ * Re-apply a method's pipeline metadata onto route entries that were already registered.
+ *
+ * TypeScript applies method decorators BOTTOM-UP, so `@UseGuards` written ABOVE `@Get` runs
+ * AFTER the route decorator has already snapshotted the (still empty) guard list — the guard
+ * was silently dropped and the route answered 200 where it should have answered 403. The
+ * route decorator's own read covers the other order; this covers this one, so the two
+ * together make source order irrelevant.
+ *
+ * The route entry is REPLACED with the full accumulated metadata rather than appended to, so
+ * applying the same decorator above and below one route cannot double-register it.
+ *
+ * @see docs:api/guards.md
+ */
+const PIPELINE_REAPPLY_HOOKS: Array<(target: object, propertyKey: string | symbol) => void> = [];
+
+/**
+ * Register a handler that re-applies pipeline metadata for a non-HTTP surface.
+ *
+ * WebSocket gateways snapshot their guards and interceptors the same way route decorators
+ * did, and `@UseInterceptors` is shared across surfaces — so the WebSocket module registers
+ * a hook here rather than this file importing it, which would be circular.
+ *
+ * @internal
+ */
+export function registerPipelineReapplyHook(
+  hook: (target: object, propertyKey: string | symbol) => void,
+): void {
+  PIPELINE_REAPPLY_HOOKS.push(hook);
+}
+
+function reapplyRoutePipelineMetadata(target: object, propertyKey: string | symbol): void {
+  for (const hook of PIPELINE_REAPPLY_HOOKS) {
+    hook(target, propertyKey);
+  }
+
+  const controllerClass = (target as { constructor?: Function }).constructor;
+  if (!controllerClass) {
+    return;
+  }
+
+  const metadata = META_CONTROLLERS.get(controllerClass);
+  if (!metadata) {
+    // The route decorator has not run yet; it will read this metadata itself.
+    return;
+  }
+
+  for (const route of metadata.routes) {
+    if (route.handler !== propertyKey) {
+      continue;
+    }
+
+    route.middleware = readPipelineMetadata(MIDDLEWARE_METADATA, target, propertyKey);
+    route.guards = readPipelineMetadata(HTTP_GUARDS_METADATA, target, propertyKey);
+    route.filters = readPipelineMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey);
+    route.interceptors = readPipelineMetadata(INTERCEPTORS_METADATA, target, propertyKey);
+    // Snapshotted by the route decorator alongside the four above, and NOT documentation
+    // only: it drives response-body validation and overrides the success status code at
+    // request time. Left out of this refresh, `@ApiResponse` above the method decorator
+    // silently disabled validation and reverted the status while OpenAPI still documented it.
+    route.responseSchemas = readPipelineMetadata(RESPONSE_SCHEMAS_METADATA, target, propertyKey);
+  }
+}
+
+/**
+ * Read one accumulated pipeline list, without duplicates.
+ *
+ * Applying the same decorator both above and below a route decorator accumulates it twice in
+ * the metadata; the pre-fix snapshot never read the second copy back, so writing
+ * `@UseGuards(G)` above each of two route decorators — the correct workaround at the time —
+ * would otherwise start running G twice and double whatever it counts.
+ */
+function readPipelineMetadata<T>(
+  metadataKey: string,
+  target: object,
+  propertyKey: string | symbol,
+): T[] {
+  const values: T[] = Reflect.getMetadata(metadataKey, target, propertyKey) || [];
+
+  return [...new Set(values)];
+}
+
+/**
  * Base route decorator factory
  */
 function createRouteDecorator(method: HttpMethod) {
@@ -860,6 +942,10 @@ export function UseMiddleware(...middleware: Function[]): any {
       propertyKey,
     );
 
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
+
     return descriptor;
   };
 }
@@ -958,6 +1044,10 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
       propertyKey,
     );
 
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
+
     return descriptor;
   };
 }
@@ -1032,6 +1122,10 @@ export function UseFilters(...filters: ExceptionFilter[]): any {
       target,
       propertyKey,
     );
+
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
 
     return descriptor;
   };
@@ -1108,6 +1202,10 @@ export function UseInterceptors(...interceptors: (Function | Interceptor)[]): an
       target,
       propertyKey,
     );
+
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
 
     return descriptor;
   };
@@ -1432,6 +1530,11 @@ export function ApiResponse(
     });
 
     Reflect.defineMetadata(RESPONSE_SCHEMAS_METADATA, existingSchemas, target, propertyKey);
+
+    // Order independence: the route decorator snapshots responseSchemas alongside the
+    // pipeline lists, and they drive response validation and the success status code at
+    // request time — not documentation only.
+    reapplyRoutePipelineMetadata(target, propertyKey);
   };
 }
 

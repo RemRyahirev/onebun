@@ -1296,10 +1296,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             ...routeMiddleware,
           ];
 
-          // Merge guards: controller-level first, then route-level
+          // Merge guards: controller-level first, then route-level.
+          // Resolved through the owning module ONCE here, like interceptors — guards used to
+          // be constructed with `new guard()` on every request, so a guard extending
+          // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
           const routeGuards = route.guards ?? [];
-          const mergedGuards = [...ctrlGuards, ...routeGuards];
+          const mergedGuardClasses = [...ctrlGuards, ...routeGuards];
+          const mergedGuards = mergedGuardClasses.length > 0
+            ? (ownerModule.resolveGuards?.(mergedGuardClasses) ?? mergedGuardClasses)
+            : [];
 
           // Merge exception filters: global → controller → route (route has highest priority)
           const globalFilters = (this.options.filters as ExceptionFilter[] | undefined) ?? [];

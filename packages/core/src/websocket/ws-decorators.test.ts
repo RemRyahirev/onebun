@@ -26,6 +26,7 @@ import {
   isWebSocketGateway,
   getWsHandlers,
   getWsParamMetadata,
+  UseWsGuards,
 } from './ws-decorators';
 import { WsHandlerType, WsParamType } from './ws.types';
 
@@ -327,5 +328,50 @@ describe('ws-decorators', () => {
       const handlers = getWsHandlers(TestGateway);
       expect(handlers).toHaveLength(4);
     });
+  });
+});
+
+// ============================================================================
+// Decorator source order must never change runtime behaviour
+//
+// `@OnMessage` and its siblings snapshot the handler's guards when they run, and
+// TypeScript applies method decorators BOTTOM-UP — so `@UseWsGuards` written ABOVE the
+// handler decorator landed after the snapshot and was silently discarded, leaving the
+// handler unguarded. The HTTP route path had the identical defect.
+// ============================================================================
+
+describe('@UseWsGuards order independence', () => {
+  class DenyWsGuard {
+    canActivate(): boolean {
+      return false;
+    }
+  }
+
+  @WebSocketGateway({ path: '/order' })
+  class OrderGateway extends BaseWebSocketGateway {
+    @UseWsGuards(DenyWsGuard)
+    @OnMessage('above')
+    above(): string {
+      return 'above';
+    }
+
+    @OnMessage('below')
+    @UseWsGuards(DenyWsGuard)
+    below(): string {
+      return 'below';
+    }
+  }
+
+  it('registers the guard whether it is written above or below @OnMessage', () => {
+    const handlers = getWsHandlers(OrderGateway);
+    const above = handlers.find((h) => h.pattern === 'above');
+    const below = handlers.find((h) => h.pattern === 'below');
+
+    // Pre-fix: the ABOVE handler carried an empty guard list and ran unguarded, while
+    // BELOW carried the guard. Asserted on the registered guard list because the gateway's
+    // execution path reads exactly this array (ws-handler.ts passes handler.guards to
+    // executeGuards); the end-to-end denial is covered by the integration suite.
+    expect(above?.guards).toEqual([DenyWsGuard]);
+    expect(below?.guards).toEqual([DenyWsGuard]);
   });
 });

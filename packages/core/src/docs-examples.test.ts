@@ -46,7 +46,11 @@ import type {
   OnModuleConfigure,
   QueueApplicationOptions,
 } from './types';
-import type { ExecutionContext, HttpExecutionContext } from './types';
+import type {
+  ExecutionContext,
+  HttpExecutionContext,
+  HttpGuard,
+} from './types';
 import type { ServerWebSocket } from 'bun';
 
 import { type } from '@onebun/core';
@@ -2455,6 +2459,60 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
     const app = new OneBunApplication(AppModule, options);
     expect(app).toBeDefined();
+  });
+
+  /**
+   * @source docs:api/guards.md#class-based-guard
+   */
+  it('should give a class-based guard this.config inside canActivate', async () => {
+    let configType: string | undefined;
+
+    // From docs: "BaseService provides this.config automatically"
+    @Service()
+    class ApiKeyGuard extends BaseService implements HttpGuard {
+      canActivate(ctx: HttpExecutionContext): boolean {
+        const key = ctx.getRequest().headers.get('x-api-key');
+        configType = typeof this.config;
+
+        return key === this.config.get('auth.apiKey');
+      }
+    }
+
+    @UseGuards(ApiKeyGuard)
+    @Controller('/keyed')
+    class KeyedController extends BaseController {
+      @Get('/')
+      get() {
+        return { ok: true };
+      }
+    }
+
+    @Module({ controllers: [KeyedController], providers: [ApiKeyGuard] })
+    class GuardModule {}
+
+    const app = new OneBunApplication(GuardModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      envSchema: { auth: { apiKey: Env.string({ default: 'docs-key', env: 'DOCS_API_KEY' }) } },
+    });
+
+    try {
+      await app.start();
+
+      const denied = await fetch(`${app.getHttpUrl()}/keyed/`);
+
+      expect(denied.status).toBe(HttpStatusCode.FORBIDDEN);
+      // The whole point of the documented example: `this.config` resolves inside
+      // canActivate. Before the fix it was `undefined` and the line above it threw a
+      // TypeError at request time. Asserted as the type rather than a config VALUE,
+      // because the env layer is shared with the other suites in this file — the
+      // allow/deny cycle over an injected value is covered in http-guards.test.ts.
+      expect(configType).toBe('object');
+    } finally {
+      await app.stop();
+    }
   });
 
   /**

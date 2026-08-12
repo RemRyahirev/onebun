@@ -20,6 +20,9 @@ import { HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } from '@on
 - `@UseGuards(MyGuard)` on a controller class — applies to all routes
 - `@UseGuards(MyGuard)` on a route method — applies to that route only
 - Both can be combined; controller guards run first, then route guards
+- Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@Delete` behaves identically. Before 0.4.5 a route-level `@UseGuards` written ABOVE the method decorator was silently discarded and the route was reachable — audit any route guarded that way if you are upgrading from 0.4.4 or earlier. The same applied to `@UseInterceptors` and `@UseFilters`
+- Class-based guards get full dependency injection — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. Dependencies are resolved once when routes are built; the guard INSTANCE is still created per request, so stashing request state on `this` remains safe. Passing an instance — `@UseGuards(new RolesGuard(['admin']))` — shares that one instance across requests, as it always did. Function-based guards from `createHttpGuard(fn)` have no DI by design
+- A guard whose constructor dependency cannot be resolved now fails the application at STARTUP instead of being constructed with `undefined`. Register the DEPENDENCY in the module's `providers` — registering the guard itself does not help
 
 **Order of execution:** global middleware → controller middleware → route middleware → guards → handler
 
@@ -90,6 +93,14 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 }
 ```
 
+Constructor dependencies are injected the same way a service's are, and `this.config` / `this.logger` are available inside `canActivate`. The dependencies are resolved once, when routes are built; the guard instance itself is still constructed per request, so request state held on `this` cannot leak between concurrent requests.
+
+Register the guard's DEPENDENCIES in the module's `providers` — the guard class itself does not need to be a provider, and adding it there does not make an unresolvable dependency resolvable. A dependency that cannot be resolved fails the application at startup rather than arriving as `undefined`.
+
+::: warning Upgrading from 0.4.4 or earlier
+Guards received no dependency injection at all: they were constructed with no arguments on every request, so `this.config` and `this.logger` were `undefined` and the example above threw a `TypeError` at request time.
+:::
+
 ### Async guard
 
 `canActivate` may return a `Promise<boolean>`:
@@ -137,6 +148,12 @@ class ResourceController extends BaseController {
   }
 }
 ```
+
+Decorator source order does not matter — `@UseGuards` above or below the route decorator behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`.
+
+::: warning Upgrading from 0.4.4 or earlier
+A route-level `@UseGuards` written **above** the method decorator used to be silently discarded: the guard never ran and the route answered as if it were unprotected. Audit every route-level guard in your codebase — the order shown above is exactly the one that was broken. `@UseInterceptors` and `@UseFilters` were skipped the same way.
+:::
 
 ### Combining controller + route guards
 

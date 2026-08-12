@@ -59,6 +59,16 @@ class TestGateway extends BaseWebSocketGateway {
     this.connectCount++;
     this.lastClient = client;
 
+    // The framework never sets `authenticated` itself — ws-handler.ts creates the client
+    // with `authenticated: false` whenever a token is present, and WsAuthGuard requires
+    // `true`. Marking the client here is what a real application does, and it is what makes
+    // the guard cases below meaningful: before the decorator-order fix the guard never ran
+    // at all, so "allows a valid token" passed without anything being authenticated.
+    if (client.auth?.token) {
+      client.auth.authenticated = true;
+      client.auth.userId = `user-for-${client.auth.token}`;
+    }
+
     return { event: 'welcome', data: { message: 'Welcome!', clientId: client.id } };
   }
 
@@ -395,17 +405,18 @@ describe('WebSocket Integration', () => {
         // Error expected when auth fails
       });
 
-      // Send to protected endpoint - should not receive response
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (client as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 30));
-
-      // We should not receive protected:response since guard blocks it
+      // Listen BEFORE sending — registering the listener afterwards made this assertion
+      // vacuous, so it passed even while the guard was being skipped entirely.
       let protectedResponseReceived = false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client as any).TestGateway.on('protected:response', () => {
         protectedResponseReceived = true;
       });
+
+      // Send to protected endpoint - should not receive response
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.send('protected', {});
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(protectedResponseReceived).toBe(false);
 

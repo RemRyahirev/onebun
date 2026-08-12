@@ -5,7 +5,11 @@ import {
 } from 'effect';
 
 import type { ModuleInstance } from '../types';
-import type { Interceptor, ResolvedInterceptor } from '../types';
+import type {
+  HttpGuard,
+  Interceptor,
+  ResolvedInterceptor,
+} from '../types';
 
 import {
   createSyncLogger,
@@ -851,6 +855,85 @@ export class OneBunModule implements ModuleInstance {
       const bound = instance.intercept.bind(instance);
 
       return bound;
+    });
+  }
+
+  /**
+   * Resolve guard classes into instances with dependency injection, once.
+   *
+   * Guards were the only element of the documented request pipeline with no DI at all:
+   * `executeHttpGuards` did `new guard()` with zero arguments, on EVERY request. A guard
+   * extending `BaseService` therefore saw `this.config` and `this.logger` as `undefined`,
+   * because the ambient init context is only set around module construction — so the
+   * documented `this.config.get('auth.apiKey')` threw at request time.
+   *
+   * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through,
+   * so `@UseGuards(new RolesGuard(['admin']))` keeps working.
+   *
+   * @see docs:api/guards.md
+   */
+  resolveGuards(guards: (Function | HttpGuard)[]): HttpGuard[] {
+    return guards.map((guard) => {
+      if (typeof guard !== 'function') {
+        // Already an instance — the caller owns its lifetime, as before. Initialize it if
+        // it can be, then use it as-is.
+        if (guard instanceof BaseService) {
+          guard.initializeService(this.logger, this.config, this.scope);
+        }
+
+        return guard;
+      }
+
+      // Dependencies are resolved ONCE, here. The instance is NOT: a guard class has always
+      // been constructed per request, so guards are the one pipeline element where stashing
+      // request state on `this` across an await is safe. Sharing one instance turns that
+      // pattern into a cross-request race that authorizes requests it must deny — measured:
+      // a slow "mallory" request and a fast "admin" one overlapping made mallory pass. So
+      // the lifetime stays per-request and only the wiring is hoisted.
+      const paramTypes = getConstructorParamTypes(guard);
+      const deps: unknown[] = [];
+
+      if (paramTypes && paramTypes.length > 0) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
+          const dep = this.resolveDependencyByType(paramType);
+          if (dep) {
+            deps.push(dep);
+          } else if (isOptionalParam(guard, i)) {
+            deps.push(undefined);
+          } else {
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(guard.name, paramType.name, 'guard', suggestions);
+          }
+        }
+      }
+
+      const guardConstructor = guard as new (...args: unknown[]) => HttpGuard;
+      const logger = this.logger;
+      const config = this.config;
+      const scope = this.scope;
+
+      // A per-request façade, so the resolved dependencies are reused without the instance
+      // being shared. Returned as an HttpGuard so `executeHttpGuards` needs no changes.
+      return {
+        canActivate(context): boolean | Promise<boolean> {
+          // Ambient init context, so a guard extending BaseService has this.config and
+          // this.logger available immediately after super().
+          BaseService.setInitContext(logger, config, scope);
+          let instance: HttpGuard;
+          try {
+            instance = new guardConstructor(...deps);
+          } finally {
+            BaseService.clearInitContext();
+          }
+
+          if (instance instanceof BaseService) {
+            instance.initializeService(logger, config, scope);
+          }
+
+          return instance.canActivate(context);
+        },
+      };
     });
   }
 
