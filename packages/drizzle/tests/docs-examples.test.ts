@@ -1342,8 +1342,10 @@ describe('Non-Global Mode (docs/api/drizzle.md)', () => {
     expect(isGlobalModule(DrizzleModule)).toBe(false);
 
     try {
-      // From docs: the process-wide mutation is symmetric. Without this, one isGlobal:false
-      // anywhere in the process silently de-globalized every later forRoot() too.
+      // From docs: the mutation is symmetric. Without this, one isGlobal:false anywhere in
+      // the process silently de-globalized every later forRoot() too. Symmetric is NOT
+      // isolation — the docs now say last-writer-wins, and the assertion below is exactly
+      // that: the LAST forRoot() decides, for every application in the process.
       DrizzleModule.forRoot({
         connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
         autoMigrate: false,
