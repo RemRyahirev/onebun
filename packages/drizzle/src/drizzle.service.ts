@@ -30,6 +30,7 @@ import {
   BaseService,
   Service,
   type OnModuleInit,
+  type OnModuleDestroy,
 } from '@onebun/core';
 import {
   Env,
@@ -289,7 +290,7 @@ interface BufferedLogEntry {
  * @see docs:api/drizzle.md
  */
 @Service()
-export class DrizzleService extends BaseService implements OnModuleInit {
+export class DrizzleService extends BaseService implements OnModuleInit, OnModuleDestroy {
   private db: DatabaseInstance | null = null;
   private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
@@ -992,6 +993,20 @@ export class DrizzleService extends BaseService implements OnModuleInit {
   /**
    * Close database connection
    */
+  /**
+   * Close the connection when the application stops.
+   *
+   * `close()` existed from the start and nothing in the lifecycle called it, so a service
+   * from one test suite kept its connection open into the next — the direct mechanism behind
+   * a suite reporting `database "..." does not exist` after an earlier suite dropped its
+   * throwaway database.
+   *
+   * @see docs:api/drizzle.md
+   */
+  async onModuleDestroy(): Promise<void> {
+    await this.close();
+  }
+
   async close(): Promise<void> {
     // Only wait for init if there are actual database clients to close
     // This prevents hanging when close() is called on an uninitialized service

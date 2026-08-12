@@ -4,7 +4,7 @@
  * @source docs:api/drizzle.md
  */
 
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'path';
 
@@ -20,9 +20,13 @@ import {
 import type { PostgreSQLConnectionOptions } from '../src/types';
 
 import {
+  BaseController,
+  Controller,
+  Get,
   Global,
   isGlobalModule,
   Module,
+  OneBunApplication,
 } from '@onebun/core';
 
 import {
@@ -1409,5 +1413,54 @@ describe('what the corrected page says still works (docs/api/drizzle.md)', () =>
     class DatabaseBridge {}
 
     expect(isGlobalModule(DatabaseBridge)).toBe(true);
+  });
+});
+
+describe('Connection Lifecycle (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#connection-lifecycle
+   */
+  it('closes the connection when the application stops', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'onebun-docs-lifecycle-'));
+
+    @Controller('/health')
+    class HealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: join(scratch, 'lifecycle.db') } },
+          autoMigrate: false,
+        }),
+      ],
+      controllers: [HealthController],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+      const service = app.getService(DrizzleServiceCtor);
+      expect(service.getSQLiteClient()).not.toBeNull();
+
+      await app.stop();
+
+      // From docs: "the client is closed and the service reports no connection".
+      expect(service.getSQLiteClient()).toBeNull();
+      expect(service.getConnectionOptions()).toBeNull();
+    } finally {
+      DrizzleModule.clearOptions();
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 });

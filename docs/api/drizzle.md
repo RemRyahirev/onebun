@@ -323,6 +323,20 @@ export * from './posts';
 
 ## DrizzleService
 
+### Connection Lifecycle
+
+`DrizzleService` implements `OnModuleDestroy` and closes its connection when the application stops, so `app.stop()` releases the database client rather than leaving it open for the lifetime of the process.
+
+```typescript
+const app = new OneBunApplication(AppModule);
+await app.start();
+// ... the service holds an open client
+await app.stop();
+// the client is closed and the service reports no connection
+```
+
+Before 0.4.5 nothing in the lifecycle called `close()`, so a service built by one test suite kept its connection open into the next — the mechanism behind a suite failing with `database "..." does not exist` after an earlier suite dropped its throwaway database.
+
 ### Injection
 
 ```typescript

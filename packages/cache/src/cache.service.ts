@@ -9,7 +9,11 @@ import type {
   RedisCacheOptions,
 } from './types';
 
-import { BaseService, Service } from '@onebun/core';
+import {
+  BaseService,
+  type OnModuleDestroy,
+  Service,
+} from '@onebun/core';
 import {
   Env,
   EnvLoader,
@@ -196,7 +200,7 @@ async function loadFromEnv(prefix: string = DEFAULT_ENV_PREFIX): Promise<CacheEn
  * @see docs:api/cache.md
  */
 @Service()
-export class CacheService extends BaseService implements ICacheService {
+export class CacheService extends BaseService implements ICacheService, OnModuleDestroy {
   private cache: InMemoryCache | RedisCache;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
@@ -382,6 +386,20 @@ export class CacheService extends BaseService implements ICacheService {
   /**
    * Close cache connection and cleanup resources
    */
+  /**
+   * Close the cache when the application stops.
+   *
+   * A shared Redis client is deliberately NOT disconnected here: `close()` disconnects only
+   * a client this service owns, and the application already disconnects the shared one
+   * during `stop()`, gated on `closeSharedRedis`. Doing it here would tear down a client
+   * other parts of the process are still using.
+   *
+   * @see docs:api/cache.md
+   */
+  async onModuleDestroy(): Promise<void> {
+    await this.close();
+  }
+
   async close(): Promise<void> {
     await this.waitForInit();
     if (this.initialized) {

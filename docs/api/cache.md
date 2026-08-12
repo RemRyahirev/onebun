@@ -211,6 +211,20 @@ CacheModule.forRoot({
 
 ## CacheService
 
+### Connection Lifecycle
+
+`CacheService` implements `OnModuleDestroy` and closes the cache when the application stops. It **does not disconnect a shared Redis client**: `close()` disconnects only a client the service owns, and the application disconnects a shared one itself during `stop()`, gated on `closeSharedRedis`. So `app.stop({ closeSharedRedis: false })` leaves a shared client connected for the rest of the process.
+
+```typescript
+const app = new OneBunApplication(AppModule);
+await app.start();
+await app.stop();               // the cache is closed
+// with a shared Redis client:
+await app.stop({ closeSharedRedis: false });  // the shared client stays connected
+```
+
+Before 0.4.5 nothing in the lifecycle called `close()`, so a cache built by one test suite stayed open into the next.
+
 ### Injection
 
 ```typescript

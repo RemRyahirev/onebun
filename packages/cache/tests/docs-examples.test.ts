@@ -10,6 +10,7 @@ import {
   expect,
   beforeEach,
   afterEach,
+  spyOn,
 } from 'bun:test';
 import { Effect, pipe } from 'effect';
 
@@ -687,5 +688,64 @@ describe('import order independence (real CacheModule)', () => {
   it('still resolves at depth 1 and 3 with the module declared FIRST', async () => {
     await boot(makeTree(true, 0));
     await boot(makeTree(true, 2));
+  });
+});
+
+describe('Connection Lifecycle (docs/api/cache.md)', () => {
+  /**
+   * @source docs:api/cache.md#connection-lifecycle
+   */
+  it('closes the cache when the application stops', async () => {
+    Global()(CacheModule);
+    CacheModule.forRoot({ type: CacheType.MEMORY });
+
+    @Service()
+    class UsesCache extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Controller('/health')
+    class HealthController extends BaseController {
+      @Get('/')
+      health(): string {
+        return 'ok';
+      }
+    }
+
+    @Module({
+      imports: [CacheModule.forFeature()],
+      providers: [UsesCache],
+      controllers: [HealthController],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    const closeSpy = spyOn(CacheService.prototype, 'close');
+
+    try {
+      await app.start();
+      const service = app.getService(UsesCache).cache;
+
+      await service.set('k', 'v');
+      expect(await service.get<string>('k')).toBe('v');
+      expect(closeSpy).toHaveBeenCalledTimes(0);
+
+      await app.stop();
+
+      // From docs: the cache is closed on app.stop(). Asserted on the documented action
+      // rather than on BaseService.isInitialized, which reports logger/config init and is
+      // unrelated to the cache connection.
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+      CacheModule.clearOptions();
+    }
   });
 });
