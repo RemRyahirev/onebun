@@ -149,6 +149,8 @@ export interface GatewayMetadata {
   path: string;
   /** Namespace for isolating gateways */
   namespace?: string;
+  /** Authentication hook run during the upgrade, when the gateway declares one. */
+  authenticate?(context: WsAuthContext): WsAuthResult | Promise<WsAuthResult>;
   /** List of handlers in this gateway */
   handlers: WsHandlerMetadata[];
 }
@@ -165,7 +167,59 @@ export interface WebSocketGatewayOptions {
   path?: string;
   /** Namespace for isolating gateways */
   namespace?: string;
+  /**
+   * Authenticate a connecting client, during the upgrade.
+   *
+   * Without this the framework parses the token and then marks every client
+   * `authenticated: false`, so `WsAuthGuard` — which requires `true` — denies everyone.
+   * This is what sets the flag the built-in guards read.
+   *
+   * Return `false` to refuse the upgrade, `true` to accept the client as authenticated, or
+   * an object to accept it and attach an identity. Omit the option entirely to keep the
+   * previous behaviour, where every client connects unauthenticated and authorization is
+   * left to guards or to an `@OnConnect` handler.
+   *
+   * @see docs:api/websocket.md
+   */
+  authenticate?(context: WsAuthContext): WsAuthResult | Promise<WsAuthResult>;
 }
+
+/**
+ * What an `authenticate` hook is given.
+ *
+ * @see docs:api/websocket.md
+ */
+export interface WsAuthContext {
+  /** Bearer token from `?token=` or the `Authorization` header, when present. */
+  token?: string;
+  /** The upgrade request, for anything the token does not carry (cookies, headers, IP). */
+  request: Request;
+}
+
+/**
+ * What an `authenticate` hook may return.
+ *
+ * Three outcomes, because a gateway usually needs all of them:
+ * - `false` — refuse the upgrade (HTTP 401).
+ * - `null` — accept the client as ANONYMOUS. It connects, `authenticated` stays false, and
+ *   `WsAuthGuard` denies it on any handler that requires authentication. This is what a
+ *   gateway serving both public and private events returns for a client with no token.
+ * - `true` or an object — accept the client as authenticated; the object attaches the
+ *   identity the built-in guards read.
+ *
+ * @see docs:api/websocket.md
+ */
+export type WsAuthResult =
+  | boolean
+  | null
+  | {
+    /** Identity of the authenticated client. */
+    userId?: string;
+    /** Permissions `WsPermissionGuard` checks against. */
+    permissions?: string[];
+    /** Anything else the application wants on `client.auth`. */
+    metadata?: Record<string, unknown>;
+  };
 
 /**
  * Storage type for WebSocket state

@@ -244,6 +244,39 @@ export class ChatGateway extends BaseWebSocketGateway {
 |--------|------|---------|-------------|
 | `path` | `string` | `'/'` | WebSocket connection path |
 | `namespace` | `string` | - | Namespace for isolating gateways |
+| `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
+
+### Authentication
+
+`authenticate` runs during the upgrade and decides who the client is. It is what sets the flag the built-in guards read — **without it no client is ever authenticated**, so `WsAuthGuard` denies everyone and `WsPermissionGuard` reads a permission list nobody populates.
+
+```typescript
+@WebSocketGateway({
+  path: '/ws',
+  authenticate: async ({ token, request }) => {
+    if (!token) return null;                       // connect, but anonymous
+    const user = await verifyToken(token);
+    if (!user) return false;                       // refuse the upgrade (HTTP 401)
+    return { userId: user.id, permissions: user.permissions };
+  },
+})
+export class ChatGateway extends BaseWebSocketGateway {}
+```
+
+Three outcomes, because a gateway usually needs all of them:
+
+| Return | Effect |
+|--------|--------|
+| `false` | The upgrade is refused with HTTP 401 |
+| `null` | The client connects as **anonymous**; `WsAuthGuard` still denies it |
+| `true` | The client is authenticated, with no identity attached |
+| `{ userId, permissions, metadata }` | The client is authenticated and the identity reaches `client.auth` |
+
+The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, headers, the peer address. A hook that throws refuses the upgrade.
+
+::: warning Upgrading from 0.4.4 or earlier
+`WsAuthGuard` could never pass: the framework parsed the token and then marked every client `authenticated: false`, and nothing anywhere set it to `true`. A handler guarded with it was unreachable for every client. If you worked around that by setting `client.auth.authenticated` in an `@OnConnect` handler, that still works — `authenticate` is the supported way to do it now.
+:::
 
 ## Event decorators
 
@@ -376,6 +409,10 @@ getRoomsByPattern(pattern: string): Promise<WsRoom[]>;
 ## Guards
 
 Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissionGuard`, `WsAnyPermissionGuard`, `WsRoomGuard`, `WsServiceGuard`. Custom: `createGuard((ctx) => boolean)`.
+
+`WsAuthGuard` and `WsPermissionGuard` read what the gateway's [`authenticate`](#authentication) hook attached to the client. Without that hook no client is authenticated and no client has permissions, so both deny everyone — the guards check an identity, they do not establish one.
+
+Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically. Before 0.4.5 a guard written above the handler decorator was silently discarded and the handler ran unguarded.
 
 ## Interceptors
 

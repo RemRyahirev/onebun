@@ -59,6 +59,7 @@ export function WebSocketGateway(options?: WebSocketGatewayOptions) {
     const metadata: GatewayMetadata = {
       path: options?.path || '/',
       namespace: options?.namespace,
+      authenticate: options?.authenticate,
       handlers: [],
     };
 

@@ -13,7 +13,7 @@ import type {
   WsHandlerMetadata,
   WebSocketApplicationOptions,
 } from './ws.types';
-import type { WsHandlerResponse } from './ws.types';
+import type { WsAuthResult, WsHandlerResponse } from './ws.types';
 import type { OneBunRequest } from '../types';
 import type { Server, ServerWebSocket } from 'bun';
 
@@ -214,11 +214,12 @@ export class WsHandler {
     const path = url.pathname;
 
     let protocol: WsClientData['protocol'] = 'native';
+    let gateway: GatewayInstance | undefined;
 
     if (this.socketioEnabled && path.startsWith(this.socketioPath)) {
       protocol = 'socketio';
     } else {
-      const gateway = this.getGatewayForPath(path);
+      gateway = this.getGatewayForPath(path);
       if (!gateway) {
         return new Response('Not Found', { status: 404 });
       }
@@ -245,6 +246,44 @@ export class WsHandler {
       metadata: {},
       protocol,
     };
+
+    // Run the gateway's authenticate hook, if it has one. Without it nothing in the
+    // framework ever sets `authenticated`, so WsAuthGuard — which requires `true` — denies
+    // every client, and WsPermissionGuard reads a `permissions` list nobody populates.
+    const authenticate = gateway?.metadata?.authenticate;
+
+    if (authenticate) {
+      let result: WsAuthResult;
+      try {
+        result = await authenticate({ token, request: req as Request });
+      } catch (error) {
+        this.logger.warn(`WebSocket authenticate hook threw, refusing upgrade: ${error}`);
+
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      if (result === false) {
+        return new Response('Unauthorized', { status: 401 });
+      }
+
+      // `null` means "connect, but anonymous" — the client is admitted and every guard that
+      // requires authentication still denies it. A gateway serving both public and private
+      // events needs that third outcome; without it the hook can only be all-or-nothing.
+      const anonymous = result === null;
+      const identity = typeof result === 'object' && result !== null ? result : {};
+      if (!anonymous) {
+        clientData.auth = {
+          ...clientData.auth,
+          authenticated: true,
+          token,
+          userId: identity.userId,
+          permissions: identity.permissions,
+        };
+      }
+      if (identity.metadata) {
+        clientData.metadata = { ...clientData.metadata, ...identity.metadata };
+      }
+    }
 
     // Try to upgrade
     const success = server.upgrade(req, {

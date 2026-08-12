@@ -94,6 +94,7 @@ import {
   createServiceDefinition,
   createServiceClient,
   WebSocketGateway,
+  getGatewayMetadata,
   BaseWebSocketGateway,
   OnConnect,
   OnDisconnect,
@@ -3374,6 +3375,38 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       }
 
       expect(ChatGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/websocket.md#authentication
+     */
+    it('should carry the authenticate hook and its three outcomes', async () => {
+      // From docs: the authenticate hook decides who the client is, during the upgrade.
+      @WebSocketGateway({
+        path: '/ws',
+        authenticate({ token }) {
+          if (!token) {
+            return null;
+          }
+          if (token !== 'valid') {
+            return false;
+          }
+
+          return { userId: 'u-1', permissions: ['admin'] };
+        },
+      })
+      class ChatGateway extends BaseWebSocketGateway {}
+
+      const metadata = getGatewayMetadata(ChatGateway);
+
+      expect(typeof metadata?.authenticate).toBe('function');
+
+      // The three documented outcomes: anonymous, refused, authenticated with an identity.
+      const request = new Request('http://localhost/ws');
+      expect(await metadata?.authenticate?.({ request })).toBeNull();
+      expect(await metadata?.authenticate?.({ token: 'nope', request })).toBe(false);
+      expect(await metadata?.authenticate?.({ token: 'valid', request }))
+        .toEqual({ userId: 'u-1', permissions: ['admin'] });
     });
   });
 
