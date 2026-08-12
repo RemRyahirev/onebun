@@ -213,6 +213,12 @@ export class OneBunModule implements ModuleInstance {
    */
   private readonly scope: GlobalScope;
 
+  /**
+   * Whether this module is the root of its own tree. Only the root runs the global-module
+   * pre-pass; children inherit its results through the shared scope.
+   */
+  private readonly isTreeRoot: boolean;
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
@@ -220,8 +226,10 @@ export class OneBunModule implements ModuleInstance {
     ancestorMiddleware?: Function[],
     tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
     scope?: GlobalScope,
+    parent?: OneBunModule,
   ) {
     this.scope = scope ?? processDefaultScope;
+    this.isTreeRoot = parent === undefined;
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -268,6 +276,12 @@ export class OneBunModule implements ModuleInstance {
   private childModules: OneBunModule[] = [];
 
   /**
+   * Global modules this module constructed in the pre-pass, so the import loop can merge
+   * their layers when it reaches the corresponding `imports` entry.
+   */
+  private preRegisteredModules: Map<Function, OneBunModule> = new Map();
+
+  /**
    * Initialize module from metadata and create layer
    */
   private initModule(): {
@@ -308,6 +322,14 @@ export class OneBunModule implements ModuleInstance {
     // Global services are available in all modules without explicit import
     this.seedGlobalServices();
 
+    // PHASE 0.5: construct every @Global() module anywhere in the graph, BEFORE the import
+    // loop. Re-seeding the scope (FB-6) only helps a module that is still being built when
+    // the registration happens; a consumer nested inside a subtree built EARLIER in the same
+    // `imports` array has already finished by then. `imports: [Feature, CacheModule]` failed
+    // where `[CacheModule, Feature]` booted, at any depth. Building the globals up front
+    // removes the ordering question instead of racing it.
+    this.preRegisterGlobalModules(metadata);
+
     // PHASE 1: Import child modules FIRST and collect their exported services
     if (metadata.imports) {
       for (const importModule of metadata.imports) {
@@ -324,6 +346,14 @@ export class OneBunModule implements ModuleInstance {
           // constructing it again. Seeding HERE rather than relying on PHASE 0 is the point:
           // PHASE 0 ran before this loop, so a module registered by an earlier import in the
           // same loop would otherwise contribute nothing to the module that declared it.
+          //
+          // When THIS module pre-registered it, merge its layer here — the pre-pass builds
+          // the module but only the import that declares it knows where its layer belongs.
+          const preRegistered = this.preRegisteredModules.get(importModule);
+          if (preRegistered) {
+            layer = Layer.merge(layer, preRegistered.getLayer());
+          }
+
           const reseeded = this.seedGlobalServices();
           this.logger.debug(
             `Global module ${importModule.name} already initialized; ` +
@@ -337,7 +367,7 @@ export class OneBunModule implements ModuleInstance {
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
         const childModule = new OneBunModule(
           importModule, this.loggerLayer, this.config,
-          accumulatedMiddleware, this.tracingOptions, this.scope,
+          accumulatedMiddleware, this.tracingOptions, this.scope, this,
         );
         this.childModules.push(childModule);
 
@@ -390,6 +420,77 @@ export class OneBunModule implements ModuleInstance {
     }
 
     return { layer, controllers };
+  }
+
+  /**
+   * Construct every `@Global()` module reachable from this module's import graph, before any
+   * ordinary import is processed.
+   *
+   * Only the tree root does this; children share the scope and find the globals already in
+   * `processedModules`, so their own import loops take the re-seed branch.
+   *
+   * Walks metadata ONLY to decide what is global — no provider is constructed by the walk
+   * itself. Cycles and repeats are handled by the visited set, and a module already in
+   * `scope.processedModules` is skipped, so nothing is built twice.
+   */
+  private preRegisterGlobalModules(metadata: NonNullable<ReturnType<typeof getModuleMetadata>>): void {
+    if (!this.isTreeRoot) {
+      return;
+    }
+
+    const globals: Function[] = [];
+    const visited = new Set<Function>();
+
+    const walk = (moduleClass: Function): void => {
+      if (visited.has(moduleClass)) {
+        return;
+      }
+      visited.add(moduleClass);
+
+      if (isGlobalModule(moduleClass) && !this.scope.processedModules.has(moduleClass)) {
+        globals.push(moduleClass);
+      }
+
+      const childMetadata = getModuleMetadata(moduleClass);
+      for (const imported of childMetadata?.imports ?? []) {
+        walk(imported);
+      }
+    };
+
+    for (const imported of metadata.imports ?? []) {
+      walk(imported);
+    }
+
+    if (globals.length === 0) {
+      return;
+    }
+
+    for (const globalModule of globals) {
+      // A global module imported by an earlier one in this list is already processed.
+      if (this.scope.processedModules.has(globalModule)) {
+        continue;
+      }
+
+      const childModule = new OneBunModule(
+        globalModule, this.loggerLayer, this.config,
+        [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses],
+        this.tracingOptions, this.scope, this,
+      );
+      this.childModules.push(childModule);
+      this.preRegisteredModules.set(globalModule, childModule);
+
+      for (const [tag, instance] of childModule.getExportedServices()) {
+        this.scope.services.set(tag, instance);
+      }
+      this.scope.processedModules.add(globalModule);
+
+      this.logger.debug(
+        `Pre-registered global module ${globalModule.name} before processing imports of ${this.moduleClass.name}`,
+      );
+    }
+
+    // Make them visible to THIS module too, since PHASE 0 already ran.
+    this.seedGlobalServices();
   }
 
   /**

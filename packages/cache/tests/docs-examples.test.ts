@@ -18,6 +18,7 @@ import {
   BaseService,
   Controller,
   Get,
+  Global,
   Module,
   OneBunApplication,
   Service,
@@ -600,5 +601,90 @@ describe('CacheModule Global Mode Examples (docs/api/cache.md)', () => {
 
     expect(module).toBe(CacheModule);
     expect(CacheModule.getOptions()?.isGlobal).toBe(true);
+  });
+});
+
+/**
+ * Import order must not decide whether a nested consumer resolves.
+ *
+ * `imports: [Feature, CacheModule.forRoot(...)]` used to fail at boot with
+ * `Could not resolve dependency CacheService for service LeafSvc` while
+ * `[CacheModule.forRoot(...), Feature]` booted — at depth 1 and at depth 3. Exercised
+ * against the REAL CacheModule rather than a fixture, because that is where it was found
+ * and a fixture does not carry forRoot's interaction with the global registry.
+ */
+describe('import order independence (real CacheModule)', () => {
+  const makeTree = (globalFirst: boolean, depth: number): Function => {
+    @Service()
+    class LeafSvc extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Controller('/order-probe')
+    class LeafController extends BaseController {
+      @Get('/')
+      get(): string {
+        return 'ok';
+      }
+    }
+
+    @Module({ providers: [LeafSvc], controllers: [LeafController] })
+    class Leaf {}
+
+    let current: Function = Leaf;
+    for (let i = 0; i < depth; i++) {
+      const inner = current;
+
+      @Module({ imports: [inner] })
+      class Wrapper {}
+      current = Wrapper;
+    }
+
+    const cache = CacheModule.forRoot({ type: CacheType.MEMORY });
+    const feature = current;
+
+    @Module({ imports: globalFirst ? [cache, feature] : [feature, cache] })
+    class Root {}
+
+    return Root;
+  };
+
+  const boot = async (root: Function): Promise<void> => {
+    const app = new OneBunApplication(root as never, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+    await app.stop();
+  };
+
+  beforeEach(() => {
+    // An earlier test in this file calls forRoot({ isGlobal: false }), which runs
+    // removeFromGlobalModules(CacheModule) — process-wide and permanent, with no way to undo
+    // it through forRoot. Re-applying the decorator is the workaround the repo already
+    // carries in drizzle-module.test.ts and cache-module.test.ts; WI-233 deletes the latch
+    // and this block with it.
+    Global()(CacheModule);
+  });
+
+  afterEach(() => {
+    CacheModule.clearOptions();
+  });
+
+  it('resolves at depth 1 with the module declared AFTER the feature', async () => {
+    // Pre-fix: Could not resolve dependency CacheService for service LeafSvc.
+    await boot(makeTree(false, 0));
+  });
+
+  it('resolves at depth 3 with the module declared AFTER the feature', async () => {
+    await boot(makeTree(false, 2));
+  });
+
+  it('still resolves at depth 1 and 3 with the module declared FIRST', async () => {
+    await boot(makeTree(true, 0));
+    await boot(makeTree(true, 2));
   });
 });

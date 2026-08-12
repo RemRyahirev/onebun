@@ -1226,12 +1226,21 @@ describe('OneBunModule', () => {
 
       new OneBunModule(FeatureFirst, capturingLayer as any, undefined, undefined, undefined, createGlobalScope());
 
-      // The silence is what made this cost a month of debugging, so the line has to name
-      // both modules and how many services actually crossed over.
+      // The silence is what made this cost a month of debugging, so an already-initialized
+      // global import must say so, naming both modules.
       const reseedLine = messages.find(m => m.includes('re-seeded') && m.includes('CoreModule'));
       expect(reseedLine).toBeDefined();
-      expect(reseedLine).toContain('FeatureFirst');
-      expect(reseedLine).toMatch(/re-seeded [1-9]\d* service/);
+
+      // The count is deliberately NOT asserted non-zero any more. The pre-pass (WI-232)
+      // constructs global modules before the import loop runs, so by the time the loop
+      // reaches CoreModule its services are already in this module — a re-seed of 0 is the
+      // correct outcome, not a lost registration. The line that now carries the information
+      // is the pre-registration one below.
+      const preRegisteredLine = messages.find(
+        m => m.includes('Pre-registered global module CoreModule'),
+      );
+      expect(preRegisteredLine).toBeDefined();
+      expect(preRegisteredLine).toContain('FeatureFirst');
     });
 
     test('exporting a MODULE throws instead of silently contributing nothing', () => {
@@ -1331,6 +1340,186 @@ describe('OneBunModule', () => {
       } finally {
         await app.stop();
       }
+    });
+
+    /**
+     * The half FB-6 could NOT reach. Note what makes it different from the cases above: the
+     * consumer's subtree does not import the global module AT ALL, so nothing in that
+     * subtree ever triggers the post-loop re-seed — the subtree is built to completion
+     * during the root's import loop, before the root has even looked at its second entry.
+     *
+     * A fixture where the intermediate module imports the global one passes WITHOUT the
+     * pre-pass, because FB-6's re-seed already covers it. That version of this test was
+     * written first and verified vacuous.
+     */
+    const buildDetachedTree = (depth: number) => {
+      let constructed = 0;
+
+      @Service()
+      class Svc {
+        constructor() {
+          constructed++;
+        }
+
+        value(): string {
+          return 'ok';
+        }
+      }
+
+      @Global()
+      @Module({ providers: [Svc], exports: [Svc] })
+      class CoreModule {}
+
+      @Service()
+      class Consumer {
+        constructor(public svc: Svc) {}
+      }
+
+      // Leaf needs the global service but imports nothing.
+      @Module({ providers: [Consumer] })
+      class Leaf {}
+
+      let current: Function = Leaf;
+      for (let i = 0; i < depth; i++) {
+        const inner = current;
+
+        @Module({ imports: [inner] })
+        class Wrapper {}
+        current = Wrapper;
+      }
+
+      return {
+        Svc, CoreModule, Consumer, Feature: current, count: () => constructed,
+      };
+    };
+
+    const findConsumer = (module: OneBunModule, Consumer: Function): { svc: unknown } | undefined => {
+      const search = (candidate: any): any => {
+        const own = candidate.getServiceByClass(Consumer as never);
+        if (own) {
+          return own;
+        }
+        for (const child of candidate.childModules ?? []) {
+          const found = search(child);
+          if (found) {
+            return found;
+          }
+        }
+
+        return undefined;
+      };
+
+      return search(module as any);
+    };
+
+    test('a consumer in a detached subtree sees a later sibling registration (depth 1)', () => {
+      const {
+        Svc, CoreModule, Consumer, Feature, count,
+      } = buildDetachedTree(1);
+
+      @Module({ imports: [Feature, CoreModule] })
+      class FeatureFirst {}
+
+      const module = new OneBunModule(FeatureFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(findConsumer(module, Consumer)?.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('the same, at depth 3', () => {
+      const {
+        Svc, CoreModule, Consumer, Feature, count,
+      } = buildDetachedTree(3);
+
+      @Module({ imports: [Feature, CoreModule] })
+      class FeatureFirst {}
+
+      const module = new OneBunModule(FeatureFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(findConsumer(module, Consumer)?.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('the working order still works at depth 3', () => {
+      const {
+        Svc, CoreModule, Consumer, Feature, count,
+      } = buildDetachedTree(3);
+
+      @Module({ imports: [CoreModule, Feature] })
+      class CoreFirst {}
+
+      const module = new OneBunModule(CoreFirst, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(findConsumer(module, Consumer)?.svc).toBeInstanceOf(Svc);
+      expect(count()).toBe(1);
+    });
+
+    test('the pre-pass constructs nothing by walking, and still builds a global module ONCE', () => {
+      let constructed = 0;
+
+      @Service()
+      class Counted {
+        constructor() {
+          constructed++;
+        }
+      }
+
+      @Global()
+      @Module({ providers: [Counted], exports: [Counted] })
+      class CountedGlobal {}
+
+      @Service()
+      class Plain {
+        constructor() {
+          constructed++;
+        }
+      }
+
+      @Module({ providers: [Plain] })
+      class PlainModule {}
+
+      @Module({ imports: [PlainModule, CountedGlobal] })
+      class Mid {}
+
+      @Module({ imports: [Mid, CountedGlobal] })
+      class RootModule {}
+
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      // CountedGlobal is reachable twice and appears in two imports arrays; it must still be
+      // constructed exactly once, and PlainModule exactly once.
+      expect(constructed).toBe(2);
+    });
+
+    test('a cyclic import graph does not hang or double-register', () => {
+      let constructed = 0;
+
+      @Service()
+      class Shared {
+        constructor() {
+          constructed++;
+        }
+      }
+
+      @Global()
+      @Module({ providers: [Shared], exports: [Shared] })
+      class SharedGlobal {}
+
+      // A imports B, B imports A, and both import the global module.
+      const ModuleA = class {};
+      const ModuleB = class {};
+      Object.defineProperty(ModuleA, 'name', { value: 'ModuleA' });
+      Object.defineProperty(ModuleB, 'name', { value: 'ModuleB' });
+      Module({ imports: [SharedGlobal, ModuleB] })(ModuleA as never);
+      Module({ imports: [SharedGlobal] })(ModuleB as never);
+
+      @Module({ imports: [ModuleA as never] })
+      class RootModule {}
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(module).toBeInstanceOf(OneBunModule);
+      expect(constructed).toBe(1);
     });
 
     test('exporting a SERVICE is untouched', () => {
