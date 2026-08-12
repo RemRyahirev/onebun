@@ -573,7 +573,17 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * Get module options from DrizzleModule if available
    */
   private getModuleOptions(): DrizzleModuleOptions | undefined {
+    // THIS service's own registration first. The class-static slot below is shared by every
+    // registration in the process, so reading it first is what made two forRoot() calls
+    // collapse onto the last one — two DrizzleService instances, one database, silently.
+    const own = this.registrationOptions<DrizzleModuleOptions>();
+    if (own) {
+      return own;
+    }
+
     try {
+      // Fallback for the no-application path: createTestService() builds the service with no
+      // module, so there is no registration to read from.
       // eslint-disable-next-line @typescript-eslint/naming-convention
       const { DrizzleModule: DrizzleModuleClass } = require('./drizzle.module');
 

@@ -12,6 +12,8 @@ import type { Span } from '@opentelemetry/api';
 
 import type { SyncLogger } from '@onebun/logger';
 
+import { getRegistrationOptions } from './registration';
+
 /**
  * Metadata storage for services
  */
@@ -106,8 +108,12 @@ export class BaseService {
    * so they are available immediately after super() in subclass constructors.
    * @internal
    */
-  private static _initContext:
-    { logger: SyncLogger; config: IConfig<OneBunAppConfig>; scope?: GlobalScope } | null = null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+    owner?: Function;
+  } | null = null;
 
   /**
    * The owning application's DI scope, when the service was built by one.
@@ -115,6 +121,16 @@ export class BaseService {
    * @internal
    */
   private _scope?: GlobalScope;
+
+  /**
+   * The module class that built this service.
+   *
+   * For a service provided by a named registration this is the minted registration class,
+   * which is what lets the service read ITS OWN configuration rather than the class-static
+   * slot every registration in the process shares.
+   * @internal
+   */
+  private _owner?: Function;
 
   /**
    * Set the ambient init context before constructing a service.
@@ -125,8 +141,11 @@ export class BaseService {
     logger: SyncLogger,
     config: IConfig<OneBunAppConfig>,
     scope?: GlobalScope,
+    owner?: Function,
   ): void {
-    BaseService._initContext = { logger, config, scope };
+    BaseService._initContext = {
+      logger, config, scope, owner,
+    };
   }
 
   /**
@@ -143,11 +162,14 @@ export class BaseService {
     // This makes this.config and this.logger available immediately after super()
     // in subclass constructors.
     if (BaseService._initContext) {
-      const { logger, config, scope } = BaseService._initContext;
+      const {
+        logger, config, scope, owner,
+      } = BaseService._initContext;
       const className = this.constructor.name;
       this.logger = logger.child({ className });
       this.config = config;
       this._scope = scope;
+      this._owner = owner;
       this._initialized = true;
     }
   }
@@ -161,6 +183,17 @@ export class BaseService {
    */
   protected get moduleScope(): GlobalScope | undefined {
     return this._scope;
+  }
+
+  /**
+   * The options of the registration that provides this service, when there is one.
+   *
+   * Falls back to `undefined` outside a registration — a service built by `createTestService`
+   * or by a plain `new`, where the caller supplies configuration directly.
+   * @internal
+   */
+  protected registrationOptions<T>(): T | undefined {
+    return this._owner ? getRegistrationOptions<T>(this._owner) : undefined;
   }
 
   /**

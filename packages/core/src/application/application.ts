@@ -65,6 +65,7 @@ import {
   type GlobalScope,
   OneBunModule,
 } from '../module/module';
+import { assertRegistrationsConfigured } from '../module/registration';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -675,6 +676,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (PROFILING_ENABLED) {
         profileMark = getProfiler()!.start('bootstrap', 'module:create');
       }
+      // A registration selected with forFeature(token) but never configured with
+      // forRoot({ as: token }) is caught here, before anything is constructed.
+      assertRegistrationsConfigured();
+
       this.rootModule = OneBunModule.create(
         this.moduleClass!, this.loggerLayer, this.config,
         this.options.tracing?.traceAll

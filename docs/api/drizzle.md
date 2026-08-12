@@ -167,14 +167,46 @@ export class UserService extends BaseService {
 export class ReportModule {}
 ```
 
-::: danger Multiple databases are not supported yet
-Separate instances do **not** mean separate configuration. `forRoot()` stores its options on the `DrizzleModule` class, which the whole process shares, so every instance reads the same — last-written — configuration. Two `forRoot()` calls with two different databases give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently: nothing errors, and which one wins depends on module evaluation order.
+### Multiple databases
 
-Earlier releases documented exactly that arrangement as the way to run a main and an analytics database. It never worked: both services end up on ONE of the two databases, and which one depends on the order the modules were evaluated in — not on the order you declared them, so it is not reliably the one you would guess. **If you followed it, audit both databases**: the writes are all in one of them.
+Name each configuration with `as`, and let each feature module select the one it needs. The token is a `symbol` or a `string`:
 
-The boundary is the PROCESS, not the application. A second `OneBunApplication` does not help: each builds its own `DrizzleService`, but both read the same class-static options, so two applications declaring two different databases both connect to the last one — measured, including in multi-service mode.
+```typescript
+export const MAIN_DB = Symbol('MAIN_DB');
+export const ANALYTICS_DB = Symbol('ANALYTICS_DB');
 
-**If you need a second database today**, build the service yourself rather than through `forRoot()`: `new DrizzleService()` followed by `initialize(connection)` takes its options directly and is unaffected by the shared slot (see [Apply Migrations at Runtime](#apply-migrations-at-runtime) for the same construction). Such an instance is yours to hold — it is not injectable by type, since `DrizzleService` resolves to the module-configured one. A first-class mechanism for configuring a module more than once is being built; treat the manual route as the interim answer, not the destination.
+@Module({
+  imports: [
+    DrizzleModule.forRoot({ connection: mainConnection,      as: MAIN_DB }),
+    DrizzleModule.forRoot({ connection: analyticsConnection, as: ANALYTICS_DB }),
+    ReportsModule,
+  ],
+})
+export class AppModule {}
+
+// The feature selects its registration at its own boundary...
+@Module({
+  imports: [DrizzleModule.forFeature(ANALYTICS_DB)],
+  providers: [ReportService],
+})
+export class ReportsModule {}
+
+// ...and its providers write the ordinary constructor. No @Inject and no token at the
+// injection site — the module's import already decided which registration it resolves to.
+@Service()
+export class ReportService extends BaseService {
+  constructor(private db: DrizzleService) { super(); }
+}
+```
+
+Registering one token twice throws rather than silently replacing the first, and selecting a token that no `forRoot()` configured fails at startup naming the missing call.
+
+**One registration per module.** A module that selects two registrations of the same service cannot resolve it — the service has a single injection identity, so the request is genuinely ambiguous — and the application refuses to start, naming both. Give each feature its own module.
+
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. An unnamed `forRoot()` keeps the global behaviour it always had.
+
+::: warning Upgrading from 0.4.4 or earlier
+Two `forRoot()` calls used to give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently — and earlier releases documented exactly that arrangement as the way to run a main and an analytics database. If you followed it, audit both databases: every write is in one of them, and which one depended on module evaluation order rather than on the order you declared them.
 :::
 
 ### forFeature() Method
@@ -222,10 +254,11 @@ export class DatabaseModule {}
 **Technical details for AI agents:**
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
 - `isGlobal: true` (default) - one DrizzleService per application, one DB connection
-- `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT a multi-database mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration
+- `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT the multi-database mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own configuration and its own instance
+- `as: symbol | string` on `forRoot()` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; a module that selects TWO registrations of one service refuses to start, naming both. A named registration is never `@Global()`
 - `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one DrizzleService
 - Global services are stored in the application's scope and automatically injected into all its modules
-- When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`, which is process-wide and permanent: one such call de-globalizes the module for every application in the process, and `forRoot({ isGlobal: true })` does not restore it
+- `isGlobal: false` removes the module from the process-wide global registry via `removeFromGlobalModules()`; a later unnamed `forRoot()` that does not opt out puts it back, so the mutation is symmetric and one test or one application cannot de-globalize the module for the rest of the process
 </llm-only>
 
 ## Schema Definition

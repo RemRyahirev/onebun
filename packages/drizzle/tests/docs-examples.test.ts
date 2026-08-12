@@ -27,6 +27,7 @@ import {
   isGlobalModule,
   Module,
   OneBunApplication,
+  resetRegistrations,
 } from '@onebun/core';
 
 import {
@@ -1324,6 +1325,30 @@ describe('Non-Global Mode (docs/api/drizzle.md)', () => {
   /**
    * @source docs:api/drizzle.md#forfeature-method
    */
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  it('restores globality when a later unnamed forRoot() does not opt out', () => {
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+    expect(isGlobalModule(DrizzleModule)).toBe(false);
+
+    try {
+      // From docs: the process-wide mutation is symmetric. Without this, one isGlobal:false
+      // anywhere in the process silently de-globalized every later forRoot() too.
+      DrizzleModule.forRoot({
+        connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+        autoMigrate: false,
+      });
+      expect(isGlobalModule(DrizzleModule)).toBe(true);
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
   it('forFeature() returns the module class, so it does not hand back a shared instance', () => {
     // From docs: forFeature() "is an ordinary import and does NOT share the root's instance".
     expect(DrizzleModule.forFeature()).toBe(DrizzleModule);
@@ -1331,12 +1356,12 @@ describe('Non-Global Mode (docs/api/drizzle.md)', () => {
 });
 
 /**
- * The corrected page tells readers the boundary is the PROCESS, not the application.
- * That sentence replaced an earlier draft which said a second application was "fine" —
- * measured false in the same way the original defect was: two applications, two
- * DrizzleService instances, one database. Pinned so the claim cannot rot back.
+ * An UNNAMED forRoot() still has one options slot per process — that has not changed, and
+ * the page still says so. What changed is that it is no longer the only shape available:
+ * `forRoot({ as: TOKEN })` gives each configuration its own slot. Pinned so the unnamed
+ * path cannot silently acquire per-application behaviour it does not have.
  */
-describe('one configuration per process (docs/api/drizzle.md)', () => {
+describe('one configuration per process, unnamed (docs/api/drizzle.md)', () => {
   /**
    * @source docs:api/drizzle.md#non-global-mode
    */
@@ -1462,5 +1487,54 @@ describe('Connection Lifecycle (docs/api/drizzle.md)', () => {
       DrizzleModule.clearOptions();
       rmSync(scratch, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#multiple-databases
+ */
+describe('Multiple databases (docs/api/drizzle.md)', () => {
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('names each configuration with `as` and selects it with forFeature', () => {
+    const MAIN_DB = Symbol('MAIN_DB');
+    const ANALYTICS_DB = Symbol('ANALYTICS_DB');
+
+    // From docs: two registrations, each with its own configuration.
+    const main = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-main.db' } },
+      autoMigrate: false,
+      as: MAIN_DB,
+    });
+    const analytics = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-analytics.db' } },
+      autoMigrate: false,
+      as: ANALYTICS_DB,
+    });
+
+    // Distinct module identities, and forFeature selects them by token. The end-to-end
+    // assertion that they reach DIFFERENT databases lives in registration.test.ts.
+    expect(main).not.toBe(analytics);
+    expect(DrizzleModule.forFeature(ANALYTICS_DB)).toBe(analytics);
+    expect(DrizzleModule.forFeature(MAIN_DB)).toBe(main);
+  });
+
+  it('refuses to register one token twice', () => {
+    const TOKEN = 'docs-token';
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: TOKEN,
+    });
+
+    // From docs: "Registering one token twice throws rather than silently replacing the first".
+    expect(() => DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: TOKEN,
+    })).toThrow(/already registered/);
   });
 });

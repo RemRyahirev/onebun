@@ -165,3 +165,15 @@ export * from './errors';
 
 // Request Context (AsyncLocalStorage)
 export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';
+
+// Named module registrations — the supported way to configure a dynamic module more than
+// once. See docs:api/decorators.md.
+export {
+  getRegistrationBase,
+  getRegistrationOptions,
+  isRegistrationModule,
+  registerModule,
+  type RegistrationToken,
+  resetRegistrations,
+  selectRegistration,
+} from './module/registration';

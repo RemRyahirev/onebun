@@ -6,6 +6,8 @@ import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
+import type { RegistrationToken } from '@onebun/core';
+
 /**
  * Supported database types
  */
@@ -207,10 +209,22 @@ export interface DrizzleModuleOptions {
   /**
    * Whether to register module as global
    * When true, DrizzleService is available in all modules without explicit import.
-   * When false, each import creates a new instance (useful for multi-database scenarios).
+   * When false, a module reaches it only by importing DrizzleModule explicitly.
    * Default: true
    */
   isGlobal?: boolean;
+
+  /**
+   * Names this registration, so a feature module can select it with
+   * `DrizzleModule.forFeature(token)`.
+   *
+   * This is how one application runs more than one database. Without it, `forRoot()`
+   * configures the single default registration and a second call replaces the first.
+   * A named registration is never global — it reaches a module only by being imported.
+   *
+   * @see docs:api/drizzle.md
+   */
+  as?: RegistrationToken;
 }
 
 /**

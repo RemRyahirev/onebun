@@ -296,6 +296,12 @@ export class OneBunModule implements ModuleInstance {
   private preRegisteredModules: Map<Function, OneBunModule> = new Map();
 
   /**
+   * Which imported modules contributed each service tag, used to detect two registrations
+   * of one class competing for the single slot the tag has.
+   */
+  private tagContributors: Map<Context.Tag<unknown, unknown>, Function[]> = new Map();
+
+  /**
    * Initialize module from metadata and create layer
    */
   private initModule(): {
@@ -383,6 +389,7 @@ export class OneBunModule implements ModuleInstance {
         if (shared) {
           layer = Layer.merge(layer, shared.getLayer());
           for (const [tag, instance] of shared.getExportedServices()) {
+            this.noteContributor(tag, importModule);
             if (!this.scope.overrides.has(tag)) {
               this.serviceInstances.set(tag, instance);
             }
@@ -408,6 +415,8 @@ export class OneBunModule implements ModuleInstance {
         // Get exported services from child module and register them for DI
         const exportedServices = childModule.getExportedServices();
         for (const [tag, instance] of exportedServices) {
+          this.noteContributor(tag, importModule);
+
           // An override wins over the real provider, whichever module declared it.
           if (!this.scope.overrides.has(tag)) {
             this.serviceInstances.set(tag, instance);
@@ -529,6 +538,52 @@ export class OneBunModule implements ModuleInstance {
 
     // Make them visible to THIS module too, since PHASE 0 already ran.
     this.seedGlobalServices();
+  }
+
+  /**
+   * Record which imported module contributed a service, so two registrations of the same
+   * class can be told apart.
+   *
+   * Two named registrations export the SAME service class and therefore the same tag; the
+   * per-module map has one slot for it, so without this the second import silently replaces
+   * the first and the module talks to whichever database was listed last.
+   */
+  private noteContributor(tag: Context.Tag<unknown, unknown>, importModule: Function): void {
+    const existing = this.tagContributors.get(tag);
+    if (!existing) {
+      this.tagContributors.set(tag, [importModule]);
+
+      return;
+    }
+
+    if (!existing.includes(importModule)) {
+      existing.push(importModule);
+    }
+  }
+
+  /**
+   * Refuse to answer for a service that two selected registrations both provide.
+   *
+   * The slot is VACATED rather than left holding the last writer: an ambiguous ask must not
+   * be answered, and leaving a value there would answer it. The error names both
+   * registrations, because "could not resolve" for a service that is present twice reads as
+   * a missing import and sends the reader looking in the wrong place.
+   */
+  private assertUnambiguous(tag: Context.Tag<unknown, unknown>, requestedBy: string): void {
+    const contributors = this.tagContributors.get(tag);
+    if (!contributors || contributors.length < 2) {
+      return;
+    }
+
+    const names = contributors.map((module) => module.name).join(', ');
+    const error = new Error(
+      `Module ${this.moduleClass.name} selects ${contributors.length} registrations that ` +
+      `each provide this service (${names}), so the dependency of ${requestedBy} is ` +
+      'ambiguous. Import one registration per module, so each module\'s providers resolve ' +
+      'to the one it selected.',
+    );
+    error.name = 'OneBunAmbiguousRegistrationError';
+    throw error;
   }
 
   /**
@@ -750,7 +805,7 @@ export class OneBunModule implements ModuleInstance {
       try {
         const serviceConstructor = provider as new (...args: unknown[]) => unknown;
 
-        BaseService.setInitContext(this.logger, this.config, this.scope);
+        BaseService.setInitContext(this.logger, this.config, this.scope, this.moduleClass);
         let serviceInstance: unknown;
         try {
           serviceInstance = new serviceConstructor(...dependencies);
@@ -1219,14 +1274,23 @@ export class OneBunModule implements ModuleInstance {
     // This is the primary mechanism and also makes test overrides work:
     // TestingModule.overrideProvider(MyService).useValue(mock) registers the mock
     // under MyService's tag, so it is found here even if mock is not instanceof MyService.
+    let tag: Context.Tag<unknown, unknown> | undefined;
     try {
-      const tag = getServiceTag(type as new (...args: unknown[]) => unknown);
-      const byTag = this.serviceInstances.get(tag as Context.Tag<unknown, unknown>);
+      tag = getServiceTag(type as new (...args: unknown[]) => unknown) as Context.Tag<unknown, unknown>;
+    } catch {
+      // Not a @Service()-decorated class — fall through to the instanceof check below.
+      tag = undefined;
+    }
+
+    if (tag) {
+      // Outside the try on purpose: an ambiguity error must propagate, not be swallowed by
+      // the catch that exists only to detect a non-@Service class.
+      this.assertUnambiguous(tag, type.name);
+
+      const byTag = this.serviceInstances.get(tag);
       if (byTag !== undefined) {
         return byTag;
       }
-    } catch {
-      // Not a @Service()-decorated class — fall through to instanceof check below
     }
 
     // Fallback: find service instance that matches the type by reference equality or inheritance
