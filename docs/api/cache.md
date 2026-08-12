@@ -213,7 +213,11 @@ CacheModule.forRoot({
 
 ### Connection Lifecycle
 
-`CacheService` implements `OnModuleDestroy` and closes the cache when the application stops. It **does not disconnect a shared Redis client**: `close()` disconnects only a client the service owns, and the application disconnects a shared one itself during `stop()`, gated on `closeSharedRedis`. So `app.stop({ closeSharedRedis: false })` leaves a shared client connected for the rest of the process.
+`CacheService` implements `OnModuleDestroy` and closes the cache when the application stops. It **does not disconnect a shared Redis client**: `close()` disconnects only a client the service owns.
+
+A shared client is **reference-counted**. Each consumer takes a hold when it first obtains the client, `app.stop()` releases that hold, and the connection is closed only when the last one lets go — so in multi-service mode the first sub-application to stop no longer tears the client away from its still-running siblings. `app.stop({ closeSharedRedis: false })` skips releasing altogether.
+
+If the shared client is gone when a cache operation runs, the cache re-acquires it rather than reporting a miss. When it cannot — the server is unreachable — the operation **throws**. A cache read returns `undefined` only for a key that genuinely is not there; a broken cache is an error, because code that treats a miss as "not present" (rate limits, replay guards, locks) would otherwise decide wrongly. The re-acquire is bounded by a short deadline, since the driver's auto-reconnect retries indefinitely and would otherwise turn a dead cache into a hung request.
 
 ```typescript
 const app = new OneBunApplication(AppModule);

@@ -256,4 +256,46 @@ describe('RedisCache', () => {
       expect(value).toBeUndefined();
     });
   });
+
+  /**
+   * A dead connection must not look like a cold cache.
+   *
+   * `get()` used to swallow every Redis error and return `undefined`, so a client that had
+   * been disconnected — by another application releasing the shared one, or by the server
+   * going away — was indistinguishable from an absent key. Anything treating "not in cache"
+   * as "not present" (rate limiting, replay guards, locks) then decides wrongly.
+   *
+   * Deliberately exercised through an OWNED client rather than the shared provider:
+   * SharedRedisProvider is process-global and bun runs every test file in one process, so a
+   * test that repoints it breaks suites whose beforeAll already ran. The lease arithmetic is
+   * covered in packages/core/src/redis/shared-redis.test.ts, which owns the provider for its
+   * whole file.
+   */
+  describe('failure reporting', () => {
+    const TEST_TIMEOUT_MS = 30000;
+
+    it('THROWS rather than reporting a miss when the client is unusable', async () => {
+      const own = createRedisCache({
+        host: redis.host,
+        port: redis.port,
+        keyPrefix: 'unusable:',
+      });
+      await own.connect();
+      await own.set('k', 'v');
+      expect(await own.get<string>('k')).toBe('v');
+
+      // Close the client underneath the cache, as another consumer's shutdown would.
+      await own.close();
+
+      // Pre-fix this resolved to `undefined` and the caller read it as a cache miss. The
+      // re-acquire is bounded, because the driver's auto-reconnect never rejects on its own —
+      // measured: a connect to a refused port stays pending indefinitely.
+      await expect(own.get('k')).rejects.toThrow(/not usable/);
+    }, TEST_TIMEOUT_MS);
+
+    it('still reports a genuine absent key as undefined', async () => {
+      // The distinction the throw exists to preserve: a missing key is still a miss.
+      expect(await cache.get('definitely-not-set')).toBeUndefined();
+    });
+  });
 });

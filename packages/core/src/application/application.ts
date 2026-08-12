@@ -2257,10 +2257,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       await this.rootModule.callOnModuleDestroy();
     }
 
-    // Close shared Redis connection if configured and requested
+    // Release this application's hold on the shared Redis client. It is disconnected only
+    // when the last consumer lets go — previously every application called disconnect()
+    // outright, so in multi-service mode the FIRST one to stop tore the client out from
+    // under its still-running siblings.
     if (closeRedis && SharedRedisProvider.isConnected()) {
-      this.logger.debug('Disconnecting shared Redis');
-      await SharedRedisProvider.disconnect();
+      this.logger.debug('Releasing shared Redis');
+      await SharedRedisProvider.release();
     }
 
     // Call onApplicationDestroy lifecycle hook

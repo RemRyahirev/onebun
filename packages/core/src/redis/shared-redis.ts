@@ -54,6 +54,17 @@ export class SharedRedisProvider {
   private static connecting: Promise<RedisClient> | null = null;
 
   /**
+   * Number of consumers currently holding the shared client.
+   *
+   * The connection is LAZY — `configure()` opens nothing — so ownership cannot be decided at
+   * configuration time. Without a count, the FIRST application to stop disconnected the
+   * client for every sibling still serving traffic, and those siblings were never told:
+   * measured, a cache read through a surviving consumer returned `undefined` rather than
+   * failing, so a dead connection looked like a permanently cold cache.
+   */
+  private static leases = 0;
+
+  /**
    * Configure the shared Redis connection
    * Must be called before getClient()
    */
@@ -66,6 +77,8 @@ export class SharedRedisProvider {
    * Get the shared Redis client (creates connection if needed)
    */
   static async getClient(): Promise<RedisClient> {
+    SharedRedisProvider.leases++;
+
     // Return existing instance
     if (SharedRedisProvider.instance?.isConnected()) {
       return SharedRedisProvider.instance;
@@ -96,6 +109,26 @@ export class SharedRedisProvider {
   }
 
   /**
+   * Get a live client WITHOUT taking another lease.
+   *
+   * For a consumer that already holds one and found its reference dead — the client is
+   * reconnected if necessary, but the lease count is untouched, so re-fetching on every
+   * failed operation cannot inflate it.
+   */
+  static async reacquire(): Promise<RedisClient> {
+    if (SharedRedisProvider.instance?.isConnected()) {
+      return SharedRedisProvider.instance;
+    }
+
+    const held = SharedRedisProvider.leases;
+    try {
+      return await SharedRedisProvider.getClient();
+    } finally {
+      SharedRedisProvider.leases = held;
+    }
+  }
+
+  /**
    * Create a new Redis connection
    */
   private static async createConnection(): Promise<RedisClient> {
@@ -113,9 +146,38 @@ export class SharedRedisProvider {
   }
 
   /**
-   * Disconnect the shared client
+   * Release one consumer's hold on the shared client, disconnecting it when the last one
+   * lets go.
+   *
+   * This is what an application should call on shutdown. `disconnect()` tears the client
+   * down regardless of who else is using it.
+   */
+  static async release(): Promise<void> {
+    if (SharedRedisProvider.leases > 0) {
+      SharedRedisProvider.leases--;
+    }
+
+    if (SharedRedisProvider.leases === 0) {
+      await SharedRedisProvider.disconnect();
+    }
+  }
+
+  /**
+   * Number of consumers currently holding the shared client.
+   * @internal
+   */
+  static leaseCount(): number {
+    return SharedRedisProvider.leases;
+  }
+
+  /**
+   * Disconnect the shared client REGARDLESS of how many consumers still hold it.
+   *
+   * Prefer {@link release}: this is the force-close, and any consumer that already fetched
+   * the client keeps a reference to a dead object.
    */
   static async disconnect(): Promise<void> {
+    SharedRedisProvider.leases = 0;
     if (SharedRedisProvider.instance) {
       await SharedRedisProvider.instance.disconnect();
       SharedRedisProvider.instance = null;
@@ -127,6 +189,19 @@ export class SharedRedisProvider {
    */
   static isConnected(): boolean {
     return SharedRedisProvider.instance?.isConnected() ?? false;
+  }
+
+  /**
+   * The current configuration, or `null`.
+   *
+   * Exists so a test that must repoint the process-global provider can put back exactly what
+   * it found. Without it, "restore" means "configure to something of my own", which leaves
+   * every suite whose `beforeAll` already ran pointing at an address that is about to
+   * disappear — measured as an indefinite hang in an unrelated suite.
+   * @internal
+   */
+  static getOptions(): SharedRedisOptions | null {
+    return SharedRedisProvider.options;
   }
 
   /**
@@ -160,6 +235,8 @@ export class SharedRedisProvider {
    * Reset provider state (mainly for testing)
    */
   static async reset(): Promise<void> {
+    // disconnect() already zeroes the lease count; reset() additionally forgets the
+    // configuration, so a suite starts from a clean provider.
     await SharedRedisProvider.disconnect();
     SharedRedisProvider.options = null;
   }
