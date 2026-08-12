@@ -2462,6 +2462,59 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
+   * @source docs:api/guards.md#on-a-base-controller
+   * @source docs:api/controllers.md#extending-a-base-controller
+   */
+  it('should inherit a class-level guard from a base controller', async () => {
+    let guardRan = false;
+
+    class DenyingBaseGuard implements HttpGuard {
+      canActivate(): boolean {
+        guardRan = true;
+
+        return false;
+      }
+    }
+
+    // From docs: a class-level guard is inherited; the base need not be a @Controller
+    @UseGuards(DenyingBaseGuard)
+    class ProtectedControllerBase extends BaseController {}
+
+    @Controller('/admin')
+    class AdminController extends ProtectedControllerBase {
+      @Get('/stats')
+      stats() {
+        return { ok: true };
+      }
+    }
+
+    @Module({ controllers: [AdminController] })
+    class AdminModule {}
+
+    const app = new OneBunApplication(AdminModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+
+      const response = await fetch(`${app.getHttpUrl()}/admin/stats`);
+
+      expect(response.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(guardRan).toBe(true);
+
+      // From docs: routes declared on the base are NOT mounted under the subclass
+      const inherited = await fetch(`${app.getHttpUrl()}/admin/nothing-here`);
+      expect(inherited.status).toBe(HttpStatusCode.NOT_FOUND);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
    * @source docs:api/guards.md#class-based-guard
    */
   it('should give a class-based guard this.config inside canActivate', async () => {

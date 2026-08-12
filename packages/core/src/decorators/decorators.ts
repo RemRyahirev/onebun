@@ -951,6 +951,39 @@ export function UseMiddleware(...middleware: Function[]): any {
 }
 
 /**
+ * Collect a class-level pipeline list from a controller AND every class it extends.
+ *
+ * The metadata polyfill (`decorators/metadata.ts`) is a `WeakMap` keyed on the exact object
+ * and does NOT walk the prototype chain, unlike the `reflect-metadata` it replaced. So a
+ * controller extending a `@UseGuards`-decorated base inherited nothing and answered
+ * UNGUARDED — measured HTTP 200 with the handler reached, no error, nothing in the logs.
+ * The pattern that bypasses is the ordinary one: a `ProtectedBase` that feature controllers
+ * extend so the decorator is written once.
+ *
+ * Base entries come FIRST, matching how controller-level and route-level lists already
+ * merge, so a subclass adds to its base rather than running ahead of it. Deduplicated by
+ * identity, because `@Controller` copies class-level metadata onto the class it wraps and
+ * both appear on one chain.
+ *
+ * @see docs:api/guards.md
+ */
+function collectInheritedClassMetadata<T>(metadataKey: string, target: Function): T[] {
+  const perLevel: T[][] = [];
+
+  let current: Function | null = target;
+  while (typeof current === 'function') {
+    const values: T[] | undefined = Reflect.getMetadata(metadataKey, current);
+    if (values && values.length > 0) {
+      perLevel.push(values);
+    }
+    current = Object.getPrototypeOf(current) as Function | null;
+  }
+
+  // Walked most-derived first; reverse so the base class contributes first.
+  return [...new Set(perLevel.reverse().flat())];
+}
+
+/**
  * Get controller-level middleware class constructors for a controller class.
  * Returns middleware registered via @UseMiddleware() applied to the class.
  *
@@ -958,7 +991,7 @@ export function UseMiddleware(...middleware: Function[]): any {
  * @returns Array of middleware class constructors
  */
 export function getControllerMiddleware(target: Function): Function[] {
-  return Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_MIDDLEWARE_METADATA, target);
 }
 
 /**
@@ -969,7 +1002,7 @@ export function getControllerMiddleware(target: Function): Function[] {
  * @returns Array of guard class constructors or instances
  */
 export function getControllerGuards(target: Function): (Function | HttpGuard)[] {
-  return Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+  return collectInheritedClassMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target);
 }
 
 /**
@@ -1060,7 +1093,7 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
  * @returns Array of exception filter instances
  */
 export function getControllerFilters(target: Function): ExceptionFilter[] {
-  return Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target);
 }
 
 /**
@@ -1139,7 +1172,7 @@ export function UseFilters(...filters: ExceptionFilter[]): any {
  * @returns Array of interceptor class constructors or instances
  */
 export function getControllerInterceptors(target: Function): (Function | Interceptor)[] {
-  return Reflect.getMetadata(CONTROLLER_INTERCEPTORS_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_INTERCEPTORS_METADATA, target);
 }
 
 /**

@@ -23,6 +23,7 @@ import { HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } from '@on
 - Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@Delete` behaves identically. Before 0.4.5 a route-level `@UseGuards` written ABOVE the method decorator was silently discarded and the route was reachable — audit any route guarded that way if you are upgrading from 0.4.4 or earlier. The same applied to `@UseInterceptors` and `@UseFilters`
 - Class-based guards get full dependency injection — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. Dependencies are resolved once when routes are built; the guard INSTANCE is still created per request, so stashing request state on `this` remains safe. Passing an instance — `@UseGuards(new RolesGuard(['admin']))` — shares that one instance across requests, as it always did. Function-based guards from `createHttpGuard(fn)` have no DI by design
 - A guard whose constructor dependency cannot be resolved now fails the application at STARTUP instead of being constructed with `undefined`. Register the DEPENDENCY in the module's `providers` — registering the guard itself does not help
+- A class-level `@UseGuards` is INHERITED by a subclass controller, base first then the subclass's own. `@UseMiddleware`, `@UseInterceptors` and `@UseFilters` inherit the same way; routes do not
 
 **Order of execution:** global middleware → controller middleware → route middleware → guards → handler
 
@@ -153,6 +154,27 @@ Decorator source order does not matter — `@UseGuards` above or below the route
 
 ::: warning Upgrading from 0.4.4 or earlier
 A route-level `@UseGuards` written **above** the method decorator used to be silently discarded: the guard never ran and the route answered as if it were unprotected. Audit every route-level guard in your codebase — the order shown above is exactly the one that was broken. `@UseInterceptors` and `@UseFilters` were skipped the same way.
+:::
+
+### On a base controller
+
+A class-level guard is inherited by every controller that extends the class, so a shared protected base can carry it once. The base does not need to be a `@Controller`.
+
+```typescript
+@UseGuards(AuthGuard)
+class ProtectedController extends BaseController {}
+
+@Controller('/admin')
+class AdminController extends ProtectedController {
+  @Get('/stats')
+  stats() { /* requires a Bearer token */ }
+}
+```
+
+Base guards run before the subclass's own, matching the controller-then-route order. Routes declared on the base are not mounted under the subclass — see [Controllers — Extending a Base Controller](/api/controllers#extending-a-base-controller).
+
+::: warning Upgrading from 0.4.4 or earlier
+Class-level decorators were not inherited at all: a subclass of a guarded base answered as if unprotected, with no error and nothing in the logs. Audit any shared protected base controller.
 :::
 
 ### Combining controller + route guards

@@ -17,6 +17,7 @@ import {
   Controller,
   Delete,
   Get,
+  getControllerMetadata,
   Module,
   UseFilters,
   UseGuards,
@@ -642,5 +643,285 @@ describe('guard instance lifetime', () => {
 
     expect(denied.status).toBe(HTTP_FORBIDDEN);
     expect(allowed.status).toBe(HTTP_OK);
+  });
+});
+
+// ============================================================================
+// Class-level pipeline decorators must inherit through `extends`
+//
+// The metadata polyfill is a WeakMap keyed on the exact object and does not walk the
+// prototype chain, unlike the reflect-metadata it replaced — so a controller extending a
+// `@UseGuards`-decorated base inherited nothing and answered UNGUARDED. The shape that
+// bypassed is the ordinary one: a ProtectedBase that feature controllers extend so the
+// decorator is written once.
+// ============================================================================
+
+describe('class-level decorator inheritance', () => {
+  const HTTP_OK = 200;
+  const HTTP_FORBIDDEN = 403;
+  const HTTP_TEAPOT = 418;
+  const HTTP_ERROR = 500;
+
+  let ran: string[] = [];
+
+  class DenyGuard implements HttpGuard {
+    canActivate(): boolean {
+      ran.push('deny');
+
+      return false;
+    }
+  }
+
+  class AllowGuard implements HttpGuard {
+    canActivate(): boolean {
+      ran.push('allow');
+
+      return true;
+    }
+  }
+
+  class SubAllowGuard implements HttpGuard {
+    canActivate(): boolean {
+      ran.push('sub-allow');
+
+      return true;
+    }
+  }
+
+  class InheritedInterceptor extends BaseInterceptor {
+    async intercept(_ctx: unknown, next: () => Promise<unknown>): Promise<unknown> {
+      ran.push('interceptor');
+
+      return await next();
+    }
+  }
+
+  const inheritedFilter: ExceptionFilter = {
+    catch(): Response {
+      ran.push('filter');
+
+      return new Response(JSON.stringify({ filtered: true }), { status: HTTP_TEAPOT });
+    },
+  };
+
+  // (1) a base that is decorated but is NOT itself a @Controller
+  @UseGuards(DenyGuard)
+  class ProtectedBase extends BaseController {}
+
+  @Controller('/admin')
+  class AdminController extends ProtectedBase {
+    @Get('/users')
+    users() {
+      ran.push('HANDLER');
+
+      return { users: ['root'] };
+    }
+  }
+
+  // (2) a base that IS a @Controller with its own routes
+  @Controller('/mounted')
+  @UseGuards(DenyGuard)
+  class MountedBase extends BaseController {
+    @Get('/own')
+    own() {
+      ran.push('HANDLER');
+
+      return { ok: true };
+    }
+  }
+
+  @Controller('/child')
+  class ChildController extends MountedBase {
+    @Get('/secret')
+    secret() {
+      ran.push('HANDLER');
+
+      return { secret: 'leaked' };
+    }
+  }
+
+  // (3) filters and interceptors inherit too
+  @UseInterceptors(InheritedInterceptor)
+  @UseFilters(inheritedFilter)
+  class ObservedBase extends BaseController {}
+
+  @Controller('/observed')
+  class ObservedController extends ObservedBase {
+    @Get('/ok')
+    ok() {
+      return { ok: true };
+    }
+
+    @Get('/boom')
+    boom(): never {
+      throw new HttpException(HTTP_ERROR, 'boom');
+    }
+  }
+
+  // (4) merge order — the base contributes first
+  @UseGuards(AllowGuard)
+  class OrderedBase extends BaseController {}
+
+  @Controller('/ordered')
+  @UseGuards(SubAllowGuard)
+  class OrderedController extends OrderedBase {
+    @Get('/')
+    get() {
+      return { ok: true };
+    }
+  }
+
+  @Module({
+    controllers: [AdminController, MountedBase, ChildController, ObservedController, OrderedController],
+  })
+  class InheritanceModule {}
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: OneBunApplication<any, any>;
+
+  beforeAll(async () => {
+    app = new OneBunApplication(InheritanceModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer() as never,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+  });
+
+  afterAll(async () => {
+    await app?.stop();
+  });
+
+  const call = async (path: string): Promise<{ status: number; ran: string[] }> => {
+    ran = [];
+    const response = await fetch(`${app.getHttpUrl()}${path}`);
+
+    return { status: response.status, ran: [...ran] };
+  };
+
+  it('a subclass of a guarded base is guarded — the base need not be a @Controller', async () => {
+    // Pre-fix: HTTP 200 with ran=['HANDLER'] — the guard was never registered.
+    const result = await call('/admin/users');
+
+    expect(result.status).toBe(HTTP_FORBIDDEN);
+    expect(result.ran).toEqual(['deny']);
+  });
+
+  it('a subclass of a guarded @Controller is guarded, and so is the base itself', async () => {
+    const child = await call('/child/secret');
+    const base = await call('/mounted/own');
+
+    // Pre-fix: the child answered HTTP 200 with the body while the base answered 403.
+    expect(child.status).toBe(HTTP_FORBIDDEN);
+    expect(child.ran).toEqual(['deny']);
+    expect(base.status).toBe(HTTP_FORBIDDEN);
+  });
+
+  it('inherits @UseInterceptors and @UseFilters as well', async () => {
+    const ok = await call('/observed/ok');
+    const boom = await call('/observed/boom');
+
+    expect(ok.ran).toEqual(['interceptor']);
+    expect(boom.status).toBe(HTTP_TEAPOT);
+    expect(boom.ran).toContain('filter');
+  });
+
+  it('runs the base class guards first, then the subclass own', async () => {
+    const result = await call('/ordered/');
+
+    expect(result.status).toBe(HTTP_OK);
+    // Same order as the existing controller-then-route merge.
+    expect(result.ran).toEqual(['allow', 'sub-allow']);
+  });
+});
+
+// ============================================================================
+// ...and nothing that must NOT inherit starts inheriting
+// ============================================================================
+
+describe('class-level inheritance does not overreach', () => {
+  const HTTP_OK = 200;
+
+  @Service()
+  class DepA extends BaseService {
+    who(): string {
+      return 'A';
+    }
+  }
+
+  @Service()
+  class DepB extends BaseService {
+    who(): string {
+      return 'B';
+    }
+  }
+
+  @Controller('/inherit-base')
+  class ParamBase extends BaseController {
+    constructor(public a: DepA) {
+      super();
+    }
+
+    @Get('/own')
+    own() {
+      return { from: 'base', dep: this.a.who() };
+    }
+  }
+
+  @Controller('/inherit-sub')
+  class ParamSub extends ParamBase {
+    constructor(public b: DepB) {
+      super(undefined as never);
+    }
+
+    @Get('/mine')
+    mine() {
+      return { from: 'sub', dep: this.b.who() };
+    }
+  }
+
+  @Module({ controllers: [ParamBase, ParamSub], providers: [DepA, DepB] })
+  class ParamModule {}
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let app: OneBunApplication<any, any>;
+
+  beforeAll(async () => {
+    app = new OneBunApplication(ParamModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer() as never,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+  });
+
+  afterAll(async () => {
+    await app?.stop();
+  });
+
+  it('resolves each class own constructor dependencies', async () => {
+    // design:paramtypes must stay per-class: only the four class-level PIPELINE readers
+    // walk the prototype chain, not the metadata polyfill itself.
+    const sub = await fetch(`${app.getHttpUrl()}/inherit-sub/mine`);
+    const base = await fetch(`${app.getHttpUrl()}/inherit-base/own`);
+
+    expect(await sub.json()).toEqual({ success: true, result: { from: 'sub', dep: 'B' } });
+    expect(await base.json()).toEqual({ success: true, result: { from: 'base', dep: 'A' } });
+  });
+
+  it('does not copy the base class routes onto the subclass', async () => {
+    const routes = getControllerMetadata(ParamSub)?.routes ?? [];
+    const paths = routes.map((route) => `${route.method} ${route.path}`);
+
+    expect(paths).toEqual(['GET /mine']);
+    expect(paths.length).toBe(new Set(paths).size);
+
+    // A route declared on the base is not mounted under the subclass prefix. That is
+    // pre-existing and fail-closed (404, never an unguarded 200); it is stated in
+    // docs/api/controllers.md rather than changed here.
+    const inherited = await fetch(`${app.getHttpUrl()}/inherit-sub/own`);
+    expect(inherited.status).not.toBe(HTTP_OK);
   });
 });

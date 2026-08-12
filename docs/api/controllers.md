@@ -233,6 +233,28 @@ export class UserController extends BaseController {
 }
 ```
 
+## Extending a Base Controller
+
+Class-level pipeline decorators are inherited: a controller that extends a base carrying `@UseGuards`, `@UseMiddleware`, `@UseInterceptors` or `@UseFilters` gets them. The base does not need to be a `@Controller` itself. Base entries run first, then the subclass's own — the same order in which controller-level and route-level entries merge.
+
+```typescript
+@UseGuards(AuthGuard)
+class ProtectedController extends BaseController {}
+
+// inherits AuthGuard — every route below requires a Bearer token
+@Controller('/admin')
+class AdminController extends ProtectedController {
+  @Get('/stats')
+  stats() { return { ok: true }; }
+}
+```
+
+**Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
+
+::: warning Upgrading from 0.4.4 or earlier
+Class-level decorators were NOT inherited: a subclass of a guarded base answered as if unprotected, with no error. If you use a shared protected base controller, treat its subclasses' routes as having been exposed.
+:::
+
 ## Lifecycle Hooks
 
 Controllers support the same lifecycle hooks as services (`OnModuleInit`, `OnApplicationInit`, `OnModuleDestroy`, `BeforeApplicationDestroy`, `OnApplicationDestroy`). See [Services API — Lifecycle Hooks](/api/services#lifecycle-hooks) for the full reference and execution order.
