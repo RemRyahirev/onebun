@@ -574,6 +574,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   getLayer(): Layer.Layer<never, never, unknown> {
     this.ensureSingleServiceMode('getLayer');
+    this.assertLayerUnambiguous();
 
     return this.ensureModule().getLayer();
   }
@@ -2700,9 +2701,66 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * await userService.performBackgroundTask();
    * ```
    */
+  /**
+   * Refuse to answer for a service the tree holds two instances of.
+   *
+   * An Effect tag is keyed by the class NAME, so two named registrations — or two service
+   * classes that happen to share a name — have more instances than there are keys. Returning
+   * one of them makes the answer a function of module import order. Injection is unaffected:
+   * it resolves by tag identity at the module boundary, where each module has exactly one.
+   */
+  private assertServiceUnambiguous(className: string): void {
+    const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
+    const holders = ambiguous?.get(className);
+    if (!holders) {
+      return;
+    }
+
+    const error = new Error(
+      `This application holds ${holders.length} instances of ${className} (${holders.join(', ')}), ` +
+      'so getService() has no correct answer — the one it would return depends on the order ' +
+      'the modules were imported in. Name the registration you mean: ' +
+      `getService(${className}, <token>).`,
+    );
+    error.name = 'OneBunAmbiguousServiceError';
+    throw error;
+  }
+
+  /**
+   * Refuse to hand out a layer that silently drops one of two instances.
+   *
+   * An Effect `Context` has exactly one slot per key, so an application with two instances of
+   * one service class does not fit in one. There is no supported way to build a layer that
+   * holds both — reach a specific instance with `getService(Class, token)`.
+   */
+  private assertLayerUnambiguous(): void {
+    const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
+    if (!ambiguous || ambiguous.size === 0) {
+      return;
+    }
+
+    const details = [...ambiguous.entries()]
+      .map(([key, holders]) => `${key} (${holders.join(', ')})`)
+      .join('; ');
+    const error = new Error(
+      'getLayer() cannot represent this application: an Effect Context has one slot per ' +
+      `service class and this one holds two instances of ${details}. The layer would carry ` +
+      'whichever was merged last. Reach a specific instance with getService(Class, token) ' +
+      'or @Inject(token).',
+    );
+    error.name = 'OneBunAmbiguousServiceError';
+    throw error;
+  }
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   getService<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T {
     this.ensureSingleServiceMode('getService');
+    if (token === undefined) {
+      // Only the UNTOKENED form is ambiguous. `getService(Class, TOKEN)` names one
+      // registration and is unambiguous by construction.
+      this.assertServiceUnambiguous(serviceClass.name);
+    }
+
     if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');
     }

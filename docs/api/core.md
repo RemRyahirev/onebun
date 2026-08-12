@@ -310,8 +310,8 @@ class OneBunApplication {
   /** Get root module layer */
   getLayer(): Layer.Layer<never, never, unknown>;
 
-  /** Get a service instance by class from the module container */
-  getService<T>(serviceClass: new (...args: unknown[]) => T): T;
+  /** Get a service instance by class from the module container, optionally naming a registration */
+  getService<T>(serviceClass: new (...args: unknown[]) => T, token?: symbol | string): T;
 
   /** Get a child OneBunApplication instance by service name (multi-service mode only) */
   getApplication(name: string): OneBunApplication | undefined;
@@ -383,6 +383,43 @@ const userService = app.getService(UserService);
 await userService.performBackgroundTask();
 await userService.sendScheduledEmails();
 ```
+
+### Service identity
+
+Every `@Service()` class gets one Effect tag, keyed by the class NAME. Constructor injection and `getService(Class, token)` do not use that key — they resolve by tag identity at the module boundary — so this is invisible to most applications. It becomes visible wherever one application holds TWO instances of one service class.
+
+**Named registrations.** `DrizzleModule.forRoot({ ..., as: MAIN_DB })` and `forRoot({ ..., as: ANALYTICS_DB })` both provide `DrizzleService`: one class, one key, two instances. Name the one you want and you always get it:
+
+```typescript
+const main = app.getService(DrizzleService, MAIN_DB);
+```
+
+Ask without naming one and there is no correct answer, so `app.getService(DrizzleService)` throws rather than choosing. The instance it would otherwise return depends on the order the modules were imported in, which is not something your code should depend on.
+
+**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last. There is no supported way to build a single layer holding two instances of one service class; reach a specific instance with `getService(Class, token)` or `@Inject(token)`.
+
+**Two service classes with the same name.** Two classes called `CacheService` from different packages are separate services to the framework, and injection resolves each of them correctly. They mint the same tag key, so they cannot both appear in a layer. If your application needs both in one layer, give one an explicit tag:
+
+```typescript
+import { Context } from 'effect';
+
+export const BillingCacheTag = Context.GenericTag<CacheService>('@acme/billing/CacheService');
+
+@Service(BillingCacheTag)
+export class CacheService extends BaseService {}
+```
+
+The convention the framework packages follow is `@scope/package/ClassName`.
+
+**One copy of `@onebun/core` per application.** Decorator metadata is held per copy of the framework. If `node_modules` resolves two copies, classes decorated by one copy are invisible to the other and boot fails with a dependency error naming a service that is correctly decorated. Deduplicate the dependency; there is no runtime workaround.
+
+<llm-only>
+**Technical details for AI agents:**
+- `@Service()` mints `Context.GenericTag(target.name)` — one tag OBJECT per class, and `tag.key` is the bare class name. Effect keys `Context`/`Layer` by `tag.key`; OneBun's own maps (`serviceInstances`, `GlobalScope.services`, overrides) are keyed by the tag OBJECT, which is why injection is unaffected by a name collision
+- `getService(Class)` and `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT. Keyed by name, two same-named provider classes made boot depend on the order of the `providers` array
+- The framework's own tag keys `LoggerService`, `ConfigService`, `QueueService` and `SharedRedisService` are NOT namespaced, so a user service with one of those names shares their key. It reaches nothing at runtime — the framework reads its logger from its own layer, never from `rootLayer` — but it does make `getLayer()` ambiguous
+</llm-only>
 
 ### Graceful Shutdown
 

@@ -168,6 +168,12 @@ export interface ModuleInstance {
   getServiceByClass?<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T | undefined;
 
   /**
+   * Service class names the module tree holds more than one instance of, mapped to a
+   * description of each holder. Empty for an ordinary application.
+   */
+  findAmbiguousServiceKeys?(): Map<string, string[]>;
+
+  /**
    * Get accumulated module-level middleware (resolved bound functions)
    * for a given controller class.
    * Includes middleware from ancestor modules (root → child → … → owner module).

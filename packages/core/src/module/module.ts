@@ -311,6 +311,9 @@ export class OneBunModule implements ModuleInstance {
    */
   private tagByRegistration: Map<Context.Tag<unknown, unknown>, Map<Function, unknown>> = new Map();
 
+  /** Cached result of findAmbiguousServiceKeys; the tree is immutable after setup(). */
+  private ambiguousKeys: Map<string, string[]> | undefined;
+
   /**
    * Initialize module from metadata and create layer
    */
@@ -710,19 +713,23 @@ export class OneBunModule implements ModuleInstance {
     // provider used to disappear without a trace.
     this.validateProviderShapes(metadata.providers as readonly unknown[]);
 
-    // Build a map of available service classes for dependency resolution
-    // Include both current module providers and imported services
-    const availableServiceClasses = new Map<string, Function>();
+    // The set of service classes this module can resolve, keyed by the class OBJECT.
+    // Keyed by `provider.name` this decided "defer" vs "throw" for two DIFFERENT classes that
+    // share a name: creating the first marked the other one's name as created, the deferral
+    // was skipped, and boot died with a DependencyResolutionError advising you to decorate a
+    // class that is decorated. Same module graph, and the order of the `providers` array
+    // decided whether the application started.
+    const availableServiceClasses = new Set<Function>();
     for (const provider of metadata.providers) {
       if (typeof provider === 'function') {
-        availableServiceClasses.set(provider.name, provider);
+        availableServiceClasses.add(provider);
       }
     }
 
     // Add imported services to available classes
     for (const [, instance] of this.serviceInstances) {
       if (instance && typeof instance === 'object') {
-        availableServiceClasses.set(instance.constructor.name, instance.constructor);
+        availableServiceClasses.add(instance.constructor);
       }
     }
 
@@ -748,7 +755,8 @@ export class OneBunModule implements ModuleInstance {
 
     // Create services in dependency order
     const pendingProviders = [...metadata.providers.filter((p) => typeof p === 'function')];
-    const createdServices = new Set<string>();
+    const createdServices = new Set<Function>();
+    // Names, not classes: this one only ever feeds message text and buildDependencyChain.
     const unresolvedDeps = new Map<string, string[]>(); // Track unresolved dependencies for error reporting
     let iterations = 0;
     const maxIterations = pendingProviders.length * 2; // Prevent infinite loops
@@ -769,7 +777,7 @@ export class OneBunModule implements ModuleInstance {
       // An override replaces the provider outright: constructing the real one would run its
       // constructor (and its dependencies') for an instance nothing would ever receive.
       if (this.scope.overrides.has(serviceMetadata.tag as Context.Tag<unknown, unknown>)) {
-        createdServices.add(provider.name);
+        createdServices.add(provider);
         this.logger.debug(`Provider ${provider.name} replaced by a test override, not constructed`);
         continue;
       }
@@ -787,8 +795,8 @@ export class OneBunModule implements ModuleInstance {
             dependencies.push(dependency);
           } else {
             // Check if it's a service that hasn't been created yet
-            const isServiceInModule = availableServiceClasses.has(depType.name);
-            if (isServiceInModule && !createdServices.has(depType.name)) {
+            const isServiceInModule = availableServiceClasses.has(depType);
+            if (isServiceInModule && !createdServices.has(depType)) {
               // Track unresolved dependency for error reporting
               const deps = unresolvedDeps.get(provider.name) || [];
               if (!deps.includes(depType.name)) {
@@ -865,7 +873,7 @@ export class OneBunModule implements ModuleInstance {
         }
 
         this.serviceInstances.set(serviceMetadata.tag, serviceInstance);
-        createdServices.add(provider.name);
+        createdServices.add(provider);
         if (diMark) {
           getProfiler()!.end(diMark);
         }
@@ -1929,6 +1937,65 @@ export class OneBunModule implements ModuleInstance {
     }
 
     return undefined;
+  }
+
+  /**
+   * Service classes the module tree holds MORE THAN ONE instance of, keyed by tag key.
+   *
+   * Two named registrations, or two service classes that share a name, mint one Effect tag
+   * key and hold two instances. `assertUnambiguous` catches only the case where a SINGLE
+   * module imported both; in the ordinary layout — the root selects one, a feature module the
+   * other — nothing in the tree is ambiguous and every injection is correct. What is
+   * ambiguous is asking the APPLICATION for "the" instance, and that is what this answers.
+   *
+   * Computed on demand and cached: the tree is immutable once `setup()` has run.
+   * @internal
+   */
+  findAmbiguousServiceKeys(): Map<string, string[]> {
+    if (this.ambiguousKeys) {
+      return this.ambiguousKeys;
+    }
+
+    const byKey = new Map<string, Set<unknown>>();
+    this.collectInstancesByKey(byKey);
+
+    const ambiguous = new Map<string, string[]>();
+    for (const [key, instances] of byKey) {
+      if (instances.size > 1) {
+        ambiguous.set(key, [...instances].map((instance) => this.describeInstance(instance)));
+      }
+    }
+    this.ambiguousKeys = ambiguous;
+
+    return ambiguous;
+  }
+
+  /**
+   * Group every instance in this subtree by its tag KEY — the class name Effect keys by.
+   */
+  private collectInstancesByKey(byKey: Map<string, Set<unknown>>): void {
+    for (const [tag, instance] of this.serviceInstances) {
+      const key = (tag as unknown as { key: string }).key;
+      const existing = byKey.get(key) ?? new Set<unknown>();
+      existing.add(instance);
+      byKey.set(key, existing);
+    }
+
+    for (const child of this.childModules) {
+      child.collectInstancesByKey(byKey);
+    }
+  }
+
+  /**
+   * Name an instance for the ambiguity error: the registration that owns it when there is
+   * one, so the message points at the `forRoot({ as })` call rather than at a class name that
+   * is the same for both.
+   */
+  private describeInstance(instance: unknown): string {
+    const owner = (instance as { _owner?: Function })?._owner;
+    const className = (instance as object)?.constructor?.name ?? 'unknown';
+
+    return owner && owner !== this.moduleClass ? `${className} from ${owner.name}` : className;
   }
 
   /**

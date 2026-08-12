@@ -5688,3 +5688,56 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     expect(mod).toBeInstanceOf(OneBunModule);
   });
 });
+
+/**
+ * @source docs:api/core.md#service-identity
+ */
+describe('Service identity (docs/api/core.md)', () => {
+  const appOptions = { port: 0, metrics: { enabled: false }, gracefulShutdown: false } as const;
+
+  it('refuses getService(Class) and getLayer() when one class has two instances', async () => {
+    @Service()
+    class Widget extends BaseService {}
+
+    @Module({ providers: [Widget], exports: [Widget] })
+    class FirstModule {}
+
+    @Module({ providers: [Widget], exports: [Widget] })
+    class SecondModule {}
+
+    @Module({ imports: [FirstModule, SecondModule] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      // From docs: "there is no correct answer, so app.getService(...) throws rather than
+      // choosing" and "a Context has exactly one slot per key".
+      expect(() => app.getService(Widget)).toThrow(/instances of Widget/);
+      expect(() => app.getLayer()).toThrow(/one slot per service class/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('leaves an ordinary application answering both', async () => {
+    @Service()
+    class Gadget extends BaseService {}
+
+    @Module({ providers: [Gadget] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      expect(app.getService(Gadget)).toBeInstanceOf(Gadget);
+      expect(app.getLayer()).toBeDefined();
+    } finally {
+      await app.stop();
+    }
+  });
+});
