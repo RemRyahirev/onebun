@@ -26,6 +26,7 @@ import {
   BaseService,
   Controller,
   Get,
+  Inject,
   Module,
   OneBunApplication,
   resetRegistrations,
@@ -249,6 +250,180 @@ describe('named registrations', () => {
     expect(error?.name).toBe('OneBunAmbiguousRegistrationError');
     expect(error?.message).toContain('DrizzleModule_MAIN_DB');
     expect(error?.message).toContain('DrizzleModule_analytics_db');
+  });
+
+  test('@Inject(TOKEN) resolves per registration in a module that holds BOTH', async () => {
+    const mainDb = join(scratch, 'inject-main.db');
+    const analyticsDb = join(scratch, 'inject-analytics.db');
+
+    @Service()
+    class Counter extends BaseService {
+      readonly id = 'counter';
+    }
+
+    @Service()
+    class Reconciler extends BaseService {
+      constructor(
+        @Inject(MAIN) public main: DrizzleService,
+        @Inject(ANALYTICS) public analytics: DrizzleService,
+        public counter: Counter,
+      ) {
+        super();
+      }
+    }
+
+    @Controller('/reconcile')
+    class ReconcileController extends BaseController {
+      constructor(
+        @Inject(ANALYTICS) private analytics: DrizzleService,
+        private counter: Counter,
+      ) {
+        super();
+      }
+
+      @Get('/')
+      report() {
+        return {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          target: (this.analytics as any).connectionOptions?.options?.url as string,
+          counter: this.counter.id,
+        };
+      }
+    }
+
+    // The ONE module that legitimately needs both. Everything else selects one registration
+    // at its boundary and writes a plain constructor.
+    @Module({
+      imports: [
+        DrizzleModule.forFeature(MAIN),
+        DrizzleModule.forFeature(ANALYTICS),
+      ],
+      providers: [Counter, Reconciler],
+      controllers: [ReconcileController],
+      exports: [Reconciler],
+    })
+    class ReconcileModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({ connection: conn(mainDb), autoMigrate: false, as: MAIN }),
+        DrizzleModule.forRoot({ connection: conn(analyticsDb), autoMigrate: false, as: ANALYTICS }),
+        ReconcileModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+
+      const reconciler = app.getService(Reconciler);
+      expect(targetOf(reconciler.main)).toBe(mainDb);
+      expect(targetOf(reconciler.analytics)).toBe(analyticsDb);
+      // The un-annotated parameter still resolves normally — the token map is a SIDE map, so
+      // design:paramtypes is untouched and partial injection keeps working.
+      expect(reconciler.counter.id).toBe('counter');
+
+      // Through a real request: @Controller replaces the class with a subclass, so the token
+      // map has to be carried onto the wrapper or the controller silently gets the other one.
+      const response = await fetch(`http://127.0.0.1:${app.getPort()}/reconcile`);
+      const body = await response.json() as { result: { target: string; counter: string } };
+      expect(body.result.target).toBe(analyticsDb);
+      expect(body.result.counter).toBe('counter');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('@Inject(TOKEN) for a registration the module never selected fails, naming what it did select', async () => {
+    const mainDb = join(scratch, 'unselected-main.db');
+    const analyticsDb = join(scratch, 'unselected-analytics.db');
+
+    @Service()
+    class Forgetful extends BaseService {
+      constructor(@Inject(ANALYTICS) public analytics: DrizzleService) {
+        super();
+      }
+    }
+
+    // Imports MAIN, asks for ANALYTICS. Falling back to the tag slot would hand it the main
+    // database — the silent wrong-database failure this mechanism exists to prevent.
+    @Module({ imports: [DrizzleModule.forFeature(MAIN)], providers: [Forgetful] })
+    class ForgetfulModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({ connection: conn(mainDb), autoMigrate: false, as: MAIN }),
+        DrizzleModule.forRoot({ connection: conn(analyticsDb), autoMigrate: false, as: ANALYTICS }),
+        ForgetfulModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await expect(app.start()).rejects.toThrow(
+        /did not select the registration 'analytics-db'.*It selected: DrizzleModule_MAIN_DB.*forFeature\('analytics-db'\)/s,
+      );
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('app.getService(Class, TOKEN) reaches a registration a FEATURE module selected', async () => {
+    const mainDb = join(scratch, 'lookup-main.db');
+    const analyticsDb = join(scratch, 'lookup-analytics.db');
+
+    @Module({ imports: [DrizzleModule.forFeature(ANALYTICS)] })
+    class ReportsModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({ connection: conn(mainDb), autoMigrate: false, as: MAIN }),
+        DrizzleModule.forRoot({ connection: conn(analyticsDb), autoMigrate: false, as: ANALYTICS }),
+        ReportsModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+
+      // The tag-keyed slot holds one instance per module and cannot answer for a second
+      // registration; the token walks the tree to the module that selected it.
+      expect(targetOf(app.getService(DrizzleService, ANALYTICS))).toBe(analyticsDb);
+      expect(targetOf(app.getService(DrizzleService, MAIN))).toBe(mainDb);
+      expect(() => app.getService(DrizzleService, 'never-registered')).toThrow(/not found for registration/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('a named registration cannot also be global', () => {
+    // Ambient visibility has one slot per service class, so two global registrations would
+    // collapse back into one instance — the defect, with extra steps.
+    expect(() => DrizzleModule.forRoot({
+      connection: conn(':memory:'),
+      autoMigrate: false,
+      as: MAIN,
+      isGlobal: true,
+    })).toThrow(/never global/);
   });
 
   test('the single-registration case is unchanged — no token anywhere', async () => {

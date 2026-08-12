@@ -22,6 +22,7 @@ import {
   Global,
   Module,
   OneBunApplication,
+  resetRegistrations,
   Service,
 } from '@onebun/core';
 
@@ -747,5 +748,36 @@ describe('Connection Lifecycle (docs/api/cache.md)', () => {
       closeSpy.mockRestore();
       CacheModule.clearOptions();
     }
+  });
+});
+
+/**
+ * @source docs:api/cache.md#multiple-caches
+ */
+describe('Multiple caches (docs/api/cache.md)', () => {
+  const sessions = Symbol('SESSIONS');
+  const fragments = Symbol('FRAGMENTS');
+
+  afterEach(() => {
+    resetRegistrations();
+    CacheModule.clearOptions();
+  });
+
+  it('names each configuration with `as` and selects it with forFeature', () => {
+    // From docs: two registrations, each with its own configuration.
+    const first = CacheModule.forRoot({ type: CacheType.MEMORY, cacheOptions: { maxSize: 10 }, as: sessions });
+    const second = CacheModule.forRoot({ type: CacheType.MEMORY, cacheOptions: { maxSize: 20 }, as: fragments });
+
+    // Distinct module identities, and forFeature selects them by token. The end-to-end
+    // assertion that each cache uses its OWN options lives in registration.test.ts.
+    expect(first).not.toBe(second);
+    expect(CacheModule.forFeature(fragments)).toBe(second);
+    expect(CacheModule.forFeature(sessions)).toBe(first);
+  });
+
+  it('refuses `as` combined with isGlobal: true', () => {
+    // From docs: "Combining `as` with `isGlobal: true` throws."
+    expect(() => CacheModule.forRoot({ type: CacheType.MEMORY, as: sessions, isGlobal: true }))
+      .toThrow(/never global/);
   });
 });

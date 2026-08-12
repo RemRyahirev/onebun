@@ -160,6 +160,15 @@ export class DrizzleModule {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (DrizzleModule as any)[DRIZZLE_MODULE_OPTIONS] = options;
 
+    if (options.as !== undefined && options.isGlobal === true) {
+      throw new Error(
+        'DrizzleModule.forRoot({ as, isGlobal: true }) is not a valid combination. A named ' +
+        'registration is never global: ambient visibility has one slot per service class, ' +
+        'so two global registrations would collapse back into one instance. Reach a named ' +
+        'registration by importing DrizzleModule.forFeature(<token>).',
+      );
+    }
+
     // A NAMED registration gets its own module identity and its own options, so a second
     // forRoot() no longer overwrites the first for everyone. An unnamed one keeps the base
     // module exactly as before.

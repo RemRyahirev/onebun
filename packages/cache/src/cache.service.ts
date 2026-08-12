@@ -288,6 +288,14 @@ export class CacheService extends BaseService implements ICacheService, OnModule
    * Get module options from CacheModule if available
    */
   private getModuleOptions(): CacheModuleOptions | undefined {
+    // THIS service's own registration first. The class-static slot below is shared by every
+    // registration in the process, so reading it first would make two forRoot() calls
+    // collapse onto the last one — two CacheService instances, one cache, silently.
+    const own = this.registrationOptions<CacheModuleOptions>();
+    if (own) {
+      return own;
+    }
+
     try {
       // Dynamically import CacheModule to avoid circular dependency
       // eslint-disable-next-line @typescript-eslint/naming-convention

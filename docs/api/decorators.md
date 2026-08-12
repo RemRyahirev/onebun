@@ -736,12 +736,14 @@ Explicit dependency injection for edge cases. **In most cases, automatic DI work
 
 ```typescript
 @Inject(type: new (...args: any[]) => T)
+@Inject(token: symbol | string)
 ```
 
 **When to use @Inject:**
 - Interface or abstract class injection
 - Token-based injection (custom Context.Tag)
 - Overriding automatic resolution
+- Picking WHICH [named registration](/api/drizzle#multiple-databases) a parameter gets, in a module that selected two of them
 
 **Example:**
 
@@ -762,6 +764,36 @@ export class UserController extends BaseController {
   }
 }
 ```
+
+**Selecting a named registration:**
+
+Only needed in a module that imported TWO registrations of one service. A module that selected
+one resolves it by type, with no annotation at all.
+
+```typescript
+@Module({
+  imports: [
+    DrizzleModule.forFeature(MAIN_DB),
+    DrizzleModule.forFeature(ANALYTICS_DB),
+  ],
+  providers: [Reconciler],
+})
+export class ReconcileModule {}
+
+@Service()
+export class Reconciler extends BaseService {
+  constructor(
+    @Inject(MAIN_DB) private main: DrizzleService,
+    @Inject(ANALYTICS_DB) private analytics: DrizzleService,
+    private clock: ClockService,          // un-annotated parameters resolve normally
+  ) {
+    super();
+  }
+}
+```
+
+Asking for a token the module never selected throws at startup, naming what it did select — the
+alternative is being handed the other database, silently.
 
 ### @Optional()
 

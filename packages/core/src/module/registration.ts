@@ -39,6 +39,8 @@ interface Registration {
   baseModule: Function;
   /** Whether `forRoot()` has supplied options. A selected-but-unconfigured one is an error. */
   configured: boolean;
+  /** The service classes this registration provides, for resolving `@Inject(TOKEN)`. */
+  providers: Function[];
 }
 
 /** Every registration in the process, keyed by base module and then by token. */
@@ -83,7 +85,7 @@ export function registerModule(
     // application with one configuration is byte-for-byte what it was before registrations
     // existed: same class in `imports`, same globality, same ambient resolution.
     const registration: Registration = {
-      moduleClass: baseModule, options, baseModule, configured: true,
+      moduleClass: baseModule, options, baseModule, configured: true, providers,
     };
     defaultRegistrations.set(baseModule, registration);
     byModuleClass.set(baseModule, registration);
@@ -127,6 +129,10 @@ function getOrCreate(
   const forBase = registrations.get(baseModule) ?? new Map<RegistrationToken, Registration>();
   const existing = forBase.get(token);
   if (existing) {
+    if (existing.providers.length === 0 && providers.length > 0) {
+      existing.providers = providers;
+    }
+
     return existing;
   }
 
@@ -144,7 +150,7 @@ function getOrCreate(
   Module({ providers, exports: providers })(moduleClass as never);
 
   const registration: Registration = {
-    moduleClass, options: undefined, baseModule, configured: false,
+    moduleClass, options: undefined, baseModule, configured: false, providers,
   };
   forBase.set(token, registration);
   registrations.set(baseModule, forBase);
@@ -261,4 +267,46 @@ export function assertRegistrationsConfigured(): void {
       throw error;
     }
   }
+}
+
+/**
+ * The module class registered under a token, for `@Inject(TOKEN)`.
+ *
+ * `provider` disambiguates when two different base modules use the same token string — the
+ * one that actually provides the requested service wins, and only a genuinely undecidable
+ * token returns undefined.
+ */
+export function findRegistrationModule(
+  token: RegistrationToken,
+  provider?: Function,
+): Function | undefined {
+  const matches: Registration[] = [];
+  for (const forBase of registrations.values()) {
+    const registration = forBase.get(token);
+    if (registration) {
+      matches.push(registration);
+    }
+  }
+
+  if (matches.length === 0) {
+    return undefined;
+  }
+
+  if (matches.length === 1) {
+    return matches[0].moduleClass;
+  }
+
+  const byProvider = provider
+    ? matches.filter((registration) => registration.providers.includes(provider))
+    : [];
+
+  return byProvider.length === 1 ? byProvider[0].moduleClass : undefined;
+}
+
+/**
+ * Every token configured for a base module, for error messages.
+ * @internal
+ */
+export function describeRegistrationToken(token: RegistrationToken): string {
+  return describeToken(token);
 }

@@ -72,15 +72,45 @@ export class AppModule {}
 export class OrderModule {}
 ```
 
-::: danger Multiple caches are not supported yet, and instances do not share state
-Separate instances do **not** mean separate configuration. `forRoot()` stores its options on the `CacheModule` class, which the whole process shares, so every instance reads the same — last-written — configuration. Two `forRoot()` calls with different settings give you instances that all use the last one, silently.
+### Multiple caches
 
-`forFeature()` DOES share: every module that imports the same `CacheModule` receives the same `CacheService`, so a value written through one is visible through another and the cache is initialized once. Instance count is not what `isGlobal` controls.
+Name each configuration with `as`, and let each feature module select the one it needs. The token is a `symbol` or a `string`:
 
-The boundary is the PROCESS, not the application: a second `OneBunApplication` builds its own `CacheService` but reads the same class-static options, so two applications declaring different settings both get the last one.
+```typescript
+export const SESSIONS = Symbol('SESSIONS_CACHE');
+export const FRAGMENTS = Symbol('FRAGMENTS_CACHE');
 
-Unless you specifically want per-module isolation, leave the module global. A supported mechanism for configuring a module more than once is being built.
-:::
+@Module({
+  imports: [
+    CacheModule.forRoot({ type: CacheType.REDIS,  redisOptions: { database: 1 }, as: SESSIONS }),
+    CacheModule.forRoot({ type: CacheType.MEMORY, cacheOptions: { maxSize: 1000 }, as: FRAGMENTS }),
+    PageModule,
+  ],
+})
+export class AppModule {}
+
+// The feature selects its registration at its own boundary...
+@Module({
+  imports: [CacheModule.forFeature(FRAGMENTS)],
+  providers: [PageService],
+})
+export class PageModule {}
+
+// ...and its providers write the ordinary constructor. No @Inject and no token at the
+// injection site — the module's import already decided which registration it resolves to.
+@Service()
+export class PageService extends BaseService {
+  constructor(private cache: CacheService) { super(); }
+}
+```
+
+Registering one token twice throws rather than silently replacing the first, and selecting a token that no `forRoot()` configured fails at startup naming the missing call.
+
+**One registration per module.** A module that selects two registrations of the same service cannot resolve it by type — the service has a single injection identity — so it must name each one with `@Inject(TOKEN)`. Without the annotation the application refuses to start, naming both candidates.
+
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws. An unnamed `forRoot()` keeps the global behaviour it always had.
+
+`forFeature()` with no token still SHARES: every module importing the same registration receives the same `CacheService`, so a value written through one is visible through another and the cache is initialized once. `isGlobal` controls visibility, never instance count.
 
 ### Redis Configuration
 
@@ -182,8 +212,9 @@ If Redis connection fails during auto-initialization, CacheService **automatical
 
 **Technical details for AI agents:**
 - `CacheModule` is decorated with `@Global()` — by default `CacheService` is available in all modules without explicit import
-- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. That call is process-wide and permanent: it de-globalizes the module for every application in the process, and `forRoot({ isGlobal: true })` does not restore it
-- NOT a multi-cache mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration
+- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. The registry is process-wide, so the mutation is symmetric: a later unnamed `forRoot()` that does not opt out puts the module back
+- `isGlobal: false` is NOT the multi-cache mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own options and its own `CacheService`. An unnamed `forRoot()` still writes to a single class-static slot shared by the process
+- `as: symbol | string` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws; a module holding two registrations must name each with `@Inject(TOKEN)`
 - `CacheModule.forFeature()` returns the module class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one CacheService — `isGlobal` controls visibility, never instance count
 - `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`)
 - `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)

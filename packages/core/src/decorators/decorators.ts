@@ -40,6 +40,16 @@ const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
 const META_OPTIONAL_PARAMS = new Map<Function, Set<number>>();
 
 /**
+ * Registration tokens attached to constructor parameters by `@Inject(TOKEN)`.
+ *
+ * Deliberately a SIDE map rather than an entry in META_CONSTRUCTOR_PARAMS: the token names a
+ * registration, not a type, so writing it there would force every paramtypes reader to filter
+ * non-classes out of the hottest DI path. Kept apart, `getConstructorParamTypes` keeps
+ * returning the complete `design:paramtypes` array and partial injection keeps working.
+ */
+const META_INJECT_TOKENS = new Map<Function, Map<number, symbol | string>>();
+
+/**
  * Injectable decorator for controllers and services
  * This decorator enables automatic dependency injection by registering the class for DI
  */
@@ -227,19 +237,39 @@ export function controllerDecorator(basePath: string = '') {
       );
     }
 
+    // Carry @Inject(TOKEN) selections onto the wrapper, which is the class DI constructs.
+    copyInjectTokens(target, WrappedController);
+
     return WrappedController as T;
   };
 }
 
 /**
  * Decorator for explicit dependency injection (for complex cases)
+ *
+ * With a CLASS it pins the type of a parameter. With a registration TOKEN — the `as` value of
+ * a `forRoot()` call — it picks WHICH registration of that type this parameter gets, which is
+ * only needed in a module that selected two registrations of one service; a module that
+ * selected one needs no annotation at all.
+ *
  * Usage: constructor(\@Inject(CounterService) private counterService: CounterService)
+ * Usage: constructor(\@Inject(ANALYTICS_DB) private analytics: DrizzleService)
  * @see docs:api/decorators.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
-export function Inject<T>(serviceType: new (...args: any[]) => T) {
+export function Inject<T>(serviceType: (new (...args: any[]) => T) | symbol | string) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
   return (target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void => {
+    if (typeof serviceType === 'symbol' || typeof serviceType === 'string') {
+      // A token selects a registration; the parameter's TYPE still comes from
+      // design:paramtypes, so nothing is written into META_CONSTRUCTOR_PARAMS here.
+      const tokens = META_INJECT_TOKENS.get(target) ?? new Map<number, symbol | string>();
+      tokens.set(parameterIndex, serviceType);
+      META_INJECT_TOKENS.set(target, tokens);
+
+      return;
+    }
+
     // Get existing dependencies or create new array
     const existingDeps = META_CONSTRUCTOR_PARAMS.get(target) || [];
 
@@ -280,6 +310,28 @@ export function Optional() {
     existing.add(parameterIndex);
     META_OPTIONAL_PARAMS.set(target, existing);
   };
+}
+
+/**
+ * The registration token `@Inject(TOKEN)` put on a constructor parameter, if any.
+ */
+export function getInjectToken(target: Function, parameterIndex: number): symbol | string | undefined {
+  return META_INJECT_TOKENS.get(target)?.get(parameterIndex);
+}
+
+/**
+ * Carry the token map onto a class the framework replaces with a subclass.
+ *
+ * `@Controller` wraps the class, and the wrapper is what DI constructs — the tokens were
+ * recorded against the original, so without this a controller's `@Inject(TOKEN)` is silently
+ * dropped and it receives whichever registration happened to be in the slot.
+ * @internal
+ */
+export function copyInjectTokens(from: Function, to: Function): void {
+  const tokens = META_INJECT_TOKENS.get(from);
+  if (tokens) {
+    META_INJECT_TOKENS.set(to, new Map(tokens));
+  }
 }
 
 /**

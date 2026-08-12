@@ -2701,16 +2701,20 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * ```
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  getService<T>(serviceClass: new (...args: any[]) => T): T {
+  getService<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T {
     this.ensureSingleServiceMode('getService');
     if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');
     }
 
-    const service = this.ensureModule().getServiceByClass!(serviceClass);
+    const service = this.ensureModule().getServiceByClass!(serviceClass, token);
     if (!service) {
+      const named = token !== undefined
+        ? ` for registration ${typeof token === 'symbol' ? token.toString() : `'${token}'`}`
+        : '';
       throw new Error(
-        `Service ${serviceClass.name} not found. Make sure it's registered in the module's providers.`,
+        `Service ${serviceClass.name} not found${named}. ` +
+        'Make sure it\'s registered in the module\'s providers.',
       );
     }
 

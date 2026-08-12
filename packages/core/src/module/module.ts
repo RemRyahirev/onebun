@@ -26,6 +26,7 @@ import {
   getRegisteredModules,
   isGlobalModule,
   isOptionalParam,
+  getInjectToken,
   registerControllerDependencies,
 } from '../decorators/decorators';
 import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
@@ -56,6 +57,7 @@ import {
   hasConfigureMiddleware,
 } from './lifecycle';
 import { BaseMiddleware } from './middleware';
+import { describeRegistrationToken, findRegistrationModule } from './registration';
 import {
   BaseService,
   getServiceMetadata,
@@ -302,6 +304,14 @@ export class OneBunModule implements ModuleInstance {
   private tagContributors: Map<Context.Tag<unknown, unknown>, Function[]> = new Map();
 
   /**
+   * Per-registration instances this module selected, keyed by tag and then by the imported
+   * registration module. What `@Inject(TOKEN)` reads: `serviceInstances` has one slot per tag
+   * and cannot hold two registrations, but a module that imported both still has to hand each
+   * one to the parameter that named it.
+   */
+  private tagByRegistration: Map<Context.Tag<unknown, unknown>, Map<Function, unknown>> = new Map();
+
+  /**
    * Initialize module from metadata and create layer
    */
   private initModule(): {
@@ -389,7 +399,7 @@ export class OneBunModule implements ModuleInstance {
         if (shared) {
           layer = Layer.merge(layer, shared.getLayer());
           for (const [tag, instance] of shared.getExportedServices()) {
-            this.noteContributor(tag, importModule);
+            this.noteContributor(tag, importModule, instance);
             if (!this.scope.overrides.has(tag)) {
               this.serviceInstances.set(tag, instance);
             }
@@ -415,7 +425,7 @@ export class OneBunModule implements ModuleInstance {
         // Get exported services from child module and register them for DI
         const exportedServices = childModule.getExportedServices();
         for (const [tag, instance] of exportedServices) {
-          this.noteContributor(tag, importModule);
+          this.noteContributor(tag, importModule, instance);
 
           // An override wins over the real provider, whichever module declared it.
           if (!this.scope.overrides.has(tag)) {
@@ -548,7 +558,17 @@ export class OneBunModule implements ModuleInstance {
    * per-module map has one slot for it, so without this the second import silently replaces
    * the first and the module talks to whichever database was listed last.
    */
-  private noteContributor(tag: Context.Tag<unknown, unknown>, importModule: Function): void {
+  private noteContributor(
+    tag: Context.Tag<unknown, unknown>,
+    importModule: Function,
+    instance?: unknown,
+  ): void {
+    if (instance !== undefined) {
+      const byRegistration = this.tagByRegistration.get(tag) ?? new Map<Function, unknown>();
+      byRegistration.set(importModule, instance);
+      this.tagByRegistration.set(tag, byRegistration);
+    }
+
     const existing = this.tagContributors.get(tag);
     if (!existing) {
       this.tagContributors.set(tag, [importModule]);
@@ -762,7 +782,7 @@ export class OneBunModule implements ModuleInstance {
       if (detectedDeps && detectedDeps.length > 0) {
         for (let i = 0; i < detectedDeps.length; i++) {
           const depType = detectedDeps[i];
-          const dependency = this.resolveDependencyByType(depType);
+          const dependency = this.resolveDependencyByType(depType, provider, i);
           if (dependency) {
             dependencies.push(dependency);
           } else {
@@ -955,7 +975,7 @@ export class OneBunModule implements ModuleInstance {
       if (paramTypes && paramTypes.length > 0) {
         for (let i = 0; i < paramTypes.length; i++) {
           const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType);
+          const dep = this.resolveDependencyByType(paramType, cls, i);
           if (dep) {
             deps.push(dep);
           } else if (isOptionalParam(cls, i)) {
@@ -1018,7 +1038,7 @@ export class OneBunModule implements ModuleInstance {
       if (paramTypes && paramTypes.length > 0) {
         for (let i = 0; i < paramTypes.length; i++) {
           const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType);
+          const dep = this.resolveDependencyByType(paramType, cls, i);
           if (dep) {
             deps.push(dep);
           } else if (isOptionalParam(cls, i)) {
@@ -1090,7 +1110,7 @@ export class OneBunModule implements ModuleInstance {
       if (paramTypes && paramTypes.length > 0) {
         for (let i = 0; i < paramTypes.length; i++) {
           const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType);
+          const dep = this.resolveDependencyByType(paramType, guard, i);
           if (dep) {
             deps.push(dep);
           } else if (isOptionalParam(guard, i)) {
@@ -1178,7 +1198,7 @@ export class OneBunModule implements ModuleInstance {
         // Resolve dependencies based on registered parameter types
         for (let i = 0; i < paramTypes.length; i++) {
           const paramType = paramTypes[i];
-          const dependency = this.resolveDependencyByType(paramType);
+          const dependency = this.resolveDependencyByType(paramType, controllerClass, i);
           if (dependency) {
             dependencies.push(dependency);
           } else if (isOptionalParam(controllerClass, i)) {
@@ -1257,9 +1277,52 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
+   * Resolve a dependency the caller named with `@Inject(TOKEN)`.
+   *
+   * Reads the per-registration map rather than `serviceInstances`, whose single slot per tag
+   * is exactly what a module holding two registrations cannot use. An unselected token is an
+   * error naming what the module DID select: silently falling back to the tag slot would hand
+   * back the other database, which is the failure this whole mechanism exists to prevent.
+   */
+  private resolveByRegistrationToken(type: Function, token: symbol | string, requestedBy: string): unknown {
+    const registrationModule = findRegistrationModule(token, type);
+    let tag: Context.Tag<unknown, unknown> | undefined;
+    try {
+      tag = getServiceTag(type as new (...args: unknown[]) => unknown) as Context.Tag<unknown, unknown>;
+    } catch {
+      tag = undefined;
+    }
+
+    const selected = tag ? this.tagByRegistration.get(tag) : undefined;
+    if (registrationModule && selected?.has(registrationModule)) {
+      return selected.get(registrationModule);
+    }
+
+    const available = selected && selected.size > 0
+      ? [...selected.keys()].map((module) => module.name).join(', ')
+      : '(none)';
+    const error = new Error(
+      `Module ${this.moduleClass.name} did not select the registration ` +
+      `${describeRegistrationToken(token)} that ${requestedBy} asks for. It selected: ` +
+      `${available}. Add forFeature(${describeRegistrationToken(token)}) to this module's imports.`,
+    );
+    error.name = 'OneBunUnselectedRegistrationError';
+    throw error;
+  }
+
+  /**
    * Resolve dependency by type (constructor function)
    */
-  private resolveDependencyByType(type: Function): unknown {
+  private resolveDependencyByType(type: Function, owner?: Function, paramIndex?: number): unknown {
+    // An explicit registration token decides WHICH registration this parameter gets, which is
+    // the only way to resolve at all in a module that selected two of them.
+    if (owner !== undefined && paramIndex !== undefined) {
+      const token = getInjectToken(owner, paramIndex);
+      if (token !== undefined) {
+        return this.resolveByRegistrationToken(type, token, owner.name);
+      }
+    }
+
     // QueueService is registered by tag (QueueServiceTag) before setup(); resolve by tag
     if (type === QueueService) {
       const byTag = this.serviceInstances.get(
@@ -1819,18 +1882,53 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Get service instance by class
+   * Get service instance by class, optionally from a NAMED registration.
+   *
+   * Without a token this answers from the tag-keyed slot, exactly as before. With one it
+   * walks the tree for the module that selected that registration — the tag slot holds one
+   * instance per module and cannot answer for a second registration, so an application with
+   * two of them has no other way to reach the one it means.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  getServiceByClass<T>(serviceClass: new (...args: any[]) => T): T | undefined {
+  getServiceByClass<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T | undefined {
     try {
       const tag = getServiceTag(serviceClass);
+
+      if (token !== undefined) {
+        const registrationModule = findRegistrationModule(token, serviceClass);
+
+        return registrationModule
+          ? this.findByRegistration(tag as Context.Tag<unknown, unknown>, registrationModule) as T | undefined
+          : undefined;
+      }
 
       return this.getServiceInstance(tag);
     } catch {
       // Service doesn't have @Service decorator or not found
       return undefined;
     }
+  }
+
+  /**
+   * The instance a given registration module contributed, searched depth-first.
+   *
+   * The registration may have been selected by a feature module rather than the root, so
+   * asking only this module answers `undefined` for a perfectly reachable service.
+   */
+  private findByRegistration(tag: Context.Tag<unknown, unknown>, registrationModule: Function): unknown {
+    const own = this.tagByRegistration.get(tag)?.get(registrationModule);
+    if (own !== undefined) {
+      return own;
+    }
+
+    for (const child of this.childModules) {
+      const found = child.findByRegistration(tag, registrationModule);
+      if (found !== undefined) {
+        return found;
+      }
+    }
+
+    return undefined;
   }
 
   /**

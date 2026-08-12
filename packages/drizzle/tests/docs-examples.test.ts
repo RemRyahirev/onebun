@@ -21,13 +21,18 @@ import type { PostgreSQLConnectionOptions } from '../src/types';
 
 import {
   BaseController,
+  BaseService,
   Controller,
   Get,
   Global,
+  getConstructorParamTypes,
+  getInjectToken,
+  Inject,
   isGlobalModule,
   Module,
   OneBunApplication,
   resetRegistrations,
+  Service as ServiceDecorator,
 } from '@onebun/core';
 
 import {
@@ -1520,6 +1525,41 @@ describe('Multiple databases (docs/api/drizzle.md)', () => {
     expect(main).not.toBe(analytics);
     expect(DrizzleModule.forFeature(ANALYTICS_DB)).toBe(analytics);
     expect(DrizzleModule.forFeature(MAIN_DB)).toBe(main);
+  });
+
+  it('names the registration with @Inject in a module that holds BOTH', () => {
+    const mainDb = Symbol('MAIN_DB');
+    const analyticsDb = Symbol('ANALYTICS_DB');
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: mainDb,
+    });
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: analyticsDb,
+    });
+
+    // From docs: the module that needs both imports both and names each one. Pinned here at
+    // the metadata level — that the two parameters reach two DIFFERENT databases through a
+    // real boot, and that an un-annotated parameter still resolves, is registration.test.ts.
+    @ServiceDecorator()
+    class Reconciler extends BaseService {
+      constructor(
+        @Inject(mainDb) public main: DrizzleServiceCtor,
+        @Inject(analyticsDb) public analytics: DrizzleServiceCtor,
+      ) {
+        super();
+      }
+    }
+
+    expect(getInjectToken(Reconciler, 0)).toBe(mainDb);
+    expect(getInjectToken(Reconciler, 1)).toBe(analyticsDb);
+    // The token map is a SIDE map: design:paramtypes is untouched, so partial injection and
+    // every other paramtypes reader keep working.
+    expect(getConstructorParamTypes(Reconciler)).toEqual([DrizzleServiceCtor, DrizzleServiceCtor]);
   });
 
   it('refuses to register one token twice', () => {

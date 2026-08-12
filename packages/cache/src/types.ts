@@ -1,3 +1,5 @@
+import type { RegistrationToken } from '@onebun/core';
+
 /**
  * Default cleanup interval for expired cache entries (1 minute)
  */
@@ -289,4 +291,15 @@ export interface CacheModuleOptions {
    * @defaultValue true
    */
   isGlobal?: boolean;
+
+  /**
+   * Names this registration, so `CacheModule.forFeature(token)` can select it.
+   *
+   * Two caches in one application: each `forRoot({ as })` keeps its own options and its own
+   * `CacheService`, and a feature module picks one by importing `forFeature(token)`. A named
+   * registration is never global — combining `as` with `isGlobal: true` throws.
+   *
+   * @see docs:api/cache.md
+   */
+  as?: RegistrationToken;
 }

@@ -201,9 +201,30 @@ export class ReportService extends BaseService {
 
 Registering one token twice throws rather than silently replacing the first, and selecting a token that no `forRoot()` configured fails at startup naming the missing call.
 
-**One registration per module.** A module that selects two registrations of the same service cannot resolve it — the service has a single injection identity, so the request is genuinely ambiguous — and the application refuses to start, naming both. Give each feature its own module.
+**A module that needs BOTH** — a reconciliation job, a migration — names each one with `@Inject(TOKEN)`. Un-annotated parameters in the same constructor keep resolving by type:
 
-**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. An unnamed `forRoot()` keeps the global behaviour it always had.
+```typescript
+@Module({
+  imports: [DrizzleModule.forFeature(MAIN_DB), DrizzleModule.forFeature(ANALYTICS_DB)],
+  providers: [Reconciler],
+})
+export class ReconcileModule {}
+
+@Service()
+export class Reconciler extends BaseService {
+  constructor(
+    @Inject(MAIN_DB) private main: DrizzleService,
+    @Inject(ANALYTICS_DB) private analytics: DrizzleService,
+    private clock: ClockService,
+  ) { super(); }
+}
+```
+
+Asking for the bare class in such a module fails at startup naming both candidates, and asking for a token the module never selected fails naming what it did select. Both alternatives — picking one silently — are the wrong-database failure this mechanism exists to prevent.
+
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws. An unnamed `forRoot()` keeps the global behaviour it always had.
+
+**Reaching a registration from outside the tree:** `app.getService(DrizzleService, ANALYTICS_DB)`. Without the token the call answers from the tag-keyed slot, which holds one instance and cannot answer for a second registration. `app.getLayer()` has the same single-value limit and no token parameter: Effect keys a `Context` by the tag's key, which is the class NAME, so with two registrations it returns whichever was merged last.
 
 ::: warning Upgrading from 0.4.4 or earlier
 Two `forRoot()` calls used to give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently — and earlier releases documented exactly that arrangement as the way to run a main and an analytics database. If you followed it, audit both databases: every write is in one of them, and which one depended on module evaluation order rather than on the order you declared them.
@@ -255,7 +276,9 @@ export class DatabaseModule {}
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
 - `isGlobal: true` (default) - one DrizzleService per application, one DB connection
 - `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT the multi-database mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own configuration and its own instance
-- `as: symbol | string` on `forRoot()` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; a module that selects TWO registrations of one service refuses to start, naming both. A named registration is never `@Global()`
+- `as: symbol | string` on `forRoot()` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws. A named registration is never `@Global()`
+- A module that selects TWO registrations of one service must name each with `@Inject(TOKEN)`; the bare class throws naming both candidates, and `@Inject` with an unselected token throws naming what the module did select. The token lives in a SIDE map, so `getConstructorParamTypes` still returns the full `design:paramtypes` array and partial injection is unaffected; `@Controller` copies the map onto its wrapper subclass
+- `app.getService(Class, TOKEN)` walks the module tree for the registration that token names. `app.getLayer()` stays single-valued per class NAME — Effect keys `Context` by `tag.key` — so with two registrations it returns the last merged one
 - `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one DrizzleService
 - Global services are stored in the application's scope and automatically injected into all its modules
 - `isGlobal: false` removes the module from the process-wide global registry via `removeFromGlobalModules()`; a later unnamed `forRoot()` that does not opt out puts it back, so the mutation is symmetric and one test or one application cannot de-globalize the module for the rest of the process

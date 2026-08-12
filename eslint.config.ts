@@ -340,7 +340,7 @@ const config: Linter.Config[] = [
     },
   },
   {
-    files: ['**/*.spec.ts', '**/*.test.ts'],
+    files: ['**/*.spec.ts', '**/*.test.ts', '**/*.test-d.ts'],
     plugins: {
       jest: jestPlugin,
     },
