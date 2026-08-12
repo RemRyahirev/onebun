@@ -2630,4 +2630,189 @@ describe('OneBunModule', () => {
       expect(typeof middleware[2]).toBe('function');
     });
   });
+
+  describe('one instance per application (WI-233)', () => {
+    const { Global, clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry, createGlobalScope } = require('./module');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    const buildFixture = (makeGlobal: boolean) => {
+      let constructed = 0;
+      let inits = 0;
+      let destroys = 0;
+
+      @Service()
+      class Shared {
+        constructor() {
+          constructed++;
+        }
+
+        async onModuleInit(): Promise<void> {
+          inits++;
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          destroys++;
+        }
+      }
+
+      @Module({ providers: [Shared], exports: [Shared] })
+      class SharedModule {}
+      if (makeGlobal) {
+        Global()(SharedModule);
+      }
+
+      @Service()
+      class Consumer {
+        constructor(public shared: Shared) {}
+      }
+
+      return {
+        Shared,
+        SharedModule,
+        Consumer,
+        count: () => constructed,
+        inits: () => inits,
+        destroys: () => destroys,
+      };
+    };
+
+    test('three importers of one module share ONE instance', async () => {
+      const {
+        Shared, SharedModule, Consumer, count, inits,
+      } = buildFixture(false);
+
+      @Module({ imports: [SharedModule], providers: [Consumer], exports: [Consumer] })
+      class One {}
+
+      @Module({ imports: [SharedModule], providers: [Consumer], exports: [Consumer] })
+      class Two {}
+
+      @Module({ imports: [SharedModule, One, Two], providers: [Consumer] })
+      class RootModule {}
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      // Pre-fix: one instance per importer — for CacheService that was 3 stores, for
+      // DrizzleService 3 connection pools, and no state in common.
+      expect(count()).toBe(1);
+      expect(module.getServiceByClass(Shared as never)).toBeInstanceOf(Shared);
+
+      await module.callOnApplicationInit();
+      expect(inits()).toBeLessThanOrEqual(1);
+    });
+
+    test('lifecycle hooks fire once, not once per importer', async () => {
+      const {
+        SharedModule, Consumer, destroys,
+      } = buildFixture(false);
+
+      @Module({ imports: [SharedModule], providers: [Consumer], exports: [Consumer] })
+      class One {}
+
+      @Module({ imports: [SharedModule], providers: [Consumer], exports: [Consumer] })
+      class Two {}
+
+      @Module({ imports: [One, Two] })
+      class RootModule {}
+
+      const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      await module.callOnModuleDestroy();
+
+      expect(destroys()).toBe(1);
+    });
+
+    test('visibility still differs between global and non-global, instance count does not', () => {
+      for (const makeGlobal of [true, false]) {
+        clearGlobalModules();
+        clearGlobalServicesRegistry();
+
+        const {
+          Shared, SharedModule, Consumer, count,
+        } = buildFixture(makeGlobal);
+
+        // A module that does NOT import it.
+        @Module({ providers: [Consumer] })
+        class Detached {}
+
+        @Module({ imports: [SharedModule, Detached] })
+        class RootModule {}
+
+        if (makeGlobal) {
+          const module = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+          const detached = (module as any).childModules.find((c: any) => c.getServiceByClass(Consumer as never));
+
+          expect(detached.getServiceByClass(Consumer as never).shared).toBeInstanceOf(Shared);
+        } else {
+          expect(() => new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope()))
+            .toThrow(/Could not resolve dependency/);
+        }
+
+        // Either way: never more than one instance.
+        expect(count()).toBeLessThanOrEqual(1);
+      }
+    });
+
+    test('two applications each build their own instance', () => {
+      const { SharedModule, count } = buildFixture(false);
+
+      @Module({ imports: [SharedModule] })
+      class RootModule {}
+
+      const a = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+      const b = new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      // Sharing is per APPLICATION, not per process — WI-187 must not regress.
+      expect(a).not.toBe(b);
+      expect(count()).toBe(2);
+    });
+
+    test('a sibling reaching the module first does not produce a second copy', () => {
+      const { SharedModule, count } = buildFixture(false);
+
+      // The shape that produced 5 instances when the publish happened in the importer
+      // rather than in the module itself: a descendant of import #1 reaches the same
+      // module as import #2.
+      @Module({ imports: [SharedModule] })
+      class Deep {}
+
+      @Module({ imports: [Deep] })
+      class Branch {}
+
+      @Module({ imports: [Branch, SharedModule] })
+      class RootModule {}
+
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(count()).toBe(1);
+    });
+
+    test('a cyclic graph still yields one instance', () => {
+      const { SharedModule, count } = buildFixture(false);
+
+      const ModuleA = class {};
+      const ModuleB = class {};
+      Object.defineProperty(ModuleA, 'name', { value: 'CycleA' });
+      Object.defineProperty(ModuleB, 'name', { value: 'CycleB' });
+      Module({ imports: [SharedModule, ModuleB] })(ModuleA as never);
+      Module({ imports: [SharedModule] })(ModuleB as never);
+
+      @Module({ imports: [ModuleA as never] })
+      class RootModule {}
+
+      new OneBunModule(RootModule, mockLoggerLayer, undefined, undefined, undefined, createGlobalScope());
+
+      expect(count()).toBe(1);
+    });
+  });
 });

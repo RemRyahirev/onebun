@@ -86,6 +86,16 @@ export interface GlobalScope {
   overrides: Map<Context.Tag<unknown, unknown>, unknown>;
   /** Dynamic-module options captured at import-processing time, keyed by module class. */
   moduleOptions: Map<Function, unknown>;
+  /**
+   * Modules already constructed in this application, keyed by module class.
+   *
+   * A module class is built ONCE per application and `imports` decides VISIBILITY only.
+   * Before this, deduplication existed for `@Global()` modules alone, so the documented
+   * remedy for a non-global module — every submodule importing it via `forFeature()` — gave
+   * each submodule its OWN instance: three CacheService instances for a root plus two
+   * leaves, three initializations, and state written in one invisible in another.
+   */
+  sharedModules: Map<Function, OneBunModule>;
 }
 
 /**
@@ -99,6 +109,7 @@ export function createGlobalScope(): GlobalScope {
     processedModules: new Set(),
     overrides: new Map(),
     moduleOptions: new Map(),
+    sharedModules: new Map(),
   };
 }
 
@@ -118,6 +129,8 @@ const processDefaultScope: GlobalScope = {
   overrides: ((globalThis as any)[Symbol.for('onebun:global_overrides')] ??= new Map()),
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   moduleOptions: ((globalThis as any)[Symbol.for('onebun:global_module_options')] ??= new Map()),
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sharedModules: ((globalThis as any)[Symbol.for('onebun:shared_modules')] ??= new Map()),
 };
 
 /**
@@ -150,6 +163,7 @@ export function clearGlobalServicesRegistry(): void {
   processDefaultScope.processedModules.clear();
   processDefaultScope.overrides.clear();
   processDefaultScope.moduleOptions.clear();
+  processDefaultScope.sharedModules.clear();
   OneBunModule.resetDecoratorMetadataDiagnosis();
 }
 
@@ -362,6 +376,23 @@ export class OneBunModule implements ModuleInstance {
           continue;
         }
 
+        // Already built in this application: take its exports rather than constructing a
+        // second copy. `imports` decides VISIBILITY; the instance count is one per
+        // application, for global and non-global modules alike.
+        const shared = this.scope.sharedModules.get(importModule);
+        if (shared) {
+          layer = Layer.merge(layer, shared.getLayer());
+          for (const [tag, instance] of shared.getExportedServices()) {
+            if (!this.scope.overrides.has(tag)) {
+              this.serviceInstances.set(tag, instance);
+            }
+          }
+          this.logger.debug(
+            `Reusing already-constructed module ${importModule.name} in ${this.moduleClass.name}`,
+          );
+          continue;
+        }
+
         // Pass the logger layer, config, accumulated middleware class refs and — by
         // reference — this application's scope to child modules
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
@@ -418,6 +449,13 @@ export class OneBunModule implements ModuleInstance {
       const serviceLayer = Layer.succeed(tag, instance);
       layer = Layer.merge(layer, serviceLayer);
     }
+
+    // Publish SELF, at the end of this module's own initialization. Publishing from the
+    // importer instead — after its whole import loop finished — lets a sibling or a
+    // descendant reach the same module first and build a second copy: measured 5 instances
+    // where there should have been 2.
+    this.rootLayer = layer;
+    this.scope.sharedModules.set(this.moduleClass, this);
 
     return { layer, controllers };
   }

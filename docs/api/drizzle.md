@@ -149,7 +149,7 @@ export class UserService extends BaseService {
 
 ### Non-Global Mode
 
-`isGlobal: false` stops `DrizzleService` from being ambiently available and gives each module that imports `DrizzleModule` its **own** `DrizzleService` instance — its own client, its own connection.
+`isGlobal: false` stops `DrizzleService` from being ambiently available: a module reaches it only by importing `DrizzleModule` explicitly. There is still exactly ONE `DrizzleService` per application — the two modes differ in VISIBILITY, not in how many instances exist.
 
 ```typescript
 @Module({
@@ -203,8 +203,8 @@ export class AppModule {}
 export class UserModule {}
 ```
 
-::: warning forFeature() does not share the root instance
-Each module importing it currently constructs its **own** `DrizzleService` — a separate connection, and no state in common with the root's. Two feature modules therefore mean two connections, not one shared pool. This is the opposite of what `forFeature()` means in NestJS, and it is being changed; today, prefer leaving the module global unless you specifically want per-module instances.
+::: tip forFeature() shares the root instance
+Every module importing it receives the SAME `DrizzleService` — one connection pool for the application, not one per feature module. Earlier releases constructed a new instance per importer, so two feature modules opened two pools and shared no state.
 
 If you want ONE shared instance without making `DrizzleModule` itself global, a `@Global()` module that imports it and re-exports the service does that — the re-exported instance then reaches modules that import neither:
 
@@ -222,8 +222,8 @@ export class DatabaseModule {}
 **Technical details for AI agents:**
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
 - `isGlobal: true` (default) - one DrizzleService per application, one DB connection
-- `isGlobal: false` - each importing module constructs its own DrizzleService instance. NOT a multi-database mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration. Two `forRoot()` calls with different databases yield two instances both connected to the last one, silently
-- `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import and does NOT share the root's instance — each importing module gets its own. That inverts the NestJS meaning and is being changed
+- `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT a multi-database mechanism: `forRoot()` stores options on the module CLASS, so every instance reads the same last-written configuration
+- `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one DrizzleService
 - Global services are stored in the application's scope and automatically injected into all its modules
 - When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`, which is process-wide and permanent: one such call de-globalizes the module for every application in the process, and `forRoot({ isGlobal: true })` does not restore it
 </llm-only>

@@ -532,10 +532,11 @@ describe('CacheModule Global Mode Examples (docs/api/cache.md)', () => {
   /**
    * @source docs:api/cache.md#non-global-mode
    */
-  it('should give each importing module its own CacheService, not the root instance', async () => {
-    // From docs: "each importing module constructs its OWN CacheService rather than
-    // sharing the root's — state written through one is invisible through another".
-    // Pinned so that changing it (planned) has to be a deliberate edit here.
+  it('should share ONE CacheService between the root and every module that imports it', async () => {
+    // From docs: forFeature() shares the registration. This case previously pinned the
+    // opposite — each importer got its own instance, state was not shared, and a root plus
+    // two leaves produced 3 CacheService instances and 3 initializations. It was written to
+    // force a deliberate edit when that changed, and this is that edit.
     CacheModule.forRoot({ type: CacheType.MEMORY, isGlobal: false });
 
     @Service()
@@ -581,10 +582,10 @@ describe('CacheModule Global Mode Examples (docs/api/cache.md)', () => {
       const left = app.getService(LeftService);
       const right = app.getService(RightService);
 
-      expect(left.cache).not.toBe(right.cache);
+      expect(left.cache).toBe(right.cache);
 
       await left.cache.set('shared-key', 'written-left');
-      expect(await right.cache.get('shared-key')).toBeUndefined();
+      expect(await right.cache.get<string>('shared-key')).toBe('written-left');
     } finally {
       await app.stop();
       CacheModule.clearOptions();

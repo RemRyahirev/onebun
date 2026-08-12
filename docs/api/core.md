@@ -561,6 +561,8 @@ export class UserModule {}
 
 **Import order does not matter.** A `@Global()` module's services reach every module that can see it regardless of where it sits in an `imports` array — and whether or not the importing module lists it at all. A sibling import that happens to initialize the global module first no longer leaves the importer with nothing.
 
+**Visibility, not instance count.** `@Global()` makes a module's exported services reachable from every module without an explicit import; a module without it is reachable only where it is imported. Either way the module itself is constructed exactly ONCE per application, so two modules importing the same one share its services rather than each getting a copy.
+
 **Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
 
 The options a dynamic module was imported with are **captured per application** at import time, so a later `forRoot()` in the same process cannot retroactively change what an already-running application is using.
