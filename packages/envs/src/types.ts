@@ -41,43 +41,67 @@ export type EnvSchema<T> = {
 };
 
 /**
- * Format value for error messages
+ * Describe a rejected value for an error message.
+ *
+ * The value is never rendered. An environment variable may hold a secret, and the framework
+ * logs its own startup failures before user code gets control — there is nothing to suppress
+ * at that point, so the only safe rule is to never echo the value at all, with no flag to
+ * remember. Only the shape survives: the kind, plus the length where that is what tells an
+ * operator about a stray quote, a trailing space or an accidentally blank value.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function formatValue(value: any): string {
+function describeValue(value: unknown): string {
   if (value === undefined) {
-    return 'undefined';
+    return 'not set';
   }
   if (value === null) {
     return 'null';
   }
   if (typeof value === 'string') {
-    return `"${value}"`;
+    return value === '' ? 'an empty string' : `a string of length ${value.length}`;
+  }
+  if (Array.isArray(value)) {
+    return `an array of length ${value.length}`;
   }
   if (typeof value === 'object') {
-    try {
-      return JSON.stringify(value);
-    } catch {
-      return '[object Object]';
-    }
+    return 'an object';
+  }
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    return 'a number';
+  }
+  if (typeof value === 'boolean') {
+    return 'a boolean';
   }
 
-  return String(value);
+  return `a ${typeof value}`;
 }
 
 /**
- * Environment variable validation error
+ * Environment variable validation error.
+ *
+ * The rejected value is described, never stored: `value` holds a redacted description such as
+ * `a string of length 21`, so serializing the error — message, stack or own properties — cannot
+ * leak a secret. This is the single choke point every construction site funnels through.
+ *
+ * @see docs:api/envs.md
  */
 export class EnvValidationError extends Error {
-  constructor(
-    public readonly variable: string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
-    public readonly value: any,
-    public readonly reason: string,
-  ) {
-    super(
-      `Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`,
-    );
+  /** Environment variable name */
+  public readonly variable: string;
+
+  /** Redacted description of the rejected value, e.g. `a string of length 21` */
+  public readonly value: string;
+
+  /** Why the value was rejected */
+  public readonly reason: string;
+
+  constructor(variable: string, rejectedValue: unknown, reason: string) {
+    const described = describeValue(rejectedValue);
+
+    super(`Environment variable validation failed for "${variable}": ${reason}. Got: ${described}`);
+
+    this.variable = variable;
+    this.value = described;
+    this.reason = reason;
     this.name = 'EnvValidationError';
   }
 }

@@ -12,11 +12,13 @@ describe('EnvValidationError', () => {
 
     expect(error.name).toBe('EnvValidationError');
     expect(error.variable).toBe('TEST_VAR');
-    expect(error.value).toBe('invalid_value');
+    // The rejected value is described, never retained — 'invalid_value' is 13 characters.
+    expect(error.value).toBe('a string of length 13');
     expect(error.reason).toBe('not a number');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": not a number. Got: "invalid_value"',
+      'Environment variable validation failed for "TEST_VAR": not a number. Got: a string of length 13',
     );
+    expect(error.message).not.toContain('invalid_value');
   });
 
   it('should be instance of Error', () => {
@@ -26,24 +28,25 @@ describe('EnvValidationError', () => {
 
   it('should handle undefined value', () => {
     const error = new EnvValidationError('TEST_VAR', undefined, 'required');
-    expect(error.value).toBeUndefined();
+    expect(error.value).toBe('not set');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": required. Got: undefined',
+      'Environment variable validation failed for "TEST_VAR": required. Got: not set',
     );
   });
 
   it('should handle object values', () => {
-    const value = { key: 'value' };
+    const value = { key: 'secret-value' };
     const error = new EnvValidationError('TEST_VAR', value, 'invalid object');
-    expect(error.value).toBe(value);
+    expect(error.value).toBe('an object');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": invalid object. Got: {"key":"value"}',
+      'Environment variable validation failed for "TEST_VAR": invalid object. Got: an object',
     );
+    expect(error.message).not.toContain('secret-value');
   });
 
   it('should handle null value', () => {
     const error = new EnvValidationError('TEST_VAR', null, 'null value');
-    expect(error.value).toBeNull();
+    expect(error.value).toBe('null');
     expect(error.message).toBe(
       'Environment variable validation failed for "TEST_VAR": null value. Got: null',
     );
@@ -51,26 +54,27 @@ describe('EnvValidationError', () => {
 
   it('should handle number values', () => {
     const error = new EnvValidationError('TEST_VAR', 42, 'invalid number');
-    expect(error.value).toBe(42);
+    expect(error.value).toBe('a number');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": invalid number. Got: 42',
+      'Environment variable validation failed for "TEST_VAR": invalid number. Got: a number',
     );
+    expect(error.message).not.toContain('42');
   });
 
   it('should handle boolean values', () => {
     const error = new EnvValidationError('TEST_VAR', true, 'invalid boolean');
-    expect(error.value).toBe(true);
+    expect(error.value).toBe('a boolean');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": invalid boolean. Got: true',
+      'Environment variable validation failed for "TEST_VAR": invalid boolean. Got: a boolean',
     );
   });
 
   it('should handle array values', () => {
     const value = ['a', 'b', 'c'];
     const error = new EnvValidationError('TEST_VAR', value, 'invalid array');
-    expect(error.value).toBe(value);
+    expect(error.value).toBe('an array of length 3');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": invalid array. Got: ["a","b","c"]',
+      'Environment variable validation failed for "TEST_VAR": invalid array. Got: an array of length 3',
     );
   });
 
@@ -78,9 +82,10 @@ describe('EnvValidationError', () => {
     const value: Record<string, unknown> = { key: 'value' };
     value.self = value; // создаем циклическую ссылку
     const error = new EnvValidationError('TEST_VAR', value, 'circular object');
-    expect(error.value).toBe(value);
+    // Nothing is serialized, so a cycle can no longer throw on the error path.
+    expect(error.value).toBe('an object');
     expect(error.message).toBe(
-      'Environment variable validation failed for "TEST_VAR": circular object. Got: [object Object]',
+      'Environment variable validation failed for "TEST_VAR": circular object. Got: an object',
     );
   });
 });

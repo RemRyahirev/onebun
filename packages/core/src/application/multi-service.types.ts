@@ -138,4 +138,22 @@ export interface MultiServiceApplicationOptions<TServices extends ServicesMap = 
    * When set, each service's OneBunApplication receives this queue config.
    */
   queue?: ApplicationOptions['queue'];
+
+  /**
+   * Enable graceful shutdown on SIGTERM/SIGINT for the whole process.
+   *
+   * Exactly one handler is registered, on the parent: it stops every service through
+   * `stopAll()` and only then exits. Child services never register their own — the first
+   * one to finish would otherwise exit the process out from under its siblings.
+   * Set to false to install no handler at all and drive `stop()` yourself.
+   * @defaultValue true
+   */
+  gracefulShutdown?: boolean;
+
+  /**
+   * Deadline for the whole shutdown, in milliseconds. Applies to the parent's `stopAll()`
+   * and is passed to every service.
+   * @defaultValue 15000
+   */
+  shutdownTimeout?: number;
 }

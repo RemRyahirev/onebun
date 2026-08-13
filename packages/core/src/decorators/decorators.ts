@@ -1,9 +1,10 @@
 import './metadata'; // Import polyfill first
-import { type, type Type } from 'arktype';
+
 
 import type { ExceptionFilter } from '../exception-filters/exception-filters';
 import type { Guard } from '../http-guards/http-guards';
 import type { Interceptor } from '../interceptors/interceptors';
+import type { Type } from 'arktype';
 
 import {
   type ControllerMetadata,
@@ -15,6 +16,11 @@ import {
   ParamType,
   type RouteOptions,
 } from '../types';
+import {
+  isArkErrors,
+  isUnrecognisedArkResult,
+  reportDuplicateArkTypeCopies,
+} from '../validation/arktype-interop';
 
 import {
   copyAllMetadata,
@@ -560,9 +566,21 @@ function createRouteDecorator(method: HttpMethod) {
 /**
  * Helper function to check if a schema accepts undefined
  * Used to determine if @Body is required by default
+ *
+ * Uses the same copy-independent failure check as `validate()`: `instanceof type.errors` compares
+ * against @onebun/core's own arktype copy, so under a duplicate install every `@Body` would be
+ * silently inferred optional. Anything that is a failure — or an ArkType internal we cannot
+ * identify — fails closed to "does not accept undefined", i.e. `@Body` stays required.
+ *
+ * Decoration runs at application startup, so this is also where the one-per-process
+ * duplicate-arktype diagnostic is emitted.
  */
 function schemaAcceptsUndefined(schema: Type<unknown>): boolean {
-  return !(schema(undefined) instanceof type.errors);
+  reportDuplicateArkTypeCopies();
+
+  const result = schema(undefined);
+
+  return !isArkErrors(result) && !isUnrecognisedArkResult(result);
 }
 
 /**

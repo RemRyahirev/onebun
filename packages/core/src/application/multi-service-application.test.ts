@@ -6,6 +6,8 @@ import {
   test,
 } from 'bun:test';
 
+import type { BeforeApplicationDestroy, OnModuleDestroy } from '../module/lifecycle';
+
 import { TypedEnv } from '@onebun/envs';
 
 import {
@@ -665,6 +667,152 @@ describe('OneBunApplication multi-service mode', () => {
       expect(probeOne.queue).toBeDefined();
       expect(probeTwo.queue).toBeDefined();
       expect(probeOne.queue).not.toBe(probeTwo.queue);
+    });
+  });
+
+  /**
+   * One process, one signal handler. Every child used to register its own, each ending in
+   * `process.exit(0)`, so the first service to finish stopping killed the process while
+   * its siblings were still inside `beforeApplicationDestroy`.
+   */
+  describe('signal-driven shutdown', () => {
+    const HOOK_DELAY_MS = 80;
+    const events: string[] = [];
+
+    @Service()
+    class AlphaLifecycleService extends BaseService
+      implements BeforeApplicationDestroy, OnModuleDestroy {
+      async beforeApplicationDestroy(): Promise<void> {
+        events.push('alpha:before:enter');
+        await Bun.sleep(HOOK_DELAY_MS);
+        events.push('alpha:before:exit');
+      }
+
+      onModuleDestroy(): void {
+        events.push('alpha:moduleDestroy');
+      }
+    }
+
+    @Service()
+    class BravoLifecycleService extends BaseService
+      implements BeforeApplicationDestroy, OnModuleDestroy {
+      async beforeApplicationDestroy(): Promise<void> {
+        events.push('bravo:before:enter');
+        await Bun.sleep(HOOK_DELAY_MS);
+        events.push('bravo:before:exit');
+      }
+
+      onModuleDestroy(): void {
+        events.push('bravo:moduleDestroy');
+      }
+    }
+
+    @Module({ providers: [AlphaLifecycleService] })
+    class AlphaModule {}
+
+    @Module({ providers: [BravoLifecycleService] })
+    class BravoModule {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any> | undefined;
+
+    beforeEach(() => {
+      events.length = 0;
+    });
+
+    afterEach(async () => {
+      await app?.stop();
+      app = undefined;
+      TypedEnv.clear();
+    });
+
+    test('one SIGTERM stops every service completely before the process exits', async () => {
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+      const originalExit = process.exit.bind(process);
+      const exitCodes: number[] = [];
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+      process.exit = ((code?: number) => {
+        exitCodes.push(code ?? 0);
+      }) as typeof process.exit;
+
+      try {
+        app = new OneBunApplication({
+          services: {
+            alpha: { module: AlphaModule, port: 0 },
+            bravo: { module: BravoModule, port: 0 },
+          },
+          metrics: { enabled: false },
+        });
+        await app.start();
+
+        // The FIRST handler registered is the one that used to win the race and exit the
+        // process; driving it must now stop the whole process' worth of services.
+        signalHandlers.SIGTERM[0]();
+
+        const startedAt = Date.now();
+        while (exitCodes.length === 0 && Date.now() - startedAt < 5000) {
+          await Bun.sleep(5);
+        }
+      } finally {
+        process.on = originalProcessOn;
+        process.exit = originalExit;
+      }
+
+      // bravo used to be cut mid-teardown: its beforeApplicationDestroy never returned
+      // and its onModuleDestroy never ran at all.
+      expect(events).toContain('alpha:before:exit');
+      expect(events).toContain('bravo:before:exit');
+      expect(events).toContain('alpha:moduleDestroy');
+      expect(events).toContain('bravo:moduleDestroy');
+
+      // Exactly one handler for the whole process — the parent's.
+      expect(signalHandlers.SIGTERM).toHaveLength(1);
+      expect(signalHandlers.SIGINT).toHaveLength(1);
+
+      // stopAll() ran to completion before the exit, and exited exactly once.
+      expect(app!.getRunningServices()).toEqual([]);
+      expect(exitCodes).toEqual([0]);
+    });
+
+    test('gracefulShutdown: false installs no handler at all', async () => {
+      const signalHandlers: string[] = [];
+      const originalProcessOn = process.on.bind(process);
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers.push(event);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+
+      try {
+        app = new OneBunApplication({
+          services: {
+            alpha: { module: AlphaModule, port: 0 },
+            bravo: { module: BravoModule, port: 0 },
+          },
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+        });
+        await app.start();
+      } finally {
+        process.on = originalProcessOn;
+      }
+
+      expect(signalHandlers).toEqual([]);
     });
   });
 });

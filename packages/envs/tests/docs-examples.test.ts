@@ -472,6 +472,137 @@ describe('Envs API Documentation Examples', () => {
     });
   });
 
+  describe('Empty Values (docs/api/envs.md)', () => {
+    afterEach(() => {
+      clearGetConfigCache();
+    });
+
+    /**
+     * @source docs:api/envs.md#empty-values
+     */
+    it('should apply the declared default when the variable is blank', () => {
+      // From docs: `VAR=` means "not configured"
+      const envSchema: EnvSchema<{ database: { host: string; port: number } }> = {
+        database: {
+          host: Env.string({ env: 'DB_HOST', default: 'localhost' }),
+          port: Env.number({ env: 'DB_PORT', default: 5432 }),
+        },
+      };
+
+      // .env
+      // DB_HOST=
+      // DB_PORT=
+      const config = getConfig(envSchema, {
+        loadDotEnv: false,
+        valueOverrides: { DB_HOST: '', DB_PORT: '' },
+      });
+
+      expect(config.get('database.host')).toBe('localhost'); // the default, not ''
+      expect(config.get('database.port')).toBe(5432); // the default, not a parse error
+    });
+
+    /**
+     * @source docs:api/envs.md#empty-values
+     */
+    it('should not let a blank value satisfy required: true', () => {
+      // From docs: DATABASE_URL= throws — an empty string does not satisfy `required`
+      const envSchema: EnvSchema<{ database: { url: string } }> = {
+        database: {
+          url: Env.string({ env: 'DATABASE_URL', required: true }),
+        },
+      };
+
+      expect(() =>
+        getConfig(envSchema, {
+          loadDotEnv: false,
+          valueOverrides: { DATABASE_URL: '' },
+        }),
+      ).toThrow(
+        'Environment variable validation failed for "DATABASE_URL":'
+        + ' Required variable is set to an empty string. Got: an empty string',
+      );
+    });
+
+    /**
+     * @source docs:api/envs.md#empty-values
+     */
+    it('should keep whitespace as a real value', () => {
+      // From docs: "What counts as empty" — only the exact empty string
+      const envSchema: EnvSchema<{ database: { host: string } }> = {
+        database: { host: Env.string({ env: 'WS_DB_HOST', default: 'localhost' }) },
+      };
+
+      const config = getConfig(envSchema, {
+        loadDotEnv: false,
+        valueOverrides: { WS_DB_HOST: '   ' },
+      });
+
+      expect(config.get('database.host')).toBe('   ');
+    });
+
+    /**
+     * @source docs:api/envs.md#empty-values
+     */
+    it('should use the type zero value when neither default nor required is declared', () => {
+      // From docs: "Neither `default` nor `required`"
+      const envSchema = { host: Env.string({ env: 'ZERO_VALUE_HOST' }) };
+
+      const config = getConfig(envSchema, { loadDotEnv: false });
+
+      expect(config.get('host')).toBe('');
+    });
+  });
+
+  describe('Rejected Values Are Never Echoed (docs/api/envs.md)', () => {
+    afterEach(() => {
+      clearGetConfigCache();
+    });
+
+    /**
+     * @source docs:api/envs.md#rejected-values-are-never-echoed
+     */
+    it('should describe the rejected value instead of printing it', () => {
+      // From docs: DATABASE_PASSWORD=super-secret-p@ssw0rd against a number variable
+      const secret = 'super-secret-p@ssw0rd';
+      const envSchema: EnvSchema<{ database: { password: number } }> = {
+        database: {
+          password: Env.number({ env: 'DATABASE_PASSWORD', required: true, sensitive: true }),
+        },
+      };
+
+      let thrown: Error | undefined;
+      try {
+        getConfig(envSchema, {
+          loadDotEnv: false,
+          valueOverrides: { DATABASE_PASSWORD: secret },
+        });
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown).toBeInstanceOf(EnvValidationError);
+      expect(thrown?.message).toBe(
+        'Environment variable validation failed for "DATABASE_PASSWORD":'
+        + ' Value is not a valid number. Got: a string of length 21',
+      );
+      expect(thrown?.message).not.toContain(secret);
+    });
+
+    /**
+     * @source docs:api/envs.md#rejected-values-are-never-echoed
+     */
+    it('should expose the same description through error.value', () => {
+      // From docs: the description table
+      expect(new EnvValidationError('V', undefined, 'r').value).toBe('not set');
+      expect(new EnvValidationError('V', '', 'r').value).toBe('an empty string');
+      expect(new EnvValidationError('V', 'hunter2', 'r').value).toBe('a string of length 7');
+      expect(new EnvValidationError('V', 42, 'r').value).toBe('a number');
+      expect(new EnvValidationError('V', true, 'r').value).toBe('a boolean');
+      expect(new EnvValidationError('V', ['a', 'b'], 'r').value).toBe('an array of length 2');
+      expect(new EnvValidationError('V', { key: 'v' }, 'r').value).toBe('an object');
+    });
+  });
+
   describe('Pre-init Config Access (docs/api/envs.md)', () => {
     afterEach(() => {
       clearGetConfigCache();

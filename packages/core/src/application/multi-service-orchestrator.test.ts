@@ -16,6 +16,7 @@ import {
   test,
 } from 'bun:test';
 
+import type { BeforeApplicationDestroy } from '../module/lifecycle';
 import type { QueueAdapter, Subscription } from '../queue/types';
 
 import { TypedEnv } from '@onebun/envs';
@@ -27,6 +28,7 @@ import {
   Module,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { BaseService, Service } from '../module/service';
 import { createMockSyncLogger } from '../testing/test-utils';
 
 import { MultiServiceOrchestrator } from './multi-service-orchestrator';
@@ -206,5 +208,129 @@ describe('MultiServiceOrchestrator queue enablement', () => {
 
     expect(contradictionWarnings()).toHaveLength(1);
     expect(SpyQueueAdapter.constructCount).toBe(0);
+  });
+});
+
+/**
+ * Shutdown ordering and signal-handler ownership. Both are only visible from the
+ * orchestrator: the application builds the parent logger itself, so the per-service
+ * `Service "x" stopped` lines cannot be captured through the public multi-service API.
+ */
+describe('MultiServiceOrchestrator shutdown', () => {
+  const HOOK_DELAY_MS = 150;
+  const SEQUENTIAL_FLOOR_MS = HOOK_DELAY_MS * 2;
+
+  let logLines: { level: string; message: string }[];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let orchestrator: MultiServiceOrchestrator<any> | null;
+
+  @Service()
+  class SlowTeardownService extends BaseService implements BeforeApplicationDestroy {
+    async beforeApplicationDestroy(): Promise<void> {
+      await Bun.sleep(HOOK_DELAY_MS);
+    }
+  }
+
+  @Module({ providers: [SlowTeardownService] })
+  class SlowModuleA {}
+
+  @Module({ providers: [SlowTeardownService] })
+  class SlowModuleB {}
+
+  function makeRecordingLogger(): SyncLogger {
+    const record = (level: string) => (message: string) => {
+      logLines.push({ level, message });
+    };
+    const logger: SyncLogger = {
+      ...createMockSyncLogger(),
+      trace: record('trace'),
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
+      fatal: record('fatal'),
+      child: () => logger,
+    };
+
+    return logger;
+  }
+
+  beforeEach(() => {
+    logLines = [];
+    orchestrator = null;
+    TypedEnv.clear();
+  });
+
+  afterEach(async () => {
+    await orchestrator?.stopAll();
+    TypedEnv.clear();
+  });
+
+  test('stops services concurrently, not one after another', async () => {
+    orchestrator = new MultiServiceOrchestrator(
+      {
+        services: {
+          svcA: { module: SlowModuleA, port: 0 },
+          svcB: { module: SlowModuleB, port: 0 },
+        },
+        metrics: { enabled: false },
+      },
+      makeRecordingLogger(),
+    );
+
+    await orchestrator.startAll();
+
+    const startedAt = Date.now();
+    await orchestrator.stopAll();
+    const elapsed = Date.now() - startedAt;
+
+    // Sequential teardown costs the sum of the hooks; concurrent costs the slowest one.
+    expect(elapsed).toBeLessThan(SEQUENTIAL_FLOOR_MS);
+
+    // Preserved diagnostics, not a regression test: these lines were already emitted on
+    // the explicit-stop path. What is new is that a SIGTERM now reaches this code at all.
+    const messages = logLines.map(line => line.message);
+    expect(messages).toContain('Service "svcA" stopped');
+    expect(messages).toContain('Service "svcB" stopped');
+    expect(messages).toContain('Multi-service application stopped');
+    expect(messages.indexOf('Multi-service application stopped'))
+      .toBeGreaterThan(messages.indexOf('Service "svcB" stopped'));
+
+    orchestrator = null;
+  });
+
+  test('children never register their own signal handlers', async () => {
+    const registered: string[] = [];
+    const originalProcessOn = process.on.bind(process);
+
+    process.on = ((event: string, handler: () => void) => {
+      if (event === 'SIGTERM' || event === 'SIGINT') {
+        registered.push(event);
+
+        return process;
+      }
+
+      return originalProcessOn(event as 'exit', handler as () => void);
+    }) as typeof process.on;
+
+    try {
+      orchestrator = new MultiServiceOrchestrator(
+        {
+          services: {
+            svcA: { module: SlowModuleA, port: 0 },
+            svcB: { module: SlowModuleB, port: 0 },
+          },
+          metrics: { enabled: false },
+        },
+        makeRecordingLogger(),
+      );
+
+      await orchestrator.startAll();
+    } finally {
+      process.on = originalProcessOn;
+    }
+
+    // Every child used to install a SIGTERM/SIGINT pair ending in process.exit(0).
+    expect(registered).toEqual([]);
   });
 });

@@ -20,20 +20,32 @@ export class EnvParser {
     config: EnvVariableConfig<T>,
     options: EnvLoadOptions = {},
   ): Effect.Effect<T, EnvValidationError> {
-    const resolveValue = Effect.sync(() => {
-      // If value is not set
-      if (value === undefined) {
+    const resolveValue = Effect.suspend((): Effect.Effect<unknown, EnvValidationError> => {
+      // `VAR=` means "not configured", exactly like an unset variable: a compose file with a
+      // blank value, a ConfigMap key with no value, a CI variable that was never populated.
+      // Whitespace is not empty — `VAR=" "` is something an operator typed on purpose.
+      if (value === undefined || value === '') {
         if (config.default !== undefined) {
-          return config.default;
+          return Effect.succeed(config.default);
         }
         if (config.required) {
-          throw new EnvValidationError(variable, value, 'Required variable is not set');
+          // Name which of the two happened: an operator whose compose file blanked a value
+          // cannot tell that apart from a variable nobody ever declared.
+          return Effect.fail(
+            new EnvValidationError(
+              variable,
+              value,
+              value === undefined
+                ? 'Required variable is not set'
+                : 'Required variable is set to an empty string',
+            ),
+          );
         }
 
-        return EnvParser.getDefaultForTypeSync(config.type);
+        return Effect.succeed(EnvParser.getDefaultForTypeSync(config.type));
       }
 
-      return value;
+      return Effect.succeed(value);
     });
 
     const parseValue = (resolvedValue: unknown) => {
@@ -68,14 +80,15 @@ export class EnvParser {
             return value;
 
           case 'number': {
-            // Empty string should be rejected for numbers
+            // A blank value never reaches here (parse() treats it as "not configured"), but a
+            // whitespace-only one does — and Number('  ') is 0, which would be a silent lie.
             if (value.trim() === '') {
-              throw new Error(`"${value}" is not a valid number`);
+              throw new Error('Value is not a valid number');
             }
 
             const num = Number(value);
             if (isNaN(num)) {
-              throw new Error(`"${value}" is not a valid number`);
+              throw new Error('Value is not a valid number');
             }
 
             return num;
@@ -89,7 +102,7 @@ export class EnvParser {
             if (['false', '0', 'no', 'off'].includes(lower)) {
               return false;
             }
-            throw new Error(`"${value}" is not a valid boolean`);
+            throw new Error('Value is not a valid boolean');
           }
 
           case 'array': {

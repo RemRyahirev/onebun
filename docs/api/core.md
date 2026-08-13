@@ -202,6 +202,14 @@ interface ApplicationOptions {
   /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
   gracefulShutdown?: boolean;
 
+  /**
+   * Deadline for the whole shutdown sequence in ms (default: 15000).
+   * The first half bounds the in-flight request drain — connections still open when it
+   * expires are force-closed and counted in a warning — and the rest bounds the destroy
+   * hooks. On the signal path a shutdown that hits the deadline exits with code 1.
+   */
+  shutdownTimeout?: number;
+
   /** Global exception filters. Route/controller filters take priority. */
   filters?: ExceptionFilter[];
 
@@ -300,13 +308,17 @@ class OneBunApplication {
   /** Start the HTTP server */
   async start(): Promise<void>;
 
-  /** Stop the HTTP server with optional cleanup options */
+  /**
+   * Drain in-flight requests, then stop the server and run the destroy hooks.
+   * Idempotent: a second call awaits the first shutdown instead of repeating it.
+   * Always resolves within `shutdownTimeout`.
+   */
   async stop(options?: { 
     closeSharedRedis?: boolean; 
     signal?: string;  // e.g., 'SIGTERM', 'SIGINT'
   }): Promise<void>;
 
-  /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT) */
+  /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT). Registers at most once. */
   enableGracefulShutdown(): void;
 
   /** Get configuration service with full type inference via module augmentation */
@@ -438,29 +450,58 @@ The convention the framework packages follow is `@scope/package/ClassName`.
 
 ### Graceful Shutdown
 
-OneBun enables graceful shutdown **by default**. When the application receives SIGTERM or SIGINT signals, it automatically:
-1. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
-2. Stops the HTTP server
-3. Closes all WebSocket connections
-4. Calls `onModuleDestroy()` hooks on all services and controllers
-5. Disconnects shared Redis connection
-6. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on any
+`await app.stop()` — it runs this sequence, in this order:
+
+1. **Refuses new requests**: every route answers `503 Service Unavailable`
+   (`{"success": false, "error": "Service Unavailable", ...}`). The listener stays open on
+   purpose, so a load balancer sees a refusal instead of a dropped connection.
+2. **Drains in-flight requests**: waits for the requests already being served to finish.
+   Anything still open when the drain deadline expires is force-closed, and a `warn` names
+   how many connections were cut.
+3. **Closes the HTTP listener** — before any destroy hook runs.
+4. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
+5. Closes all WebSocket connections
+6. Stops the queue service and disconnects the queue adapter
+7. Flushes traces
+8. Calls `onModuleDestroy()` hooks on all services and controllers
+9. Releases the shared Redis connection (disconnected when the last consumer lets go)
+10. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+11. Flushes the logger transport
+
+Steps 1–3 are what keeps a rolling deploy from cutting responses that were mid-flight: the
+destroy hooks no longer run while the socket is still accepting work.
+
+**Bounded, always**. `shutdownTimeout` (default **15000 ms**) caps the whole sequence.
+The first half of that budget bounds the drain; the rest bounds the destroy hooks. `stop()`
+resolves when the deadline expires whatever is still running, logging what that was; on the
+signal path the process then exits with code **1** instead of 0.
+
+**Idempotent**. `stop()` runs once per application. A second call — sequential, overlapping,
+or a second signal — awaits the first shutdown and re-runs nothing. A signal arriving during
+a shutdown is logged (`Already shutting down, ignoring SIGINT`) and does not restart the
+drain. `enableGracefulShutdown()` registers its listeners at most once per instance.
 
 ```typescript
-// Default: graceful shutdown is enabled
+// Default: graceful shutdown is enabled, with a 15s budget
 const app = new OneBunApplication(AppModule);
 await app.start();
 // SIGTERM/SIGINT handlers are automatically registered
+
+// Give slow requests more room to finish (drain gets the first half: 15s here)
+const app = new OneBunApplication(AppModule, {
+  shutdownTimeout: 30_000,
+});
 
 // To disable automatic shutdown handling:
 const app = new OneBunApplication(AppModule, {
   gracefulShutdown: false,
 });
 await app.start();
-app.enableGracefulShutdown(); // Enable manually later if needed
+app.enableGracefulShutdown(); // Register the handlers yourself instead
 
-// Programmatic shutdown
-await app.stop(); // Closes server, WebSocket, and shared Redis
+// Programmatic shutdown — drains, then closes server, WebSocket, and shared Redis
+await app.stop();
 
 // Keep shared Redis open for other consumers
 await app.stop({ closeSharedRedis: false });
@@ -468,6 +509,12 @@ await app.stop({ closeSharedRedis: false });
 // Pass signal for lifecycle hooks
 await app.stop({ signal: 'SIGTERM' });
 ```
+
+**Multi-service mode**: the *parent* application registers the one SIGTERM/SIGINT handler
+for the process; child services never register their own. The handler runs
+`stopAll()`, which stops every service **concurrently** (each service still drains its own
+requests), and the process exits only after the last service has finished its hooks. Pass
+`gracefulShutdown: false` in `MultiServiceApplicationOptions` to install no handler at all.
 
 ### Lifecycle Hooks
 
@@ -506,6 +553,10 @@ interface MultiServiceApplicationOptions {
   enabledServices?: string[];
   excludedServices?: string[];
   externalServiceUrls?: Record<string, string>;
+  /** One process-level SIGTERM/SIGINT handler on the parent (default: true) */
+  gracefulShutdown?: boolean;
+  /** Shutdown deadline in ms for stopAll() and every child (default: 15000) */
+  shutdownTimeout?: number;
 }
 
 interface ServiceConfig {

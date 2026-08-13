@@ -538,6 +538,20 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   gracefulShutdown?: boolean;
 
   /**
+   * Deadline for the whole shutdown sequence, in milliseconds.
+   *
+   * `stop()` returns after at most this long whatever is still running, so a wedged
+   * handler or a destroy hook that never resolves cannot hold the process forever.
+   * The first half of the budget bounds the in-flight HTTP drain — connections still
+   * open when it expires are force-closed and counted in a warning — and the remainder
+   * bounds the destroy hooks. On the signal path a shutdown that hits the deadline
+   * exits the process with code 1 and logs what was still running.
+   * @defaultValue 15000
+   * @see docs:api/core.md
+   */
+  shutdownTimeout?: number;
+
+  /**
    * Global exception filters applied to all routes.
    * Route-level and controller-level filters take priority over global ones.
    * If no filters match, the built-in default filter is used.

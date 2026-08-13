@@ -38,13 +38,16 @@ interface EnvVariableConfig {
   /** Type of the variable */
   type: 'string' | 'number' | 'boolean' | 'array';
 
-  /** Default value if not set */
+  /** Default value if not set — also applied when the variable is set to an empty string */
   default?: unknown;
 
   /** Whether the variable is required (default: true if no default) */
   required?: boolean;
 
-  /** Mark as sensitive (will be masked in logs) */
+  /**
+   * Mark as sensitive: `get()` returns a wrapper whose `toString()`/`toJSON()` is `'***'`,
+   * and `getSafeConfig()` masks it. Validation errors never print any value, sensitive or not.
+   */
   sensitive?: boolean;
 
   /** Validation function */
@@ -377,6 +380,118 @@ this.logger.info('Config', { password }); // Logs '***'
 const actualPassword = password.value;
 ```
 
+`sensitive: true` covers value access — `get()` returns the wrapper above, and `getSafeConfig()`
+replaces the value with `'***'`. It does **not** need to cover validation errors, because those
+never carry a value in the first place — see below.
+
+## Rejected Values Are Never Echoed
+
+**No validation error ever contains the value that was rejected** — for any variable, whether or
+not it is marked `sensitive`. There is no flag to switch this on and nothing to remember.
+
+The reason is timing: env validation fails during startup, and the framework logs that failure
+itself (`Failed to start application:`) before your code gets control. There is no point at which
+a user could suppress it, so an error that echoes values would ship secrets to the log aggregator
+on every failed boot.
+
+`EnvValidationError` therefore describes the value instead of printing it, and never stores it:
+
+```typescript
+const config = {
+  database: {
+    password: Env.number({ env: 'DATABASE_PASSWORD', required: true, sensitive: true }),
+  },
+};
+
+// With DATABASE_PASSWORD=super-secret-p@ssw0rd the startup error reads:
+// EnvValidationError: Environment variable validation failed for "DATABASE_PASSWORD":
+//                     Value is not a valid number. Got: a string of length 21
+```
+
+The message still names the variable and the reason, so the misconfiguration is fixable without
+ever seeing the secret. The description is one of:
+
+| Value | `Got:` |
+|-------|--------|
+| unset | `not set` |
+| `''` | `an empty string` |
+| `'hunter2'` | `a string of length 7` |
+| `42` | `a number` |
+| `true` | `a boolean` |
+| `['a', 'b']` | `an array of length 2` |
+| `{ … }` | `an object` |
+
+The length is deliberate: it is what reveals a stray quote or a trailing space without revealing
+the value. The same description is what `error.value` holds — the raw value is not kept on the
+error instance either, so a structured logger that serializes error properties cannot leak it.
+
+::: warning
+The trade-off is that a rejected value is not visible anywhere in the logs, including for
+non-secret variables. To see what a variable actually holds, use `config.getSafeConfig()` after a
+successful boot, or inspect the environment directly.
+:::
+
+## Empty Values
+
+**`VAR=` means "not configured".** An environment variable set to an empty string is treated
+exactly like a variable that was never set: the declared `default` applies, and `required: true`
+is **not** satisfied.
+
+This is the shape real deployments produce — a docker-compose `env_file` with a blank value, a
+Kubernetes ConfigMap key with no value, a CI variable that was declared but never populated.
+
+```typescript
+const envSchema = {
+  database: {
+    host: Env.string({ env: 'DB_HOST', default: 'localhost' }),
+    port: Env.number({ env: 'DB_PORT', default: 5432 }),
+    url: Env.string({ env: 'DATABASE_URL', required: true }),
+  },
+};
+
+// .env
+// DB_HOST=
+// DB_PORT=
+// DATABASE_URL=
+
+config.get('database.host');  // 'localhost' — the default, not ''
+config.get('database.port');  // 5432 — the default, not a parse error
+// DATABASE_URL throws: it is required and an empty string does not satisfy that.
+```
+
+The startup error says which of the two happened, so an operator whose compose file blanked a
+value can tell it apart from one nobody ever declared:
+
+```
+Environment variable validation failed for "DATABASE_URL": Required variable is not set. Got: not set
+Environment variable validation failed for "DATABASE_URL": Required variable is set to an empty string. Got: an empty string
+```
+
+### What counts as empty
+
+Only the exact empty string. **Whitespace is a value the operator typed** and is kept as-is:
+
+| Raw value | `Env.string({ default: 'localhost' })` | `Env.number({ default: 5432 })` |
+|-----------|----------------------------------------|----------------------------------|
+| unset | `'localhost'` | `5432` |
+| `VAR=` | `'localhost'` | `5432` |
+| `VAR="   "` | `'   '` | throws — not a valid number |
+
+### Neither `default` nor `required`
+
+A variable with neither is **never absent** — it takes the type's zero value: `''`, `0`, `false`,
+`[]`. This keeps `InferConfigType` honest (`server.host` is `string`, never `string | undefined`),
+but it means the zero value cannot be distinguished from a real one.
+
+```typescript
+Env.string()                          // unset -> ''      (indistinguishable from VAR=)
+Env.string({ default: 'localhost' })  // unset -> 'localhost'
+Env.string({ required: true })        // unset -> throws at startup
+```
+
+If your code needs to tell "not configured" apart from "configured to the zero value", declare a
+`default` or `required: true`.
+
 ## Environment Variable Naming
 
 By default, nested paths are converted to uppercase with underscores:
@@ -442,7 +557,11 @@ const envSchema = {
 
 // If DATABASE_URL is not set in environment or .env file:
 // Throws: EnvValidationError: Environment variable validation failed for "DATABASE_URL":
-//         Required variable is not set. Got: undefined
+//         Required variable is not set. Got: not set
+
+// If DATABASE_URL is present but blank (`DATABASE_URL=`):
+// Throws: EnvValidationError: Environment variable validation failed for "DATABASE_URL":
+//         Required variable is set to an empty string. Got: an empty string
 ```
 
 **Custom validation function failure:**
@@ -466,7 +585,9 @@ const envSchema = {
 
 // If PORT=99999:
 // Throws: EnvValidationError: Environment variable validation failed for "SERVER_PORT":
-//         Port must be between 1 and 65535. Got: 99999
+//         Port must be between 1 and 65535. Got: a number
+//
+// The value is described, never printed — see "Rejected Values Are Never Echoed".
 ```
 
 ::: tip
@@ -500,6 +621,7 @@ try {
   if (error instanceof EnvValidationError) {
     console.error(`Configuration error: ${error.message}`);
     console.error(`Variable: ${error.variable}`);
+    // A description such as 'a string of length 21' — never the value itself
     console.error(`Value: ${error.value}`);
     process.exit(1);
   }
@@ -535,10 +657,15 @@ const envSchema = {
 **Technical details for AI agents:**
 - `EnvParser.parse()` returns `Effect.Effect<T, EnvValidationError>` — parsing is Effect-based internally
 - `TypedEnv.parseNestedSchema()` runs `Effect.runSync()` on each variable — errors are thrown synchronously
-- `EnvValidationError` has properties: `variable` (env var name), `value` (raw value), `reason` (description)
-- Error message format: `Environment variable validation failed for "${variable}": ${reason}. Got: ${formatValue(value)}`
+- `EnvValidationError` has properties: `variable` (env var name), `value` (redacted **description** of the rejected value, a `string`), `reason` (description)
+- The raw value is never stored on the error and never appears in its message — `describeValue()` in `packages/envs/src/types.ts` is the single choke point every construction site funnels through, so `sensitive` never needs to be threaded into the validators
+- Error message format: `Environment variable validation failed for "${variable}": ${reason}. Got: ${describeValue(value)}`
+- `describeValue()` returns: `not set` | `null` | `an empty string` | `a string of length N` | `a number` | `a boolean` | `an array of length N` | `an object`
 - Variables without `env` option get auto-generated names: `server.port` → `SERVER_PORT`
-- `required` must be explicitly set to `true` — if not set and no `default` is provided, a type-default is used (empty string, 0, false, [])
+- `EnvParser.parse()` treats `''` identically to `undefined` ("not configured"): the `default` applies and `required: true` is not satisfied. Only the exact empty string counts — whitespace-only values are passed through to the type parser
+- The required-variable failure distinguishes the two cases in words: `Required variable is not set` vs `Required variable is set to an empty string`
+- `parseSchema()` uses `Effect.runSyncExit` + `Cause.squash`, not `runSync` inside `try`/`catch`: `runSync` throws a `FiberFailure` (not an `EnvValidationError`), which the old catch re-wrapped, printing the whole message twice
+- `required` must be explicitly set to `true` — if not set and no `default` is provided, a type-default is used (empty string, 0, false, []); a variable is therefore never absent, which keeps `InferConfigType` free of `| undefined`
 - Parsing order: resolve value → parse by type → validate (validate function must return `Effect.Effect<T, EnvValidationError>`)
 - `strict` option in `EnvLoadOptions` means "only load variables defined in schema" (default: false), NOT "make all variables required"
 - `validate` function signature: `(value: T) => Effect.Effect<T, EnvValidationError>` — use `Effect.succeed(value)` for valid, `Effect.fail(new EnvValidationError(...))` for invalid

@@ -12,6 +12,11 @@ import {
 } from 'bun:test';
 import { Effect, Layer } from 'effect';
 
+import type {
+  BeforeApplicationDestroy,
+  OnApplicationDestroy,
+  OnModuleDestroy,
+} from '../module/lifecycle';
 import type { QueueAdapter, Subscription } from '../queue/types';
 import type { ApplicationOptions, ModuleInstance } from '../types';
 import type {
@@ -5288,6 +5293,385 @@ describe('OneBunApplication', () => {
       } finally {
         await app.stop();
       }
+    });
+  });
+
+  /**
+   * Shutdown behaviour that only a REAL server can show: draining, the 503 window, the
+   * deadline and the shutdown latch. The `Bun.serve` mock used by
+   * `describe('Graceful shutdown')` has a `stop: mock()` and no `pendingRequests`, so
+   * nothing there can drain or force-close anything.
+   */
+  describe('Graceful shutdown drain and latch (real server)', () => {
+    const SLOW_HANDLER_MS = 300;
+    const IN_FLIGHT_SETTLE_MS = 60;
+    const SHORT_BUDGET_MS = 400;
+    const OK = 200;
+    const SERVICE_UNAVAILABLE = 503;
+
+    interface LogLine {
+      level: string;
+      message: string;
+    }
+
+    let logLines: LogLine[] = [];
+
+    function capturingLoggerLayer(): Layer.Layer<Logger, never, never> {
+      const record = (level: string) => (message: string) =>
+        Effect.sync(() => {
+          logLines.push({ level, message });
+        });
+
+      const logger: Logger = {
+        trace: record('trace'),
+        debug: record('debug'),
+        info: record('info'),
+        warn: record('warn'),
+        error: record('error'),
+        fatal: record('fatal'),
+        child: () => logger,
+      };
+
+      return Layer.succeed(LoggerService, logger);
+    }
+
+    function createRealApp(
+      moduleClass: new (...args: unknown[]) => object,
+      options?: Partial<ApplicationOptions>,
+    ): OneBunApplication {
+      return new OneBunApplication(moduleClass, {
+        port: 0,
+        metrics: { enabled: false },
+        docs: { enabled: false },
+        gracefulShutdown: false,
+        ...options,
+        loggerLayer: capturingLoggerLayer(),
+      });
+    }
+
+    function hasLine(level: string, fragment: string): boolean {
+      return logLines.some(line => line.level === level && line.message.includes(fragment));
+    }
+
+    async function waitUntil(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+      const startedAt = Date.now();
+      while (!condition() && Date.now() - startedAt < timeoutMs) {
+        await Bun.sleep(5);
+      }
+    }
+
+    /** Counters shared with the per-test lifecycle provider. */
+    interface HookCounters {
+      before: number;
+      module: number;
+      application: number;
+    }
+
+    beforeEach(() => {
+      logLines = [];
+    });
+
+    test('drains an in-flight request instead of resolving while it is still running', async () => {
+      let handlerFinishedAt = 0;
+
+      @Controller('/drain')
+      class SlowController extends BaseController {
+        @Get('/slow')
+        async slow() {
+          await Bun.sleep(SLOW_HANDLER_MS);
+          handlerFinishedAt = Date.now();
+
+          return { marker: 'drained-in-full' };
+        }
+      }
+
+      @Module({ controllers: [SlowController] })
+      class SlowModule {}
+
+      const app = createRealApp(SlowModule);
+      await app.start();
+      const url = `http://localhost:${app.getPort()}/drain/slow`;
+
+      const inFlight = fetch(url);
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      await app.stop();
+      const stopResolvedAt = Date.now();
+
+      const response = await inFlight;
+      expect(response.status).toBe(OK);
+      expect(await response.text()).toContain('drained-in-full');
+      expect(handlerFinishedAt).toBeGreaterThan(0);
+      // The defect: stop() used to discard the promise from Bun's stop() and resolve in
+      // a few milliseconds, with the response still being produced.
+      expect(stopResolvedAt).toBeGreaterThanOrEqual(handlerFinishedAt);
+    });
+
+    test('answers 503 to a request that arrives during the drain window', async () => {
+      @Controller('/drain')
+      class SlowController extends BaseController {
+        @Get('/slow')
+        async slow() {
+          await Bun.sleep(SLOW_HANDLER_MS);
+
+          return { marker: 'drained-in-full' };
+        }
+      }
+
+      @Module({ controllers: [SlowController] })
+      class SlowModule {}
+
+      const app = createRealApp(SlowModule);
+      await app.start();
+      const url = `http://localhost:${app.getPort()}/drain/slow`;
+
+      const inFlight = fetch(url);
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const stopping = app.stop();
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const refused = await fetch(url);
+      expect(refused.status).toBe(SERVICE_UNAVAILABLE);
+      expect(await refused.json()).toMatchObject({ error: 'Service Unavailable' });
+
+      await stopping;
+      expect((await inFlight).status).toBe(OK);
+    });
+
+    test('refuses a request issued after shutdown has begun, from inside beforeApplicationDestroy', async () => {
+      let probeUrl = '';
+      let probeOutcome: number | string = 0;
+
+      @Service()
+      class ShutdownProbeService extends BaseService implements BeforeApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          probeOutcome = await fetch(probeUrl).then(
+            response => response.status,
+            () => 'connection-error',
+          );
+        }
+      }
+
+      @Controller('/probe')
+      class ProbeController extends BaseController {
+        @Get('/ping')
+        ping() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [ProbeController], providers: [ShutdownProbeService] })
+      class ProbeModule {}
+
+      const app = createRealApp(ProbeModule);
+      await app.start();
+      probeUrl = `http://localhost:${app.getPort()}/probe/ping`;
+
+      expect((await fetch(probeUrl)).status).toBe(OK);
+
+      await app.stop();
+
+      // The listener is closed (or refusing) before the first destroy hook runs; it used
+      // to answer 200 while the hooks deregistered the instance from discovery.
+      expect([SERVICE_UNAVAILABLE, 'connection-error']).toContain(probeOutcome);
+    });
+
+    test('force-closes at the drain deadline and warns how many requests were cut', async () => {
+      @Controller('/drain')
+      class HangingController extends BaseController {
+        @Get('/forever')
+        async forever() {
+          await new Promise(() => {
+            // Never resolves: the only thing that can end this request is the deadline.
+          });
+
+          return { unreachable: true };
+        }
+      }
+
+      @Module({ controllers: [HangingController] })
+      class HangingModule {}
+
+      const app = createRealApp(HangingModule, { shutdownTimeout: SHORT_BUDGET_MS });
+      await app.start();
+
+      const hanging = fetch(`http://localhost:${app.getPort()}/drain/forever`).then(
+        () => 'answered',
+        () => 'force-closed',
+      );
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const startedAt = Date.now();
+      await app.stop();
+      const elapsed = Date.now() - startedAt;
+
+      // Bounded by the drain share of the budget, not by the hanging handler.
+      expect(elapsed).toBeLessThan(SHORT_BUDGET_MS * 3);
+      expect(hasLine('warn', 'force-closing')).toBe(true);
+      expect(hasLine('warn', '1 HTTP request(s)')).toBe(true);
+      expect(await hanging).toBe('force-closed');
+    });
+
+    test('stop() called twice sequentially runs every destroy hook exactly once', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        beforeApplicationDestroy(): void {
+          counters.before++;
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      await app.stop();
+      await app.stop();
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+    });
+
+    test('two overlapping stop() calls run every destroy hook exactly once', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          counters.before++;
+          await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      await Promise.all([app.stop(), app.stop()]);
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+    });
+
+    test('a second signal during shutdown is logged and ignored instead of starting a second teardown', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          counters.before++;
+          await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+      const originalExit = process.exit.bind(process);
+      const exitCodes: number[] = [];
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+      process.exit = ((code?: number) => {
+        exitCodes.push(code ?? 0);
+      }) as typeof process.exit;
+
+      const app = createRealApp(CountingModule, { gracefulShutdown: true });
+      try {
+        await app.start();
+
+        expect(signalHandlers.SIGTERM).toHaveLength(1);
+        expect(signalHandlers.SIGINT).toHaveLength(1);
+
+        signalHandlers.SIGTERM[0]();
+        await Bun.sleep(10);
+        signalHandlers.SIGINT[0]();
+
+        await waitUntil(() => exitCodes.length > 0);
+        // Without the latch the second signal starts a SECOND teardown that ends in its
+        // own process.exit — wait for it to land on the stub, otherwise it lands on the
+        // real process.exit after the restore below and kills the whole test run.
+        await Bun.sleep(200);
+      } finally {
+        process.on = originalProcessOn;
+        process.exit = originalExit;
+        await app.stop();
+      }
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+      expect(exitCodes).toEqual([0]);
+      expect(hasLine('warn', 'ignoring SIGINT')).toBe(true);
+    });
+
+    test('enableGracefulShutdown() after start() does not register a second pair of handlers', async () => {
+      @Module({})
+      class PlainModule {}
+
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+
+      const app = createRealApp(PlainModule, { gracefulShutdown: true });
+      try {
+        await app.start();
+        // Exactly what the JSDoc example used to instruct — it must not double-register.
+        app.enableGracefulShutdown();
+      } finally {
+        process.on = originalProcessOn;
+        await app.stop();
+      }
+
+      expect(signalHandlers.SIGTERM).toHaveLength(1);
+      expect(signalHandlers.SIGINT).toHaveLength(1);
     });
   });
 });

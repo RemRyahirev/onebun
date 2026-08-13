@@ -108,6 +108,15 @@ import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
 import { QUEUE_DISABLED_WITH_ADAPTER_WARNING, resolveQueueEnablement } from './queue-enablement';
+import {
+  createDeadline,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  DRAIN_BUDGET_RATIO,
+  describeRemaining,
+  drainInFlight,
+  type DrainReport,
+  type InFlightSource,
+} from './shutdown';
 
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -358,6 +367,28 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
 }
 
 /**
+ * Body served to every request that arrives after the drain has begun. The listener stays
+ * open on purpose: answering 503 is what tells a load balancer to stop routing here, and
+ * it keeps the deadline enforceable — Bun ignores `stop(true)` once a graceful `stop()` is
+ * pending, so closing the listener first would make the force-close unreachable.
+ */
+const SHUTDOWN_RESPONSE_BODY = JSON.stringify({
+  success: false,
+  error: 'Service Unavailable',
+  message: 'Server is shutting down',
+});
+
+/** How the shutdown ended — the signal handler turns this into an exit code. */
+interface ShutdownOutcome {
+  /** The deadline expired before the sequence finished. */
+  timedOut: boolean;
+  /** What was running when the deadline expired, for the log line. */
+  phase: string | null;
+  /** Connections force-closed because the drain window expired. */
+  forceClosed: number;
+}
+
+/**
  * OneBun Application
  * @see docs:api/core.md
  * @see docs:getting-started.md
@@ -389,6 +420,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * on purpose — it is package-internal state, not something a caller configures.
    */
   private globalScope: GlobalScope | null = null;
+  /**
+   * The one shutdown latch. `stop()`, the SIGTERM handler and a second signal all go
+   * through it, so a shutdown runs exactly once per application instance: a second call
+   * awaits the first outcome instead of walking the destroy hooks again. Terminal on
+   * purpose — it is never cleared, because "stopped" is not a state an application
+   * returns from.
+   */
+  private shutdownPromise: Promise<ShutdownOutcome> | null = null;
+  /** Signal handlers are installed at most once per instance. */
+  private signalHandlersRegistered = false;
   // Docs (OpenAPI/Swagger) - generated on start()
   private openApiSpec: Record<string, unknown> | null = null;
   private swaggerHtml: string | null = null;
@@ -414,7 +455,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Multi-service mode
       this.multiServiceMode = true;
       this.moduleClass = null;
-      this.options = {} as ApplicationOptions;
+      // The only two single-service options that mean anything at the parent level: the
+      // parent owns the process-wide signal handler and the shutdown budget for
+      // `stopAll()`. Everything else about a child is configured per service.
+      this.options = {
+        gracefulShutdown: moduleClassOrOptions.gracefulShutdown,
+        shutdownTimeout: moduleClassOrOptions.shutdownTimeout,
+      } as ApplicationOptions;
       this.config = new NotInitializedConfig();
 
       // Initialize logger (simplified — no config/metrics/tracing at parent level)
@@ -686,6 +733,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   async start(): Promise<void> {
     if (this.multiServiceMode) {
       await this.orchestrator!.startAll();
+
+      // ONE handler for the whole process. The children are built with
+      // `gracefulShutdown: false`, so nothing below this line can call `process.exit`
+      // while a sibling is still running its destroy hooks — the parent exits after
+      // `stopAll()` has stopped every service.
+      if (this.options.gracefulShutdown !== false) {
+        this.enableGracefulShutdown();
+      }
 
       return;
     }
@@ -2370,11 +2425,91 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Stop the application with graceful shutdown
+   * Stop the application with graceful shutdown.
+   *
+   * Idempotent and concurrency-safe: every call after the first awaits the same shutdown
+   * and performs no second pass over the destroy hooks. Bounded by `shutdownTimeout` —
+   * it always resolves, even if a request or a hook never does.
+   *
    * @param options - Shutdown options
    */
   async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
+    await this.runShutdown(options);
+  }
+
+  /**
+   * The shutdown latch. The first caller runs the sequence; everyone after — a second
+   * `stop()`, a second signal, the orchestrator stopping an already-stopped child —
+   * awaits that same promise and its outcome.
+   */
+  private async runShutdown(
+    options?: { closeSharedRedis?: boolean; signal?: string },
+  ): Promise<ShutdownOutcome> {
+    this.shutdownPromise ??= this.executeShutdown(options);
+
+    return await this.shutdownPromise;
+  }
+
+  /**
+   * Run the shutdown sequence against a hard deadline.
+   *
+   * The sequence is raced, not cancelled: a hook that never returns cannot be interrupted
+   * from the outside, so the deadline stops *waiting* for it, names it, and lets the
+   * caller decide (the signal path exits with code 1).
+   */
+  private async executeShutdown(
+    options?: { closeSharedRedis?: boolean; signal?: string },
+  ): Promise<ShutdownOutcome> {
+    const budgetMs = this.resolveShutdownTimeout();
+    const outcome: ShutdownOutcome = { timedOut: false, phase: null, forceClosed: 0 };
+    const deadline = createDeadline(budgetMs);
+
+    const sequence = this.performShutdown(options, outcome).then(
+      () => 'done' as const,
+      (error: unknown) => {
+        this.logger.error(
+          'Shutdown sequence failed:',
+          error instanceof Error ? error : new Error(String(error)),
+        );
+
+        return 'done' as const;
+      },
+    );
+
+    const result = await Promise.race([sequence, deadline.expired]);
+    deadline.cancel();
+
+    if (result === 'timeout') {
+      outcome.timedOut = true;
+      this.logger.error(
+        `Shutdown timed out after ${budgetMs}ms while ${outcome.phase ?? 'stopping'}; `
+        + 'abandoning the rest of the teardown',
+      );
+    }
+
+    return outcome;
+  }
+
+  /** Resolve the shutdown budget, ignoring non-positive and non-finite overrides. */
+  private resolveShutdownTimeout(): number {
+    const configured = this.options.shutdownTimeout;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+
+    return DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  }
+
+  /**
+   * The shutdown sequence itself. `outcome.phase` is updated as it advances so a timeout
+   * can name what was still running.
+   */
+  private async performShutdown(
+    options: { closeSharedRedis?: boolean; signal?: string } | undefined,
+    outcome: ShutdownOutcome,
+  ): Promise<void> {
     if (this.multiServiceMode) {
+      outcome.phase = 'stopping services';
       if (this.orchestrator) {
         await this.orchestrator.stopAll();
       }
@@ -2387,14 +2522,24 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     this.logger.info('Stopping OneBun application...');
 
+    // Drain and close the HTTP server FIRST. Destroy hooks used to run while the socket
+    // was still accepting new work — a hook that deregisters from discovery or flushes a
+    // buffer ran under live traffic, and the request that was mid-response was severed by
+    // the process.exit that followed.
+    outcome.phase = 'draining in-flight HTTP requests';
+    const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
+    outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+
     // Call beforeApplicationDestroy lifecycle hook
     if (this.rootModule?.callBeforeApplicationDestroy) {
+      outcome.phase = 'running beforeApplicationDestroy hooks';
       this.logger.debug('Calling beforeApplicationDestroy hooks');
       await this.rootModule.callBeforeApplicationDestroy(signal);
     }
 
     // Cleanup WebSocket resources
     if (this.wsHandler) {
+      outcome.phase = 'closing WebSocket connections';
       this.logger.debug('Cleaning up WebSocket handler');
       await this.wsHandler.cleanup();
       this.wsHandler = null;
@@ -2402,6 +2547,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Stop queue service
     if (this.queueService) {
+      outcome.phase = 'stopping the queue service';
       this.logger.debug('Stopping queue service');
       await this.queueService.stop();
       this.queueService = null;
@@ -2410,26 +2556,22 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Disconnect queue adapter
     if (this.queueAdapter) {
+      outcome.phase = 'disconnecting the queue adapter';
       this.logger.debug('Disconnecting queue adapter');
       await this.queueAdapter.disconnect();
       this.queueAdapter = null;
     }
 
-    // Stop HTTP server
-    if (this.server) {
-      this.server.stop();
-      this.server = null;
-      this.logger.debug('HTTP server stopped');
-    }
-
     // Shutdown trace service — flush pending spans before module destroy
     if (this.traceService?.shutdown) {
+      outcome.phase = 'flushing traces';
       this.logger.debug('Shutting down trace service');
       await this.traceService.shutdown();
     }
 
     // Call onModuleDestroy lifecycle hook
     if (this.rootModule?.callOnModuleDestroy) {
+      outcome.phase = 'running onModuleDestroy hooks';
       this.logger.debug('Calling onModuleDestroy hooks');
       await this.rootModule.callOnModuleDestroy();
     }
@@ -2445,6 +2587,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Call onApplicationDestroy lifecycle hook
     if (this.rootModule?.callOnApplicationDestroy) {
+      outcome.phase = 'running onApplicationDestroy hooks';
       this.logger.debug('Calling onApplicationDestroy hooks');
       await this.rootModule.callOnApplicationDestroy(signal);
     }
@@ -2459,10 +2602,92 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.globalScope = null;
     }
 
-    this.logger.info('OneBun application stopped');
+    this.logger.info(
+      outcome.forceClosed > 0
+        ? `OneBun application stopped (${outcome.forceClosed} request(s) force-closed)`
+        : 'OneBun application stopped',
+    );
 
     // Shutdown logger transport LAST — flush OTLP log batches after final log message
+    outcome.phase = 'flushing logs';
     await shutdownLogger();
+  }
+
+  /**
+   * Refuse new requests, wait for the in-flight ones, then close the listener.
+   *
+   * The listener deliberately stays open while draining and answers 503: that is what
+   * tells a load balancer to stop routing here, and it keeps the deadline enforceable —
+   * Bun ignores `stop(true)` once a graceful `stop()` is pending, so closing the listener
+   * first would leave nothing able to force-close a wedged connection.
+   *
+   * WebSocket sockets and in-flight scheduled jobs belong in the same wait: add another
+   * {@link InFlightSource} to `sources` rather than a second waiting loop.
+   *
+   * @param budgetMs - Deadline for the drain, in milliseconds
+   * @returns Number of connections force-closed because the deadline expired
+   */
+  private async drainHttpServer(budgetMs: number): Promise<number> {
+    const server = this.server;
+    if (!server) {
+      return 0;
+    }
+
+    // Swapping the route table beats a per-request `isDraining` check: the hot path keeps
+    // exactly the code it had, and every route — controller, docs, metrics, static — is
+    // refused by the one handler.
+    if (typeof server.reload === 'function') {
+      server.reload({
+        routes: {},
+        fetch(): Response {
+          return new Response(SHUTDOWN_RESPONSE_BODY, {
+            status: HttpStatusCode.SERVICE_UNAVAILABLE,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/json',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Connection': 'close',
+            },
+          });
+        },
+      });
+    }
+
+    const sources: InFlightSource[] = [{
+      name: 'HTTP request(s)',
+      // A mocked server has no counter; nothing to wait for then.
+      pending: () => (typeof server.pendingRequests === 'number' ? server.pendingRequests : 0),
+    }];
+
+    const report: DrainReport = await drainInFlight(sources, budgetMs);
+    const forceClosed = report.remaining.reduce((total, entry) => total + entry.pending, 0);
+
+    if (report.drained) {
+      this.logger.debug(`In-flight requests drained in ${report.waitedMs}ms`);
+    } else {
+      this.logger.warn(
+        `Drain deadline of ${budgetMs}ms expired with ${describeRemaining(report.remaining)} `
+        + 'still in flight; force-closing',
+      );
+    }
+
+    // Open WebSockets are cut here, not drained — they have no bounded wait of their own
+    // yet, and a graceful `stop()` never resolves while one is connected (measured).
+    const openSockets = typeof server.pendingWebSockets === 'number' ? server.pendingWebSockets : 0;
+    if (openSockets > 0) {
+      this.logger.warn(
+        `Closing ${openSockets} active WebSocket connection(s) without waiting for in-flight messages`,
+      );
+    }
+
+    // Always the forcing form. The bounded wait above is what makes the shutdown graceful;
+    // `stop(false)` would hand the deadline back to whatever is still connected — a single
+    // idle WebSocket keeps it pending forever.
+    await server.stop(true);
+    this.server = null;
+    this.logger.debug('HTTP server stopped');
+
+    return forceClosed;
   }
 
   /**
@@ -2685,21 +2910,67 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Register signal handlers for graceful shutdown
-   * Call this after start() to enable automatic shutdown on SIGTERM/SIGINT
+   * Register signal handlers for graceful shutdown.
+   *
+   * `start()` already calls this unless `gracefulShutdown: false` was passed, so calling
+   * it again is a no-op rather than a second pair of listeners. A signal that arrives
+   * while a shutdown is already running is logged and ignored — it does not restart the
+   * drain or re-run the destroy hooks.
+   *
+   * The process exits `0` when the shutdown completed, and `1` when it hit
+   * `shutdownTimeout` with work still running.
    *
    * @example
    * ```typescript
-   * const app = new OneBunApplication(AppModule, options);
+   * // Only needed when the automatic registration was turned off
+   * const app = new OneBunApplication(AppModule, { gracefulShutdown: false });
    * await app.start();
    * app.enableGracefulShutdown();
    * ```
    */
   enableGracefulShutdown(): void {
-    const shutdown = async (signal: string) => {
+    if (this.signalHandlersRegistered) {
+      this.logger.debug('Graceful shutdown handlers already registered, ignoring');
+
+      return;
+    }
+    this.signalHandlersRegistered = true;
+
+    // Exactly one exit is ever scheduled, but every signal leads to one: a signal that
+    // arrives after a programmatic `stop()` must still end the process, and a second
+    // signal during a shutdown must not exit twice or restart the teardown.
+    let exitScheduled = false;
+    const scheduleExit = (shutdown: Promise<ShutdownOutcome>): void => {
+      if (exitScheduled) {
+        return;
+      }
+      exitScheduled = true;
+
+      void shutdown
+        .then((outcome) => {
+          process.exit(outcome.timedOut ? 1 : 0);
+        })
+        .catch((error: unknown) => {
+          this.logger.error(
+            'Graceful shutdown failed:',
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          process.exit(1);
+        });
+    };
+
+    const shutdown = (signal: string): void => {
+      // The latch, not a local flag: `stop()` called by application code before the
+      // signal arrived must silence the handler just as a first signal does.
+      if (this.shutdownPromise) {
+        this.logger.warn(`Already shutting down, ignoring ${signal}`);
+        scheduleExit(this.shutdownPromise);
+
+        return;
+      }
+
       this.logger.info(`Received ${signal}, initiating graceful shutdown...`);
-      await this.stop({ signal });
-      process.exit(0);
+      scheduleExit(this.runShutdown({ signal }));
     };
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));

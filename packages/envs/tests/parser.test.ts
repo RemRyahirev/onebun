@@ -87,9 +87,17 @@ describe('EnvParser', () => {
       expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '12.34.56', config))).rejects.toThrow(
         'is not a valid number',
       );
-      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '', config))).rejects.toThrow(
+      // Whitespace-only is a value the operator typed, so it is still rejected —
+      // unlike `VAR=`, which means "not configured" (see empty-values.test.ts).
+      expect(Effect.runPromise(EnvParser.parse('TEST_VAR', '   ', config))).rejects.toThrow(
         'is not a valid number',
       );
+    });
+
+    it('should treat an empty number variable as not configured', async () => {
+      const config = { type: 'number' as const };
+      const result = await Effect.runPromise(EnvParser.parse('TEST_VAR', '', config));
+      expect(result).toBe(0);
     });
 
     it('should throw for required number when undefined', async () => {

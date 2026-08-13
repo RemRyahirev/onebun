@@ -52,6 +52,7 @@ import type {
   HttpExecutionContext,
   HttpGuard,
 } from './types';
+import type { ValidationSchema } from './validation/types';
 import type { ServerWebSocket } from 'bun';
 
 import { type } from '@onebun/core';
@@ -93,6 +94,9 @@ import {
   Env,
   validate,
   validateOrThrow,
+  DuplicateArkTypeError,
+  hasDuplicateArkTypeCopies,
+  isArkErrors,
   OneBunApplication,
   createServiceDefinition,
   createServiceClient,
@@ -2139,6 +2143,86 @@ describe('Validation API Documentation Examples', () => {
       expect(() => {
         validateOrThrow(schema, { name: 'John', age: -5 });
       }).toThrow();
+    });
+  });
+
+  describe('single ArkType copy requirement (docs/api/validation.md)', () => {
+    const arkKindKey = ' arkKind';
+
+    /**
+     * `ArkErrors` as a SECOND physical arktype copy produces it: same ` arkKind: 'errors'` brand
+     * `@ark/schema` discriminates on, different class object, so not instanceof core's type.errors.
+     */
+    class ForeignArkErrors extends Array<{ message: string }> {
+      get summary(): string {
+        return this.map((issue) => issue.message).join('\n');
+      }
+    }
+
+    const makeForeignSchema = (branded: boolean): ValidationSchema => {
+      const schema = (data: unknown): unknown => {
+        if (typeof (data as { age?: unknown })?.age === 'number') {
+          return data;
+        }
+        const errors = new ForeignArkErrors();
+        errors.push({ message: 'age must be a number (was a string)' });
+        Object.assign(errors, { byPath: {}, count: 1 });
+        if (branded) {
+          Object.assign(errors, { [arkKindKey]: 'errors' });
+        }
+
+        return errors;
+      };
+      Object.assign(schema, { [arkKindKey]: 'root' });
+
+      return schema as unknown as ValidationSchema;
+    };
+
+    /**
+     * @source docs:api/validation.md#detecting-duplicates
+     */
+    it('reports a healthy single-copy install', () => {
+      expect(hasDuplicateArkTypeCopies()).toBe(false);
+    });
+
+    /**
+     * @source docs:api/validation.md#error-messages
+     */
+    it('identifies ArkErrors by brand, so it works across copies', () => {
+      const schema = type({ name: 'string', age: 'number' });
+
+      expect(isArkErrors(schema({ name: 'John', age: 'thirty' }))).toBe(true);
+      expect(isArkErrors(schema({ name: 'John', age: 30 }))).toBe(false);
+      expect(isArkErrors(makeForeignSchema(true)({ age: 'thirty' }))).toBe(true);
+    });
+
+    /**
+     * @source docs:api/validation.md#single-arktype-copy-requirement
+     */
+    it('rejects invalid data validated against a foreign copy instead of failing open', () => {
+      const foreignSchema = makeForeignSchema(true);
+
+      const result = validate(foreignSchema, { name: 'John', age: 'thirty' });
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toEqual(['age must be a number (was a string)']);
+    });
+
+    /**
+     * @source docs:api/validation.md#what-onebun-does-when-it-finds-one
+     */
+    it('throws DuplicateArkTypeError rather than returning ArkType internals as the payload', () => {
+      const foreignSchema = makeForeignSchema(false);
+
+      try {
+        validate(foreignSchema, { name: 'John', age: 'thirty' });
+        expect('unreachable').toBe('threw');
+      } catch (error) {
+        expect(error).toBeInstanceOf(DuplicateArkTypeError);
+        const err = error as DuplicateArkTypeError;
+        expect(err.message).toContain('Duplicate arktype installation detected');
+        expect(err.registries).toContain('$ark');
+      }
     });
   });
 

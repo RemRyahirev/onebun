@@ -279,6 +279,87 @@ try {
 }
 ```
 
+## Single ArkType Copy Requirement
+
+**An application must resolve exactly one physical copy of `arktype`.** Two copies are two sets of
+classes: a schema built by one copy produces failure objects belonging to that copy, and anything
+that identifies them by class identity (`result instanceof type.errors`) silently answers "no
+failure". Two copies of the *same version* are enough — version skew is not required.
+
+OneBun no longer fails open on this. `validate()`, `validateOrThrow()` and `@Body` requiredness
+identify ArkType failures by ArkType's own brand (the ` arkKind` key `@ark/schema` discriminates
+on), which is copy-independent. A duplicate install is still unsupported, though: composing schemas
+across copies (`.and`, `.or`, `.array()`) and cross-copy registry references remain broken, so
+deduplicate rather than rely on the framework's tolerance.
+
+### Detecting duplicates
+
+`@ark/schema` publishes its registry on `globalThis`: the first copy loaded claims `$ark`, every
+further copy claims `$ark2`, `$ark3`, and so on. OneBun uses that as its check, and you can too:
+
+```typescript
+import { hasDuplicateArkTypeCopies } from '@onebun/core';
+
+if (hasDuplicateArkTypeCopies()) {
+  // more than one physical arktype is loaded in this process
+}
+```
+
+At the package level: `bun pm ls --all | grep arktype` should list exactly one entry.
+
+### What OneBun does when it finds one
+
+- **One** startup warning, emitted the first time a schema is evaluated at decoration time. It names
+  the cause, lists the detected registries, and tells you to deduplicate.
+- If validation returns a value that is neither valid data nor a recognisable `ArkErrors` — an
+  ArkType internal this version cannot identify — the framework throws `DuplicateArkTypeError`
+  instead of handing that object back as the validated payload. Failing closed is deliberate: the
+  alternative was HTTP 200 with ArkType error objects as the response body.
+
+```typescript
+import { DuplicateArkTypeError, validate } from '@onebun/core';
+
+try {
+  validate(schema, input);
+} catch (error) {
+  if (error instanceof DuplicateArkTypeError) {
+    // error.message names the duplicate-arktype cause and the fix
+    // error.registries: ['$ark', '$ark2']
+  }
+}
+```
+
+### Fixing a duplicate
+
+Pin a single version at the workspace root and reinstall:
+
+```jsonc
+// package.json (bun / yarn)
+{
+  "resolutions": {
+    "arktype": "2.2.0"
+  }
+}
+```
+
+```jsonc
+// package.json (npm)
+{
+  "overrides": {
+    "arktype": "2.2.0"
+  }
+}
+```
+
+### Why `arktype` is a dependency, not a peer dependency
+
+`arktype` is a regular `dependencies` entry of `@onebun/core` and stays one. Making it a
+`peerDependency` looks like the textbook fix for duplicate copies, but it is the wrong trade here:
+`@onebun/drizzle` builds its schemas through `drizzle-arktype`, which already declares `arktype` as
+a *peer* and resolves its own. Peer-ifying core would break that path and force every existing
+install to add an explicit `arktype` entry, in exchange for a guarantee the package manager still
+would not give. The single-copy requirement is enforced by detection and a loud diagnostic instead.
+
 ## Common Schema Patterns
 
 ### Create/Update DTOs
@@ -441,6 +522,20 @@ if (result instanceof type.errors) {
   console.log(result.summary);
   // "name must be more than 2 characters (was 2)"
   // "age must be at least 18 (was 16)"
+}
+```
+
+`instanceof type.errors` compares against the classes of whichever `arktype` copy `type` came from.
+It is safe here because both the schema and `type` are imported from `@onebun/core`. If you hold a
+schema whose origin you do not control, use `isArkErrors()` instead — it identifies failures by
+ArkType's own brand, so it works across copies (see
+[Single ArkType Copy Requirement](#single-arktype-copy-requirement)):
+
+```typescript
+import { isArkErrors } from '@onebun/core';
+
+if (isArkErrors(result)) {
+  // result is an ArkErrors, whichever copy produced it
 }
 ```
 
