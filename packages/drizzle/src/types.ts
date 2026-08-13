@@ -6,6 +6,8 @@ import type { BunSQLiteDatabase } from 'drizzle-orm/bun-sqlite';
 import type { PgTable } from 'drizzle-orm/pg-core';
 import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
 
+import type { RegistrationToken } from '@onebun/core';
+
 /**
  * Supported database types
  */
@@ -49,52 +51,102 @@ export interface SQLiteConnectionOptions {
 /**
  * PostgreSQL connection options
  */
-export interface PostgreSQLConnectionOptions {
+/**
+ * Connection pool options, shared by both PostgreSQL connection shapes.
+ */
+export interface PostgreSQLPoolOptions {
+  /**
+   * Maximum number of connections in the pool
+   */
+  max?: number;
+
+  /**
+   * Minimum number of connections in the pool
+   */
+  min?: number;
+
+  /**
+   * Connection timeout in milliseconds
+   */
+  timeout?: number;
+}
+
+/**
+ * PostgreSQL connection given as a single URL.
+ *
+ * The discrete fields are `never` here rather than absent, so supplying both forms is a
+ * compile error instead of a silent precedence question.
+ */
+export interface PostgreSQLUrlConnection {
+  /**
+   * Full connection URL, e.g. `postgresql://user:password@host:5432/database`.
+   */
+  connectionString: string;
+
+  host?: never;
+  port?: never;
+  user?: never;
+  password?: never;
+  database?: never;
+
+  /**
+   * Connection pool options
+   */
+  pool?: PostgreSQLPoolOptions;
+}
+
+/**
+ * PostgreSQL connection given as discrete fields.
+ *
+ * All five are required together: a partially filled object cannot describe a reachable
+ * server, and accepting one would only defer the failure to connect time.
+ */
+export interface PostgreSQLDiscreteConnection {
+  connectionString?: never;
+
   /**
    * PostgreSQL server host
    */
   host: string;
-  
+
   /**
    * PostgreSQL server port
    */
   port: number;
-  
+
   /**
    * PostgreSQL user name
    */
   user: string;
-  
+
   /**
    * PostgreSQL user password
    */
   password: string;
-  
+
   /**
    * PostgreSQL database name
    */
   database: string;
-  
+
   /**
    * Connection pool options
    */
-  pool?: {
-    /**
-     * Maximum number of connections in the pool
-     */
-    max?: number;
-    
-    /**
-     * Minimum number of connections in the pool
-     */
-    min?: number;
-    
-    /**
-     * Connection timeout in milliseconds
-     */
-    timeout?: number;
-  };
+  pool?: PostgreSQLPoolOptions;
 }
+
+/**
+ * PostgreSQL connection options — a URL, or the five discrete fields, never a mix.
+ *
+ * Discriminated on purpose. The documentation described `connectionString` for a long time
+ * while the type had no such field and `initialize()` ignored it, so a reader who followed
+ * the docs got a connection built from undefined discrete fields and no error naming the
+ * cause. Making the two shapes mutually exclusive means a half-filled object fails at the
+ * call site rather than at connect time.
+ */
+export type PostgreSQLConnectionOptions =
+  | PostgreSQLUrlConnection
+  | PostgreSQLDiscreteConnection;
 
 /**
  * Database connection options (union type)
@@ -123,6 +175,18 @@ export interface DrizzleModuleOptions {
    * Default: './drizzle'
    */
   migrationsFolder?: string;
+
+  /**
+   * Journal table recording which migrations have run. Defaults to drizzle's
+   * `__drizzle_migrations`. See `MigrationOptions.migrationsTable` — a package that ships
+   * its own migrations needs its own journal, or one of the two sets is silently skipped.
+   */
+  migrationsTable?: string;
+
+  /**
+   * Schema holding the journal table. PostgreSQL only. Defaults to drizzle's `drizzle`.
+   */
+  migrationsSchema?: string;
   
   /**
    * Environment variable prefix
@@ -141,14 +205,51 @@ export interface DrizzleModuleOptions {
    * Default: false
    */
   logQueries?: boolean;
-  
+
+  /**
+   * Accept a database that is absent, unreachable or unmigrated at boot.
+   *
+   * A configured database is a required one: when `connection` is given, the service checks
+   * at startup that the database can actually be reached — the file opens on SQLite, a
+   * bounded `SELECT 1` answers on PostgreSQL — and an application whose check fails does not
+   * start. `app.start()` rejects, the HTTP server never binds, and the orchestrator sees a
+   * container that refuses to come up instead of one that passes readiness and 500s every
+   * request.
+   *
+   * Set this to `true` to keep the older behaviour: the failure is logged at `warn` and the
+   * application starts anyway. It says "I accept a degraded or absent database at boot" —
+   * a read-mostly service with a cache in front of it, or a deployment that brings the
+   * database up after the application. It does not disable the check; the check still runs
+   * and still reports.
+   *
+   * On the environment-variable path the same switch is `DB_ALLOW_DEGRADED_START=true`
+   * (with the configured `envPrefix`).
+   *
+   * Default: false
+   *
+   * @see docs:api/drizzle.md
+   */
+  allowDegradedStart?: boolean;
+
   /**
    * Whether to register module as global
    * When true, DrizzleService is available in all modules without explicit import.
-   * When false, each import creates a new instance (useful for multi-database scenarios).
+   * When false, a module reaches it only by importing DrizzleModule explicitly.
    * Default: true
    */
   isGlobal?: boolean;
+
+  /**
+   * Names this registration, so a feature module can select it with
+   * `DrizzleModule.forFeature(token)`.
+   *
+   * This is how one application runs more than one database. Without it, `forRoot()`
+   * configures the single default registration and a second call replaces the first.
+   * A named registration is never global — it reaches a module only by being imported.
+   *
+   * @see docs:api/drizzle.md
+   */
+  as?: RegistrationToken;
 }
 
 /**
@@ -226,7 +327,25 @@ export interface MigrationOptions {
    * Migration folder path
    */
   migrationsFolder?: string;
-  
+
+  /**
+   * Journal table recording which migrations have run. Defaults to drizzle's
+   * `__drizzle_migrations`.
+   *
+   * Set it when a package ships migrations of its own. Drizzle decides what to apply by
+   * comparing a migration's folder timestamp against the NEWEST row in the journal — not
+   * by hash — so two folders sharing one journal silently skip whichever set was
+   * generated earlier, with no error and nothing logged. A private journal per migration
+   * set removes that coupling entirely.
+   */
+  migrationsTable?: string;
+
+  /**
+   * Schema holding the journal table. PostgreSQL only; ignored on SQLite, which has no
+   * schemas. Defaults to drizzle's `drizzle`.
+   */
+  migrationsSchema?: string;
+
   /**
    * Whether to apply migrations
    */

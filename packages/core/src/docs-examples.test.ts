@@ -36,6 +36,7 @@ import type {
   OnApplicationDestroy,
 } from './';
 import type { ExceptionFilter } from './exception-filters/exception-filters';
+import type { Guard } from './http-guards/http-guards';
 import type { QueueAdapter, QueueAdapterConstructor } from './queue/types';
 import type {
   SseEvent,
@@ -46,16 +47,23 @@ import type {
   OnModuleConfigure,
   QueueApplicationOptions,
 } from './types';
-import type { ExecutionContext, HttpExecutionContext } from './types';
+import type {
+  ExecutionContext,
+  HttpExecutionContext,
+  HttpGuard,
+} from './types';
+import type { ValidationSchema } from './validation/types';
 import type { ServerWebSocket } from 'bun';
 
 import { type } from '@onebun/core';
 
 import { registerDependencies } from './decorators/decorators';
-import { OneBunModule } from './module/module';
+import { createGlobalScope, OneBunModule } from './module/module';
+import { MessageExecutionContextImpl } from './queue/guards';
 import { makeMockLoggerLayer } from './testing';
 
 import {
+  All,
   Controller,
   Get,
   Post,
@@ -69,6 +77,8 @@ import {
   Req,
   Cookie,
   Module,
+  Global,
+  isGlobalModule,
   Service,
   BaseService,
   BaseController,
@@ -84,10 +94,14 @@ import {
   Env,
   validate,
   validateOrThrow,
+  DuplicateArkTypeError,
+  hasDuplicateArkTypeCopies,
+  isArkErrors,
   OneBunApplication,
   createServiceDefinition,
   createServiceClient,
   WebSocketGateway,
+  getGatewayMetadata,
   BaseWebSocketGateway,
   OnConnect,
   OnDisconnect,
@@ -101,6 +115,9 @@ import {
   PatternParams,
   WsServer,
   UseWsGuards,
+  isHttpContext,
+  isQueueContext,
+  isWsContext,
   WsAuthGuard,
   WsPermissionGuard,
   WsAnyPermissionGuard,
@@ -153,6 +170,10 @@ import {
   RateLimitMiddleware,
   MemoryRateLimitStore,
   SecurityHeadersMiddleware,
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  getPeerAddress,
   Optional,
   CircularDependencyError,
   DependencyResolutionError,
@@ -248,6 +269,37 @@ describe('Minimal Working Example (docs/index.md)', () => {
     expect(app).toBeDefined();
     expect(typeof app.start).toBe('function');
     expect(typeof app.stop).toBe('function');
+  });
+
+  /**
+   * The sample's `.catch()` ends in `process.exit(1)` because a failed boot leaves a live
+   * process that never binds a port. Pins the half a test can assert: `start()` rejects,
+   * and nothing is listening afterwards.
+   *
+   * @source docs:index.md#minimal-working-example
+   */
+  it('should reject start() when boot fails, so the sample .catch() runs', async () => {
+    @Service()
+    class UnreachableBackendService extends BaseService implements OnModuleInit {
+      async onModuleInit(): Promise<void> {
+        throw new Error('backend unreachable at boot');
+      }
+    }
+
+    @Module({ providers: [UnreachableBackendService] })
+    class FailingModule {}
+
+    const app = new OneBunApplication(FailingModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      loggerLayer: makeMockLoggerLayer(),
+    });
+
+    await expect(app.start()).rejects.toThrow();
+
+    // The HTTP server never bound — which is why the catch must exit non-zero
+    expect(app.getPort()).toBe(0);
   });
 });
 
@@ -517,6 +569,83 @@ describe('Decorators API Documentation Examples', () => {
       }
 
       expect(UserController).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/decorators.md#all-catch-all-routes
+     */
+    it('should route every verb to the @All() handler', async () => {
+      // From docs: @All() — catch-all routes
+      @Controller('/gateway')
+      class GatewayController extends BaseController {
+        @All('/proxy/:id')
+        async proxy(@Param('id') id: string, @Req() req: OneBunRequest) {
+          // req.method is whatever the client sent: GET, POST, PROPFIND, QUERY, ...
+          return { id, method: req.method };
+        }
+      }
+
+      @Module({ controllers: [GatewayController] })
+      class GatewayModule {}
+
+      const app = new OneBunApplication(GatewayModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        for (const method of ['GET', 'POST', 'PROPFIND', 'QUERY']) {
+          const response = await fetch(`http://localhost:${app.getPort()}/gateway/proxy/9`, { method });
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual({ success: true, result: { id: '9', method } });
+        }
+      } finally {
+        await app.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/decorators.md#all-catch-all-routes
+     */
+    it('should give a concrete verb decorator priority over @All() on the same path', async () => {
+      // From docs: @All() precedence example
+      @Controller('/webhooks')
+      class WebhookController extends BaseController {
+        @All('/github')
+        async fallback() {
+          return { handled: 'all' };
+        }
+
+        @Get('/github')
+        async health() {
+          return { handled: 'get' };
+        }
+      }
+
+      @Module({ controllers: [WebhookController] })
+      class WebhookModule {}
+
+      const app = new OneBunApplication(WebhookModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        const base = `http://localhost:${app.getPort()}/webhooks/github`;
+        const get = await fetch(base, { method: 'GET' });
+        expect(await get.json()).toEqual({ success: true, result: { handled: 'get' } });
+
+        const put = await fetch(base, { method: 'PUT' });
+        expect(await put.json()).toEqual({ success: true, result: { handled: 'all' } });
+      } finally {
+        await app.stop();
+      }
     });
   });
 
@@ -1574,7 +1703,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
       @Service()
       class GracefulService extends BaseService implements BeforeApplicationDestroy {
         beforeApplicationDestroy(signal?: string): void {
-          // Called at the very start of shutdown
+          // First destroy hook — after the drain, after the HTTP listener is closed
           this.logger.info(`Shutdown initiated by signal: ${signal || 'unknown'}`);
         }
       }
@@ -2048,6 +2177,128 @@ describe('Validation API Documentation Examples', () => {
     });
   });
 
+  describe('single ArkType copy requirement (docs/api/validation.md)', () => {
+    const arkKindKey = ' arkKind';
+
+    /**
+     * `ArkErrors` as a SECOND physical arktype copy produces it: same ` arkKind: 'errors'` brand
+     * `@ark/schema` discriminates on, different class object, so not instanceof core's type.errors.
+     */
+    class ForeignArkErrors extends Array<{ message: string }> {
+      get summary(): string {
+        return this.map((issue) => issue.message).join('\n');
+      }
+    }
+
+    const makeForeignSchema = (branded: boolean): ValidationSchema => {
+      const schema = (data: unknown): unknown => {
+        if (typeof (data as { age?: unknown })?.age === 'number') {
+          return data;
+        }
+        const errors = new ForeignArkErrors();
+        errors.push({ message: 'age must be a number (was a string)' });
+        Object.assign(errors, { byPath: {}, count: 1 });
+        if (branded) {
+          Object.assign(errors, { [arkKindKey]: 'errors' });
+        }
+
+        return errors;
+      };
+      Object.assign(schema, { [arkKindKey]: 'root' });
+
+      return schema as unknown as ValidationSchema;
+    };
+
+    /**
+     * @source docs:api/validation.md#detecting-duplicates
+     */
+    it('reports a healthy single-copy install', () => {
+      expect(hasDuplicateArkTypeCopies()).toBe(false);
+    });
+
+    /**
+     * @source docs:api/validation.md#error-messages
+     */
+    it('identifies ArkErrors by brand, so it works across copies', () => {
+      const schema = type({ name: 'string', age: 'number' });
+
+      expect(isArkErrors(schema({ name: 'John', age: 'thirty' }))).toBe(true);
+      expect(isArkErrors(schema({ name: 'John', age: 30 }))).toBe(false);
+      expect(isArkErrors(makeForeignSchema(true)({ age: 'thirty' }))).toBe(true);
+    });
+
+    /**
+     * @source docs:api/validation.md#single-arktype-copy-requirement
+     */
+    it('rejects invalid data validated against a foreign copy instead of failing open', () => {
+      const foreignSchema = makeForeignSchema(true);
+
+      const result = validate(foreignSchema, { name: 'John', age: 'thirty' });
+
+      expect(result.success).toBe(false);
+      expect(result.errors).toEqual(['age must be a number (was a string)']);
+    });
+
+    /**
+     * @source docs:api/validation.md#what-onebun-does-when-it-finds-one
+     */
+    it('throws DuplicateArkTypeError rather than returning ArkType internals as the payload', () => {
+      const foreignSchema = makeForeignSchema(false);
+
+      try {
+        validate(foreignSchema, { name: 'John', age: 'thirty' });
+        expect('unreachable').toBe('threw');
+      } catch (error) {
+        expect(error).toBeInstanceOf(DuplicateArkTypeError);
+        const err = error as DuplicateArkTypeError;
+        expect(err.message).toContain('Duplicate arktype installation detected');
+        expect(err.registries).toContain('$ark');
+      }
+    });
+  });
+
+  describe('JSON Schema conversion (docs/api/validation.md)', () => {
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('marks a partial conversion with the codes responsible', () => {
+      // From docs: `schema[JSON_SCHEMA_PARTIAL]` is `{ codes: ['date'] }`
+       
+      const { getJsonSchema, JSON_SCHEMA_PARTIAL } = require('./validation/json-schema');
+      const schema = getJsonSchema(type({ when: 'Date', name: 'string' }));
+
+      expect(schema[JSON_SCHEMA_PARTIAL]).toEqual({ codes: ['date'] });
+      // …and everything ArkType could build is still there
+      expect(schema.properties.name).toEqual({ type: 'string' });
+    });
+
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('suppresses the marker for codes a caller handles', () => {
+      // From docs: properties.when is { type: 'string', format: 'date-time' }, no marker
+       
+      const { getJsonSchema, JSON_SCHEMA_PARTIAL } = require('./validation/json-schema');
+      const withDates = getJsonSchema(type({ when: 'Date', name: 'string' }), {
+        fallback: { date: () => ({ type: 'string', format: 'date-time' }) },
+      });
+
+      expect(withDates.properties.when).toEqual({ type: 'string', format: 'date-time' });
+      expect(withDates[JSON_SCHEMA_PARTIAL]).toBeUndefined();
+    });
+
+    /**
+     * @source docs:api/validation.md#types-json-schema-cannot-express
+     */
+    it('throws from the strict helper where the lenient one degrades', () => {
+      // From docs: the table contrasting toJsonSchema and getJsonSchema
+       
+      const { toJsonSchema: strict } = require('./validation/json-schema');
+
+      expect(() => strict(type({ when: 'Date' }))).toThrow();
+    });
+  });
+
   describe('Schema Types (docs/api/validation.md)', () => {
     /**
      * @source docs:api/validation.md#primitives
@@ -2414,6 +2665,252 @@ describe('OneBunApplication (docs/api/core.md)', () => {
   });
 
   /**
+   * @source docs:api/guards.md#on-a-base-controller
+   * @source docs:api/controllers.md#extending-a-base-controller
+   */
+  it('should inherit a class-level guard from a base controller', async () => {
+    let guardRan = false;
+
+    class DenyingBaseGuard implements HttpGuard {
+      canActivate(): boolean {
+        guardRan = true;
+
+        return false;
+      }
+    }
+
+    // From docs: a class-level guard is inherited; the base need not be a @Controller
+    @UseGuards(DenyingBaseGuard)
+    class ProtectedControllerBase extends BaseController {}
+
+    @Controller('/admin')
+    class AdminController extends ProtectedControllerBase {
+      @Get('/stats')
+      stats() {
+        return { ok: true };
+      }
+    }
+
+    @Module({ controllers: [AdminController] })
+    class AdminModule {}
+
+    const app = new OneBunApplication(AdminModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+
+      const response = await fetch(`${app.getHttpUrl()}/admin/stats`);
+
+      expect(response.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(guardRan).toBe(true);
+
+      // From docs: routes declared on the base are NOT mounted under the subclass
+      const inherited = await fetch(`${app.getHttpUrl()}/admin/nothing-here`);
+      expect(inherited.status).toBe(HttpStatusCode.NOT_FOUND);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/guards.md#class-based-guard
+   */
+  it('should give a class-based guard this.config inside canActivate', async () => {
+    let configType: string | undefined;
+
+    // From docs: "BaseService provides this.config automatically"
+    @Service()
+    class ApiKeyGuard extends BaseService implements HttpGuard {
+      canActivate(ctx: HttpExecutionContext): boolean {
+        const key = ctx.getRequest().headers.get('x-api-key');
+        configType = typeof this.config;
+
+        return key === this.config.get('auth.apiKey');
+      }
+    }
+
+    @UseGuards(ApiKeyGuard)
+    @Controller('/keyed')
+    class KeyedController extends BaseController {
+      @Get('/')
+      get() {
+        return { ok: true };
+      }
+    }
+
+    @Module({ controllers: [KeyedController], providers: [ApiKeyGuard] })
+    class GuardModule {}
+
+    const app = new OneBunApplication(GuardModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      envSchema: { auth: { apiKey: Env.string({ default: 'docs-key', env: 'DOCS_API_KEY' }) } },
+    });
+
+    try {
+      await app.start();
+
+      const denied = await fetch(`${app.getHttpUrl()}/keyed/`);
+
+      expect(denied.status).toBe(HttpStatusCode.FORBIDDEN);
+      // The whole point of the documented example: `this.config` resolves inside
+      // canActivate. Before the fix it was `undefined` and the line above it threw a
+      // TypeError at request time. Asserted as the type rather than a config VALUE,
+      // because the env layer is shared with the other suites in this file — the
+      // allow/deny cycle over an injected value is covered in http-guards.test.ts.
+      expect(configType).toBe('object');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:migration-nestjs.md#provider-patterns
+   */
+  it('should throw naming the module when a NestJS-style object provider is used', () => {
+    @Service()
+    class UserService extends BaseService {
+      findAll(): string[] {
+        return [];
+      }
+    }
+
+    // From docs: an object entry throws an error naming the module and the entry
+    @Module({
+      providers: [
+        { provide: UserService, useValue: { findAll: () => [] } } as unknown as typeof UserService,
+      ],
+    })
+    class UserModule {}
+
+    expect(() => new OneBunModule(UserModule, makeMockLoggerLayer()))
+      .toThrow(/UserModule.*object provider/s);
+  });
+
+  /**
+   * @source docs:api/decorators.md#module
+   */
+  it('should throw when a module is listed in exports instead of a service', () => {
+    @Service()
+    class UserService extends BaseService {
+      findAll(): string[] {
+        return [];
+      }
+    }
+
+    @Module({ providers: [UserService], exports: [UserService] })
+    class CoreModule {}
+
+    // From docs: exports accepts services only — re-exporting a module throws
+    @Module({ imports: [CoreModule], exports: [CoreModule] })
+    class ReExportingModule {}
+
+    @Module({ imports: [ReExportingModule] })
+    class AppModule {}
+
+    expect(() => new OneBunModule(AppModule, makeMockLoggerLayer()))
+      .toThrow(/exports the module CoreModule/);
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should reach an importer regardless of its position in the imports array', () => {
+    @Service()
+    class SharedService extends BaseService {
+      value(): string {
+        return 'shared';
+      }
+    }
+
+    @Global()
+    @Module({ providers: [SharedService], exports: [SharedService] })
+    class CoreModule {}
+
+    @Module({ imports: [CoreModule] })
+    class FeatureModule {}
+
+    @Service()
+    class Consumer extends BaseService {
+      constructor(public shared: SharedService) {
+        super();
+      }
+    }
+
+    // From docs: "Import order does not matter" — FeatureModule initializes CoreModule
+    // first, so the second entry hits the already-processed path.
+    @Module({ imports: [FeatureModule, CoreModule], providers: [Consumer] })
+    class AppModule {}
+
+    const module = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+
+    expect(module.getServiceByClass(Consumer)?.shared.value()).toBe('shared');
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should report a @Global()-decorated module through isGlobalModule', () => {
+    @Service()
+    class DatabaseService extends BaseService {
+      query(_sql: string): string {
+        return 'rows';
+      }
+    }
+
+    @Global()
+    @Module({ providers: [DatabaseService], exports: [DatabaseService] })
+    class DatabaseModule {}
+
+    @Module({ providers: [] })
+    class PlainModule {}
+
+    // From docs: Global Module Utilities
+    expect(isGlobalModule(DatabaseModule)).toBe(true);
+    expect(isGlobalModule(PlainModule)).toBe(false);
+  });
+
+  /**
+   * @source docs:api/core.md#global-modules
+   */
+  it('should give each application its own instance of a @Global() service', () => {
+    let constructed = 0;
+
+    @Service()
+    class ScopedDatabaseService extends BaseService {
+      readonly id = ++constructed;
+    }
+
+    @Global()
+    @Module({ providers: [ScopedDatabaseService], exports: [ScopedDatabaseService] })
+    class ScopedDatabaseModule {}
+
+    @Module({ imports: [ScopedDatabaseModule] })
+    class AppModule {}
+
+    // From docs: "A @Global() module contributes exactly one instance per application"
+    const first = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+    const second = new OneBunModule(
+      AppModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope(),
+    );
+
+    expect(first.getServiceByClass(ScopedDatabaseService))
+      .not.toBe(second.getServiceByClass(ScopedDatabaseService));
+    expect(constructed).toBe(2);
+  });
+
+  /**
    * @source docs:api/core.md#metrics-options
    */
   it('should accept metrics configuration', () => {
@@ -2766,7 +3263,8 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       class CacheService extends BaseService {}
 
       // No @Inject needed - automatic DI works via emitDecoratorMetadata
-      // @Inject is only needed for: interfaces, abstract classes, token-based injection
+      // @Inject is only needed for: token-based injection (which named registration),
+      // or overriding the type inferred from design:paramtypes
       @Controller('/users')
       class UserController extends BaseController {
         constructor(
@@ -2778,6 +3276,90 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       }
 
       expect(UserController).toBeDefined();
+    });
+
+    /**
+     * An abstract-class-typed parameter is the case that needs NO @Inject: DI matches a
+     * registered subclass by inheritance. @Inject(AbstractClass) does not even typecheck.
+     *
+     * @source docs:architecture.md#explicit-injection-edge-cases
+     */
+    it('should resolve an abstract-class-typed parameter without @Inject', async () => {
+      abstract class AbstractPaymentGateway extends BaseService {
+        abstract charge(): string;
+      }
+
+      @Service()
+      class StripeGateway extends AbstractPaymentGateway {
+        charge(): string {
+          return 'stripe';
+        }
+      }
+
+      @Controller('/billing')
+      class BillingController extends BaseController {
+        // no @Inject — the declared type is the ABSTRACT base
+        constructor(private gateway: AbstractPaymentGateway) {
+          super();
+        }
+
+        @Get('/charge')
+        async charge() {
+          return { via: this.gateway.charge(), ctor: this.gateway.constructor.name };
+        }
+      }
+
+      @Module({ controllers: [BillingController], providers: [StripeGateway] })
+      class BillingModule {}
+
+      const app = new OneBunApplication(BillingModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/billing/charge`);
+        expect(await response.json()).toEqual({
+          success: true,
+          result: { via: 'stripe', ctor: 'StripeGateway' },
+        });
+      } finally {
+        await app.stop();
+      }
+    });
+
+    /**
+     * @source docs:architecture.md#explicit-injection-edge-cases
+     */
+    it('should reject a { provide, useClass } object provider at startup', async () => {
+      abstract class AbstractPaymentGateway extends BaseService {
+        abstract charge(): string;
+      }
+
+      @Service()
+      class StripeGateway extends AbstractPaymentGateway {
+        charge(): string {
+          return 'stripe';
+        }
+      }
+
+      @Module({
+        // There is no binding form: OneBun takes classes, not object providers
+        providers: [{ provide: AbstractPaymentGateway, useClass: StripeGateway }],
+      })
+      class BadModule {}
+
+      const app = new OneBunApplication(BadModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+
+      await expect(app.start()).rejects.toThrow(/OneBun supports class-based providers only/);
     });
   });
 
@@ -2852,6 +3434,70 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       const controller = mod.getControllerInstance(LocalController) as LocalController;
       expect(controller).toBeDefined();
       expect(controller.getData()).toBe('internal');
+    });
+
+    /**
+     * The documented Shutdown Phase: the HTTP listener is refused/drained/closed BEFORE the
+     * first destroy hook, then the three hooks run in order.
+     *
+     * @source docs:architecture.md#module-lifecycle
+     */
+    it('should close the HTTP listener before any destroy hook, then run hooks in order', async () => {
+      const order: string[] = [];
+      let probeUrl = '';
+      let fromInsideHook: number | string = 0;
+
+      @Service()
+      class ShutdownOrderService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(signal?: string): Promise<void> {
+          order.push(`beforeApplicationDestroy:${String(signal)}`);
+          fromInsideHook = await fetch(probeUrl).then(
+            response => response.status,
+            () => 'connection-error',
+          );
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          order.push('onModuleDestroy');
+        }
+
+        async onApplicationDestroy(signal?: string): Promise<void> {
+          order.push(`onApplicationDestroy:${String(signal)}`);
+        }
+      }
+
+      @Controller('/lifecycle')
+      class LifecycleController extends BaseController {
+        @Get('/ping')
+        async ping() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [LifecycleController], providers: [ShutdownOrderService] })
+      class LifecycleModule {}
+
+      const app = new OneBunApplication(LifecycleModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+      probeUrl = `http://localhost:${app.getPort()}/lifecycle/ping`;
+
+      expect((await fetch(probeUrl)).status).toBe(200);
+
+      await app.stop({ signal: 'SIGTERM' });
+
+      // Phases 1-3 already happened: the listener no longer serves by the time hooks run
+      expect([503, 'connection-error']).toContain(fromInsideHook);
+      expect(order).toEqual([
+        'beforeApplicationDestroy:SIGTERM',
+        'onModuleDestroy',
+        'onApplicationDestroy:SIGTERM',
+      ]);
     });
   });
 });
@@ -3080,6 +3726,38 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       }
 
       expect(ChatGateway).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/websocket.md#authentication
+     */
+    it('should carry the authenticate hook and its three outcomes', async () => {
+      // From docs: the authenticate hook decides who the client is, during the upgrade.
+      @WebSocketGateway({
+        path: '/ws',
+        authenticate({ token }) {
+          if (!token) {
+            return null;
+          }
+          if (token !== 'valid') {
+            return false;
+          }
+
+          return { userId: 'u-1', permissions: ['admin'] };
+        },
+      })
+      class ChatGateway extends BaseWebSocketGateway {}
+
+      const metadata = getGatewayMetadata(ChatGateway);
+
+      expect(typeof metadata?.authenticate).toBe('function');
+
+      // The three documented outcomes: anonymous, refused, authenticated with an identity.
+      const request = new Request('http://localhost/ws');
+      expect(await metadata?.authenticate?.({ request })).toBeNull();
+      expect(await metadata?.authenticate?.({ token: 'nope', request })).toBe(false);
+      expect(await metadata?.authenticate?.({ token: 'valid', request }))
+        .toEqual({ userId: 'u-1', permissions: ['admin'] });
     });
   });
 
@@ -4956,6 +5634,76 @@ describe('docs/api/guards.md', () => {
 
     expect(ProtectedController).toBeDefined();
   });
+
+  /**
+   * @source docs:api/guards.md#one-decorator-three-transports
+   */
+  it('a Guard narrows the universal ExecutionContext per transport', () => {
+    class TenantActiveGuard implements Guard {
+      canActivate(ctx: ExecutionContext): boolean {
+        let tenantId: string | undefined;
+
+        if (isHttpContext(ctx)) {
+          tenantId = ctx.getRequest().headers.get('x-tenant-id') ?? undefined;
+        } else if (isQueueContext(ctx)) {
+          tenantId = ctx.getMetadata().headers?.['x-tenant-id'];
+        } else if (isWsContext(ctx)) {
+          tenantId = ctx.getClient().metadata.tenantId as string | undefined;
+        }
+
+        // No branch matched, or no tenant on the one that did: deny.
+        return tenantId !== undefined && tenantId === 'acme';
+      }
+    }
+
+    const guard = new TenantActiveGuard();
+
+    const httpHeaders = new Headers();
+    httpHeaders.set('x-tenant-id', 'acme');
+    const httpReq = new Request('http://localhost/', { headers: httpHeaders }) as unknown as OneBunRequest;
+    expect(guard.canActivate(new HttpExecutionContextImpl(httpReq, 'h', 'C'))).toBe(true);
+
+    const message = {
+      id: 'm1',
+      pattern: 'orders.created',
+      data: {},
+      timestamp: 0,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      metadata: { headers: { 'x-tenant-id': 'acme' } },
+      ack: async () => undefined,
+      nack: async () => undefined,
+    };
+    const queueCtx = new MessageExecutionContextImpl(
+      message,
+      'orders.created',
+      () => undefined,
+      class Consumer {},
+    );
+    expect(guard.canActivate(queueCtx)).toBe(true);
+  });
+
+  /**
+   * @source docs:api/guards.md#one-decorator-three-transports
+   */
+  it('AuthGuard denies a queue context instead of reading a request that is not there', () => {
+    const message = {
+      id: 'm2',
+      pattern: 'orders.created',
+      data: {},
+      timestamp: 0,
+      metadata: { authorization: 'Bearer token' },
+      ack: async () => undefined,
+      nack: async () => undefined,
+    };
+    const queueCtx = new MessageExecutionContextImpl(
+      message,
+      'orders.created',
+      () => undefined,
+      class Consumer {},
+    );
+
+    expect(new AuthGuard().canActivate(queueCtx)).toBe(false);
+  });
 });
 
 // ============================================================================
@@ -5129,6 +5877,66 @@ describe('docs/api/security.md', () => {
     expect(res.status).toBe(429);
   });
 
+  /**
+   * @source docs:api/security.md#client-identification-and-trustproxy
+   */
+  it('getClientAddress — transport peer wins over a header by default', () => {
+    const req = new Request('http://localhost/', {
+      headers: new Headers([['x-forwarded-for', '203.0.113.9']]),
+    });
+    const binding = createClientAddressBinding(
+      { requestIP: () => ({ address: '198.51.100.4' }) },
+      false,
+    );
+    bindClientAddress(req, binding);
+
+    expect(getClientAddress(req)).toBe('198.51.100.4');
+    expect(getPeerAddress(req)).toBe('198.51.100.4');
+  });
+
+  /**
+   * @source docs:api/security.md#client-identification-and-trustproxy
+   */
+  it('getClientAddress — forwarded client wins when trustProxy is on', () => {
+    const req = new Request('http://localhost/', {
+      headers: new Headers([['x-forwarded-for', '203.0.113.9, 10.0.0.1']]),
+    });
+    const binding = createClientAddressBinding(
+      { requestIP: () => ({ address: '198.51.100.4' }) },
+      true,
+    );
+    bindClientAddress(req, binding);
+
+    expect(getClientAddress(req)).toBe('203.0.113.9');
+    expect(getPeerAddress(req)).toBe('198.51.100.4');
+  });
+
+  /**
+   * @source docs:api/security.md#reading-the-client-address-yourself
+   */
+  it('RateLimitMiddleware — keyGenerator falling back to getClientAddress', async () => {
+    const store = new MemoryRateLimitStore();
+    const configuredClass = RateLimitMiddleware.configure({
+      max: 1,
+      windowMs: 60_000,
+      store,
+      keyGenerator: (req) => req.headers.get('x-api-key') ?? getClientAddress(req) ?? 'unknown',
+    });
+    const mw = new configuredClass();
+
+    const keyed = new Request('http://localhost/', {
+      headers: new Headers([['x-api-key', 'key-a']]),
+    }) as unknown as OneBunRequest;
+    const other = new Request('http://localhost/', {
+      headers: new Headers([['x-api-key', 'key-b']]),
+    }) as unknown as OneBunRequest;
+
+    expect((await mw.use(keyed, async () => new Response('ok'))).status).toBe(200);
+    expect((await mw.use(keyed, async () => new Response('ok'))).status).toBe(429);
+    // A different API key is a different bucket.
+    expect((await mw.use(other, async () => new Response('ok'))).status).toBe(200);
+  });
+
   it('SecurityHeadersMiddleware — sets X-Frame-Options', async () => {
     const mw = new SecurityHeadersMiddleware();
     const req = new Request('http://localhost/') as unknown as OneBunRequest;
@@ -5160,16 +5968,27 @@ describe('docs/api/queue.md — type-safe adapter options', () => {
   }
 
   class CustomAdapter implements QueueAdapter {
+    static connectCount = 0;
+    static published: Array<{ pattern: string; data: unknown }> = [];
+
     readonly name = 'custom';
     readonly type = 'jetstream' as const;
+    private connected = false;
     constructor(private opts: CustomAdapterOptions) {}
-    async connect() { /* noop */ }
-    async disconnect() { /* noop */ }
-    isConnected() {
-      return true; 
+    async connect() {
+      CustomAdapter.connectCount++;
+      this.connected = true;
     }
-    async publish() {
-      return ''; 
+    async disconnect() {
+      this.connected = false;
+    }
+    isConnected() {
+      return this.connected;
+    }
+    async publish(pattern: string, data: unknown) {
+      CustomAdapter.published.push({ pattern, data });
+
+      return 'custom-id';
     }
     async publishBatch() {
       return []; 
@@ -5240,6 +6059,46 @@ describe('docs/api/queue.md — type-safe adapter options', () => {
 
     expect(app).toBeDefined();
   });
+
+  /**
+   * @source docs:api/queue.md#queueapplicationoptions
+   */
+  it('a producer-only app enables the queue from the adapter config alone and publishes through it', async () => {
+    // The documented producer-only configuration: an adapter is configured, no controller
+    // carries a queue decorator, and `enabled` is not set. Asserted on observable behaviour
+    // — the adapter is connected and the payload reaches it — not on the app merely booting.
+    @Module({ controllers: [] })
+    class ProducerOnlyDocsModule {}
+
+    CustomAdapter.connectCount = 0;
+    CustomAdapter.published = [];
+
+    const app = new OneBunApplication(ProducerOnlyDocsModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      queue: {
+        adapter: CustomAdapter,
+        options: {
+          servers: 'nats://localhost:4222',
+          streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+        },
+      },
+    });
+
+    await app.start();
+
+    const queueService = app.getQueueService();
+    expect(queueService).not.toBeNull();
+    expect(CustomAdapter.connectCount).toBe(1);
+
+    await queueService!.publish('events.created', { id: 'e-1' });
+
+    expect(CustomAdapter.published).toHaveLength(1);
+    expect(CustomAdapter.published[0].pattern).toBe('events.created');
+    expect(CustomAdapter.published[0].data).toEqual({ id: 'e-1' });
+
+    await app.stop();
+  });
 });
 
 /**
@@ -5308,5 +6167,58 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     // Should NOT throw — @Optional allows undefined
     const mod = new OneBunModule(NotifModule, mockLoggerLayer);
     expect(mod).toBeInstanceOf(OneBunModule);
+  });
+});
+
+/**
+ * @source docs:api/core.md#service-identity
+ */
+describe('Service identity (docs/api/core.md)', () => {
+  const appOptions = { port: 0, metrics: { enabled: false }, gracefulShutdown: false } as const;
+
+  it('refuses getService(Class) and getLayer() when one class has two instances', async () => {
+    @Service()
+    class Widget extends BaseService {}
+
+    @Module({ providers: [Widget], exports: [Widget] })
+    class FirstModule {}
+
+    @Module({ providers: [Widget], exports: [Widget] })
+    class SecondModule {}
+
+    @Module({ imports: [FirstModule, SecondModule] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      // From docs: "there is no correct answer, so app.getService(...) throws rather than
+      // choosing" and "a Context has exactly one slot per key".
+      expect(() => app.getService(Widget)).toThrow(/instances of Widget/);
+      expect(() => app.getLayer()).toThrow(/one slot per service class/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  it('leaves an ordinary application answering both', async () => {
+    @Service()
+    class Gadget extends BaseService {}
+
+    @Module({ providers: [Gadget] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      expect(app.getService(Gadget)).toBeInstanceOf(Gadget);
+      expect(app.getLayer()).toBeDefined();
+    } finally {
+      await app.stop();
+    }
   });
 });

@@ -104,6 +104,11 @@ The framework automatically wraps plain return values into `{ success: true, res
 }
 ```
 
+Error handling does not depend on whether a handler declares parameter decorators. A
+handler written `async findAll()` and one written `async findAll(@Query('q') q?: string)`
+produce identical responses for the same throw — same status, same content type, same
+envelope. See [Exception Filters](./exception-filters.md#what-filters-cover).
+
 ## Response Methods (Alternative)
 
 These methods are available on `BaseController` but are not the recommended default. Prefer returning plain data and throwing `HttpException`.
@@ -227,6 +232,28 @@ export class UserController extends BaseController {
   }
 }
 ```
+
+## Extending a Base Controller
+
+Class-level pipeline decorators are inherited: a controller that extends a base carrying `@UseGuards`, `@UseMiddleware`, `@UseInterceptors` or `@UseFilters` gets them. The base does not need to be a `@Controller` itself. Base entries run first, then the subclass's own — the same order in which controller-level and route-level entries merge.
+
+```typescript
+@UseGuards(AuthGuard)
+class ProtectedController extends BaseController {}
+
+// inherits AuthGuard — every route below requires a Bearer token
+@Controller('/admin')
+class AdminController extends ProtectedController {
+  @Get('/stats')
+  stats() { return { ok: true }; }
+}
+```
+
+**Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
+
+::: warning Upgrading from 0.4.4 or earlier
+Class-level decorators were NOT inherited: a subclass of a guarded base answered as if unprotected, with no error. If you use a shared protected base controller, treat its subclasses' routes as having been exposed.
+:::
 
 ## Lifecycle Hooks
 

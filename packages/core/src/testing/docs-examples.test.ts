@@ -15,6 +15,7 @@ import type { CompiledTestingModule } from './testing-module';
 import {
   Controller,
   Get,
+  Module,
   Param,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
@@ -184,6 +185,76 @@ describe('docs/testing.md — TestingModule', () => {
 
       const body = await response.json() as { result: { id: string; name: string } };
       expect(body.result.name).toBe('MockUser');
+    } finally {
+      await module?.close();
+    }
+  });
+
+  /**
+   * @source docs:testing.md#overrideproviderserviceclass
+   */
+  it('overrideProvider — replaces service with another class', async () => {
+    @Service()
+    class MockUserService extends BaseService {
+      findById(id: string) {
+        return { id, name: 'ClassMockUser' };
+      }
+    }
+
+    let module: CompiledTestingModule | undefined;
+
+    try {
+      module = await TestingModule
+        .create({ controllers: [UserController], providers: [UserService] })
+        .overrideProvider(UserService).useClass(MockUserService)
+        .compile();
+
+      const response = await module.inject('GET', '/users/1');
+
+      expect(response.status).toBe(200);
+
+      const body = await response.json() as { result: { id: string; name: string } };
+      expect(body.result.name).toBe('ClassMockUser');
+    } finally {
+      await module?.close();
+    }
+  });
+
+  /**
+   * @source docs:testing.md#overrideproviderserviceclass
+   */
+  it('overrideProvider — reaches a service, and an imported module that provides the class', async () => {
+    @Service()
+    class ImportedDep extends BaseService {
+      who(): string {
+        return 'REAL';
+      }
+    }
+
+    @Service()
+    class ImportedConsumer extends BaseService {
+      constructor(private dep: ImportedDep) {
+        super();
+      }
+
+      saw(): string {
+        return this.dep.who();
+      }
+    }
+
+    @Module({ providers: [ImportedDep, ImportedConsumer], exports: [ImportedDep, ImportedConsumer] })
+    class ImportedModule {}
+
+    let module: CompiledTestingModule | undefined;
+
+    try {
+      module = await TestingModule
+        .create({ imports: [ImportedModule] })
+        .overrideProvider(ImportedDep).useValue({ who: () => 'MOCK' })
+        .compile();
+
+      // From docs: the override reaches services and imported modules, not only controllers.
+      expect(module.get(ImportedConsumer).saw()).toBe('MOCK');
     } finally {
       await module?.close();
     }

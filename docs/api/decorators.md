@@ -25,6 +25,12 @@ export class MyModule {}
 export class DbModule {}
 ```
 
+**Module resolution rules**:
+- `exports` accepts SERVICES only. `exports: [SomeModule]` throws `OneBunInvalidExportError` naming both modules — a re-exported module never contributed anything. Import the providing module directly where its services are needed
+- A `@Global()` module's services reach every module regardless of its position in an `imports` array, and whether the importing module lists it at all — import order is not semantic
+- One `@Global()` service instance per application (per sub-application in multi-service mode), not per process
+- Object providers (`{ provide: X, useValue: v }`) throw `OneBunInvalidProviderError`; providers are classes
+
 **Controller with Routes**:
 ```typescript
 @Controller('/api/users')   // or @Controller('api/users') — leading slash is optional
@@ -161,6 +167,18 @@ import { UserService } from './user.service';
   exports: [UserService],
 })
 export class UserModule {}
+```
+
+**`exports` accepts services only.** Listing a MODULE there — the NestJS re-export idiom — throws `OneBunInvalidExportError` naming both modules. It never worked: a re-exported module contributed nothing to the importer, so either the importer failed at a controller with no mention of the export, or it also imported the module directly and got a second copy of every provider. Import the module that provides the service directly wherever the service is needed:
+
+```typescript
+// Does not work — throws OneBunInvalidExportError at boot
+@Module({ imports: [CoreModule], exports: [CoreModule] })
+export class FeatureModule {}
+
+// Import the providing module where the service is needed
+@Module({ imports: [CoreModule], providers: [UserService] })
+export class FeatureModule {}
 ```
 
 ### @Global()
@@ -302,6 +320,54 @@ export class UserController extends BaseController {
   async remove(@Param('id') id: string) {}
 }
 ```
+
+### @All() — catch-all routes {#all-catch-all-routes}
+
+`@All()` is a **true** catch-all, like NestJS `router.all()`: the decorated handler answers
+**every** HTTP method on that path, not just the seven with a decorator of their own. That
+includes `OPTIONS` and `HEAD`, and it includes methods the framework has no decorator for at
+all — `PROPFIND`, `PURGE`, `LOCK`, `QUERY`, vendor verbs. This is what makes `@All()` usable
+for reverse proxies, webhook receivers and legacy-path shims.
+
+```typescript
+@Controller('/gateway')
+export class GatewayController extends BaseController {
+  @All('/proxy/:id')
+  async proxy(@Param('id') id: string, @Req() req: OneBunRequest) {
+    // req.method is whatever the client sent: GET, POST, PROPFIND, QUERY, ...
+    return { id, method: req.method };
+  }
+}
+```
+
+**Precedence — an explicitly declared verb always wins.** If the same path carries both
+`@All()` and a concrete verb decorator, the concrete one handles its verb and `@All()` handles
+everything else. The rule is fixed; it does not depend on the order the decorators are written
+in:
+
+```typescript
+@Controller('/webhooks')
+export class WebhookController extends BaseController {
+  @All('/github')
+  async fallback() {
+    return { handled: 'all' };   // PUT, DELETE, PROPFIND, ... land here
+  }
+
+  @Get('/github')
+  async health() {
+    return { handled: 'get' };   // GET lands here, not in fallback()
+  }
+}
+```
+
+> **CORS preflight.** Because an `@All()` path claims `OPTIONS`, a preflight request reaches
+> that route's middleware chain. When the application is configured with `cors`, the built-in
+> `CorsMiddleware` runs first and answers the preflight with `204` — the `@All()` handler body
+> never runs. Without `cors` configured, the `@All()` handler itself answers `OPTIONS`.
+
+> **OpenAPI.** An `@All()` route has no single HTTP method, so it cannot be expressed as one
+> OpenAPI operation. Document the individual verbs you care about with concrete decorators, or
+> exclude the route from the generated spec.
 
 ## Parameter Decorators
 
@@ -718,12 +784,14 @@ Explicit dependency injection for edge cases. **In most cases, automatic DI work
 
 ```typescript
 @Inject(type: new (...args: any[]) => T)
+@Inject(token: symbol | string)
 ```
 
 **When to use @Inject:**
 - Interface or abstract class injection
 - Token-based injection (custom Context.Tag)
 - Overriding automatic resolution
+- Picking WHICH [named registration](/api/drizzle#multiple-databases) a parameter gets, in a module that selected two of them
 
 **Example:**
 
@@ -744,6 +812,36 @@ export class UserController extends BaseController {
   }
 }
 ```
+
+**Selecting a named registration:**
+
+Only needed in a module that imported TWO registrations of one service. A module that selected
+one resolves it by type, with no annotation at all.
+
+```typescript
+@Module({
+  imports: [
+    DrizzleModule.forFeature(MAIN_DB),
+    DrizzleModule.forFeature(ANALYTICS_DB),
+  ],
+  providers: [Reconciler],
+})
+export class ReconcileModule {}
+
+@Service()
+export class Reconciler extends BaseService {
+  constructor(
+    @Inject(MAIN_DB) private main: DrizzleService,
+    @Inject(ANALYTICS_DB) private analytics: DrizzleService,
+    private clock: ClockService,          // un-annotated parameters resolve normally
+  ) {
+    super();
+  }
+}
+```
+
+Asking for a token the module never selected throws at startup, naming what it did select — the
+alternative is being handed the other database, silently.
 
 ### @Optional()
 

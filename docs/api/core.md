@@ -64,8 +64,13 @@ const app = new OneBunApplication(AppModule, {
 cors: { origin: '*' }           // or: cors: true
 rateLimit: { max: 100 }         // or: rateLimit: true
 security: { xFrameOptions: 'DENY' }  // or: security: true
+trustProxy: true                // only behind a proxy — see Security Middleware
 ```
 Auto-ordering: CorsMiddleware → RateLimitMiddleware → [user middleware] → SecurityHeadersMiddleware
+
+Rate limiting keys on the transport peer address, not on `x-forwarded-for`. Set
+`trustProxy: true` when the application sits behind a load balancer — see
+[Security Middleware](./security.md#client-identification-and-trustproxy).
 
 **Static files (SPA on same host)**:
 ```typescript
@@ -88,11 +93,12 @@ await app.start();
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
 - `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree)
 - `onApplicationInit()` - after all modules, before HTTP starts
-- `onModuleDestroy()` - during shutdown
-- `beforeApplicationDestroy(signal?)` - start of shutdown
-- `onApplicationDestroy(signal?)` - end of shutdown
+- `beforeApplicationDestroy(signal?)` - FIRST destroy hook, but NOT the start of shutdown: it runs after new requests are refused with 503, after the in-flight drain, and after the HTTP listener is closed. A request issued from inside it is refused (connection refused, not 503)
+- `onModuleDestroy()` - after `beforeApplicationDestroy`, WebSocket close, queue stop and trace flush; before `onApplicationDestroy`
+- `onApplicationDestroy(signal?)` - last destroy hook; only the DI scope disposal and the logger flush follow it
+- in multi-service mode `signal` is always `undefined` in both hooks — the parent owns the signal handler and stops each child with a bare `stop()`
 
-**Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process.
+**Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process. Each sub-application owns its DI scope: one global service instance per sub-application, and dynamic-module options are captured per application at import time.
 
 </llm-only>
 
@@ -197,6 +203,14 @@ interface ApplicationOptions {
   /** Enable graceful shutdown on SIGTERM/SIGINT (default: true) */
   gracefulShutdown?: boolean;
 
+  /**
+   * Deadline for the whole shutdown sequence in ms (default: 15000).
+   * The first half bounds the in-flight request drain — connections still open when it
+   * expires are force-closed and counted in a warning — and the rest bounds the destroy
+   * hooks. On the signal path a shutdown that hits the deadline exits with code 1.
+   */
+  shutdownTimeout?: number;
+
   /** Global exception filters. Route/controller filters take priority. */
   filters?: ExceptionFilter[];
 
@@ -213,6 +227,16 @@ interface ApplicationOptions {
    * See Security Middleware for details.
    */
   rateLimit?: RateLimitOptions | true;
+
+  /**
+   * Whether proxy headers (x-forwarded-for, cf-connecting-ip, x-real-ip) sent by the
+   * caller may override the transport peer when identifying the client.
+   * Off by default — those headers are attacker-controlled on a direct connection.
+   * Enable only when every request arrives through a proxy that overwrites them.
+   * Consumed by the default rate-limit key and the remoteAddr span field.
+   * @default false
+   */
+  trustProxy?: boolean;
 
   /**
    * Security headers shorthand — auto-appends SecurityHeadersMiddleware.
@@ -285,13 +309,17 @@ class OneBunApplication {
   /** Start the HTTP server */
   async start(): Promise<void>;
 
-  /** Stop the HTTP server with optional cleanup options */
+  /**
+   * Drain in-flight requests, then stop the server and run the destroy hooks.
+   * Idempotent: a second call awaits the first shutdown instead of repeating it.
+   * Always resolves within `shutdownTimeout`.
+   */
   async stop(options?: { 
     closeSharedRedis?: boolean; 
     signal?: string;  // e.g., 'SIGTERM', 'SIGINT'
   }): Promise<void>;
 
-  /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT) */
+  /** Enable graceful shutdown signal handlers (SIGTERM, SIGINT). Registers at most once. */
   enableGracefulShutdown(): void;
 
   /** Get configuration service with full type inference via module augmentation */
@@ -310,8 +338,8 @@ class OneBunApplication {
   /** Get root module layer */
   getLayer(): Layer.Layer<never, never, unknown>;
 
-  /** Get a service instance by class from the module container */
-  getService<T>(serviceClass: new (...args: unknown[]) => T): T;
+  /** Get a service instance by class from the module container, optionally naming a registration */
+  getService<T>(serviceClass: new (...args: unknown[]) => T, token?: symbol | string): T;
 
   /** Get a child OneBunApplication instance by service name (multi-service mode only) */
   getApplication(name: string): OneBunApplication | undefined;
@@ -384,31 +412,97 @@ await userService.performBackgroundTask();
 await userService.sendScheduledEmails();
 ```
 
-### Graceful Shutdown
+### Service identity
 
-OneBun enables graceful shutdown **by default**. When the application receives SIGTERM or SIGINT signals, it automatically:
-1. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
-2. Stops the HTTP server
-3. Closes all WebSocket connections
-4. Calls `onModuleDestroy()` hooks on all services and controllers
-5. Disconnects shared Redis connection
-6. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+Every `@Service()` class gets one Effect tag, keyed by the class NAME. Constructor injection and `getService(Class, token)` do not use that key — they resolve by tag identity at the module boundary — so this is invisible to most applications. It becomes visible wherever one application holds TWO instances of one service class.
+
+**Named registrations.** `DrizzleModule.forRoot({ ..., as: MAIN_DB })` and `forRoot({ ..., as: ANALYTICS_DB })` both provide `DrizzleService`: one class, one key, two instances. Name the one you want and you always get it:
 
 ```typescript
-// Default: graceful shutdown is enabled
+const main = app.getService(DrizzleService, MAIN_DB);
+```
+
+Ask without naming one and there is no correct answer, so `app.getService(DrizzleService)` throws rather than choosing. The instance it would otherwise return depends on the order the modules were imported in, which is not something your code should depend on.
+
+**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last. There is no supported way to build a single layer holding two instances of one service class; reach a specific instance with `getService(Class, token)` or `@Inject(token)`.
+
+**Two service classes with the same name.** Two classes called `CacheService` from different packages are separate services to the framework, and injection resolves each of them correctly. They mint the same tag key, so they cannot both appear in a layer. If your application needs both in one layer, give one an explicit tag:
+
+```typescript
+import { Context } from 'effect';
+
+export const BillingCacheTag = Context.GenericTag<CacheService>('@acme/billing/CacheService');
+
+@Service(BillingCacheTag)
+export class CacheService extends BaseService {}
+```
+
+The convention the framework packages follow is `@scope/package/ClassName`.
+
+**One copy of `@onebun/core` per application.** Decorator metadata is held per copy of the framework. If `node_modules` resolves two copies, classes decorated by one copy are invisible to the other and boot fails with a dependency error naming a service that is correctly decorated. Deduplicate the dependency; there is no runtime workaround.
+
+<llm-only>
+**Technical details for AI agents:**
+- `@Service()` mints `Context.GenericTag(target.name)` — one tag OBJECT per class, and `tag.key` is the bare class name. Effect keys `Context`/`Layer` by `tag.key`; OneBun's own maps (`serviceInstances`, `GlobalScope.services`, overrides) are keyed by the tag OBJECT, which is why injection is unaffected by a name collision
+- `getService(Class)` and `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT. Keyed by name, two same-named provider classes made boot depend on the order of the `providers` array
+- The framework's own tag keys `LoggerService`, `ConfigService`, `QueueService` and `SharedRedisService` are NOT namespaced, so a user service with one of those names shares their key. It reaches nothing at runtime — the framework reads its logger from its own layer, never from `rootLayer` — but it does make `getLayer()` ambiguous
+</llm-only>
+
+### Graceful Shutdown
+
+OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on any
+`await app.stop()` — it runs this sequence, in this order:
+
+1. **Refuses new requests**: every route answers `503 Service Unavailable`
+   (`{"success": false, "error": "Service Unavailable", ...}`). The listener stays open on
+   purpose, so a load balancer sees a refusal instead of a dropped connection.
+2. **Drains in-flight requests**: waits for the requests already being served to finish.
+   Anything still open when the drain deadline expires is force-closed, and a `warn` names
+   how many connections were cut.
+3. **Closes the HTTP listener** — before any destroy hook runs.
+4. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
+5. Closes all WebSocket connections
+6. Stops the queue service and disconnects the queue adapter
+7. Flushes traces
+8. Calls `onModuleDestroy()` hooks on all services and controllers
+9. Releases the shared Redis connection (disconnected when the last consumer lets go)
+10. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+11. Flushes the logger transport
+
+Steps 1–3 are what keeps a rolling deploy from cutting responses that were mid-flight: the
+destroy hooks no longer run while the socket is still accepting work.
+
+**Bounded, always**. `shutdownTimeout` (default **15000 ms**) caps the whole sequence.
+The first half of that budget bounds the drain; the rest bounds the destroy hooks. `stop()`
+resolves when the deadline expires whatever is still running, logging what that was; on the
+signal path the process then exits with code **1** instead of 0.
+
+**Idempotent**. `stop()` runs once per application. A second call — sequential, overlapping,
+or a second signal — awaits the first shutdown and re-runs nothing. A signal arriving during
+a shutdown is logged (`Already shutting down, ignoring SIGINT`) and does not restart the
+drain. `enableGracefulShutdown()` registers its listeners at most once per instance.
+
+```typescript
+// Default: graceful shutdown is enabled, with a 15s budget
 const app = new OneBunApplication(AppModule);
 await app.start();
 // SIGTERM/SIGINT handlers are automatically registered
+
+// Give slow requests more room to finish (drain gets the first half: 15s here)
+const app = new OneBunApplication(AppModule, {
+  shutdownTimeout: 30_000,
+});
 
 // To disable automatic shutdown handling:
 const app = new OneBunApplication(AppModule, {
   gracefulShutdown: false,
 });
 await app.start();
-app.enableGracefulShutdown(); // Enable manually later if needed
+app.enableGracefulShutdown(); // Register the handlers yourself instead
 
-// Programmatic shutdown
-await app.stop(); // Closes server, WebSocket, and shared Redis
+// Programmatic shutdown — drains, then closes server, WebSocket, and shared Redis
+await app.stop();
 
 // Keep shared Redis open for other consumers
 await app.stop({ closeSharedRedis: false });
@@ -416,6 +510,17 @@ await app.stop({ closeSharedRedis: false });
 // Pass signal for lifecycle hooks
 await app.stop({ signal: 'SIGTERM' });
 ```
+
+**Multi-service mode**: the *parent* application registers the one SIGTERM/SIGINT handler
+for the process; child services never register their own. The handler runs
+`stopAll()`, which stops every service **concurrently** (each service still drains its own
+requests), and the process exits only after the last service has finished its hooks. Pass
+`gracefulShutdown: false` in `MultiServiceApplicationOptions` to install no handler at all.
+
+The signal name is **not** forwarded to the children: `stopAll()` calls each child's `stop()`
+with no arguments, so `beforeApplicationDestroy(signal)` and `onApplicationDestroy(signal)` both
+receive `undefined` in multi-service mode — even when the parent was given an explicit
+`stop({ signal: 'SIGTERM' })`. Do not branch on `signal` there.
 
 ### Lifecycle Hooks
 
@@ -426,8 +531,12 @@ Services and controllers can implement lifecycle hooks to execute code at specif
 | `OnModuleInit` | `onModuleInit()` | After instantiation and DI |
 | `OnApplicationInit` | `onApplicationInit()` | After all modules, before HTTP server |
 | `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
-| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain and listener close — first hook of the teardown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown |
+
+The listener is already closed when `beforeApplicationDestroy` runs, so a hook cannot serve or
+self-call over HTTP — traffic was refused with `503` from the start of the drain, well before it.
+In multi-service mode `signal` is `undefined` in both hooks — see [Graceful Shutdown](#graceful-shutdown).
 
 See [Services API](./services.md#lifecycle-hooks) for detailed usage examples.
 
@@ -448,25 +557,61 @@ interface MultiServiceApplicationOptions {
   services: ServicesMap;
   envSchema?: TypedEnvSchema;
   envOptions?: EnvLoadOptions;
-  metrics?: MetricsOptions;
-  tracing?: TracingOptions;
   queue?: QueueApplicationOptions;
   enabledServices?: string[];
   excludedServices?: string[];
   externalServiceUrls?: Record<string, string>;
+  /** One process-level SIGTERM/SIGINT handler on the parent (default: true) */
+  gracefulShutdown?: boolean;
+  /** Shutdown deadline in ms for stopAll() and every child (default: 15000) */
+  shutdownTimeout?: number;
+
+  // Defaults for every service — a service that sets the same key wins
+  host?: string;
+  basePath?: string;
+  routePrefix?: boolean;
+  envOverrides?: EnvOverrides;
+  logger?: { minLevel?: 'fatal' | 'error' | 'warning' | 'info' | 'debug' | 'trace' };
+  metrics?: MetricsOptions;
+  tracing?: TracingOptions;
+  middleware?: MiddlewareClass[];
+  static?: StaticApplicationOptions;
 }
 
 interface ServiceConfig {
-  module: Function;
+  /** Root module CLASS — a bare `Function` is not assignable */
+  module: new (...args: unknown[]) => object;
   port: number;
   host?: string;
   basePath?: string;
   routePrefix?: boolean;
   envOverrides?: EnvOverrides;
+  /** Extra ENV variables for this service only */
+  envSchemaExtend?: TypedEnvSchema;
+  logger?: { minLevel?: 'fatal' | 'error' | 'warning' | 'info' | 'debug' | 'trace' };
+  metrics?: MetricsOptions;
+  tracing?: TracingOptions;
+  middleware?: MiddlewareClass[];
+  static?: StaticApplicationOptions;
 }
 
 type ServicesMap = Record<string, ServiceConfig>;
 ```
+
+Two per-service keys are accepted but always overwritten with the services-map key:
+`tracing.serviceName` and `metrics.defaultLabels.service`. `tracing: { serviceName: 'users-service' }`
+on the `users` service reaches nothing — the tracer reports `users`. Rename the map key instead.
+`metrics.prefix` and the rest are merged service-over-application as documented above.
+
+`static` is the one option that does **not** cascade: it is honoured per service only, an
+application-level `static` is not passed to the children.
+
+::: warning envOverrides are not per-service yet
+Keys are **environment variable names** (`DB_NAME`), never `config.get()` paths — a wrong key is
+ignored silently. And with two or more services the scoping does not hold: every service reads the
+ENV resolved for the first service to start, so the other services' `envOverrides` are dropped.
+With a single service, or with overrides declared at application level, they apply as written.
+:::
 
 ### Usage Example
 
@@ -559,16 +704,20 @@ export class AppModule {}
 export class UserModule {}
 ```
 
+**Import order does not matter.** A `@Global()` module's services reach every module that can see it regardless of where it sits in an `imports` array — and whether or not the importing module lists it at all. A sibling import that happens to initialize the global module first no longer leaves the importer with nothing.
+
+**Visibility, not instance count.** `@Global()` makes a module's exported services reachable from every module without an explicit import; a module without it is reachable only where it is imported. Either way the module itself is constructed exactly ONCE per application, so two modules importing the same one share its services rather than each getting a copy.
+
+**Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
+
+The options a dynamic module was imported with are **captured per application** at import time, so a later `forRoot()` in the same process cannot retroactively change what an already-running application is using.
+
 **Global Module Utilities:**
 
 ```typescript
 // Check if module is global
 import { isGlobalModule } from '@onebun/core';
 isGlobalModule(DatabaseModule); // true
-
-// Clear global registries (for testing)
-import { clearGlobalServicesRegistry } from '@onebun/core';
-clearGlobalServicesRegistry();
 ```
 
 ## Metrics Options

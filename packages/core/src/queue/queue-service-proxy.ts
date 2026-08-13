@@ -20,7 +20,10 @@ import type {
 } from './types';
 
 const QUEUE_NOT_ENABLED_MESSAGE =
-  'Queue is not enabled. Enable it via `queue.enabled: true` in application options or register at least one controller with queue decorators (@Subscribe, @Cron, @Interval, @Timeout).';
+  'Queue is not enabled. Enable it by any one of: registering a controller with queue decorators '
+  + '(@Subscribe, @Cron, @Interval, @Timeout); setting `queue.enabled: true` in application options; '
+  + 'or configuring a backend via `queue.adapter`, `queue.options` or `queue.redis`. '
+  + 'An explicit `queue.enabled: false` overrides a configured backend and keeps the queue disabled.';
 
 function throwIfNoDelegate(delegate: QueueService | null): asserts delegate is QueueService {
   if (delegate === null) {

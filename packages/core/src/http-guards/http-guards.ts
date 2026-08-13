@@ -6,10 +6,50 @@
  */
 
 import type {
+  ExecutionContext,
   HttpExecutionContext,
-  HttpGuard,
   OneBunRequest,
 } from '../types';
+
+import { isHttpContext } from '../types';
+
+// ============================================================================
+// Universal Guard Contract
+// ============================================================================
+
+/**
+ * Universal Guard interface — ONE guard contract across HTTP, WebSocket and queue handlers.
+ *
+ * `@UseGuards()` accepts anything shaped like this on all three transports, mirroring
+ * `@UseInterceptors()`, which has always shared one metadata key across them. The context is
+ * the discriminated union `ExecutionContext`: narrow it with `isHttpContext()`,
+ * `isWsContext()` or `isQueueContext()` before touching transport-specific accessors.
+ *
+ * A guard that reaches a transport it was not written for MUST return `false` rather than
+ * fall through to `undefined` — that is what the narrowing is for. On WebSocket and queue a
+ * guard that throws is treated as a denial and logged; on HTTP a throw still travels to the
+ * route's exception filters, so `throw new HttpException(401, ...)` keeps its meaning.
+ *
+ * `HttpGuard`, `WsGuard` and `MessageGuard` all satisfy this interface — method parameters
+ * are checked bivariantly — so existing single-transport guards keep compiling unchanged.
+ *
+ * @see docs:api/guards.md
+ *
+ * @example
+ * ```typescript
+ * class TenantGuard implements Guard {
+ *   canActivate(ctx: ExecutionContext): boolean {
+ *     if (isHttpContext(ctx)) return ctx.getRequest().headers.get('x-tenant') === 'acme';
+ *     if (isQueueContext(ctx)) return ctx.getMetadata().headers?.['x-tenant'] === 'acme';
+ *     if (isWsContext(ctx)) return ctx.getClient().metadata.tenant === 'acme';
+ *     return false;
+ *   }
+ * }
+ * ```
+ */
+export interface Guard {
+  canActivate(context: ExecutionContext): boolean | Promise<boolean>;
+}
 
 // ============================================================================
 // Execution Context Implementation
@@ -56,14 +96,14 @@ export class HttpExecutionContextImpl implements HttpExecutionContext {
  * @see docs:api/guards.md
  */
 export async function executeHttpGuards(
-  guards: (Function | HttpGuard)[],
+  guards: (Function | Guard)[],
   context: HttpExecutionContext,
 ): Promise<boolean> {
   for (const guard of guards) {
-    let guardInstance: HttpGuard;
+    let guardInstance: Guard;
 
     if (typeof guard === 'function') {
-      guardInstance = new (guard as new () => HttpGuard)();
+      guardInstance = new (guard as new () => Guard)();
     } else {
       guardInstance = guard;
     }
@@ -99,9 +139,16 @@ export async function executeHttpGuards(
  */
 export function createHttpGuard(
   fn: (context: HttpExecutionContext) => boolean | Promise<boolean>,
-): new () => HttpGuard {
-  return class implements HttpGuard {
-    canActivate(context: HttpExecutionContext): boolean | Promise<boolean> {
+): new () => Guard {
+  return class implements Guard {
+    canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+      // `@UseGuards` reaches queue and WebSocket handlers too. The function was written
+      // against a request, so anywhere else it denies instead of reading `getRequest` off a
+      // context that has none and throwing a TypeError per message.
+      if (!isHttpContext(context)) {
+        return false;
+      }
+
       return fn(context);
     }
   };
@@ -125,8 +172,15 @@ export function createHttpGuard(
  * getProfile() { ... }
  * ```
  */
-export class AuthGuard implements HttpGuard {
-  canActivate(context: HttpExecutionContext): boolean {
+export class AuthGuard implements Guard {
+  canActivate(context: ExecutionContext): boolean {
+    // HTTP-only: on a queue or WebSocket handler there is no request to read a header from,
+    // so this denies rather than passing or throwing. Use `MessageAuthGuard` / `WsAuthGuard`
+    // there — see docs:api/guards.md, "One decorator, three transports".
+    if (!isHttpContext(context)) {
+      return false;
+    }
+
     const auth = context.getRequest().headers.get('authorization');
 
     return auth !== null && auth.startsWith('Bearer ');
@@ -164,7 +218,7 @@ function defaultRolesExtractor(ctx: HttpExecutionContext): string[] {
  * adminPanel() { ... }
  * ```
  */
-export class RolesGuard implements HttpGuard {
+export class RolesGuard implements Guard {
   private readonly roles: string[];
   private readonly rolesExtractor: (ctx: HttpExecutionContext) => string[];
 
@@ -176,7 +230,12 @@ export class RolesGuard implements HttpGuard {
     this.rolesExtractor = rolesExtractor;
   }
 
-  canActivate(context: HttpExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // HTTP-only, same rule as AuthGuard: the extractor takes a request.
+    if (!isHttpContext(context)) {
+      return false;
+    }
+
     const userRoles = this.rolesExtractor(context);
 
     return this.roles.every((role) => userRoles.includes(role));

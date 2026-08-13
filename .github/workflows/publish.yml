@@ -45,9 +45,44 @@ jobs:
         run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & wait
 
       - name: Test with coverage
+        timeout-minutes: 25
         env:
           TESTCONTAINERS_RYUK_DISABLED: 'true'
-        run: bun test --reporter=default --reporter=junit --reporter-outfile=test-results.xml --coverage --coverage-reporter=lcov
+        # Coverage is collected here and nowhere else — `bunfig.toml` deliberately omits the
+        # `coverage` key, because setting it to `false` would silently override this flag and
+        # produce no lcov at all.
+        #
+        # Bun's coverage instrumentation intermittently spins the process forever while
+        # loading a large module graph: no output, every timer in the process dead, and
+        # SIGTERM is not serviced — hence `timeout -s KILL`, which reports 137. Measured at
+        # roughly 4 hangs in 9 runs locally, so a single attempt is not dependable. A real
+        # test failure exits non-137 and is NOT retried, so retrying cannot mask a red suite.
+        run: |
+          set -u
+          for attempt in 1 2 3 4; do
+            echo "::group::coverage attempt ${attempt}"
+            set +e
+            timeout -s KILL 600 bun test \
+              --reporter=default --reporter=junit --reporter-outfile=test-results.xml \
+              --coverage --coverage-reporter=lcov
+            rc=$?
+            set -e
+            echo "::endgroup::"
+
+            if [ "${rc}" -eq 0 ]; then
+              exit 0
+            fi
+
+            if [ "${rc}" -ne 137 ]; then
+              echo "Tests failed with exit ${rc} — a real failure, not a hang. Not retrying."
+              exit "${rc}"
+            fi
+
+            echo "Attempt ${attempt} hung and was killed; retrying."
+          done
+
+          echo "The coverage run hung on every attempt."
+          exit 1
 
       - name: Extract test count for badge
         if: github.ref == 'refs/heads/master'

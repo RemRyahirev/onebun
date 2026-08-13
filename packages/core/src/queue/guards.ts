@@ -12,6 +12,10 @@ import type {
   MessageExecutionContext,
   MessageGuardConstructor,
 } from './types';
+import type { ExecutionContext } from '../types';
+
+import { guardName } from '../http-guards/guard-binding';
+import { isQueueContext } from '../types';
 
 // ============================================================================
 // Execution Context Implementation
@@ -69,7 +73,13 @@ export class MessageExecutionContextImpl implements MessageExecutionContext {
  * @see docs:api/queue.md
  */
 export class MessageAuthGuard implements MessageGuard {
-  canActivate(context: MessageExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and WebSocket handlers too. This guard reads message
+    // metadata, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     const metadata = context.getMetadata();
 
     return !!metadata.authorization;
@@ -94,7 +104,13 @@ export class MessageAuthGuard implements MessageGuard {
 export class MessageServiceGuard implements MessageGuard {
   constructor(private readonly allowedServices: string[]) {}
 
-  canActivate(context: MessageExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and WebSocket handlers too. This guard reads message
+    // metadata, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     const metadata = context.getMetadata();
     const serviceId = metadata.serviceId;
 
@@ -127,7 +143,13 @@ export class MessageHeaderGuard implements MessageGuard {
     private readonly expectedValue?: string,
   ) {}
 
-  canActivate(context: MessageExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and WebSocket handlers too. This guard reads message
+    // metadata, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     const metadata = context.getMetadata();
     const headers = metadata.headers;
 
@@ -163,7 +185,13 @@ export class MessageHeaderGuard implements MessageGuard {
  * @see docs:api/queue.md
  */
 export class MessageTraceGuard implements MessageGuard {
-  canActivate(context: MessageExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and WebSocket handlers too. This guard reads message
+    // metadata, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     const metadata = context.getMetadata();
 
     return !!metadata.traceId;
@@ -190,6 +218,13 @@ export class MessageTraceGuard implements MessageGuard {
  *   // Requires both auth and service check to pass
  * }
  * ```
+ *
+ * DELIBERATELY OUTSIDE DI. The children are constructed by THIS constructor, at decoration
+ * time, long before any module exists — so a child class with a constructor dependency gets
+ * nothing, exactly as before. Giving them DI would mean changing this public constructor, and
+ * `new MessageAllGuards([...])` as documented must keep working untouched. Pass an already
+ * constructed child, or list the guards directly on `@UseGuards(A, B)` where each one is
+ * resolved individually with full DI.
  * @see docs:api/queue.md
  */
 export class MessageAllGuards implements MessageGuard {
@@ -233,6 +268,13 @@ export class MessageAllGuards implements MessageGuard {
  *   // Requires either service check OR auth to pass
  * }
  * ```
+ *
+ * DELIBERATELY OUTSIDE DI. The children are constructed by THIS constructor, at decoration
+ * time, long before any module exists — so a child class with a constructor dependency gets
+ * nothing, exactly as before. Giving them DI would mean changing this public constructor, and
+ * `new MessageAllGuards([...])` as documented must keep working untouched. Pass an already
+ * constructed child, or list the guards directly on `@UseGuards(A, B)` where each one is
+ * resolved individually with full DI.
  * @see docs:api/queue.md
  */
 export class MessageAnyGuard implements MessageGuard {
@@ -265,19 +307,43 @@ export class MessageAnyGuard implements MessageGuard {
 // ============================================================================
 
 /**
- * Execute an array of guards and return whether all passed
+ * Execute an array of guards and return whether all passed.
+ *
+ * A guard that THROWS denies. `@UseGuards` reaches queue consumers now, so a guard written
+ * against an HTTP request can land here and blow up on `getRequest()`; failing open would turn
+ * that into a silent authorization bypass on every message. HTTP deliberately does the
+ * opposite — a throw there travels to the exception filters so `throw new HttpException(401)`
+ * keeps its status — but a message has no filter chain to carry it.
+ *
+ * Guards arrive already resolved when the consumer was built by a module: `registerService`
+ * runs them through the owner module's resolver, so `typeof guard === 'function'` here means a
+ * class registered outside DI, and zero-argument construction is the correct fallback for it.
  *
  * @param guards - Array of guard instances or constructors
  * @param context - Message execution context
+ * @param onError - Called with the offending guard's name and the error, for the framework's
+ *   own diagnostic. Without it a thrown guard denies silently.
  * @returns Whether all guards passed
+ * @see docs:api/guards.md
+ * @see docs:api/queue.md
  */
 export async function executeMessageGuards(
   guards: Array<MessageGuard | MessageGuardConstructor>,
   context: MessageExecutionContext,
+  onError?: (guardName: string, error: unknown) => void,
 ): Promise<boolean> {
   for (const guard of guards) {
     const guardInstance = typeof guard === 'function' ? new guard() : guard;
-    const result = await guardInstance.canActivate(context);
+
+    let result: boolean;
+    try {
+      result = await guardInstance.canActivate(context);
+    } catch (error) {
+      onError?.(guardName(guard), error);
+
+      return false;
+    }
+
     if (!result) {
       return false;
     }
@@ -311,6 +377,14 @@ export function createMessageGuard(
   checkFn: (context: MessageExecutionContext) => boolean | Promise<boolean>,
 ): MessageGuard {
   return {
-    canActivate: checkFn,
+    canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+      // Same rule as the built-ins: the function was written against a message, so it denies
+      // on any other transport instead of throwing once per request.
+      if (!isQueueContext(context)) {
+        return false;
+      }
+
+      return checkFn(context);
+    },
   };
 }

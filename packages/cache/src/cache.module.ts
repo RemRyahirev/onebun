@@ -3,7 +3,10 @@ import type { CacheModuleOptions } from './types';
 import {
   Global,
   Module,
+  registerModule,
   removeFromGlobalModules,
+  selectRegistration,
+  type RegistrationToken,
 } from '@onebun/core';
 
 
@@ -144,17 +147,35 @@ export class CacheModule {
    * ```
    */
   static forRoot(options: CacheModuleOptions): typeof CacheModule {
-    // Store options in a static property that CacheService can access
+    // Store options in a static property that CacheService can access.
+    // Kept for the no-application path — a CacheService built by hand has no module and
+    // therefore no registration to read from.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (CacheModule as any)[CACHE_MODULE_OPTIONS] = options;
 
-    // If isGlobal is explicitly set to false, remove from global modules registry
-    // This allows creating separate CacheService instances for multi-cache scenarios
-    if (options.isGlobal === false) {
-      removeFromGlobalModules(CacheModule);
+    if (options.as !== undefined && options.isGlobal === true) {
+      throw new Error(
+        'CacheModule.forRoot({ as, isGlobal: true }) is not a valid combination. A named ' +
+        'registration is never global: ambient visibility has one slot per service class, ' +
+        'so two global registrations would collapse back into one instance. Reach a named ' +
+        'registration by importing CacheModule.forFeature(<token>).',
+      );
     }
 
-    return CacheModule;
+    // A NAMED registration gets its own module identity and its own options; an unnamed one
+    // keeps the base module exactly as before.
+    const registration = registerModule(CacheModule, options, options.as, [CacheService]);
+
+    // If isGlobal is explicitly set to false, remove from global modules registry.
+    // Symmetric on purpose: the registry is process-wide, so without the else branch one
+    // opt-out de-globalized CacheModule for every later forRoot() in the process.
+    if (options.isGlobal === false) {
+      removeFromGlobalModules(CacheModule);
+    } else if (options.as === undefined) {
+      Global()(CacheModule);
+    }
+
+    return registration as typeof CacheModule;
   }
 
   /**
@@ -189,10 +210,11 @@ export class CacheModule {
    * export class UserModule {}
    * ```
    */
-  static forFeature(): typeof CacheModule {
-    // Simply return the module class - it already exports CacheService
-    // The module system will handle service instance resolution
-    return CacheModule;
+  static forFeature(token?: RegistrationToken): typeof CacheModule {
+    // With no token this resolves to the single registration, which is the base module itself
+    // when forRoot() was called without `as` — so an application with one cache writes
+    // exactly what it wrote before. With a token it selects that registration.
+    return selectRegistration(CacheModule, token, [CacheService]) as typeof CacheModule;
   }
 
   /**

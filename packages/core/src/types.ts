@@ -164,7 +164,14 @@ export interface ModuleInstance {
   /**
    * Get service instance by class
    */
-  getServiceByClass?<T>(serviceClass: new (...args: unknown[]) => T): T | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getServiceByClass?<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T | undefined;
+
+  /**
+   * Service class names the module tree holds more than one instance of, mapped to a
+   * description of each holder. Empty for an ordinary application.
+   */
+  findAmbiguousServiceKeys?(): Map<string, string[]>;
 
   /**
    * Get accumulated module-level middleware (resolved bound functions)
@@ -191,6 +198,11 @@ export interface ModuleInstance {
    * using this module's DI scope (services + logger + config).
    */
   resolveInterceptors?(classes: (Function | Interceptor)[]): ResolvedInterceptor[];
+
+  /**
+   * Resolve guard classes into instances with dependency injection, once at route-build time.
+   */
+  resolveGuards?(guards: (Function | HttpGuard)[]): HttpGuard[];
 
   /**
    * Register a service instance by tag (e.g. before setup() for application-provided services like QueueService proxy).
@@ -526,6 +538,20 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   gracefulShutdown?: boolean;
 
   /**
+   * Deadline for the whole shutdown sequence, in milliseconds.
+   *
+   * `stop()` returns after at most this long whatever is still running, so a wedged
+   * handler or a destroy hook that never resolves cannot hold the process forever.
+   * The first half of the budget bounds the in-flight HTTP drain — connections still
+   * open when it expires are force-closed and counted in a warning — and the remainder
+   * bounds the destroy hooks. On the signal path a shutdown that hits the deadline
+   * exits the process with code 1 and logs what was still running.
+   * @defaultValue 15000
+   * @see docs:api/core.md
+   */
+  shutdownTimeout?: number;
+
+  /**
    * Global exception filters applied to all routes.
    * Route-level and controller-level filters take priority over global ones.
    * If no filters match, the built-in default filter is used.
@@ -587,6 +613,31 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   rateLimit?: import('./security/rate-limit-middleware').RateLimitOptions | true;
 
   /**
+   * Whether to believe the proxy headers a caller sends (`x-forwarded-for`,
+   * `cf-connecting-ip`, `x-real-ip`) when deciding which client a request came from.
+   *
+   * Those headers are attacker-controlled on a direct connection, so they are ignored
+   * by default: the client address is the transport peer of the TCP connection, which
+   * cannot be forged. Turn this on only when every request genuinely reaches the
+   * application through a proxy or load balancer that overwrites the header — behind
+   * one, the peer address is the proxy and every caller would otherwise share a bucket.
+   *
+   * One flag, consumed everywhere the framework asks "who called": the default
+   * rate-limit key and the `remoteAddr` field on HTTP spans.
+   *
+   * @defaultValue false
+   *
+   * @example Behind a load balancer that sets `x-forwarded-for`
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   trustProxy: true,
+   *   rateLimit: { windowMs: 60_000, max: 100 },
+   * });
+   * ```
+   */
+  trustProxy?: boolean;
+
+  /**
    * Security headers configuration. When provided, `SecurityHeadersMiddleware` is
    * automatically appended to the global middleware chain.
    * Pass `true` to use all defaults (equivalent to no options).
@@ -640,7 +691,14 @@ export type QueueAdapterType = 'memory' | 'redis';
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export interface QueueApplicationOptions<A extends QueueAdapterConstructor<any> = QueueAdapterConstructor> {
-  /** Enable/disable queue (default: auto - enabled if handlers exist) */
+  /**
+   * Enable/disable queue.
+   *
+   * Left undefined (the default) the queue auto-enables when a controller carries a queue
+   * decorator OR when a backend is configured via `adapter`, `options` or `redis`.
+   * `true` forces it on; `false` forces it off even when a backend is configured, in which
+   * case the application logs a single warning naming the contradiction.
+   */
   enabled?: boolean;
   /** Adapter type, or custom adapter constructor (e.g. for NATS JetStream) */
   adapter?: QueueAdapterType | A;

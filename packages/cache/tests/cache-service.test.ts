@@ -1,4 +1,6 @@
 import {
+  afterEach,
+  beforeEach,
   describe,
   expect,
   it,
@@ -11,12 +13,24 @@ import {
 
 import type { CacheService } from '../src/cache-effect.service';
 
+
+import {
+  Module,
+  OneBunApplication,
+  resetRegistrations,
+} from '@onebun/core';
+import { createRedisContainer, createTestService } from '@onebun/core/testing';
+import type { SyncLogger } from '@onebun/logger';
+
 import {
   cacheServiceTag,
   makeCacheService,
   makeCacheServiceFromOptions,
 } from '../src/cache-effect.service';
+import { CacheModule } from '../src/cache.module';
+import { CacheService as CacheServiceProvider } from '../src/cache.service';
 import { createInMemoryCache } from '../src/memory-cache';
+import { CacheType } from '../src/types';
 
 describe('cacheServiceTag', () => {
   describe('Effect integration', () => {
@@ -425,4 +439,214 @@ describe('cacheServiceTag', () => {
       expect(result).toBe('error handled');
     });
   });
+});
+
+/**
+ * A configured backend is a REQUIRED backend.
+ *
+ * The defect: `CACHE_TYPE=redis` with Redis down booted the process on a private in-memory
+ * cache and reported success. Two replicas then held different data, invalidation reached
+ * neither, and nothing on the service could tell anyone which cache was actually serving.
+ */
+describe('CacheService backend requirements', () => {
+  const ENV_KEYS = [
+    'CACHE_TYPE',
+    'CACHE_REDIS_HOST',
+    'CACHE_REDIS_PORT',
+    'CACHE_REDIS_PASSWORD',
+    'CACHE_REDIS_CONNECT_TIMEOUT',
+    'CACHE_ALLOW_DEGRADED_START',
+  ];
+  const CONNECT_TIMEOUT_MS = 250;
+  const BOUND_MS = 5000;
+  const CONTAINER_TIMEOUT_MS = 120000;
+  const savedEnv: Record<string, string | undefined> = {};
+
+  /** A port that is guaranteed to have nothing listening: bound, read, released. */
+  const closedPort = (): number => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response('') });
+    const { port } = server;
+    server.stop(true);
+
+    if (port === undefined) {
+      throw new Error('Bun.serve did not report a port');
+    }
+
+    return port;
+  };
+
+  const warnLines = (logger: SyncLogger): string[] =>
+    (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((call) => String(call[0]));
+
+  const failureOf = async (service: CacheServiceProvider): Promise<string> => {
+    try {
+      await service.waitForInit();
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+
+    return '';
+  };
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    CacheModule.clearOptions();
+    // Both, and BEFORE the test rather than only after it. clearOptions() empties the
+    // class-static slot; resetRegistrations() empties the registration record — and the
+    // service reads the registration FIRST. A file that ran earlier in the same process and
+    // left an unnamed forRoot() behind would otherwise decide this test's backend, which is
+    // exactly how these cases passed alone and failed in a full run.
+    resetRegistrations();
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
+    CacheModule.clearOptions();
+    resetRegistrations();
+  });
+
+  it('rejects app.start() when the configured Redis backend is unreachable', async () => {
+    const port = closedPort();
+    process.env.CACHE_TYPE = 'redis';
+    process.env.CACHE_REDIS_HOST = '127.0.0.1';
+    process.env.CACHE_REDIS_PORT = String(port);
+    process.env.CACHE_REDIS_CONNECT_TIMEOUT = String(CONNECT_TIMEOUT_MS);
+
+    @Module({ imports: [CacheModule] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    let failure = '';
+    try {
+      await app.start();
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+    } finally {
+      try {
+        await app.stop();
+      } catch {
+        // A start that never completed has nothing to stop.
+      }
+    }
+
+    // Named: the backend, the target, the budget it was given, and the one way out.
+    expect(failure).toContain('redis');
+    expect(failure).toContain(`127.0.0.1:${port}`);
+    expect(failure).toContain(`${CONNECT_TIMEOUT_MS}ms`);
+    expect(failure).toContain('allowDegradedStart');
+  });
+
+  it('bounds the connect attempt on a host that never answers', async () => {
+    // Black-holed address: packets are dropped rather than refused, so the driver's own
+    // reconnect loop would wait forever. Unbounded, this hung `waitForInit()` past 20s.
+    process.env.CACHE_TYPE = 'redis';
+    process.env.CACHE_REDIS_HOST = '10.255.255.1';
+    process.env.CACHE_REDIS_CONNECT_TIMEOUT = String(CONNECT_TIMEOUT_MS);
+
+    const { instance: service } = createTestService(CacheServiceProvider);
+    const startedAt = Date.now();
+    const failure = await failureOf(service);
+
+    expect(failure).toContain('did not become usable');
+    expect(Date.now() - startedAt).toBeLessThan(BOUND_MS);
+  });
+
+  it('never puts the configured password in the startup error', async () => {
+    const password = 'wi276-super-secret';
+    const port = closedPort();
+    process.env.CACHE_TYPE = 'redis';
+    process.env.CACHE_REDIS_HOST = '127.0.0.1';
+    process.env.CACHE_REDIS_PORT = String(port);
+    process.env.CACHE_REDIS_PASSWORD = password;
+    process.env.CACHE_REDIS_CONNECT_TIMEOUT = String(CONNECT_TIMEOUT_MS);
+
+    const { instance: service } = createTestService(CacheServiceProvider);
+    const failure = await failureOf(service);
+
+    expect(failure).toContain(`redis://127.0.0.1:${port}/0`);
+    expect(failure).not.toContain(password);
+  });
+
+  it('accepts a process-local cache only with allowDegradedStart, and says what that costs', async () => {
+    const port = closedPort();
+    process.env.CACHE_TYPE = 'redis';
+    process.env.CACHE_REDIS_HOST = '127.0.0.1';
+    process.env.CACHE_REDIS_PORT = String(port);
+    process.env.CACHE_REDIS_CONNECT_TIMEOUT = String(CONNECT_TIMEOUT_MS);
+    process.env.CACHE_ALLOW_DEGRADED_START = 'true';
+
+    const { instance: service, logger } = createTestService(CacheServiceProvider);
+    await service.waitForInit();
+
+    expect(service.getBackendStatus()).toEqual({
+      configured: CacheType.REDIS,
+      active: CacheType.MEMORY,
+      degraded: true,
+    });
+
+    const line = warnLines(logger).find((warning) => warning.includes('redis'));
+    expect(line).toContain('PROCESS-LOCAL');
+    expect(line).toContain('not shared with other replicas');
+    expect(line).toContain('never');
+
+    await service.close();
+  });
+
+  it('leaves an application that configured nothing exactly as it was', async () => {
+    const { instance: service, logger } = createTestService(CacheServiceProvider);
+    await service.waitForInit();
+
+    expect(service.getBackendStatus()).toEqual({
+      configured: CacheType.MEMORY,
+      active: CacheType.MEMORY,
+      degraded: false,
+    });
+    expect(warnLines(logger)).toHaveLength(0);
+
+    await service.set('untouched', 'value');
+    expect(await service.get<string>('untouched')).toBe('value');
+
+    await service.close();
+  });
+
+  it('reports redis as the live backend when Redis is actually up', async () => {
+    const redis = await createRedisContainer();
+
+    try {
+      process.env.CACHE_TYPE = 'redis';
+      process.env.CACHE_REDIS_HOST = redis.host;
+      process.env.CACHE_REDIS_PORT = String(redis.port);
+
+      const { instance: service } = createTestService(CacheServiceProvider);
+      await service.waitForInit();
+
+      expect(service.getBackendStatus()).toEqual({
+        configured: CacheType.REDIS,
+        active: CacheType.REDIS,
+        degraded: false,
+      });
+
+      await service.set('wi276', 'served-by-redis');
+      expect(await service.get<string>('wi276')).toBe('served-by-redis');
+
+      await service.close();
+    } finally {
+      await redis.stop();
+    }
+  }, CONTAINER_TIMEOUT_MS);
 });

@@ -18,6 +18,13 @@ import type {
   MessageHandler,
 } from '../types';
 
+import {
+  acknowledgesAutomatically,
+  nackedError,
+  tracksDelivery,
+  wasNacked,
+  type NackAwareMessage,
+} from '../ack-mode';
 import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
 import { QueueScheduler } from '../scheduler';
 
@@ -47,7 +54,7 @@ interface DelayedMessage {
 /**
  * In-memory message implementation
  */
-class InMemoryMessage<T> implements Message<T> {
+class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
   data: T;
@@ -85,6 +92,15 @@ class InMemoryMessage<T> implements Message<T> {
     this.maxAttempts = options?.maxAttempts;
     this.onAck = options?.onAck;
     this.onNack = options?.onNack;
+  }
+
+  /**
+   * True once `nack()` has been called, so the dispatch loop can report the message as
+   * failed rather than processed. Not on the public `Message` interface — see
+   * `NackAwareMessage`.
+   */
+  get wasNacked(): boolean {
+    return this.nacked;
   }
 
   async ack(): Promise<void> {
@@ -396,7 +412,9 @@ export class InMemoryQueueAdapter implements QueueAdapter {
 
       const message = new InMemoryMessage<T>(messageId, pattern, data, fullMetadata, {
         onNack: (requeue) => {
-          if (requeue) {
+          // Under 'none' a requeue would resurrect a message in the one mode that
+          // promises a single delivery, so it is suppressed rather than honoured.
+          if (requeue && tracksDelivery(entry.options)) {
             // Re-dispatch the message
             setImmediate(() => {
               this.dispatch(pattern, data, messageId, metadata);
@@ -411,19 +429,24 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       try {
         await entry.handler(message);
 
-        // Auto-ack if not manual mode
-        if (entry.options?.ackMode !== 'manual') {
+        // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
+        if (acknowledgesAutomatically(entry.options)) {
           await message.ack();
         }
 
-        // Emit processed event
-        this.emit('onMessageProcessed', message);
+        // A handler that catches its own exception and nacks returns normally, so control
+        // flow alone cannot tell the drop apart from a success.
+        if (wasNacked(message)) {
+          this.emit('onMessageFailed', message, nackedError(message));
+        } else {
+          this.emit('onMessageProcessed', message);
+        }
       } catch (error) {
-        // Emit failed event
+        // A throw is the failure, whether or not the handler also nacked — one event either way.
         this.emit('onMessageFailed', message, error as Error);
 
-        // Auto-nack if not manual mode
-        if (entry.options?.ackMode !== 'manual') {
+        // Same rule on the failure side. Under 'none' the message is simply gone.
+        if (acknowledgesAutomatically(entry.options)) {
           await message.nack(false);
         }
       }

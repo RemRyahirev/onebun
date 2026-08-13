@@ -58,42 +58,57 @@ export class UniversalTransactionClient {
   }
 
   /**
+   * Create an INSERT query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload.
+   */
+  insert<TTable extends PgTable>(table: TTable): PgInsertBuilder<TTable, BunSQLQueryResultHKT>;
+
+  /**
    * Create an INSERT query for SQLite table
    */
   insert<TTable extends SQLiteTable>(table: TTable): SQLiteInsertBuilder<TTable, 'sync', void>;
-
-  /**
-   * Create an INSERT query for PostgreSQL table
-   */
-  insert<TTable extends PgTable>(table: TTable): PgInsertBuilder<TTable, BunSQLQueryResultHKT>;
 
   insert(table: SQLiteTable | PgTable) {
     return (this.tx as any).insert(table);
   }
 
   /**
+   * Create an UPDATE query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload.
+   */
+  update<TTable extends PgTable>(table: TTable): PgUpdateBuilder<TTable, BunSQLQueryResultHKT>;
+
+  /**
    * Create an UPDATE query for SQLite table
    */
   update<TTable extends SQLiteTable>(table: TTable): SQLiteUpdateBuilder<TTable, 'sync', void>;
-
-  /**
-   * Create an UPDATE query for PostgreSQL table
-   */
-  update<TTable extends PgTable>(table: TTable): PgUpdateBuilder<TTable, BunSQLQueryResultHKT>;
 
   update(table: SQLiteTable | PgTable) {
     return (this.tx as any).update(table);
   }
 
   /**
+   * Create a DELETE query for PostgreSQL table
+   *
+   * PostgreSQL is declared FIRST on purpose: the bare `PgTable` constraint is
+   * dialect-branded and rejects a SQLite table, while the bare `SQLiteTable` constraint
+   * accepts a PostgreSQL one. Declared the other way round, every `pgTable` matched the
+   * SQLite overload.
+   */
+  delete<TTable extends PgTable>(table: TTable): PgDeleteBase<TTable, BunSQLQueryResultHKT>;
+
+  /**
    * Create a DELETE query for SQLite table
    */
   delete<TTable extends SQLiteTable>(table: TTable): SQLiteDeleteBase<TTable, 'sync', void>;
-
-  /**
-   * Create a DELETE query for PostgreSQL table
-   */
-  delete<TTable extends PgTable>(table: TTable): PgDeleteBase<TTable, BunSQLQueryResultHKT>;
 
   delete(table: SQLiteTable | PgTable) {
     return (this.tx as any).delete(table);

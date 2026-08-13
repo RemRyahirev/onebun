@@ -51,13 +51,14 @@ describe('queue-decorators', () => {
 
     it('should support subscribe options', () => {
       class TestService {
-        @Subscribe('orders.*', { ackMode: 'manual', group: 'order-processors' })
+        @Subscribe('orders.*', { ackMode: 'manual', group: 'order-processors', ackTimeout: 30_000 })
         handleOrder(_message: Message) {}
       }
 
       const metadata = getSubscribeMetadata(TestService);
       expect(metadata[0].options?.ackMode).toBe('manual');
       expect(metadata[0].options?.group).toBe('order-processors');
+      expect(metadata[0].options?.ackTimeout).toBe(30_000);
     });
 
     it('should support multiple subscriptions', () => {

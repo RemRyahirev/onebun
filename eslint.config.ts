@@ -8,7 +8,19 @@ import importNewlinesPlugin from 'eslint-plugin-import-newlines';
 import stylisticPlugin from '@stylistic/eslint-plugin';
 
 const config: Linter.Config[] = [
-  { ignores: ['examples/**', 'future-example/**', 'scripts/**', 'docs/.vitepress/**', 'eslint.config.ts', 'benchmarks/**'] },
+  {
+    ignores: [
+      'examples/**',
+      'future-example/**',
+      'scripts/**',
+      'docs/.vitepress/**',
+      'eslint.config.ts',
+      'benchmarks/**',
+      // Gitignored local tooling directory (agent settings, one-off workflow scripts).
+      // Not shipped, not written against this config's rules.
+      '.claude/**',
+    ],
+  },
   {
     files: ['**/*.ts', '**/*.tsx'],
     languageOptions: {
@@ -328,7 +340,7 @@ const config: Linter.Config[] = [
     },
   },
   {
-    files: ['**/*.spec.ts', '**/*.test.ts'],
+    files: ['**/*.spec.ts', '**/*.test.ts', '**/*.test-d.ts'],
     plugins: {
       jest: jestPlugin,
     },

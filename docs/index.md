@@ -86,7 +86,7 @@ my-app/
 | `@Service()` | Mark class as injectable service | `@Service()` |
 | `@Get()`, `@Post()`, etc. | Define HTTP endpoints | `@Get('/:id')` |
 | `@Body()`, `@Param()`, `@Query()` | Parameter injection | `@Param('id') id: string` |
-| `@Inject()` | Explicit DI — rarely needed; prefer constructor params | `@Inject(AbstractService)` |
+| `@Inject()` | Explicit DI — rarely needed; prefer constructor params. Takes a concrete class, or a token that selects WHICH named registration | `@Inject(UserService)`, `@Inject(ANALYTICS_DB)` |
 | `@WebSocketGateway()` | Define WebSocket gateway | `@WebSocketGateway({ path: '/ws' })` |
 | `@OnMessage()`, `@OnConnect()`, etc. | WebSocket event handlers | `@OnMessage('chat:*')` |
 
@@ -198,8 +198,16 @@ app
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+    process.exit(1);
   });
 ```
+
+`start()` rejects when a configured backend cannot be reached at boot — for example
+`CacheModule.forRoot({ type: REDIS })` against an unreachable Redis raises
+`CacheBackendUnavailableError` (set `allowDegradedStart: true` / `CACHE_ALLOW_DEGRADED_START=true`
+to start degraded instead). **Exit non-zero from the catch.** Without it the process either
+exits `0` — reporting a failed boot to your supervisor as a success — or stays alive holding
+the failed backend's handles while never binding a port.
 
 ## Key Patterns
 

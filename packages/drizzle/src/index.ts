@@ -23,10 +23,16 @@ export { DatabaseType } from './types';
 
 // Module and service
 export { DrizzleModule } from './drizzle.module';
-export { DrizzleService } from './drizzle.service';
+export {
+  DrizzleService,
+  DrizzleStartupError,
+  type DrizzleStartupStage,
+} from './drizzle.service';
 
 // Universal builders for type inference
 export {
+  DrizzleTransactionError,
+  type DrizzleTransactionErrorCode,
   UniversalSelectBuilder,
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,

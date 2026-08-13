@@ -15,7 +15,11 @@ import type {
   WsGuard,
 } from './ws.types';
 
-import { INTERCEPTORS_METADATA } from '../decorators/decorators';
+import {
+  GUARDS_METADATA,
+  INTERCEPTORS_METADATA,
+  registerPipelineReapplyHook,
+} from '../decorators/decorators';
 import { Reflect } from '../decorators/metadata';
 
 import { WsHandlerType, WsParamType } from './ws.types';
@@ -59,6 +63,7 @@ export function WebSocketGateway(options?: WebSocketGatewayOptions) {
     const metadata: GatewayMetadata = {
       path: options?.path || '/',
       namespace: options?.namespace,
+      authenticate: options?.authenticate,
       handlers: [],
     };
 
@@ -110,9 +115,10 @@ function createWsHandlerDecorator(type: WsHandlerType, pattern?: string) {
     const params: WsParamMetadata[] =
       Reflect.getMetadata(WS_PARAMS_METADATA, target, propertyKey) || [];
 
-    // Get guards metadata
-    const guards: Function[] =
-      Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey) || [];
+    // Get guards metadata: the shared @UseGuards key first, then the WS-specific
+    // @UseWsGuards one. Sharing the key is what stops `@UseGuards` on an `@OnMessage`
+    // handler from being a silent no-op — see readHandlerGuards.
+    const guards = readHandlerGuards(target, propertyKey);
 
     // Get interceptors metadata (shared key with HTTP/Queue via @UseInterceptors)
     const interceptors: Function[] =
@@ -388,9 +394,76 @@ export function UseWsGuards(...guards: (Function | WsGuard)[]): MethodDecorator 
       propertyKey as string,
     );
 
+    // Order independence: `@OnMessage` may already have snapshotted an empty guard list,
+    // because method decorators apply bottom-up. Without this, `@UseWsGuards` written ABOVE
+    // the handler decorator was silently discarded and the handler ran unguarded.
+    reapplyGatewayPipelineMetadata(target, propertyKey);
+
     return descriptor;
   };
 }
+
+/**
+ * The guards a gateway handler runs: shared `@UseGuards` first, then `@UseWsGuards`.
+ *
+ * `@UseGuards` used to write a key only HTTP route registration read, so it was silently
+ * discarded here and the message handler ran unguarded — a security hole shaped like working
+ * code. Both decorators now feed the same handler list; `@UseWsGuards` keeps working and is
+ * still the right choice for a guard that only ever makes sense on a socket.
+ *
+ * Deduplicated by identity, because the same guard written with both decorators must not run
+ * twice.
+ *
+ * @see docs:api/guards.md
+ */
+function readHandlerGuards(target: object, propertyKey: string | symbol): (Function | WsGuard)[] {
+  const shared: (Function | WsGuard)[] =
+    Reflect.getMetadata(GUARDS_METADATA, target, propertyKey as string) || [];
+  const wsSpecific: (Function | WsGuard)[] =
+    Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey as string) || [];
+
+  return [...new Set([...shared, ...wsSpecific])];
+}
+
+/**
+ * Re-apply a handler's pipeline metadata onto gateway handlers already registered.
+ *
+ * The WebSocket twin of the route-level fix: `@OnMessage` and friends snapshot guards and
+ * interceptors when they run, and method decorators apply bottom-up, so anything written
+ * above the handler decorator landed after the snapshot and was dropped.
+ *
+ * @see docs:api/websocket.md
+ */
+function reapplyGatewayPipelineMetadata(target: object, propertyKey: string | symbol): void {
+  const gatewayClass = (target as { constructor?: Function }).constructor;
+  if (!gatewayClass) {
+    return;
+  }
+
+  const metadata = META_GATEWAYS.get(gatewayClass);
+  if (!metadata) {
+    // The handler decorator has not run yet; it will read this metadata itself.
+    return;
+  }
+
+  for (const handler of metadata.handlers) {
+    if (handler.handler !== propertyKey) {
+      continue;
+    }
+
+    handler.guards = readHandlerGuards(target, propertyKey as string);
+
+    const interceptors: Function[] =
+      Reflect.getMetadata(INTERCEPTORS_METADATA, target, propertyKey as string) || [];
+    if (interceptors.length > 0) {
+      handler.interceptors = interceptors as unknown as import('../types').ResolvedInterceptor[];
+    }
+  }
+}
+
+// `@UseInterceptors` is shared across HTTP, WebSocket and Queue and lives in the decorators
+// module, so it cannot import this one. It calls every registered hook instead.
+registerPipelineReapplyHook(reapplyGatewayPipelineMetadata);
 
 // ============================================================================
 // Helper Functions

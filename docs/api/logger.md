@@ -62,16 +62,25 @@ export class UserController extends BaseController {
 ### Object Context
 
 ```typescript
+import { getClientAddress } from '@onebun/core';
+
 this.logger.info('User action', {
   userId: user.id,
   action: 'login',
-  ip: request.headers.get('x-forwarded-for'),
+  ip: getClientAddress(request),
   userAgent: request.headers.get('user-agent'),
 });
 
 // Output (JSON):
 // {"level":"info","message":"User action","userId":"123","action":"login","ip":"192.168.1.1",...}
 ```
+
+`getClientAddress` returns the address the framework itself attributes the request to — the
+transport peer, or the leftmost proxy-header entry when the application sets `trustProxy: true`.
+Reading `x-forwarded-for` directly logs whatever the caller sent: the whole `client, proxy1,
+proxy2` chain rather than one address, `null` when no proxy is in front, and a forged value on an
+app that deliberately does not trust proxies. See
+[Client identification and `trustProxy`](/api/security#client-identification-and-trustproxy).
 
 ### Error Logging
 

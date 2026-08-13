@@ -16,9 +16,12 @@ description: System architecture overview. Module hierarchy, DI container, reque
 1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
 2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all`)
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
-4. Shutdown signal → `beforeApplicationDestroy(signal?)` called
-5. HTTP server stops → `onModuleDestroy()` called
-6. Cleanup complete → `onApplicationDestroy(signal?)` called
+4. Shutdown signal (or `app.stop()`) → every route answers `503 Service Unavailable` while the listener deliberately stays open, in-flight requests are drained (budget: half of `shutdownTimeout`, 7500ms by default), then the HTTP listener is closed
+5. Listener already closed → `beforeApplicationDestroy(signal?)` called
+6. WebSocket cleanup → queue service stop → queue adapter disconnect → trace flush → `onModuleDestroy()` called (no signal argument)
+7. Shared Redis released (refcounted) → `onApplicationDestroy(signal?)` called → DI scope disposed → logger transport flushed
+
+The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry the phase still running is named in the error log, and on the signal path the process exits with code 1 instead of 0. Full order: [Core — Graceful Shutdown](/api/core#graceful-shutdown)
 
 **Accessing Services Outside Requests**:
 - `app.getService(ServiceClass)` - returns service instance by class
@@ -159,15 +162,28 @@ import { Inject } from '@onebun/core';
 export class UserController extends BaseController {
   constructor(
     // Use @Inject for:
-    // - Interface/abstract class injection
-    // - Token-based injection
-    // - Overriding automatic resolution
+    // - Token-based injection: picks WHICH named registration this parameter gets,
+    //   e.g. @Inject(ANALYTICS_DB) private analytics: DrizzleService
+    // - Overriding the type inferred from design:paramtypes
     @Inject(UserService) private userService: UserService,
   ) {
     super();
   }
 }
 ```
+
+`@Inject()` accepts a **concrete** constructor, a `symbol` or a `string` — nothing else:
+
+- **Interfaces cannot be injected.** They have no runtime value, so `@Inject(SomeInterface)`
+  is `error TS2693: 'SomeInterface' only refers to a type, but is being used as a value here`.
+- **An abstract-class-typed parameter needs no `@Inject` at all.** DI resolves it to a
+  registered subclass automatically (`instance instanceof type`), while `@Inject(AbstractClass)`
+  is `error TS2345` — an abstract constructor is not assignable to `new (...args: any[]) => T`.
+  This works only when exactly one subclass is registered; with two, the first one listed in
+  `providers` wins silently.
+- **There is no `{ provide, useClass }` binding form.** An object provider throws
+  `OneBunInvalidProviderError` at startup; substitute implementations with
+  `TestingModule.overrideProvider()`.
 
 ## Effect.js Integration
 
@@ -342,17 +358,33 @@ await this.callOnApplicationInit();
 **Shutdown Phase:**
 
 ```typescript
-// Phase 1: Call beforeApplicationDestroy(signal) on all services and controllers
+// Phase 1: Refuse new requests — every route answers 503 Service Unavailable.
+//          The listener deliberately stays open, so a load balancer sees a refusal.
+// Phase 2: Drain in-flight requests, bounded by half of `shutdownTimeout`.
+//          Anything still open when that deadline expires is force-closed, with a warn.
+// Phase 3: Close the HTTP listener — before any destroy hook runs.
+
+// Phase 4: Call beforeApplicationDestroy(signal) on all services and controllers
+//          (the socket is already closed here — this hook cannot serve HTTP)
 await this.callBeforeApplicationDestroy(signal);
 
-// Phase 2: HTTP server stops (handled by application)
+// Phase 5: Framework teardown — WebSocket cleanup, queue service stop,
+//          queue adapter disconnect, trace flush
 
-// Phase 3: Call onModuleDestroy() on all services and controllers
+// Phase 6: Call onModuleDestroy() on all services and controllers
 await this.callOnModuleDestroy();
 
-// Phase 4: Call onApplicationDestroy(signal) on all services and controllers
+// Phase 7: Release the shared Redis connection, then
+//          call onApplicationDestroy(signal) on all services and controllers
 await this.callOnApplicationDestroy(signal);
 ```
+
+The whole sequence is bounded by `shutdownTimeout` (default 15000ms): the first half bounds
+the drain, the rest bounds the destroy hooks. On expiry the remaining teardown is abandoned
+and the phase still running is named in the error log; on the signal path the process then
+exits with code `1`. `stop()` is idempotent — a second call awaits the first and re-runs
+nothing. Applications with no HTTP server skip phases 1–3. See
+[Core — Graceful Shutdown](/api/core#graceful-shutdown) for the full 11-step order.
 
 ### Lifecycle Hooks
 

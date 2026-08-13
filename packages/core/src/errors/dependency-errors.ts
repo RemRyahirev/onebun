@@ -21,7 +21,7 @@ export class DependencyResolutionError extends OneBunBootstrapError {
   constructor(
     public readonly targetName: string,
     public readonly dependencyName: string,
-    public readonly targetType: 'service' | 'controller' | 'middleware' | 'interceptor',
+    public readonly targetType: 'service' | 'controller' | 'middleware' | 'interceptor' | 'guard',
     public readonly suggestions: string[],
   ) {
     const msg = `Could not resolve dependency ${dependencyName} for ${targetType} ${targetName}.`;

@@ -15,7 +15,7 @@ import type {
 } from './types';
 import type { Interceptor } from '../types';
 
-import { INTERCEPTORS_METADATA } from '../decorators/decorators';
+import { getMethodGuards, INTERCEPTORS_METADATA } from '../decorators/decorators';
 import { defineMetadata, getMetadata } from '../decorators/metadata';
 
 // ============================================================================
@@ -473,13 +473,32 @@ export function getTimeoutMetadata(target: object): TimeoutMetadata[] {
 }
 
 /**
- * Get guards for a method
+ * Get guards for a message handler method.
+ *
+ * Merges the shared `@UseGuards` list — the same `onebun:guards` key HTTP routes and WebSocket
+ * handlers read — with the queue-specific `@UseMessageGuards` list, shared first. Before this
+ * merge, `@UseGuards` on a `@Subscribe` handler wrote a key nothing on the queue path ever
+ * read: no type error, no warning, and the consumer ran completely unguarded.
+ *
+ * @param target - Consumer class (constructor), NOT its prototype
+ * @param propertyKey - Handler method name
+ * @see docs:api/guards.md
+ * @see docs:api/queue.md
  */
 export function getMessageGuards(
   target: object,
   propertyKey: string | symbol,
 ): Array<MessageGuard | MessageGuardConstructor> {
-  return getMetadata(QUEUE_METADATA.GUARDS, target, propertyKey) || [];
+  const shared = typeof target === 'function'
+    ? getMethodGuards(target as Function, propertyKey)
+    : [];
+  const messageGuards: Array<MessageGuard | MessageGuardConstructor> =
+    getMetadata(QUEUE_METADATA.GUARDS, target, propertyKey) || [];
+
+  return [
+    ...(shared as unknown as Array<MessageGuard | MessageGuardConstructor>),
+    ...messageGuards,
+  ];
 }
 
 /**

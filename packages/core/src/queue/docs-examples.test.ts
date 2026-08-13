@@ -17,6 +17,7 @@ import {
 
 import { UseInterceptors } from '../decorators/decorators';
 
+import { acknowledgesAutomatically, tracksDelivery } from './ack-mode';
 import { getMessageInterceptors } from './decorators';
 
 import {
@@ -210,6 +211,7 @@ describe('Subscribe Decorator Examples (docs/api/queue.md)', () => {
         ackMode: 'manual',
         group: 'order-processors',
         prefetch: 10,
+        ackTimeout: 30_000, // ms — max time a handler may hold a message before redelivery
         retry: {
           attempts: 3,
           backoff: 'exponential',
@@ -231,6 +233,7 @@ describe('Subscribe Decorator Examples (docs/api/queue.md)', () => {
     expect(subscriptions[0].options?.ackMode).toBe('manual');
     expect(subscriptions[0].options?.group).toBe('order-processors');
     expect(subscriptions[0].options?.prefetch).toBe(10);
+    expect(subscriptions[0].options?.ackTimeout).toBe(30_000);
     expect(subscriptions[0].options?.retry?.attempts).toBe(3);
   });
 });
@@ -890,5 +893,44 @@ describe('Interceptors on queue handlers (docs/api/queue.md)', () => {
     );
     expect(interceptors.length).toBe(1);
     expect(interceptors[0]).toBe(LoggingInterceptor);
+  });
+});
+
+/**
+ * @source docs:api/queue.md#ackmode-none
+ */
+describe("ackMode 'none' (docs/api/queue.md)", () => {
+  it('delivers the documented fire-and-forget snippet exactly once', async () => {
+    // From docs/api/queue.md: `@Subscribe('telemetry.samples', { ackMode: 'none' })` —
+    // "if this throws, the sample is gone".
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    let calls = 0;
+    const failures: Error[] = [];
+    adapter.on('onMessageFailed', (_message, error) => {
+      failures.push(error);
+    });
+
+    await adapter.subscribe('telemetry.samples', async () => {
+      calls += 1;
+      throw new Error('write failed');
+    }, { ackMode: 'none' });
+
+    await adapter.publish('telemetry.samples', { value: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await adapter.disconnect();
+
+    expect(calls).toBe(1);
+    // Failures stay observable even though the message is not retried.
+    expect(failures).toHaveLength(1);
+  });
+
+  it('reports the documented inert modes through the shared resolver', async () => {
+    // From the docs table: 'none' is the only mode where the broker tracks nothing.
+    expect(tracksDelivery({ ackMode: 'none' })).toBe(false);
+    expect(tracksDelivery({ ackMode: 'manual' })).toBe(true);
+    expect(acknowledgesAutomatically({ ackMode: 'none' })).toBe(false);
+    expect(acknowledgesAutomatically({ ackMode: 'auto' })).toBe(true);
   });
 });

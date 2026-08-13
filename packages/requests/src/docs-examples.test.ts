@@ -9,12 +9,80 @@ import {
   it,
   expect,
 } from 'bun:test';
+import {
+  Cause,
+  Effect,
+  Runtime,
+} from 'effect';
 
 import {
   createHttpClient,
   isErrorResponse,
+  DEFAULT_RETRY_CONFIG,
+  DEFAULT_RETRY_DELAY,
   HttpStatusCode,
 } from './';
+
+/** Counts the requests a client really sent, so retry claims can be checked end to end. */
+function startCountingServer(
+  respond: (attempt: number) => Response,
+): { baseUrl: string; methods: string[]; stop(): void } {
+  const methods: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      methods.push(req.method);
+
+      return respond(methods.length);
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    methods,
+    stop: () => server.stop(true),
+  };
+}
+
+const jsonStatus = (code: number, body: unknown = { ok: code < 400 }): Response =>
+  new Response(JSON.stringify(body), {
+    status: code,
+    headers: new Headers([['content-type', 'application/json']]),
+  });
+
+interface EchoedCall {
+  method: string;
+  path: string;
+  body: string;
+  headers: Headers;
+}
+
+/** Records what the client really put on the wire, so call-shape claims can be checked. */
+function startEchoServer(): { baseUrl: string; calls: EchoedCall[]; stop(): void } {
+  const calls: EchoedCall[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      const hasBody = req.method !== 'GET' && req.method !== 'DELETE' && req.method !== 'HEAD';
+
+      calls.push({
+        method: req.method,
+        path: url.pathname + url.search,
+        body: hasBody ? await req.text() : '',
+        headers: req.headers,
+      });
+
+      return url.pathname === '/missing' ? jsonStatus(404) : jsonStatus(200);
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    calls,
+    stop: () => server.stop(true),
+  };
+}
 
 describe('Requests README Examples', () => {
   describe('Basic Usage with Promise API (README)', () => {
@@ -130,24 +198,323 @@ describe('Requests README Examples', () => {
 
 describe('Requests API Documentation Examples', () => {
   describe('Basic Requests (docs/api/requests.md)', () => {
-    it('should support GET with query parameters', () => {
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-      });
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should send the query record given as the second argument', async () => {
+      // From docs: "the second argument *is* the query record"
+      const server = startEchoServer();
 
-      // From docs: With query parameters
-      // Note: This is just verifying the API signature exists
-      // Actual request would need a real server
-      expect(typeof client.get).toBe('function');
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.get('/users', { page: 1, limit: 10 });
+
+        expect(server.calls[0]?.path).toBe('/users?page=1&limit=10');
+      } finally {
+        server.stop();
+      }
     });
 
-    it('should support POST with body', () => {
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-      });
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should read an object carrying headers as config, not as query', async () => {
+      // From docs: "an object carrying `headers`, `timeout`, `auth` or `method` is read as config"
+      const server = startEchoServer();
 
-      // From docs: POST with body
-      expect(typeof client.post).toBe('function');
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        /* eslint-disable @typescript-eslint/naming-convention */
+        await client.get('/users', { headers: { 'X-Custom-Header': 'value' } });
+        /* eslint-enable @typescript-eslint/naming-convention */
+
+        expect(server.calls[0]?.path).toBe('/users');
+        expect(server.calls[0]?.headers.get('x-custom-header')).toBe('value');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should take the query second and the config third', async () => {
+      // From docs: "Both at once: query second, config third"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.get('/users', { page: 1, limit: 10 }, { timeout: 5000 });
+
+        expect(server.calls[0]?.path).toBe('/users?page=1&limit=10');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should stringify a wrapped query object instead of expanding it', async () => {
+      // From docs (warning): "Do not wrap the query in a key"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.get('/users', { params: { page: 1 } });
+        await client.get('/users', { query: { page: 1 } });
+
+        expect(server.calls[0]?.path).toBe('/users?params=%5Bobject+Object%5D');
+        expect(server.calls[1]?.path).toBe('/users?query=%5Bobject+Object%5D');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#post
+     */
+    it('should send the payload given as the second argument', async () => {
+      // From docs: "the second argument *is* the payload"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.post('/users', { name: 'John', email: 'john@example.com' });
+
+        expect(server.calls[0]?.body).toBe('{"name":"John","email":"john@example.com"}');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#post
+     */
+    it('should apply per-request config given as the third argument', async () => {
+      // From docs: "per-request config is the third argument"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        /* eslint-disable @typescript-eslint/naming-convention */
+        await client.post('/users', { name: 'John' }, {
+          headers: { 'X-Request-ID': 'rid-123' },
+          timeout: 30000,
+        });
+        /* eslint-enable @typescript-eslint/naming-convention */
+
+        expect(server.calls[0]?.body).toBe('{"name":"John"}');
+        expect(server.calls[0]?.headers.get('x-request-id')).toBe('rid-123');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#post
+     */
+    it('should send a wrapped payload verbatim, timeout and all', async () => {
+      // From docs: wrapping the payload "sends {"body":{...},"timeout":30000} as the request body"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.post('/users', { body: { name: 'John' }, timeout: 30000 });
+
+        expect(server.calls[0]?.body).toBe('{"body":{"name":"John"},"timeout":30000}');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#put-patch-delete
+     */
+    it('should send PUT and PATCH payloads positionally', async () => {
+      // From docs: PUT, PATCH, DELETE
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.put('/users/123', { name: 'Updated Name' });
+        await client.patch('/users/123', { name: 'Partial Update' });
+        await client.delete('/users/123');
+
+        expect(server.calls[0]?.body).toBe('{"name":"Updated Name"}');
+        expect(server.calls[1]?.body).toBe('{"name":"Partial Update"}');
+        expect(server.calls[2]?.method).toBe('DELETE');
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('Error Handling (docs/api/requests.md)', () => {
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it('should reject the promise instead of resolving with an ErrorResponse', async () => {
+      // From docs: "await on a failed request throws; it never resolves with an ErrorResponse"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        let resolved: unknown;
+        let rejected = false;
+
+        try {
+          resolved = await client.get('/missing');
+        } catch {
+          rejected = true;
+        }
+
+        expect(rejected).toBe(true);
+        expect(resolved).toBeUndefined();
+
+        // The narrowing branch the docs keep is a type-level formality: on success it is false
+        const ok = await client.get('/users');
+
+        expect(isErrorResponse(ok)).toBe(false);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#reading-the-errorresponse
+     */
+    it('should put the ErrorResponse in the Effect error channel', async () => {
+      // From docs: Reading the ErrorResponse
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/missing')));
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.code).toBe(HttpStatusCode.NOT_FOUND);
+          expect(outcome.left.error).toBe('HTTP_ERROR');
+          expect(outcome.left.retryCount).toBe(0);
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#reading-the-errorresponse
+     */
+    it('should carry the ErrorResponse inside the rejected FiberFailure', async () => {
+      // From docs: unwrapping the rejection with Runtime.isFiberFailure + Cause.squash
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        let code: number | undefined;
+        let name: string | undefined;
+
+        try {
+          await client.get('/missing');
+        } catch (error) {
+          expect(Runtime.isFiberFailure(error)).toBe(true);
+
+          if (Runtime.isFiberFailure(error)) {
+            const failure = Cause.squash(error[Runtime.FiberFailureCauseId]);
+
+            expect(isErrorResponse(failure)).toBe(true);
+
+            if (isErrorResponse(failure)) {
+              code = failure.code;
+              name = failure.error;
+            }
+          }
+        }
+
+        expect(code).toBe(HttpStatusCode.NOT_FOUND);
+        expect(name).toBe('HTTP_ERROR');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#error-response
+     */
+    it('should name the failure in `error`, never in `message`', async () => {
+      // From docs: "There is no `message` field"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/missing')));
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(Object.keys(outcome.left)).not.toContain('message');
+          expect(typeof outcome.left.error).toBe('string');
+          expect(typeof outcome.left.details).toBe('object');
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#success-response
+     */
+    it('should carry retryCount on a successful response', async () => {
+      // From docs: Success Response
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        const response = await client.get('/users');
+
+        expect(response.success).toBe(true);
+        expect(response.retryCount).toBe(0);
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('Request Configuration (docs/api/requests.md)', () => {
+    /**
+     * @source docs:api/requests.md#request-configuration
+     */
+    it('should drop the third argument of get when the second is undefined', async () => {
+      // From docs (warning): "get, delete, head and options drop the third argument
+      // when the second is undefined"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        /* eslint-disable @typescript-eslint/naming-convention */
+        await client.get('/users', undefined, { headers: { 'X-Request-ID': 'rid-1' } });
+        await client.post('/users', undefined, { headers: { 'X-Request-ID': 'rid-2' } });
+        /* eslint-enable @typescript-eslint/naming-convention */
+
+        expect(server.calls[0]?.headers.get('x-request-id')).toBeNull();
+        expect(server.calls[1]?.headers.get('x-request-id')).toBe('rid-2');
+      } finally {
+        server.stop();
+      }
     });
   });
 
@@ -267,6 +634,123 @@ describe('Requests API Documentation Examples', () => {
       });
 
       expect(client).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should use the documented defaults when no retry config is given', () => {
+      // From docs: Retry Configuration - Defaults table
+      expect(DEFAULT_RETRY_CONFIG.max).toBe(3);
+      expect(DEFAULT_RETRY_CONFIG.delay).toBe(300);
+      expect(DEFAULT_RETRY_CONFIG.backoff).toBe('exponential');
+      expect(DEFAULT_RETRY_CONFIG.factor).toBe(2);
+      expect(DEFAULT_RETRY_CONFIG.retryOn).toEqual([408, 429, 500, 502, 503, 504]);
+      expect(DEFAULT_RETRY_CONFIG.methods).toEqual(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+      expect(DEFAULT_RETRY_CONFIG.retryOnNetworkError).toBe(true);
+      expect(DEFAULT_RETRY_CONFIG.retryOnTimeout).toBe(false);
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should not replay POST or PATCH without an opt-in', async () => {
+      // From docs: "POST and PATCH are not retried unless you ask for it"
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        await client.post('/charges', { amount: 100 }).catch(() => undefined);
+        await client.patch('/charges/1', { amount: 100 }).catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST', 'PATCH']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#overriding
+     */
+    it('should merge a partial retry config field-wise onto the defaults', async () => {
+      // From docs: "max becomes 5; delay stays 300, retryOn still includes 429"
+      const server = startCountingServer((attempt) =>
+        attempt === 1 ? jsonStatus(429) : jsonStatus(200));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 5 },
+        });
+
+        const started = Date.now();
+        const response = await client.get('/reports');
+        const elapsed = Date.now() - started;
+
+        expect(server.methods).toEqual(['GET', 'GET']);
+        expect(isErrorResponse(response)).toBe(false);
+        expect(elapsed).toBeGreaterThanOrEqual(DEFAULT_RETRY_DELAY - 50);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retrying-a-non-idempotent-method
+     */
+    it('should retry POST when the caller lists it in retries.methods', async () => {
+      // From docs: Retrying a non-idempotent method
+      const server = startCountingServer(() => jsonStatus(429));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        await client
+          .post('/charges', { amount: 100 }, {
+            /* eslint-disable @typescript-eslint/naming-convention */
+            headers: { 'Idempotency-Key': 'charge-1' },
+            /* eslint-enable @typescript-eslint/naming-convention */
+            retries: {
+              max: 2,
+              delay: 1,
+              methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'POST'],
+            },
+          })
+          .catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST', 'POST', 'POST']);
+
+        // The same POST without the opt-in is sent once
+        server.methods.length = 0;
+        await client.post('/charges', { amount: 100 }).catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#observing-retries
+     */
+    it('should report retryCount on the response', async () => {
+      // From docs: Observing retries
+      const server = startCountingServer((attempt) =>
+        attempt === 1 ? jsonStatus(429) : jsonStatus(200));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 3, delay: 1 },
+        });
+
+        const response = await client.get('/reports');
+
+        expect(response.retryCount).toBe(1);
+      } finally {
+        server.stop();
+      }
     });
 
     /**

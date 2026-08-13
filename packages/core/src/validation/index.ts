@@ -7,3 +7,10 @@ export * from './types';
 export * from './validator';
 export * from './json-schema';
 export * from './schemas';
+export {
+  type ArkTypeDiagnosticSink,
+  DuplicateArkTypeError,
+  duplicateArkTypeMessage,
+  hasDuplicateArkTypeCopies,
+  isArkErrors,
+} from './arktype-interop';

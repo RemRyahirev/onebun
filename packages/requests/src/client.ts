@@ -5,21 +5,25 @@ import {
   type ApiResponse,
   createErrorResponse,
   createSuccessResponse,
-  DEFAULT_MAX_RETRIES,
   DEFAULT_REQUESTS_OPTIONS,
   DEFAULT_TIMEOUT_MS,
   type ErrorResponse,
+  getTransportFailureKind,
   HttpMethod,
   HttpStatusCode,
   InternalServerError,
   isErrorResponse,
+  isRetryableMethod,
   OneBunBaseError,
   type ReqConfig,
   type RequestConfig,
   type RequestMetricsData,
   type RequestsOptions,
+  resolveRetryConfig,
   type RetryConfig,
   type SuccessResponse,
+  TRANSPORT_FAILURE_CODE,
+  type TransportFailureKind,
   wrapToErrorResponse,
 } from './types.js';
 
@@ -65,6 +69,128 @@ export const calculateRetryDelay = (attempt: number, config: RetryConfig): numbe
     default:
       return delay;
   }
+};
+
+/**
+ * Merge client options onto the defaults, re-basing the retry config field-wise so that a
+ * partial `retries` never silently drops the fields it did not mention.
+ */
+const mergeRequestsOptions = (options: RequestsOptions): RequestsOptions => ({
+  ...DEFAULT_REQUESTS_OPTIONS,
+  ...options,
+  retries: resolveRetryConfig(options.retries),
+});
+
+/**
+ * Classify a failure that happened before any HTTP response existed.
+ *
+ * `AbortSignal.timeout` rejects with a `TimeoutError`, an explicit abort with an `AbortError`,
+ * and everything else (connection refused, DNS, TLS) is a network failure. None of them are a
+ * server 500, so none of them carry an HTTP status code.
+ */
+const classifyTransportFailure = (error: unknown, traceId?: string): ErrorResponse => {
+  const name = error instanceof Error ? error.name : '';
+  let kind: TransportFailureKind = 'network';
+  let code = 'FETCH_ERROR';
+
+  if (name === 'TimeoutError') {
+    kind = 'timeout';
+    code = 'TIMEOUT_ERROR';
+  } else if (name === 'AbortError') {
+    kind = 'abort';
+    code = 'ABORT_ERROR';
+  }
+
+  return createErrorResponse(
+    code,
+    TRANSPORT_FAILURE_CODE,
+    traceId,
+    { details: error, transport: kind },
+  );
+};
+
+/**
+ * Decide whether a failed attempt may be retried.
+ *
+ * The method gate comes first: a method outside the allowlist is never retried, whatever the
+ * status code. Transport failures are then decided by their own flags, so `retryOn` only ever
+ * matches statuses a server actually returned.
+ */
+const shouldRetryRequest = (
+  error: unknown,
+  method: string,
+  retryConfig: RetryConfig,
+): boolean => {
+  if (!isErrorResponse(error) || !isRetryableMethod(method, retryConfig)) {
+    return false;
+  }
+
+  const transport = getTransportFailureKind(error);
+
+  if (transport === 'timeout') {
+    return retryConfig.retryOnTimeout === true;
+  }
+
+  if (transport === 'network') {
+    return retryConfig.retryOnNetworkError !== false;
+  }
+
+  if (transport === 'abort') {
+    return false;
+  }
+
+  return Array.isArray(retryConfig.retryOn) && retryConfig.retryOn.includes(error.code);
+};
+
+/**
+ * Emit a framework-level record of a retry, independent of the user-supplied `onRetry`.
+ *
+ * Prefers the ambient logger the framework installs (same pattern as the metrics service);
+ * falls back to Effect's logger so that a retry is never completely silent.
+ */
+const logRetryAttempt = (
+  method: string,
+  url: string,
+  attempt: number,
+  delay: number,
+  error: ErrorResponse,
+  retryConfig: RetryConfig,
+): Effect.Effect<void, never> => {
+  const transport = getTransportFailureKind(error);
+  const context: Record<string, unknown> = {
+    method,
+    url,
+    attempt,
+    maxAttempts: retryConfig.max,
+    delay,
+    code: error.code,
+    error: error.error,
+    ...(transport ? { transport } : {}),
+  };
+  const reason = transport ? `${error.error} (${transport})` : `${error.error} ${error.code}`;
+  const message =
+    `HTTP retry ${attempt}/${retryConfig.max}: ${method} ${url} failed with ${reason}, ` +
+    `retrying in ${delay}ms`;
+
+  interface OneBunRetryLogger {
+    warn(message: string, ...args: unknown[]): void;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  const g = globalThis as unknown as { __onebunLoggerService?: OneBunRetryLogger };
+  const logger = g.__onebunLoggerService;
+
+  if (logger && typeof logger.warn === 'function') {
+    return Effect.sync(() => {
+      try {
+        logger.warn(message, context);
+      } catch {
+        // Logging must never break the request
+      }
+    });
+  }
+
+  return pipe(Effect.logWarning(message), Effect.annotateLogs(context));
 };
 
 /**
@@ -285,13 +411,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   return pipe(
     Effect.tryPromise({
       try: () => fetch(fullUrl, requestInit),
-      catch: (error) =>
-        createErrorResponse(
-          'FETCH_ERROR',
-          HttpStatusCode.INTERNAL_SERVER_ERROR,
-          traceId,
-          { details: error },
-        ),
+      catch: (error) => classifyTransportFailure(error, traceId),
     }),
     Effect.flatMap((response) => {
       const responseHeaders: Record<string, string> = {};
@@ -377,24 +497,8 @@ const executeWithRetry = <T, E extends string, R extends string>(
     }),
     Effect.catchAll((error) => {
       // Check if we should retry on this error
-      const retryConfig: RetryConfig = {
-        max: DEFAULT_MAX_RETRIES,
-        delay: 1000,
-        backoff: 'exponential',
-        factor: 2,
-        retryOn: [
-          HttpStatusCode.INTERNAL_SERVER_ERROR,
-          HttpStatusCode.BAD_GATEWAY,
-          HttpStatusCode.SERVICE_UNAVAILABLE,
-          HttpStatusCode.GATEWAY_TIMEOUT,
-        ],
-        ...mergedOptions.retries,
-        ...config.retries,
-      };
-
-      const shouldRetry = isErrorResponse(error) && Array.isArray(retryConfig.retryOn)
-        ? retryConfig.retryOn.includes(error.code)
-        : false;
+      const retryConfig: RetryConfig = resolveRetryConfig(mergedOptions.retries, config.retries);
+      const shouldRetry = shouldRetryRequest(error, config.method, retryConfig);
 
       if (shouldRetry && attemptNumber <= retryConfig.max) {
         const callRetryCallback = retryConfig.onRetry
@@ -413,7 +517,8 @@ const executeWithRetry = <T, E extends string, R extends string>(
         const delay = calculateRetryDelay(attemptNumber, retryConfig);
 
         return pipe(
-          callRetryCallback,
+          logRetryAttempt(config.method, fullUrl, attemptNumber, delay, error, retryConfig),
+          Effect.flatMap(() => callRetryCallback),
           Effect.flatMap(() => Effect.sleep(`${delay} millis`)),
           Effect.flatMap(() =>
             executeWithRetry<T, E, R>(
@@ -444,7 +549,7 @@ export const executeRequest = <
   config: RequestConfig,
   requestOptions: RequestsOptions = {},
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
-  const mergedOptions = { ...DEFAULT_REQUESTS_OPTIONS, ...requestOptions };
+  const mergedOptions = mergeRequestsOptions(requestOptions);
   const fullUrl = buildUrl(mergedOptions.baseUrl, config.url, config.query);
   const traceId = getTraceId(config, mergedOptions);
 
@@ -476,10 +581,7 @@ export class HttpClient {
   requestEffect<T = any>(
     config: Partial<RequestConfig>,
   ): Effect.Effect<SuccessResponse<T>, ErrorResponse> {
-    const mergedOptions = {
-      ...DEFAULT_REQUESTS_OPTIONS,
-      ...this.clientOptions,
-    };
+    const mergedOptions = mergeRequestsOptions(this.clientOptions);
     const fullConfig: RequestConfig = {
       method: HttpMethod.GET,
       url: '',

@@ -68,6 +68,17 @@ export {
   type QueuePatternMatch,
 } from './pattern-matcher';
 
+// Acknowledgment semantics
+export {
+  resolveAckMode,
+  acknowledgesAutomatically,
+  tracksDelivery,
+  wasNacked,
+  nackedError,
+  type NackAwareMessage,
+  DEFAULT_ACK_MODE,
+} from './ack-mode';
+
 // Guards
 export {
   MessageExecutionContextImpl,
