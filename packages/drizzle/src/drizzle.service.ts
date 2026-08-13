@@ -43,6 +43,7 @@ import {
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,
 } from './builders';
+import { createGatedDatabase, SQLiteTransactionGate } from './builders/transaction-gate';
 import {
   type DatabaseConnectionOptions,
   type DatabaseInstance,
@@ -52,6 +53,18 @@ import {
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
 } from './types';
+
+/**
+ * Thrown by `transaction()` on SQLite when the single connection cannot serve the request:
+ * a nested transaction, or a query issued outside the transaction client from inside the
+ * callback. Re-exported here because that is where it is raised.
+ *
+ * @see docs:api/drizzle.md
+ */
+export {
+  DrizzleTransactionError,
+  type DrizzleTransactionErrorCode,
+} from './builders/transaction-gate';
 
 /**
  * Default environment variable prefix
@@ -292,12 +305,20 @@ interface BufferedLogEntry {
 @Service()
 export class DrizzleService extends BaseService implements OnModuleInit, OnModuleDestroy {
   private db: DatabaseInstance | null = null;
+  /**
+   * What `getDatabase()` hands out on SQLite: the same database with every query gated on
+   * the transaction that may be holding the single connection. `null` on PostgreSQL, where
+   * a transaction takes a pooled connection and nothing has to wait.
+   */
+  private gatedDb: DatabaseInstance | null = null;
   private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
   private initialized = false;
   private initPromise: Promise<void> | null = null;
   private sqliteClient: Database | null = null;
   private postgresClient: SQL | null = null;
+  /** Serializes SQLite transactions and queues ordinary queries behind them. */
+  private readonly sqliteGate = new SQLiteTransactionGate();
   /**
    * Which folder claimed each journal, keyed by `schema.table`.
    *
@@ -694,6 +715,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       }
 
       this.db = drizzleSQLite(this.sqliteClient);
+      this.gatedDb = createGatedDatabase(this.db, this.sqliteGate);
       this.patchSQLiteStatementCaching();
       this.safeLog('info', 'SQLite database initialized', { url: sqliteOptions.url });
     } else if (options.type === DatabaseType.POSTGRESQL) {
@@ -733,13 +755,20 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * 
    * For most use cases, prefer using select(), insert(), update(), delete()
    * methods which automatically infer types from table schemas.
+   *
+   * On SQLite the instance returned here is gated on `transaction()`: a query built from it
+   * while a transaction holds the single connection runs after that transaction commits or
+   * rolls back, instead of joining it. `getSQLiteDatabase()` and `getSQLiteClient()` are the
+   * ungated escape hatches.
+   *
+   * @see docs:api/drizzle.md
    */
   getDatabase(): DatabaseInstance {
     if (!this.db || !this.dbType) {
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    return this.db;
+    return this.gatedDb ?? this.db;
   }
 
   /**
@@ -1099,6 +1128,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     }
 
     this.db = null;
+    this.gatedDb = null;
     this.dbType = null;
     this.connectionOptions = null;
     this.initialized = false;
@@ -1107,10 +1137,24 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
 
   /**
    * Execute a transaction with universal transaction client
-   * 
+   *
    * The transaction client provides the same API as DrizzleService
    * with automatic type inference from table schemas.
-   * 
+   *
+   * One API and one observable behaviour on both dialects: the callback may await, and a
+   * throw rolls the whole thing back. How that is reached differs, because the drivers do:
+   *
+   * - PostgreSQL keeps drizzle's own `transaction()`. bun-sql runs `client.begin(async ...)`,
+   *   which genuinely awaits the callback, on a connection taken from the pool — correct as
+   *   it stands, and unaffected by anything below.
+   * - SQLite is issued as manual BEGIN / COMMIT | ROLLBACK on the raw bun:sqlite client.
+   *   drizzle's bun-sqlite session is SYNCHRONOUS: `client.transaction(fn)` commits the
+   *   moment `fn` returns, and an async `fn` returns a pending promise at its first `await` —
+   *   so everything past that `await`, the throw included, ran after COMMIT and nothing was
+   *   ever rolled back. bun:sqlite is also ONE connection, so while the transaction is open
+   *   every other query is queued behind it (see {@link SQLiteTransactionGate}) rather than
+   *   silently enrolled in it and rolled back with it.
+   *
    * @example
    * ```typescript
    * await db.transaction(async (tx) => {
@@ -1119,6 +1163,11 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    *   await tx.update(usersTable).set({ name: 'Jane' }).where(eq(usersTable.id, 1));
    * });
    * ```
+   *
+   * @throws DrizzleTransactionError on SQLite when called from inside another transaction
+   * callback, which the single connection cannot serve.
+   *
+   * @see docs:api/drizzle.md
    */
   async transaction<R>(
     callback: (tx: UniversalTransactionClient) => Promise<R>,
@@ -1129,12 +1178,82 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
+    if (this.dbType === DatabaseType.SQLITE) {
+      return await this.runSQLiteTransaction(callback);
+    }
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return await (this.db as any).transaction(async (rawTx: DatabaseInstance) => {
       const wrappedTx = new UniversalTransactionClient(rawTx);
 
       return await callback(wrappedTx);
     });
+  }
+
+  /**
+   * Run a transaction on the single bun:sqlite connection.
+   *
+   * The callback receives the database itself: BEGIN is already on the connection, so its
+   * statements are in the transaction with no wrapper needed — and, unlike everything handed
+   * out by `getDatabase()`, they must not wait for the gate this transaction holds.
+   */
+  private async runSQLiteTransaction<R>(
+    callback: (tx: UniversalTransactionClient) => Promise<R>,
+  ): Promise<R> {
+    const client = this.sqliteClient;
+    if (!client) {
+      throw new Error('SQLite client not available. Call initialize() first.');
+    }
+
+    // Refuses a nested transaction, and otherwise waits for whichever transaction is on the
+    // connection already — two overlapping transactions are serialized, not collided.
+    await this.sqliteGate.acquire();
+
+    try {
+      client.run('BEGIN');
+
+      let result: R;
+      try {
+        result = await this.sqliteGate.runInContext(
+          this.db!,
+          async () => await callback(new UniversalTransactionClient(this.db!)),
+        );
+      } catch (error) {
+        this.rollbackSQLite(client, error);
+
+        throw error;
+      }
+
+      try {
+        client.run('COMMIT');
+      } catch (commitError) {
+        // A COMMIT that fails leaves the transaction open, so it still has to be undone.
+        this.rollbackSQLite(client, commitError);
+
+        throw commitError;
+      }
+
+      return result;
+    } finally {
+      this.sqliteGate.releaseAcquired();
+    }
+  }
+
+  /**
+   * Undo the transaction without ever replacing the caller's error with the rollback's.
+   *
+   * What the caller needs to see is why their work failed; a ROLLBACK that also fails is an
+   * operational fact for the log, not a substitute for that.
+   */
+  private rollbackSQLite(client: Database, cause: unknown): void {
+    try {
+      client.run('ROLLBACK');
+    } catch (rollbackError) {
+      this.safeLog('error', 'SQLite ROLLBACK failed; the transaction may still be open', {
+        error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+        cause: cause instanceof Error ? cause.message : String(cause),
+      });
+    }
   }
 
   // ============================================

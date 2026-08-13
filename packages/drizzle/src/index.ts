@@ -27,6 +27,8 @@ export { DrizzleService } from './drizzle.service';
 
 // Universal builders for type inference
 export {
+  DrizzleTransactionError,
+  type DrizzleTransactionErrorCode,
   UniversalSelectBuilder,
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,

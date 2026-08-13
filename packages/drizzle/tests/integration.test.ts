@@ -324,6 +324,16 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
             age: 20,
           });
 
+          // An await between the write and the failure: this is where the transaction used
+          // to have committed already, so the throw undid nothing.
+          await new Promise((resolve) => setTimeout(resolve, 5));
+
+          await txDb.insert(usersTable).values({
+            name: 'Second Rollback User',
+            email: 'rollback2@example.com',
+            age: 21,
+          });
+
           // Force error
           throw new Error('Transaction error');
         });
@@ -334,17 +344,9 @@ describe('Drizzle Integration Tests - Schema-First Approach', () => {
 
       expect(transactionThrew).toBe(true);
 
-      // Verify user was not inserted (transaction rolled back)
+      // Rolled back — both rows, including the one written before the await.
       const users = await userRepository.findAll();
-      // Note: SQLite in-memory transactions may not always rollback correctly
-      // This is a known limitation. In production, use file-based SQLite or PostgreSQL
-      if (users.length > 0) {
-        // Clean up manually if rollback didn't work
-        const sqliteClient = drizzleService.getSQLiteClient();
-        if (sqliteClient) {
-          sqliteClient.exec('DELETE FROM users');
-        }
-      }
+      expect(users).toEqual([]);
     });
   });
 });

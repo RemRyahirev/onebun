@@ -7,3 +7,9 @@
 
 export { UniversalSelectBuilder, UniversalSelectDistinctBuilder } from './select-builder';
 export { UniversalTransactionClient } from './transaction-client';
+export {
+  createGatedDatabase,
+  DrizzleTransactionError,
+  SQLiteTransactionGate,
+  type DrizzleTransactionErrorCode,
+} from './transaction-gate';

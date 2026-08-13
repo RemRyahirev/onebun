@@ -1580,3 +1580,128 @@ describe('Multiple databases (docs/api/drizzle.md)', () => {
     })).toThrow(/already registered/);
   });
 });
+
+/**
+ * @source docs:api/drizzle.md#transaction
+ */
+describe('transaction() semantics (docs/api/drizzle.md)', () => {
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleService } = require('../src/drizzle.service');
+  const { DrizzleTransactionError } = require('../src/builders/transaction-gate');
+  const { createTestService } = require('@onebun/core/testing');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  const docUsers = sqliteTable('doc_tx_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  let service: typeof DrizzleService.prototype;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
+
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+
+    service.getSQLiteClient()!.run(`
+      CREATE TABLE doc_tx_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL
+      )
+    `);
+  });
+
+  afterEach(async () => {
+    await service.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#transaction
+   */
+  it('rolls the transaction back when the callback throws after an await', async () => {
+    // From docs: "The callback may await freely. If it throws, the whole transaction is
+    // rolled back and the original error reaches the caller."
+    const someSlowCheck = async (): Promise<void> => await new Promise(resolve => setTimeout(resolve, 5));
+
+    let seen: Error | null = null;
+    try {
+      await service.transaction(async (tx: typeof service) => {
+        await tx.insert(docUsers).values({ name: 'John', email: 'john@example.com' });
+        await someSlowCheck();
+
+        throw new Error('changed my mind');
+      });
+    } catch (error) {
+      seen = error as Error;
+    }
+
+    expect(seen?.message).toBe('changed my mind');
+    expect(await service.select().from(docUsers)).toEqual([]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#sqlite
+   */
+  it('runs a service query from inside the callback on the transaction, and refuses a nested one', async () => {
+    // From docs: a query through the service is issued ON the transaction and undone with it;
+    // only a nested transaction() throws, with code 'SQLITE_TRANSACTION_NESTED'.
+    await service.transaction(async (tx: typeof service) => {
+      await tx.insert(docUsers).values({ name: 'John', email: 'john@example.com' });
+      await service.insert(docUsers).values({ name: 'Jane', email: 'jane@example.com' });
+    });
+
+    expect(await service.select().from(docUsers)).toHaveLength(2);
+
+    let nested: unknown;
+    try {
+      await service.transaction(async () => {
+        await service.transaction(async () => undefined);
+      });
+    } catch (error) {
+      nested = error;
+    }
+
+    expect(nested).toBeInstanceOf(DrizzleTransactionError);
+    expect((nested as { code: string }).code).toBe('SQLITE_TRANSACTION_NESTED');
+  }, 5000);
+
+  /**
+   * @source docs:api/drizzle.md#sqlite
+   */
+  it('queues a query issued elsewhere in the application until the transaction ends', async () => {
+    // From docs: "A query issued elsewhere in the application while the transaction is open
+    // waits for it, then runs after the COMMIT or ROLLBACK."
+    let released!: () => void;
+    const transactionOpen = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+
+    const elsewhere = (async () => {
+      await transactionOpen;
+      await service.insert(docUsers).values({ name: 'Bystander', email: 'by@example.com' });
+
+      return 'written';
+    })();
+
+    await expect(service.transaction(async (tx: typeof service) => {
+      await tx.insert(docUsers).values({ name: 'Doomed', email: 'doomed@example.com' });
+      released();
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      throw new Error('undo');
+    })).rejects.toThrow('undo');
+
+    expect(await elsewhere).toBe('written');
+
+    const rows = await service.select().from(docUsers);
+    expect(rows.map((row: { name: string }) => row.name)).toEqual(['Bystander']);
+  }, 5000);
+});

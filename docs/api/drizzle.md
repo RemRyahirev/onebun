@@ -559,6 +559,85 @@ const result = await this.db.transaction(async (tx) => {
 });
 ```
 
+The callback may `await` freely. If it throws, the whole transaction is rolled back and the
+original error reaches the caller — on both dialects:
+
+```typescript
+try {
+  await this.db.transaction(async (tx) => {
+    await tx.insert(users).values({ name: 'John', email: 'john@example.com' });
+    await someSlowCheck();                 // an await in the middle changes nothing
+    throw new Error('changed my mind');
+  });
+} catch (error) {
+  // error.message === 'changed my mind', and no user row was written
+}
+```
+
+**Use `tx` for every statement that belongs to the transaction.** A query issued through the
+service (or through a repository) from inside the callback does not join the transaction —
+see the SQLite rules below.
+
+##### SQLite
+
+SQLite has a single connection, so a transaction owns the database for its whole duration:
+
+- **Rollback works across awaits.** The transaction is issued as `BEGIN` / `COMMIT` |
+  `ROLLBACK`, not through drizzle's synchronous bun-sqlite transaction, which would have
+  committed at the callback's first `await`.
+- **Other queries are queued, not enrolled.** A query issued elsewhere in the application
+  while the transaction is open waits for it, then runs after the `COMMIT` or `ROLLBACK`. It
+  is never rolled back together with the transaction that was in flight.
+- **Two transactions are serialized.** The second one waits for the first; both commit.
+- **A query issued through the service from inside the callback runs ON the transaction.**
+  A repository method — or any code holding `DrizzleService` rather than the `tx` argument —
+  does not have to be rewritten to take part: it is issued on the open transaction, and is
+  rolled back with it. Only a NESTED `transaction()` is refused, because it would wait for a
+  connection its own caller is holding:
+
+```typescript
+await this.db.transaction(async (tx) => {
+  await tx.insert(users).values({ name: 'John', email: 'john@example.com' });
+
+  // Runs on the same transaction, and is undone with it.
+  await this.userRepository.create({ name: 'Jane', email: 'jane@example.com' });
+
+  // Throws DrizzleTransactionError (code 'SQLITE_TRANSACTION_NESTED')
+  await this.db.transaction(async () => { /* ... */ });
+});
+```
+
+Work that OUTLIVES the transaction it was started in is not routed onto it — once the
+transaction has ended, such a statement queues like any other bystander.
+
+The error carries `name === 'DrizzleTransactionError'` and one of the codes
+`SQLITE_TRANSACTION_NESTED` or `SQLITE_TRANSACTION_SYNC_QUERY` — the latter for a
+synchronous `.get()`, `.all()`, `.run()` or `.values()` issued by a CONCURRENT caller while
+a transaction holds the connection, which cannot be queued because it returns rows rather
+than a promise.
+
+##### PostgreSQL
+
+Unchanged: the transaction runs on its own pooled connection through drizzle's own
+`transaction()`. Nothing is queued, nothing is refused — concurrent queries use other
+connections, nested `transaction()` calls are drizzle's savepoints, and the re-entrancy
+errors above cannot occur.
+
+<llm-only>
+**Technical details for AI agents:**
+- The SQLite path is `DrizzleService.runSQLiteTransaction()`: `sqliteGate.acquire()` →
+  `BEGIN` → callback → `COMMIT`, or `ROLLBACK` when the callback rejects, with the gate
+  released in a `finally` so both outcomes free the connection.
+- `getDatabase()` on SQLite returns a gated view of the database: builders it produces
+  intercept `then` and wait for the gate at execution time, since drizzle's builders are
+  lazy and the statement runs inside `then()`. Measured cost 0.17-0.27us per query.
+- Re-entrancy is detected with `AsyncLocalStorage`; the store is inherited by everything
+  created inside the callback, so "concurrent" means an async context that began outside it.
+- `getSQLiteDatabase()`, `getSQLiteClient()` and `.prepare()` are ungated escape hatches:
+  statements issued through them during a transaction join it and are rolled back with it.
+- On PostgreSQL `getDatabase()` returns the drizzle instance itself, with no wrapper.
+</llm-only>
+
 ## BaseRepository
 
 For common CRUD operations:

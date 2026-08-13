@@ -212,13 +212,28 @@ describe('BaseRepository', () => {
   });
 
   describe('transaction', () => {
-    test('should execute operations within transaction', async () => {
-      await repository.transaction(async () => {
-        await repository.create({ name: 'In Transaction' });
+    test('should execute operations within transaction through the tx client', async () => {
+      await repository.transaction(async (tx) => {
+        await tx.insert(testEntities).values({ name: 'In Transaction' });
       });
-      
+
       const count = await repository.count();
       expect(count).toBe(1);
+    });
+
+    test('runs a repository method inside its own transaction callback, and rolls it back with it', async () => {
+      // The repository holds the service, not the `tx` argument, so every method it exposes is
+      // a non-transactional query. Refusing those would make repositories unusable inside a
+      // transaction; they are issued on the open transaction instead — which means they are
+      // part of it, and undone with it.
+      const before = await repository.count();
+
+      await expect(repository.transaction(async () => {
+        await repository.create({ name: 'Reentrant' });
+        throw new Error('undo it');
+      })).rejects.toThrow('undo it');
+
+      expect(await repository.count()).toBe(before);
     });
   });
 });
