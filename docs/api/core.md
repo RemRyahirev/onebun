@@ -64,8 +64,13 @@ const app = new OneBunApplication(AppModule, {
 cors: { origin: '*' }           // or: cors: true
 rateLimit: { max: 100 }         // or: rateLimit: true
 security: { xFrameOptions: 'DENY' }  // or: security: true
+trustProxy: true                // only behind a proxy — see Security Middleware
 ```
 Auto-ordering: CorsMiddleware → RateLimitMiddleware → [user middleware] → SecurityHeadersMiddleware
+
+Rate limiting keys on the transport peer address, not on `x-forwarded-for`. Set
+`trustProxy: true` when the application sits behind a load balancer — see
+[Security Middleware](./security.md#client-identification-and-trustproxy).
 
 **Static files (SPA on same host)**:
 ```typescript
@@ -213,6 +218,16 @@ interface ApplicationOptions {
    * See Security Middleware for details.
    */
   rateLimit?: RateLimitOptions | true;
+
+  /**
+   * Whether proxy headers (x-forwarded-for, cf-connecting-ip, x-real-ip) sent by the
+   * caller may override the transport peer when identifying the client.
+   * Off by default — those headers are attacker-controlled on a direct connection.
+   * Enable only when every request arrives through a proxy that overwrites them.
+   * Consumed by the default rate-limit key and the remoteAddr span field.
+   * @default false
+   */
+  trustProxy?: boolean;
 
   /**
    * Security headers shorthand — auto-appends SecurityHeadersMiddleware.

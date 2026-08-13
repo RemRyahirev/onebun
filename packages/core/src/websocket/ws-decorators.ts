@@ -15,7 +15,11 @@ import type {
   WsGuard,
 } from './ws.types';
 
-import { INTERCEPTORS_METADATA, registerPipelineReapplyHook } from '../decorators/decorators';
+import {
+  GUARDS_METADATA,
+  INTERCEPTORS_METADATA,
+  registerPipelineReapplyHook,
+} from '../decorators/decorators';
 import { Reflect } from '../decorators/metadata';
 
 import { WsHandlerType, WsParamType } from './ws.types';
@@ -111,9 +115,10 @@ function createWsHandlerDecorator(type: WsHandlerType, pattern?: string) {
     const params: WsParamMetadata[] =
       Reflect.getMetadata(WS_PARAMS_METADATA, target, propertyKey) || [];
 
-    // Get guards metadata
-    const guards: Function[] =
-      Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey) || [];
+    // Get guards metadata: the shared @UseGuards key first, then the WS-specific
+    // @UseWsGuards one. Sharing the key is what stops `@UseGuards` on an `@OnMessage`
+    // handler from being a silent no-op — see readHandlerGuards.
+    const guards = readHandlerGuards(target, propertyKey);
 
     // Get interceptors metadata (shared key with HTTP/Queue via @UseInterceptors)
     const interceptors: Function[] =
@@ -399,6 +404,28 @@ export function UseWsGuards(...guards: (Function | WsGuard)[]): MethodDecorator 
 }
 
 /**
+ * The guards a gateway handler runs: shared `@UseGuards` first, then `@UseWsGuards`.
+ *
+ * `@UseGuards` used to write a key only HTTP route registration read, so it was silently
+ * discarded here and the message handler ran unguarded — a security hole shaped like working
+ * code. Both decorators now feed the same handler list; `@UseWsGuards` keeps working and is
+ * still the right choice for a guard that only ever makes sense on a socket.
+ *
+ * Deduplicated by identity, because the same guard written with both decorators must not run
+ * twice.
+ *
+ * @see docs:api/guards.md
+ */
+function readHandlerGuards(target: object, propertyKey: string | symbol): (Function | WsGuard)[] {
+  const shared: (Function | WsGuard)[] =
+    Reflect.getMetadata(GUARDS_METADATA, target, propertyKey as string) || [];
+  const wsSpecific: (Function | WsGuard)[] =
+    Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey as string) || [];
+
+  return [...new Set([...shared, ...wsSpecific])];
+}
+
+/**
  * Re-apply a handler's pipeline metadata onto gateway handlers already registered.
  *
  * The WebSocket twin of the route-level fix: `@OnMessage` and friends snapshot guards and
@@ -424,7 +451,7 @@ function reapplyGatewayPipelineMetadata(target: object, propertyKey: string | sy
       continue;
     }
 
-    handler.guards = Reflect.getMetadata(WS_GUARDS_METADATA, target, propertyKey as string) || [];
+    handler.guards = readHandlerGuards(target, propertyKey as string);
 
     const interceptors: Function[] =
       Reflect.getMetadata(INTERCEPTORS_METADATA, target, propertyKey as string) || [];

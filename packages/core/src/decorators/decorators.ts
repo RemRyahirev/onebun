@@ -2,6 +2,7 @@ import './metadata'; // Import polyfill first
 import { type, type Type } from 'arktype';
 
 import type { ExceptionFilter } from '../exception-filters/exception-filters';
+import type { Guard } from '../http-guards/http-guards';
 import type { Interceptor } from '../interceptors/interceptors';
 
 import {
@@ -9,7 +10,6 @@ import {
   type FileUploadOptions,
   type FilesUploadOptions,
   HttpMethod,
-  type HttpGuard,
   type ParamDecoratorOptions,
   type ParamMetadata,
   ParamType,
@@ -203,11 +203,11 @@ export function controllerDecorator(basePath: string = '') {
 
     // Copy controller-level guards from original class to wrapped class
     // This ensures @UseGuards works regardless of decorator order
-    const existingControllerGuards: (Function | HttpGuard)[] | undefined =
-      Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target);
+    const existingControllerGuards: (Function | Guard)[] | undefined =
+      Reflect.getMetadata(CONTROLLER_GUARDS_METADATA, target);
     if (existingControllerGuards) {
       Reflect.defineMetadata(
-        HTTP_CONTROLLER_GUARDS_METADATA,
+        CONTROLLER_GUARDS_METADATA,
         existingControllerGuards,
         WrappedController,
       );
@@ -457,7 +457,7 @@ function reapplyRoutePipelineMetadata(target: object, propertyKey: string | symb
     }
 
     route.middleware = readPipelineMetadata(MIDDLEWARE_METADATA, target, propertyKey);
-    route.guards = readPipelineMetadata(HTTP_GUARDS_METADATA, target, propertyKey);
+    route.guards = readPipelineMetadata(GUARDS_METADATA, target, propertyKey);
     route.filters = readPipelineMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey);
     route.interceptors = readPipelineMetadata(INTERCEPTORS_METADATA, target, propertyKey);
     // Snapshotted by the route decorator alongside the four above, and NOT documentation
@@ -516,8 +516,8 @@ function createRouteDecorator(method: HttpMethod) {
         Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
 
       // Get HTTP guards metadata if exists
-      const guards: (Function | HttpGuard)[] =
-        Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+      const guards: (Function | Guard)[] =
+        Reflect.getMetadata(GUARDS_METADATA, target, propertyKey) || [];
 
       // Get exception filters metadata if exists
       const filters: ExceptionFilter[] =
@@ -891,14 +891,23 @@ export function FormField(fieldName: string, options?: ParamDecoratorOptions): P
 const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 
 /**
- * Metadata key for route-level HTTP guards
+ * Metadata key for method-level guards (shared across HTTP, WS, Queue).
+ *
+ * One key, three transports — the same shape `INTERCEPTORS_METADATA` has always had. It used
+ * to be `'onebun:http_guards'`, read only by HTTP route registration, so `@UseGuards` on a
+ * `@Subscribe` or `@OnMessage` handler was a silent no-op: no type error, no warning,
+ * and the handler ran completely unguarded.
+ *
+ * @see docs:api/guards.md
  */
-const HTTP_GUARDS_METADATA = 'onebun:http_guards';
+export const GUARDS_METADATA = 'onebun:guards';
 
 /**
- * Metadata key for controller-level HTTP guards
+ * Metadata key for class-level guards (shared across HTTP, WS, Queue).
+ *
+ * @see docs:api/guards.md
  */
-const HTTP_CONTROLLER_GUARDS_METADATA = 'onebun:controller_http_guards';
+export const CONTROLLER_GUARDS_METADATA = 'onebun:controller_guards';
 
 /**
  * Metadata key for route-level exception filters
@@ -1047,26 +1056,69 @@ export function getControllerMiddleware(target: Function): Function[] {
 }
 
 /**
- * Get controller-level HTTP guards for a controller class.
+ * Get class-level guards for a controller, gateway or queue consumer class.
  * Returns guards registered via @UseGuards() applied to the class.
  *
  * @param target - Controller class (constructor)
  * @returns Array of guard class constructors or instances
  */
-export function getControllerGuards(target: Function): (Function | HttpGuard)[] {
-  return collectInheritedClassMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target);
+export function getControllerGuards(target: Function): (Function | Guard)[] {
+  return collectInheritedClassMetadata(CONTROLLER_GUARDS_METADATA, target);
 }
 
 /**
- * Guards decorator — can be applied to both controllers (class) and individual routes (method).
+ * Read the method-level `@UseGuards` list for a handler, walking the prototype chain.
  *
- * Pass guard **class constructors** or **instances**. Class constructors are instantiated
- * for each request; instances are reused.
+ * `@Controller` wraps the decorated class in a subclass, so `WrappedController.prototype` is a
+ * DIFFERENT object from the prototype the method decorator wrote to, and the metadata polyfill
+ * is a `WeakMap` keyed on the exact object with no prototype walking. A queue consumer read by
+ * class — which is how `QueueService.registerService` receives it — therefore finds nothing
+ * unless the chain is walked. HTTP does not need this: route registration reads the prototype
+ * it was handed directly.
  *
- * Guards run after the middleware chain but before the route handler.
- * If any guard returns false, the request is rejected with a 403 Forbidden response.
+ * Base entries come first, matching how class-level and method-level lists already merge.
  *
- * Execution order: middleware → guards → handler
+ * @param target - Class holding the handler
+ * @param propertyKey - Handler method name
+ * @returns Guards declared with `@UseGuards` on that method
+ * @see docs:api/guards.md
+ */
+export function getMethodGuards(target: Function, propertyKey: string | symbol): (Function | Guard)[] {
+  const perLevel: (Function | Guard)[][] = [];
+
+  let proto: object | null = target.prototype as object | null;
+  while (proto && proto !== Object.prototype) {
+    const values: (Function | Guard)[] | undefined =
+      Reflect.getMetadata(GUARDS_METADATA, proto, propertyKey);
+    if (values && values.length > 0) {
+      perLevel.push(values);
+    }
+    proto = Object.getPrototypeOf(proto) as object | null;
+  }
+
+  return [...new Set(perLevel.reverse().flat())];
+}
+
+/**
+ * Guards decorator — ONE decorator across HTTP routes, WebSocket message handlers and queue
+ * consumers, applicable to both classes and individual methods.
+ *
+ * Pass guard **class constructors** or **instances**. Class constructors get full constructor
+ * DI from the module that owns the handler and are instantiated per invocation; instances are
+ * reused as given.
+ *
+ * A guard receives the universal `ExecutionContext`. Narrow it with `isHttpContext()`,
+ * `isWsContext()` or `isQueueContext()` — a guard that reads `getRequest()` on a queue message
+ * has no request to read, and the built-in guards deny rather than throw when they land on a
+ * transport they were not written for.
+ *
+ * Denial per transport:
+ * - HTTP — 403 Forbidden (200 with the error in the body under `httpEnvelope`)
+ * - WebSocket — an `error` frame back to the client; the socket stays open
+ * - Queue — the message is nacked with `requeue: false`, so it dead-letters where the adapter
+ *   supports one and raises `onMessageFailed` either way. It is never silently dropped
+ *
+ * Execution order: middleware → class guards → method guards → handler
  *
  * @see docs:api/guards.md
  * @see docs:api/decorators.md
@@ -1085,6 +1137,13 @@ export function getControllerGuards(target: Function): (Function | HttpGuard)[] 
  * getDashboard() { ... }
  * ```
  *
+ * @example Queue consumer
+ * ```typescript
+ * \@UseGuards(TenantActiveGuard)
+ * \@Subscribe('orders.*')
+ * async handleOrder(message: Message<OrderData>) { ... }
+ * ```
+ *
  * @example Combined (class guard + route guard)
  * ```typescript
  * \@Controller('/api')
@@ -1097,16 +1156,16 @@ export function getControllerGuards(target: Function): (Function | HttpGuard)[] 
  * ```
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function UseGuards(...guards: (Function | HttpGuard)[]): any {
+export function UseGuards(...guards: (Function | Guard)[]): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function useGuardsDecorator(...args: any[]): any {
     // ---- Class decorator: target is a constructor function ----
     if (args.length === 1 && typeof args[0] === 'function') {
       const target = args[0] as Function;
-      const existing: (Function | HttpGuard)[] =
-        Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+      const existing: (Function | Guard)[] =
+        Reflect.getMetadata(CONTROLLER_GUARDS_METADATA, target) || [];
       Reflect.defineMetadata(
-        HTTP_CONTROLLER_GUARDS_METADATA,
+        CONTROLLER_GUARDS_METADATA,
         [...existing, ...guards],
         target,
       );
@@ -1120,10 +1179,10 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
       string | symbol,
       PropertyDescriptor,
     ];
-    const existingGuards: (Function | HttpGuard)[] =
-      Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+    const existingGuards: (Function | Guard)[] =
+      Reflect.getMetadata(GUARDS_METADATA, target, propertyKey) || [];
     Reflect.defineMetadata(
-      HTTP_GUARDS_METADATA,
+      GUARDS_METADATA,
       [...existingGuards, ...guards],
       target,
       propertyKey,

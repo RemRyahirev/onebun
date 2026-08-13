@@ -5,6 +5,8 @@ import { createErrorResponse } from '@onebun/requests';
 
 import { BaseMiddleware } from '../module/middleware';
 
+import { getClientAddress } from './client-address';
+
 /**
  * Rate limiting storage backend interface.
  * Implement this to provide a custom backend (e.g. NATS KV, DynamoDB, etc.).
@@ -127,8 +129,12 @@ export interface RateLimitOptions {
 
   /**
    * A function that derives the rate-limit key from the incoming request.
-   * Defaults to the client's IP address (`x-forwarded-for` or `cf-connecting-ip` headers,
-   * falling back to `'unknown'`).
+   *
+   * Defaults to the client's address as resolved by `getClientAddress` — the transport
+   * peer of the connection, which the caller cannot forge. Proxy headers
+   * (`x-forwarded-for`, `cf-connecting-ip`, `x-real-ip`) are consulted only when the
+   * application sets `ApplicationOptions.trustProxy: true`; without that opt-in they
+   * cannot influence which bucket a request lands in.
    */
   keyGenerator?: (req: OneBunRequest) => string;
 
@@ -158,12 +164,20 @@ export interface RateLimitOptions {
   store?: RateLimitStore;
 }
 
+/**
+ * The bucket a request falls into when nothing identifies its caller.
+ *
+ * Only reachable off the server path — a hand-constructed `Request` that never passed
+ * through `bindClientAddress`. On a served request the transport peer is always known,
+ * so real traffic never lands here. It is deliberately NOT the behaviour for a normal
+ * direct connection, which used to share this one bucket across every client.
+ */
+const UNIDENTIFIED_CLIENT_KEY = 'unknown';
+
 function defaultKeyGenerator(req: OneBunRequest): string {
-  return (
-    req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ??
-    req.headers.get('cf-connecting-ip') ??
-    'unknown'
-  );
+  // The transport peer, not a header. `x-forwarded-for` and friends only enter the
+  // answer when the application sets `trustProxy: true` — see `getClientAddress`.
+  return getClientAddress(req) ?? UNIDENTIFIED_CLIENT_KEY;
 }
 
 /**

@@ -4,12 +4,9 @@ import {
   Layer,
 } from 'effect';
 
+import type { Guard } from '../http-guards/http-guards';
 import type { ModuleInstance } from '../types';
-import type {
-  HttpGuard,
-  Interceptor,
-  ResolvedInterceptor,
-} from '../types';
+import type { Interceptor, ResolvedInterceptor } from '../types';
 
 import {
   createSyncLogger,
@@ -31,6 +28,7 @@ import {
 } from '../decorators/decorators';
 import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
 import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
+import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
 import {
   type ProfileMark,
@@ -1092,9 +1090,13 @@ export class OneBunModule implements ModuleInstance {
    * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through,
    * so `@UseGuards(new RolesGuard(['admin']))` keeps working.
    *
+   * Transport-agnostic: WebSocket gateways and queue consumers run their guards through this
+   * same method, via the binding `createControllersWithDI` attaches to each instance, so
+   * `@UseGuards` behaves identically on all three transports instead of only having DI on HTTP.
+   *
    * @see docs:api/guards.md
    */
-  resolveGuards(guards: (Function | HttpGuard)[]): HttpGuard[] {
+  resolveGuards(guards: (Function | Guard)[]): Guard[] {
     return guards.map((guard) => {
       if (typeof guard !== 'function') {
         // Already an instance — the caller owns its lifetime, as before. Initialize it if
@@ -1130,19 +1132,22 @@ export class OneBunModule implements ModuleInstance {
         }
       }
 
-      const guardConstructor = guard as new (...args: unknown[]) => HttpGuard;
+      const guardConstructor = guard as new (...args: unknown[]) => Guard;
       const logger = this.logger;
       const config = this.config;
       const scope = this.scope;
 
-      // A per-request façade, so the resolved dependencies are reused without the instance
-      // being shared. Returned as an HttpGuard so `executeHttpGuards` needs no changes.
+      // A per-invocation façade, so the resolved dependencies are reused without the instance
+      // being shared. Returned as a Guard so the three executors need no changes.
       return {
+        // The class name would otherwise be lost behind this object literal, and it is what
+        // every guard diagnostic on WS and queue names.
+        guardName: guardConstructor.name,
         canActivate(context): boolean | Promise<boolean> {
           // Ambient init context, so a guard extending BaseService has this.config and
           // this.logger available immediately after super().
           BaseService.setInitContext(logger, config, scope);
-          let instance: HttpGuard;
+          let instance: Guard;
           try {
             instance = new guardConstructor(...deps);
           } finally {
@@ -1265,6 +1270,18 @@ export class OneBunModule implements ModuleInstance {
           applyAutoTrace(controller, controllerClass.name, this.tracingOptions.traceFilter);
         }
       }
+
+      // Lend this module's guard DI to whoever registers the instance later. HTTP resolves
+      // guards in application.ts, where the owner module is in hand; WebSocket gateways and
+      // queue consumers are registered by WsHandler/QueueService, which know nothing about
+      // modules — which is why both used to construct guards with a bare `new guard()` and any
+      // guard with a dependency threw on every message. Attached to the INSTANCE, not to a
+      // class-keyed registry: in multi-service mode two applications can mount the same class
+      // and must not share a DI scope.
+      attachGuardBinding(controller, {
+        resolve: (guards) => this.resolveGuards(guards),
+        logger: this.logger,
+      });
 
       this.controllerInstances.set(controllerClass, controller);
 

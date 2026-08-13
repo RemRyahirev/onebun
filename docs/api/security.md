@@ -139,7 +139,13 @@ cors: { origin: (o) => o.startsWith('https://trusted') }
 
 ## RateLimitMiddleware
 
-Limits the number of requests per time window per client IP. Supports in-memory and Redis backends.
+Limits the number of requests per time window per client. Supports in-memory and Redis backends.
+
+The client is identified by the **transport peer address** — the address the TCP connection
+actually came from, read via `server.requestIP()`. It is not taken from a header, so a caller
+cannot move itself into a fresh bucket by setting one. See
+[Client identification and `trustProxy`](#client-identification-and-trustproxy) for running
+behind a load balancer.
 
 ### Via `ApplicationOptions.rateLimit`
 
@@ -152,7 +158,59 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-Pass `rateLimit: true` for defaults (100 requests / 60 seconds, in-memory, IP-based).
+Pass `rateLimit: true` for defaults (100 requests / 60 seconds, in-memory, keyed on the
+transport peer address).
+
+### Client identification and `trustProxy`
+
+`ApplicationOptions.trustProxy` decides whether the proxy headers a caller sends may override
+the transport peer. It is `false` by default and lives on the **application**, not on the rate
+limiter, because it settles one question — "who called" — for everything that asks: the default
+rate-limit key and the `remoteAddr` field on HTTP spans.
+
+| `trustProxy` | Client address is | Use when |
+|---|---|---|
+| `false` (default) | the transport peer from `server.requestIP()` | the app is reachable directly, or you are unsure |
+| `true` | first entry of `x-forwarded-for`, else `cf-connecting-ip`, else `x-real-ip`, else the peer | **every** request arrives through a proxy that overwrites those headers |
+
+```typescript
+// Direct exposure — headers are ignored, the peer is the bucket
+const app = new OneBunApplication(AppModule, {
+  rateLimit: { windowMs: 60_000, max: 100 },
+});
+
+// Behind a load balancer that sets x-forwarded-for
+const app = new OneBunApplication(AppModule, {
+  trustProxy: true,
+  rateLimit: { windowMs: 60_000, max: 100 },
+});
+```
+
+::: warning Do not enable `trustProxy` on a directly reachable app
+`x-forwarded-for` is just a request header. If clients can reach the application without passing
+through a proxy that overwrites it, `trustProxy: true` lets any caller pick its own rate-limit
+bucket — a fresh header value per request means no effective limit at all. Conversely, leaving it
+off *behind* a proxy makes every request appear to come from the proxy, so all callers share one
+bucket. Match the setting to your deployment.
+:::
+
+#### Reading the client address yourself
+
+`getClientAddress(req)` returns the same address the framework uses, honouring `trustProxy`.
+`getPeerAddress(req)` always returns the transport peer, ignoring headers entirely.
+
+```typescript
+import { getClientAddress, RateLimitMiddleware } from '@onebun/core';
+
+RateLimitMiddleware.configure({
+  // Authenticated callers get their own bucket; anonymous ones fall back to their address
+  keyGenerator: (req) => req.headers.get('x-api-key') ?? getClientAddress(req) ?? 'unknown',
+});
+```
+
+Both return `undefined` for a `Request` that never went through a OneBun server (a
+hand-constructed one in a unit test, for example). The default key generator falls back to
+`'unknown'` in that case; on a served request the peer is always known.
 
 ### Redis-backed (multi-instance)
 
@@ -189,7 +247,7 @@ RateLimitMiddleware.configure({
 |----------|------|---------|-------------|
 | `windowMs` | `number` | `60_000` | Time window in ms |
 | `max` | `number` | `100` | Max requests per window |
-| `keyGenerator` | `(req) => string` | IP from `x-forwarded-for` | Key for grouping requests |
+| `keyGenerator` | `(req) => string` | `getClientAddress(req) ?? 'unknown'` | Key for grouping requests |
 | `message` | `string` | `'Too Many Requests'` | Error message when limit exceeded |
 | `standardHeaders` | `boolean` | `true` | Add `RateLimit-*` headers |
 | `legacyHeaders` | `boolean` | `false` | Add `X-RateLimit-*` headers |

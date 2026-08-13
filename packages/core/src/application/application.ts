@@ -86,6 +86,13 @@ import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { hasQueueDecorators } from '../queue/decorators';
 import { SharedRedisProvider } from '../redis/shared-redis';
 import { getCurrentTraceContext, requestContextStore } from '../request-context';
+import {
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  type ClientAddressBinding,
+  type PeerAddressSource,
+} from '../security/client-address';
 import { CorsMiddleware } from '../security/cors-middleware';
 import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
@@ -809,6 +816,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Create server context binding (used by route handlers and executeHandler)
       const app = this;
 
+      // Client-address policy: one answer to "who called", shared by the default
+      // rate-limit key and the `remoteAddr` span field. Proxy headers are attacker-
+      // controlled on a direct connection, so they only count when the application
+      // opts in; otherwise the transport peer wins.
+      const trustProxy = this.options.trustProxy ?? false;
+      // The Bun server handle only exists once `Bun.serve` has returned, but every
+      // request entry point is handed it as an argument — so the binding is built from
+      // the first request and reused, keeping the per-request cost to one WeakMap write.
+      let clientAddressBinding: ClientAddressBinding | null = null;
+      const bindRequestClientAddress = (
+        req: Request,
+        server: PeerAddressSource,
+      ): void => {
+        clientAddressBinding ??= createClientAddressBinding(server, trustProxy);
+        bindClientAddress(req, clientAddressBinding);
+      };
+
       // Path constants for framework endpoints
       const metricsPath = this.options.metrics?.path || '/metrics';
       const docsPath = this.options.docs?.path || '/docs';
@@ -904,6 +928,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const isCatchAllRoute = method === HttpMethod.ALL;
 
         return async (req, server) => {
+          // Outermost point of a routed request: bind before the middleware chain, the
+          // guards or the handler can run, so every one of them resolves the same
+          // client address without needing the server handle in scope.
+          bindRequestClientAddress(req, server);
+
           return await requestContextStore.run({ traceContext: null }, async () => {
           // Capture outermost timestamp before any closure/ALS overhead
             const profiler = PROFILING_ENABLED ? getProfiler() : null;
@@ -951,9 +980,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     url: req.url,
                     route: fullPath,
                     userAgent: req.headers.get('user-agent') ?? undefined,
-                    remoteAddr: req.headers.get('x-forwarded-for')
-                    || req.headers.get('x-real-ip')
-                    || undefined,
+                    // Same resolution as the rate-limit key: the transport peer unless
+                    // `trustProxy` is on. Reading the headers here directly would let a
+                    // caller decide what the span says about them.
+                    remoteAddr: getClientAddress(req),
                     requestSize: contentLengthHeader
                       ? parseInt(contentLengthHeader, 10)
                       : undefined,
@@ -1672,6 +1702,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         routes: bunRoutes,
         // Fallback: only WebSocket upgrade and 404
         async fetch(req, server) {
+          // The unrouted entry — WebSocket upgrades, static files, 404s. Bun's `routes`
+          // map bypasses `fetch` entirely for a matched route, so this is a second
+          // outermost entry, not a wrapper around the first. Binding here as well keeps
+          // the unmatched path from falling back to one shared identity the moment
+          // anything downstream starts asking who called.
+          bindRequestClientAddress(req, server);
+
           // Handle WebSocket upgrade if gateways exist
           if (hasWebSocketGateways && app.wsHandler) {
             const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();

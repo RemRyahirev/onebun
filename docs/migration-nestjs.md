@@ -50,7 +50,11 @@ A typical NestJS project with BullMQ, caching, rate limiting, and sessions opens
 
 ### Guards that work everywhere
 
-In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(AuthGuard)` works identically on HTTP routes, WebSocket message handlers, and queue consumers. One pattern, all transports.
+In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(AuthGuard)` works on HTTP routes, WebSocket message handlers (`@OnMessage`) and queue consumers (`@Subscribe`) — one decorator, class-level or method-level, with the same constructor dependency injection on all three. Guards receive the universal `ExecutionContext`; narrow it with `isHttpContext()` / `isWsContext()` / `isQueueContext()`, because a guard that reads `getRequest()` has no request to read on a queue message. See [Guards — One decorator, three transports](/api/guards#one-decorator-three-transports) for what a guard sees and what denial does on each.
+
+::: warning Before 0.4.5
+`@UseGuards` on a `@Subscribe` or `@OnMessage` handler was silently ignored — no type error, no warning, and the handler ran unguarded. If you migrated a guard onto a queue consumer or WebSocket handler on an earlier version, audit it.
+:::
 
 ### Multi-service without the pain
 
@@ -70,7 +74,7 @@ These features are built into the framework -- no community packages needed:
 - **Typed environment variables** (`@onebun/envs`) -- schema-based config with validation, defaults, sensitive value masking
 - **ArkType validation** -- one schema = TypeScript type + runtime validation + OpenAPI 3.1 spec
 - **Multi-service architecture** -- run all services in a single process during development, split by `ONEBUN_SERVICES` env var in production. Same code, same Docker image — no glue scripts or docker-compose hacks for local dev
-- **WebSocket guards and queue guards** -- guards work not only on HTTP routes but also on WebSocket messages and queue handlers
+- **WebSocket guards and queue guards** -- one `@UseGuards` covers HTTP routes, WebSocket messages and queue handlers, with dependency injection on all three. `@UseWsGuards` and `@UseMessageGuards` remain for guards that only make sense on one transport
 - **Typed inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()` with Bearer/ApiKey/Basic auth, no code generation (HMAC auth planned)
 - **Auto-generated typed WebSocket client** -- type-safe frontend SDK generated from gateway decorators
 - **SSE (Server-Sent Events)** -- `@Sse()` decorator with heartbeat, per-route timeout, auto-abort on disconnect; `this.sse()` for programmatic streaming
@@ -88,7 +92,7 @@ These features are built into the framework -- no community packages needed:
 | `@Injectable()` | `@Service()` | Services extend `BaseService` for logger/config access |
 | `@Controller()` | `@Controller()` | Controllers extend `BaseController`. Return plain objects (auto-wrapped), throw `HttpException` for errors |
 | Pipe (`@UsePipes`) | ArkType schema in `@Body()` | Declarative schema, not class-based. One schema = type + validation + OpenAPI |
-| Guard (`@UseGuards`) | Guard (`@UseGuards`) | Same `CanActivate`-style pattern via `HttpGuard` interface |
+| Guard (`@UseGuards`) | Guard (`@UseGuards`) | Same `CanActivate`-style pattern via the `HttpGuard` / `WsGuard` / `MessageGuard` interfaces, or `Guard` for all three. Works across HTTP/WS/Queue with full DI |
 | Exception Filter (`@UseFilters`) | Exception Filter (`@UseFilters`) | Same pattern. `HttpException` for throwing, `ExceptionFilter` for catching |
 | Interceptor (`@UseInterceptors`) | Interceptor (`@UseInterceptors`) | Same pattern, works across HTTP/WS/Queue. Promise-based `next()` instead of Observable. Universal `ExecutionContext` with type guards |
 | Middleware | Middleware | Class-based with `@Middleware()` decorator and full constructor DI |
@@ -143,7 +147,7 @@ These features are built into the framework -- no community packages needed:
 
 | NestJS | OneBun | Notes |
 |--------|--------|-------|
-| `@UseGuards()` | `@UseGuards()` | Same. Supports class-level and method-level |
+| `@UseGuards()` | `@UseGuards()` | Same. Class-level and method-level, and it works on WebSocket `@OnMessage` and queue `@Subscribe` handlers as well as HTTP routes. Guards take the universal `ExecutionContext` -- narrow with `isHttpContext()` / `isWsContext()` / `isQueueContext()`. See [Guards](./api/guards.md) |
 | `@UseFilters()` | `@UseFilters()` | Same. Supports class-level and method-level |
 | `@UseInterceptors()` | `@UseInterceptors()` | Same. Supports class-level and method-level |
 | `@UsePipes()` | -- | Replaced by ArkType schemas in `@Body()` / `@Param()` |

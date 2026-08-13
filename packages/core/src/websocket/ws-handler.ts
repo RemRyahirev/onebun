@@ -10,6 +10,7 @@
 import type { WsStorageAdapter } from './ws-storage';
 import type {
   WsClientData,
+  WsGuard,
   WsHandlerMetadata,
   WebSocketApplicationOptions,
 } from './ws.types';
@@ -19,7 +20,8 @@ import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
 
-import { getControllerInterceptors } from '../decorators/decorators';
+import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
+import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
@@ -51,6 +53,37 @@ import {
 // Alias for clarity
 const ParamType = WsParamType;
 const HandlerType = WsHandlerType;
+
+/**
+ * What `executeHandler` returns when a guard denied the invocation.
+ *
+ * A denial is not `undefined`: `undefined` is also what a handler that returns nothing
+ * produces, and the two need different answers to the client. Distinguishing them is what lets
+ * `routeMessage` send an error frame back for a denied message and stay silent for a handler
+ * that simply had nothing to say.
+ */
+const GUARD_DENIED = Symbol('onebun:ws:guard-denied');
+
+/**
+ * The event name a denied message is reported back on.
+ *
+ * The socket is NOT closed. One denied message must not tear down a multiplexed connection —
+ * the client may hold subscriptions for a dozen other events it is still entitled to — so the
+ * denial is reported and the connection carries on.
+ */
+const GUARD_DENIED_EVENT = 'error';
+
+/**
+ * The guards each handler was DECLARED with, before any resolution.
+ *
+ * `registerGateway` writes resolved instances back into the gateway's handler metadata, and
+ * that metadata is a process-wide `Map` keyed by gateway class — so a second registration of
+ * the same class (multi-service mode, or a test that boots twice) would read its own previous
+ * output back as input: gateway-level guards counted twice, and the second application running
+ * guards bound to the FIRST one's DI scope. Recording the declaration once makes registration
+ * idempotent and keeps each application's resolution its own.
+ */
+const declaredHandlerGuards = new WeakMap<WsHandlerMetadata, (Function | WsGuard)[]>();
 
 
 /**
@@ -117,7 +150,30 @@ export class WsHandler {
     // Collect gateway-level interceptors
     const gatewayInterceptors = getControllerInterceptors(gatewayClass) as Function[];
 
+    // Gateway-level `@UseGuards`, the guard twin of gatewayInterceptors above.
+    const gatewayGuards = getControllerGuards(gatewayClass) as (Function | WsGuard)[];
+
+    // The owner module's DI-aware guard resolver, attached to the instance it built. Absent
+    // for a gateway constructed by hand — a unit test — and then guards fall back to
+    // zero-argument construction, which is all they ever got before.
+    const guardBinding = getGuardBinding(instance);
+
     for (const handler of metadata.handlers) {
+      // Merge guards: gateway-level + handler-level, then resolve through the owner module so
+      // a guard with a constructor dependency works here exactly as it does on an HTTP route.
+      // Resolution happens HERE, at registration, so an unresolvable dependency fails the
+      // application at startup instead of throwing once per delivered message.
+      let declared = declaredHandlerGuards.get(handler);
+      if (!declared) {
+        declared = handler.guards ?? [];
+        declaredHandlerGuards.set(handler, declared);
+      }
+
+      const mergedGuards = [...new Set([...gatewayGuards, ...declared])];
+      handler.guards = mergedGuards.length > 0 && guardBinding
+        ? (guardBinding.resolve(mergedGuards) as unknown as (Function | WsGuard)[])
+        : mergedGuards;
+
       // Merge interceptors: gateway-level + handler-level
       const handlerInterceptors = handler.interceptors ?? [];
       const mergedClasses = [...gatewayInterceptors, ...handlerInterceptors];
@@ -472,6 +528,21 @@ export class WsHandler {
           try {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params);
 
+            if (result === GUARD_DENIED) {
+              // Answer the client rather than leaving it waiting on a message that will never
+              // arrive — an unanswered ack id is indistinguishable from a hung server.
+              ws.send(this.encodeResponse(
+                ws.data.protocol,
+                {
+                  event: GUARD_DENIED_EVENT,
+                  data: { code: 'FORBIDDEN', event, message: 'Guard denied this message' },
+                },
+                ackId,
+              ));
+
+              continue;
+            }
+
             // Send response
             if (result !== undefined && isWsHandlerResponse(result)) {
               ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
@@ -598,11 +669,21 @@ export class WsHandler {
         patternParams,
       );
 
-      const canActivate = await executeGuards(handler.guards, context);
+      const canActivate = await executeGuards(handler.guards, context, (name, error) => {
+        // The framework's own diagnostic. Before this, a guard that threw denied the message
+        // and said nothing anywhere — indistinguishable from a guard that meant to deny.
+        this.logger.error(
+          `WebSocket guard ${name} threw on ${gateway.metadata?.path ?? '/'} ` +
+          `${handler.handler} for client ${client.id}, denying: ${error}`,
+        );
+      });
       if (!canActivate) {
-        this.logger.debug(`Guard rejected request for ${handler.handler}`);
+        this.logger.warn(
+          `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
+          `for client ${client.id}`,
+        );
 
-        return undefined;
+        return GUARD_DENIED;
       }
     }
 

@@ -135,8 +135,13 @@ export interface WsHandlerMetadata {
   handler: string;
   /** Handler parameters metadata */
   params: WsParamMetadata[];
-  /** Guard functions to apply */
-  guards?: Function[];
+  /**
+   * Guards to apply, from `@UseGuards` and `@UseWsGuards`.
+   *
+   * Holds classes and instances as written until the gateway is registered, then the resolved
+   * instances the owner module built with DI — which is why the type admits both.
+   */
+  guards?: (Function | WsGuard)[];
   /** Resolved interceptor functions to apply */
   interceptors?: import('../types').ResolvedInterceptor[];
 }

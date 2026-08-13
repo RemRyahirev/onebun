@@ -599,6 +599,31 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   rateLimit?: import('./security/rate-limit-middleware').RateLimitOptions | true;
 
   /**
+   * Whether to believe the proxy headers a caller sends (`x-forwarded-for`,
+   * `cf-connecting-ip`, `x-real-ip`) when deciding which client a request came from.
+   *
+   * Those headers are attacker-controlled on a direct connection, so they are ignored
+   * by default: the client address is the transport peer of the TCP connection, which
+   * cannot be forged. Turn this on only when every request genuinely reaches the
+   * application through a proxy or load balancer that overwrites the header — behind
+   * one, the peer address is the proxy and every caller would otherwise share a bucket.
+   *
+   * One flag, consumed everywhere the framework asks "who called": the default
+   * rate-limit key and the `remoteAddr` field on HTTP spans.
+   *
+   * @defaultValue false
+   *
+   * @example Behind a load balancer that sets `x-forwarded-for`
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   trustProxy: true,
+   *   rateLimit: { windowMs: 60_000, max: 100 },
+   * });
+   * ```
+   */
+  trustProxy?: boolean;
+
+  /**
    * Security headers configuration. When provided, `SecurityHeadersMiddleware` is
    * automatically appended to the global middleware chain.
    * Pass `true` to use all defaults (equivalent to no options).

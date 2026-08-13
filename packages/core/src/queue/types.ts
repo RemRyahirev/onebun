@@ -627,6 +627,13 @@ export interface MessageGuard {
 }
 
 /**
- * Guard constructor type
+ * Guard constructor type.
+ *
+ * `never[]` rather than `unknown[]`: constructor parameters are checked contravariantly, so
+ * `new (...args: unknown[])` demanded a guard whose constructor accepts ANYTHING, and
+ * `class AclGuard { constructor(acl: AclService) {} }` — the exact shape dependency injection
+ * exists for — was rejected by `@UseMessageGuards` with "Type 'unknown' is not assignable to
+ * type 'AclService'". The framework never calls this constructor with arguments of its own;
+ * it either resolves them through DI or invokes it with none.
  */
-export type MessageGuardConstructor = new (...args: unknown[]) => MessageGuard;
+export type MessageGuardConstructor = new (...args: never[]) => MessageGuard;

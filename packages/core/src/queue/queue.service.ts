@@ -15,6 +15,8 @@ import type {
   QueueAdapter,
   QueueConfig,
   Message,
+  MessageGuard,
+  MessageGuardConstructor,
   PublishOptions,
   SubscribeOptions,
   Subscription,
@@ -26,10 +28,12 @@ import type {
   MessageHandler,
   BuiltInAdapterType,
 } from './types';
+import type { Guard } from '../http-guards/http-guards';
 import type { ResolvedInterceptor } from '../types';
 
-import { getControllerInterceptors } from '../decorators/decorators';
+import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getMetadata } from '../decorators/metadata';
+import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
 
 import {
@@ -316,13 +320,32 @@ export class QueueService {
     // Collect class-level interceptors
     const classInterceptors = getControllerInterceptors(serviceClass);
 
+    // Class-level `@UseGuards`, the guard twin of classInterceptors above.
+    const classGuards = getControllerGuards(serviceClass);
+
+    // The owner module's DI-aware guard resolver, attached to the instance it built. Absent
+    // for a consumer constructed by hand — a unit test calling registerService directly — and
+    // then guards fall back to zero-argument construction, which is all they ever got before.
+    const guardBinding = getGuardBinding(serviceInstance);
+    const logger = guardBinding?.logger;
+
     // Register subscribe handlers
     const subscriptions = getSubscribeMetadata(serviceClass);
     for (const sub of subscriptions) {
       const method = serviceInstance[sub.propertyKey].bind(serviceInstance) as (
         ...args: unknown[]
       ) => unknown;
-      const guards = getMessageGuards(serviceClass, sub.propertyKey);
+      // Resolution happens HERE, at registration, so a guard whose constructor dependency
+      // cannot be resolved fails the application at STARTUP with DependencyResolutionError
+      // naming it — rather than throwing once per delivered message and dropping each one.
+      const declaredGuards = [
+        ...classGuards,
+        ...getMessageGuards(serviceClass, sub.propertyKey),
+      ] as Array<MessageGuard | MessageGuardConstructor>;
+      const guards = declaredGuards.length > 0 && guardBinding
+        ? (guardBinding.resolve(declaredGuards as unknown as (Function | Guard)[]) as
+            unknown as Array<MessageGuard | MessageGuardConstructor>)
+        : declaredGuards;
 
       // Merge interceptors: class-level + method-level, resolve via DI
       const methodInterceptors = getMessageInterceptors(serviceClass, sub.propertyKey);
@@ -341,9 +364,30 @@ export class QueueService {
             serviceClass,
           );
 
-          const passed = await executeMessageGuards(guards, context);
+          const passed = await executeMessageGuards(guards, context, (name, error) => {
+            // The framework's own diagnostic. Before this, a guard that threw took the message
+            // with it and logged nothing at any level; the only way to see it was to have
+            // registered an `onMessageFailed` listener of your own.
+            logger?.error(
+              `Message guard ${name} threw on "${sub.pattern}" for message ${message.id}, ` +
+              `denying: ${error}`,
+            );
+          });
+
           if (!passed) {
-            return; // Guard rejected the message
+            // Denied messages are nacked WITHOUT requeue, never quietly swallowed. A guard
+            // decision is deterministic, so requeueing would deny the same message forever;
+            // `requeue: false` instead terminates it server-side on JetStream and routes it to
+            // the dead-letter queue on adapters that have one. Either way the adapter reports
+            // `onMessageFailed` rather than `onMessageProcessed`, so a denial is visible to
+            // metrics instead of looking like a success.
+            logger?.warn(
+              `Message guard denied ${serviceClass.name}.${String(sub.propertyKey)} on ` +
+              `"${sub.pattern}" for message ${message.id}`,
+            );
+            await message.nack(false);
+
+            return;
           }
         }
 

@@ -36,6 +36,7 @@ import type {
   OnApplicationDestroy,
 } from './';
 import type { ExceptionFilter } from './exception-filters/exception-filters';
+import type { Guard } from './http-guards/http-guards';
 import type { QueueAdapter, QueueAdapterConstructor } from './queue/types';
 import type {
   SseEvent,
@@ -57,6 +58,7 @@ import { type } from '@onebun/core';
 
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
+import { MessageExecutionContextImpl } from './queue/guards';
 import { makeMockLoggerLayer } from './testing';
 
 import {
@@ -109,6 +111,9 @@ import {
   PatternParams,
   WsServer,
   UseWsGuards,
+  isHttpContext,
+  isQueueContext,
+  isWsContext,
   WsAuthGuard,
   WsPermissionGuard,
   WsAnyPermissionGuard,
@@ -161,6 +166,10 @@ import {
   RateLimitMiddleware,
   MemoryRateLimitStore,
   SecurityHeadersMiddleware,
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  getPeerAddress,
   Optional,
   CircularDependencyError,
   DependencyResolutionError,
@@ -5361,6 +5370,76 @@ describe('docs/api/guards.md', () => {
 
     expect(ProtectedController).toBeDefined();
   });
+
+  /**
+   * @source docs:api/guards.md#one-decorator-three-transports
+   */
+  it('a Guard narrows the universal ExecutionContext per transport', () => {
+    class TenantActiveGuard implements Guard {
+      canActivate(ctx: ExecutionContext): boolean {
+        let tenantId: string | undefined;
+
+        if (isHttpContext(ctx)) {
+          tenantId = ctx.getRequest().headers.get('x-tenant-id') ?? undefined;
+        } else if (isQueueContext(ctx)) {
+          tenantId = ctx.getMetadata().headers?.['x-tenant-id'];
+        } else if (isWsContext(ctx)) {
+          tenantId = ctx.getClient().metadata.tenantId as string | undefined;
+        }
+
+        // No branch matched, or no tenant on the one that did: deny.
+        return tenantId !== undefined && tenantId === 'acme';
+      }
+    }
+
+    const guard = new TenantActiveGuard();
+
+    const httpHeaders = new Headers();
+    httpHeaders.set('x-tenant-id', 'acme');
+    const httpReq = new Request('http://localhost/', { headers: httpHeaders }) as unknown as OneBunRequest;
+    expect(guard.canActivate(new HttpExecutionContextImpl(httpReq, 'h', 'C'))).toBe(true);
+
+    const message = {
+      id: 'm1',
+      pattern: 'orders.created',
+      data: {},
+      timestamp: 0,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      metadata: { headers: { 'x-tenant-id': 'acme' } },
+      ack: async () => undefined,
+      nack: async () => undefined,
+    };
+    const queueCtx = new MessageExecutionContextImpl(
+      message,
+      'orders.created',
+      () => undefined,
+      class Consumer {},
+    );
+    expect(guard.canActivate(queueCtx)).toBe(true);
+  });
+
+  /**
+   * @source docs:api/guards.md#one-decorator-three-transports
+   */
+  it('AuthGuard denies a queue context instead of reading a request that is not there', () => {
+    const message = {
+      id: 'm2',
+      pattern: 'orders.created',
+      data: {},
+      timestamp: 0,
+      metadata: { authorization: 'Bearer token' },
+      ack: async () => undefined,
+      nack: async () => undefined,
+    };
+    const queueCtx = new MessageExecutionContextImpl(
+      message,
+      'orders.created',
+      () => undefined,
+      class Consumer {},
+    );
+
+    expect(new AuthGuard().canActivate(queueCtx)).toBe(false);
+  });
 });
 
 // ============================================================================
@@ -5532,6 +5611,66 @@ describe('docs/api/security.md', () => {
     const res = await mw.use(req, async () => new Response('ok'));
 
     expect(res.status).toBe(429);
+  });
+
+  /**
+   * @source docs:api/security.md#client-identification-and-trustproxy
+   */
+  it('getClientAddress — transport peer wins over a header by default', () => {
+    const req = new Request('http://localhost/', {
+      headers: new Headers([['x-forwarded-for', '203.0.113.9']]),
+    });
+    const binding = createClientAddressBinding(
+      { requestIP: () => ({ address: '198.51.100.4' }) },
+      false,
+    );
+    bindClientAddress(req, binding);
+
+    expect(getClientAddress(req)).toBe('198.51.100.4');
+    expect(getPeerAddress(req)).toBe('198.51.100.4');
+  });
+
+  /**
+   * @source docs:api/security.md#client-identification-and-trustproxy
+   */
+  it('getClientAddress — forwarded client wins when trustProxy is on', () => {
+    const req = new Request('http://localhost/', {
+      headers: new Headers([['x-forwarded-for', '203.0.113.9, 10.0.0.1']]),
+    });
+    const binding = createClientAddressBinding(
+      { requestIP: () => ({ address: '198.51.100.4' }) },
+      true,
+    );
+    bindClientAddress(req, binding);
+
+    expect(getClientAddress(req)).toBe('203.0.113.9');
+    expect(getPeerAddress(req)).toBe('198.51.100.4');
+  });
+
+  /**
+   * @source docs:api/security.md#reading-the-client-address-yourself
+   */
+  it('RateLimitMiddleware — keyGenerator falling back to getClientAddress', async () => {
+    const store = new MemoryRateLimitStore();
+    const configuredClass = RateLimitMiddleware.configure({
+      max: 1,
+      windowMs: 60_000,
+      store,
+      keyGenerator: (req) => req.headers.get('x-api-key') ?? getClientAddress(req) ?? 'unknown',
+    });
+    const mw = new configuredClass();
+
+    const keyed = new Request('http://localhost/', {
+      headers: new Headers([['x-api-key', 'key-a']]),
+    }) as unknown as OneBunRequest;
+    const other = new Request('http://localhost/', {
+      headers: new Headers([['x-api-key', 'key-b']]),
+    }) as unknown as OneBunRequest;
+
+    expect((await mw.use(keyed, async () => new Response('ok'))).status).toBe(200);
+    expect((await mw.use(keyed, async () => new Response('ok'))).status).toBe(429);
+    // A different API key is a different bucket.
+    expect((await mw.use(other, async () => new Response('ok'))).status).toBe(200);
   });
 
   it('SecurityHeadersMiddleware — sets X-Frame-Options', async () => {
