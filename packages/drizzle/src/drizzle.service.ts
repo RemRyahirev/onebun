@@ -320,12 +320,48 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * 2. Optimized .get() on drizzle's PreparedQuery — the default implementation uses
    *    stmt.values(...)[0] which materializes all rows as arrays then takes the first.
    *    We patch to use stmt.get() (native single-row fetch) + Object.values() conversion.
+   *    Measured on 5000 rows: 402us vs 1373us for `select().from(t).get()`.
+   *
+   *    That conversion is only sound when the result has no duplicate column names.
+   *    `mapResultRow` is POSITIONAL, while an object has one key per NAME — so a join
+   *    between two tables that both select `id` produced an array one element short, and
+   *    every value after the collision shifted one field left. Silently: HTTP 200 with a
+   *    user id in the amount field. bun:sqlite reports both shapes, and they disagree
+   *    exactly when it happens (`columnNames` is deduplicated, `columnTypes` is not), so
+   *    the collision is detected once per statement and those queries take drizzle's own
+   *    array-shaped read instead.
    */
   private patchSQLiteStatementCaching(): void {
     const client = this.sqliteClient;
     if (!client) {
       return;
     }
+
+    // How many columns the SQL actually returns, as opposed to how many keys an object row
+    // has. `columnTypes` keeps one entry per column; an object collapses repeats. Read ONLY
+    // after the statement has been executed — reading it on a statement whose parameters are
+    // still unbound steps it with nulls and can throw `datatype mismatch`. Cached per
+    // statement, and the statements are cached by Patch 1.
+    const sqlColumnCount = new WeakMap<object, number>();
+    const columnCountOf = (stmt: object): number => {
+      const cached = sqlColumnCount.get(stmt);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      let count = -1;
+      try {
+        const { columnTypes } = stmt as { columnTypes?: string[] };
+        count = columnTypes?.length ?? -1;
+      } catch {
+        // A driver that will not say is treated as unsafe: the positional path is correct,
+        // and correctness is not the thing to guess about.
+        count = -1;
+      }
+      sqlColumnCount.set(stmt, count);
+
+      return count;
+    };
 
     // Patch 1: Statement cache for .prepare()
     const cache = new Map<string, ReturnType<typeof client.prepare>>();
@@ -368,6 +404,31 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
         const obj = stmt.get(...params);
         if (!obj) {
           return undefined;
+        }
+
+        // An object has one key per NAME, `mapResultRow` is POSITIONAL, and a join between
+        // two tables that both select `id` yields fewer keys than columns. Re-read that one
+        // positionally: the array-shaped read is what drizzle itself does, and it costs the
+        // extra read only on the queries that would otherwise be silently wrong.
+        const columns = columnCountOf(stmt);
+        const expected = (fields as unknown[] | undefined)?.length ?? columns;
+        if (expected < 0 || Object.keys(obj).length !== expected) {
+          const row = stmt.values(...params)[0];
+          if (!row) {
+            return undefined;
+          }
+
+          if (!fields && !customResultMapper) {
+            return row;
+          }
+
+          if (customResultMapper) {
+            return customResultMapper([row]);
+          }
+
+          const { mapResultRow: mapPositionalRow } = require('drizzle-orm/utils');
+
+          return mapPositionalRow(fields, row, joinsNotNullableMap);
         }
 
         if (!fields && !customResultMapper) {
