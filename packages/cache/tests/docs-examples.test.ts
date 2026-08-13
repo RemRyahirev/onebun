@@ -25,6 +25,7 @@ import {
   resetRegistrations,
   Service,
 } from '@onebun/core';
+import { createTestService } from '@onebun/core/testing';
 
 import {
   createInMemoryCache,
@@ -779,5 +780,76 @@ describe('Multiple caches (docs/api/cache.md)', () => {
     // From docs: "Combining `as` with `isGlobal: true` throws."
     expect(() => CacheModule.forRoot({ type: CacheType.MEMORY, as: sessions, isGlobal: true }))
       .toThrow(/never global/);
+  });
+});
+
+describe('Unreachable Redis at startup (docs/api/cache.md)', () => {
+  const CONNECT_TIMEOUT_MS = 250;
+  const ENV_KEYS = ['CACHE_TYPE', 'CACHE_REDIS_HOST', 'CACHE_REDIS_PORT', 'CACHE_REDIS_CONNECT_TIMEOUT'];
+  const savedEnv: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    CacheModule.clearOptions();
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = savedEnv[key];
+      }
+    }
+    CacheModule.clearOptions();
+    resetRegistrations();
+  });
+
+  /**
+   * @source docs:api/cache.md#accepting-a-degraded-cache
+   */
+  it('starts on a process-local cache when allowDegradedStart says that is acceptable', async () => {
+    const server = Bun.serve({ port: 0, fetch: () => new Response('') });
+    const { port } = server;
+    server.stop(true);
+
+    process.env.CACHE_REDIS_HOST = '127.0.0.1';
+    process.env.CACHE_REDIS_PORT = String(port);
+    process.env.CACHE_REDIS_CONNECT_TIMEOUT = String(CONNECT_TIMEOUT_MS);
+
+    // From docs: start on a process-local cache if Redis is down
+    CacheModule.forRoot({
+      type: CacheType.REDIS,
+      allowDegradedStart: true,
+    });
+
+    const { instance: service } = createTestService(CacheService);
+    await service.waitForInit();
+
+    expect(service.getBackendStatus().degraded).toBe(true);
+
+    await service.close();
+  });
+
+  /**
+   * @source docs:api/cache.md#which-backend-is-actually-serving
+   */
+  it('reports which backend is configured and which one is actually serving', async () => {
+    const { instance: service } = createTestService(CacheService);
+    await service.waitForInit();
+
+    // From docs: getBackendStatus() answers from state, synchronously
+    const status = service.getBackendStatus();
+
+    expect(status).toEqual({
+      configured: CacheType.MEMORY,
+      active: CacheType.MEMORY,
+      degraded: false,
+    });
+
+    await service.close();
   });
 });

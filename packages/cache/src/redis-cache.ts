@@ -32,8 +32,16 @@ import { DEFAULT_REDIS_CACHE_OPTIONS } from './types';
  */
 const REACQUIRE_TIMEOUT_MS = 5000;
 
-/** Reject if `promise` has not settled within `ms`. */
-async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+/**
+ * Reject if `promise` has not settled within `ms`.
+ *
+ * `promise` keeps running after the deadline — `Promise.race` cannot cancel it — but it stays
+ * handled, so a late rejection is not reported as unhandled. Whoever abandons it is responsible
+ * for closing what it was building.
+ *
+ * @internal
+ */
+export async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   try {

@@ -205,7 +205,32 @@ export interface DrizzleModuleOptions {
    * Default: false
    */
   logQueries?: boolean;
-  
+
+  /**
+   * Accept a database that is absent, unreachable or unmigrated at boot.
+   *
+   * A configured database is a required one: when `connection` is given, the service checks
+   * at startup that the database can actually be reached — the file opens on SQLite, a
+   * bounded `SELECT 1` answers on PostgreSQL — and an application whose check fails does not
+   * start. `app.start()` rejects, the HTTP server never binds, and the orchestrator sees a
+   * container that refuses to come up instead of one that passes readiness and 500s every
+   * request.
+   *
+   * Set this to `true` to keep the older behaviour: the failure is logged at `warn` and the
+   * application starts anyway. It says "I accept a degraded or absent database at boot" —
+   * a read-mostly service with a cache in front of it, or a deployment that brings the
+   * database up after the application. It does not disable the check; the check still runs
+   * and still reports.
+   *
+   * On the environment-variable path the same switch is `DB_ALLOW_DEGRADED_START=true`
+   * (with the configured `envPrefix`).
+   *
+   * Default: false
+   *
+   * @see docs:api/drizzle.md
+   */
+  allowDegradedStart?: boolean;
+
   /**
    * Whether to register module as global
    * When true, DrizzleService is available in all modules without explicit import.

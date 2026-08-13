@@ -6,6 +6,7 @@
 
 // Types and interfaces
 export type {
+  CacheBackendStatus,
   CacheEntry,
   CacheModuleOptions,
   CacheOptions,

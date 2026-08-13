@@ -1705,3 +1705,69 @@ describe('transaction() semantics (docs/api/drizzle.md)', () => {
     expect(rows.map((row: { name: string }) => row.name)).toEqual(['Bystander']);
   }, 5000);
 });
+
+describe('Startup Contract (docs)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+  const deadUrl = 'postgresql://app:hunter2@127.0.0.1:5999/orders';
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#startup-contract
+   */
+  it('rejects app.start() when the configured database does not answer, without printing the password', async () => {
+    // From docs: "await app.start(); // rejects with DrizzleStartupError when the configured
+    // database is unreachable" — and the quoted message redacts the password.
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.POSTGRESQL, options: { connectionString: deadUrl } },
+        }),
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+    await app.stop().catch(() => undefined);
+
+    // The rejection reaching the caller is Effect's FiberFailure wrapper; it carries the
+    // DrizzleStartupError's own message. The error object itself is what onModuleInit()
+    // throws — see startup-contract.test.ts.
+    expect(String(failure)).toContain('DrizzleStartupError');
+    expect(failure!.message).toContain('did not answer SELECT 1');
+    expect(failure!.message).toContain('5000ms connect timeout');
+    expect(failure!.message).toContain(':***@');
+    expect(failure!.message).not.toContain('hunter2');
+  });
+
+  /**
+   * @source docs:api/drizzle.md#allowdegradedstart
+   */
+  it('starts anyway with allowDegradedStart: true, and warns instead', async () => {
+    // From docs: the check still runs and still reports; the failure is logged at `warn`
+    // and the application starts anyway.
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.POSTGRESQL, options: { connectionString: deadUrl } },
+      allowDegradedStart: true,
+    });
+
+    const { instance, logger } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    const warnings = (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((call: unknown[]) => String(call[0])).join('\n');
+    expect(warnings).toContain('allowDegradedStart is set');
+    expect(warnings).not.toContain('hunter2');
+
+    await instance.close();
+  });
+});

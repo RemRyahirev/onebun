@@ -393,6 +393,64 @@ await app.stop();
 
 Before 0.4.5 nothing in the lifecycle called `close()`, so a service built by one test suite kept its connection open into the next — the mechanism behind a suite failing with `database "..." does not exist` after an earlier suite dropped its throwaway database.
 
+### Startup Contract
+
+**A configured database is a required one.** When an application configures a database — `DrizzleModule.forRoot({ connection })`, or `DB_URL` in the environment — the service checks at startup that it can actually be used, and `app.start()` **rejects** when it cannot. The HTTP server never binds, so an orchestrator sees a container that refuses to come up instead of one that passes readiness and then fails every request that touches the database.
+
+Three failures reach `app.start()`:
+
+| What failed | SQLite | PostgreSQL |
+|---|---|---|
+| The database cannot be opened | the file cannot be created or written — the error names the missing directory, or the permission | the connection options do not describe a server |
+| The database does not answer | — (opening the file is the check) | a bounded `SELECT 1` — the connection is otherwise lazy and nothing would touch the server until the first request |
+| A migration failed | a migration file that exists failed to apply | same |
+
+```typescript
+const app = new OneBunApplication(AppModule);
+
+await app.start();
+// rejects with DrizzleStartupError when the configured database is unreachable:
+//   PostgreSQL at postgresql://app:***@db:5432/orders did not answer SELECT 1 within the
+//   5000ms connect timeout (waited 5001ms): Connection closed. A configured database is a
+//   required one, so the application does not start without it. Set
+//   `allowDegradedStart: true` in DrizzleModule.forRoot(...) (or DB_ALLOW_DEGRADED_START=true
+//   on the environment path) to start anyway and accept a database that is absent,
+//   unreachable or unmigrated.
+```
+
+The error is a `DrizzleStartupError` carrying `stage` (`'open' | 'connect' | 'migrate'`), `target`, `waitedMs` and `timeoutMs`. **The password is never printed** — not in the error, not in the log line that names the connection.
+
+**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied.
+
+**What does not fail.** An application that configures no database at all is untouched: no connection is opened and nothing is checked. A missing migrations folder is *no migrations*, not a failure — `migrationsFolder` defaults to `./drizzle`, and an application that has never generated a migration starts normally.
+
+#### allowDegradedStart
+
+One option opts out, and it means "I accept a degraded or absent database at boot" — not "skip the check". The check still runs and still reports; the failure is logged at `warn` and the application starts anyway.
+
+```typescript
+DrizzleModule.forRoot({
+  connection: { /* ... */ },
+  // The database may be absent at boot: the application starts, and every request that
+  // touches the database fails until it is available.
+  allowDegradedStart: true,
+})
+```
+
+On the environment path the same switch is `DB_ALLOW_DEGRADED_START=true` (with the configured `envPrefix`). Module options are code, so an application configured through `forRoot()` takes the option and ignores the variable.
+
+<llm-only>
+**Technical details for AI agents:**
+- The failure is raised from `DrizzleService.onModuleInit()` — which `OneBunModule.callServicesOnModuleInit()` awaits — so it propagates out of `app.start()` before `Bun.serve()` is called. It is not a fire-and-forget promise: that was the defect (`autoInitialize()` swallowed everything, the module-options path at `warn` and the `DB_URL` path at `debug`)
+- The rejection reaching `await app.start()` is Effect's `FiberFailure` wrapper carrying the `DrizzleStartupError`'s message, so match on the message there; `instanceof DrizzleStartupError` holds on what `onModuleInit()` itself throws
+- The reachability check runs INDEPENDENTLY of `autoMigrate`. `autoMigrate: false` is the documented recommendation for production, and before this contract that path never touched the server at all
+- PostgreSQL: `drizzle(url)` from `drizzle-orm/bun-sql` is lazy — no socket is opened until the first query — so the probe is what makes an unreachable server visible at boot
+- SQLite: `SQLITE_CANTOPEN` covers both "the directory does not exist" and "the directory is there and unwritable"; the service asks the file system directly and says which one. A write pragma against a read-only database fails after a successful open and is reported as the pragma it was
+- The bound comes from `connection.options.pool.timeout` (ms) or `DEFAULT_STARTUP_PROBE_TIMEOUT_MS` (5000). On timeout the in-flight query is left settled with a no-op catch, so it cannot surface as an unhandled rejection
+- On the fatal path the service closes whatever it opened before rethrowing, so a refused boot leaves no socket or file handle behind
+- `allowDegradedStart` is read from module options on the `forRoot()` path and from `<PREFIX>_ALLOW_DEGRADED_START` on the environment path. The variable is read straight from `process.env` rather than through the env schema, so it still works when parsing the rest of the configuration is what failed
+</llm-only>
+
 ### Injection
 
 ```typescript
@@ -909,6 +967,10 @@ DrizzleModule.forRoot({
 })
 ```
 
+**A migration that fails fails the boot.** `app.start()` rejects with a `DrizzleStartupError` naming the folder and the SQL error, and the HTTP server never binds — a half-applied schema is not a state to serve traffic in. A migrations folder that does not exist is *no migrations* and is not a failure: `./drizzle` is the default, and an application that has never generated one starts normally.
+
+The database is checked for reachability whether or not migrations run, so `autoMigrate: false` — the recommendation for production, where migrations are a deploy step — still refuses to start against a database that is not there. See [Startup Contract](#startup-contract), including the `allowDegradedStart` opt-out.
+
 ### One Journal Per Migration Set
 
 A package that ships migrations of its own needs its own journal table:
@@ -953,6 +1015,7 @@ Migrations whose entries end up neither applied nor already recorded are reporte
 | `DB_MIGRATIONS_TABLE` | Journal table recording applied migrations | `'__drizzle_migrations'` |
 | `DB_MIGRATIONS_SCHEMA` | Schema holding the journal (PostgreSQL only) | `'drizzle'` |
 | `DB_SCHEMA_PATH` | Path to schema files | - |
+| `DB_ALLOW_DEGRADED_START` | Start even when the configured database cannot be reached ([Startup Contract](#startup-contract)) | `false` |
 
 `migrationsTable` and `migrationsSchema` are also accepted by `DrizzleModule.forRoot()` and
 are forwarded on every path that runs migrations, including automatic ones.

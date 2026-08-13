@@ -253,6 +253,33 @@ export enum CacheType {
 }
 
 /**
+ * Which backend the cache was configured with, and which one is actually answering.
+ *
+ * A readiness probe wants exactly this pair: `degraded` is true when the configured backend is
+ * NOT the one serving, which for `redis` means the process is on a private in-memory cache that
+ * no other replica can see and that no cross-replica invalidation ever reaches.
+ *
+ * @see docs:api/cache.md
+ */
+export interface CacheBackendStatus {
+  /**
+   * Backend the configuration asked for
+   */
+  configured: CacheType;
+
+  /**
+   * Backend actually serving reads and writes
+   */
+  active: CacheType;
+
+  /**
+   * True when `active` is not `configured` — a process-local cache stands in for the real
+   * backend. Only reachable with `allowDegradedStart: true`
+   */
+  degraded: boolean;
+}
+
+/**
  * Cache module configuration
  * Used by both NestJS-style CacheModule.forRoot() and Effect.js createCacheModule()
  */
@@ -283,6 +310,24 @@ export interface CacheModuleOptions {
    * @defaultValue 'CACHE'
    */
   envPrefix?: string;
+
+  /**
+   * Accept a degraded cache at boot: if the configured backend is unreachable, start anyway on
+   * a process-local in-memory cache instead of failing `app.start()`.
+   *
+   * Configured means required. With the default (`false`) a `type: REDIS` cache that cannot be
+   * reached within `redisOptions.connectTimeout` fails the application start, because the
+   * fallback is permanent for the life of the process: nothing retries, the cache is private to
+   * this replica, and cross-replica invalidation silently stops working.
+   *
+   * Set it to `true` only where a cold, unshared cache is genuinely acceptable — then the
+   * fallback happens and is announced with a WARN naming the consequences. Also readable from
+   * the environment as `CACHE_ALLOW_DEGRADED_START` (with the configured `envPrefix`).
+   *
+   * @defaultValue false
+   * @see docs:api/cache.md
+   */
+  allowDegradedStart?: boolean;
 
   /**
    * Whether the module should be global (available in all modules without explicit import).

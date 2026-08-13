@@ -52,6 +52,7 @@ import {
   type DrizzleModuleOptions,
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
+  type SQLiteConnectionOptions,
 } from './types';
 
 /**
@@ -120,6 +121,189 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
   }
 
   return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+}
+
+/**
+ * How long the startup reachability probe waits for the database to answer, when the
+ * connection options carry no `pool.timeout` of their own.
+ *
+ * The bound is the point: a black-holed host — a TCP port that accepts and then never
+ * answers, which is what a dropped route or a stalled proxy looks like — used to hold
+ * `app.start()` open forever with nothing logged.
+ */
+const DEFAULT_STARTUP_PROBE_TIMEOUT_MS = 5000;
+
+/** The one option that turns a fatal startup into a degraded one. Quoted in every message. */
+const DEGRADED_START_OPTION = 'allowDegradedStart';
+
+/** Environment suffix of {@link DEGRADED_START_OPTION}, appended to the configured prefix. */
+const DEGRADED_START_ENV_SUFFIX = 'ALLOW_DEGRADED_START';
+
+/** Drizzle's own default, and the one this service uses when nothing else is configured. */
+const DEFAULT_MIGRATIONS_FOLDER = './drizzle';
+
+/**
+ * Strip the password out of a connection URL.
+ *
+ * The startup error names its target so an operator can tell WHICH database refused, and a
+ * PostgreSQL URL carries the password in that target. A framework's own startup error is a
+ * leak channel like any other, so the password never reaches the message, the log or the
+ * exception — not even when the connection failed and it is "only" a diagnostic.
+ */
+function redactConnectionUrl(url: string): string {
+  return url
+    .replace(/^([^:]+:\/\/[^:@/]*):[^@/]*@/, '$1:***@')
+    .replace(/([?&](?:password|pwd)=)[^&]*/gi, '$1***');
+}
+
+/**
+ * Say WHY a SQLite database would not open.
+ *
+ * bun:sqlite reports both "the directory is not there" and "the directory is there and I
+ * may not write in it" as the same `SQLITE_CANTOPEN: unable to open database file`, and the
+ * two need different fixes — one is a missing `mkdir` in the deployment, the other is a
+ * volume mounted with the wrong owner. The file system is asked directly, because the
+ * driver cannot tell them apart.
+ */
+function describeSQLiteOpenFailure(url: string, error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+
+  if (url === ':memory:' || url.startsWith('file::memory:') || url.startsWith(':memory:')) {
+    return raw;
+  }
+
+  const file = path.resolve(url);
+  const directory = path.dirname(file);
+
+  if (!fs.existsSync(directory)) {
+    return `the directory "${directory}" does not exist (${raw})`;
+  }
+
+  if (fs.existsSync(file)) {
+    try {
+      fs.accessSync(file, fs.constants.W_OK);
+    } catch {
+      return `the file "${file}" exists but this process may not write to it (${raw})`;
+    }
+
+    return raw;
+  }
+
+  try {
+    fs.accessSync(directory, fs.constants.W_OK);
+  } catch {
+    return `the directory "${directory}" exists but this process may not write to it, so `
+      + `"${path.basename(file)}" cannot be created (${raw})`;
+  }
+
+  return raw;
+}
+
+/**
+ * Name the database an error is about: the SQLite file, or the PostgreSQL URL redacted.
+ */
+function describeTarget(connection: DatabaseConnectionOptions): string {
+  if (connection.type === DatabaseType.SQLITE) {
+    return `SQLite database "${connection.options.url}"`;
+  }
+
+  try {
+    return `PostgreSQL at ${redactConnectionUrl(resolvePostgreSQLUrl(connection.options))}`;
+  } catch {
+    // The options do not describe a server at all, and the resolver's own message says
+    // exactly what is missing — that message IS the failure being reported here.
+    return 'PostgreSQL';
+  }
+}
+
+/**
+ * The bound for the reachability probe: the timeout the options already carry, or the
+ * default. `pool.timeout` is documented as the connection timeout in milliseconds.
+ */
+function startupProbeTimeoutOf(connection: DatabaseConnectionOptions): number {
+  if (connection.type === DatabaseType.POSTGRESQL) {
+    const configured = connection.options.pool?.timeout;
+
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+  }
+
+  return DEFAULT_STARTUP_PROBE_TIMEOUT_MS;
+}
+
+/**
+ * Read the degraded-start switch straight from `process.env`.
+ *
+ * Deliberately not part of the env schema: the switch has to be readable even when parsing
+ * the rest of the configuration is what failed, and a malformed `DB_TYPE` must still be able
+ * to fall back to a degraded start when the operator asked for one. Accepts the same
+ * spellings as `Env.boolean`; anything else is not an opt-out.
+ */
+function envAllowsDegradedStart(prefix: string): boolean {
+  const raw = process.env[`${prefix}_${DEGRADED_START_ENV_SUFFIX}`];
+
+  return raw !== undefined && ['true', '1', 'yes', 'on'].includes(raw.trim().toLowerCase());
+}
+
+/**
+ * The single sentence every startup failure ends with: what to change to boot anyway.
+ *
+ * One option, one meaning, both configuration paths — an operator reading the error should
+ * not have to find out which of the two spellings their deployment uses.
+ */
+function degradedStartHint(envPrefix: string): string {
+  return 'A configured database is a required one, so the application does not start without it. '
+    + `Set \`${DEGRADED_START_OPTION}: true\` in DrizzleModule.forRoot(...) `
+    + `(or ${envPrefix}_${DEGRADED_START_ENV_SUFFIX}=true on the environment path) to start anyway `
+    + 'and accept a database that is absent, unreachable or unmigrated.';
+}
+
+/** The same text, as the warning of a start that was allowed to degrade. */
+function degradedContinuation(failure: Error): string {
+  return `${failure.message} Starting anyway: ${DEGRADED_START_OPTION} is set. Requests that touch `
+    + 'the database will fail until it is available.';
+}
+
+/**
+ * Which step of the startup sequence failed.
+ *
+ * - `open` — the SQLite file could not be opened, or the connection options were rejected.
+ * - `connect` — the server did not answer the reachability probe inside its timeout.
+ * - `migrate` — a migration that exists failed to apply. (A migration folder that does not
+ *   exist is "no migrations", not a failure.)
+ *
+ * @see docs:api/drizzle.md
+ */
+export type DrizzleStartupStage = 'open' | 'connect' | 'migrate';
+
+/**
+ * Raised from `onModuleInit` when a database the application configured explicitly cannot be
+ * used, which makes `app.start()` reject before the HTTP server binds.
+ *
+ * Configured means required. Degrading to a process that starts, passes readiness and then
+ * fails every request that touches the database is the behaviour this replaces; the opt-out
+ * is `allowDegradedStart: true` (`DB_ALLOW_DEGRADED_START=true` on the environment path).
+ *
+ * @see docs:api/drizzle.md
+ */
+export class DrizzleStartupError extends Error {
+  override readonly name = 'DrizzleStartupError';
+
+  constructor(
+    /** Which step failed. */
+    readonly stage: DrizzleStartupStage,
+    /** The database it failed against, with any password redacted. */
+    readonly target: string,
+    /** How long the attempt took before it was given up. */
+    readonly waitedMs: number,
+    /** The bound that applied, or `null` where the step cannot be timed out. */
+    readonly timeoutMs: number | null,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+  }
 }
 
 /**
@@ -261,6 +445,23 @@ function assertSafeIdentifier(value: string, option: string): void {
       + 'identifier — letters, digits, underscores and $, not starting with a digit.',
     );
   }
+}
+
+/**
+ * One database the application configured, flattened from whichever path configured it.
+ *
+ * Both paths produce this and then take the same code, because "configured means required"
+ * has to hold identically for `DrizzleModule.forRoot({ connection })` and for `DB_URL`.
+ */
+interface ConfiguredDatabaseStart {
+  connection: DatabaseConnectionOptions;
+  autoMigrate: boolean;
+  migrationsFolder?: string;
+  migrationsTable?: string;
+  migrationsSchema?: string;
+  allowDegradedStart: boolean;
+  /** Environment prefix, so the error names the variable THIS application would set. */
+  envPrefix: string;
 }
 
 /**
@@ -542,6 +743,11 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   /**
    * Module initialization hook - called by the framework after initializeService()
    * This ensures the database is fully ready before client code runs
+   *
+   * A configured database that cannot be used fails HERE, which is what makes `app.start()`
+   * reject before the HTTP server binds. See {@link DrizzleStartupError}.
+   *
+   * @see docs:api/drizzle.md
    */
   async onModuleInit(): Promise<void> {
     // Flush any buffered logs now that logger is available
@@ -554,100 +760,313 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   /**
    * Auto-initialize database from environment variables and/or module options
    * Only initializes if explicit configuration is provided (module options or DB_URL env var)
+   *
+   * An application that configures NOTHING keeps the old behaviour exactly: no connection is
+   * opened and nothing fails. Everything below is about a configuration the user wrote.
    */
   private async autoInitialize(): Promise<void> {
-    try {
-      const moduleOptions = this.getModuleOptions();
+    const moduleOptions = this.getModuleOptions();
+    const envPrefix = moduleOptions?.envPrefix ?? DEFAULT_ENV_PREFIX;
 
-      // If module options are provided, use them
-      if (moduleOptions?.connection) {
-        this.safeLog('debug', 'Auto-initializing database service from module options', {
-          type: moduleOptions.connection.type,
-        });
+    // If module options are provided, use them
+    if (moduleOptions?.connection) {
+      this.safeLog('debug', 'Auto-initializing database service from module options', {
+        type: moduleOptions.connection.type,
+      });
 
-        // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-        await this.initialize(moduleOptions.connection, true);
-
-        // Auto-migrate is enabled by default (unless explicitly set to false)
-        const shouldAutoMigrate = moduleOptions.autoMigrate !== false;
-        if (shouldAutoMigrate) {
-          const migrationsFolder = moduleOptions.migrationsFolder ?? './drizzle';
-          this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
-          try {
-            // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-            await this.runMigrations({
-              migrationsFolder,
-              migrationsTable: moduleOptions.migrationsTable,
-              migrationsSchema: moduleOptions.migrationsSchema,
-            }, true);
-            this.safeLog('debug', 'Auto-migrations completed successfully');
-          } catch (migrationError) {
-            this.safeLog('warn', 'Auto-migration failed, database initialized without migrations', {
-              error: migrationError instanceof Error ? migrationError.message : String(migrationError),
-            });
-            // Don't rethrow - allow DB to be used even if migrations fail
-          }
-        } else {
-          this.safeLog('debug', 'Auto-migrations disabled via module options');
-        }
-
-        this.initialized = true;
-
-        return;
-      }
-
-      // Otherwise, check environment variables
-      const envPrefix = moduleOptions?.envPrefix ?? DEFAULT_ENV_PREFIX;
-      // Only auto-initialize if DB_URL is explicitly set in process.env and not empty
-      // Check process.env directly to ensure we only auto-initialize when explicitly configured
-      const dbUrlFromProcess = process.env[`${envPrefix}_URL`];
-      if (!dbUrlFromProcess || dbUrlFromProcess.trim() === '') {
-        this.safeLog('debug', 'Skipping auto-initialization: no database configuration found in process.env');
-        this.initialized = false;
-
-        return;
-      }
-
-      const envConfig = await loadFromEnv(envPrefix);
-      const dbType = envConfig.type === DatabaseType.SQLITE ? DatabaseType.SQLITE : DatabaseType.POSTGRESQL;
-
-      const connectionOptions: DatabaseConnectionOptions =
-        dbType === DatabaseType.SQLITE
-          ? {
-            type: DatabaseType.SQLITE,
-            options: { url: envConfig.url },
-          }
-          : {
-            type: DatabaseType.POSTGRESQL,
-            // Passed through, not parsed into fields and reassembled: that round trip
-            // dropped everything after the path, so a DB_URL carrying `?sslmode=require`
-            // silently connected without SSL.
-            options: { connectionString: envConfig.url },
-          };
-
-      this.safeLog('debug', `Auto-initializing database service with type: ${connectionOptions.type}`, {
+      await this.startConfiguredDatabase({
+        connection: moduleOptions.connection,
+        autoMigrate: moduleOptions.autoMigrate !== false,
+        migrationsFolder: moduleOptions.migrationsFolder,
+        migrationsTable: moduleOptions.migrationsTable,
+        migrationsSchema: moduleOptions.migrationsSchema,
+        // Module options are code, so the opt-out is the option — not an environment
+        // variable that would silently override what the code asked for.
+        allowDegradedStart: moduleOptions.allowDegradedStart === true,
         envPrefix,
       });
 
-      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-      await this.initialize(connectionOptions, true);
+      return;
+    }
 
-      // Auto-migrate is enabled by default (env schema default is true)
-      if (envConfig.autoMigrate) {
-        const migrationsFolder = envConfig.migrationsFolder ?? './drizzle';
-        // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
-        await this.runMigrations({
-          migrationsFolder,
-          migrationsTable: envConfig.migrationsTable,
-          migrationsSchema: envConfig.migrationsSchema,
-        }, true);
+    // Otherwise, check environment variables
+    // Only auto-initialize if DB_URL is explicitly set in process.env and not empty
+    // Check process.env directly to ensure we only auto-initialize when explicitly configured
+    const dbUrlFromProcess = process.env[`${envPrefix}_URL`];
+    if (!dbUrlFromProcess || dbUrlFromProcess.trim() === '') {
+      this.safeLog('debug', 'Skipping auto-initialization: no database configuration found in process.env');
+      this.initialized = false;
+
+      return;
+    }
+
+    const allowDegradedStart = moduleOptions?.allowDegradedStart === true || envAllowsDegradedStart(envPrefix);
+
+    let envConfig: DatabaseEnvSchema;
+    try {
+      envConfig = await loadFromEnv(envPrefix);
+    } catch (error) {
+      // A malformed value is still a configuration the user wrote and the framework cannot
+      // honour, so it fails the boot rather than starting without a database.
+      this.initialized = false;
+      const failure = new DrizzleStartupError(
+        'open',
+        `the ${envPrefix}_* environment`,
+        0,
+        null,
+        `${envPrefix}_URL is set, but the database configuration in the environment could not be read: `
+        + `${error instanceof Error ? error.message : String(error)}. `
+        + degradedStartHint(envPrefix),
+        { cause: error },
+      );
+
+      if (!allowDegradedStart) {
+        throw failure;
       }
 
-      this.initialized = true;
+      this.safeLog('warn', degradedContinuation(failure), { stage: failure.stage });
+
+      return;
+    }
+
+    const dbType = envConfig.type === DatabaseType.SQLITE ? DatabaseType.SQLITE : DatabaseType.POSTGRESQL;
+
+    const connectionOptions: DatabaseConnectionOptions =
+      dbType === DatabaseType.SQLITE
+        ? {
+          type: DatabaseType.SQLITE,
+          options: { url: envConfig.url },
+        }
+        : {
+          type: DatabaseType.POSTGRESQL,
+          // Passed through, not parsed into fields and reassembled: that round trip
+          // dropped everything after the path, so a DB_URL carrying `?sslmode=require`
+          // silently connected without SSL.
+          options: { connectionString: envConfig.url },
+        };
+
+    this.safeLog('debug', `Auto-initializing database service with type: ${connectionOptions.type}`, {
+      envPrefix,
+    });
+
+    await this.startConfiguredDatabase({
+      connection: connectionOptions,
+      autoMigrate: envConfig.autoMigrate === true,
+      migrationsFolder: envConfig.migrationsFolder,
+      migrationsTable: envConfig.migrationsTable,
+      migrationsSchema: envConfig.migrationsSchema,
+      allowDegradedStart,
+      envPrefix,
+    });
+  }
+
+  /**
+   * Open, verify and migrate a database the application configured explicitly.
+   *
+   * One routine for both configuration paths, because the guarantee has to be the same on
+   * both: the module-options path used to warn and carry on, and the environment path — the
+   * documented default — logged a single `debug` line and carried on. Either way the server
+   * bound, readiness passed, and every request that touched the database returned 500.
+   */
+  private async startConfiguredDatabase(plan: ConfiguredDatabaseStart): Promise<void> {
+    const target = describeTarget(plan.connection);
+    const timeoutMs = startupProbeTimeoutOf(plan.connection);
+    const startedAt = Date.now();
+
+    try {
+      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      await this.initialize(plan.connection, true);
+      await this.verifyReachable(plan, target, timeoutMs, startedAt);
+
+      if (plan.autoMigrate) {
+        await this.runStartupMigrations(plan, target, startedAt);
+      } else {
+        this.safeLog('debug', 'Auto-migrations disabled; the reachability check still ran');
+      }
+
+      this.initialized = this.db !== null;
     } catch (error) {
-      // Don't throw error - just log it and allow manual initialization
-      this.safeLog('debug', 'Failed to auto-initialize database from environment', { error });
-      this.initialized = false;
+      const failure = error instanceof DrizzleStartupError
+        ? error
+        : this.openFailure(plan, target, Date.now() - startedAt, error);
+
+      if (!plan.allowDegradedStart) {
+        // Nothing may keep a socket or a file handle for a database this process has just
+        // refused to start with: the container has to exit, not linger holding a connection.
+        await this.close().catch(() => undefined);
+        this.initialized = false;
+
+        throw failure;
+      }
+
+      this.safeLog('warn', degradedContinuation(failure), {
+        stage: failure.stage,
+        target: failure.target,
+        waitedMs: failure.waitedMs,
+      });
+      this.initialized = this.db !== null;
+    }
+  }
+
+  /**
+   * Wrap a failure that is not one of the staged ones — the file would not open, or the
+   * connection options do not describe a server.
+   *
+   * `openSQLite()` and `resolvePostgreSQLUrl()` already say which database and why, so the
+   * target is prefixed only when the cause does not carry it. Repeating it reads as two
+   * different failures.
+   */
+  private openFailure(
+    plan: ConfiguredDatabaseStart,
+    target: string,
+    waitedMs: number,
+    cause: unknown,
+  ): DrizzleStartupError {
+    const causeText = cause instanceof Error ? cause.message : String(cause);
+    const head = causeText.includes(target) ? causeText : `${target} could not be opened: ${causeText}`;
+
+    return new DrizzleStartupError(
+      'open',
+      target,
+      waitedMs,
+      null,
+      `${head} (waited ${waitedMs}ms). ${degradedStartHint(plan.envPrefix)}`,
+      { cause },
+    );
+  }
+
+  /**
+   * Prove the configured database can actually be reached, inside a bound.
+   *
+   * PostgreSQL connects lazily — `drizzlePostgres(url)` touches no socket — so before this
+   * check nothing in the boot sequence ever spoke to the server, and the first evidence that
+   * it was unreachable was a 500 on a live request. The `SELECT 1` is raced against the
+   * timeout because a host that accepts the connection and never answers (a dropped route, a
+   * stalled proxy) otherwise holds `app.start()` open forever.
+   */
+  private async verifyReachable(
+    plan: ConfiguredDatabaseStart,
+    target: string,
+    timeoutMs: number,
+    startedAt: number,
+  ): Promise<void> {
+    if (plan.connection.type === DatabaseType.SQLITE) {
+      // Opening the file IS the reachability check on SQLite, and `initialize()` has just
+      // done it: the database is created, the pragmas are applied, and both fail loudly when
+      // the file cannot be opened or written.
+      return;
+    }
+
+    const client = this.postgresClient;
+    if (!client) {
+      throw new DrizzleStartupError(
+        'connect',
+        target,
+        Date.now() - startedAt,
+        timeoutMs,
+        `${target} produced no client to probe with. ${degradedStartHint(plan.envPrefix)}`,
+      );
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // The probe outlives the timeout — the query is still in flight when the race is lost —
+    // and an unhandled rejection from it would be reported as a crash by the process-level
+    // handler this service installs. Settling it here is what keeps the failure a single
+    // named error instead of a crash report.
+    const probe = client`SELECT 1`.then(() => 'answered' as const);
+    probe.catch(() => undefined);
+
+    try {
+      const outcome = await Promise.race([
+        probe,
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), timeoutMs);
+        }),
+      ]);
+
+      if (outcome === 'timeout') {
+        throw new DrizzleStartupError(
+          'connect',
+          target,
+          Date.now() - startedAt,
+          timeoutMs,
+          `${target} accepted no answer to SELECT 1 within the ${timeoutMs}ms connect timeout `
+          + `(waited ${Date.now() - startedAt}ms). ${degradedStartHint(plan.envPrefix)}`,
+        );
+      }
+
+      this.safeLog('debug', 'Database reachability confirmed', { target, timeoutMs });
+    } catch (error) {
+      if (error instanceof DrizzleStartupError) {
+        throw error;
+      }
+
+      throw new DrizzleStartupError(
+        'connect',
+        target,
+        Date.now() - startedAt,
+        timeoutMs,
+        `${target} did not answer SELECT 1 within the ${timeoutMs}ms connect timeout `
+        + `(waited ${Date.now() - startedAt}ms): ${error instanceof Error ? error.message : String(error)}. `
+        + degradedStartHint(plan.envPrefix),
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Apply the migrations that exist, and fail the boot when one of them fails.
+   *
+   * The two cases are NOT the same failure. `migrationsFolder` defaults to `./drizzle`, so
+   * an application that never generated a migration reaches this with no folder at all —
+   * "no migrations" is the normal state of such an application, and it starts. A migration
+   * that exists and then fails leaves the schema half-built, which is exactly the state no
+   * process should serve traffic in.
+   */
+  private async runStartupMigrations(
+    plan: ConfiguredDatabaseStart,
+    target: string,
+    startedAt: number,
+  ): Promise<void> {
+    const migrationsFolder = plan.migrationsFolder ?? DEFAULT_MIGRATIONS_FOLDER;
+    const journalPath = path.join(migrationsFolder, 'meta', '_journal.json');
+
+    if (!fs.existsSync(journalPath)) {
+      // An explicitly configured folder that is not there is worth a word — it is usually a
+      // path that did not survive the build — but it is still "no migrations", not a failure.
+      this.safeLog(
+        plan.migrationsFolder === undefined ? 'debug' : 'warn',
+        `No migrations to run: "${journalPath}" does not exist`,
+        { migrationsFolder },
+      );
+
+      return;
+    }
+
+    this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
+
+    try {
+      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      await this.runMigrations({
+        migrationsFolder,
+        migrationsTable: plan.migrationsTable,
+        migrationsSchema: plan.migrationsSchema,
+      }, true);
+      this.safeLog('debug', 'Auto-migrations completed successfully');
+    } catch (error) {
+      throw new DrizzleStartupError(
+        'migrate',
+        target,
+        Date.now() - startedAt,
+        null,
+        `Migrations in "${migrationsFolder}" failed against ${target} after ${Date.now() - startedAt}ms: `
+        + `${error instanceof Error ? error.message : String(error)}. `
+        + 'The schema is not the one the application expects. '
+        + degradedStartHint(plan.envPrefix),
+        { cause: error },
+      );
     }
   }
 
@@ -685,6 +1104,48 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   }
 
   /**
+   * Open the SQLite file and apply its pragmas, saying which of the two went wrong.
+   *
+   * Opening the file is the whole reachability check on SQLite, so it has to fail with
+   * something an operator can act on. bun:sqlite reports a missing directory and an
+   * unwritable one identically (`SQLITE_CANTOPEN`), and a write pragma against a read-only
+   * database fails AFTER a perfectly successful open — three different fixes behind two
+   * driver messages.
+   */
+  private openSQLite(options: SQLiteConnectionOptions): Database {
+    let client: Database;
+
+    try {
+      client = new Database(options.url, options.options);
+    } catch (error) {
+      throw new Error(
+        `SQLite database "${options.url}" could not be opened: ${describeSQLiteOpenFailure(options.url, error)}`,
+        { cause: error },
+      );
+    }
+
+    // Apply SQLite pragmas before creating drizzle instance
+    const pragmas = options.pragmas ?? ['journal_mode = WAL', 'synchronous = NORMAL'];
+    for (const pragma of pragmas) {
+      try {
+        client.run(`PRAGMA ${pragma}`);
+      } catch (error) {
+        client.close();
+
+        throw new Error(
+          `SQLite database "${options.url}" opened, but PRAGMA ${pragma} failed: `
+          + `${error instanceof Error ? error.message : String(error)}. `
+          + 'The default pragmas write to the database; a read-only one needs `pragmas: []` '
+          + 'or a list that does not write.',
+          { cause: error },
+        );
+      }
+    }
+
+    return client;
+  }
+
+  /**
    * Initialize database connection
    * @param options - Database connection options
    * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
@@ -706,13 +1167,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
 
     if (options.type === DatabaseType.SQLITE) {
       const sqliteOptions = options.options;
-      this.sqliteClient = new Database(sqliteOptions.url, sqliteOptions.options);
-
-      // Apply SQLite pragmas before creating drizzle instance
-      const pragmas = sqliteOptions.pragmas ?? ['journal_mode = WAL', 'synchronous = NORMAL'];
-      for (const pragma of pragmas) {
-        this.sqliteClient.run(`PRAGMA ${pragma}`);
-      }
+      this.sqliteClient = this.openSQLite(sqliteOptions);
 
       this.db = drizzleSQLite(this.sqliteClient);
       this.gatedDb = createGatedDatabase(this.db, this.sqliteGate);
@@ -734,10 +1189,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       this.postgresClient = (this.db as any).$client as SQL | null;
 
       this.safeLog('info', 'PostgreSQL database initialized with Bun.SQL', {
-        host: pgOptions.host,
-        port: pgOptions.port,
-        database: pgOptions.database,
-        user: pgOptions.user,
+        // The discrete fields are all undefined on the connectionString shape, so the
+        // redacted URL is the only line that names the target on both. It is redacted
+        // because a log is a leak channel exactly like an error message is.
+        target: redactConnectionUrl(connectionUrl),
       });
     } else {
       const _exhaustive: never = options;
@@ -1003,7 +1458,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    const migrationsFolder = options?.migrationsFolder ?? './drizzle';
+    const migrationsFolder = options?.migrationsFolder ?? DEFAULT_MIGRATIONS_FOLDER;
     const migrationsTable = options?.migrationsTable ?? DEFAULT_MIGRATIONS_TABLE;
     const migrationsSchema = options?.migrationsSchema ?? DEFAULT_MIGRATIONS_SCHEMA;
 

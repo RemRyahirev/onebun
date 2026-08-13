@@ -198,15 +198,50 @@ CacheModule.forRoot({
 })
 ```
 
-### Redis Error Handling
+### Unreachable Redis at startup
 
-If Redis connection fails during auto-initialization, CacheService **automatically falls back to in-memory cache** and logs a warning:
+**Configured means required.** If the application configured `type: REDIS` (or `CACHE_TYPE=redis`) and Redis is not reachable, `app.start()` **fails** and the process never takes traffic. The failure is raised from `CacheService`'s `onModuleInit`, so it arrives as a rejected `app.start()`, not as a log line after the server is already listening.
+
+The connect attempt is **bounded** by `connectTimeout` (default `5000` ms). The driver's own reconnect never gives up on a host that swallows packets, so without that bound a black-holed Redis leaves the boot hanging indefinitely.
+
+The error names the backend, the target, how long it waited and the one option that opts out. It never contains the password — the target is rebuilt from host, port and database rather than from the connection URL:
+
+```
+Cache backend "redis" at redis://cache.internal:6379/0 did not become usable within 5000ms
+(gave up after 5003ms). Cause: Error: timed out after 5000ms. The application configured redis
+explicitly, so startup fails instead of silently serving a process-local in-memory cache.
+Set allowDegradedStart: true (or CACHE_ALLOW_DEGRADED_START=true) to accept a degraded cache at boot.
+```
+
+An application that configures **nothing** is unaffected: with no `type` and no `CACHE_TYPE`, the cache is in-memory by choice and there is nothing to fail.
+
+#### Accepting a degraded cache
+
+Where a cold, unshared cache is genuinely acceptable at boot, say so:
 
 ```typescript
-// If CACHE_TYPE=redis but Redis is unreachable:
-// WARN: Failed to auto-initialize cache from environment
-// INFO: In-memory cache initialized (fallback)
+CacheModule.forRoot({
+  type: CacheType.REDIS,
+  allowDegradedStart: true,  // start on a process-local cache if Redis is down
+})
 ```
+
+The same switch is readable from the environment as `CACHE_ALLOW_DEGRADED_START=true` (with the configured `envPrefix`), for deployments whose whole cache configuration comes from env vars.
+
+Know what it buys:
+
+- the fallback is **permanent for the life of the process** — nothing retries, and a Redis that comes up three seconds later changes nothing;
+- the fallback cache is **per-process** — two replicas hold different data, and cross-replica invalidation silently does nothing;
+- one `WARN` line says exactly that, naming the configured backend and the target.
+
+#### Which backend is actually serving
+
+```typescript
+const status = cacheService.getBackendStatus();
+// { configured: CacheType.REDIS, active: CacheType.MEMORY, degraded: true }
+```
+
+`getBackendStatus()` is synchronous and answers from state, so a readiness endpoint can call it on every probe — treat `degraded: true` as NOT ready. It is meaningful once initialization has settled, which the framework awaits before the application starts.
 
 <llm-only>
 
@@ -216,10 +251,13 @@ If Redis connection fails during auto-initialization, CacheService **automatical
 - `isGlobal: false` is NOT the multi-cache mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own options and its own `CacheService`. An unnamed `forRoot()` still writes to a single class-static slot shared by the process
 - `as: symbol | string` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws; a module holding two registrations must name each with `@Inject(TOKEN)`
 - `CacheModule.forFeature()` returns the module class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one CacheService — `isGlobal` controls visibility, never instance count
-- `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`)
+- `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`). The promise is NOT awaited there — `onModuleInit()` awaits it, which is what makes a failure reject `app.start()`. A rejection handler is attached in the constructor so the pending rejection is not reported as unhandled before the hook runs
 - `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)
 - Auto-init flow: check `CacheModule.forRoot()` options → load env vars → merge (module > env > defaults) → create cache instance
-- If Redis init fails, catches error and falls back to `createInMemoryCache()` — the service always initializes
+- A configured Redis that does not connect within `connectTimeout` THROWS out of `autoInitialize()` and fails the application start. `allowDegradedStart: true` (or `<PREFIX>_ALLOW_DEGRADED_START=true`) turns that into a `WARN` plus `createInMemoryCache()`. A `connectTimeout` of `0` means "no driver timeout" and is treated here as the default `5000` ms rather than as an instant failure
+- The connect is wrapped in `withDeadline()`: the driver retries a black-holed host forever with `reconnect: true`, so nothing else bounds it. On timeout the abandoned `RedisCache` is closed, otherwise its client keeps reconnecting for the life of the process
+- A failure in loading/parsing the env configuration itself is a different path: it still logs `ERROR: Failed to auto-initialize cache from environment` and falls back to in-memory, since the configured backend is not known at that point
+- `getBackendStatus()` returns `{ configured, active, degraded }` (`CacheType` values); `degraded` is `active !== configured` and is only reachable with `allowDegradedStart`
 - Redis cache uses `createRedisCache(options)` which creates a Bun-native Redis client
 - In-memory cache uses `InMemoryCache` with LRU eviction, TTL, and periodic cleanup
 - `CacheService` implements `getStats()` returning `{ hits, misses, entries, hitRate }`
