@@ -6,9 +6,13 @@ import {
 } from 'effect';
 
 import type { IConfig, OneBunAppConfig } from './config.interface';
+// Type-only: `module.ts` imports this file at runtime, so a value import would be circular.
+import type { GlobalScope } from './module';
 import type { Span } from '@opentelemetry/api';
 
 import type { SyncLogger } from '@onebun/logger';
+
+import { getRegistrationOptions } from './registration';
 
 /**
  * Metadata storage for services
@@ -57,7 +61,8 @@ export function getServiceMetadata(
  * Get the service tag for a service class
  * @see docs:api/services.md
  */
-export function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): Context.Tag<T, T> {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function getServiceTag<T>(serviceClass: new (...args: any[]) => T): Context.Tag<T, T> {
   const metadata = getServiceMetadata(serviceClass);
   if (!metadata) {
     throw new Error(`Service ${serviceClass.name} does not have @Service decorator`);
@@ -103,16 +108,44 @@ export class BaseService {
    * so they are available immediately after super() in subclass constructors.
    * @internal
    */
-  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
-    null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+    owner?: Function;
+  } | null = null;
+
+  /**
+   * The owning application's DI scope, when the service was built by one.
+   * Carries dynamic-module options captured per application rather than per process.
+   * @internal
+   */
+  private _scope?: GlobalScope;
+
+  /**
+   * The module class that built this service.
+   *
+   * For a service provided by a named registration this is the minted registration class,
+   * which is what lets the service read ITS OWN configuration rather than the class-static
+   * slot every registration in the process shares.
+   * @internal
+   */
+  private _owner?: Function;
 
   /**
    * Set the ambient init context before constructing a service.
    * Called by the framework (OneBunModule) before `new ServiceClass(...)`.
    * @internal
    */
-  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
-    BaseService._initContext = { logger, config };
+  static setInitContext(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+    owner?: Function,
+  ): void {
+    BaseService._initContext = {
+      logger, config, scope, owner,
+    };
   }
 
   /**
@@ -129,12 +162,38 @@ export class BaseService {
     // This makes this.config and this.logger available immediately after super()
     // in subclass constructors.
     if (BaseService._initContext) {
-      const { logger, config } = BaseService._initContext;
+      const {
+        logger, config, scope, owner,
+      } = BaseService._initContext;
       const className = this.constructor.name;
       this.logger = logger.child({ className });
       this.config = config;
+      this._scope = scope;
+      this._owner = owner;
       this._initialized = true;
     }
+  }
+
+  /**
+   * The owning application's DI scope, or `undefined` outside an application.
+   *
+   * The one supported way for a service to read the options its application imported a
+   * dynamic module with — `Module.getOptions()` reads a slot the whole process shares.
+   * @internal
+   */
+  protected get moduleScope(): GlobalScope | undefined {
+    return this._scope;
+  }
+
+  /**
+   * The options of the registration that provides this service, when there is one.
+   *
+   * Falls back to `undefined` outside a registration — a service built by `createTestService`
+   * or by a plain `new`, where the caller supplies configuration directly.
+   * @internal
+   */
+  protected registrationOptions<T>(): T | undefined {
+    return this._owner ? getRegistrationOptions<T>(this._owner) : undefined;
   }
 
   /**
@@ -144,7 +203,15 @@ export class BaseService {
    * initialized via the constructor init context, this is a no-op.
    * @internal
    */
-  initializeService(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
+  initializeService(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+  ): void {
+    // Assigned before the early return: a service built through DI is already initialized by
+    // the constructor path above, so anything set after this guard would never reach it.
+    this._scope ??= scope;
+
     if (this._initialized) {
       return; // Already initialized (via constructor or previous call)
     }
@@ -245,7 +312,8 @@ export class BaseService {
  * @see docs:api/services.md
  */
 export function createServiceLayer<T>(
-  serviceClass: new (...args: unknown[]) => T,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  serviceClass: new (...args: any[]) => T,
   logger?: SyncLogger,
   config?: IConfig<OneBunAppConfig>,
 ): Layer.Layer<never, never, unknown> {

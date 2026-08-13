@@ -10,7 +10,13 @@ import {
   afterEach,
   mock,
 } from 'bun:test';
+import { Effect, Layer } from 'effect';
 
+import type {
+  BeforeApplicationDestroy,
+  OnApplicationDestroy,
+  OnModuleDestroy,
+} from '../module/lifecycle';
 import type { QueueAdapter, Subscription } from '../queue/types';
 import type { ApplicationOptions, ModuleInstance } from '../types';
 import type {
@@ -20,6 +26,7 @@ import type {
 } from '../types';
 import type { OnModuleConfigure } from '../types';
 
+import { LoggerService, type Logger } from '@onebun/logger';
 import { register } from '@onebun/metrics';
 
 import {
@@ -53,10 +60,11 @@ import {
   Subscribe,
   Timeout,
 } from '../queue/decorators';
-import { makeMockLoggerLayer } from '../testing/test-utils';
+import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
 
 
 import { OneBunApplication } from './application';
+import { QUEUE_DISABLED_WITH_ADAPTER_WARNING } from './queue-enablement';
 
 // Helper function to create app with mock logger to suppress logs in tests
 function createTestApp(
@@ -2335,7 +2343,18 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
+      // `throwError` declares no parameter decorators, so it takes the fast path.
+      // Asserting the status alone passed both before and after the filters were
+      // applied here — a code-less Error maps to 500 either way — so the envelope
+      // and the content type are what actually pin the behaviour.
       expect(response.status).toBe(500);
+      expect(response.headers.get('content-type')).toContain('application/json');
+
+      const body = await response.json() as { success: boolean; error: string; code: number };
+
+      expect(body.success).toBe(false);
+      expect(body.error).toBe('Test error');
+      expect(body.code).toBe(500);
     });
 
     test('should handle complex route patterns with multiple parameters', async () => {
@@ -4347,6 +4366,248 @@ describe('OneBunApplication', () => {
 
       await app.stop();
     });
+
+    // ------------------------------------------------------------------
+    // Enabling via an explicit backend config (no queue decorators anywhere)
+    // ------------------------------------------------------------------
+
+    /** Adapter that counts constructions and connections, so "never built" is assertable. */
+    /* eslint-disable @typescript-eslint/no-empty-function */
+    class SpyQueueAdapter implements QueueAdapter {
+      static constructCount = 0;
+      static connectCount = 0;
+      static published: Array<{ pattern: string; data: unknown }> = [];
+
+      readonly name = 'spy';
+      readonly type = 'jetstream';
+      private connected = false;
+
+      constructor(_options?: unknown) {
+        SpyQueueAdapter.constructCount++;
+      }
+
+      static reset(): void {
+        SpyQueueAdapter.constructCount = 0;
+        SpyQueueAdapter.connectCount = 0;
+        SpyQueueAdapter.published = [];
+      }
+
+      async connect(): Promise<void> {
+        SpyQueueAdapter.connectCount++;
+        this.connected = true;
+      }
+
+      async disconnect(): Promise<void> {
+        this.connected = false;
+      }
+
+      isConnected(): boolean {
+        return this.connected;
+      }
+
+      async publish(pattern: string, data: unknown): Promise<string> {
+        SpyQueueAdapter.published.push({ pattern, data });
+
+        return 'spy-id';
+      }
+
+      async publishBatch(): Promise<string[]> {
+        return [];
+      }
+
+      async subscribe(): Promise<Subscription> {
+        return {
+          async unsubscribe() {},
+          pause() {},
+          resume() {},
+          pattern: '',
+          isActive: true,
+        };
+      }
+
+      supports(): boolean {
+        return false;
+      }
+      on(): void {}
+      off(): void {}
+    }
+    /* eslint-enable @typescript-eslint/no-empty-function */
+
+    @Controller('/producer-only')
+    class ProducerOnlyController extends BaseController {
+      @Get('/')
+      async index(): Promise<OneBunResponse> {
+        return this.success({});
+      }
+    }
+
+    @Module({ controllers: [ProducerOnlyController] })
+    class ProducerOnlyModule {}
+
+    /**
+     * A logger layer that records `warn` messages.
+     *
+     * Built here rather than via `createTestApp`, which spreads caller options first and
+     * then unconditionally overwrites `loggerLayer` — any layer passed through it is
+     * discarded and the capture silently observes nothing.
+     *
+     * `child` must return this same object: the application calls
+     * `logger.child({ className: 'OneBunApplication' })` before use, and the spread copy
+     * from `createMockLogger()` would otherwise hand back the unpatched original.
+     */
+    function makeCapturingLoggerLayer(warnings: string[]): ReturnType<typeof makeMockLoggerLayer> {
+      const logger: Logger = {
+        ...createMockLogger(),
+        warn: (message: string) => Effect.sync(() => {
+          warnings.push(message);
+        }),
+        child: () => logger,
+      };
+
+      return Layer.succeed(LoggerService, logger);
+    }
+
+    beforeEach(() => {
+      SpyQueueAdapter.reset();
+    });
+
+    test('enables queue when queue.adapter is configured without any queue decorator', async () => {
+      const app = createTestApp(ProducerOnlyModule, { port: 0, queue: { adapter: 'memory' } });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('producer-only app publishes through the configured custom adapter', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+      await app.start();
+
+      expect(SpyQueueAdapter.constructCount).toBe(1);
+      expect(SpyQueueAdapter.connectCount).toBe(1);
+
+      await app.getQueueService()!.publish('order.created', { id: 1 });
+
+      expect(SpyQueueAdapter.published).toHaveLength(1);
+      expect(SpyQueueAdapter.published[0].pattern).toBe('order.created');
+      expect(SpyQueueAdapter.published[0].data).toEqual({ id: 1 });
+
+      await app.stop();
+    });
+
+    test('enables queue when only queue.options is present', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { options: { anything: true } },
+      } as Partial<ApplicationOptions>);
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('enables queue when only queue.redis is present', async () => {
+      const app = createTestApp(ProducerOnlyModule, {
+        port: 0,
+        queue: { redis: { useSharedProvider: true } },
+      });
+      await app.start();
+
+      expect(app.getQueueService()).not.toBeNull();
+
+      await app.stop();
+    });
+
+    test('queue.enabled: false keeps the queue disabled despite a configured adapter, and warns once', async () => {
+      const warnings: string[] = [];
+      const app = new OneBunApplication(ProducerOnlyModule, {
+        port: 0,
+        loggerLayer: makeCapturingLoggerLayer(warnings),
+        queue: { enabled: false, adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+      expect(SpyQueueAdapter.constructCount).toBe(0);
+      expect(SpyQueueAdapter.connectCount).toBe(0);
+      // Filter by exact equality: other subsystems warn during start() too.
+      expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(1);
+
+      await app.stop();
+    });
+
+    test('queue.enabled: false without a backend config emits no contradiction warning', async () => {
+      @Controller('/silent-off')
+      class SilentOffController extends BaseController {
+        @Subscribe('silent.off')
+        async handle(): Promise<void> {}
+      }
+
+      @Module({ controllers: [SilentOffController] })
+      class SilentOffModule {}
+
+      const warnings: string[] = [];
+      const app = new OneBunApplication(SilentOffModule, {
+        port: 0,
+        loggerLayer: makeCapturingLoggerLayer(warnings),
+        queue: { enabled: false },
+      });
+
+      await app.start();
+
+      expect(app.getQueueService()).toBeNull();
+      expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(0);
+
+      await app.stop();
+    });
+
+    test('injected QueueService no longer throws in a producer-only app', async () => {
+      let publishError: unknown = null;
+
+      @Controller('/injected-producer')
+      class InjectedProducerController extends BaseController {
+        constructor(private queueService: QueueService) {
+          super();
+        }
+
+        @Get('/')
+        async index(): Promise<OneBunResponse> {
+          return this.success({});
+        }
+
+        async publishTest(): Promise<string | null> {
+          try {
+            return await this.queueService.publish('injected.event', { ok: true });
+          } catch (error) {
+            publishError = error;
+
+            return null;
+          }
+        }
+      }
+
+      @Module({ controllers: [InjectedProducerController] })
+      class InjectedProducerModule {}
+
+      const app = createTestApp(InjectedProducerModule, {
+        port: 0,
+        queue: { adapter: SpyQueueAdapter, options: { servers: 'stub://none' } },
+      });
+      await app.start();
+
+      await app.getQueueService()!.publish('injected.event', { ok: true });
+
+      expect(publishError).toBeNull();
+      expect(SpyQueueAdapter.published.map(p => p.pattern)).toContain('injected.event');
+
+      await app.stop();
+    });
   });
 
   describe('queue handler execution', () => {
@@ -5032,6 +5293,385 @@ describe('OneBunApplication', () => {
       } finally {
         await app.stop();
       }
+    });
+  });
+
+  /**
+   * Shutdown behaviour that only a REAL server can show: draining, the 503 window, the
+   * deadline and the shutdown latch. The `Bun.serve` mock used by
+   * `describe('Graceful shutdown')` has a `stop: mock()` and no `pendingRequests`, so
+   * nothing there can drain or force-close anything.
+   */
+  describe('Graceful shutdown drain and latch (real server)', () => {
+    const SLOW_HANDLER_MS = 300;
+    const IN_FLIGHT_SETTLE_MS = 60;
+    const SHORT_BUDGET_MS = 400;
+    const OK = 200;
+    const SERVICE_UNAVAILABLE = 503;
+
+    interface LogLine {
+      level: string;
+      message: string;
+    }
+
+    let logLines: LogLine[] = [];
+
+    function capturingLoggerLayer(): Layer.Layer<Logger, never, never> {
+      const record = (level: string) => (message: string) =>
+        Effect.sync(() => {
+          logLines.push({ level, message });
+        });
+
+      const logger: Logger = {
+        trace: record('trace'),
+        debug: record('debug'),
+        info: record('info'),
+        warn: record('warn'),
+        error: record('error'),
+        fatal: record('fatal'),
+        child: () => logger,
+      };
+
+      return Layer.succeed(LoggerService, logger);
+    }
+
+    function createRealApp(
+      moduleClass: new (...args: unknown[]) => object,
+      options?: Partial<ApplicationOptions>,
+    ): OneBunApplication {
+      return new OneBunApplication(moduleClass, {
+        port: 0,
+        metrics: { enabled: false },
+        docs: { enabled: false },
+        gracefulShutdown: false,
+        ...options,
+        loggerLayer: capturingLoggerLayer(),
+      });
+    }
+
+    function hasLine(level: string, fragment: string): boolean {
+      return logLines.some(line => line.level === level && line.message.includes(fragment));
+    }
+
+    async function waitUntil(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+      const startedAt = Date.now();
+      while (!condition() && Date.now() - startedAt < timeoutMs) {
+        await Bun.sleep(5);
+      }
+    }
+
+    /** Counters shared with the per-test lifecycle provider. */
+    interface HookCounters {
+      before: number;
+      module: number;
+      application: number;
+    }
+
+    beforeEach(() => {
+      logLines = [];
+    });
+
+    test('drains an in-flight request instead of resolving while it is still running', async () => {
+      let handlerFinishedAt = 0;
+
+      @Controller('/drain')
+      class SlowController extends BaseController {
+        @Get('/slow')
+        async slow() {
+          await Bun.sleep(SLOW_HANDLER_MS);
+          handlerFinishedAt = Date.now();
+
+          return { marker: 'drained-in-full' };
+        }
+      }
+
+      @Module({ controllers: [SlowController] })
+      class SlowModule {}
+
+      const app = createRealApp(SlowModule);
+      await app.start();
+      const url = `http://localhost:${app.getPort()}/drain/slow`;
+
+      const inFlight = fetch(url);
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      await app.stop();
+      const stopResolvedAt = Date.now();
+
+      const response = await inFlight;
+      expect(response.status).toBe(OK);
+      expect(await response.text()).toContain('drained-in-full');
+      expect(handlerFinishedAt).toBeGreaterThan(0);
+      // The defect: stop() used to discard the promise from Bun's stop() and resolve in
+      // a few milliseconds, with the response still being produced.
+      expect(stopResolvedAt).toBeGreaterThanOrEqual(handlerFinishedAt);
+    });
+
+    test('answers 503 to a request that arrives during the drain window', async () => {
+      @Controller('/drain')
+      class SlowController extends BaseController {
+        @Get('/slow')
+        async slow() {
+          await Bun.sleep(SLOW_HANDLER_MS);
+
+          return { marker: 'drained-in-full' };
+        }
+      }
+
+      @Module({ controllers: [SlowController] })
+      class SlowModule {}
+
+      const app = createRealApp(SlowModule);
+      await app.start();
+      const url = `http://localhost:${app.getPort()}/drain/slow`;
+
+      const inFlight = fetch(url);
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const stopping = app.stop();
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const refused = await fetch(url);
+      expect(refused.status).toBe(SERVICE_UNAVAILABLE);
+      expect(await refused.json()).toMatchObject({ error: 'Service Unavailable' });
+
+      await stopping;
+      expect((await inFlight).status).toBe(OK);
+    });
+
+    test('refuses a request issued after shutdown has begun, from inside beforeApplicationDestroy', async () => {
+      let probeUrl = '';
+      let probeOutcome: number | string = 0;
+
+      @Service()
+      class ShutdownProbeService extends BaseService implements BeforeApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          probeOutcome = await fetch(probeUrl).then(
+            response => response.status,
+            () => 'connection-error',
+          );
+        }
+      }
+
+      @Controller('/probe')
+      class ProbeController extends BaseController {
+        @Get('/ping')
+        ping() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [ProbeController], providers: [ShutdownProbeService] })
+      class ProbeModule {}
+
+      const app = createRealApp(ProbeModule);
+      await app.start();
+      probeUrl = `http://localhost:${app.getPort()}/probe/ping`;
+
+      expect((await fetch(probeUrl)).status).toBe(OK);
+
+      await app.stop();
+
+      // The listener is closed (or refusing) before the first destroy hook runs; it used
+      // to answer 200 while the hooks deregistered the instance from discovery.
+      expect([SERVICE_UNAVAILABLE, 'connection-error']).toContain(probeOutcome);
+    });
+
+    test('force-closes at the drain deadline and warns how many requests were cut', async () => {
+      @Controller('/drain')
+      class HangingController extends BaseController {
+        @Get('/forever')
+        async forever() {
+          await new Promise(() => {
+            // Never resolves: the only thing that can end this request is the deadline.
+          });
+
+          return { unreachable: true };
+        }
+      }
+
+      @Module({ controllers: [HangingController] })
+      class HangingModule {}
+
+      const app = createRealApp(HangingModule, { shutdownTimeout: SHORT_BUDGET_MS });
+      await app.start();
+
+      const hanging = fetch(`http://localhost:${app.getPort()}/drain/forever`).then(
+        () => 'answered',
+        () => 'force-closed',
+      );
+      await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+
+      const startedAt = Date.now();
+      await app.stop();
+      const elapsed = Date.now() - startedAt;
+
+      // Bounded by the drain share of the budget, not by the hanging handler.
+      expect(elapsed).toBeLessThan(SHORT_BUDGET_MS * 3);
+      expect(hasLine('warn', 'force-closing')).toBe(true);
+      expect(hasLine('warn', '1 HTTP request(s)')).toBe(true);
+      expect(await hanging).toBe('force-closed');
+    });
+
+    test('stop() called twice sequentially runs every destroy hook exactly once', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        beforeApplicationDestroy(): void {
+          counters.before++;
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      await app.stop();
+      await app.stop();
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+    });
+
+    test('two overlapping stop() calls run every destroy hook exactly once', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          counters.before++;
+          await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      await Promise.all([app.stop(), app.stop()]);
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+    });
+
+    test('a second signal during shutdown is logged and ignored instead of starting a second teardown', async () => {
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(): Promise<void> {
+          counters.before++;
+          await Bun.sleep(IN_FLIGHT_SETTLE_MS);
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+      const originalExit = process.exit.bind(process);
+      const exitCodes: number[] = [];
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+      process.exit = ((code?: number) => {
+        exitCodes.push(code ?? 0);
+      }) as typeof process.exit;
+
+      const app = createRealApp(CountingModule, { gracefulShutdown: true });
+      try {
+        await app.start();
+
+        expect(signalHandlers.SIGTERM).toHaveLength(1);
+        expect(signalHandlers.SIGINT).toHaveLength(1);
+
+        signalHandlers.SIGTERM[0]();
+        await Bun.sleep(10);
+        signalHandlers.SIGINT[0]();
+
+        await waitUntil(() => exitCodes.length > 0);
+        // Without the latch the second signal starts a SECOND teardown that ends in its
+        // own process.exit — wait for it to land on the stub, otherwise it lands on the
+        // real process.exit after the restore below and kills the whole test run.
+        await Bun.sleep(200);
+      } finally {
+        process.on = originalProcessOn;
+        process.exit = originalExit;
+        await app.stop();
+      }
+
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+      expect(exitCodes).toEqual([0]);
+      expect(hasLine('warn', 'ignoring SIGINT')).toBe(true);
+    });
+
+    test('enableGracefulShutdown() after start() does not register a second pair of handlers', async () => {
+      @Module({})
+      class PlainModule {}
+
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+
+      const app = createRealApp(PlainModule, { gracefulShutdown: true });
+      try {
+        await app.start();
+        // Exactly what the JSDoc example used to instruct — it must not double-register.
+        app.enableGracefulShutdown();
+      } finally {
+        process.on = originalProcessOn;
+        await app.stop();
+      }
+
+      expect(signalHandlers.SIGTERM).toHaveLength(1);
+      expect(signalHandlers.SIGINT).toHaveLength(1);
     });
   });
 });

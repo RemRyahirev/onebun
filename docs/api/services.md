@@ -186,8 +186,17 @@ Services can implement lifecycle hooks to execute code at specific points in the
 | `OnModuleInit` | `onModuleInit()` | After service instantiation and DI |
 | `OnApplicationInit` | `onApplicationInit()` | After all modules initialized, before HTTP server starts |
 | `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
-| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | At the very start of shutdown |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain and listener close — first hook of the teardown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | At the very end of shutdown |
+
+::: warning Destroy hooks run after the server is gone
+`beforeApplicationDestroy` is the first *hook*, not the first act of shutdown. Three phases precede
+it: new requests are answered `503`, the in-flight ones are drained (force-closed once the drain
+budget — half of `shutdownTimeout`, 7.5s by default — expires), and the HTTP listener is closed. A
+request issued from inside a destroy hook to the application's own server fails to connect, so these
+hooks are for cleanup, not for serving or self-calling. See
+[Graceful Shutdown](./core.md#graceful-shutdown) for the full 11-step sequence.
+:::
 
 ::: tip Eager Instantiation & Standalone Services
 All services listed in `providers` are instantiated **eagerly** during module initialization — not lazily on first use. `onModuleInit` is called for **every** service that implements the interface, even if the service is not injected into any controller or other service.
@@ -242,6 +251,19 @@ export class DatabaseService extends BaseService implements OnModuleInit, OnModu
 }
 ```
 
+::: warning Destroy hooks are bounded
+`shutdownTimeout` (default **15000 ms**) caps the *whole* shutdown sequence, and the in-flight HTTP
+drain may consume the first half of it — so `await this.pool.end()` above is not guaranteed to
+finish. When the budget runs out the framework stops **waiting**; it does not cancel. On
+`await app.stop()` the call resolves at the deadline and logs
+`Shutdown timed out after <N>ms while running onModuleDestroy hooks; abandoning the rest of the teardown`,
+while the overrunning hook and every hook after it keep running unawaited and complete *after*
+`stop()` has already returned. On the SIGTERM/SIGINT path the process exits with code **1** as soon
+as `stop()` resolves, so those trailing hooks are killed mid-flight and never complete; a shutdown
+that finishes inside the budget exits **0**. Keep destroy hooks well under the budget, or raise
+[`shutdownTimeout`](./core.md#graceful-shutdown).
+:::
+
 ### Standalone Service Example
 
 A service that is not injected anywhere but performs useful work via `onModuleInit`:
@@ -281,7 +303,9 @@ export class SchedulerModule {}
 
 ### Shutdown Hooks with Signal
 
-The shutdown hooks receive the signal that triggered the shutdown (e.g., `SIGTERM`, `SIGINT`):
+The shutdown hooks receive the signal that triggered the shutdown (e.g., `SIGTERM`, `SIGINT`) — in
+multi-service mode it is always `undefined`, because the parent stops each child with a bare
+`stop()`, so keep the `|| 'unknown'` fallback:
 
 ```typescript
 import { 
@@ -322,11 +346,19 @@ STARTUP:
 7. HTTP server starts
 
 SHUTDOWN:
-1. Before destroy hook → beforeApplicationDestroy(signal)
-2. HTTP server stops
-3. Module destroy hook → onModuleDestroy()
-4. Application destroy hook → onApplicationDestroy(signal)
+1. New requests answered 503 — the listener stays open on purpose
+2. In-flight requests drained (force-closed once the drain deadline expires)
+3. HTTP listener closed
+4. Before destroy hook → beforeApplicationDestroy(signal)
+5. WebSockets closed, queue stopped and disconnected, traces flushed
+6. Module destroy hook → onModuleDestroy()
+7. Shared Redis released
+8. Application destroy hook → onApplicationDestroy(signal)
+9. Logger transport flushed
 ```
+
+A destroy hook can no longer serve or reach the application's own HTTP server: the listener is
+closed at step 3, before hook 4, and a request to it from inside a hook is refused at the socket.
 
 ## Accessing Logger
 
@@ -506,38 +538,28 @@ export class UserRepository extends BaseService {
   }
 
   async findById(id: string): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.select().from(users).where(eq(users.id, id)).limit(1)
-    );
+    const result = await this.db.select().from(users).where(eq(users.id, id)).limit(1);
     return result[0] || null;
   }
 
   async findAll(options?: { limit?: number; offset?: number }): Promise<User[]> {
-    return this.db.query(
-      db => db.select().from(users)
-        .limit(options?.limit || 100)
-        .offset(options?.offset || 0)
-    );
+    return await this.db.select().from(users)
+      .limit(options?.limit || 100)
+      .offset(options?.offset || 0);
   }
 
   async create(data: InsertUser): Promise<User> {
-    const result = await this.db.query(
-      db => db.insert(users).values(data).returning()
-    );
+    const result = await this.db.insert(users).values(data).returning();
     return result[0];
   }
 
   async update(id: string, data: Partial<InsertUser>): Promise<User | null> {
-    const result = await this.db.query(
-      db => db.update(users).set(data).where(eq(users.id, id)).returning()
-    );
+    const result = await this.db.update(users).set(data).where(eq(users.id, id)).returning();
     return result[0] || null;
   }
 
   async delete(id: string): Promise<boolean> {
-    const result = await this.db.query(
-      db => db.delete(users).where(eq(users.id, id)).returning()
-    );
+    const result = await this.db.delete(users).where(eq(users.id, id)).returning();
     return result.length > 0;
   }
 }

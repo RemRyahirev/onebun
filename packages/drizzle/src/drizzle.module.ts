@@ -3,7 +3,10 @@ import type { DrizzleModuleOptions } from './types';
 import {
   Global,
   Module,
+  registerModule,
+  type RegistrationToken,
   removeFromGlobalModules,
+  selectRegistration,
 } from '@onebun/core';
 
 
@@ -151,17 +154,37 @@ export class DrizzleModule {
    * ```
    */
   static forRoot(options: DrizzleModuleOptions): typeof DrizzleModule {
-    // Store options in a static property that DrizzleService can access
+    // Store options in a static property that DrizzleService can access.
+    // Kept for the no-application path — createTestService() builds DrizzleService with no
+    // module and therefore no registration to read from.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (DrizzleModule as any)[DRIZZLE_MODULE_OPTIONS] = options;
 
-    // If isGlobal is explicitly set to false, remove from global modules registry
-    // This allows creating separate DrizzleService instances for multi-DB scenarios
-    if (options.isGlobal === false) {
-      removeFromGlobalModules(DrizzleModule);
+    if (options.as !== undefined && options.isGlobal === true) {
+      throw new Error(
+        'DrizzleModule.forRoot({ as, isGlobal: true }) is not a valid combination. A named ' +
+        'registration is never global: ambient visibility has one slot per service class, ' +
+        'so two global registrations would collapse back into one instance. Reach a named ' +
+        'registration by importing DrizzleModule.forFeature(<token>).',
+      );
     }
 
-    return DrizzleModule;
+    // A NAMED registration gets its own module identity and its own options, so a second
+    // forRoot() no longer overwrites the first for everyone. An unnamed one keeps the base
+    // module exactly as before.
+    const registration = registerModule(DrizzleModule, options, options.as, [DrizzleService]);
+
+    // If isGlobal is explicitly set to false, remove from global modules registry.
+    // The registry is process-wide, so the restore has to be symmetric: without the else
+    // branch one isGlobal:false call de-globalized DrizzleModule for every later forRoot()
+    // in the process, including ones that asked for the default.
+    if (options.isGlobal === false) {
+      removeFromGlobalModules(DrizzleModule);
+    } else if (options.as === undefined) {
+      Global()(DrizzleModule);
+    }
+
+    return registration as typeof DrizzleModule;
   }
 
   /**
@@ -196,10 +219,13 @@ export class DrizzleModule {
    * export class UserModule {}
    * ```
    */
-  static forFeature(): typeof DrizzleModule {
-    // Simply return the module class - it already exports DrizzleService
-    // The module system will handle service instance resolution
-    return DrizzleModule;
+  static forFeature(token?: RegistrationToken): typeof DrizzleModule {
+    // With no token this resolves to the single registration, which is the base module
+    // itself when forRoot() was called without `as` — so an application with one database
+    // writes exactly what it wrote before. With a token it selects that registration, and
+    // the importing module's providers then resolve DrizzleService to it with no
+    // injection-site annotation.
+    return selectRegistration(DrizzleModule, token, [DrizzleService]) as typeof DrizzleModule;
   }
 
   /**

@@ -6,6 +6,22 @@
  */
 
 import type { JetStreamAdapterOptions, StreamDefinition } from './types';
+import type {
+  AckPolicy,
+  Consumer,
+  ConsumerConfig,
+  ConsumerMessages,
+  ConsumerNotification,
+  ConsumerInfo,
+  DeliverPolicy,
+  JetStreamClient,
+  JetStreamManager,
+  JsMsg,
+  RetentionPolicy,
+  StorageType,
+  StreamConfig,
+  StreamInfo,
+} from '@nats-io/jetstream';
 
 import type {
   QueueAdapter,
@@ -21,22 +37,361 @@ import type {
   QueueScheduler,
 } from '@onebun/core';
 import {
+  acknowledgesAutomatically,
   createQueuePatternMatcher,
   createQueueScheduler,
+  nackedError,
+  resolveAckMode,
+  tracksDelivery,
+  wasNacked,
+  type NackAwareMessage,
   type QueuePatternMatch,
 } from '@onebun/core';
 
+import {
+  CONFIG_CYCLE_WINDOW_MS,
+  decideStamp,
+  hashReconcileConfig,
+  isNotFoundError,
+  stampMetadata,
+  type StampMetadata,
+} from './config-stamp';
 import { NatsClient } from './nats-client';
+import { toNatsSubject } from './subject';
 
 const DEFAULT_ACK_WAIT_NANOSECONDS = 30_000_000_000; // 30 seconds in nanoseconds
+/**
+ * `SubscribeOptions.ackTimeout` is milliseconds — every duration in `@onebun/core` is —
+ * while the consumer's `ack_wait` is nanoseconds. Nanoseconds appear only on the
+ * NATS-native adapter types, so the conversion belongs here.
+ */
+const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 const DEFAULT_MAX_DELIVER = 3;
+const DEFAULT_MAX_ACK_PENDING = 100;
+const DEFAULT_CONSUME_BATCH = 10;
 const CONSUME_RESTART_DELAY_MS = 100;
+const IDENTITY_DIGEST_LENGTH = 12;
+const RELEASE_TIMEOUT_MS = 5_000;
+/**
+ * How long shutdown waits for a handler that is already running.
+ *
+ * Fixed rather than configurable, and deliberately equal to the default `ack_wait`: past
+ * that point the server has already redelivered the message, so waiting longer cannot
+ * prevent the duplicate it exists to prevent.
+ */
+const HANDLER_DRAIN_TIMEOUT_MS = 30_000;
+
+/** A value that may appear in a hashed stream subset. */
+type HashableStreamValue = string | number | readonly string[] | undefined;
+
+/** The loosely-typed stream config the untyped client accepts. */
+interface AnyStreamConfig {
+  subjects: string[];
+  name?: string;
+  retention?: RetentionPolicy;
+  storage?: StorageType;
+  num_replicas?: number;
+  max_msgs?: number;
+  max_bytes?: number;
+  max_age?: number;
+  duplicate_window?: number;
+}
+
+/** Everything `subscribe()` negotiates with the server, resolved once per subscription. */
+interface ResolvedConsumerConfig {
+  ackPolicy: AckPolicy;
+  deliverPolicy: DeliverPolicy;
+  maxAckPending: number;
+  ackWait: number;
+  maxDeliver: number;
+  consumeBatch: number;
+  /**
+   * False under `ackMode: 'none'`. The redelivery knobs are then neither sent nor hashed:
+   * the server accepts them but ignores them, and recording them would stamp a redelivery
+   * policy that cannot happen.
+   */
+  tracksDelivery: boolean;
+}
+
+/**
+ * Single source of truth for the consumer wire values.
+ *
+ * Precedence:
+ * - `max_ack_pending`: `prefetch` > `consumerConfig.maxAckPending` > 100
+ * - `max_deliver`: `retry.attempts` > `deadLetter.maxRetries` > `consumerConfig.maxDeliver` > 3.
+ *   `retry.attempts` stays ahead of `deadLetter.maxRetries` so every configuration that
+ *   worked before the dead-letter queue existed keeps the exact `max_deliver` it had.
+ * - `ack_wait`: `ackTimeout` > `consumerConfig.ackWait` > 30s expressed in nanoseconds.
+ *   `ackTimeout` is per-subscription and in milliseconds; `consumerConfig.ackWait` is
+ *   adapter-wide and already in nanoseconds.
+ * - `ack_policy`: explicit for `'auto'` and `'manual'` — those decide WHO acknowledges.
+ *   `'none'` is the one mode that decides WHETHER the server tracks acknowledgements at
+ *   all; it maps to the client's none policy, and `ack_wait`, `max_deliver` and `max_ack_pending`
+ *   are then omitted rather than sent, because they govern a redelivery that cannot occur.
+ *
+ * `ackPolicy` and `deliverPolicy` arrive as parameters so this stays synchronous and needs
+ * no access to the dynamically imported client module.
+ */
+function resolveConsumerConfig(
+  ackPolicy: AckPolicy,
+  deliverPolicy: DeliverPolicy,
+  options: SubscribeOptions | undefined,
+  consumerConfig: JetStreamAdapterOptions['consumerConfig'],
+): ResolvedConsumerConfig {
+  const maxAckPending = options?.prefetch ?? consumerConfig?.maxAckPending ?? DEFAULT_MAX_ACK_PENDING;
+
+  return {
+    tracksDelivery: tracksDelivery(options),
+    ackPolicy,
+    deliverPolicy,
+    maxAckPending,
+    ackWait: options?.ackTimeout !== undefined
+      ? options.ackTimeout * NANOSECONDS_PER_MILLISECOND
+      : consumerConfig?.ackWait ?? DEFAULT_ACK_WAIT_NANOSECONDS,
+    maxDeliver: options?.retry?.attempts
+      ?? options?.deadLetter?.maxRetries
+      ?? consumerConfig?.maxDeliver
+      ?? DEFAULT_MAX_DELIVER,
+    consumeBatch: Math.min(maxAckPending, options?.prefetch ?? DEFAULT_CONSUME_BATCH),
+  };
+}
+
+/**
+ * The redelivery knobs, or nothing at all under `ackMode: 'none'`.
+ *
+ * Spread into the wire payload so the keys are ABSENT rather than present-and-undefined —
+ * the client merges an update with a shallow `Object.assign`, where an explicit `undefined`
+ * would overwrite whatever the server holds.
+ */
+function redeliveryConfig(resolved: ResolvedConsumerConfig): Partial<ConsumerConfig> {
+  if (!resolved.tracksDelivery) {
+    return {};
+  }
+
+  return {
+    ack_wait: resolved.ackWait,
+    max_ack_pending: resolved.maxAckPending,
+    max_deliver: resolved.maxDeliver,
+  };
+}
+
+/**
+ * Reduces a name to the charset the client's `validName` accepts before it reaches
+ * `consumers.add`. Subject wildcards and separators are not in `[-\w]`, so a filter
+ * subject cannot be used as a consumer name unmodified.
+ */
+function sanitizeConsumerName(value: string): string {
+  return value.replace(/[^-\w]/g, '_');
+}
+
+/**
+ * Builds the durable name for a (group, filterSubject) pair.
+ *
+ * Sanitisation alone cannot identify a consumer, because it is lossy: `orders.*` and
+ * `orders.>` both reduce to `orders__`, as do `orders.new` and `orders_new`, and the `--`
+ * joiner is itself a legal character in a group name. Two subscriptions colliding that way
+ * would land on one consumer and the second would repoint it, which is the silent takeover
+ * this naming scheme exists to prevent. The readable part therefore carries a digest of the
+ * RAW pair, which distinguishes every pair the sanitised form aliases.
+ */
+function durableConsumerName(group: string, filterSubject: string): string {
+  const digest = hashReconcileConfig({ group, subject: filterSubject }).slice(0, IDENTITY_DIGEST_LENGTH);
+
+  return `${sanitizeConsumerName(group)}--${sanitizeConsumerName(filterSubject)}--${digest}`;
+}
+
+/** The wire envelope OneBun publishes. Anything else on the subject is foreign. */
+interface OneBunEnvelope {
+  id?: string;
+  pattern?: string;
+  data?: unknown;
+  timestamp?: number;
+  metadata?: MessageMetadata;
+}
+
+/**
+ * A JetStream subject can carry messages this framework did not publish. Without this
+ * check they reached the handler as `data: undefined`, which reads like an application
+ * bug rather than a foreign payload.
+ */
+function isOneBunEnvelope(value: unknown): value is OneBunEnvelope {
+  return typeof value === 'object' && value !== null && 'data' in value;
+}
+
+function poisonMessageError(subject: string, cause: unknown): Error {
+  return new Error(
+    `Failed to parse a JetStream message on subject "${subject}": ${describeCause(cause)}. `
+    + 'It was terminated rather than acknowledged or redelivered — a payload that does not parse '
+    + 'will not parse on a retry either. Publish to this subject with OneBun, or subscribe with a '
+    + 'dedicated stream if another producer shares it.',
+    { cause },
+  );
+}
+
+/**
+ * Rejects a `deadLetter.queue` that could never work, at `subscribe()` rather than on the
+ * first failed message — a DLQ that only reveals itself broken once something has already
+ * gone wrong is worse than no DLQ.
+ */
+function validateDeadLetterQueue(queue: string, pattern: string): void {
+  if (queue.split('.').some(token => token === '*' || token === '>' || token.includes('#'))) {
+    throw new Error(
+      `Invalid deadLetter.queue "${queue}": it must be a literal subject, but it contains a wildcard. `
+      + 'A message is published to exactly one subject, so "*", ">" and "#" have no meaning here — '
+      + 'name the concrete subject the dead letters should land on, and make sure a declared stream binds it.',
+    );
+  }
+
+  if (queue === pattern) {
+    throw new Error(
+      `Invalid deadLetter.queue "${queue}": it is the subscription's own pattern, so every dead letter `
+      + 'would be redelivered to the handler that just rejected it and immediately fail again. '
+      + 'Point deadLetter.queue at a different subject, bound by a stream of its own.',
+    );
+  }
+}
+
+function deadLetterRepublishError(queue: string, pattern: string, cause: unknown): Error {
+  return new Error(
+    `Failed to republish a message from "${pattern}" to the dead-letter queue "${queue}". `
+    + 'The original was NOT terminated — the server will redeliver it or exhaust max_deliver normally, '
+    + 'because losing the payload is the one outcome a dead-letter queue exists to prevent. '
+    + 'The most common cause is that no stream binds the dead-letter subject.',
+    { cause },
+  );
+}
+
+function foreignEnvelopeError(subject: string): Error {
+  return new Error(
+    `A JetStream message on subject "${subject}" parsed as JSON but is not a OneBun envelope: it `
+    + 'carries no "data" field. It was terminated rather than delivered to the handler with an '
+    + 'undefined payload. Another producer is publishing to a subject this application subscribes to.',
+  );
+}
+
+/** Notifications worth surfacing. The rest are routine flow-control chatter. */
+const REPORTABLE_NOTIFICATIONS = new Set([
+  'consumer_deleted',
+  'consumer_not_found',
+  'heartbeats_missed',
+  'stream_not_found',
+  'exceeded_limits',
+]);
+
+function isReportableNotification(notification: ConsumerNotification): boolean {
+  return REPORTABLE_NOTIFICATIONS.has(notification.type);
+}
+
+function consumerNotificationError(
+  consumerName: string,
+  streamName: string,
+  notification: ConsumerNotification,
+): Error {
+  const repaired = notification.type === 'consumer_deleted' || notification.type === 'consumer_not_found'
+    ? ' OneBun is re-creating it; delivery resumes once the new consumer is in place.'
+    : ' OneBun does not repair this automatically — it needs an operator.';
+
+  return new Error(
+    `JetStream reported "${notification.type}" for consumer "${consumerName}" on stream "${streamName}".${repaired}`,
+  );
+}
+
+function describeCause(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+function ackPolicyMigrationMessage(
+  consumerName: string,
+  streamName: string,
+  observed: string,
+  expected: string,
+): string {
+  const why = expected === 'explicit'
+    ? 'under anything else acknowledgements, ack_wait, max_deliver, max_ack_pending, retries and the dead-letter queue are inert'
+    : 'this subscription declares ackMode: \'none\', which needs ack_policy=none — the existing consumer would keep tracking acknowledgements nobody sends and redeliver every message once ack_wait expired';
+
+  return `JetStream consumer "${consumerName}" on stream "${streamName}" has ack_policy=${observed || 'unset'}, but this subscription needs ack_policy=${expected} — ${why}. ack_policy cannot be changed on an existing consumer. Either align the subscription's ackMode with the consumer, or delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}`;
+}
+
+function cycleMessage(
+  consumerName: string,
+  streamName: string,
+  currentHash: string,
+  desiredHash: string,
+  fields: string[],
+): string {
+  const diverging = fields.length > 0 ? fields.join(', ') : 'unknown';
+
+  return `JetStream consumer "${consumerName}" on stream "${streamName}" is in a reconcile cycle: OneBun wants config hash ${desiredHash}, which was already applied within the last ${CONFIG_CYCLE_WINDOW_MS}ms and has since been replaced by ${currentHash}. Diverging fields: ${diverging}. Two processes are writing different consumer configurations — align consumerConfig, prefetch and retry.attempts across them, or delete the consumer: nats consumer rm ${streamName} ${consumerName}`;
+}
+
+function addFailureMessage(consumerName: string, streamName: string, cause: unknown): string {
+  return `Failed to create JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}`;
+}
+
+function updateFailureMessage(consumerName: string, streamName: string, cause: unknown): string {
+  return `Failed to update JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}`;
+}
+
+/**
+ * The server answers a publish to an unbound subject with `jetstream is not enabled`, which
+ * names neither the subject nor the streams and sends operators looking for a disabled
+ * JetStream. This states what was actually attempted and what this application declares.
+ * The original rejection is preserved as `cause` rather than interpolated, so the misleading
+ * text never reappears inside the replacement message.
+ */
+function publishFailureMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
+  const declared = streams.length > 0
+    ? streams.map(stream => `"${stream.name}" (${stream.natsSubjects.join(', ')})`).join(', ')
+    : 'no streams at all';
+
+  return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${declared}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
+}
+
+function streamNarrowingMessage(streamName: string, dropped: string[], configured: string[]): string {
+  return `Stream "${streamName}" already stores subjects that this application's declaration would no longer cover: ${dropped.join(', ')}. Applying it would stop those subjects being stored and silently drop their messages. This application declares ${configured.join(', ')}. Every service sharing a stream must declare identical subjects, or at least a superset of what the stream already binds.`;
+}
+
+function streamCreateOnlyMessage(streamName: string, fields: string[]): string {
+  return `Stream "${streamName}" diverges from this application's declaration on ${fields.join(', ')}, which cannot be changed on an existing stream. Align the declaration with the server, or delete the stream and let OneBun recreate it — deleting discards every message it holds: nats stream rm ${streamName}`;
+}
+
+function streamCycleMessage(
+  streamName: string,
+  currentHash: string,
+  desiredHash: string,
+  fields: string[],
+): string {
+  const diverging = fields.length > 0 ? fields.join(', ') : 'unknown';
+
+  return `Stream "${streamName}" is in a reconcile cycle: OneBun wants config hash ${desiredHash}, which was already applied within the last ${CONFIG_CYCLE_WINDOW_MS}ms and has since been replaced by ${currentHash}. Diverging fields: ${diverging}. Two processes are writing different stream configurations — align the stream definitions across them.`;
+}
+
+function streamWriteFailureMessage(streamName: string, action: string, cause: unknown): string {
+  const detail = describeCause(cause);
+  const versionHint = /requires server/i.test(detail)
+    ? ' The configuration stamp is stored in stream metadata, which requires nats-server 2.10 or newer.'
+    : '';
+
+  return `Failed to ${action} JetStream stream "${streamName}": ${detail}.${versionHint}`;
+}
+
+function ephemeralCollisionMessage(consumerName: string, streamName: string): string {
+  return `JetStream consumer name "${consumerName}" is already taken on stream "${streamName}", so this ephemeral subscription would hijack an existing consumer. Retry the subscription, or pass a "group" to @Subscribe so it gets a stable durable name instead of a generated one.`;
+}
+
+/**
+ * The dynamically imported client module. `typeof import` is a pure type position and is fully
+ * erased under `verbatimModuleSyntax`, so it costs no static import: the package stays
+ * loadable without the peer dependency present, and `mock.module` still intercepts the only
+ * live edge.
+ */
+type JetStreamModule = typeof import('@nats-io/jetstream');
 
 // Import JetStream types dynamically
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let jetstreamModule: any = null;
+let jetstreamModule: JetStreamModule | null = null;
 
-async function getJetStreamModule() {
+async function getJetStreamModule(): Promise<JetStreamModule> {
   if (!jetstreamModule) {
     jetstreamModule = await import('@nats-io/jetstream');
   }
@@ -56,7 +411,7 @@ interface ResolvedStream extends StreamDefinition {
 // JetStream Message Implementation
 // ============================================================================
 
-class JetStreamMessage<T> implements Message<T> {
+class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
   data: T;
@@ -68,8 +423,19 @@ class JetStreamMessage<T> implements Message<T> {
 
   private acked = false;
   private nacked = false;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private jsMsg: any;
+  private jsMsg: JsMsg;
+  /**
+   * Supplied only when the subscription configured `deadLetter`. It republishes and then
+   * terminates, so `nack(false)` must not `term()` on its own when this is present.
+   */
+  private readonly deadLetter?: (error?: Error) => Promise<void>;
+  /**
+   * False under `ackMode: 'none'`, where `ack()` and `nack()` are documented no-ops.
+   * The server tracks nothing under `ack_policy: none`, so an ack, a nak or a term is a
+   * round trip it discards — and a `term()` in particular would contradict the mode's
+   * promise that a handler cannot influence delivery at all.
+   */
+  private readonly tracksDelivery: boolean;
 
   constructor(
     id: string,
@@ -77,8 +443,10 @@ class JetStreamMessage<T> implements Message<T> {
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    jsMsg: any,
+    jsMsg: JsMsg,
+    maxAttempts?: number,
+    deadLetter?: (error?: Error) => Promise<void>,
+    serverTracksDelivery = true,
   ) {
     this.id = id;
     this.pattern = pattern;
@@ -87,6 +455,23 @@ class JetStreamMessage<T> implements Message<T> {
     this.metadata = metadata;
     this.jsMsg = jsMsg;
     this.redelivered = jsMsg?.info?.redelivered ?? false;
+    // Read from the wire in the same place `redelivered` is: the server counts deliveries,
+    // and that count is 1-based, so the documented `attempt >= maxAttempts` comparison
+    // works as written. The cap is threaded in because only the subscription knows it.
+    this.attempt = jsMsg?.info?.deliveryCount;
+    this.maxAttempts = maxAttempts;
+    this.deadLetter = deadLetter;
+    this.tracksDelivery = serverTracksDelivery;
+  }
+
+  /**
+   * True once `nack()` has been called, so the consume loop can report the message as
+   * failed rather than processed — and so its own auto-ack does not settle a message the
+   * handler just asked the server to redeliver. Not on the public `Message` interface —
+   * see `NackAwareMessage` in `@onebun/core`.
+   */
+  get wasNacked(): boolean {
+    return this.nacked;
   }
 
   async ack(): Promise<void> {
@@ -94,7 +479,9 @@ class JetStreamMessage<T> implements Message<T> {
       return;
     }
     this.acked = true;
-    if (this.jsMsg?.ack) {
+    // Recorded but not sent under 'none': the disposition still decides which lifecycle
+    // event the loop emits, it just never reaches a server that is tracking nothing.
+    if (this.tracksDelivery && this.jsMsg?.ack) {
       this.jsMsg.ack();
     }
   }
@@ -104,10 +491,32 @@ class JetStreamMessage<T> implements Message<T> {
       return;
     }
     this.nacked = true;
-    if (this.jsMsg?.nak) {
-      // JetStream will requeue automatically based on consumer config
-      this.jsMsg.nak(requeue ? undefined : { delay: -1 });
+
+    if (!this.tracksDelivery) {
+      return;
     }
+
+    if (requeue) {
+      // `nak()` with no delay asks the server to redeliver immediately, up to max_deliver.
+      this.jsMsg.nak();
+
+      return;
+    }
+
+    // `requeue: false` means do not deliver this message again. With a dead-letter queue
+    // configured that means "park it there first" — the same disposition the Redis adapter
+    // gives `onNack(false)` — and the router terminates the original once the copy is safely
+    // published. Without one it is a bare `term()`.
+    if (this.deadLetter) {
+      await this.deadLetter();
+
+      return;
+    }
+
+    // The previous code passed an options object to `nak`, whose signature takes a delay in
+    // milliseconds, so the object became NaN and reached the wire as a null delay: a plain nak
+    // that redelivered the message up to max_deliver times, the opposite of what was asked.
+    this.jsMsg.term();
   }
 }
 
@@ -121,9 +530,53 @@ interface JetStreamSubscriptionEntry {
   options?: SubscribeOptions;
   matcher: (topic: string) => QueuePatternMatch;
   paused: boolean;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  consumer?: any;
+  consumer: Consumer;
   running: boolean;
+  /** Resolved once in subscribe(); the consume-loop restart must not recompute it. */
+  consumeBatch: number;
+  streamName: string;
+  consumerName: string;
+  /** A `group` makes the consumer durable, and a durable is never deleted implicitly. */
+  durable: boolean;
+  /** The live pull handle, so a release can close it instead of leaking the loop. */
+  messages: ConsumerMessages | null;
+  /** The pending restart, so a release inside the restart window can cancel it. */
+  restartTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * The `max_deliver` this subscription's consumer was actually created with, resolved
+   * once. Never recomputed at consume time: with reconciliation the server-side consumer
+   * is authoritative, and re-deriving the precedence chain in the loop could disagree
+   * with the consumer that really exists.
+   */
+  maxDeliver: number;
+  /** Kept so a re-created consumer is rebuilt from the same inputs, not re-derived. */
+  filterSubject: string;
+  resolved: ResolvedConsumerConfig;
+  /**
+   * The handler currently executing, so shutdown can wait for it. At most one is ever
+   * pending: the loop awaits each handler before pulling the next message.
+   */
+  inFlight: Promise<void> | null;
+}
+
+/**
+ * Awaits `promise`, giving up after `timeoutMs`. Never rejects, and never leaves the
+ * timer pending — a dangling 30s timer would keep the process alive past the shutdown
+ * this is called from.
+ */
+async function awaitBounded(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  await Promise.race([
+    promise.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
 }
 
 class JetStreamSubscription implements Subscription {
@@ -170,7 +623,8 @@ class JetStreamSubscription implements Subscription {
  * - Pattern subscriptions
  * - Consumer groups (durable consumers)
  * - Scheduled jobs (via in-process scheduler)
- * - Dead letter queue support
+ * - Dead letter queue support — `deadLetter.queue` must be a literal subject bound by a
+ *   declared stream, and `deadLetter.maxRetries` feeds `max_deliver` behind `retry.attempts`
  * - Retry with acknowledgment
  * - Message persistence
  *
@@ -209,10 +663,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   private scheduler: QueueScheduler | null = null;
   private subscriptions: JetStreamSubscriptionEntry[] = [];
   private messageIdCounter = 0;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private js: any = null;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private jsm: any = null;
+  private js: JetStreamClient | null = null;
+  private jsm: JetStreamManager | null = null;
 
   // Event handlers
   private eventHandlers: Map<keyof QueueEvents, Set<(...args: unknown[]) => void>> = new Map();
@@ -228,7 +680,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     this.resolvedStreams = options.streams.map((s) => ({
       ...defaults,
       ...s,
-      natsSubjects: s.subjects.map((subj) => subj.replace(/#/g, '>')),
+      natsSubjects: s.subjects.map((subj) => toNatsSubject(subj)),
     }));
   }
 
@@ -275,11 +727,23 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       this.scheduler = null;
     }
 
-    // Stop all consumers
-    for (const entry of this.subscriptions) {
+    const entries = this.subscriptions;
+    this.subscriptions = [];
+
+    // Stop pulling first, then drain: `running = false` makes each loop hand the next
+    // message back instead of starting a handler the drain would have to wait for. The
+    // drain is its own step rather than part of the release below because the two are
+    // bounded differently — 30s for the application's handler, 5s for the network
+    // teardown that follows it.
+    for (const entry of entries) {
       entry.running = false;
     }
-    this.subscriptions = [];
+    await this.drainHandlers(entries);
+
+    // Release every subscription while the connection is still usable — the server-side
+    // delete needs it, and `client.disconnect()` below would strand any ephemeral consumer.
+    const releases = entries.map(entry => this.releaseSubscription(entry));
+    await awaitBounded(Promise.allSettled(releases), RELEASE_TIMEOUT_MS);
 
     await this.client.disconnect();
     this.connected = false;
@@ -298,7 +762,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
     this.ensureConnected();
 
-    const messageId = options?.messageId ?? this.generateMessageId();
+    // `||`, not `??`: an empty string is not an id. It must fall back to a generated one
+    // AND leave deduplication off, so both halves agree on what "absent" means.
+    const messageId = options?.messageId || this.generateMessageId();
     const timestamp = Date.now();
 
     const messageData = {
@@ -311,10 +777,22 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
     const encoder = new TextEncoder();
 
-    // Convert OneBun subject to NATS subject (replace # with >)
-    const natsSubject = pattern.replace(/#/g, '>');
+    // Named parameters and `#` have no wire form; this is the only translation.
+    const natsSubject = toNatsSubject(pattern);
 
-    await this.js.publish(natsSubject, encoder.encode(JSON.stringify(messageData)));
+    // No pre-flight check against the locally declared streams: a subject may legitimately
+    // be bound by a stream this application never declares. Only the broker knows, so the
+    // publish is attempted and its rejection is re-reported with the context the server omits.
+    // Only a CALLER-supplied id enables deduplication. A generated one is unique per call,
+    // so sending it would grow the server's dedup index without ever matching anything. The
+    // truthy check also rejects '', matching the client's own `if (opts.msgID)` guard.
+    const publishOptions = options?.messageId ? { msgID: options.messageId } : undefined;
+
+    try {
+      await this.js!.publish(natsSubject, encoder.encode(JSON.stringify(messageData)), publishOptions);
+    } catch (cause) {
+      throw new Error(publishFailureMessage(pattern, natsSubject, this.resolvedStreams), { cause });
+    }
 
     return messageId;
   }
@@ -345,36 +823,47 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
     const jsModule = await getJetStreamModule();
 
-    // Create consumer name from group or generate one
-    const consumerName = options?.group ?? `consumer-${Date.now()}`;
+    // The filter widens to a NATS subject; `entry.matcher`, built from the original
+    // pattern, narrows it back and extracts the named parameters.
+    const filterSubject = toNatsSubject(pattern);
 
-    // Convert pattern to filter subject (replace # with >)
-    const filterSubject = pattern.replace(/#/g, '>');
+    if (options?.deadLetter !== undefined) {
+      validateDeadLetterQueue(options.deadLetter.queue, pattern);
+    }
 
-    // Determine ack policy
-    const ackPolicy = options?.ackMode === 'manual'
-      ? jsModule.AckPolicy.Explicit
-      : jsModule.AckPolicy.None;
+    // A durable is identified per (group, pattern), not per group: two subscriptions
+    // sharing a group but filtering different subjects are two different consumers, and
+    // naming them both after the group made the second silently steal the first's.
+    const consumerName = options?.group === undefined
+      ? `consumer-${crypto.randomUUID()}`
+      : durableConsumerName(options.group, filterSubject);
+
+    // Acknowledgements are always tracked server-side; `ackMode` only decides whether
+    // the adapter acks on the handler's behalf or the handler acks for itself.
+    // deliver_policy is set explicitly: the server default is not part of any contract, and
+    // a durable created before this release would otherwise replay the whole stream once.
+    // The ONLY site in the package that selects the none policy: `'none'` is the one mode that turns
+    // server-side acknowledgement tracking off entirely.
+    const resolved = resolveConsumerConfig(
+      resolveAckMode(options) === 'none' ? jsModule.AckPolicy.None : jsModule.AckPolicy.Explicit,
+      jsModule.DeliverPolicy.New,
+      options,
+      this.options.consumerConfig,
+    );
 
     // Resolve which stream this subject belongs to
     const streamName = this.resolveStreamForSubject(pattern);
 
-    // Create or get consumer
-    try {
-      await this.jsm.consumers.add(streamName, {
-        durable_name: options?.group ? consumerName : undefined,
-        name: consumerName,
-        ack_policy: ackPolicy,
-        filter_subject: filterSubject,
-        max_ack_pending: options?.prefetch ?? 100,
-        ack_wait: this.options.consumerConfig?.ackWait ?? DEFAULT_ACK_WAIT_NANOSECONDS,
-        max_deliver: options?.retry?.attempts ?? this.options.consumerConfig?.maxDeliver ?? DEFAULT_MAX_DELIVER,
-      });
-    } catch {
-      // Consumer might already exist, try to get it
-    }
+    await this.ensureConsumer(
+      jsModule,
+      streamName,
+      consumerName,
+      Boolean(options?.group),
+      filterSubject,
+      resolved,
+    );
 
-    const consumer = await this.js.consumers.get(streamName, consumerName);
+    const consumer = await this.js!.consumers.get(streamName, consumerName);
 
     const entry: JetStreamSubscriptionEntry = {
       pattern,
@@ -383,7 +872,17 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       matcher: createQueuePatternMatcher(pattern),
       paused: false,
       consumer,
+      consumeBatch: resolved.consumeBatch,
       running: true,
+      streamName,
+      consumerName,
+      durable: Boolean(options?.group),
+      messages: null,
+      restartTimer: null,
+      maxDeliver: resolved.maxDeliver,
+      filterSubject,
+      resolved,
+      inFlight: null,
     };
 
     this.subscriptions.push(entry);
@@ -392,11 +891,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     this.consumeMessages(entry);
 
     const subscription = new JetStreamSubscription(entry, async () => {
-      entry.running = false;
       const index = this.subscriptions.indexOf(entry);
       if (index !== -1) {
         this.subscriptions.splice(index, 1);
       }
+      await this.releaseSubscription(entry);
     });
 
     return subscription;
@@ -471,8 +970,237 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * Resolve which stream a subject belongs to by matching against configured subject patterns.
    * Falls back to the first stream if no match is found.
    */
+  /**
+   * Reconciles one JetStream consumer: probe, classify, then create or stamp.
+   *
+   * A `consumers.info` rejection is treated as absence ONLY when it carries the numeric
+   * ConsumerNotFound API code. Anything else — auth denied, JetStream disabled, a
+   * transport timeout — is rethrown as itself, because creating a consumer on the
+   * strength of an unclassified error is how a permissions problem turns into a
+   * "consumer not found" three lines later.
+   *
+   * @see docs:api/queue.md
+   */
+  private async ensureConsumer(
+    jsModule: JetStreamModule,
+    streamName: string,
+    consumerName: string,
+    isDurable: boolean,
+    filterSubject: string,
+    resolved: ResolvedConsumerConfig,
+  ): Promise<void> {
+    const desiredHash = hashReconcileConfig({
+      ack_wait: resolved.tracksDelivery ? resolved.ackWait : undefined,
+      filter_subject: filterSubject,
+      max_ack_pending: resolved.tracksDelivery ? resolved.maxAckPending : undefined,
+      max_deliver: resolved.tracksDelivery ? resolved.maxDeliver : undefined,
+    });
+
+    let existing: ConsumerInfo;
+    try {
+      existing = await this.jsm!.consumers.info(streamName, consumerName);
+    } catch (error) {
+      if (!isNotFoundError(error, jsModule.JetStreamApiCodes.ConsumerNotFound)) {
+        this.emit('onError', error as Error);
+        throw error;
+      }
+
+      await this.addConsumer(streamName, consumerName, isDurable, filterSubject, resolved, desiredHash);
+
+      return;
+    }
+
+    // Snapshot before any update: the client's update() mutates the ConsumerInfo it
+    // re-reads, so anything held afterwards is post-merge state.
+    const config = existing.config ?? {};
+    const metadata = config.metadata as StampMetadata | undefined;
+
+    // Identity first: telling an operator to delete a randomly named consumer that
+    // belongs to someone else is worse than useless.
+    if (!isDurable) {
+      throw this.failConsumer(ephemeralCollisionMessage(consumerName, streamName));
+    }
+
+    // Before decideStamp: a legacy consumer could carry a matching hash, in which case
+    // a stamp-first order would return noop and leave acknowledgements disabled.
+    //
+    // Compared against what THIS subscription wants, not against Explicit outright. A
+    // durable created under `ackMode: 'none'` is legitimately `ack_policy: none`, and
+    // asserting Explicit here rejected the consumer the previous boot had just created —
+    // permanently, because ack_policy is create-only and the recreated one is `none` again.
+    if (config.ack_policy !== resolved.ackPolicy) {
+      throw this.failConsumer(
+        ackPolicyMigrationMessage(
+          consumerName,
+          streamName,
+          String(config.ack_policy ?? ''),
+          String(resolved.ackPolicy),
+        ),
+      );
+    }
+
+    const decision = decideStamp(metadata, desiredHash);
+
+    if (decision.action === 'noop') {
+      return;
+    }
+
+    if (decision.action === 'cycle') {
+      throw this.failConsumer(cycleMessage(
+        consumerName,
+        streamName,
+        decision.currentHash,
+        decision.desiredHash,
+        this.divergingFields(config, filterSubject, resolved),
+      ));
+    }
+
+    try {
+      await this.jsm!.consumers.update(streamName, consumerName, {
+        filter_subject: filterSubject,
+        metadata: stampMetadata(metadata, desiredHash, decision.prevHash),
+        ...redeliveryConfig(resolved),
+      });
+    } catch (cause) {
+      throw this.failConsumer(updateFailureMessage(consumerName, streamName, cause), cause);
+    }
+  }
+
+  /** Creates the consumer, stamping the hash that the next boot compares against. */
+  private async addConsumer(
+    streamName: string,
+    consumerName: string,
+    isDurable: boolean,
+    filterSubject: string,
+    resolved: ResolvedConsumerConfig,
+    desiredHash: string,
+  ): Promise<void> {
+    try {
+      await this.jsm!.consumers.add(streamName, {
+        durable_name: isDurable ? consumerName : undefined,
+        name: consumerName,
+        ack_policy: resolved.ackPolicy,
+        deliver_policy: resolved.deliverPolicy,
+        filter_subject: filterSubject,
+        metadata: stampMetadata(undefined, desiredHash),
+        ...redeliveryConfig(resolved),
+      });
+    } catch (cause) {
+      throw this.failConsumer(addFailureMessage(consumerName, streamName, cause), cause);
+    }
+  }
+
+  /**
+   * Builds a consumer error, emitting it before it is thrown.
+   *
+   * `subscribe()` is awaited during boot before any `@OnQueueError` handler is
+   * registered, so a throw alone would reach nobody who registered a listener.
+   */
+  private failConsumer(message: string, cause?: unknown): Error {
+    const error = cause === undefined ? new Error(message) : new Error(message, { cause });
+    this.emit('onError', error);
+
+    return error;
+  }
+
+  /** Names the fields that differ, so a cycle error says what the two writers disagree on. */
+  /**
+   * The fields that disagree, each reported with BOTH values.
+   *
+   * The two config hashes in the message identify the writers but say nothing an operator
+   * can act on; the value pair is what turns "align consumerConfig" into a concrete edit.
+   */
+  private divergingFields(
+    config: ConsumerConfig,
+    filterSubject: string,
+    resolved: ResolvedConsumerConfig,
+  ): string[] {
+    const fields: string[] = [];
+    const diff = (field: string, ours: unknown, theirs: unknown): void => {
+      if (ours !== theirs) {
+        fields.push(`${field} (this process ${String(ours)}, on server ${String(theirs)})`);
+      }
+    };
+
+    diff('filter_subject', filterSubject, config.filter_subject);
+
+    // Under 'none' these are never sent, so the server's values are not ours to compare.
+    if (!resolved.tracksDelivery) {
+      return fields;
+    }
+
+    diff('ack_wait', resolved.ackWait, config.ack_wait);
+    diff('max_ack_pending', resolved.maxAckPending, config.max_ack_pending);
+    diff('max_deliver', resolved.maxDeliver, config.max_deliver);
+
+    return fields;
+  }
+
+  /**
+   * Removes a durable consumer this application created for `(pattern, group)`.
+   *
+   * `unsubscribe()` and `disconnect()` deliberately never touch a durable — they run on
+   * every graceful shutdown, and deleting there would discard the consumer's position on
+   * each deploy. This is the explicit way to decommission one, for the case that actually
+   * needs it: a `group` that was templated per run or per deploy and has left a trail of
+   * consumers behind on the server.
+   *
+   * Stream resolution here is STRICT. `resolveStreamForSubject` falls back to the first
+   * declared stream when nothing matches, which is harmless when publishing and dangerous
+   * here: a mistyped pattern would delete a same-named consumer on an unrelated stream.
+   *
+   * @param pattern - The subscription pattern the consumer was created for.
+   * @param group - The `group` the subscription declared.
+   * @returns `true` when a consumer was removed, `false` when there was none to remove.
+   * @throws If the adapter is not connected, if no declared stream binds the pattern, or on
+   *   any server rejection other than consumer-not-found — a permissions denial must not be
+   *   reported as "already gone".
+   *
+   * @see docs:api/queue.md
+   */
+  async deleteDurableConsumer(pattern: string, group: string): Promise<boolean> {
+    this.ensureConnected();
+
+    const jsModule = await getJetStreamModule();
+    const streamName = this.requireStreamForSubject(pattern);
+    const consumerName = durableConsumerName(group, toNatsSubject(pattern));
+
+    try {
+      return await this.jsm!.consumers.delete(streamName, consumerName);
+    } catch (error) {
+      if (isNotFoundError(error, jsModule.JetStreamApiCodes.ConsumerNotFound)) {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Stream resolution for destructive operations: no fallback, ever.
+   *
+   * @see docs:api/queue.md
+   */
+  private requireStreamForSubject(pattern: string): string {
+    const natsSubject = toNatsSubject(pattern);
+
+    for (const stream of this.resolvedStreams) {
+      for (const declared of stream.natsSubjects) {
+        if (this.natsSubjectMatches(declared, natsSubject)) {
+          return stream.name;
+        }
+      }
+    }
+
+    throw new Error(
+      `No declared stream binds "${pattern}" (as NATS subject "${natsSubject}"). This application declares `
+      + `${this.resolvedStreams.map(s => `"${s.name}" (${s.natsSubjects.join(', ')})`).join(', ')}. `
+      + 'Refusing to guess: on a destructive call a mistyped pattern would delete a consumer on an unrelated stream.',
+    );
+  }
+
   resolveStreamForSubject(subject: string): string {
-    const natsSubject = subject.replace(/#/g, '>');
+    const natsSubject = toNatsSubject(subject);
 
     for (const stream of this.resolvedStreams) {
       for (const pattern of stream.natsSubjects) {
@@ -528,98 +1256,549 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
   }
 
-  private async ensureStream(stream: ResolvedStream): Promise<void> {
-    const streamConfig = {
-      name: stream.name,
+  /**
+   * Builds the wire config for a stream, emitting ONLY the keys the application declared.
+   *
+   * An undeclared key must be absent, never present-and-undefined: the client merges an
+   * update with a shallow `Object.assign`, so `max_msgs: undefined` overwrites whatever the
+   * server had. That is how a stream pre-provisioned with limits used to be wiped on every
+   * connect. The `retention`/`storage`/`num_replicas` fallbacks are create-only — `update`
+   * cannot change the first two, and applying a default on update would rewrite a value the
+   * application never asked about.
+   */
+  private buildStreamConfig(stream: ResolvedStream, forCreate: boolean): AnyStreamConfig {
+    const config: AnyStreamConfig = {
       subjects: stream.natsSubjects,
-      retention: stream.retention ?? 'limits',
-      max_msgs: stream.maxMsgs,
-      max_bytes: stream.maxBytes,
-      max_age: stream.maxAge,
-      storage: stream.storage ?? 'file',
-      num_replicas: stream.replicas ?? 1,
     };
 
+    if (stream.maxMsgs !== undefined) {
+      config.max_msgs = stream.maxMsgs;
+    }
+    if (stream.maxBytes !== undefined) {
+      config.max_bytes = stream.maxBytes;
+    }
+    if (stream.maxAge !== undefined) {
+      config.max_age = stream.maxAge;
+    }
+    if (stream.duplicateWindow !== undefined) {
+      config.duplicate_window = stream.duplicateWindow;
+    }
+    if (stream.replicas !== undefined) {
+      config.num_replicas = stream.replicas;
+    }
+
+    if (forCreate) {
+      config.name = stream.name;
+      config.retention = stream.retention ?? 'limits';
+      config.storage = stream.storage ?? 'file';
+      config.num_replicas = stream.replicas ?? 1;
+    }
+
+    return config;
+  }
+
+  /**
+   * The subset of the desired config that participates in the reconciliation hash.
+   *
+   * `name` and `metadata` are excluded so a stamp write does not itself change the hash.
+   * `retention` and `storage` are excluded because `update` cannot carry them — divergence
+   * there is the delete-and-recreate guard instead.
+   */
+  private hashableStreamSubset(config: AnyStreamConfig): Record<string, HashableStreamValue> {
+    return {
+      subjects: config.subjects,
+      max_msgs: config.max_msgs,
+      max_bytes: config.max_bytes,
+      max_age: config.max_age,
+      duplicate_window: config.duplicate_window,
+      num_replicas: config.num_replicas,
+    };
+  }
+
+  /**
+   * Reconciles one JetStream stream: probe, guard, then create, no-op, update or fail.
+   *
+   * Branch order is load-bearing. Subject coverage is checked against the server's own
+   * subject list before anything else, so a stale stamp left by an out-of-band
+   * `nats stream edit` cannot wave a narrowing declaration through. The create-only
+   * divergence guard runs next, for the same reason the consumer path checks its ack policy
+   * before its hash: a matching hash must never mask a field that cannot be updated.
+   *
+   * @see docs:api/queue.md
+   */
+  private async ensureStream(stream: ResolvedStream): Promise<void> {
+    const jsModule = await getJetStreamModule();
+    const desired = this.buildStreamConfig(stream, false);
+    const desiredHash = hashReconcileConfig(this.hashableStreamSubset(desired));
+
+    let existing: StreamInfo;
     try {
-      // Try to get existing stream info, then update
-      await this.jsm.streams.info(stream.name);
-      await this.jsm.streams.update(stream.name, streamConfig);
-    } catch {
-      // Stream doesn't exist, create it
-      await this.jsm.streams.add(streamConfig);
+      existing = await this.jsm!.streams.info(stream.name);
+    } catch (error) {
+      if (!isNotFoundError(error, jsModule.JetStreamApiCodes.StreamNotFound)) {
+        this.emit('onError', error as Error);
+        throw error;
+      }
+
+      await this.addStream(stream, desiredHash);
+
+      return;
+    }
+
+    const config = existing.config ?? {};
+    const metadata = config.metadata as StampMetadata | undefined;
+
+    const dropped = this.droppedSubjects(config.subjects ?? [], stream.natsSubjects);
+    if (dropped.length > 0) {
+      throw this.failStream(streamNarrowingMessage(stream.name, dropped, stream.natsSubjects));
+    }
+
+    const diverging = this.divergingCreateOnlyFields(config, stream);
+    if (diverging.length > 0) {
+      throw this.failStream(streamCreateOnlyMessage(stream.name, diverging));
+    }
+
+    const decision = decideStamp(metadata, desiredHash);
+
+    if (decision.action === 'noop') {
+      return;
+    }
+
+    if (decision.action === 'cycle') {
+      throw this.failStream(streamCycleMessage(
+        stream.name,
+        decision.currentHash,
+        decision.desiredHash,
+        this.divergingStreamFields(config, desired),
+      ));
+    }
+
+    try {
+      await this.jsm!.streams.update(stream.name, {
+        ...desired,
+        metadata: stampMetadata(metadata, desiredHash, decision.prevHash),
+      });
+    } catch (cause) {
+      throw this.failStream(streamWriteFailureMessage(stream.name, 'update', cause), cause);
+    }
+  }
+
+  /** Creates the stream, stamping the hash the next connect compares against. */
+  private async addStream(stream: ResolvedStream, desiredHash: string): Promise<void> {
+    try {
+      await this.jsm!.streams.add({
+        ...this.buildStreamConfig(stream, true),
+        // Restates what buildStreamConfig already set on the create path: `add` types
+        // `name` as required, and a spread cannot prove that to the compiler.
+        name: stream.name,
+        metadata: stampMetadata(undefined, desiredHash),
+      });
+    } catch (cause) {
+      throw this.failStream(streamWriteFailureMessage(stream.name, 'create', cause), cause);
+    }
+  }
+
+  /** Builds a stream error, emitting it before it is thrown. */
+  private failStream(message: string, cause?: unknown): Error {
+    const error = cause === undefined ? new Error(message) : new Error(message, { cause });
+    this.emit('onError', error);
+
+    return error;
+  }
+
+  /** Existing subjects that no configured subject would still cover. */
+  private droppedSubjects(existingSubjects: string[], configured: string[]): string[] {
+    return existingSubjects.filter(
+      existing => !configured.some(pattern => this.natsSubjectMatches(pattern, existing)),
+    );
+  }
+
+  /** Declared create-only fields whose value differs from the server's. */
+  private divergingCreateOnlyFields(
+    config: StreamConfig,
+    stream: ResolvedStream,
+  ): string[] {
+    const fields: string[] = [];
+
+    if (stream.storage !== undefined && config.storage !== stream.storage) {
+      fields.push('storage');
+    }
+    if (stream.retention !== undefined && config.retention !== stream.retention) {
+      fields.push('retention');
+    }
+
+    return fields;
+  }
+
+  /** Names the mutable fields that differ, so a cycle error says what the writers disagree on. */
+  private divergingStreamFields(
+    config: StreamConfig,
+    desired: AnyStreamConfig,
+  ): string[] {
+    const fields: string[] = [];
+
+    for (const key of ['subjects', 'max_msgs', 'max_bytes', 'max_age', 'num_replicas'] as const) {
+      const want = desired[key];
+      if (want === undefined) {
+        continue;
+      }
+      if (JSON.stringify(config[key]) !== JSON.stringify(want)) {
+        fields.push(key);
+      }
+    }
+
+    return fields;
+  }
+
+  /**
+   * Stops one subscription and gives back what it holds.
+   *
+   * Deleting the consumer is gated on `durable` and that gate is the whole point: a durable
+   * exists to survive restarts, and `QueueService.stop()` unsubscribes on every graceful
+   * shutdown — deleting one here would discard its ack floor on each deploy and redeliver
+   * everything it had already acknowledged. Only the framework-generated ephemeral, which
+   * nothing else can reach, is removed.
+   *
+   * @see docs:api/queue.md
+   */
+  private async releaseSubscription(entry: JetStreamSubscriptionEntry): Promise<void> {
+    entry.running = false;
+
+    if (entry.restartTimer !== null) {
+      clearTimeout(entry.restartTimer);
+      entry.restartTimer = null;
+    }
+
+    // Before the pull handle closes and before the connection goes: a handler that is
+    // still running has to be able to acknowledge, and `running = false` above means the
+    // loop hands the NEXT message back rather than starting another one to wait for.
+    await this.drainHandlers([entry]);
+
+    if (entry.messages !== null) {
+      // Closing wakes the `for await`, which is what actually ends the loop; setting
+      // `running = false` alone leaves it parked until the next message arrives.
+      await entry.messages.close().catch(() => undefined);
+      entry.messages = null;
+    }
+
+    if (entry.durable || !this.client.isConnected()) {
+      return;
+    }
+
+    await entry.consumer.delete().catch(() => undefined);
+  }
+
+  /**
+   * Parks a message in the dead-letter queue, then terminates the original.
+   *
+   * The order is load-bearing. The copy is published FIRST and the original is terminated
+   * only once that succeeded: if the republish fails the original is left exactly as it was,
+   * so the server still redelivers it or exhausts `max_deliver` normally. Terminating first
+   * would turn a failed republish into a lost message, which is the single outcome a
+   * dead-letter queue exists to prevent.
+   *
+   * The republish goes through the adapter's own `publish()` rather than a second raw
+   * `js.publish`, so subject translation, stream resolution and the publish diagnostics all
+   * apply to dead letters without a second convention to keep in step.
+   *
+   * @see docs:api/queue.md
+   */
+  private async routeToDeadLetter(
+    entry: JetStreamSubscriptionEntry,
+    msg: JsMsg,
+    message: Pick<Message, 'id' | 'pattern' | 'data' | 'metadata'>,
+    error?: Error,
+  ): Promise<void> {
+    const queue = entry.options?.deadLetter?.queue;
+
+    if (queue === undefined) {
+      return;
+    }
+
+    try {
+      await this.publish(queue, message.data, {
+        messageId: message.id,
+        /* eslint-disable @typescript-eslint/naming-convention -- namespaced provenance keys;
+           the `dlq.` prefix keeps them from colliding with the caller's own metadata. */
+        metadata: {
+          ...message.metadata,
+          'dlq.originalPattern': message.pattern,
+          'dlq.deliveryCount': msg.info?.deliveryCount ?? 0,
+          'dlq.error': error?.message ?? 'negative acknowledgement',
+        },
+        /* eslint-enable @typescript-eslint/naming-convention */
+      });
+    } catch (cause) {
+      this.emit('onError', deadLetterRepublishError(queue, message.pattern, cause));
+
+      return;
+    }
+
+    msg.term();
+  }
+
+  /**
+   * Waits for the handlers these subscriptions are currently executing.
+   *
+   * Bounded by a fixed 30s: a handler that never returns must not hold shutdown open
+   * forever. Once the budget is spent the entries are cleared, so a later release does
+   * not start the wait again — the handler keeps running, the shutdown simply stops
+   * blocking on it.
+   *
+   * @see docs:api/queue.md
+   */
+  private async drainHandlers(entries: readonly JetStreamSubscriptionEntry[]): Promise<void> {
+    const pending = entries
+      .map(entry => entry.inFlight)
+      .filter((promise): promise is Promise<void> => promise !== null);
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    await awaitBounded(Promise.allSettled(pending), HANDLER_DRAIN_TIMEOUT_MS);
+
+    for (const entry of entries) {
+      entry.inFlight = null;
+    }
+  }
+
+  /**
+   * Surfaces consumer notifications, and repairs the one that is repairable.
+   *
+   * A deleted consumer is the only notification the adapter can act on: it re-creates the
+   * consumer from the inputs the subscription was built with and closes the pull handle so
+   * the bounded restart re-opens the loop against the new one. `heartbeats_missed` and
+   * `stream_not_found` are reported but deliberately not repaired — a missing stream is an
+   * operator problem, and re-creating a consumer against one cannot help.
+   *
+   * @see docs:api/queue.md
+   */
+  private async watchConsumerStatus(
+    entry: JetStreamSubscriptionEntry,
+    messages: ConsumerMessages,
+  ): Promise<void> {
+    try {
+      for await (const notification of messages.status()) {
+        if (!entry.running) {
+          return;
+        }
+
+        if (!isReportableNotification(notification)) {
+          continue;
+        }
+
+        this.emit('onError', consumerNotificationError(entry.consumerName, entry.streamName, notification));
+
+        if (notification.type === 'consumer_deleted' || notification.type === 'consumer_not_found') {
+          await this.recreateConsumer(entry);
+        }
+      }
+    } catch (error) {
+      this.emit('onError', error as Error);
+    }
+  }
+
+  /**
+   * Rebuilds a vanished consumer from the subscription's own inputs.
+   *
+   * Routed through `ensureConsumer()` rather than a second `consumers.add`, so the ack
+   * policy, delivery policy, naming and consumerConfig precedence are decided in exactly one
+   * place. A re-creation that re-derived them could differ from the original — losing
+   * `deliver_policy` alone would replay the entire retained stream.
+   */
+  private async recreateConsumer(entry: JetStreamSubscriptionEntry): Promise<void> {
+    try {
+      const jsModule = await getJetStreamModule();
+
+      await this.ensureConsumer(
+        jsModule,
+        entry.streamName,
+        entry.consumerName,
+        entry.durable,
+        entry.filterSubject,
+        entry.resolved,
+      );
+
+      entry.consumer = await this.js!.consumers.get(entry.streamName, entry.consumerName);
+
+      // Closing wakes the parked `for await`; the bounded restart then re-opens the loop
+      // against the consumer that now exists.
+      const stale = entry.messages;
+      entry.messages = null;
+      await stale?.close().catch(() => undefined);
+    } catch (error) {
+      this.emit('onError', error as Error);
     }
   }
 
   private async consumeMessages(entry: JetStreamSubscriptionEntry): Promise<void> {
     const decoder = new TextDecoder();
 
+    if (!entry.running) {
+      return;
+    }
+
+    // Checked BEFORE consume(): pulling a batch while paused would hold messages the
+    // handler is not going to look at, and every one of them would age out of ack_wait.
+    if (entry.paused) {
+      this.scheduleConsumeRestart(entry);
+
+      return;
+    }
+
     try {
       const messages = await entry.consumer.consume({
-        max_messages: entry.options?.prefetch ?? 10,
+        max_messages: entry.consumeBatch,
       });
+      entry.messages = messages;
+
+      // Watched alongside the loop, not instead of it. When the consumer is deleted the
+      // client neither yields, ends nor throws — it retries CONSUMER.INFO forever — so the
+      // `for await` below parks and the subscription stalls with isConnected() still true.
+      // The notification channel is the only place that fact surfaces.
+      void this.watchConsumerStatus(entry, messages);
 
       for await (const msg of messages) {
         if (!entry.running || entry.paused) {
+          // Hand it back rather than abandoning it: an un-acked message would sit in the
+          // ack window until ack_wait expired, delaying the redelivery pause() implies.
+          msg.nak();
           break;
         }
 
+        // Parsing is its own branch. Folding it together with the handler call meant an
+        // ack failure was misread as a parse failure and the message destroyed for it.
+        let messageData: OneBunEnvelope;
         try {
-          const messageData = JSON.parse(decoder.decode(msg.data));
+          messageData = JSON.parse(decoder.decode(msg.data)) as OneBunEnvelope;
+        } catch (error) {
+          this.emit('onError', poisonMessageError(msg.subject, error));
+          // Terminated, not acked and not retried: a payload that failed to parse will
+          // fail identically on every redelivery, so max_deliver would only spend the
+          // ack window on a message that can never succeed.
+          msg.term();
+          continue;
+        }
 
-          // Check if pattern matches
-          const match = entry.matcher(messageData.pattern || msg.subject);
-          if (!match.matched) {
-            // Ack and skip non-matching messages
-            if (entry.options?.ackMode !== 'manual') {
-              msg.ack();
-            }
-            continue;
-          }
+        if (!isOneBunEnvelope(messageData)) {
+          this.emit('onError', foreignEnvelopeError(msg.subject));
+          msg.term();
+          continue;
+        }
 
-          const message = new JetStreamMessage(
-            messageData.id || this.generateMessageId(),
-            messageData.pattern || msg.subject,
-            messageData.data,
-            messageData.timestamp || Date.now(),
-            messageData.metadata || {},
+        // Check if pattern matches
+        const match = entry.matcher(messageData.pattern || msg.subject);
+        if (!match.matched) {
+          // Always ack, including under ackMode 'manual': a message this subscription
+          // does not match is not the handler's to acknowledge, and under explicit acks
+          // an unacked stray holds a max_ack_pending slot and redelivers until
+          // max_deliver. Enough of them wedge the consumer permanently.
+          msg.ack();
+          continue;
+        }
+
+        const id = messageData.id || this.generateMessageId();
+        const messagePattern = messageData.pattern || msg.subject;
+        const metadata = messageData.metadata || {};
+
+        // Built only when the subscription configured a dead-letter queue AND the broker
+        // tracks delivery, so `nack(false)` keeps its bare `term()` behaviour everywhere
+        // else. Under `ackMode: 'none'` the mode promises no dead-letter routing at all —
+        // the automatic path is already gated by `acknowledgesAutomatically`, but a handler
+        // calling `nack(false)` itself reaches this closure directly, so gating the closure
+        // is what makes the promise true. Redis gates the same way in `onNack`.
+        const toDeadLetter = entry.options?.deadLetter === undefined || !tracksDelivery(entry.options)
+          ? undefined
+          : (failure?: Error): Promise<void> => this.routeToDeadLetter(
+            entry,
             msg,
+            {
+              id, pattern: messagePattern, data: messageData.data, metadata, 
+            },
+            failure,
           );
 
-          // Emit received event
-          this.emit('onMessageReceived', message);
+        const message = new JetStreamMessage(
+          id,
+          messagePattern,
+          messageData.data,
+          messageData.timestamp || Date.now(),
+          metadata,
+          msg,
+          entry.maxDeliver,
+          toDeadLetter,
+          entry.resolved.tracksDelivery,
+        );
 
-          try {
-            await entry.handler(message);
+        // Emit received event
+        this.emit('onMessageReceived', message);
 
-            // Auto-ack if not manual mode
-            if (entry.options?.ackMode !== 'manual') {
-              msg.ack();
-            }
+        try {
+          // Retained, not just awaited: a shutdown that lands here must wait for this
+          // handler to finish and acknowledge. `nc.drain()` flushes subscriptions but
+          // never the application's loop body, and an ack published after close() is
+          // buffered and then silently dropped.
+          entry.inFlight = entry.handler(message);
+          await entry.inFlight;
+        } catch (error) {
+          // Emit failed event
+          this.emit('onMessageFailed', message, error as Error);
 
-            // Emit processed event
-            this.emit('onMessageProcessed', message);
-          } catch (error) {
-            // Emit failed event
-            this.emit('onMessageFailed', message, error as Error);
-
-            // Auto-nack if not manual mode
-            if (entry.options?.ackMode !== 'manual') {
+          // Auto-nack only in 'auto'. Under 'none' the server tracks nothing, so there is
+          // no nak to send and no terminal delivery to route anywhere.
+          if (acknowledgesAutomatically(entry.options)) {
+            // On the delivery the server would otherwise make the last, park the payload in
+            // the dead-letter queue instead of letting max_deliver exhaust it silently. Below
+            // that threshold this is an ordinary retry.
+            if (toDeadLetter !== undefined && (msg.info?.deliveryCount ?? 1) >= entry.resolved.maxDeliver) {
+              await toDeadLetter(error as Error);
+            } else {
               msg.nak();
             }
           }
-        } catch {
-          // Message parsing error - ack to prevent redelivery
+
+          continue;
+        } finally {
+          entry.inFlight = null;
+        }
+
+        // Outside the handler's try: a failure here is an acknowledgement failure, not a
+        // handler failure, and it belongs on onError rather than onMessageFailed.
+        // `msg` is the raw JsMsg, so this bypasses the wrapper's first-call-wins guard: a
+        // handler that already sent `nak()` or `term()` would have its disposition settled
+        // out from under it, cancelling the redelivery it just asked for.
+        if (acknowledgesAutomatically(entry.options) && !wasNacked(message)) {
           msg.ack();
         }
+
+        // A handler that catches its own exception and nacks returns normally, so control
+        // flow alone cannot tell the drop apart from a success.
+        if (wasNacked(message)) {
+          this.emit('onMessageFailed', message, nackedError(message));
+        } else {
+          this.emit('onMessageProcessed', message);
+        }
       }
-    } catch {
-      // Consumer error - will be handled by NATS reconnection
+    } catch (error) {
+      // A consumer error used to be indistinguishable from a healthy idle loop.
+      this.emit('onError', error as Error);
     }
 
-    // Restart consumption if still running
-    if (entry.running) {
-      setTimeout(() => this.consumeMessages(entry), CONSUME_RESTART_DELAY_MS);
+    entry.messages = null;
+    this.scheduleConsumeRestart(entry);
+  }
+
+  /** Re-enters the consume loop after the restart delay, unless the subscription is gone. */
+  private scheduleConsumeRestart(entry: JetStreamSubscriptionEntry): void {
+    if (!entry.running) {
+      return;
     }
+
+    entry.restartTimer = setTimeout(() => {
+      entry.restartTimer = null;
+      void this.consumeMessages(entry);
+    }, CONSUME_RESTART_DELAY_MS);
   }
 }
 

@@ -5,6 +5,14 @@
  * and HTTP security headers.
  */
 
+export {
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  getPeerAddress,
+  type ClientAddressBinding,
+  type PeerAddressSource,
+} from './client-address';
 export { CorsMiddleware, type CorsOptions } from './cors-middleware';
 export {
   RateLimitMiddleware,

@@ -33,3 +33,31 @@ describe('createNatsContainer', () => {
     }
   }, 60000);
 });
+
+describe('testcontainers peer declaration', () => {
+  // The `@onebun/core/testing` barrel value-imports `testcontainers`, so the peer is
+  // required in fact. It was declared `optional: true`, which made the manifest contradict
+  // the code: a consumer following the declaration got a module-resolution failure from a
+  // dependency the package told them they could skip. This pins the decision — integration
+  // tests are the default, so the peer is required — and it fails if `optional` returns.
+  test('declares testcontainers as a required peer, matching the barrel that imports it', () => {
+     
+    const pkg = require('../../package.json') as {
+      peerDependencies?: Record<string, string>;
+      peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+    };
+
+    expect(pkg.peerDependencies?.testcontainers).toBeDefined();
+    expect(pkg.peerDependenciesMeta?.testcontainers?.optional).toBeUndefined();
+  });
+
+  test('is absent from dependencies, so a production install never pulls a Docker client', () => {
+    // The other way to make it mandatory would put testcontainers — and dockerode with it —
+    // into every production install of the framework. The peer keeps the choice of where to
+    // declare it with the consumer, and devDependencies is the right place.
+     
+    const pkg = require('../../package.json') as { dependencies?: Record<string, string> };
+
+    expect(pkg.dependencies?.testcontainers).toBeUndefined();
+  });
+});

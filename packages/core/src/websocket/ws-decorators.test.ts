@@ -8,6 +8,8 @@ import {
   expect,
 } from 'bun:test';
 
+import { UseGuards } from '../decorators/decorators';
+
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import {
   WebSocketGateway,
@@ -26,6 +28,7 @@ import {
   isWebSocketGateway,
   getWsHandlers,
   getWsParamMetadata,
+  UseWsGuards,
 } from './ws-decorators';
 import { WsHandlerType, WsParamType } from './ws.types';
 
@@ -327,5 +330,121 @@ describe('ws-decorators', () => {
       const handlers = getWsHandlers(TestGateway);
       expect(handlers).toHaveLength(4);
     });
+  });
+});
+
+// ============================================================================
+// Decorator source order must never change runtime behaviour
+//
+// `@OnMessage` and its siblings snapshot the handler's guards when they run, and
+// TypeScript applies method decorators BOTTOM-UP — so `@UseWsGuards` written ABOVE the
+// handler decorator landed after the snapshot and was silently discarded, leaving the
+// handler unguarded. The HTTP route path had the identical defect.
+// ============================================================================
+
+describe('@UseWsGuards order independence', () => {
+  class DenyWsGuard {
+    canActivate(): boolean {
+      return false;
+    }
+  }
+
+  @WebSocketGateway({ path: '/order' })
+  class OrderGateway extends BaseWebSocketGateway {
+    @UseWsGuards(DenyWsGuard)
+    @OnMessage('above')
+    above(): string {
+      return 'above';
+    }
+
+    @OnMessage('below')
+    @UseWsGuards(DenyWsGuard)
+    below(): string {
+      return 'below';
+    }
+  }
+
+  it('registers the guard whether it is written above or below @OnMessage', () => {
+    const handlers = getWsHandlers(OrderGateway);
+    const above = handlers.find((h) => h.pattern === 'above');
+    const below = handlers.find((h) => h.pattern === 'below');
+
+    // Pre-fix: the ABOVE handler carried an empty guard list and ran unguarded, while
+    // BELOW carried the guard. Asserted on the registered guard list because the gateway's
+    // execution path reads exactly this array (ws-handler.ts passes handler.guards to
+    // executeGuards); the end-to-end denial is covered by the integration suite.
+    expect(above?.guards).toEqual([DenyWsGuard]);
+    expect(below?.guards).toEqual([DenyWsGuard]);
+  });
+});
+
+// ============================================================================
+// `@UseGuards` — the SHARED decorator — must reach a gateway handler
+//
+// It used to write `onebun:http_guards`, a key only HTTP route registration read, so on an
+// `@OnMessage` handler it was a silent no-op: no type error, no warning, and the handler ran
+// completely unguarded. `@UseInterceptors` had already been sharing one key across HTTP,
+// WebSocket and Queue; guards now do the same.
+// ============================================================================
+
+describe('@UseGuards on WebSocket handlers', () => {
+  class DenySharedGuard {
+    canActivate(): boolean {
+      return false;
+    }
+  }
+
+  class DenyWsOnlyGuard {
+    canActivate(): boolean {
+      return false;
+    }
+  }
+
+  @WebSocketGateway({ path: '/shared-guards' })
+  class SharedGuardGateway extends BaseWebSocketGateway {
+    @UseGuards(DenySharedGuard)
+    @OnMessage('shared')
+    shared(): string {
+      return 'shared';
+    }
+
+    @OnMessage('shared-below')
+    @UseGuards(DenySharedGuard)
+    sharedBelow(): string {
+      return 'shared-below';
+    }
+
+    @UseGuards(DenySharedGuard)
+    @UseWsGuards(DenyWsOnlyGuard)
+    @OnMessage('both')
+    both(): string {
+      return 'both';
+    }
+
+    @UseGuards(DenySharedGuard, DenySharedGuard)
+    @OnMessage('repeated')
+    repeated(): string {
+      return 'repeated';
+    }
+  }
+
+  it('registers a @UseGuards guard on the handler, above or below @OnMessage', () => {
+    const handlers = getWsHandlers(SharedGuardGateway);
+
+    // Pre-fix both of these were `[]` — the guard was written to a key the gateway never read.
+    expect(handlers.find((h) => h.pattern === 'shared')?.guards).toEqual([DenySharedGuard]);
+    expect(handlers.find((h) => h.pattern === 'shared-below')?.guards).toEqual([DenySharedGuard]);
+  });
+
+  it('merges @UseGuards and @UseWsGuards, shared first', () => {
+    const both = getWsHandlers(SharedGuardGateway).find((h) => h.pattern === 'both');
+
+    expect(both?.guards).toEqual([DenySharedGuard, DenyWsOnlyGuard]);
+  });
+
+  it('does not run the same guard twice when it is listed twice', () => {
+    const repeated = getWsHandlers(SharedGuardGateway).find((h) => h.pattern === 'repeated');
+
+    expect(repeated?.guards).toEqual([DenySharedGuard]);
   });
 });

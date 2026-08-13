@@ -25,6 +25,40 @@ import {
 import { DEFAULT_REDIS_CACHE_OPTIONS } from './types';
 
 /**
+ * How long a re-acquire may take before the cache reports itself unusable.
+ *
+ * The driver's auto-reconnect never gives up on its own, so without a deadline a dead cache
+ * becomes a hung request rather than an error.
+ */
+const REACQUIRE_TIMEOUT_MS = 5000;
+
+/**
+ * Reject if `promise` has not settled within `ms`.
+ *
+ * `promise` keeps running after the deadline — `Promise.race` cannot cancel it — but it stays
+ * handled, so a late rejection is not reported as unhandled. Whoever abandons it is responsible
+ * for closing what it was building.
+ *
+ * @internal
+ */
+export async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+/**
  * Redis-based cache implementation using @onebun/core RedisClient
  * Implements CacheService interface with Redis as the backing store
  *
@@ -120,27 +154,80 @@ export class RedisCache implements CacheService {
   }
 
   /**
+   * Return a usable client, re-acquiring the shared one if the held reference went dead.
+   *
+   * A shared client can be disconnected out from under this cache — by another application
+   * shutting down, or by the server going away — and the reference stored at connect() time
+   * is not updated. Re-acquiring here is what lets a cache survive that; failing loudly when
+   * it cannot is what stops a dead connection from looking like a cold cache.
+   */
+  private async ensureClient(): Promise<RedisClient> {
+    if (this.client?.isConnected()) {
+      return this.client;
+    }
+
+    if (this.useShared) {
+      try {
+        // Bounded on purpose. With `autoReconnect` (the default) the driver never rejects a
+        // connection to an unreachable server — it retries forever — so an unbounded await
+        // here would turn a dead cache into a hung request instead of an error. A short
+        // wait rides out a blip; past it the caller is told, loudly.
+        this.client = await withDeadline(
+          SharedRedisProvider.reacquire(),
+          REACQUIRE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        throw new Error(`Redis cache is not usable: shared client could not be re-acquired: ${error}`);
+      }
+
+      if (this.client?.isConnected()) {
+        return this.client;
+      }
+    } else if (this.client) {
+      try {
+        await withDeadline(this.client.connect(), REACQUIRE_TIMEOUT_MS);
+      } catch (error) {
+        throw new Error(`Redis cache is not usable: reconnect failed: ${error}`);
+      }
+
+      if (this.client.isConnected()) {
+        return this.client;
+      }
+    }
+
+    throw new Error('Redis cache is not usable: no connected client. Call connect() first.');
+  }
+
+  /**
    * Get a value from cache by key
    */
   async get<T = unknown>(key: string): Promise<T | undefined> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
+    const client = await this.ensureClient();
+
+    let value: string | null | undefined;
+    try {
+      value = await client.get(this.getFullKey(key));
+    } catch (error) {
+      // An operational failure is NOT a cache miss. Returning `undefined` here — which is
+      // what this did — makes a dead connection indistinguishable from an absent key, so a
+      // rate limiter or a replay check reads "not seen before" and decides wrongly.
+      throw new Error(`Redis cache get failed for key ${key}: ${error}`);
     }
 
+    if (value === null || value === undefined) {
+      this.misses++;
+
+      return undefined;
+    }
+
+    this.hits++;
+
     try {
-      const fullKey = this.getFullKey(key);
-      const value = await this.client.get(fullKey);
-
-      if (value === null || value === undefined) {
-        this.misses++;
-
-        return undefined;
-      }
-
-      this.hits++;
-
       return JSON.parse(value) as T;
     } catch {
+      // A value that is not JSON is a corrupt entry, not a transport failure: treat it as a
+      // miss so one bad key cannot take the caller down.
+      this.hits--;
       this.misses++;
 
       return undefined;
@@ -175,18 +262,17 @@ export class RedisCache implements CacheService {
    * Delete a value from cache
    */
   async delete(key: string): Promise<boolean> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
 
     try {
       const fullKey = this.getFullKey(key);
-      const existed = await this.client.exists(fullKey);
-      await this.client.del(fullKey);
+      const existed = await client.exists(fullKey);
+      await client.del(fullKey);
 
       return existed;
-    } catch {
-      return false;
+    } catch (error) {
+      // `false` used to mean both "there was nothing to delete" and "the delete failed".
+      throw new Error(`Redis cache delete failed for key ${key}: ${error}`);
     }
   }
 
@@ -194,16 +280,14 @@ export class RedisCache implements CacheService {
    * Check if a key exists in cache
    */
   async has(key: string): Promise<boolean> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
 
     try {
-      const fullKey = this.getFullKey(key);
-
-      return await this.client.exists(fullKey);
-    } catch {
-      return false;
+      return await client.exists(this.getFullKey(key));
+    } catch (error) {
+      // `false` used to mean both "absent" and "could not tell" — the difference matters to
+      // anything using the cache as a lock or a replay guard.
+      throw new Error(`Redis cache has() failed for key ${key}: ${error}`);
     }
   }
 

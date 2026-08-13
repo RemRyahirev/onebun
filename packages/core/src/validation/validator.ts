@@ -1,10 +1,24 @@
-import { type } from 'arktype';
-
 import type { ValidationResult } from './types';
 import type { Type } from 'arktype';
 
+import {
+  arkErrorsSummary,
+  DuplicateArkTypeError,
+  isArkErrors,
+  isUnrecognisedArkResult,
+  reportDuplicateArkTypeCopies,
+} from './arktype-interop';
+
 /**
- * Validate data against an arktype schema
+ * Validate data against an arktype schema.
+ *
+ * Failure detection is copy-independent (see {@link isArkErrors}): a schema built by a second
+ * physical copy of `arktype` still reports its failures correctly.
+ *
+ * @throws {DuplicateArkTypeError} when the schema returns an ArkType internal this version cannot
+ * identify as a failure — that value is never passed through as validated data.
+ *
+ * @see docs:api/validation.md
  */
 export function validate<T = unknown>(
   schema: Type<T>,
@@ -12,11 +26,16 @@ export function validate<T = unknown>(
 ): ValidationResult<T> {
   const result = schema(data);
 
-  if (result instanceof type.errors) {
+  if (isArkErrors(result)) {
     return {
       success: false,
-      errors: [result.summary],
+      errors: [arkErrorsSummary(result)],
     };
+  }
+
+  if (isUnrecognisedArkResult(result)) {
+    reportDuplicateArkTypeCopies();
+    throw new DuplicateArkTypeError();
   }
 
   return {
@@ -27,6 +46,8 @@ export function validate<T = unknown>(
 
 /**
  * Validate data and throw error if validation fails
+ *
+ * @see docs:api/validation.md
  */
 export function validateOrThrow<T = unknown>(schema: Type<T>, data: unknown): T {
   const result = validate(schema, data);

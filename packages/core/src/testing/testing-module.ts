@@ -88,7 +88,8 @@ export class CompiledTestingModule {
    * @returns The service instance registered in the module
    * @throws If the service is not found
    */
-  get<T>(serviceClass: new (...args: unknown[]) => T): T {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  get<T>(serviceClass: new (...args: any[]) => T): T {
     return this.app.getService(serviceClass) as T;
   }
 

@@ -6,6 +6,13 @@ import {
 
 import type { OneBunRequest } from '../types';
 
+import {
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  getPeerAddress,
+  type PeerAddressSource,
+} from './client-address';
 import { CorsMiddleware } from './cors-middleware';
 import { MemoryRateLimitStore, RateLimitMiddleware } from './rate-limit-middleware';
 import { SecurityHeadersMiddleware } from './security-headers-middleware';
@@ -46,6 +53,40 @@ function makeCors(options = {}): CorsMiddleware {
 
 function makeRateLimit(options = {}): RateLimitMiddleware {
   return new RateLimitMiddleware(options);
+}
+
+/**
+ * A stand-in for the Bun server handle: reports a fixed transport peer per request,
+ * exactly as `server.requestIP(req)` does, and is likewise indifferent to headers.
+ */
+function makePeerSource(peers: Map<Request, string>): PeerAddressSource {
+  return {
+    requestIP(request: Request): { address: string } | null {
+      const address = peers.get(request);
+
+      return address === undefined ? null : { address };
+    },
+  };
+}
+
+/**
+ * Build requests that look like they arrived over a connection from `peer`, the way
+ * the application binds them at the outermost request entry point.
+ */
+function makeServedRequests(
+  entries: { peer: string; headers?: [string, string][] }[],
+  trustProxy = false,
+): OneBunRequest[] {
+  const peers = new Map<Request, string>();
+  const binding = createClientAddressBinding(makePeerSource(peers), trustProxy);
+
+  return entries.map(({ peer, headers = [] }) => {
+    const req = makeReq('GET', 'http://localhost/', headers);
+    peers.set(req as unknown as Request, peer);
+    bindClientAddress(req as unknown as Request, binding);
+
+    return req;
+  });
 }
 
 function makeSecurityHeaders(options = {}): SecurityHeadersMiddleware {
@@ -226,12 +267,11 @@ describe('RateLimitMiddleware', () => {
   it('tracks keys independently', async () => {
     const store = new MemoryRateLimitStore();
     const mw = makeRateLimit({ max: 1, windowMs: 60_000, store });
-    const reqA = makeReq('GET', 'http://localhost/', [['x-forwarded-for', '1.1.1.1']]);
-    const reqB = makeReq('GET', 'http://localhost/', [['x-forwarded-for', '2.2.2.2']]);
+    const [reqA, reqB] = makeServedRequests([{ peer: '1.1.1.1' }, { peer: '2.2.2.2' }]);
 
-    await mw.use(reqA, makeNext()); // A: 1st
-    const resA2 = await mw.use(reqA, makeNext()); // A: 2nd — over limit
-    const resB1 = await mw.use(reqB, makeNext()); // B: 1st — OK
+    await mw.use(reqA!, makeNext()); // A: 1st
+    const resA2 = await mw.use(reqA!, makeNext()); // A: 2nd — over limit
+    const resB1 = await mw.use(reqB!, makeNext()); // B: 1st — OK
 
     expect(resA2.status).toBe(429);
     expect(resB1.status).toBe(200);
@@ -281,5 +321,114 @@ describe('RateLimitMiddleware', () => {
     store.clear();
     const allowed = await mw.use(req, makeNext());
     expect(allowed.status).toBe(200);
+  });
+});
+
+// ============================================================================
+// Client address resolution (WI-297)
+// ============================================================================
+
+describe('client address resolution', () => {
+  it('resolves the transport peer, not a header, by default', () => {
+    const [req] = makeServedRequests([
+      { peer: '198.51.100.4', headers: [['x-forwarded-for', '203.0.113.9']] },
+    ]);
+
+    expect(getClientAddress(req as unknown as Request)).toBe('198.51.100.4');
+    expect(getPeerAddress(req as unknown as Request)).toBe('198.51.100.4');
+  });
+
+  it('uses the forwarded client when the application trusts the proxy', () => {
+    const [req] = makeServedRequests(
+      [{ peer: '198.51.100.4', headers: [['x-forwarded-for', '203.0.113.9, 10.0.0.1']] }],
+      true,
+    );
+
+    // Leftmost entry of the chain is the originating client; the peer is the proxy.
+    expect(getClientAddress(req as unknown as Request)).toBe('203.0.113.9');
+    expect(getPeerAddress(req as unknown as Request)).toBe('198.51.100.4');
+  });
+
+  it('falls back to the peer when a trusted proxy sent no forwarding header', () => {
+    const [req] = makeServedRequests([{ peer: '198.51.100.4' }], true);
+
+    expect(getClientAddress(req as unknown as Request)).toBe('198.51.100.4');
+  });
+
+  it('honours cf-connecting-ip and x-real-ip only under the opt-in', () => {
+    const headers: [string, string][] = [
+      ['cf-connecting-ip', '203.0.113.20'],
+      ['x-real-ip', '203.0.113.21'],
+    ];
+    const [trusted] = makeServedRequests([{ peer: '198.51.100.4', headers }], true);
+    const [untrusted] = makeServedRequests([{ peer: '198.51.100.4', headers }]);
+
+    expect(getClientAddress(trusted as unknown as Request)).toBe('203.0.113.20');
+    expect(getClientAddress(untrusted as unknown as Request)).toBe('198.51.100.4');
+  });
+
+  it('returns undefined for a request that never reached a server', () => {
+    const req = makeReq('GET', 'http://localhost/', [['x-forwarded-for', '203.0.113.9']]);
+
+    expect(getClientAddress(req as unknown as Request)).toBeUndefined();
+    expect(getPeerAddress(req as unknown as Request)).toBeUndefined();
+  });
+});
+
+describe('RateLimitMiddleware client identification', () => {
+  it('gives two direct callers separate buckets with no proxy header', async () => {
+    const store = new MemoryRateLimitStore();
+    const mw = makeRateLimit({ max: 1, windowMs: 60_000, store });
+    const [first, second] = makeServedRequests([
+      { peer: '198.51.100.1' },
+      { peer: '198.51.100.2' },
+    ]);
+
+    const firstOk = await mw.use(first!, makeNext());
+    const firstOver = await mw.use(first!, makeNext());
+    const secondOk = await mw.use(second!, makeNext());
+
+    expect(firstOk.status).toBe(200);
+    expect(firstOver.status).toBe(429);
+    // Before the fix both callers keyed as the literal 'unknown', so the second
+    // caller inherited the first one's exhausted counter.
+    expect(secondOk.status).toBe(200);
+  });
+
+  it('ignores a rotating x-forwarded-for when trustProxy is off', async () => {
+    const store = new MemoryRateLimitStore();
+    const mw = makeRateLimit({ max: 3, windowMs: 60_000, store });
+    const requests = makeServedRequests(
+      Array.from({ length: 10 }, (_, i) => ({
+        peer: '198.51.100.7',
+        headers: [['x-forwarded-for', `203.0.113.${i}`]] as [string, string][],
+      })),
+    );
+
+    const statuses: number[] = [];
+    for (const req of requests) {
+      statuses.push((await mw.use(req, makeNext())).status);
+    }
+
+    expect(statuses.slice(0, 3)).toEqual([200, 200, 200]);
+    expect(statuses.slice(3)).toEqual([429, 429, 429, 429, 429, 429, 429]);
+  });
+
+  it('keys on the forwarded client when trustProxy is on', async () => {
+    const store = new MemoryRateLimitStore();
+    const mw = makeRateLimit({ max: 1, windowMs: 60_000, store });
+    // One transport peer (the load balancer), two distinct forwarded clients.
+    const [clientA1, clientA2, clientB] = makeServedRequests(
+      [
+        { peer: '10.0.0.1', headers: [['x-forwarded-for', '203.0.113.5']] },
+        { peer: '10.0.0.1', headers: [['x-forwarded-for', '203.0.113.5']] },
+        { peer: '10.0.0.1', headers: [['x-forwarded-for', '203.0.113.6']] },
+      ],
+      true,
+    );
+
+    expect((await mw.use(clientA1!, makeNext())).status).toBe(200);
+    expect((await mw.use(clientA2!, makeNext())).status).toBe(429);
+    expect((await mw.use(clientB!, makeNext())).status).toBe(200);
   });
 });

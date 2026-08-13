@@ -88,6 +88,26 @@ export function SpanAttribute(name: string): ParameterDecorator {
 }
 
 /**
+ * Options for {@link TraceMiddleware.create}.
+ *
+ * @see docs:api/trace.md
+ */
+export interface TraceMiddlewareOptions {
+  /**
+   * Whether to believe the proxy headers a caller sends (`x-forwarded-for`,
+   * `x-real-ip`) when recording `remoteAddr` on the span.
+   *
+   * Those headers are attacker-controlled on a direct connection, so they are ignored
+   * by default and the span reports the transport peer instead. Mirrors
+   * `ApplicationOptions.trustProxy` in `@onebun/core`; it is passed in rather than read
+   * from there because `@onebun/core` depends on `@onebun/trace`, not the reverse.
+   *
+   * @defaultValue false
+   */
+  trustProxy?: boolean;
+}
+
+/**
  * HTTP trace middleware for OneBun applications
  *
  * @see docs:api/trace.md
@@ -95,9 +115,14 @@ export function SpanAttribute(name: string): ParameterDecorator {
 export class TraceMiddleware {
   /**
    * Create trace middleware Effect
+   *
+   * @param options - See {@link TraceMiddlewareOptions}. Proxy headers are not trusted
+   *   unless `trustProxy: true` is passed.
    */
   // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
-  static create() {
+  static create(options: TraceMiddlewareOptions = {}) {
+    const trustProxy = options.trustProxy ?? false;
+
     return Effect.flatMap(traceService, (traceServiceInstance) =>
       Effect.succeed((request: Request, next: () => Promise<Response>) => {
         return Effect.runPromise(
@@ -117,7 +142,9 @@ export class TraceMiddleware {
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     route: (request as any).route?.path,
                     userAgent: request.headers.get('user-agent') || undefined,
-                    remoteAddr: TraceMiddleware.getRemoteAddress(request),
+                    remoteAddr: trustProxy
+                      ? TraceMiddleware.getRemoteAddress(request)
+                      : TraceMiddleware.getPeerAddress(request),
                     requestSize: TraceMiddleware.getRequestSize(request),
                   };
 
@@ -185,23 +212,51 @@ export class TraceMiddleware {
   }
 
   /**
-   * Get remote address from request
+   * Get the transport peer address of the request, ignoring every header.
+   *
+   * This is what the span records unless the caller of `create()` opted into
+   * `trustProxy` — a client cannot move its own address by sending a header.
+   */
+  private static getPeerAddress(request: unknown): string | undefined {
+    if (!request || typeof request !== 'object') {
+      return undefined;
+    }
+
+    const socket = 'socket' in request ? (request.socket as { remoteAddress?: string }) : {};
+    const connection =
+      'connection' in request ? (request.connection as { remoteAddress?: string }) : {};
+
+    return socket.remoteAddress || connection.remoteAddress;
+  }
+
+  /**
+   * Get remote address from request, preferring proxy headers over the transport peer.
+   *
+   * Only reached when the application opted into `trustProxy`: the headers it reads are
+   * set by whoever made the request unless a proxy in front overwrites them.
    */
   private static getRemoteAddress(request: unknown): string | undefined {
     if (!request || typeof request !== 'object') {
       return undefined;
     }
 
-    const headers = 'headers' in request ? (request.headers as Record<string, string>) : {};
-    const socket = 'socket' in request ? (request.socket as { remoteAddress?: string }) : {};
-    const connection =
-      'connection' in request ? (request.connection as { remoteAddress?: string }) : {};
+    // A real `Request` exposes `headers` as a `Headers` instance, where indexing by name
+    // yields undefined; only plain-object carriers answer to `headers['x-...']`.
+    const rawHeaders = 'headers' in request ? request.headers : undefined;
+    const readHeader = (name: string): string | undefined => {
+      if (rawHeaders instanceof Headers) {
+        return rawHeaders.get(name) ?? undefined;
+      }
+
+      return rawHeaders && typeof rawHeaders === 'object'
+        ? (rawHeaders as Record<string, string>)[name]
+        : undefined;
+    };
 
     return (
-      headers['x-forwarded-for'] ||
-      headers['x-real-ip'] ||
-      socket.remoteAddress ||
-      connection.remoteAddress
+      readHeader('x-forwarded-for') ||
+      readHeader('x-real-ip') ||
+      TraceMiddleware.getPeerAddress(request)
     );
   }
 

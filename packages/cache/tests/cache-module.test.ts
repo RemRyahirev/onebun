@@ -3,10 +3,23 @@ import {
   beforeAll,
   describe,
   expect,
+  spyOn,
   test,
 } from 'bun:test';
 
 import type { CacheModuleOptions } from '../src';
+
+import {
+  BaseController,
+  BaseService,
+  Controller,
+  Get,
+  Global as GlobalDecorator,
+  Module,
+  OneBunApplication,
+  Service,
+} from '@onebun/core';
+
 
 import {
   CacheModule,
@@ -206,7 +219,7 @@ describe('CacheModule (NestJS-style)', () => {
 
   describe('Global module support', () => {
      
-    const { isGlobalModule, Global } = require('@onebun/core');
+    const { isGlobalModule } = require('@onebun/core');
 
     // Re-apply @Global() because other test suites (e.g. core/module.test.ts,
     // core/decorators.test.ts) call clearGlobalModules() in their beforeEach/afterEach
@@ -214,7 +227,7 @@ describe('CacheModule (NestJS-style)', () => {
     // CacheModule only runs once at module evaluation time and won't be re-applied
     // on subsequent imports due to module caching.
     beforeAll(() => {
-      Global()(CacheModule);
+      GlobalDecorator()(CacheModule);
     });
 
     test('CacheModule should be global by default', () => {
@@ -286,7 +299,7 @@ describe('CacheModule (NestJS-style)', () => {
       expect(options?.isGlobal).toBe(false);
 
       // Restore CacheModule to global for subsequent tests
-      Global()(CacheModule);
+      GlobalDecorator()(CacheModule);
     });
 
     test('forFeature should return same module reference', () => {
@@ -333,5 +346,65 @@ describe('CacheModule (NestJS-style)', () => {
       expect(options?.type).toBe(CacheType.MEMORY);
       expect(options?.cacheOptions?.defaultTtl).toBe(30000);
     });
+  });
+});
+
+/**
+ * CacheService never closed on shutdown: `close()` existed and nothing in the lifecycle
+ * called it. The count matters as much as the fact — before the lifecycle dedupe shipped,
+ * a hook on a shared service ran once per module that could see it.
+ */
+describe('connection lifecycle', () => {
+  test('close() runs exactly once when the application stops', async () => {
+    GlobalDecorator()(CacheModule);
+    CacheModule.forRoot({ type: CacheType.MEMORY });
+
+    const closeSpy = spyOn(CacheService.prototype, 'close');
+
+    @Service()
+    class UsesCache extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [UsesCache], exports: [UsesCache] })
+    class FeatureOne {}
+
+    @Module({ providers: [UsesCache], exports: [UsesCache] })
+    class FeatureTwo {}
+
+    @Controller('/health')
+    class HealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Module({
+      imports: [CacheModule.forFeature(), FeatureOne, FeatureTwo],
+      controllers: [HealthController],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+      expect(closeSpy).toHaveBeenCalledTimes(0);
+
+      await app.stop();
+
+      // Not "was called": once per module that can see the service would be 3 here.
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+      CacheModule.clearOptions();
+    }
   });
 });

@@ -234,4 +234,68 @@ describe('SharedRedisProvider', () => {
       expect(result._tag).toBe('Success');
     });
   });
+
+  describe('lease counting', () => {
+    it('stays connected until the LAST consumer releases', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+
+      // Two consumers, as two applications sharing one client would be.
+      await SharedRedisProvider.getClient();
+      await SharedRedisProvider.getClient();
+      expect(SharedRedisProvider.leaseCount()).toBe(2);
+
+      await SharedRedisProvider.release();
+
+      // Pre-fix: the first application to stop called disconnect() outright and tore the
+      // client out from under every sibling still serving traffic.
+      expect(SharedRedisProvider.isConnected()).toBe(true);
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+
+      await SharedRedisProvider.release();
+
+      expect(SharedRedisProvider.isConnected()).toBe(false);
+      expect(SharedRedisProvider.leaseCount()).toBe(0);
+    });
+
+    it('keeps the connection lazy — configure() alone opens nothing', () => {
+      SharedRedisProvider.configure({ url: redis.url });
+
+      expect(SharedRedisProvider.isConnected()).toBe(false);
+      expect(SharedRedisProvider.leaseCount()).toBe(0);
+    });
+
+    it('does not drive the count negative on a double release', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      await SharedRedisProvider.getClient();
+
+      await SharedRedisProvider.release();
+      await SharedRedisProvider.release();
+
+      expect(SharedRedisProvider.leaseCount()).toBe(0);
+    });
+
+    it('reacquire() returns a live client without taking another lease', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      await SharedRedisProvider.getClient();
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+
+      const again = await SharedRedisProvider.reacquire();
+
+      // Re-fetching on every failed operation must not inflate the count, or the client
+      // would never be released.
+      expect(again.isConnected()).toBe(true);
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+    });
+
+    it('disconnect() is the force-close and drops every lease', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      await SharedRedisProvider.getClient();
+      await SharedRedisProvider.getClient();
+
+      await SharedRedisProvider.disconnect();
+
+      expect(SharedRedisProvider.isConnected()).toBe(false);
+      expect(SharedRedisProvider.leaseCount()).toBe(0);
+    });
+  });
 });

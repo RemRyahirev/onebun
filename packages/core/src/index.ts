@@ -142,8 +142,11 @@ export {
   DefaultProfiler,
 } from './profiler';
 
-// Testing Utilities are available via '@onebun/core/testing' subpath import
-// to avoid requiring testcontainers as a mandatory dependency
+// Testing utilities live behind the '@onebun/core/testing' subpath so the framework's own
+// entry point stays free of them. `testcontainers` is a REQUIRED peer dependency: OneBun
+// takes integration tests as the default way to test a service and ships the helpers for
+// them, so the subpath is a boundary of concern, not a way to make the peer optional.
+// Declare it in your devDependencies — a production install never pulls it.
 
 // HTTP Guards
 export * from './http-guards';
@@ -162,3 +165,15 @@ export * from './errors';
 
 // Request Context (AsyncLocalStorage)
 export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';
+
+// Named module registrations — the supported way to configure a dynamic module more than
+// once. See docs:api/decorators.md.
+export {
+  getRegistrationBase,
+  getRegistrationOptions,
+  isRegistrationModule,
+  registerModule,
+  type RegistrationToken,
+  resetRegistrations,
+  selectRegistration,
+} from './module/registration';

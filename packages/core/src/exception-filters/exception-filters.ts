@@ -83,6 +83,24 @@ export function createExceptionFilter(
  *   When false (default), proper HTTP status codes are used.
  * @see docs:api/exception-filters.md
  */
+const MIN_HTTP_STATUS = 100;
+const MAX_HTTP_STATUS = 599;
+
+/**
+ * Coerces an error's `code` to a status `new Response` will accept.
+ *
+ * Returns 500 for anything that is not an integer inside the HTTP range — a string
+ * `code` such as `ECONNREFUSED`, a zero, an errno. Without this the filter throws
+ * RangeError while building the response, which loses the error it was handling.
+ */
+function toHttpStatus(code: unknown): number {
+  const numeric = Number(code);
+
+  return Number.isInteger(numeric) && numeric >= MIN_HTTP_STATUS && numeric <= MAX_HTTP_STATUS
+    ? numeric
+    : HttpStatusCode.INTERNAL_SERVER_ERROR;
+}
+
 export function createDefaultExceptionFilter(
   options: { httpEnvelope?: boolean } = {},
 ): ExceptionFilter {
@@ -107,7 +125,7 @@ export function createDefaultExceptionFilter(
 
       if (error instanceof OneBunBaseError) {
         return new Response(JSON.stringify(error.toErrorResponse()), {
-          status: httpEnvelope ? HttpStatusCode.OK : error.code,
+          status: httpEnvelope ? HttpStatusCode.OK : toHttpStatus(error.code),
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
@@ -116,13 +134,19 @@ export function createDefaultExceptionFilter(
       }
 
       const message = error instanceof Error ? error.message : String(error);
-      const code =
-        error instanceof Error && 'code' in error
-          ? Number((error as { code: unknown }).code)
-          : HttpStatusCode.INTERNAL_SERVER_ERROR;
+      const originalCode = error instanceof Error && 'code' in error
+        ? (error as { code: unknown }).code
+        : undefined;
+      // A thrown Error may carry a non-HTTP `code` — a socket failure carries the string
+      // 'ECONNREFUSED', and `Number()` of that is NaN. Passing NaN (or 0, or 600) to
+      // `new Response` throws RangeError from inside the filter, so the filter itself
+      // failed and the error escaped as a bare 500. Anything outside the HTTP range is a
+      // 500 instead, with the original preserved in `details.originalCode`.
+      const code = toHttpStatus(originalCode);
 
       const errorResponse = createErrorResponse(message, code, undefined, {
         originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+        originalCode,
         stack: error instanceof Error ? error.stack : undefined,
       });
 

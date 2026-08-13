@@ -1,4 +1,8 @@
-import { Effect } from 'effect';
+import {
+  Cause,
+  Effect,
+  Exit,
+} from 'effect';
 
 import { EnvParser } from './parser';
 import {
@@ -43,22 +47,33 @@ export function parseSchema(
       const envVar = envConfig.env || pathToEnvVar(fullPath);
       const rawValue = rawVariables[envVar];
 
-      try {
-        const parsed = Effect.runSync(
-          EnvParser.parse(
-            envVar,
-            rawValue,
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            envConfig as any,
-            options,
-          ),
-        );
-        result[key] = parsed;
-      } catch (error) {
-        if (error instanceof EnvValidationError) {
-          throw error;
+      // runSyncExit rather than runSync: runSync throws a FiberFailure, which is not an
+      // EnvValidationError, so the old catch re-wrapped it and produced the whole message twice.
+      const exit = Effect.runSyncExit(
+        EnvParser.parse(
+          envVar,
+          rawValue,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          envConfig as any,
+          options,
+        ),
+      );
+
+      if (Exit.isSuccess(exit)) {
+        result[key] = exit.value;
+      } else {
+        // squash covers both channels: a validation failure and a defect thrown by user code.
+        const failure = Cause.squash(exit.cause);
+
+        if (failure instanceof EnvValidationError) {
+          throw failure;
         }
-        throw new EnvValidationError(envVar, rawValue, String(error));
+
+        throw new EnvValidationError(
+          envVar,
+          rawValue,
+          failure instanceof Error ? failure.message : String(failure),
+        );
       }
     } else {
       result[key] = parseSchema(config as Record<string, unknown>, rawVariables, fullPath, options);

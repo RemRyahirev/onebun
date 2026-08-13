@@ -51,19 +51,48 @@ DrizzleModule.forRoot({
   connection: {
     type: DatabaseType.POSTGRESQL,
     options: {
+      // A URL…
       connectionString: config.get('database.url'),
-      // Or individual options:
-      host: 'localhost',
-      port: 5432,
-      database: 'myapp',
-      user: 'postgres',
-      password: 'password',
+
+      // …or the five discrete fields. Not both — see PostgreSQL Connection below.
+      // host: 'localhost',
+      // port: 5432,
+      // database: 'myapp',
+      // user: 'postgres',
+      // password: 'password',
     },
   },
   // autoMigrate defaults to true — omit unless you need to disable it
   migrationsFolder: './drizzle',
 })
 ```
+
+#### PostgreSQL Connection
+
+`options` takes **either** a `connectionString` **or** the five discrete fields — never a
+mix, and never a subset. The two shapes are mutually exclusive at the type level, so a
+half-filled object is a compile error rather than a connection built from `undefined` that
+surfaces later as an unreachable server:
+
+```typescript
+// A URL
+options: { connectionString: 'postgresql://user:password@host:5432/database' }
+
+// Or every discrete field
+options: { host: 'localhost', port: 5432, user: 'postgres', password: 'secret', database: 'app' }
+```
+
+Prefer the URL when the value comes from configuration. A `connectionString` is passed to
+the driver untouched, so query parameters it carries — `?sslmode=require`,
+`?application_name=…` — reach the server. Assembling the URL from discrete fields cannot
+express them.
+
+Options arriving from an untyped source (a JSON config, a cast) are validated at
+`initialize()` and rejected with an error naming the problem: which discrete fields
+accompanied a `connectionString`, or which of the five are missing. Neither case is resolved
+by picking a winner.
+
+`pool` is accepted alongside either shape.
 
 ### Global Module (Default Behavior)
 
@@ -118,44 +147,92 @@ export class UserService extends BaseService {
 }
 ```
 
-### Non-Global Mode (Multiple Databases)
+### Non-Global Mode
 
-For scenarios where you need multiple database connections (e.g., main database + analytics database), you can disable global behavior:
+`isGlobal: false` stops `DrizzleService` from being ambiently available: a module reaches it only by importing `DrizzleModule` explicitly. There is still exactly ONE `DrizzleService` per application — the two modes differ in VISIBILITY, not in how many instances exist.
 
 ```typescript
-// Main database - global (available everywhere)
 @Module({
   imports: [
     DrizzleModule.forRoot({
       connection: {
         type: DatabaseType.POSTGRESQL,
-        options: { host: 'main-db', port: 5432, user: 'app', password: 'secret', database: 'main' },
+        options: { host: 'db', port: 5432, user: 'app', password: 'secret', database: 'app' },
       },
-      isGlobal: true, // Default, can be omitted
+      isGlobal: false,
     }),
+  ],
+  providers: [ReportService],
+})
+export class ReportModule {}
+```
+
+### Multiple databases
+
+Name each configuration with `as`, and let each feature module select the one it needs. The token is a `symbol` or a `string`:
+
+```typescript
+export const MAIN_DB = Symbol('MAIN_DB');
+export const ANALYTICS_DB = Symbol('ANALYTICS_DB');
+
+@Module({
+  imports: [
+    DrizzleModule.forRoot({ connection: mainConnection,      as: MAIN_DB }),
+    DrizzleModule.forRoot({ connection: analyticsConnection, as: ANALYTICS_DB }),
+    ReportsModule,
   ],
 })
 export class AppModule {}
 
-// Analytics module with separate database - non-global
+// The feature selects its registration at its own boundary...
 @Module({
-  imports: [
-    DrizzleModule.forRoot({
-      connection: {
-        type: DatabaseType.POSTGRESQL,
-        options: { host: 'analytics-db', port: 5432, user: 'analytics', password: 'secret', database: 'analytics' },
-      },
-      isGlobal: false, // Each import creates new instance
-    }),
-  ],
-  providers: [AnalyticsService],
+  imports: [DrizzleModule.forFeature(ANALYTICS_DB)],
+  providers: [ReportService],
 })
-export class AnalyticsModule {}
+export class ReportsModule {}
+
+// ...and its providers write the ordinary constructor. No @Inject and no token at the
+// injection site — the module's import already decided which registration it resolves to.
+@Service()
+export class ReportService extends BaseService {
+  constructor(private db: DrizzleService) { super(); }
+}
 ```
+
+Registering one token twice throws rather than silently replacing the first, and selecting a token that no `forRoot()` configured fails at startup naming the missing call.
+
+**A module that needs BOTH** — a reconciliation job, a migration — names each one with `@Inject(TOKEN)`. Un-annotated parameters in the same constructor keep resolving by type:
+
+```typescript
+@Module({
+  imports: [DrizzleModule.forFeature(MAIN_DB), DrizzleModule.forFeature(ANALYTICS_DB)],
+  providers: [Reconciler],
+})
+export class ReconcileModule {}
+
+@Service()
+export class Reconciler extends BaseService {
+  constructor(
+    @Inject(MAIN_DB) private main: DrizzleService,
+    @Inject(ANALYTICS_DB) private analytics: DrizzleService,
+    private clock: ClockService,
+  ) { super(); }
+}
+```
+
+Asking for the bare class in such a module fails at startup naming both candidates, and asking for a token the module never selected fails naming what it did select. Both alternatives — picking one silently — are the wrong-database failure this mechanism exists to prevent.
+
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws. An unnamed `forRoot()` keeps the global behaviour it always had.
+
+**Reaching a registration from outside the tree:** `app.getService(DrizzleService, ANALYTICS_DB)`. Without the token there is no correct answer once two registrations exist, so the call throws instead of choosing — an `Error` whose `name` is `OneBunAmbiguousServiceError`, naming both candidates. `app.getLayer()` has no token parameter and cannot represent such an application at all: Effect keys a `Context` by the tag's key, which is the class NAME, so two registrations need two slots where a `Context` has one — it throws the same error rather than silently carrying whichever was merged last. Both checks fire only when the tree holds two or more instances under one key; a single registration, named or not, still answers.
+
+::: warning Upgrading from 0.4.4 or earlier
+Two `forRoot()` calls used to give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently — and earlier releases documented exactly that arrangement as the way to run a main and an analytics database. If you followed it, audit both databases: every write is in one of them, and which one depended on module evaluation order rather than on the order you declared them.
+:::
 
 ### forFeature() Method
 
-When `DrizzleModule` is not global (`isGlobal: false`), submodules must explicitly import it using `forFeature()`:
+When `DrizzleModule` is not global (`isGlobal: false`), a submodule must import it to reach `DrizzleService`: a non-global service does not travel down the module tree, and `exports` travels up to the importing module rather than down to children. `forFeature()` is that import:
 
 ```typescript
 // Root module with non-global DrizzleModule
@@ -179,14 +256,32 @@ export class AppModule {}
 export class UserModule {}
 ```
 
+::: tip forFeature() shares the root instance
+Every module importing it receives the SAME `DrizzleService` — one connection pool for the application, not one per feature module. Earlier releases constructed a new instance per importer, so two feature modules opened two pools and shared no state.
+
+If you want ONE shared instance without making `DrizzleModule` itself global, a `@Global()` module that imports it and re-exports the service does that — the re-exported instance then reaches modules that import neither:
+
+```typescript
+@Global()
+@Module({
+  imports: [DrizzleModule.forRoot({ connection: { /* ... */ }, isGlobal: false })],
+  exports: [DrizzleService],
+})
+export class DatabaseModule {}
+```
+:::
+
 <llm-only>
 **Technical details for AI agents:**
 - `DrizzleModule` is decorated with `@Global()` by default, making `DrizzleService` available in all modules
-- `isGlobal: true` (default) - singleton DrizzleService, one DB connection for entire app
-- `isGlobal: false` - each import creates new DrizzleService instance (useful for multi-DB scenarios)
-- `forFeature()` simply returns the DrizzleModule class for explicit imports in feature modules
-- Global services are stored in a registry and automatically injected into all modules
-- When `isGlobal: false` is set, the module is removed from the global registry via `removeFromGlobalModules()`
+- `isGlobal: true` (default) - one DrizzleService per application, one DB connection
+- `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT the multi-database mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own configuration and its own instance
+- `as: symbol | string` on `forRoot()` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws. A named registration is never `@Global()`
+- A module that selects TWO registrations of one service must name each with `@Inject(TOKEN)`; the bare class throws naming both candidates, and `@Inject` with an unselected token throws naming what the module did select. The token lives in a SIDE map, so `getConstructorParamTypes` still returns the full `design:paramtypes` array and partial injection is unaffected; `@Controller` copies the map onto its wrapper subclass
+- `app.getService(Class, TOKEN)` walks the module tree for the registration that token names. `app.getLayer()` refuses outright: a `Context` has one slot per `tag.key`, which is the class NAME, so with two registrations it throws an `Error` whose `name` is `OneBunAmbiguousServiceError` — there is no token parameter and no last-writer fallback. Untokened `app.getService(Class)` throws the same error in the same case. Both fire only when the tree holds 2+ instances under one key; a single registration still answers. `OneBunAmbiguousServiceError` is a `name` on a plain `Error`, not an exported class — match on `err.name`, not `instanceof`
+- `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one DrizzleService
+- Global services are stored in the application's scope and automatically injected into all its modules
+- `isGlobal: false` removes the module from the process-wide global registry via `removeFromGlobalModules()`; a later unnamed `forRoot()` that does not opt out puts it back. That symmetry replaced a permanent latch with LAST-WRITER-WINS — it is not isolation. The registry has one entry per module CLASS for the whole process, and `forRoot()` normally runs at import time (it is the argument to `@Module({ imports: [...] })`), so the last unnamed `forRoot()` evaluated anywhere in the process decides globality for EVERY application in it. Measured, two applications, `forRoot` evaluation order varied: `{isGlobal:false}` then default → both see global and the application that asked to opt out gets ambient injection anyway; default then `{isGlobal:false}` → both see non-global and BOTH fail at `app.start()` with `Could not resolve dependency`, including the one that declared nothing. Boot order is irrelevant. Two configurations that must not interfere need `forRoot({ as: TOKEN })`, which never touches the registry
 </llm-only>
 
 ## Schema Definition
@@ -283,6 +378,78 @@ export * from './posts';
 ```
 
 ## DrizzleService
+
+### Connection Lifecycle
+
+`DrizzleService` implements `OnModuleDestroy` and closes its connection when the application stops, so `app.stop()` releases the database client rather than leaving it open for the lifetime of the process.
+
+```typescript
+const app = new OneBunApplication(AppModule);
+await app.start();
+// ... the service holds an open client
+await app.stop();
+// the client is closed and the service reports no connection
+```
+
+Before 0.4.5 nothing in the lifecycle called `close()`, so a service built by one test suite kept its connection open into the next — the mechanism behind a suite failing with `database "..." does not exist` after an earlier suite dropped its throwaway database.
+
+### Startup Contract
+
+**A configured database is a required one.** When an application configures a database — `DrizzleModule.forRoot({ connection })`, or `DB_URL` in the environment — the service checks at startup that it can actually be used, and `app.start()` **rejects** when it cannot. The HTTP server never binds, so an orchestrator sees a container that refuses to come up instead of one that passes readiness and then fails every request that touches the database.
+
+Three failures reach `app.start()`:
+
+| What failed | SQLite | PostgreSQL |
+|---|---|---|
+| The database cannot be opened | the file cannot be created or written — the error names the missing directory, or the permission | the connection options do not describe a server |
+| The database does not answer | — (opening the file is the check) | a bounded `SELECT 1` — the connection is otherwise lazy and nothing would touch the server until the first request |
+| A migration failed | a migration file that exists failed to apply | same |
+
+```typescript
+const app = new OneBunApplication(AppModule);
+
+await app.start();
+// rejects with DrizzleStartupError when the configured database is unreachable:
+//   PostgreSQL at postgresql://app:***@db:5432/orders did not answer SELECT 1 within the
+//   5000ms connect timeout (waited 5001ms): Connection closed. A configured database is a
+//   required one, so the application does not start without it. Set
+//   `allowDegradedStart: true` in DrizzleModule.forRoot(...) (or DB_ALLOW_DEGRADED_START=true
+//   on the environment path) to start anyway and accept a database that is absent,
+//   unreachable or unmigrated.
+```
+
+The error is a `DrizzleStartupError` carrying `stage` (`'open' | 'connect' | 'migrate'`), `target`, `waitedMs` and `timeoutMs`. **The password is never printed** — not in the error, not in the log line that names the connection.
+
+**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied.
+
+**What does not fail.** An application that configures no database at all is untouched: no connection is opened and nothing is checked. A missing migrations folder is *no migrations*, not a failure — `migrationsFolder` defaults to `./drizzle`, and an application that has never generated a migration starts normally.
+
+#### allowDegradedStart
+
+One option opts out, and it means "I accept a degraded or absent database at boot" — not "skip the check". The check still runs and still reports; the failure is logged at `warn` and the application starts anyway.
+
+```typescript
+DrizzleModule.forRoot({
+  connection: { /* ... */ },
+  // The database may be absent at boot: the application starts, and every request that
+  // touches the database fails until it is available.
+  allowDegradedStart: true,
+})
+```
+
+On the environment path the same switch is `DB_ALLOW_DEGRADED_START=true` (with the configured `envPrefix`). Module options are code, so an application configured through `forRoot()` takes the option and ignores the variable.
+
+<llm-only>
+**Technical details for AI agents:**
+- The failure is raised from `DrizzleService.onModuleInit()` — which `OneBunModule.callServicesOnModuleInit()` awaits — so it propagates out of `app.start()` before `Bun.serve()` is called. It is not a fire-and-forget promise: that was the defect (`autoInitialize()` swallowed everything, the module-options path at `warn` and the `DB_URL` path at `debug`)
+- The rejection reaching `await app.start()` is Effect's `FiberFailure` wrapper carrying the `DrizzleStartupError`'s message, so match on the message there; `instanceof DrizzleStartupError` holds on what `onModuleInit()` itself throws
+- The reachability check runs INDEPENDENTLY of `autoMigrate`. `autoMigrate: false` is the documented recommendation for production, and before this contract that path never touched the server at all
+- PostgreSQL: `drizzle(url)` from `drizzle-orm/bun-sql` is lazy — no socket is opened until the first query — so the probe is what makes an unreachable server visible at boot
+- SQLite: `SQLITE_CANTOPEN` covers both "the directory does not exist" and "the directory is there and unwritable"; the service asks the file system directly and says which one. A write pragma against a read-only database fails after a successful open and is reported as the pragma it was
+- The bound comes from `connection.options.pool.timeout` (ms) or `DEFAULT_STARTUP_PROBE_TIMEOUT_MS` (5000). On timeout the in-flight query is left settled with a no-op catch, so it cannot surface as an unhandled rejection
+- On the fatal path the service closes whatever it opened before rethrowing, so a refused boot leaves no socket or file handle behind
+- `allowDegradedStart` is read from module options on the `forRoot()` path and from `<PREFIX>_ALLOW_DEGRADED_START` on the environment path. The variable is read straight from `process.env` rather than through the env schema, so it still works when parsing the rest of the configuration is what failed
+</llm-only>
 
 ### Injection
 
@@ -450,39 +617,200 @@ const result = await this.db.transaction(async (tx) => {
 });
 ```
 
+The callback may `await` freely. If it throws, the whole transaction is rolled back and the
+original error reaches the caller — on both dialects:
+
+```typescript
+try {
+  await this.db.transaction(async (tx) => {
+    await tx.insert(users).values({ name: 'John', email: 'john@example.com' });
+    await someSlowCheck();                 // an await in the middle changes nothing
+    throw new Error('changed my mind');
+  });
+} catch (error) {
+  // error.message === 'changed my mind', and no user row was written
+}
+```
+
+**Prefer `tx` for every statement that belongs to the transaction.** What happens to a query
+issued through the service — or through a repository — from inside the callback depends on
+the dialect: on SQLite it runs ON the open transaction and is rolled back with it (see the
+SQLite rules below); on PostgreSQL it takes another pooled connection, so it does NOT join
+the transaction and survives the rollback. `tx` is the one form that means the same thing on
+both.
+
+##### SQLite
+
+SQLite has a single connection, so a transaction owns the database for its whole duration:
+
+- **Rollback works across awaits.** The transaction is issued as `BEGIN` / `COMMIT` |
+  `ROLLBACK`, not through drizzle's synchronous bun-sqlite transaction, which would have
+  committed at the callback's first `await`.
+- **Other queries are queued, not enrolled.** A query issued elsewhere in the application
+  while the transaction is open waits for it, then runs after the `COMMIT` or `ROLLBACK`. It
+  is never rolled back together with the transaction that was in flight.
+- **Two transactions are serialized.** The second one waits for the first; both commit.
+- **A query issued through the service from inside the callback runs ON the transaction.**
+  A repository method — or any code holding `DrizzleService` rather than the `tx` argument —
+  does not have to be rewritten to take part: it is issued on the open transaction, and is
+  rolled back with it. Only a NESTED `transaction()` is refused, because it would wait for a
+  connection its own caller is holding:
+
+```typescript
+await this.db.transaction(async (tx) => {
+  await tx.insert(users).values({ name: 'John', email: 'john@example.com' });
+
+  // Runs on the same transaction, and is undone with it.
+  await this.userRepository.create({ name: 'Jane', email: 'jane@example.com' });
+
+  // Throws DrizzleTransactionError (code 'SQLITE_TRANSACTION_NESTED')
+  await this.db.transaction(async () => { /* ... */ });
+});
+```
+
+Work that OUTLIVES the transaction it was started in is not routed onto it — once the
+transaction has ended, such a statement queues like any other bystander.
+
+The error carries `name === 'DrizzleTransactionError'` and one of the codes
+`SQLITE_TRANSACTION_NESTED` or `SQLITE_TRANSACTION_SYNC_QUERY` — the latter for a
+synchronous `.get()`, `.all()`, `.run()` or `.values()` issued by a CONCURRENT caller while
+a transaction holds the connection, which cannot be queued because it returns rows rather
+than a promise.
+
+##### PostgreSQL
+
+Unchanged: the transaction runs on its own pooled connection through drizzle's own
+`transaction()`. Nothing is queued, nothing is refused — concurrent queries use other
+connections, nested `transaction()` calls are drizzle's savepoints, and the re-entrancy
+errors above cannot occur.
+
+**A query issued through the service from inside the callback takes another connection.** It
+is therefore NOT part of the transaction and is NOT undone when the transaction rolls back —
+the opposite of the SQLite rule above. A repository method that has to take part must be
+given `tx`.
+
+<llm-only>
+**Technical details for AI agents:**
+- The SQLite path is `DrizzleService.runSQLiteTransaction()`: `sqliteGate.acquire()` →
+  `BEGIN` → callback → `COMMIT`, or `ROLLBACK` when the callback rejects, with the gate
+  released in a `finally` so both outcomes free the connection.
+- `getDatabase()` on SQLite returns a gated view of the database: builders it produces
+  intercept `then` and wait for the gate at execution time, since drizzle's builders are
+  lazy and the statement runs inside `then()`. Measured cost 0.17-0.27us per query.
+- Re-entrancy is detected with `AsyncLocalStorage`; the store is inherited by everything
+  created inside the callback, so "concurrent" means an async context that began outside it.
+- `getSQLiteDatabase()`, `getSQLiteClient()` and `.prepare()` are ungated escape hatches:
+  statements issued through them during a transaction join it and are rolled back with it.
+- On PostgreSQL `getDatabase()` returns the drizzle instance itself, with no wrapper.
+</llm-only>
+
 ## BaseRepository
 
 For common CRUD operations:
 
 ```typescript
-import { BaseRepository } from '@onebun/drizzle';
+import { BaseRepository, DrizzleService, eq } from '@onebun/drizzle';
 import { users, type User, type InsertUser } from './schema';
 
-@Service()
-export class UserRepository extends BaseRepository<typeof users, User, InsertUser> {
+export class UserRepository extends BaseRepository<typeof users> {
   constructor(db: DrizzleService) {
     super(db, users);
   }
 
-  // Inherited methods:
-  // findAll(options?: { limit?: number; offset?: number }): Promise<User[]>
-  // findById(id: string): Promise<User | null>
-  // create(data: InsertUser): Promise<User>
-  // update(id: string, data: Partial<InsertUser>): Promise<User | null>
-  // delete(id: string): Promise<boolean>
+  // Inherited methods — ONE type argument, the table; the row and insert types are derived
+  // from it, so `User` and `InsertUser` are not passed in:
+  // findAll(): Promise<User[]>                    // the whole table — no pagination
+  // findById(id: unknown): Promise<User | null>
+  // create(data: Partial<InsertUser>): Promise<User>
+  // update(id: unknown, data: Partial<InsertUser>): Promise<User | null>
+  // delete(id: unknown): Promise<boolean>
+  // count(): Promise<number>                      // findAll().length, so O(rows) in memory
+  // transaction<R>(cb: (tx: UniversalTransactionClient) => Promise<R>): Promise<R>
 
-  // Custom methods
+  // Custom methods go through the inherited `drizzleService`, NOT `this.db`: `this.db` is the
+  // raw dialect union, whose `.from()` has no callable signature.
   async findByEmail(email: string): Promise<User | null> {
-    const result = await this.db.select()
+    const result = await this.drizzleService.select()
       .from(users)
       .where(eq(users.email, email))
       .limit(1);
-    return result[0] || null;
+
+    return result[0] ?? null;
+  }
+}
+```
+
+`findAll()` takes no arguments and returns the entire table; `count()` loads it to measure it.
+For a page, or a count that does not read every row, query through `DrizzleService` instead —
+[Basic Queries](#basic-queries) shows both the `.limit()` / `.offset()` form and a `count(*)`
+projection.
+
+**A repository is not a provider.** `BaseRepository` resolves the database in its constructor,
+and every provider is constructed before `DrizzleService` has opened one — so a repository
+carrying `@Service()` fails to construct with `Database not initialized. Call initialize()
+first.` If anything injects it, `app.start()` then rejects with a `CircularDependencyError`
+naming the CONSUMER, not the repository; if nothing does, the application boots with the
+repository silently absent from DI. Construct it after the database is up instead — lazily on
+first use, or in `onApplicationInit()` — from a service that holds `DrizzleService`.
+
+```typescript
+@Service()
+export class UserService extends BaseService {
+  private repository: UserRepository | null = null;
+
+  constructor(private db: DrizzleService) { super(); }
+
+  private repo(): UserRepository {
+    this.repository ??= new UserRepository(this.db);
+
+    return this.repository;
+  }
+
+  async byEmail(email: string): Promise<User | null> {
+    return await this.repo().findByEmail(email);
   }
 }
 ```
 
 ## Query Examples
+
+### Dialect Resolution
+
+`select()`, `selectDistinct()`, `insert()`, `update()` and `delete()` accept a table of
+either dialect and resolve to that dialect's own query builder. On PostgreSQL that means the
+whole chain is typed and reachable:
+
+```typescript
+await this.db.select().from(runs).where(eq(runs.id, id)).limit(1);
+await this.db.select({ id: outbox.id }).from(outbox).limit(10).for('update', { skipLocked: true });
+await this.db.update(runs).set({ status: 'running' }).where(eq(runs.id, id)).returning({ id: runs.id });
+```
+
+`.limit()`, `.offset()`, `.orderBy()`, `.for()`, `.$dynamic()` and a projected `.returning(fields)`
+are all available on the PostgreSQL path, and SQLite tables continue to resolve to the SQLite
+builders.
+
+For anything the universal surface does not model — a PostgreSQL-only feature, or a raw
+`sql` construction against the typed schema — `getPostgreSQLDatabase()` and
+`getSQLiteDatabase()` return the underlying dialect-specific drizzle instance. Both throw if
+the configured database is of the other type.
+
+```typescript
+const pg = this.db.getPostgreSQLDatabase();
+await pg.execute(sql`REFRESH MATERIALIZED VIEW ${sql.identifier('run_stats')}`);
+```
+
+<llm-only>
+
+**Technical details for AI agents — dialect resolution:**
+- `SQLiteTable<any>` and `PgTable<any>` do NOT discriminate: a `pgTable` satisfies `SQLiteTable<any>` and a `sqliteTable` satisfies `PgTable<any>`. Overload ordering therefore cannot separate them where the constraint carries `<any>` — whichever is declared first captures every table
+- The BARE constraints behave differently and asymmetrically: bare `PgTable` is dialect-branded and rejects a SQLite table, while bare `SQLiteTable` accepts a PostgreSQL one. That asymmetry is what makes declaration order work for `insert`/`update`/`delete`, whose overloads use the bare forms — PostgreSQL is declared FIRST there on purpose
+- `select().from()` cannot be fixed that way, because its constraints are the `<any>` forms. It uses ONE generic signature with a conditional return type instead, keyed on `DialectOf<TTable>` — which reads the `dialect` brand ('pg' | 'sqlite') off the table's own column map
+- `PgSelectQueryResult` is instantiated to match what `BunSQLDatabase.select().from()` returns, so the PostgreSQL chain is drizzle's real `PgSelectBase` rather than the previous hand-written `Promise & { where }`, which ended the chain after one call
+- The regression guard is `packages/drizzle/tests/dialect-resolution.test-d.ts`, gated by `bun run typecheck`. It is named `.test-d.ts` so `bun test` does not collect it: the defect is invisible at runtime, since the queries ran correctly while the API was untypeable
+- `getPostgreSQLDatabase()` / `getSQLiteDatabase()` are supported escape hatches, not internal.
+
+</llm-only>
 
 ### Basic Queries
 
@@ -673,6 +1001,12 @@ await drizzleService.initialize({ /* connection options */ });
 await drizzleService.runMigrations({ migrationsFolder: './drizzle' });
 ```
 
+A manual `runMigrations()` requires the folder to exist: against one with no
+`meta/_journal.json` it throws drizzle-orm's `Error: Can't find meta/_journal.json file` — a
+plain `Error`, not a `DrizzleStartupError`, so it carries none of the folder/target context the
+[Startup Contract](#startup-contract) promises. Guard the call, or let `autoMigrate` run it. The
+same applies to the two calls under [One Journal Per Migration Set](#one-journal-per-migration-set).
+
 Or enable automatic migrations in module configuration:
 
 ```typescript
@@ -683,17 +1017,72 @@ DrizzleModule.forRoot({
 })
 ```
 
+**A migration that fails fails the boot.** `app.start()` rejects with a `DrizzleStartupError` naming the folder and the SQL error, and the HTTP server never binds — a half-applied schema is not a state to serve traffic in. **On the startup path**, a migrations folder that does not exist is *no migrations* and is not a failure: `./drizzle` is the default, an application that has never generated one boots normally, and the skipped step is logged — `No migrations to run: "drizzle/meta/_journal.json" does not exist`, at `debug` for the default folder and at `warn` for one you configured explicitly. That exemption is the startup path's alone — the manual `runMigrations()` above throws.
+
+The database is checked for reachability whether or not migrations run, so `autoMigrate: false` — the recommendation for production, where migrations are a deploy step — still refuses to start against a database that is not there. See [Startup Contract](#startup-contract), including the `allowDegradedStart` opt-out.
+
+### One Journal Per Migration Set
+
+A package that ships migrations of its own needs its own journal table:
+
+```typescript
+// The application's own set — default journal
+await drizzleService.runMigrations({ migrationsFolder: './drizzle' });
+
+// A package's set — its own journal, independent of the application's
+await drizzleService.runMigrations({
+  migrationsFolder: './node_modules/@acme/durable/migrations',
+  migrationsTable: '__drizzle_migrations_durable',
+});
+```
+
+**Why this is not optional.** Drizzle decides whether to apply a migration by comparing the
+timestamp baked into its folder against the **newest row** in the journal — never by hash.
+So when two folders share one journal, whichever set was generated earlier is skipped
+entirely: no error, no log, and the application starts and then fails at the first query
+against a table that was never created.
+
+To make that impossible to hit by accident, a second migration folder that would share a
+journal with the first is refused at the point of the call, naming both folders and the
+option that separates them. Several journals in one process is the supported shape; several
+**folders** sharing one journal is not.
+
+`migrationsSchema` names the schema holding the journal (PostgreSQL only — SQLite has no
+schemas and the option is ignored there). Both default to drizzle's own
+`drizzle.__drizzle_migrations`.
+
+Migrations whose entries end up neither applied nor already recorded are reported with a
+`warn` naming each file, so a skipped set is visible even where it is legitimate.
+
 ### Environment Variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `DB_TYPE` | `sqlite` or `postgresql` | `sqlite` |
+| `DB_URL` | Connection URL — a file path for SQLite, a full `postgresql://…` for PostgreSQL | — (none: unset means no database) |
 | `DB_AUTO_MIGRATE` | Auto-run migrations on startup | `true` |
 | `DB_MIGRATIONS_FOLDER` | Path to migrations folder | `'./drizzle'` |
+| `DB_MIGRATIONS_TABLE` | Journal table recording applied migrations | `'__drizzle_migrations'` |
+| `DB_MIGRATIONS_SCHEMA` | Schema holding the journal (PostgreSQL only) | `'drizzle'` |
 | `DB_SCHEMA_PATH` | Path to schema files | - |
+| `DB_ALLOW_DEGRADED_START` | Start even when the configured database cannot be reached ([Startup Contract](#startup-contract)) | `false` |
+
+`migrationsTable` and `migrationsSchema` are also accepted by `DrizzleModule.forRoot()` and
+are forwarded on every path that runs migrations, including automatic ones.
+
+`DB_TYPE` and `DB_URL` are the environment equivalent of `connection` in
+`DrizzleModule.forRoot()`: set them and the service initializes itself with no module
+configuration at all. On PostgreSQL the URL reaches the driver untouched, so its query
+parameters are preserved.
+
+`DB_URL` has no default. Unset, empty or whitespace-only is *not configured* rather than
+`:memory:`: no connection is opened, `app.start()` succeeds, and every `getDatabase()` throws
+`Database not initialized. Call initialize() first.` — see [Startup Contract](#startup-contract).
+The only surviving `:memory:` fallback is the drizzle-kit config that `pushSchema()` generates.
 
 ### Migration Tracking
 
-Drizzle automatically tracks applied migrations in the `__drizzle_migrations` table. This ensures:
+Drizzle automatically tracks applied migrations in the journal table. This ensures:
 - Migrations are only applied once (idempotency)
 - Running `runMigrations()` multiple times is safe
 - No duplicate table creation errors
@@ -720,10 +1109,14 @@ info: SQLite migrations applied { migrationsFolder: './drizzle', newMigrations: 
 - `pushSchema()` runs `bunx drizzle-kit push:sqlite` or `push:pg` depending on dialect
 - `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
 - Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
-- The `__drizzle_migrations` table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
+- The journal table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`
 - Migration hash is SHA-256 of the SQL file content, used to match applied migrations with journal entries
 - `readMigrationJournal()` reads `meta/_journal.json` and computes hashes for each migration file
-- `getAppliedMigrationHashes()` queries `__drizzle_migrations` table before and after running migrations to determine which were newly applied
+- `getAppliedMigrationHashes(table, schema)` queries the configured journal before and after running migrations to determine which were newly applied. It is ASYNC: Bun's SQL template returns a lazy thenable, and the earlier synchronous version read `.length` off a promise, so the PostgreSQL path always reported zero applied migrations regardless of what ran
+- On PostgreSQL the existence probe is schema-qualified against `information_schema.tables`; an unqualified name never matched, because drizzle puts the journal in its own schema
+- `migrationsTable`/`migrationsSchema` are validated against `/^[A-Za-z_][A-Za-z0-9_$]*$/` before use — an identifier cannot be a bound parameter, so it reaches the query as text
+- `assertJournalNotShared()` keys a per-service map on `schema.table` and throws when a second, different `migrationsFolder` claims a journal another folder already owns. Re-running the SAME folder is idempotent and does not throw
+- Drizzle's own selection rule is `!lastDbMigration || Number(lastDbMigration.created_at) < migration.folderMillis` against the single newest journal row — the hash is written but never used for filtering, which is why journal sharing loses migrations rather than merely reordering them
 </llm-only>
 
 ## Complete Example
@@ -896,13 +1289,13 @@ describe('MyService', () => {
     DrizzleModule.clearOptions();
 
     // Configure with in-memory database
-    // Note: autoMigrate defaults to true, set to false if you don't have migrations
+    // Note: autoMigrate defaults to true; with no migrations folder it is a no-op
     DrizzleModule.forRoot({
       connection: {
         type: DatabaseType.SQLITE,
         options: { url: ':memory:' },
       },
-      autoMigrate: false, // Disable if no migrations folder exists
+      autoMigrate: false, // optional — this test creates its tables itself
     });
 
     // Create and initialize service
@@ -917,11 +1310,11 @@ describe('MyService', () => {
     // No generic parameter needed - types are inferred from table schemas
     drizzleService = new DrizzleService();
     drizzleService.initializeService(logger, createMockConfig());
-    // onAsyncInit() is called automatically by the framework
+    // onModuleInit() is called automatically by the framework
     // In tests, call it manually to simulate framework behavior
-    await drizzleService.onAsyncInit();
+    await drizzleService.onModuleInit();
 
-    // Create test tables manually (when autoMigrate is false)
+    // Create test tables manually (this test ships no migrations)
     const sqliteClient = drizzleService.getSQLiteClient();
     sqliteClient!.exec(`
       CREATE TABLE IF NOT EXISTS users (
@@ -961,7 +1354,7 @@ beforeEach(async () => {
   });
 
   // ... create and initialize service
-  await drizzleService.onAsyncInit();
+  await drizzleService.onModuleInit();
 
   // Tables from migrations should now exist
   const sqliteClient = drizzleService.getSQLiteClient();
@@ -987,13 +1380,13 @@ beforeEach(async () => {
   // Set test environment
   process.env.DB_URL = ':memory:';
   process.env.DB_TYPE = 'sqlite';
-  process.env.DB_AUTO_MIGRATE = 'false'; // Disable to avoid missing migrations folder error
+  process.env.DB_AUTO_MIGRATE = 'false'; // optional: skips the migration step (a missing folder is already a no-op)
 
   // Create service - will auto-initialize from env vars
   // No generic parameter needed
   drizzleService = new DrizzleService();
   drizzleService.initializeService(logger, createMockConfig());
-  await drizzleService.onAsyncInit();
+  await drizzleService.onModuleInit();
 });
 
 afterEach(() => {
@@ -1006,10 +1399,10 @@ afterEach(() => {
 
 ### Key Testing Notes
 
-1. **Call `onAsyncInit()` in tests** - this triggers async initialization that the framework does automatically
+1. **Call `onModuleInit()` in tests** - this triggers async initialization that the framework does automatically
 2. **Use `DrizzleModule.clearOptions()`** in beforeEach/afterEach to ensure test isolation
 3. **Clean up environment variables** when testing env-based initialization
 4. **Use `:memory:`** SQLite URL for in-memory databases that are faster and don't leave files
-5. **autoMigrate defaults to `true`** - set to `false` explicitly if you don't have migrations
-6. **Database is ready after `onAsyncInit()`** - no need to call `waitForInit()` in client code
+5. **autoMigrate defaults to `true`** - a missing migrations folder is *no migrations*, not a failure, so leaving it on is safe; `false` skips only the migration step, not the reachability check (see [Startup Contract](#startup-contract))
+6. **Database is ready after `onModuleInit()`** - no need to call `waitForInit()` in client code
 7. **No generic parameter needed** - `DrizzleService` infers types from table schemas automatically

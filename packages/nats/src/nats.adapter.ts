@@ -9,6 +9,7 @@
 import type { NatsAdapterOptions } from './types';
 
 import type {
+  AckMode,
   QueueAdapter,
   QueueAdapterType,
   QueueFeature,
@@ -24,6 +25,10 @@ import type {
 import {
   createQueuePatternMatcher,
   createQueueScheduler,
+  nackedError,
+  resolveAckMode,
+  wasNacked,
+  type NackAwareMessage,
   type QueuePatternMatch,
 } from '@onebun/core';
 
@@ -32,12 +37,13 @@ import {
   type NatsMessage,
   type NatsSubscriptionHandle,
 } from './nats-client';
+import { toNatsSubject } from './subject';
 
 // ============================================================================
 // NATS Message Implementation
 // ============================================================================
 
-class NatsQueueMessage<T> implements Message<T> {
+class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
   data: T;
@@ -65,13 +71,42 @@ class NatsQueueMessage<T> implements Message<T> {
     this.redelivered = false;
   }
 
+  /**
+   * True once `nack()` has been called, so the consume loop can report the message as
+   * failed rather than processed. Not on the public `Message` interface — see
+   * `NackAwareMessage` in `@onebun/core`.
+   */
+  get wasNacked(): boolean {
+    return this.nacked;
+  }
+
+  /**
+   * A no-op on the wire: core NATS has no acknowledgement protocol, so there is nothing to
+   * send. The call is still recorded, because it is what tells the consume loop the handler
+   * considered this message handled.
+   *
+   * @see docs:api/queue.md
+   */
   async ack(): Promise<void> {
-    // NATS pub/sub doesn't require explicit ack
+    if (this.acked || this.nacked) {
+      return;
+    }
+
     this.acked = true;
   }
 
+  /**
+   * A no-op on the wire, and `requeue` cannot be honoured: core NATS never redelivers, so a
+   * nacked message is simply dropped. The call is recorded so the subscription reports
+   * `onMessageFailed` instead of `onMessageProcessed` — the drop is the failure.
+   *
+   * @see docs:api/queue.md
+   */
   async nack(_requeue = false): Promise<void> {
-    // NATS pub/sub doesn't support nack/requeue
+    if (this.acked || this.nacked) {
+      return;
+    }
+
     this.nacked = true;
   }
 }
@@ -87,6 +122,13 @@ interface NatsSubscriptionEntry {
   matcher: (topic: string) => QueuePatternMatch;
   paused: boolean;
   handle?: NatsSubscriptionHandle;
+  /**
+   * Resolved once, so the adapter names the mode in one place instead of re-reading the
+   * raw option. Core NATS has no acknowledgement protocol at all, so nothing on the wire
+   * varies with it — `'none'` is simply the only mode that describes what this adapter
+   * really does, and `'auto'`/`'manual'` are accepted with no transport effect.
+   */
+  ackMode: AckMode;
 }
 
 class NatsSubscription implements Subscription {
@@ -277,10 +319,10 @@ export class NatsQueueAdapter implements QueueAdapter {
   ): Promise<Subscription> {
     this.ensureConnected();
 
-    // Convert OneBun pattern to NATS pattern
-    // OneBun uses '.' as separator and '*' for single-level, '#' for multi-level
-    // NATS uses '.' as separator and '*' for single-level, '>' for multi-level
-    const natsPattern = pattern.replace(/#/g, '>');
+    // OneBun spells the multi-level wildcard '#' and NATS spells it '>', and NATS has
+    // no form for a named parameter at all — `{id}` widens to '*' and `entry.matcher`
+    // narrows it back.
+    const natsPattern = toNatsSubject(pattern);
 
     const entry: NatsSubscriptionEntry = {
       pattern,
@@ -288,6 +330,7 @@ export class NatsQueueAdapter implements QueueAdapter {
       options,
       matcher: createQueuePatternMatcher(pattern),
       paused: false,
+      ackMode: resolveAckMode(options),
     };
 
     // Subscribe to NATS
@@ -407,10 +450,15 @@ export class NatsQueueAdapter implements QueueAdapter {
       try {
         await entry.handler(message);
 
-        // Emit processed event
-        this.emit('onMessageProcessed', message);
+        // A handler that catches its own exception and nacks returns normally, so control
+        // flow alone cannot tell the drop apart from a success.
+        if (wasNacked(message)) {
+          this.emit('onMessageFailed', message, nackedError(message));
+        } else {
+          this.emit('onMessageProcessed', message);
+        }
       } catch (error) {
-        // Emit failed event
+        // A throw is the failure, whether or not the handler also nacked — one event either way.
         this.emit('onMessageFailed', message, error as Error);
       }
     } catch {

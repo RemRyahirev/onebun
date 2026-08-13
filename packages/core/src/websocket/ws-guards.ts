@@ -10,7 +10,11 @@ import type {
   WsExecutionContext,
   WsHandlerMetadata,
 } from './ws.types';
+import type { ExecutionContext } from '../types';
 import type { ServerWebSocket } from 'bun';
+
+import { guardName } from '../http-guards/guard-binding';
+import { isWsContext } from '../types';
 
 
 // ============================================================================
@@ -69,7 +73,13 @@ export class WsExecutionContextImpl implements WsExecutionContext {
  * ```
  */
 export class WsAuthGuard implements WsGuard {
-  canActivate(context: WsExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and queue consumers too. This guard reads socket
+    // state, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     const client = context.getClient();
 
     return client.auth?.authenticated === true;
@@ -99,7 +109,13 @@ export class WsPermissionGuard implements WsGuard {
     this.requiredPermissions = Array.isArray(permissions) ? permissions : [permissions];
   }
 
-  canActivate(context: WsExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and queue consumers too. This guard reads socket
+    // state, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     const client = context.getClient();
     const clientPermissions = client.auth?.permissions || [];
 
@@ -120,7 +136,13 @@ export class WsPermissionGuard implements WsGuard {
 export class WsRoomGuard implements WsGuard {
   constructor(private roomName: string) {}
 
-  canActivate(context: WsExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and queue consumers too. This guard reads socket
+    // state, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     const client = context.getClient();
 
     return client.rooms.includes(this.roomName);
@@ -144,7 +166,13 @@ export class WsAnyPermissionGuard implements WsGuard {
     this.permissions = permissions;
   }
 
-  canActivate(context: WsExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and queue consumers too. This guard reads socket
+    // state, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     const client = context.getClient();
     const clientPermissions = client.auth?.permissions || [];
 
@@ -169,7 +197,13 @@ export class WsServiceGuard implements WsGuard {
     this.allowedServices = Array.isArray(services) ? services : [services];
   }
 
-  canActivate(context: WsExecutionContext): boolean {
+  canActivate(context: ExecutionContext): boolean {
+    // `@UseGuards` reaches HTTP routes and queue consumers too. This guard reads socket
+    // state, so anywhere else it denies rather than throwing on an absent accessor.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     const client = context.getClient();
     const serviceId = client.auth?.serviceId;
 
@@ -242,15 +276,25 @@ export class WsAnyGuard implements WsGuard {
 // ============================================================================
 
 /**
- * Execute a list of guards
+ * Execute a list of guards.
+ *
+ * A guard that THROWS denies. `@UseGuards` reaches WebSocket handlers now, so a guard written
+ * against an HTTP request can land here and blow up on `getRequest()`; failing open would make
+ * that a silent authorization bypass. HTTP deliberately does the opposite — a throw there
+ * travels to the exception filters so `throw new HttpException(401, ...)` keeps its status —
+ * but a socket has no filter chain to carry it, so the throw is reported and treated as a deny.
  *
  * @param guards - Array of guard classes or instances
  * @param context - Execution context
+ * @param onError - Called with the offending guard's name and the error, for the framework's
+ *   own diagnostic. Without it a thrown guard denies silently.
  * @returns Whether all guards passed
+ * @see docs:api/guards.md
  */
 export async function executeGuards(
   guards: (Function | WsGuard)[],
   context: WsExecutionContext,
+  onError?: (guardName: string, error: unknown) => void,
 ): Promise<boolean> {
   for (const guard of guards) {
     let guardInstance: WsGuard;
@@ -263,7 +307,15 @@ export async function executeGuards(
       guardInstance = guard;
     }
 
-    const result = await guardInstance.canActivate(context);
+    let result: boolean;
+    try {
+      result = await guardInstance.canActivate(context);
+    } catch (error) {
+      onError?.(guardName(guard), error);
+
+      return false;
+    }
+
     if (!result) {
       return false;
     }
@@ -293,7 +345,13 @@ export function createGuard(
   fn: (context: WsExecutionContext) => boolean | Promise<boolean>,
 ): new () => WsGuard {
   return class implements WsGuard {
-    canActivate(context: WsExecutionContext): boolean | Promise<boolean> {
+    canActivate(context: ExecutionContext): boolean | Promise<boolean> {
+      // Same rule as the built-ins: the function was written against a socket, so it denies
+      // on any other transport instead of throwing once per message.
+      if (!isWsContext(context)) {
+        return false;
+      }
+
       return fn(context);
     }
   };

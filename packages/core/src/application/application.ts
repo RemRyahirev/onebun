@@ -30,6 +30,7 @@ import {
   createErrorResponse,
   createSuccessResponse,
   HttpStatusCode,
+  OneBunBaseError,
 } from '@onebun/requests';
 
 import {
@@ -59,7 +60,12 @@ import {
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
 } from '../module/controller';
-import { OneBunModule, registerGlobalService } from '../module/module';
+import {
+  createGlobalScope,
+  type GlobalScope,
+  OneBunModule,
+} from '../module/module';
+import { assertRegistrationsConfigured } from '../module/registration';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -80,12 +86,19 @@ import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { hasQueueDecorators } from '../queue/decorators';
 import { SharedRedisProvider } from '../redis/shared-redis';
 import { getCurrentTraceContext, requestContextStore } from '../request-context';
+import {
+  bindClientAddress,
+  createClientAddressBinding,
+  getClientAddress,
+  type ClientAddressBinding,
+  type PeerAddressSource,
+} from '../security/client-address';
 import { CorsMiddleware } from '../security/cors-middleware';
 import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
 import {
   type ApplicationOptions,
-  type HttpMethod,
+  HttpMethod,
   type ModuleInstance,
   type OneBunRequest,
   ParamType,
@@ -93,6 +106,17 @@ import {
 } from '../types';
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
+
+import { QUEUE_DISABLED_WITH_ADAPTER_WARNING, resolveQueueEnablement } from './queue-enablement';
+import {
+  createDeadline,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  DRAIN_BUDGET_RATIO,
+  describeRemaining,
+  drainInFlight,
+  type DrainReport,
+  type InFlightSource,
+} from './shutdown';
 
 // Conditionally import metrics
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -151,6 +175,64 @@ function normalizePath(pathStr: string): string {
   }
 
   return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
+}
+
+/**
+ * Method keys Bun accepts inside the object form of a `routes` entry
+ * (`{ '/x': { GET: handler } }`).
+ *
+ * MEASURED against Bun 1.3.14, not assumed: these nine are accepted, and every
+ * other key — `ALL`, `PROPFIND`, `QUERY`, or any lowercase spelling — makes
+ * `Bun.serve` throw a bare `TypeError` reading
+ * `'routes' expects a Record<string, Response | HTMLBundle | {...}>`.
+ * That message names neither the controller nor the handler, so registration
+ * validates against this set first and raises `OneBunBootstrapError` instead.
+ */
+const BUN_ROUTE_METHOD_KEYS: ReadonlySet<string> = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'DELETE',
+  'PATCH',
+  'OPTIONS',
+  'HEAD',
+  'TRACE',
+  'CONNECT',
+]);
+
+/**
+ * Decorator names by `HttpMethod`, used to name the offending decorator in
+ * bootstrap diagnostics.
+ */
+const ROUTE_DECORATOR_NAMES: Readonly<Record<string, string>> = {
+  [HttpMethod.GET]: '@Get',
+  [HttpMethod.POST]: '@Post',
+  [HttpMethod.PUT]: '@Put',
+  [HttpMethod.DELETE]: '@Delete',
+  [HttpMethod.PATCH]: '@Patch',
+  [HttpMethod.OPTIONS]: '@Options',
+  [HttpMethod.HEAD]: '@Head',
+  [HttpMethod.ALL]: '@All',
+};
+
+/**
+ * A handler as Bun's `routes` option consumes it.
+ */
+type BunRouteHandler = (
+  req: OneBunRequest,
+  server: ReturnType<typeof Bun.serve>,
+) => Promise<Response>;
+
+/**
+ * Everything registered for one concrete path, collected before anything is
+ * handed to Bun so that precedence is decided by rule rather than by the order
+ * in which controllers happened to be walked.
+ */
+interface PathRegistration {
+  /** Handlers declared with a concrete verb decorator (`@Get`, `@Post`, …), keyed by uppercase verb. */
+  methods: Map<string, BunRouteHandler>;
+  /** Handler declared with `@All()` — the catch-all for every verb no concrete decorator claims. */
+  catchAll?: BunRouteHandler;
 }
 
 /**
@@ -285,6 +367,28 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
 }
 
 /**
+ * Body served to every request that arrives after the drain has begun. The listener stays
+ * open on purpose: answering 503 is what tells a load balancer to stop routing here, and
+ * it keeps the deadline enforceable — Bun ignores `stop(true)` once a graceful `stop()` is
+ * pending, so closing the listener first would make the force-close unreachable.
+ */
+const SHUTDOWN_RESPONSE_BODY = JSON.stringify({
+  success: false,
+  error: 'Service Unavailable',
+  message: 'Server is shutting down',
+});
+
+/** How the shutdown ended — the signal handler turns this into an exit code. */
+interface ShutdownOutcome {
+  /** The deadline expired before the sequence finished. */
+  timedOut: boolean;
+  /** What was running when the deadline expired, for the log line. */
+  phase: string | null;
+  /** Connections force-closed because the drain window expired. */
+  forceClosed: number;
+}
+
+/**
  * OneBun Application
  * @see docs:api/core.md
  * @see docs:getting-started.md
@@ -310,6 +414,22 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
+  /**
+   * DI state owned by THIS application: `@Global()` service instances, the modules already
+   * processed, test overrides and dynamic-module option snapshots. Not on `ApplicationOptions`
+   * on purpose — it is package-internal state, not something a caller configures.
+   */
+  private globalScope: GlobalScope | null = null;
+  /**
+   * The one shutdown latch. `stop()`, the SIGTERM handler and a second signal all go
+   * through it, so a shutdown runs exactly once per application instance: a second call
+   * awaits the first outcome instead of walking the destroy hooks again. Terminal on
+   * purpose — it is never cleared, because "stopped" is not a state an application
+   * returns from.
+   */
+  private shutdownPromise: Promise<ShutdownOutcome> | null = null;
+  /** Signal handlers are installed at most once per instance. */
+  private signalHandlersRegistered = false;
   // Docs (OpenAPI/Swagger) - generated on start()
   private openApiSpec: Record<string, unknown> | null = null;
   private swaggerHtml: string | null = null;
@@ -335,7 +455,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Multi-service mode
       this.multiServiceMode = true;
       this.moduleClass = null;
-      this.options = {} as ApplicationOptions;
+      // The only two single-service options that mean anything at the parent level: the
+      // parent owns the process-wide signal handler and the shutdown budget for
+      // `stopAll()`. Everything else about a child is configured per service.
+      this.options = {
+        gracefulShutdown: moduleClassOrOptions.gracefulShutdown,
+        shutdownTimeout: moduleClassOrOptions.shutdownTimeout,
+      } as ApplicationOptions;
       this.config = new NotInitializedConfig();
 
       // Initialize logger (simplified — no config/metrics/tracing at parent level)
@@ -560,6 +686,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   getLayer(): Layer.Layer<never, never, unknown> {
     this.ensureSingleServiceMode('getLayer');
+    this.assertLayerUnambiguous();
 
     return this.ensureModule().getLayer();
   }
@@ -607,6 +734,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     if (this.multiServiceMode) {
       await this.orchestrator!.startAll();
 
+      // ONE handler for the whole process. The children are built with
+      // `gracefulShutdown: false`, so nothing below this line can call `process.exit`
+      // while a sibling is still running its destroy hooks — the parent exits after
+      // `stopAll()` has stopped every service.
+      if (this.options.gracefulShutdown !== false) {
+        this.enableGracefulShutdown();
+      }
+
       return;
     }
 
@@ -614,6 +749,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
       httpEnvelope: this.options.httpEnvelope,
     });
+    // `applyExceptionFilters` is a function declaration at method-body scope, so it
+    // cannot see `const app = this` — that one is block-scoped inside the try below.
+    const appLogger = this.logger;
 
     try {
       // Initialize configuration if schema was provided
@@ -629,12 +767,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         getProfiler()!.end(profileMark);
       }
 
-      // Register QueueService proxy in global registry BEFORE creating the root module,
+      // This application's own DI scope. Everything below writes into it rather than into a
+      // process-wide registry, which is what keeps a second application's @Global() services
+      // — and a second DrizzleModule.forRoot() — from being the first one's.
+      this.globalScope = createGlobalScope();
+
+      // Test provider overrides are seeded BEFORE the tree is built, so PHASE -1 of every
+      // module picks them up. Patching the root module afterwards, as this used to, reached
+      // root-module controllers only: services and imported modules silently kept the real
+      // instance, so a mock could be ignored without a word.
+      if (this.options._testProviders) {
+        for (const { tag, value } of this.options._testProviders) {
+          this.globalScope.overrides.set(tag as Context.Tag<unknown, unknown>, value);
+        }
+      }
+
+      // Register QueueService proxy in the scope BEFORE creating the root module,
       // so all modules (including child modules) pick it up via PHASE 0 of initModule().
       // After initializeQueue(), setDelegate(real) is called when queue is enabled.
       this.queueServiceProxy = new QueueServiceProxy();
-      registerGlobalService(
-        QueueServiceTag as Context.Tag<unknown, QueueService>,
+      this.globalScope.services.set(
+        QueueServiceTag as unknown as Context.Tag<unknown, unknown>,
         this.queueServiceProxy as unknown as QueueService,
       );
 
@@ -644,21 +797,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (PROFILING_ENABLED) {
         profileMark = getProfiler()!.start('bootstrap', 'module:create');
       }
+      // A registration selected with forFeature(token) but never configured with
+      // forRoot({ as: token }) is caught here, before anything is constructed.
+      assertRegistrationsConfigured();
+
       this.rootModule = OneBunModule.create(
         this.moduleClass!, this.loggerLayer, this.config,
         this.options.tracing?.traceAll
           ? { traceAll: true, traceFilter: this.options.tracing.traceFilter }
           : undefined,
+        this.globalScope,
       );
       if (profileMark) {
         getProfiler()!.end(profileMark);
-      }
-
-      // Register test provider overrides (must happen before setup() so controllers receive mocks)
-      if (this.options._testProviders) {
-        for (const { tag, value } of this.options._testProviders) {
-          this.ensureModule().registerService?.(tag, value);
-        }
       }
 
       // Start metrics collection if enabled
@@ -720,6 +871,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Create server context binding (used by route handlers and executeHandler)
       const app = this;
 
+      // Client-address policy: one answer to "who called", shared by the default
+      // rate-limit key and the `remoteAddr` span field. Proxy headers are attacker-
+      // controlled on a direct connection, so they only count when the application
+      // opts in; otherwise the transport peer wins.
+      const trustProxy = this.options.trustProxy ?? false;
+      // The Bun server handle only exists once `Bun.serve` has returned, but every
+      // request entry point is handed it as an argument — so the binding is built from
+      // the first request and reused, keeping the per-request cost to one WeakMap write.
+      let clientAddressBinding: ClientAddressBinding | null = null;
+      const bindRequestClientAddress = (
+        req: Request,
+        server: PeerAddressSource,
+      ): void => {
+        clientAddressBinding ??= createClientAddressBinding(server, trustProxy);
+        bindClientAddress(req, clientAddressBinding);
+      };
+
       // Path constants for framework endpoints
       const metricsPath = this.options.metrics?.path || '/metrics';
       const docsPath = this.options.docs?.path || '/docs';
@@ -731,6 +899,51 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // Build Bun routes object: { "/path": { GET: handler, POST: handler } }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bunRoutes: Record<string, any> = {};
+
+      // Controller routes land here first, keyed by path, and are materialised into
+      // `bunRoutes` in one pass once every controller has been walked. Writing straight
+      // into a shared `bunRoutes[path]` object made precedence a function of walk order;
+      // it is now a rule (see materialisation below).
+      const routeRegistry = new Map<string, PathRegistration>();
+
+      /**
+       * Record one path/verb pair. `@All()` is stored apart from the concrete verbs
+       * rather than as a `bunRoutes[path].ALL` key: Bun's method map has no
+       * "every other verb" slot, and an `ALL` key makes `Bun.serve` throw.
+       */
+      function registerRoute(
+        controllerClass: Function,
+        route: RouteMetadata,
+        pathKey: string,
+        handler: BunRouteHandler,
+      ): void {
+        let registration = routeRegistry.get(pathKey);
+        if (!registration) {
+          registration = { methods: new Map() };
+          routeRegistry.set(pathKey, registration);
+        }
+
+        if (route.method === HttpMethod.ALL) {
+          registration.catchAll = handler;
+
+          return;
+        }
+
+        const verb = String(route.method);
+        if (!BUN_ROUTE_METHOD_KEYS.has(verb)) {
+          // Without this, Bun.serve throws a TypeError that names neither the
+          // controller nor the handler, so nobody can find the offending route.
+          const decorator = ROUTE_DECORATOR_NAMES[verb] ?? `@${verb}`;
+          throw new OneBunBootstrapError(
+            `Cannot register route ${verb} ${pathKey} declared by ` +
+              `${controllerClass.name}.${String(route.handler)}() via ${decorator}(): ` +
+              `Bun's routes option accepts only ${[...BUN_ROUTE_METHOD_KEYS].join(', ')} ` +
+              'as method keys. Use @All() for a catch-all route.',
+          );
+        }
+
+        registration.methods.set(verb, handler);
+      }
 
       /**
        * Create a route handler with the full OneBun request lifecycle:
@@ -757,14 +970,29 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const effectiveTimeout: number | undefined = isSse
           ? (sseDecoratorOptions?.timeout ?? routeMeta.timeout ?? DEFAULT_SSE_TIMEOUT)
           : routeMeta.timeout;
+        // MEASURED optimisation, not incidental duplication: routing zero-param,
+        // no-schema routes through executeHandler regresses the hot path. Do NOT collapse
+        // the two arms — they also differ observably, the fast arm calling
+        // boundHandler(req) where executeHandler calls boundHandler(...args).
         const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
+        // An @All route answers every verb, so 'ALL' is not a method any client sent —
+        // emitting it as a metric label or span attribute would be a lie, and it would
+        // collapse every verb into one Prometheus series. Concrete routes keep the
+        // registered verb, which Bun guarantees equals req.method for a method-map route.
+        const isCatchAllRoute = method === HttpMethod.ALL;
 
         return async (req, server) => {
+          // Outermost point of a routed request: bind before the middleware chain, the
+          // guards or the handler can run, so every one of them resolves the same
+          // client address without needing the server handle in scope.
+          bindRequestClientAddress(req, server);
+
           return await requestContextStore.run({ traceContext: null }, async () => {
           // Capture outermost timestamp before any closure/ALS overhead
             const profiler = PROFILING_ENABLED ? getProfiler() : null;
             const outerStartNs = profiler ? Bun.nanoseconds() : 0;
+            const observedMethod = isCatchAllRoute ? req.method : method;
 
             const requestHandler = async (): Promise<Response> => {
             // Only measure time when metrics or tracing need it
@@ -803,13 +1031,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
                   const contentLengthHeader = req.headers.get('content-length');
                   traceSpan = app.traceService.startHttpTraceSync({
-                    method,
+                    method: observedMethod,
                     url: req.url,
                     route: fullPath,
                     userAgent: req.headers.get('user-agent') ?? undefined,
-                    remoteAddr: req.headers.get('x-forwarded-for')
-                    || req.headers.get('x-real-ip')
-                    || undefined,
+                    // Same resolution as the rate-limit key: the transport peer unless
+                    // `trustProxy` is on. Reading the headers here directly would let a
+                    // caller decide what the span says about them.
+                    remoteAddr: getClientAddress(req),
                     requestSize: contentLengthHeader
                       ? parseInt(contentLengthHeader, 10)
                       : undefined,
@@ -848,31 +1077,37 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 // Full path: delegate to executeHandler for param extraction, validation, response wrapping
                 const callHandler = isFastPath
                   ? async (): Promise<Response> => {
-                    let hMark: ProfileMark | undefined;
-                    if (profiler) {
-                      hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
-                    }
-                    const result = await boundHandler(req);
-                    if (hMark) {
-                      profiler!.end(hMark);
-                    }
-                    if (sseDecoratorOptions) {
-                      return createSseResponseFromResult(result, sseDecoratorOptions);
-                    }
+                    // Filtered here rather than in the outer catch, which sits above the
+                    // middleware chain — see applyExceptionFilters.
+                    try {
+                      let hMark: ProfileMark | undefined;
+                      if (profiler) {
+                        hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+                      }
+                      const result = await boundHandler(req);
+                      if (hMark) {
+                        profiler!.end(hMark);
+                      }
+                      if (sseDecoratorOptions) {
+                        return createSseResponseFromResult(result, sseDecoratorOptions);
+                      }
 
-                    if (result instanceof Response) {
-                      return result;
+                      if (result instanceof Response) {
+                        return result;
+                      }
+
+                      const successResponse = createSuccessResponse(result);
+
+                      return new Response(JSON.stringify(successResponse), {
+                        status: HttpStatusCode.OK,
+                        headers: {
+                        // eslint-disable-next-line @typescript-eslint/naming-convention
+                          'Content-Type': 'application/json',
+                        },
+                      });
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
-
-                    const successResponse = createSuccessResponse(result);
-
-                    return new Response(JSON.stringify(successResponse), {
-                      status: HttpStatusCode.OK,
-                      headers: {
-                      // eslint-disable-next-line @typescript-eslint/naming-convention
-                        'Content-Type': 'application/json',
-                      },
-                    });
                   }
                   : (): Promise<Response> => executeHandler(
                     boundHandler, routeMeta, controller, controllerName,
@@ -881,14 +1116,22 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
                 // Wrap callHandler with interceptors if any (zero-cost when absent)
                 const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
-                  ? (): Promise<Response> => {
+                  ? async (): Promise<Response> => {
                     const interceptorCtx = new HttpExecutionContextImpl(
                       req,
-                      routeMeta.handler,
-                      controller.constructor.name,
+                      routeMeta.handler ?? '',
+                      controllerName,
                     );
 
-                    return composeInterceptors(resolvedInterceptors, interceptorCtx, callHandler)() as Promise<Response>;
+                    // callHandler already returns a filtered Response, so this only ever
+                    // sees a throw from the interceptors themselves.
+                    try {
+                      return await (composeInterceptors(
+                        resolvedInterceptors, interceptorCtx, callHandler,
+                      )() as Promise<Response>);
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                    }
                   }
                   : callHandler;
 
@@ -902,10 +1145,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       }
                       const guardCtx = new HttpExecutionContextImpl(
                         req,
-                        routeMeta.handler,
-                        controller.constructor.name,
+                        routeMeta.handler ?? '',
+                        controllerName,
                       );
-                      const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                      let allowed: boolean;
+                      try {
+                        allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                      } catch (error) {
+                        if (guardMark) {
+                          profiler!.end(guardMark);
+                        }
+
+                        return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                      }
                       if (guardMark) {
                         profiler!.end(guardMark);
                       }
@@ -964,15 +1216,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     }
                     const guardCtx = new HttpExecutionContextImpl(
                       req,
-                      routeMeta.handler,
-                      controller.constructor.name,
+                      routeMeta.handler ?? '',
+                      controllerName,
                     );
-                    const allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                    let allowed = false;
+                    let guardError: { error: unknown } | null = null;
+                    try {
+                      allowed = await executeHttpGuards(routeMeta.guards, guardCtx);
+                    } catch (error) {
+                      guardError = { error };
+                    }
                     if (guardMark) {
                       profiler!.end(guardMark);
                     }
 
-                    if (!allowed) {
+                    if (guardError) {
+                      response = await applyExceptionFilters(guardError.error, req, routeMeta, controllerName);
+                    } else if (!allowed) {
                       response = new Response(
                         JSON.stringify(
                           createErrorResponse(
@@ -1008,7 +1268,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 if (app.metricsService && app.metricsService.recordHttpRequest) {
                   const durationSeconds = duration / 1000;
                   app.metricsService.recordHttpRequest({
-                    method,
+                    method: observedMethod,
                     route: fullPath,
                     statusCode: response?.status || HttpStatusCode.OK,
                     duration: durationSeconds,
@@ -1046,16 +1306,30 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   'Request handling error:',
                   error instanceof Error ? error : new Error(String(error)),
                 );
-                const response = new Response('Internal Server Error', {
-                  status: HttpStatusCode.INTERNAL_SERVER_ERROR,
-                });
+                // Reachable only when framework code itself failed: a throwing
+                // middleware, a metrics/profiler throw, or the default filter throwing.
+                // Everything a route can throw is filtered below the middleware chain.
+                const response = new Response(
+                  JSON.stringify(
+                    createErrorResponse('Internal Server Error', HttpStatusCode.INTERNAL_SERVER_ERROR),
+                  ),
+                  {
+                    status: app.options.httpEnvelope
+                      ? HttpStatusCode.OK
+                      : HttpStatusCode.INTERNAL_SERVER_ERROR,
+                    headers: {
+                      // eslint-disable-next-line @typescript-eslint/naming-convention
+                      'Content-Type': 'application/json',
+                    },
+                  },
+                );
                 const duration = Date.now() - startTime;
 
                 // Record error metrics
                 if (app.metricsService && app.metricsService.recordHttpRequest) {
                   const durationSeconds = duration / 1000;
                   app.metricsService.recordHttpRequest({
-                    method,
+                    method: observedMethod,
                     route: fullPath,
                     statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
                     duration: durationSeconds,
@@ -1222,10 +1496,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             ...routeMiddleware,
           ];
 
-          // Merge guards: controller-level first, then route-level
+          // Merge guards: controller-level first, then route-level.
+          // Resolved through the owning module ONCE here, like interceptors — guards used to
+          // be constructed with `new guard()` on every request, so a guard extending
+          // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
           const routeGuards = route.guards ?? [];
-          const mergedGuards = [...ctrlGuards, ...routeGuards];
+          const mergedGuardClasses = [...ctrlGuards, ...routeGuards];
+          const mergedGuards = mergedGuardClasses.length > 0
+            ? (ownerModule.resolveGuards?.(mergedGuardClasses) ?? mergedGuardClasses)
+            : [];
 
           // Merge exception filters: global → controller → route (route has highest priority)
           const globalFilters = (this.options.filters as ExceptionFilter[] | undefined) ?? [];
@@ -1255,22 +1535,47 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             resolvedInterceptors.length > 0 ? resolvedInterceptors : undefined,
           );
 
-          // Add to bunRoutes grouped by path and method
-          if (!bunRoutes[fullPath]) {
-            bunRoutes[fullPath] = {};
-          }
-          bunRoutes[fullPath][method] = wrappedHandler;
+          // Collect into the registry; bunRoutes is filled in once, below.
+          registerRoute(controllerClass, route, fullPath, wrappedHandler);
 
           // Register trailing slash variant for consistent matching
           // (e.g., /api/users and /api/users/ both map to the same handler)
           if (fullPath.length > 1 && !fullPath.endsWith('/')) {
-            const trailingPath = fullPath + '/';
-            if (!bunRoutes[trailingPath]) {
-              bunRoutes[trailingPath] = {};
-            }
-            bunRoutes[trailingPath][method] = wrappedHandler;
+            registerRoute(controllerClass, route, fullPath + '/', wrappedHandler);
           }
         }
+      }
+
+      // Materialise the registry into the two shapes Bun's `routes` option understands.
+      //
+      // PRECEDENCE RULE — an explicitly declared verb always beats `@All()` on the same
+      // path. `@Get('/x')` next to `@All('/x')` sends GET to the @Get handler and every
+      // other verb to the @All handler, whichever order the decorators were written in.
+      //
+      // A path with no `@All()` keeps the method-map form, so Bun itself rejects verbs
+      // nobody declared (405/404 via the fetch fallback). A path that carries an `@All()`
+      // becomes a bare function instead, because the method map has no "every other verb"
+      // slot: Bun then routes EVERY method to it — GET…DELETE, OPTIONS, HEAD, and
+      // non-standard verbs such as PROPFIND, PURGE, LOCK and QUERY — with `req.params`
+      // intact. That is what makes @All a true catch-all, matching NestJS `router.all()`.
+      // The dispatcher must always return a Response: a bare route function that returns
+      // undefined does NOT fall through to `fetch`, Bun logs
+      // "Expected a Response object" and serves its own welcome page.
+      for (const [pathKey, registration] of routeRegistry) {
+        const { methods, catchAll } = registration;
+
+        if (!catchAll) {
+          bunRoutes[pathKey] = Object.fromEntries(methods);
+
+          continue;
+        }
+
+        // `methods` stays a Map so that a request whose method spells an
+        // Object.prototype key cannot resolve to an inherited function.
+        bunRoutes[pathKey] = (
+          req: OneBunRequest,
+          server: ReturnType<typeof Bun.serve>,
+        ): Promise<Response> => (methods.get(req.method) ?? catchAll)(req, server);
       }
 
       // Add framework endpoints to routes (docs, metrics)
@@ -1452,6 +1757,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         routes: bunRoutes,
         // Fallback: only WebSocket upgrade and 404
         async fetch(req, server) {
+          // The unrouted entry — WebSocket upgrades, static files, 404s. Bun's `routes`
+          // map bypasses `fetch` entirely for a matched route, so this is a second
+          // outermost entry, not a wrapper around the first. Binding here as well keeps
+          // the unmatched path from falling back to one shared identity the moment
+          // anything downstream starts asking who called.
+          bindRequestClientAddress(req, server);
+
           // Handle WebSocket upgrade if gateways exist
           if (hasWebSocketGateways && app.wsHandler) {
             const upgradeHeader = req.headers.get('upgrade')?.toLowerCase();
@@ -1613,6 +1925,74 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * Path parameters come from BunRequest.params (populated by Bun routes API).
      * Query parameters are extracted separately from the URL.
      */
+    /**
+     * Apply the route's exception filters to a thrown error.
+     *
+     * SINGLE SOURCE OF FILTER APPLICATION. Every execution path that can throw while
+     * producing a route response must sit inside a `try` that delegates here. A path
+     * added outside one is silently unfiltered — that was the original defect, where a
+     * handler with no decorated parameters took the fast path and its `HttpException`
+     * left the framework as a bare 500 `text/plain`. Call sites, `grep` for the name and
+     * expect five:
+     *   1. `executeHandler`'s catch                        — full-path handler
+     *   2. the `isFastPath` arm of the `callHandler` ternary — fast-path handler
+     *   3. the `interceptedHandler` arm                     — throwing interceptors
+     *   4. the guard call inside `guardedHandler`           — throwing guards, with middleware
+     *   5. the inline guard call                            — throwing guards, without
+     *
+     * DELIBERATELY NOT applied to the middleware chain. Middleware post-processes the
+     * Response that `next()` returns — `CorsMiddleware`, `SecurityHeadersMiddleware` and
+     * `RateLimitMiddleware` all set headers AFTER `await next()`. Filtering above the
+     * chain would unwind past those blocks and strip the headers from every error
+     * response. All five sites sit BELOW the chain, so a filtered response still flows
+     * back out through it. A throwing middleware is therefore not filtered by design and
+     * falls to the last-resort outer catch.
+     *
+     * Only the last filter runs — route-level filters are appended last and win. A filter
+     * that throws, or returns something other than a Response, degrades to the default
+     * filter instead of escaping: applying filters on more paths widens the blast radius
+     * of a buggy user filter, so the fallback is part of the fix rather than a bonus.
+     */
+    async function applyExceptionFilters(
+      error: unknown,
+      req: OneBunRequest,
+      routeMeta: RouteMetadata,
+      controllerName: string,
+    ): Promise<Response> {
+      // Log the unexpected bucket only: HttpException and OneBunBaseError carry a
+      // deliberate status and are ordinary control flow, not incidents.
+      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      }
+
+      const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
+      const filters = routeMeta.filters;
+
+      if (filters && filters.length > 0) {
+        try {
+          const filtered = await filters[filters.length - 1].catch(error, ctx);
+          if (filtered instanceof Response) {
+            return filtered;
+          }
+
+          appLogger.error(
+            'Exception filter returned a non-Response; falling back to the default filter',
+            new Error(`${controllerName}.${routeMeta.handler ?? 'unknown'}`),
+          );
+        } catch (filterError) {
+          appLogger.error(
+            'Exception filter threw; falling back to the default filter',
+            filterError instanceof Error ? filterError : new Error(String(filterError)),
+          );
+        }
+      }
+
+      return await appDefaultExceptionFilter.catch(error, ctx);
+    }
+
     /**
      * Execute route handler with parameter injection, validation, and response wrapping.
      * Called only for routes with params or response schemas (full path).
@@ -1994,25 +2374,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
         return resp;
       } catch (error) {
-        // Run through exception filters (route → controller → global), then default
-        const filters = routeMeta.filters ?? [];
-
-        if (filters.length > 0) {
-          const guardCtx = new HttpExecutionContextImpl(
-            req,
-            routeMeta.handler ?? '',
-            controllerName,
-          );
-
-          // Last filter wins (route-level filters were appended last and take highest priority)
-          return await filters[filters.length - 1].catch(error, guardCtx);
-        }
-
-        return await appDefaultExceptionFilter.catch(error, new HttpExecutionContextImpl(
-          req,
-          routeMeta.handler ?? '',
-          controllerName,
-        ));
+        return await applyExceptionFilters(error, req, routeMeta, controllerName);
       }
     }
 
@@ -2063,11 +2425,91 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Stop the application with graceful shutdown
+   * Stop the application with graceful shutdown.
+   *
+   * Idempotent and concurrency-safe: every call after the first awaits the same shutdown
+   * and performs no second pass over the destroy hooks. Bounded by `shutdownTimeout` —
+   * it always resolves, even if a request or a hook never does.
+   *
    * @param options - Shutdown options
    */
   async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
+    await this.runShutdown(options);
+  }
+
+  /**
+   * The shutdown latch. The first caller runs the sequence; everyone after — a second
+   * `stop()`, a second signal, the orchestrator stopping an already-stopped child —
+   * awaits that same promise and its outcome.
+   */
+  private async runShutdown(
+    options?: { closeSharedRedis?: boolean; signal?: string },
+  ): Promise<ShutdownOutcome> {
+    this.shutdownPromise ??= this.executeShutdown(options);
+
+    return await this.shutdownPromise;
+  }
+
+  /**
+   * Run the shutdown sequence against a hard deadline.
+   *
+   * The sequence is raced, not cancelled: a hook that never returns cannot be interrupted
+   * from the outside, so the deadline stops *waiting* for it, names it, and lets the
+   * caller decide (the signal path exits with code 1).
+   */
+  private async executeShutdown(
+    options?: { closeSharedRedis?: boolean; signal?: string },
+  ): Promise<ShutdownOutcome> {
+    const budgetMs = this.resolveShutdownTimeout();
+    const outcome: ShutdownOutcome = { timedOut: false, phase: null, forceClosed: 0 };
+    const deadline = createDeadline(budgetMs);
+
+    const sequence = this.performShutdown(options, outcome).then(
+      () => 'done' as const,
+      (error: unknown) => {
+        this.logger.error(
+          'Shutdown sequence failed:',
+          error instanceof Error ? error : new Error(String(error)),
+        );
+
+        return 'done' as const;
+      },
+    );
+
+    const result = await Promise.race([sequence, deadline.expired]);
+    deadline.cancel();
+
+    if (result === 'timeout') {
+      outcome.timedOut = true;
+      this.logger.error(
+        `Shutdown timed out after ${budgetMs}ms while ${outcome.phase ?? 'stopping'}; `
+        + 'abandoning the rest of the teardown',
+      );
+    }
+
+    return outcome;
+  }
+
+  /** Resolve the shutdown budget, ignoring non-positive and non-finite overrides. */
+  private resolveShutdownTimeout(): number {
+    const configured = this.options.shutdownTimeout;
+    if (typeof configured === 'number' && Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+
+    return DEFAULT_SHUTDOWN_TIMEOUT_MS;
+  }
+
+  /**
+   * The shutdown sequence itself. `outcome.phase` is updated as it advances so a timeout
+   * can name what was still running.
+   */
+  private async performShutdown(
+    options: { closeSharedRedis?: boolean; signal?: string } | undefined,
+    outcome: ShutdownOutcome,
+  ): Promise<void> {
     if (this.multiServiceMode) {
+      outcome.phase = 'stopping services';
       if (this.orchestrator) {
         await this.orchestrator.stopAll();
       }
@@ -2080,14 +2522,24 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     this.logger.info('Stopping OneBun application...');
 
+    // Drain and close the HTTP server FIRST. Destroy hooks used to run while the socket
+    // was still accepting new work — a hook that deregisters from discovery or flushes a
+    // buffer ran under live traffic, and the request that was mid-response was severed by
+    // the process.exit that followed.
+    outcome.phase = 'draining in-flight HTTP requests';
+    const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
+    outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+
     // Call beforeApplicationDestroy lifecycle hook
     if (this.rootModule?.callBeforeApplicationDestroy) {
+      outcome.phase = 'running beforeApplicationDestroy hooks';
       this.logger.debug('Calling beforeApplicationDestroy hooks');
       await this.rootModule.callBeforeApplicationDestroy(signal);
     }
 
     // Cleanup WebSocket resources
     if (this.wsHandler) {
+      outcome.phase = 'closing WebSocket connections';
       this.logger.debug('Cleaning up WebSocket handler');
       await this.wsHandler.cleanup();
       this.wsHandler = null;
@@ -2095,6 +2547,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Stop queue service
     if (this.queueService) {
+      outcome.phase = 'stopping the queue service';
       this.logger.debug('Stopping queue service');
       await this.queueService.stop();
       this.queueService = null;
@@ -2103,46 +2556,138 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Disconnect queue adapter
     if (this.queueAdapter) {
+      outcome.phase = 'disconnecting the queue adapter';
       this.logger.debug('Disconnecting queue adapter');
       await this.queueAdapter.disconnect();
       this.queueAdapter = null;
     }
 
-    // Stop HTTP server
-    if (this.server) {
-      this.server.stop();
-      this.server = null;
-      this.logger.debug('HTTP server stopped');
-    }
-
     // Shutdown trace service — flush pending spans before module destroy
     if (this.traceService?.shutdown) {
+      outcome.phase = 'flushing traces';
       this.logger.debug('Shutting down trace service');
       await this.traceService.shutdown();
     }
 
     // Call onModuleDestroy lifecycle hook
     if (this.rootModule?.callOnModuleDestroy) {
+      outcome.phase = 'running onModuleDestroy hooks';
       this.logger.debug('Calling onModuleDestroy hooks');
       await this.rootModule.callOnModuleDestroy();
     }
 
-    // Close shared Redis connection if configured and requested
+    // Release this application's hold on the shared Redis client. It is disconnected only
+    // when the last consumer lets go — previously every application called disconnect()
+    // outright, so in multi-service mode the FIRST one to stop tore the client out from
+    // under its still-running siblings.
     if (closeRedis && SharedRedisProvider.isConnected()) {
-      this.logger.debug('Disconnecting shared Redis');
-      await SharedRedisProvider.disconnect();
+      this.logger.debug('Releasing shared Redis');
+      await SharedRedisProvider.release();
     }
 
     // Call onApplicationDestroy lifecycle hook
     if (this.rootModule?.callOnApplicationDestroy) {
+      outcome.phase = 'running onApplicationDestroy hooks';
       this.logger.debug('Calling onApplicationDestroy hooks');
       await this.rootModule.callOnApplicationDestroy(signal);
     }
 
-    this.logger.info('OneBun application stopped');
+    // Dispose this application's DI scope AFTER every destroy hook has run — the hooks read
+    // service instances, and a later application must not inherit any of them.
+    if (this.globalScope) {
+      this.globalScope.services.clear();
+      this.globalScope.processedModules.clear();
+      this.globalScope.overrides.clear();
+      this.globalScope.moduleOptions.clear();
+      this.globalScope = null;
+    }
+
+    this.logger.info(
+      outcome.forceClosed > 0
+        ? `OneBun application stopped (${outcome.forceClosed} request(s) force-closed)`
+        : 'OneBun application stopped',
+    );
 
     // Shutdown logger transport LAST — flush OTLP log batches after final log message
+    outcome.phase = 'flushing logs';
     await shutdownLogger();
+  }
+
+  /**
+   * Refuse new requests, wait for the in-flight ones, then close the listener.
+   *
+   * The listener deliberately stays open while draining and answers 503: that is what
+   * tells a load balancer to stop routing here, and it keeps the deadline enforceable —
+   * Bun ignores `stop(true)` once a graceful `stop()` is pending, so closing the listener
+   * first would leave nothing able to force-close a wedged connection.
+   *
+   * WebSocket sockets and in-flight scheduled jobs belong in the same wait: add another
+   * {@link InFlightSource} to `sources` rather than a second waiting loop.
+   *
+   * @param budgetMs - Deadline for the drain, in milliseconds
+   * @returns Number of connections force-closed because the deadline expired
+   */
+  private async drainHttpServer(budgetMs: number): Promise<number> {
+    const server = this.server;
+    if (!server) {
+      return 0;
+    }
+
+    // Swapping the route table beats a per-request `isDraining` check: the hot path keeps
+    // exactly the code it had, and every route — controller, docs, metrics, static — is
+    // refused by the one handler.
+    if (typeof server.reload === 'function') {
+      server.reload({
+        routes: {},
+        fetch(): Response {
+          return new Response(SHUTDOWN_RESPONSE_BODY, {
+            status: HttpStatusCode.SERVICE_UNAVAILABLE,
+            headers: {
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Content-Type': 'application/json',
+              // eslint-disable-next-line @typescript-eslint/naming-convention
+              'Connection': 'close',
+            },
+          });
+        },
+      });
+    }
+
+    const sources: InFlightSource[] = [{
+      name: 'HTTP request(s)',
+      // A mocked server has no counter; nothing to wait for then.
+      pending: () => (typeof server.pendingRequests === 'number' ? server.pendingRequests : 0),
+    }];
+
+    const report: DrainReport = await drainInFlight(sources, budgetMs);
+    const forceClosed = report.remaining.reduce((total, entry) => total + entry.pending, 0);
+
+    if (report.drained) {
+      this.logger.debug(`In-flight requests drained in ${report.waitedMs}ms`);
+    } else {
+      this.logger.warn(
+        `Drain deadline of ${budgetMs}ms expired with ${describeRemaining(report.remaining)} `
+        + 'still in flight; force-closing',
+      );
+    }
+
+    // Open WebSockets are cut here, not drained — they have no bounded wait of their own
+    // yet, and a graceful `stop()` never resolves while one is connected (measured).
+    const openSockets = typeof server.pendingWebSockets === 'number' ? server.pendingWebSockets : 0;
+    if (openSockets > 0) {
+      this.logger.warn(
+        `Closing ${openSockets} active WebSocket connection(s) without waiting for in-flight messages`,
+      );
+    }
+
+    // Always the forcing form. The bounded wait above is what makes the shutdown graceful;
+    // `stop(false)` would hand the deadline back to whatever is still connected — a single
+    // idle WebSocket keeps it pending forever.
+    await server.stop(true);
+    this.server = null;
+    this.logger.debug('HTTP server stopped');
+
+    return forceClosed;
   }
 
   /**
@@ -2161,10 +2706,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return hasQueueDecorators(controller) || hasQueueDecorators(instance.constructor);
     });
 
-    // Determine if queue should be enabled
-    const shouldEnableQueue = queueOptions?.enabled ?? hasQueueHandlers;
-    if (!shouldEnableQueue) {
-      this.logger.debug('Queue system not enabled (no handlers detected or explicitly disabled)');
+    // Determine if queue should be enabled: a queue decorator on a controller, OR
+    // queue.enabled === true, OR an explicit queue.adapter/options/redis backend config.
+    // An explicit queue.enabled === false overrides all three, and warns once when it
+    // contradicts a configured backend.
+    const enablement = resolveQueueEnablement(queueOptions, hasQueueHandlers);
+    if (!enablement.enabled) {
+      if (enablement.contradiction) {
+        this.logger.warn(QUEUE_DISABLED_WITH_ADAPTER_WARNING);
+      } else {
+        this.logger.debug(
+          'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
+        );
+      }
 
       return;
     }
@@ -2356,21 +2910,67 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Register signal handlers for graceful shutdown
-   * Call this after start() to enable automatic shutdown on SIGTERM/SIGINT
+   * Register signal handlers for graceful shutdown.
+   *
+   * `start()` already calls this unless `gracefulShutdown: false` was passed, so calling
+   * it again is a no-op rather than a second pair of listeners. A signal that arrives
+   * while a shutdown is already running is logged and ignored — it does not restart the
+   * drain or re-run the destroy hooks.
+   *
+   * The process exits `0` when the shutdown completed, and `1` when it hit
+   * `shutdownTimeout` with work still running.
    *
    * @example
    * ```typescript
-   * const app = new OneBunApplication(AppModule, options);
+   * // Only needed when the automatic registration was turned off
+   * const app = new OneBunApplication(AppModule, { gracefulShutdown: false });
    * await app.start();
    * app.enableGracefulShutdown();
    * ```
    */
   enableGracefulShutdown(): void {
-    const shutdown = async (signal: string) => {
+    if (this.signalHandlersRegistered) {
+      this.logger.debug('Graceful shutdown handlers already registered, ignoring');
+
+      return;
+    }
+    this.signalHandlersRegistered = true;
+
+    // Exactly one exit is ever scheduled, but every signal leads to one: a signal that
+    // arrives after a programmatic `stop()` must still end the process, and a second
+    // signal during a shutdown must not exit twice or restart the teardown.
+    let exitScheduled = false;
+    const scheduleExit = (shutdown: Promise<ShutdownOutcome>): void => {
+      if (exitScheduled) {
+        return;
+      }
+      exitScheduled = true;
+
+      void shutdown
+        .then((outcome) => {
+          process.exit(outcome.timedOut ? 1 : 0);
+        })
+        .catch((error: unknown) => {
+          this.logger.error(
+            'Graceful shutdown failed:',
+            error instanceof Error ? error : new Error(String(error)),
+          );
+          process.exit(1);
+        });
+    };
+
+    const shutdown = (signal: string): void => {
+      // The latch, not a local flag: `stop()` called by application code before the
+      // signal arrived must silence the handler just as a first signal does.
+      if (this.shutdownPromise) {
+        this.logger.warn(`Already shutting down, ignoring ${signal}`);
+        scheduleExit(this.shutdownPromise);
+
+        return;
+      }
+
       this.logger.info(`Received ${signal}, initiating graceful shutdown...`);
-      await this.stop({ signal });
-      process.exit(0);
+      scheduleExit(this.runShutdown({ signal }));
     };
 
     process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -2543,16 +3143,78 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * await userService.performBackgroundTask();
    * ```
    */
-  getService<T>(serviceClass: new (...args: unknown[]) => T): T {
+  /**
+   * Refuse to answer for a service the tree holds two instances of.
+   *
+   * An Effect tag is keyed by the class NAME, so two named registrations — or two service
+   * classes that happen to share a name — have more instances than there are keys. Returning
+   * one of them makes the answer a function of module import order. Injection is unaffected:
+   * it resolves by tag identity at the module boundary, where each module has exactly one.
+   */
+  private assertServiceUnambiguous(className: string): void {
+    const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
+    const holders = ambiguous?.get(className);
+    if (!holders) {
+      return;
+    }
+
+    const error = new Error(
+      `This application holds ${holders.length} instances of ${className} (${holders.join(', ')}), ` +
+      'so getService() has no correct answer — the one it would return depends on the order ' +
+      'the modules were imported in. Name the registration you mean: ' +
+      `getService(${className}, <token>).`,
+    );
+    error.name = 'OneBunAmbiguousServiceError';
+    throw error;
+  }
+
+  /**
+   * Refuse to hand out a layer that silently drops one of two instances.
+   *
+   * An Effect `Context` has exactly one slot per key, so an application with two instances of
+   * one service class does not fit in one. There is no supported way to build a layer that
+   * holds both — reach a specific instance with `getService(Class, token)`.
+   */
+  private assertLayerUnambiguous(): void {
+    const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
+    if (!ambiguous || ambiguous.size === 0) {
+      return;
+    }
+
+    const details = [...ambiguous.entries()]
+      .map(([key, holders]) => `${key} (${holders.join(', ')})`)
+      .join('; ');
+    const error = new Error(
+      'getLayer() cannot represent this application: an Effect Context has one slot per ' +
+      `service class and this one holds two instances of ${details}. The layer would carry ` +
+      'whichever was merged last. Reach a specific instance with getService(Class, token) ' +
+      'or @Inject(token).',
+    );
+    error.name = 'OneBunAmbiguousServiceError';
+    throw error;
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  getService<T>(serviceClass: new (...args: any[]) => T, token?: symbol | string): T {
     this.ensureSingleServiceMode('getService');
+    if (token === undefined) {
+      // Only the UNTOKENED form is ambiguous. `getService(Class, TOKEN)` names one
+      // registration and is unambiguous by construction.
+      this.assertServiceUnambiguous(serviceClass.name);
+    }
+
     if (!this.ensureModule().getServiceByClass) {
       throw new Error('Module does not support getServiceByClass');
     }
 
-    const service = this.ensureModule().getServiceByClass!(serviceClass);
+    const service = this.ensureModule().getServiceByClass!(serviceClass, token);
     if (!service) {
+      const named = token !== undefined
+        ? ` for registration ${typeof token === 'symbol' ? token.toString() : `'${token}'`}`
+        : '';
       throw new Error(
-        `Service ${serviceClass.name} not found. Make sure it's registered in the module's providers.`,
+        `Service ${serviceClass.name} not found${named}. ` +
+        'Make sure it\'s registered in the module\'s providers.',
       );
     }
 

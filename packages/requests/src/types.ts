@@ -54,6 +54,11 @@ export interface SuccessResponse<T = unknown> {
   success: true;
   result: T;
   traceId?: string;
+  /**
+   * How many retries were spent before this response was produced.
+   * `0` means the request was sent exactly once.
+   */
+  retryCount?: number;
 }
 
 /**
@@ -62,6 +67,11 @@ export interface SuccessResponse<T = unknown> {
 export interface ErrorResponse<E extends string = string, R extends string = string>
   extends OneBunError<E, R> {
   success: false;
+  /**
+   * How many retries were spent before this response was produced.
+   * `0` means the request was sent exactly once.
+   */
+  retryCount?: number;
 }
 
 /**
@@ -399,14 +409,74 @@ export interface OneBunAuthConfig {
 }
 
 /**
+ * Kind of failure that happened before any HTTP response existed.
+ *
+ * - `timeout` — the client-side timeout fired; the server may still have processed the request
+ * - `abort` — the request was aborted deliberately
+ * - `network` — connection refused, DNS failure, TLS failure: the request never arrived
+ *
+ * @see docs:api/requests.md
+ */
+export type TransportFailureKind = 'timeout' | 'abort' | 'network';
+
+/**
+ * Pseudo status code carried by transport failures.
+ *
+ * Zero is not a valid HTTP status, so a transport failure can never collide with an entry
+ * of `RetryConfig.retryOn` — that list stays a pure status-code list and a timeout stops
+ * masquerading as a server 500.
+ *
+ * @see docs:api/requests.md
+ */
+export const TRANSPORT_FAILURE_CODE = 0;
+
+/**
+ * Read the transport failure kind off a response, if it is one.
+ *
+ * Returns `undefined` for every response that came back from a server, including 5xx.
+ *
+ * @see docs:api/requests.md
+ */
+export function getTransportFailureKind(response: unknown): TransportFailureKind | undefined {
+  if (!isErrorResponse(response) || response.code !== TRANSPORT_FAILURE_CODE) {
+    return undefined;
+  }
+
+  const kind = response.details?.transport;
+
+  return kind === 'timeout' || kind === 'abort' || kind === 'network' ? kind : undefined;
+}
+
+/**
  * Retry configuration
+ *
+ * @see docs:api/requests.md
  */
 export interface RetryConfig {
+  /** Number of retries after the initial attempt. `max: 3` means up to 4 requests in total. */
   max: number;
+  /** Base delay in milliseconds between attempts. */
   delay: number;
   backoff: 'linear' | 'exponential' | 'fixed';
   factor?: number;
+  /**
+   * HTTP status codes that trigger a retry. Only statuses that a server actually returned are
+   * matched here — transport failures are governed by `retryOnNetworkError`/`retryOnTimeout`.
+   */
   retryOn?: number[];
+  /**
+   * HTTP methods allowed to be retried. Defaults to {@link DEFAULT_RETRY_METHODS} — the
+   * idempotent set. POST and PATCH must be listed explicitly to be retried, because replaying
+   * them can duplicate a charge, an order or a message.
+   */
+  methods?: string[];
+  /** Retry when the request never reached the server (connection refused, DNS, TLS). */
+  retryOnNetworkError?: boolean;
+  /**
+   * Retry when the client-side timeout fired. Off by default: the server may have processed
+   * the request already, so a retry duplicates it even for an idempotent method.
+   */
+  retryOnTimeout?: boolean;
   onRetry?: (error: ErrorResponse, attempt: number) => void | Promise<void>;
 }
 
@@ -434,7 +504,8 @@ export interface RequestsOptions {
   timeout?: number;
   headers?: Record<string, string>;
   auth?: AuthConfig;
-  retries?: RetryConfig;
+  /** Partial: every field left out keeps its {@link DEFAULT_RETRY_CONFIG} value. */
+  retries?: Partial<RetryConfig>;
   tracing?: boolean;
   metrics?: boolean;
   userAgent?: string;
@@ -473,6 +544,27 @@ export interface RequestTraceData {
 export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_RETRY_DELAY = 300;
 
+/**
+ * Methods retried without any configuration: the idempotent set of RFC 9110 §9.2.2.
+ *
+ * POST and PATCH are absent on purpose — re-sending them creates a second order, charge or
+ * message. A caller who knows a particular endpoint is safe opts in via `retries.methods`.
+ *
+ * @see docs:api/requests.md
+ */
+export const DEFAULT_RETRY_METHODS: string[] = [
+  HttpMethod.GET,
+  HttpMethod.HEAD,
+  HttpMethod.OPTIONS,
+  HttpMethod.PUT,
+  HttpMethod.DELETE,
+];
+
+/**
+ * The single source of truth for retry behaviour. Every partial config is merged onto this.
+ *
+ * @see docs:api/requests.md
+ */
 export const DEFAULT_RETRY_CONFIG: RetryConfig = {
   max: DEFAULT_MAX_RETRIES,
   delay: DEFAULT_RETRY_DELAY,
@@ -486,7 +578,39 @@ export const DEFAULT_RETRY_CONFIG: RetryConfig = {
     HttpStatusCode.SERVICE_UNAVAILABLE,
     HttpStatusCode.GATEWAY_TIMEOUT,
   ],
+  methods: DEFAULT_RETRY_METHODS,
+  retryOnNetworkError: true,
+  retryOnTimeout: false,
 };
+
+/**
+ * Merge partial retry configs field-wise onto {@link DEFAULT_RETRY_CONFIG}, later wins.
+ *
+ * Passing `{ max: 5 }` changes only `max`; every other field keeps its documented default
+ * instead of being dropped by a shallow object replacement.
+ *
+ * @see docs:api/requests.md
+ */
+export function resolveRetryConfig(
+  ...configs: (Partial<RetryConfig> | undefined)[]
+): RetryConfig {
+  return configs.reduce<RetryConfig>(
+    (acc, config) => (config ? { ...acc, ...config } : acc),
+    { ...DEFAULT_RETRY_CONFIG },
+  );
+}
+
+/**
+ * Whether a method may be retried under the given config.
+ *
+ * @see docs:api/requests.md
+ */
+export function isRetryableMethod(method: string, config: RetryConfig): boolean {
+  const methods = config.methods ?? DEFAULT_RETRY_METHODS;
+  const normalized = method.toUpperCase();
+
+  return methods.some((allowed) => allowed.toUpperCase() === normalized);
+}
 
 /**
  * Error configuration for req method

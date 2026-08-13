@@ -1,20 +1,26 @@
 import './metadata'; // Import polyfill first
-import { type, type Type } from 'arktype';
+
 
 import type { ExceptionFilter } from '../exception-filters/exception-filters';
+import type { Guard } from '../http-guards/http-guards';
 import type { Interceptor } from '../interceptors/interceptors';
+import type { Type } from 'arktype';
 
 import {
   type ControllerMetadata,
   type FileUploadOptions,
   type FilesUploadOptions,
   HttpMethod,
-  type HttpGuard,
   type ParamDecoratorOptions,
   type ParamMetadata,
   ParamType,
   type RouteOptions,
 } from '../types';
+import {
+  isArkErrors,
+  isUnrecognisedArkResult,
+  reportDuplicateArkTypeCopies,
+} from '../validation/arktype-interop';
 
 import {
   copyAllMetadata,
@@ -38,6 +44,16 @@ const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
  * causing a DependencyResolutionError when their dependency cannot be resolved.
  */
 const META_OPTIONAL_PARAMS = new Map<Function, Set<number>>();
+
+/**
+ * Registration tokens attached to constructor parameters by `@Inject(TOKEN)`.
+ *
+ * Deliberately a SIDE map rather than an entry in META_CONSTRUCTOR_PARAMS: the token names a
+ * registration, not a type, so writing it there would force every paramtypes reader to filter
+ * non-classes out of the hottest DI path. Kept apart, `getConstructorParamTypes` keeps
+ * returning the complete `design:paramtypes` array and partial injection keeps working.
+ */
+const META_INJECT_TOKENS = new Map<Function, Map<number, symbol | string>>();
 
 /**
  * Injectable decorator for controllers and services
@@ -193,11 +209,11 @@ export function controllerDecorator(basePath: string = '') {
 
     // Copy controller-level guards from original class to wrapped class
     // This ensures @UseGuards works regardless of decorator order
-    const existingControllerGuards: (Function | HttpGuard)[] | undefined =
-      Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target);
+    const existingControllerGuards: (Function | Guard)[] | undefined =
+      Reflect.getMetadata(CONTROLLER_GUARDS_METADATA, target);
     if (existingControllerGuards) {
       Reflect.defineMetadata(
-        HTTP_CONTROLLER_GUARDS_METADATA,
+        CONTROLLER_GUARDS_METADATA,
         existingControllerGuards,
         WrappedController,
       );
@@ -227,19 +243,39 @@ export function controllerDecorator(basePath: string = '') {
       );
     }
 
+    // Carry @Inject(TOKEN) selections onto the wrapper, which is the class DI constructs.
+    copyInjectTokens(target, WrappedController);
+
     return WrappedController as T;
   };
 }
 
 /**
  * Decorator for explicit dependency injection (for complex cases)
+ *
+ * With a CLASS it pins the type of a parameter. With a registration TOKEN — the `as` value of
+ * a `forRoot()` call — it picks WHICH registration of that type this parameter gets, which is
+ * only needed in a module that selected two registrations of one service; a module that
+ * selected one needs no annotation at all.
+ *
  * Usage: constructor(\@Inject(CounterService) private counterService: CounterService)
+ * Usage: constructor(\@Inject(ANALYTICS_DB) private analytics: DrizzleService)
  * @see docs:api/decorators.md
  */
 // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
-export function Inject<T>(serviceType: new (...args: any[]) => T) {
+export function Inject<T>(serviceType: (new (...args: any[]) => T) | symbol | string) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types
   return (target: any, propertyKey: string | symbol | undefined, parameterIndex: number): void => {
+    if (typeof serviceType === 'symbol' || typeof serviceType === 'string') {
+      // A token selects a registration; the parameter's TYPE still comes from
+      // design:paramtypes, so nothing is written into META_CONSTRUCTOR_PARAMS here.
+      const tokens = META_INJECT_TOKENS.get(target) ?? new Map<number, symbol | string>();
+      tokens.set(parameterIndex, serviceType);
+      META_INJECT_TOKENS.set(target, tokens);
+
+      return;
+    }
+
     // Get existing dependencies or create new array
     const existingDeps = META_CONSTRUCTOR_PARAMS.get(target) || [];
 
@@ -280,6 +316,28 @@ export function Optional() {
     existing.add(parameterIndex);
     META_OPTIONAL_PARAMS.set(target, existing);
   };
+}
+
+/**
+ * The registration token `@Inject(TOKEN)` put on a constructor parameter, if any.
+ */
+export function getInjectToken(target: Function, parameterIndex: number): symbol | string | undefined {
+  return META_INJECT_TOKENS.get(target)?.get(parameterIndex);
+}
+
+/**
+ * Carry the token map onto a class the framework replaces with a subclass.
+ *
+ * `@Controller` wraps the class, and the wrapper is what DI constructs — the tokens were
+ * recorded against the original, so without this a controller's `@Inject(TOKEN)` is silently
+ * dropped and it receives whichever registration happened to be in the slot.
+ * @internal
+ */
+export function copyInjectTokens(from: Function, to: Function): void {
+  const tokens = META_INJECT_TOKENS.get(from);
+  if (tokens) {
+    META_INJECT_TOKENS.set(to, new Map(tokens));
+  }
 }
 
 /**
@@ -353,6 +411,88 @@ const MIDDLEWARE_METADATA = 'onebun:middleware';
 const RESPONSE_SCHEMAS_METADATA = 'onebun:responseSchemas';
 
 /**
+ * Re-apply a method's pipeline metadata onto route entries that were already registered.
+ *
+ * TypeScript applies method decorators BOTTOM-UP, so `@UseGuards` written ABOVE `@Get` runs
+ * AFTER the route decorator has already snapshotted the (still empty) guard list — the guard
+ * was silently dropped and the route answered 200 where it should have answered 403. The
+ * route decorator's own read covers the other order; this covers this one, so the two
+ * together make source order irrelevant.
+ *
+ * The route entry is REPLACED with the full accumulated metadata rather than appended to, so
+ * applying the same decorator above and below one route cannot double-register it.
+ *
+ * @see docs:api/guards.md
+ */
+const PIPELINE_REAPPLY_HOOKS: Array<(target: object, propertyKey: string | symbol) => void> = [];
+
+/**
+ * Register a handler that re-applies pipeline metadata for a non-HTTP surface.
+ *
+ * WebSocket gateways snapshot their guards and interceptors the same way route decorators
+ * did, and `@UseInterceptors` is shared across surfaces — so the WebSocket module registers
+ * a hook here rather than this file importing it, which would be circular.
+ *
+ * @internal
+ */
+export function registerPipelineReapplyHook(
+  hook: (target: object, propertyKey: string | symbol) => void,
+): void {
+  PIPELINE_REAPPLY_HOOKS.push(hook);
+}
+
+function reapplyRoutePipelineMetadata(target: object, propertyKey: string | symbol): void {
+  for (const hook of PIPELINE_REAPPLY_HOOKS) {
+    hook(target, propertyKey);
+  }
+
+  const controllerClass = (target as { constructor?: Function }).constructor;
+  if (!controllerClass) {
+    return;
+  }
+
+  const metadata = META_CONTROLLERS.get(controllerClass);
+  if (!metadata) {
+    // The route decorator has not run yet; it will read this metadata itself.
+    return;
+  }
+
+  for (const route of metadata.routes) {
+    if (route.handler !== propertyKey) {
+      continue;
+    }
+
+    route.middleware = readPipelineMetadata(MIDDLEWARE_METADATA, target, propertyKey);
+    route.guards = readPipelineMetadata(GUARDS_METADATA, target, propertyKey);
+    route.filters = readPipelineMetadata(EXCEPTION_FILTERS_METADATA, target, propertyKey);
+    route.interceptors = readPipelineMetadata(INTERCEPTORS_METADATA, target, propertyKey);
+    // Snapshotted by the route decorator alongside the four above, and NOT documentation
+    // only: it drives response-body validation and overrides the success status code at
+    // request time. Left out of this refresh, `@ApiResponse` above the method decorator
+    // silently disabled validation and reverted the status while OpenAPI still documented it.
+    route.responseSchemas = readPipelineMetadata(RESPONSE_SCHEMAS_METADATA, target, propertyKey);
+  }
+}
+
+/**
+ * Read one accumulated pipeline list, without duplicates.
+ *
+ * Applying the same decorator both above and below a route decorator accumulates it twice in
+ * the metadata; the pre-fix snapshot never read the second copy back, so writing
+ * `@UseGuards(G)` above each of two route decorators — the correct workaround at the time —
+ * would otherwise start running G twice and double whatever it counts.
+ */
+function readPipelineMetadata<T>(
+  metadataKey: string,
+  target: object,
+  propertyKey: string | symbol,
+): T[] {
+  const values: T[] = Reflect.getMetadata(metadataKey, target, propertyKey) || [];
+
+  return [...new Set(values)];
+}
+
+/**
  * Base route decorator factory
  */
 function createRouteDecorator(method: HttpMethod) {
@@ -382,8 +522,8 @@ function createRouteDecorator(method: HttpMethod) {
         Reflect.getMetadata(MIDDLEWARE_METADATA, target, propertyKey) || [];
 
       // Get HTTP guards metadata if exists
-      const guards: (Function | HttpGuard)[] =
-        Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+      const guards: (Function | Guard)[] =
+        Reflect.getMetadata(GUARDS_METADATA, target, propertyKey) || [];
 
       // Get exception filters metadata if exists
       const filters: ExceptionFilter[] =
@@ -426,9 +566,21 @@ function createRouteDecorator(method: HttpMethod) {
 /**
  * Helper function to check if a schema accepts undefined
  * Used to determine if @Body is required by default
+ *
+ * Uses the same copy-independent failure check as `validate()`: `instanceof type.errors` compares
+ * against @onebun/core's own arktype copy, so under a duplicate install every `@Body` would be
+ * silently inferred optional. Anything that is a failure — or an ArkType internal we cannot
+ * identify — fails closed to "does not accept undefined", i.e. `@Body` stays required.
+ *
+ * Decoration runs at application startup, so this is also where the one-per-process
+ * duplicate-arktype diagnostic is emitted.
  */
 function schemaAcceptsUndefined(schema: Type<unknown>): boolean {
-  return !(schema(undefined) instanceof type.errors);
+  reportDuplicateArkTypeCopies();
+
+  const result = schema(undefined);
+
+  return !isArkErrors(result) && !isUnrecognisedArkResult(result);
 }
 
 /**
@@ -757,14 +909,23 @@ export function FormField(fieldName: string, options?: ParamDecoratorOptions): P
 const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 
 /**
- * Metadata key for route-level HTTP guards
+ * Metadata key for method-level guards (shared across HTTP, WS, Queue).
+ *
+ * One key, three transports — the same shape `INTERCEPTORS_METADATA` has always had. It used
+ * to be `'onebun:http_guards'`, read only by HTTP route registration, so `@UseGuards` on a
+ * `@Subscribe` or `@OnMessage` handler was a silent no-op: no type error, no warning,
+ * and the handler ran completely unguarded.
+ *
+ * @see docs:api/guards.md
  */
-const HTTP_GUARDS_METADATA = 'onebun:http_guards';
+export const GUARDS_METADATA = 'onebun:guards';
 
 /**
- * Metadata key for controller-level HTTP guards
+ * Metadata key for class-level guards (shared across HTTP, WS, Queue).
+ *
+ * @see docs:api/guards.md
  */
-const HTTP_CONTROLLER_GUARDS_METADATA = 'onebun:controller_http_guards';
+export const CONTROLLER_GUARDS_METADATA = 'onebun:controller_guards';
 
 /**
  * Metadata key for route-level exception filters
@@ -860,8 +1021,45 @@ export function UseMiddleware(...middleware: Function[]): any {
       propertyKey,
     );
 
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
+
     return descriptor;
   };
+}
+
+/**
+ * Collect a class-level pipeline list from a controller AND every class it extends.
+ *
+ * The metadata polyfill (`decorators/metadata.ts`) is a `WeakMap` keyed on the exact object
+ * and does NOT walk the prototype chain, unlike the `reflect-metadata` it replaced. So a
+ * controller extending a `@UseGuards`-decorated base inherited nothing and answered
+ * UNGUARDED — measured HTTP 200 with the handler reached, no error, nothing in the logs.
+ * The pattern that bypasses is the ordinary one: a `ProtectedBase` that feature controllers
+ * extend so the decorator is written once.
+ *
+ * Base entries come FIRST, matching how controller-level and route-level lists already
+ * merge, so a subclass adds to its base rather than running ahead of it. Deduplicated by
+ * identity, because `@Controller` copies class-level metadata onto the class it wraps and
+ * both appear on one chain.
+ *
+ * @see docs:api/guards.md
+ */
+function collectInheritedClassMetadata<T>(metadataKey: string, target: Function): T[] {
+  const perLevel: T[][] = [];
+
+  let current: Function | null = target;
+  while (typeof current === 'function') {
+    const values: T[] | undefined = Reflect.getMetadata(metadataKey, current);
+    if (values && values.length > 0) {
+      perLevel.push(values);
+    }
+    current = Object.getPrototypeOf(current) as Function | null;
+  }
+
+  // Walked most-derived first; reverse so the base class contributes first.
+  return [...new Set(perLevel.reverse().flat())];
 }
 
 /**
@@ -872,30 +1070,73 @@ export function UseMiddleware(...middleware: Function[]): any {
  * @returns Array of middleware class constructors
  */
 export function getControllerMiddleware(target: Function): Function[] {
-  return Reflect.getMetadata(CONTROLLER_MIDDLEWARE_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_MIDDLEWARE_METADATA, target);
 }
 
 /**
- * Get controller-level HTTP guards for a controller class.
+ * Get class-level guards for a controller, gateway or queue consumer class.
  * Returns guards registered via @UseGuards() applied to the class.
  *
  * @param target - Controller class (constructor)
  * @returns Array of guard class constructors or instances
  */
-export function getControllerGuards(target: Function): (Function | HttpGuard)[] {
-  return Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+export function getControllerGuards(target: Function): (Function | Guard)[] {
+  return collectInheritedClassMetadata(CONTROLLER_GUARDS_METADATA, target);
 }
 
 /**
- * Guards decorator — can be applied to both controllers (class) and individual routes (method).
+ * Read the method-level `@UseGuards` list for a handler, walking the prototype chain.
  *
- * Pass guard **class constructors** or **instances**. Class constructors are instantiated
- * for each request; instances are reused.
+ * `@Controller` wraps the decorated class in a subclass, so `WrappedController.prototype` is a
+ * DIFFERENT object from the prototype the method decorator wrote to, and the metadata polyfill
+ * is a `WeakMap` keyed on the exact object with no prototype walking. A queue consumer read by
+ * class — which is how `QueueService.registerService` receives it — therefore finds nothing
+ * unless the chain is walked. HTTP does not need this: route registration reads the prototype
+ * it was handed directly.
  *
- * Guards run after the middleware chain but before the route handler.
- * If any guard returns false, the request is rejected with a 403 Forbidden response.
+ * Base entries come first, matching how class-level and method-level lists already merge.
  *
- * Execution order: middleware → guards → handler
+ * @param target - Class holding the handler
+ * @param propertyKey - Handler method name
+ * @returns Guards declared with `@UseGuards` on that method
+ * @see docs:api/guards.md
+ */
+export function getMethodGuards(target: Function, propertyKey: string | symbol): (Function | Guard)[] {
+  const perLevel: (Function | Guard)[][] = [];
+
+  let proto: object | null = target.prototype as object | null;
+  while (proto && proto !== Object.prototype) {
+    const values: (Function | Guard)[] | undefined =
+      Reflect.getMetadata(GUARDS_METADATA, proto, propertyKey);
+    if (values && values.length > 0) {
+      perLevel.push(values);
+    }
+    proto = Object.getPrototypeOf(proto) as object | null;
+  }
+
+  return [...new Set(perLevel.reverse().flat())];
+}
+
+/**
+ * Guards decorator — ONE decorator across HTTP routes, WebSocket message handlers and queue
+ * consumers, applicable to both classes and individual methods.
+ *
+ * Pass guard **class constructors** or **instances**. Class constructors get full constructor
+ * DI from the module that owns the handler and are instantiated per invocation; instances are
+ * reused as given.
+ *
+ * A guard receives the universal `ExecutionContext`. Narrow it with `isHttpContext()`,
+ * `isWsContext()` or `isQueueContext()` — a guard that reads `getRequest()` on a queue message
+ * has no request to read, and the built-in guards deny rather than throw when they land on a
+ * transport they were not written for.
+ *
+ * Denial per transport:
+ * - HTTP — 403 Forbidden (200 with the error in the body under `httpEnvelope`)
+ * - WebSocket — an `error` frame back to the client; the socket stays open
+ * - Queue — the message is nacked with `requeue: false`, so it dead-letters where the adapter
+ *   supports one and raises `onMessageFailed` either way. It is never silently dropped
+ *
+ * Execution order: middleware → class guards → method guards → handler
  *
  * @see docs:api/guards.md
  * @see docs:api/decorators.md
@@ -914,6 +1155,13 @@ export function getControllerGuards(target: Function): (Function | HttpGuard)[] 
  * getDashboard() { ... }
  * ```
  *
+ * @example Queue consumer
+ * ```typescript
+ * \@UseGuards(TenantActiveGuard)
+ * \@Subscribe('orders.*')
+ * async handleOrder(message: Message<OrderData>) { ... }
+ * ```
+ *
  * @example Combined (class guard + route guard)
  * ```typescript
  * \@Controller('/api')
@@ -926,16 +1174,16 @@ export function getControllerGuards(target: Function): (Function | HttpGuard)[] 
  * ```
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function UseGuards(...guards: (Function | HttpGuard)[]): any {
+export function UseGuards(...guards: (Function | Guard)[]): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function useGuardsDecorator(...args: any[]): any {
     // ---- Class decorator: target is a constructor function ----
     if (args.length === 1 && typeof args[0] === 'function') {
       const target = args[0] as Function;
-      const existing: (Function | HttpGuard)[] =
-        Reflect.getMetadata(HTTP_CONTROLLER_GUARDS_METADATA, target) || [];
+      const existing: (Function | Guard)[] =
+        Reflect.getMetadata(CONTROLLER_GUARDS_METADATA, target) || [];
       Reflect.defineMetadata(
-        HTTP_CONTROLLER_GUARDS_METADATA,
+        CONTROLLER_GUARDS_METADATA,
         [...existing, ...guards],
         target,
       );
@@ -949,14 +1197,18 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
       string | symbol,
       PropertyDescriptor,
     ];
-    const existingGuards: (Function | HttpGuard)[] =
-      Reflect.getMetadata(HTTP_GUARDS_METADATA, target, propertyKey) || [];
+    const existingGuards: (Function | Guard)[] =
+      Reflect.getMetadata(GUARDS_METADATA, target, propertyKey) || [];
     Reflect.defineMetadata(
-      HTTP_GUARDS_METADATA,
+      GUARDS_METADATA,
       [...existingGuards, ...guards],
       target,
       propertyKey,
     );
+
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
 
     return descriptor;
   };
@@ -970,7 +1222,7 @@ export function UseGuards(...guards: (Function | HttpGuard)[]): any {
  * @returns Array of exception filter instances
  */
 export function getControllerFilters(target: Function): ExceptionFilter[] {
-  return Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target);
 }
 
 /**
@@ -1033,6 +1285,10 @@ export function UseFilters(...filters: ExceptionFilter[]): any {
       propertyKey,
     );
 
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
+
     return descriptor;
   };
 }
@@ -1045,7 +1301,7 @@ export function UseFilters(...filters: ExceptionFilter[]): any {
  * @returns Array of interceptor class constructors or instances
  */
 export function getControllerInterceptors(target: Function): (Function | Interceptor)[] {
-  return Reflect.getMetadata(CONTROLLER_INTERCEPTORS_METADATA, target) || [];
+  return collectInheritedClassMetadata(CONTROLLER_INTERCEPTORS_METADATA, target);
 }
 
 /**
@@ -1108,6 +1364,10 @@ export function UseInterceptors(...interceptors: (Function | Interceptor)[]): an
       target,
       propertyKey,
     );
+
+    // Order independence: the route decorator may already have registered this route
+    // with an empty list, because method decorators apply bottom-up.
+    reapplyRoutePipelineMetadata(target, propertyKey);
 
     return descriptor;
   };
@@ -1432,6 +1692,11 @@ export function ApiResponse(
     });
 
     Reflect.defineMetadata(RESPONSE_SCHEMAS_METADATA, existingSchemas, target, propertyKey);
+
+    // Order independence: the route decorator snapshots responseSchemas alongside the
+    // pipeline lists, and they drive response validation and the success status code at
+    // request time — not documentation only.
+    reapplyRoutePipelineMetadata(target, propertyKey);
   };
 }
 

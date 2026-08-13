@@ -14,6 +14,8 @@ import {
   mock,
 } from 'bun:test';
 
+import type { Type } from 'arktype';
+
 import { OneBunApplication } from '../application';
 import {
   BaseController,
@@ -666,6 +668,42 @@ describe('decorators', () => {
       const route = metadata?.routes[0];
       const param = route?.params?.[0];
       expect(param?.isRequired).toBe(false); // Explicitly set to optional
+    });
+
+    test('should keep Body required when the schema comes from a different arktype copy', () => {
+      // `ArkErrors` from a second physical arktype copy: same ` arkKind` brand as @ark/schema's own
+      // class, different class object, so NOT instanceof core's `type.errors`.
+      const arkKindKey = ' arkKind';
+      class ForeignArkErrors extends Array<{ message: string }> {
+        get summary(): string {
+          return this.map((issue) => issue.message).join('\n');
+        }
+      }
+      const foreignSchema = (data: unknown): unknown => {
+        if (typeof (data as { name?: unknown })?.name === 'string') {
+          return data;
+        }
+        const errors = new ForeignArkErrors();
+        errors.push({ message: 'must be an object (was undefined)' });
+        Object.assign(errors, { [arkKindKey]: 'errors', byPath: {}, count: 1 });
+
+        return errors;
+      };
+      Object.assign(foreignSchema, { [arkKindKey]: 'root' });
+
+      @Controller()
+      class TestController {
+        @Post()
+        test(
+          @Body(foreignSchema as unknown as Type<unknown>) data: { name: string },
+        ) {}
+      }
+
+      const metadata = getControllerMetadata(TestController);
+      const route = metadata?.routes[0];
+      const param = route?.params?.[0];
+      // The foreign schema rejects undefined, so @Body must stay required.
+      expect(param?.isRequired).toBe(true);
     });
 
     test('should handle multiple parameters', () => {

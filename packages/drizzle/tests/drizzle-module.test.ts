@@ -1,4 +1,8 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   beforeAll,
   describe,
@@ -10,7 +14,16 @@ import {
 } from 'bun:test';
 
 import {
+  BaseController,
+  Controller,
+  Get,
+  Module,
+  OneBunApplication,
+} from '@onebun/core';
+
+import {
   DrizzleModule,
+  DrizzleService as DrizzleServiceCtor,
   DatabaseType,
   type DrizzleModuleOptions,
 } from '../src';
@@ -384,5 +397,64 @@ describe('DrizzleModule', () => {
       expect(feature1).toBe(DrizzleModule);
       expect(feature2).toBe(DrizzleModule);
     });
+  });
+});
+
+/**
+ * DrizzleService never closed its connection on shutdown: `close()` existed and nothing in
+ * the lifecycle called it. A service from one suite therefore kept its connection open into
+ * the next — the direct mechanism behind a suite reporting `database "..." does not exist`
+ * after an earlier one dropped its throwaway database.
+ */
+describe('connection lifecycle', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'onebun-drizzle-destroy-'));
+
+  afterEach(() => {
+    DrizzleModule.clearOptions();
+  });
+
+  afterAll(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  test('closes the connection when the application stops', async () => {
+    const dbFile = join(scratch, 'lifecycle.db');
+
+    @Controller('/health')
+    class HealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: dbFile } },
+          // Mandatory: the default reaches runMigrations() and a swallowed-warning path.
+          autoMigrate: false,
+        }),
+      ],
+      controllers: [HealthController],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    await app.start();
+    const service = app.getService(DrizzleServiceCtor);
+
+    expect(service.getSQLiteClient()).not.toBeNull();
+
+    await app.stop();
+
+    // Both are nulled only by close(). Pre-fix they stayed populated after stop().
+    expect(service.getSQLiteClient()).toBeNull();
+    expect(service.getConnectionOptions()).toBeNull();
   });
 });

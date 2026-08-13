@@ -18,9 +18,10 @@
  * matchQueuePattern('orders.*', 'orders.created')    // true
  * matchQueuePattern('orders.*', 'orders.created.new') // false
  *
- * // Multi-level wildcard
+ * // Multi-level wildcard — one or more segments, never zero: the separator
+ * // before `#` is required, so the bare prefix on its own does not match.
  * matchQueuePattern('events.#', 'events.user.created') // true
- * matchQueuePattern('events.#', 'events')              // true
+ * matchQueuePattern('events.#', 'events.created')      // true
  *
  * // Named parameters
  * matchQueuePattern('orders.{id}.status', 'orders.123.status')

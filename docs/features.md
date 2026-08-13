@@ -15,7 +15,7 @@ production-grade backend services.
 ### Core Capabilities
 - **Modules & DI**: NestJS-style @Module, @Controller, @Service with automatic constructor injection
 - **HTTP Routing**: Decorator-based (@Get, @Post, @Put, @Delete, @Patch) with path params, query, body, headers
-- **Guards**: Custom route guards for authentication/authorization
+- **Guards**: One `@UseGuards` across HTTP/WS/Queue for authentication/authorization, class- or method-level, with constructor DI
 - **Interceptors**: Universal handler wrapping across HTTP/WS/Queue for logging, caching, timeouts
 - **Middleware**: @UseMiddleware decorator with chaining support
 - **Graceful Shutdown**: Enabled by default, handles SIGTERM/SIGINT
@@ -46,6 +46,7 @@ production-grade backend services.
 - Schema-first approach with full type inference from schema
 - CLI migrations (onebun-drizzle generate/push/studio)
 - Auto-migrate on startup (enabled by default)
+- Configured means required: an unreachable database or a failing migration rejects `app.start()` with `DrizzleStartupError` (stage `open`/`connect`/`migrate`); opt out via `allowDegradedStart: true` in `forRoot()`, or `DB_ALLOW_DEGRADED_START=true` on the environment path
 - BaseRepository with CRUD operations
 
 ### Queue & Scheduler
@@ -55,11 +56,12 @@ production-grade backend services.
 
 ### Caching (@onebun/cache)
 - In-memory cache (TTL, max size, cleanup) and Redis cache
+- Configuring Redis makes it a startup dependency: unreachable within `connectTimeout` (default 5000ms) rejects `app.start()` with `CacheBackendUnavailableError`; `allowDegradedStart: true` / `CACHE_ALLOW_DEGRADED_START=true` starts with a process-local cache instead, and `getBackendStatus()` reports the active backend
 - Shared Redis connection pool across modules
 - Batch operations (mget, mset)
 
 ### HTTP Client (@onebun/requests)
-- createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential)
+- createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential, idempotent methods only by default — POST/PATCH must opt in via retries.methods)
 - Typed `ApiResponse<T>` with success/error discrimination
 - Typed service clients for inter-service communication
 
@@ -113,8 +115,10 @@ Standardized ApiResponse format across the application.
 → [API Reference](/api/controllers)
 
 ### Guards
-Custom guard support for authentication and authorization.
-Write guard functions and apply them via decorators to protect routes.
+One `@UseGuards()` across HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe`
+consumers — class-level or method-level, with constructor DI on all three.
+Denial per transport: HTTP `403` (200 with `httpEnvelope`), a WebSocket `error` frame that
+leaves the socket open, a queue `nack(false)` with no redelivery.
 → [API Reference](/api/guards)
 
 ### Interceptors
@@ -210,6 +214,10 @@ Supports PostgreSQL and SQLite (via bun:sqlite).
 - CLI: `bunx onebun-drizzle generate` / `push` / `studio`
 - Programmatic: `generateMigrations()`, `pushSchema()`
 - Auto-migrate on startup (enabled by default — no configuration needed)
+- A configured database is required at boot: an unreachable server or a failing migration makes
+  `app.start()` reject before the HTTP server binds. Opt out with `allowDegradedStart: true` in
+  `forRoot()`, or `DB_ALLOW_DEGRADED_START=true` on the environment path.
+  → [Startup Contract](/api/drizzle#startup-contract)
 
 ### Repository Pattern
 BaseRepository with built-in CRUD operations,
@@ -233,7 +241,11 @@ Cron-like task scheduling with the same backend options.
 
 ### CacheModule
 - **In-memory cache** — with TTL, max size, cleanup intervals
-- **Redis cache** — with shared connection pool support
+- **Redis cache** — with shared connection pool support. Choosing it makes Redis a startup
+  dependency: unreachable within `connectTimeout` (default 5000ms) and `app.start()` fails
+  without the listener ever opening, unless `allowDegradedStart: true` /
+  `CACHE_ALLOW_DEGRADED_START=true` accepts a process-local cache instead.
+  `getBackendStatus()` reports which backend is actually serving.
 - Batch operations: mget, mset
 - Cache-aside, invalidation, and warming patterns
 → [API Reference](/api/cache)
@@ -243,7 +255,8 @@ Cron-like task scheduling with the same backend options.
 ### createHttpClient()
 Full-featured HTTP client with:
 - **Authentication**: Bearer, API Key, Basic, HMAC (inter-service)
-- **Retries**: fixed, linear, exponential backoff strategies
+- **Retries**: fixed, linear, exponential backoff — idempotent methods only by default;
+  POST and PATCH must opt in via `retries.methods`. See the [defaults table](/api/requests#defaults).
 - **Typed responses**: `ApiResponse<T>` with success/error discrimination
 
 ### Typed Service Clients
@@ -288,8 +301,11 @@ type-safe inter-service REST communication without code generation.
 ## Production Features
 
 ### Graceful Shutdown
-Enabled by default. Handles SIGTERM/SIGINT, closes HTTP server,
-WebSocket connections, and Redis connections.
+Enabled by default. On SIGTERM/SIGINT the application first refuses new requests with
+`503` while the listener stays open, drains the requests already being served, and only
+then closes the listener and runs the destroy hooks — so a rolling deploy stops cutting
+responses that were mid-flight. Bounded by `shutdownTimeout` (default 15s), idempotent,
+and in multi-service mode a single parent handler stops every service.
 
 ### Shared Redis Connection
 Single Redis connection pool shared between Cache, WebSocket,
@@ -307,7 +323,7 @@ If you're coming from NestJS, here's what to expect:
 - @Module, @Controller, @Service decorators
 - Constructor-based dependency injection
 - Module imports/exports for service sharing
-- Guards for route protection
+- Guards for route protection — and in OneBun the same decorator covers WebSocket and queue handlers too
 - Middleware support
 
 ### Improved in OneBun

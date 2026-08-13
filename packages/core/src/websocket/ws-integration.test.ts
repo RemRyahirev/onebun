@@ -47,7 +47,14 @@ const TEST_PORT = 19876;
 const TEST_URL = `ws://localhost:${TEST_PORT}/ws`;
 
 // Test Gateway implementation
-@WebSocketGateway({ path: '/ws' })
+@WebSocketGateway({
+  path: '/ws',
+  // The gateway's own authentication. Nothing in the framework sets `authenticated`, and
+  // WsAuthGuard requires it — before this hook existed the guard could never pass, and the
+  // suite's "allows a valid token" case only looked green because a decorator-order defect
+  // stopped the guard from running at all.
+  authenticate: ({ token }) => (token ? { userId: `user-for-${token}` } : null),
+})
 class TestGateway extends BaseWebSocketGateway {
   public connectCount = 0;
   public disconnectCount = 0;
@@ -395,17 +402,18 @@ describe('WebSocket Integration', () => {
         // Error expected when auth fails
       });
 
-      // Send to protected endpoint - should not receive response
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (client as any).TestGateway.send('protected', {});
-      await new Promise((resolve) => setTimeout(resolve, 30));
-
-      // We should not receive protected:response since guard blocks it
+      // Listen BEFORE sending — registering the listener afterwards made this assertion
+      // vacuous, so it passed even while the guard was being skipped entirely.
       let protectedResponseReceived = false;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (client as any).TestGateway.on('protected:response', () => {
         protectedResponseReceived = true;
       });
+
+      // Send to protected endpoint - should not receive response
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.send('protected', {});
+      await new Promise((resolve) => setTimeout(resolve, 30));
 
       expect(protectedResponseReceived).toBe(false);
 
@@ -515,6 +523,68 @@ describe('WebSocket Integration', () => {
 
       client1.disconnect();
       client2.disconnect();
+    });
+  });
+
+  describe('authenticate hook', () => {
+    /**
+     * Before this hook existed, `ws-handler.ts` created every client with
+     * `authenticated: false` and nothing anywhere set it to true — so `WsAuthGuard`, an
+     * exported built-in, denied every client forever, and `WsPermissionGuard` read a
+     * permissions list nobody populated. The suite's own "allows a valid token" case passed
+     * only because a decorator-order defect stopped the guard from running at all.
+     */
+    it('lets an authenticated client through a WsAuthGuard-protected handler', async () => {
+      const client = createWsClient(definition, {
+        url: TEST_URL,
+        timeout: 2000,
+        auth: { token: 'hook-token' },
+      });
+
+      await client.connect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      let received = false;
+      let payload: { userId?: string } | undefined;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.on('protected:response', (data: { userId?: string }) => {
+        received = true;
+        payload = data;
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.send('protected', {});
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(received).toBe(true);
+      // The identity the hook returned reached the handler, which is what proves the hook
+      // ran rather than the guard being bypassed.
+      expect(payload?.userId).toBe('user-for-hook-token');
+
+      client.disconnect();
+    });
+
+    it('admits a client with no token as anonymous, and the guard still denies it', async () => {
+      const client = createWsClient(definition, { url: TEST_URL, timeout: 2000 });
+
+      // `null` from the hook means connect-but-anonymous: the upgrade succeeds...
+      await client.connect();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      let received = false;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.on('protected:response', () => {
+        received = true;
+      });
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (client as any).TestGateway.send('protected', {});
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      // ...and the protected handler is still out of reach.
+      expect(received).toBe(false);
+
+      client.disconnect();
     });
   });
 });

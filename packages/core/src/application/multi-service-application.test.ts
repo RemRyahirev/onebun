@@ -6,16 +6,24 @@ import {
   test,
 } from 'bun:test';
 
+import type { BeforeApplicationDestroy, OnModuleDestroy } from '../module/lifecycle';
+
 import { TypedEnv } from '@onebun/envs';
 
 import {
   Controller,
   Get,
+  Global,
   Module,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { BaseService, Service } from '../module/service';
+import { QueueService } from '../queue';
+import { Subscribe } from '../queue/decorators';
 
 import { OneBunApplication } from './application';
+
+const HTTP_OK = 200;
 
 // Test modules
 @Module({
@@ -247,17 +255,133 @@ describe('OneBunApplication multi-service mode', () => {
   });
 
   describe('queue option', () => {
-    test('should accept queue option and pass it to child applications', () => {
-      const app = new OneBunApplication({
+    @Controller('/queue-health')
+    class QueueHealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Controller('/queue-consumer')
+    class QueueConsumerController extends BaseController {
+      @Subscribe('multi.service.event')
+      async handle(): Promise<void> {
+        // no-op consumer; its presence is what auto-enables the queue
+      }
+    }
+
+    @Module({ controllers: [QueueHealthController] })
+    class ProducerServiceModule {}
+
+    @Module({ controllers: [QueueHealthController] })
+    class PlainServiceModule {}
+
+    @Module({ controllers: [QueueConsumerController] })
+    class ConsumerServiceModule {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any>;
+
+    afterEach(async () => {
+      await app?.stop();
+      TypedEnv.clear();
+    });
+
+    function twoServices(): {
+      svcA: { module: typeof ProducerServiceModule; port: number };
+      svcB: { module: typeof PlainServiceModule; port: number };
+    } {
+      return {
+        svcA: { module: ProducerServiceModule, port: 0 },
+        svcB: { module: PlainServiceModule, port: 0 },
+      };
+    }
+
+    function queueServiceOf(name: string): unknown {
+      return app.getApplication(name as never)!.getQueueService();
+    }
+
+    test('should accept queue option and pass it to child applications', async () => {
+      // Row (e): an explicit enabled:true reaches every child, including ones with no
+      // queue decorator. Asserted on observable state, not on the option being accepted.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: true, adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).not.toBeNull();
+    });
+
+    test('an adapter configured without `enabled` enables the queue in every child', async () => {
+      // Row (a) — the bug this item fixes.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).not.toBeNull();
+    });
+
+    test('queue.enabled: false with no backend keeps every child disabled but still started', async () => {
+      // Row (b): disabled, and no contradiction — the warning count is pinned in
+      // multi-service-orchestrator.test.ts, which can substitute a capturing logger.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: false },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+      expect(app.getRunningServices()).toHaveLength(2);
+    });
+
+    test('queue.enabled: false with a configured adapter keeps every child disabled but still started', async () => {
+      // Row (c): the override wins over the backend config, and startAll() does not throw.
+      app = new OneBunApplication({
+        services: twoServices(),
+        queue: { enabled: false, adapter: 'memory' },
+      });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+      expect(app.getRunningServices()).toHaveLength(2);
+    });
+
+    test('a child carrying a queue decorator still auto-enables when no queue option is set', async () => {
+      // Row (d): the orchestrator must forward `undefined` untouched. Materialising an
+      // explicit `enabled: false` here would silently kill decorator auto-detection.
+      app = new OneBunApplication({
         services: {
-          serviceA: { module: TestModuleA, port: 3001 },
-        },
-        queue: {
-          enabled: true,
-          adapter: 'memory',
+          svcA: { module: ConsumerServiceModule, port: 0 },
+          svcB: { module: PlainServiceModule, port: 0 },
         },
       });
-      expect(app).toBeDefined();
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).not.toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
+    });
+
+    test('no queue option and no queue decorator leaves every child disabled', async () => {
+      // Row (f): the unchanged baseline.
+      app = new OneBunApplication({ services: twoServices() });
+
+      await app.start();
+
+      expect(queueServiceOf('svcA')).toBeNull();
+      expect(queueServiceOf('svcB')).toBeNull();
     });
   });
 
@@ -430,6 +554,265 @@ describe('OneBunApplication multi-service mode', () => {
 
       await app.stop();
       expect(app.getRunningServices()).toEqual([]);
+    });
+  });
+
+  describe('per-sub-application GlobalScope', () => {
+    let constructed = 0;
+
+    @Service()
+    class ScopedGlobalService extends BaseService {
+      readonly id: number;
+
+      constructor() {
+        super();
+        constructed++;
+        this.id = constructed;
+      }
+    }
+
+    @Global()
+    @Module({ providers: [ScopedGlobalService], exports: [ScopedGlobalService] })
+    class ScopedGlobalModule {}
+
+    /** Resolves QueueService through the ordinary DI path, by tag. */
+    @Service()
+    class QueueProbeService extends BaseService {
+      constructor(readonly queue: QueueService) {
+        super();
+      }
+    }
+
+    @Controller('/scoped')
+    class ScopedController extends BaseController {
+      constructor(private svc: ScopedGlobalService) {
+        super();
+      }
+
+      @Get('/')
+      id() {
+        return { id: this.svc.id };
+      }
+    }
+
+    @Module({
+      imports: [ScopedGlobalModule],
+      controllers: [ScopedController],
+      providers: [QueueProbeService],
+    })
+    class ScopedModuleOne {}
+
+    @Module({
+      imports: [ScopedGlobalModule],
+      controllers: [ScopedController],
+      providers: [QueueProbeService],
+    })
+    class ScopedModuleTwo {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any> | undefined;
+
+    const startPair = async (): Promise<void> => {
+      app = new OneBunApplication({
+        services: {
+          one: { module: ScopedModuleOne, port: 0 },
+          two: { module: ScopedModuleTwo, port: 0 },
+        },
+        metrics: { enabled: false },
+      });
+      await app.start();
+    };
+
+    beforeEach(() => {
+      constructed = 0;
+    });
+
+    afterEach(async () => {
+      await app?.stop();
+      app = undefined;
+      TypedEnv.clear();
+    });
+
+    test('each sub-application holds its OWN @Global() instance', async () => {
+      await startPair();
+
+      const first = app!.getApplication('one')!.getService(ScopedGlobalService);
+      const second = app!.getApplication('two')!.getService(ScopedGlobalService);
+
+      // One global service instance per SUB-APPLICATION, not per process.
+      expect(first).not.toBe(second);
+      expect(constructed).toBe(2);
+    });
+
+    test('stopping one sub-application leaves the other fully functional', async () => {
+      await startPair();
+
+      const two = app!.getApplication('two')!;
+      // Disposing sub-app one's scope must not empty a scope its sibling is still using.
+      await app!.getApplication('one')!.stop();
+
+      const response = await fetch(`${two.getHttpUrl()}/scoped`);
+      expect(response.status).toBe(HTTP_OK);
+      expect(two.getService(ScopedGlobalService)).toBeDefined();
+    });
+
+    test('each sub-application resolves QueueService to the proxy its own start() wrote', async () => {
+      await startPair();
+
+      // Sub-apps start concurrently; with a process-wide registry the proxy each one wrote
+      // could be captured by a sibling still in PHASE 0 of its own module tree.
+      const probeOne = app!.getApplication('one')!.getService(QueueProbeService);
+      const probeTwo = app!.getApplication('two')!.getService(QueueProbeService);
+
+      expect(probeOne.queue).toBeDefined();
+      expect(probeTwo.queue).toBeDefined();
+      expect(probeOne.queue).not.toBe(probeTwo.queue);
+    });
+  });
+
+  /**
+   * One process, one signal handler. Every child used to register its own, each ending in
+   * `process.exit(0)`, so the first service to finish stopping killed the process while
+   * its siblings were still inside `beforeApplicationDestroy`.
+   */
+  describe('signal-driven shutdown', () => {
+    const HOOK_DELAY_MS = 80;
+    const events: string[] = [];
+
+    @Service()
+    class AlphaLifecycleService extends BaseService
+      implements BeforeApplicationDestroy, OnModuleDestroy {
+      async beforeApplicationDestroy(): Promise<void> {
+        events.push('alpha:before:enter');
+        await Bun.sleep(HOOK_DELAY_MS);
+        events.push('alpha:before:exit');
+      }
+
+      onModuleDestroy(): void {
+        events.push('alpha:moduleDestroy');
+      }
+    }
+
+    @Service()
+    class BravoLifecycleService extends BaseService
+      implements BeforeApplicationDestroy, OnModuleDestroy {
+      async beforeApplicationDestroy(): Promise<void> {
+        events.push('bravo:before:enter');
+        await Bun.sleep(HOOK_DELAY_MS);
+        events.push('bravo:before:exit');
+      }
+
+      onModuleDestroy(): void {
+        events.push('bravo:moduleDestroy');
+      }
+    }
+
+    @Module({ providers: [AlphaLifecycleService] })
+    class AlphaModule {}
+
+    @Module({ providers: [BravoLifecycleService] })
+    class BravoModule {}
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let app: OneBunApplication<any, any> | undefined;
+
+    beforeEach(() => {
+      events.length = 0;
+    });
+
+    afterEach(async () => {
+      await app?.stop();
+      app = undefined;
+      TypedEnv.clear();
+    });
+
+    test('one SIGTERM stops every service completely before the process exits', async () => {
+      const signalHandlers: Record<string, (() => void)[]> = { SIGTERM: [], SIGINT: [] };
+      const originalProcessOn = process.on.bind(process);
+      const originalExit = process.exit.bind(process);
+      const exitCodes: number[] = [];
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers[event].push(handler);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+      process.exit = ((code?: number) => {
+        exitCodes.push(code ?? 0);
+      }) as typeof process.exit;
+
+      try {
+        app = new OneBunApplication({
+          services: {
+            alpha: { module: AlphaModule, port: 0 },
+            bravo: { module: BravoModule, port: 0 },
+          },
+          metrics: { enabled: false },
+        });
+        await app.start();
+
+        // The FIRST handler registered is the one that used to win the race and exit the
+        // process; driving it must now stop the whole process' worth of services.
+        signalHandlers.SIGTERM[0]();
+
+        const startedAt = Date.now();
+        while (exitCodes.length === 0 && Date.now() - startedAt < 5000) {
+          await Bun.sleep(5);
+        }
+      } finally {
+        process.on = originalProcessOn;
+        process.exit = originalExit;
+      }
+
+      // bravo used to be cut mid-teardown: its beforeApplicationDestroy never returned
+      // and its onModuleDestroy never ran at all.
+      expect(events).toContain('alpha:before:exit');
+      expect(events).toContain('bravo:before:exit');
+      expect(events).toContain('alpha:moduleDestroy');
+      expect(events).toContain('bravo:moduleDestroy');
+
+      // Exactly one handler for the whole process — the parent's.
+      expect(signalHandlers.SIGTERM).toHaveLength(1);
+      expect(signalHandlers.SIGINT).toHaveLength(1);
+
+      // stopAll() ran to completion before the exit, and exited exactly once.
+      expect(app!.getRunningServices()).toEqual([]);
+      expect(exitCodes).toEqual([0]);
+    });
+
+    test('gracefulShutdown: false installs no handler at all', async () => {
+      const signalHandlers: string[] = [];
+      const originalProcessOn = process.on.bind(process);
+
+      process.on = ((event: string, handler: () => void) => {
+        if (event === 'SIGTERM' || event === 'SIGINT') {
+          signalHandlers.push(event);
+
+          return process;
+        }
+
+        return originalProcessOn(event as 'exit', handler as () => void);
+      }) as typeof process.on;
+
+      try {
+        app = new OneBunApplication({
+          services: {
+            alpha: { module: AlphaModule, port: 0 },
+            bravo: { module: BravoModule, port: 0 },
+          },
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+        });
+        await app.start();
+      } finally {
+        process.on = originalProcessOn;
+      }
+
+      expect(signalHandlers).toEqual([]);
     });
   });
 });

@@ -61,9 +61,15 @@ export interface OnModuleDestroy {
 }
 
 /**
- * Interface for hook called before application shutdown begins.
- * Called at the very start of the shutdown process.
+ * Interface for hook called before the application's own teardown begins.
+ *
+ * NOT the very first thing that happens: the server has already stopped accepting new
+ * requests and drained the ones in flight, and the listener is closed, so a request
+ * issued from this hook is refused. That ordering is what keeps a deploy from cutting
+ * responses; the hook still runs before any service or controller is destroyed.
+ *
  * @see docs:api/services.md
+ * @see docs:api/core.md
  */
 export interface BeforeApplicationDestroy {
   /**

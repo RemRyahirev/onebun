@@ -4,6 +4,10 @@
  * @source docs:api/drizzle.md
  */
 
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'path';
+
 import {
   describe,
   it,
@@ -13,8 +17,27 @@ import {
 } from 'bun:test';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
+import type { PostgreSQLConnectionOptions } from '../src/types';
+
+import {
+  BaseController,
+  BaseService,
+  Controller,
+  Get,
+  Global,
+  getConstructorParamTypes,
+  getInjectToken,
+  Inject,
+  isGlobalModule,
+  Module,
+  OneBunApplication,
+  resetRegistrations,
+  Service as ServiceDecorator,
+} from '@onebun/core';
+
 import {
   DrizzleModule,
+  DrizzleService as DrizzleServiceCtor,
   DatabaseType,
   Entity,
   BaseRepository,
@@ -32,6 +55,8 @@ import {
   text,
   integer,
 } from '../src/sqlite';
+
+const migrationsFixture = join(__dirname, 'test-migrations');
 
 
 describe('Drizzle README Examples', () => {
@@ -239,6 +264,10 @@ describe('Drizzle API Documentation Examples', () => {
       expect(BaseRepository.prototype.delete).toBeDefined();
       expect(BaseRepository.prototype.count).toBeDefined();
       expect(BaseRepository.prototype.transaction).toBeDefined();
+      // From docs: "findAll(): Promise<User[]> — the whole table, no pagination". The
+      // documented signature took an options object; an argument passed to this one is
+      // silently discarded, so the arity is what the page now promises.
+      expect(BaseRepository.prototype.findAll.length).toBe(0);
       /* eslint-enable jest/unbound-method */
     });
   });
@@ -258,6 +287,72 @@ describe('Drizzle API Documentation Examples', () => {
       const { pushSchema } = require('../src/migrations');
       expect(pushSchema).toBeDefined();
       expect(typeof pushSchema).toBe('function');
+    });
+
+    /**
+     * @source docs:api/drizzle.md#postgresql-connection
+     */
+    it('accepts either connection shape and refuses a mix', async () => {
+      // From docs: "either a connectionString or the five discrete fields — never a mix"
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+
+      const urlForm: PostgreSQLConnectionOptions = {
+        connectionString: 'postgresql://user:password@host:5432/database',
+      };
+      const discreteForm: PostgreSQLConnectionOptions = {
+        host: 'localhost',
+        port: 5432,
+        user: 'postgres',
+        password: 'secret',
+        database: 'app',
+      };
+
+      expect(urlForm.connectionString).toBeDefined();
+      expect(discreteForm.host).toBeDefined();
+
+      // A mix is a compile error; from an untyped source it is a runtime one.
+      await expect(new Service().initialize({
+        type: DatabaseType.POSTGRESQL,
+        options: { connectionString: 'postgresql://u:p@h:5432/d', host: 'other' },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any)).rejects.toThrow(/both connectionString and discrete field/);
+    });
+
+    /**
+     * @source docs:api/drizzle.md#one-journal-per-migration-set
+     */
+    it('gives each migration set its own journal, as the docs show', async () => {
+      // From docs: "One Journal Per Migration Set" — the application's set on the default
+      // journal, a package's set on its own. Both folders here are the same fixture; what
+      // the example is about is the journal, not the contents.
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service();
+      await service.initialize({
+        type: DatabaseType.SQLITE,
+        options: { url: ':memory:' },
+      });
+
+      try {
+        await service.runMigrations({ migrationsFolder: migrationsFixture });
+        await service.runMigrations({
+          migrationsFolder: migrationsFixture,
+          migrationsTable: '__drizzle_migrations_durable',
+        });
+
+        const client = service.getSQLiteClient()!;
+        const tables = client.query(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '__drizzle_migrations%'",
+        ).all() as Array<{ name: string }>;
+
+        expect(tables.map(t => t.name).sort()).toEqual([
+          '__drizzle_migrations',
+          '__drizzle_migrations_durable',
+        ]);
+      } finally {
+        await service.close();
+      }
     });
 
     it('generateMigrations should accept documented options', async () => {
@@ -1197,5 +1292,895 @@ describe('DrizzleService Type Inference (docs/api/drizzle.md)', () => {
       expect(typeof user.name).toBe('string');
       expect(typeof user.email).toBe('string');
     });
+  });
+});
+
+/**
+ * The documentation used to present two `forRoot()` calls as a way to reach two databases.
+ * It never worked: `forRoot()` stores its options on the module CLASS, so every instance
+ * reads the same last-written configuration and every analytics write landed in the main
+ * database. The page now says so; this pins the behaviour it describes, so that changing it
+ * has to be a deliberate edit here.
+ */
+describe('Non-Global Mode (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('gives separate instances that nevertheless share ONE configuration', () => {
+    const first = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+
+    const second = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-second.db' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+
+    try {
+      // Both calls return the same module class, which is why the options collapse.
+      expect(first).toBe(second);
+
+      // From docs: "every instance reads the same — last-written — configuration".
+      const options = DrizzleModule.getOptions();
+      expect(options?.connection.options).toEqual({ url: '/tmp/onebun-docs-second.db' });
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  it('restores globality when a later unnamed forRoot() does not opt out', () => {
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      isGlobal: false,
+    });
+    expect(isGlobalModule(DrizzleModule)).toBe(false);
+
+    try {
+      // From docs: the mutation is symmetric. Without this, one isGlobal:false anywhere in
+      // the process silently de-globalized every later forRoot() too. Symmetric is NOT
+      // isolation — the docs now say last-writer-wins, and the assertion below is exactly
+      // that: the LAST forRoot() decides, for every application in the process.
+      DrizzleModule.forRoot({
+        connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+        autoMigrate: false,
+      });
+      expect(isGlobalModule(DrizzleModule)).toBe(true);
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
+  it('forFeature() returns the module class, so it does not hand back a shared instance', () => {
+    // From docs: forFeature() "is an ordinary import and does NOT share the root's instance".
+    expect(DrizzleModule.forFeature()).toBe(DrizzleModule);
+  });
+});
+
+/**
+ * An UNNAMED forRoot() still has one options slot per process — that has not changed, and
+ * the page still says so. What changed is that it is no longer the only shape available:
+ * `forRoot({ as: TOKEN })` gives each configuration its own slot. Pinned so the unnamed
+ * path cannot silently acquire per-application behaviour it does not have.
+ */
+describe('one configuration per process, unnamed (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('a second forRoot anywhere in the process replaces the first for everyone', () => {
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-app-a.db' } },
+      autoMigrate: false,
+    });
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-app-b.db' } },
+      autoMigrate: false,
+    });
+
+    try {
+      // There is one options slot per module CLASS, which every application in the process
+      // shares — so "one database per application" is not reachable through forRoot().
+      expect(DrizzleModule.getOptions()?.connection.options).toEqual({ url: '/tmp/onebun-app-b.db' });
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+});
+
+/**
+ * Two claims the corrected page makes about what DOES work. Both were added after an
+ * independent audit found the first draft denied them — accuracy, not pessimism, was the
+ * point of the correction.
+ */
+describe('what the corrected page says still works (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#non-global-mode
+   */
+  it('a manually built DrizzleService reaches a different database than the module-configured one', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'onebun-docs-manual-'));
+    const moduleDb = join(scratch, 'module.db');
+    const manualDb = join(scratch, 'manual.db');
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: moduleDb } },
+      autoMigrate: false,
+    });
+
+    try {
+      // From docs: "new DrizzleService() followed by initialize(connection) takes its
+      // options directly and is unaffected by the shared slot".
+      const manual = new DrizzleServiceCtor();
+      await manual.initialize({ type: DatabaseType.SQLITE, options: { url: manualDb } });
+
+      // Asserted on the resolved connection TARGET, not on instance identity: two instances
+      // pointing at one database is exactly the defect this page documents, and an identity
+      // assertion passes for it.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const resolved = (manual as any).connectionOptions as { options?: { url?: string } } | null;
+      expect(resolved?.options?.url).toBe(manualDb);
+
+      // The module's own options are untouched, and the manual instance did not read them.
+      expect(DrizzleModule.getOptions()?.connection.options).toEqual({ url: moduleDb });
+
+      await manual.close?.();
+    } finally {
+      DrizzleModule.clearOptions();
+    }
+  });
+
+  /**
+   * @source docs:api/drizzle.md#forfeature-method
+   */
+  it('a @Global() module re-exporting the service shares ONE instance with modules that import neither', () => {
+    // From docs: the re-exported instance "then reaches modules that import neither".
+    // Pinned at the metadata level: a module class listing a SERVICE in exports is valid,
+    // which is what makes the documented bridge legal (listing a MODULE there throws).
+    @Global()
+    @Module({ imports: [DrizzleModule.forFeature()], exports: [DrizzleServiceCtor] })
+    class DatabaseBridge {}
+
+    expect(isGlobalModule(DatabaseBridge)).toBe(true);
+  });
+});
+
+describe('Connection Lifecycle (docs/api/drizzle.md)', () => {
+  /**
+   * @source docs:api/drizzle.md#connection-lifecycle
+   */
+  it('closes the connection when the application stops', async () => {
+    const scratch = mkdtempSync(join(tmpdir(), 'onebun-docs-lifecycle-'));
+
+    @Controller('/health')
+    class HealthController extends BaseController {
+      @Get('/')
+      health() {
+        return { ok: true };
+      }
+    }
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: join(scratch, 'lifecycle.db') } },
+          autoMigrate: false,
+        }),
+      ],
+      controllers: [HealthController],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      await app.start();
+      const service = app.getService(DrizzleServiceCtor);
+      expect(service.getSQLiteClient()).not.toBeNull();
+
+      await app.stop();
+
+      // From docs: "the client is closed and the service reports no connection".
+      expect(service.getSQLiteClient()).toBeNull();
+      expect(service.getConnectionOptions()).toBeNull();
+    } finally {
+      DrizzleModule.clearOptions();
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#multiple-databases
+ */
+describe('Multiple databases (docs/api/drizzle.md)', () => {
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('names each configuration with `as` and selects it with forFeature', () => {
+    const MAIN_DB = Symbol('MAIN_DB');
+    const ANALYTICS_DB = Symbol('ANALYTICS_DB');
+
+    // From docs: two registrations, each with its own configuration.
+    const main = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-main.db' } },
+      autoMigrate: false,
+      as: MAIN_DB,
+    });
+    const analytics = DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: '/tmp/onebun-docs-analytics.db' } },
+      autoMigrate: false,
+      as: ANALYTICS_DB,
+    });
+
+    // Distinct module identities, and forFeature selects them by token. The end-to-end
+    // assertion that they reach DIFFERENT databases lives in registration.test.ts.
+    expect(main).not.toBe(analytics);
+    expect(DrizzleModule.forFeature(ANALYTICS_DB)).toBe(analytics);
+    expect(DrizzleModule.forFeature(MAIN_DB)).toBe(main);
+  });
+
+  it('names the registration with @Inject in a module that holds BOTH', () => {
+    const mainDb = Symbol('MAIN_DB');
+    const analyticsDb = Symbol('ANALYTICS_DB');
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: mainDb,
+    });
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: analyticsDb,
+    });
+
+    // From docs: the module that needs both imports both and names each one. Pinned here at
+    // the metadata level — that the two parameters reach two DIFFERENT databases through a
+    // real boot, and that an un-annotated parameter still resolves, is registration.test.ts.
+    @ServiceDecorator()
+    class Reconciler extends BaseService {
+      constructor(
+        @Inject(mainDb) public main: DrizzleServiceCtor,
+        @Inject(analyticsDb) public analytics: DrizzleServiceCtor,
+      ) {
+        super();
+      }
+    }
+
+    expect(getInjectToken(Reconciler, 0)).toBe(mainDb);
+    expect(getInjectToken(Reconciler, 1)).toBe(analyticsDb);
+    // The token map is a SIDE map: design:paramtypes is untouched, so partial injection and
+    // every other paramtypes reader keep working.
+    expect(getConstructorParamTypes(Reconciler)).toEqual([DrizzleServiceCtor, DrizzleServiceCtor]);
+  });
+
+  it('refuses to register one token twice', () => {
+    const TOKEN = 'docs-token';
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: TOKEN,
+    });
+
+    // From docs: "Registering one token twice throws rather than silently replacing the first".
+    expect(() => DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+      as: TOKEN,
+    })).toThrow(/already registered/);
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#transaction
+ */
+describe('transaction() semantics (docs/api/drizzle.md)', () => {
+  /* eslint-disable @typescript-eslint/naming-convention */
+  const { DrizzleService } = require('../src/drizzle.service');
+  const { DrizzleTransactionError } = require('../src/builders/transaction-gate');
+  const { createTestService } = require('@onebun/core/testing');
+  /* eslint-enable @typescript-eslint/naming-convention */
+
+  const docUsers = sqliteTable('doc_tx_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  let service: typeof DrizzleService.prototype;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const { instance } = createTestService(DrizzleService);
+    service = instance;
+
+    await service.initialize({
+      type: DatabaseType.SQLITE,
+      options: { url: ':memory:' },
+    });
+
+    service.getSQLiteClient()!.run(`
+      CREATE TABLE doc_tx_users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL
+      )
+    `);
+  });
+
+  afterEach(async () => {
+    await service.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#transaction
+   */
+  it('rolls the transaction back when the callback throws after an await', async () => {
+    // From docs: "The callback may await freely. If it throws, the whole transaction is
+    // rolled back and the original error reaches the caller."
+    const someSlowCheck = async (): Promise<void> => await new Promise(resolve => setTimeout(resolve, 5));
+
+    let seen: Error | null = null;
+    try {
+      await service.transaction(async (tx: typeof service) => {
+        await tx.insert(docUsers).values({ name: 'John', email: 'john@example.com' });
+        await someSlowCheck();
+
+        throw new Error('changed my mind');
+      });
+    } catch (error) {
+      seen = error as Error;
+    }
+
+    expect(seen?.message).toBe('changed my mind');
+    expect(await service.select().from(docUsers)).toEqual([]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#sqlite
+   */
+  it('runs a service query from inside the callback on the transaction, and refuses a nested one', async () => {
+    // From docs: a query through the service is issued ON the transaction and undone with it;
+    // only a nested transaction() throws, with code 'SQLITE_TRANSACTION_NESTED'.
+    await service.transaction(async (tx: typeof service) => {
+      await tx.insert(docUsers).values({ name: 'John', email: 'john@example.com' });
+      await service.insert(docUsers).values({ name: 'Jane', email: 'jane@example.com' });
+    });
+
+    expect(await service.select().from(docUsers)).toHaveLength(2);
+
+    let nested: unknown;
+    try {
+      await service.transaction(async () => {
+        await service.transaction(async () => undefined);
+      });
+    } catch (error) {
+      nested = error;
+    }
+
+    expect(nested).toBeInstanceOf(DrizzleTransactionError);
+    expect((nested as { code: string }).code).toBe('SQLITE_TRANSACTION_NESTED');
+  }, 5000);
+
+  /**
+   * @source docs:api/drizzle.md#sqlite
+   */
+  it('queues a query issued elsewhere in the application until the transaction ends', async () => {
+    // From docs: "A query issued elsewhere in the application while the transaction is open
+    // waits for it, then runs after the COMMIT or ROLLBACK."
+    let released!: () => void;
+    const transactionOpen = new Promise<void>((resolve) => {
+      released = resolve;
+    });
+
+    const elsewhere = (async () => {
+      await transactionOpen;
+      await service.insert(docUsers).values({ name: 'Bystander', email: 'by@example.com' });
+
+      return 'written';
+    })();
+
+    await expect(service.transaction(async (tx: typeof service) => {
+      await tx.insert(docUsers).values({ name: 'Doomed', email: 'doomed@example.com' });
+      released();
+      await new Promise(resolve => setTimeout(resolve, 20));
+
+      throw new Error('undo');
+    })).rejects.toThrow('undo');
+
+    expect(await elsewhere).toBe('written');
+
+    const rows = await service.select().from(docUsers);
+    expect(rows.map((row: { name: string }) => row.name)).toEqual(['Bystander']);
+  }, 5000);
+});
+
+describe('Startup Contract (docs)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+  const deadUrl = 'postgresql://app:hunter2@127.0.0.1:5999/orders';
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#startup-contract
+   */
+  it('rejects app.start() when the configured database does not answer, without printing the password', async () => {
+    // From docs: "await app.start(); // rejects with DrizzleStartupError when the configured
+    // database is unreachable" — and the quoted message redacts the password.
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.POSTGRESQL, options: { connectionString: deadUrl } },
+        }),
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+    await app.stop().catch(() => undefined);
+
+    // The rejection reaching the caller is Effect's FiberFailure wrapper; it carries the
+    // DrizzleStartupError's own message. The error object itself is what onModuleInit()
+    // throws — see startup-contract.test.ts.
+    expect(String(failure)).toContain('DrizzleStartupError');
+    expect(failure!.message).toContain('did not answer SELECT 1');
+    expect(failure!.message).toContain('5000ms connect timeout');
+    expect(failure!.message).toContain(':***@');
+    expect(failure!.message).not.toContain('hunter2');
+  });
+
+  /**
+   * @source docs:api/drizzle.md#allowdegradedstart
+   */
+  it('starts anyway with allowDegradedStart: true, and warns instead', async () => {
+    // From docs: the check still runs and still reports; the failure is logged at `warn`
+    // and the application starts anyway.
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.POSTGRESQL, options: { connectionString: deadUrl } },
+      allowDegradedStart: true,
+    });
+
+    const { instance, logger } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    const warnings = (logger.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls
+      .map((call: unknown[]) => String(call[0])).join('\n');
+    expect(warnings).toContain('allowDegradedStart is set');
+    expect(warnings).not.toContain('hunter2');
+
+    await instance.close();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#baserepository
+ */
+describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+  const { eq } = require('../src/index');
+
+  const docRepoUsers = sqliteTable('doc_repo_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  type DocUser = typeof docRepoUsers.$inferSelect;
+
+  const createTable = 'CREATE TABLE doc_repo_users '
+    + '(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL)';
+
+  // From docs: ONE type argument — the table — and the row/insert types are derived from it.
+  // Custom methods go through the inherited `drizzleService`: `this.db` is the raw dialect
+  // union, whose `.from()` has no callable signature.
+  class UserRepository extends BaseRepository<typeof docRepoUsers> {
+    constructor(db: DrizzleServiceCtor) {
+      super(db, docRepoUsers);
+    }
+
+    async findByEmail(email: string): Promise<DocUser | null> {
+      const result = await this.drizzleService.select()
+        .from(docRepoUsers)
+        .where(eq(docRepoUsers.email, email))
+        .limit(1);
+
+      return result[0] ?? null;
+    }
+  }
+
+  let service: DrizzleServiceCtor;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    service = instance;
+
+    await service.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+    service.getSQLiteClient()!.run(createTable);
+  });
+
+  afterEach(async () => {
+    await service.close();
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('derives the row types from the table alone, and findAll() reads the whole table', async () => {
+    // From docs: findAll(): Promise<User[]>, create(data: Partial<InsertUser>): Promise<User>,
+    // count(): Promise<number>.
+    const repository = new UserRepository(service);
+
+    await repository.create({ name: 'Ada', email: 'ada@example.com' });
+    await repository.create({ name: 'Grace', email: 'grace@example.com' });
+
+    const all: DocUser[] = await repository.findAll();
+
+    expect(all).toHaveLength(2);
+    expect(await repository.count()).toBe(2);
+    expect((await repository.findByEmail('ada@example.com'))?.name).toBe('Ada');
+    expect(await repository.findByEmail('nobody@example.com')).toBeNull();
+  });
+
+  it('resolves the database in its constructor, so it cannot be constructed before the boot', () => {
+    // From docs: "A repository is not a provider" — the constructor calls getDatabase().
+    const { instance } = createTestService(DrizzleServiceCtor);
+
+    expect(() => new UserRepository(instance)).toThrow(/Database not initialized/);
+  });
+
+  it('is built after the database is up — the lazy service the page shows', async () => {
+    // From docs: the UserService that holds DrizzleService and builds the repository on first use.
+    class UserService {
+      private repository: UserRepository | null = null;
+
+      constructor(private db: DrizzleServiceCtor) {}
+
+      private repo(): UserRepository {
+        this.repository ??= new UserRepository(this.db);
+
+        return this.repository;
+      }
+
+      async byEmail(email: string): Promise<DocUser | null> {
+        return await this.repo().findByEmail(email);
+      }
+    }
+
+    const users = new UserService(service);
+    await new UserRepository(service).create({ name: 'Ada', email: 'ada@example.com' });
+
+    expect((await users.byEmail('ada@example.com'))?.name).toBe('Ada');
+  });
+
+  it('fails the boot when it carries @Service() and something injects it', async () => {
+    // From docs: registering a repository as a provider makes app.start() reject with a
+    // CircularDependencyError naming the CONSUMER, not the repository.
+    @ServiceDecorator()
+    class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
+      constructor(db: DrizzleServiceCtor) {
+        super(db, docRepoUsers);
+      }
+    }
+
+    @ServiceDecorator()
+    class Consumer extends BaseService {
+      constructor(private repository: ProviderRepository) {
+        super();
+      }
+
+      async count(): Promise<number> {
+        return await this.repository.count();
+      }
+    }
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+        }),
+      ],
+      providers: [ProviderRepository, Consumer],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+    await app.stop().catch(() => undefined);
+
+    expect(String(failure)).toContain('CircularDependencyError');
+    expect(String(failure)).toContain('Consumer');
+  });
+});
+
+describe('Migrations and environment as the page writes them (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+    delete process.env.DB_URL;
+    delete process.env.DB_TYPE;
+    delete process.env.DB_AUTO_MIGRATE;
+  });
+
+  /**
+   * @source docs:api/drizzle.md#apply-migrations-at-runtime
+   */
+  it('throws a plain Error from a manual runMigrations() against a folder with no journal', async () => {
+    // From docs: "A manual runMigrations() requires the folder to exist ... it throws
+    // drizzle-orm's Error: Can't find meta/_journal.json file — a plain Error, not a
+    // DrizzleStartupError."
+    const missing = join(tmpdir(), 'onebun-docs-no-such-migrations');
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+
+    const failure = await instance.runMigrations({ migrationsFolder: missing })
+      .then(() => null, (error: unknown) => error as Error);
+
+    expect(failure?.message).toContain("Can't find meta/_journal.json file");
+    expect(failure?.name).toBe('Error');
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#key-testing-notes
+   */
+  it('treats a missing migrations folder as no migrations on the startup path', async () => {
+    // From docs: "autoMigrate defaults to true - a missing migrations folder is no migrations,
+    // not a failure, so leaving it on is safe".
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      migrationsFolder: join(tmpdir(), 'onebun-docs-no-such-migrations'),
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    expect(instance.getSQLiteClient()).not.toBeNull();
+    expect(instance.getDatabase()).toBeDefined();
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#testing-with-auto-migrations
+   */
+  it('runs the migrations on onModuleInit(), so the tables exist afterwards', async () => {
+    // From docs, "Testing with Auto-migrations": migrations run automatically by default and
+    // the tables they create are there once onModuleInit() has resolved.
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      migrationsFolder: migrationsFixture,
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    const sqliteClient = instance.getSQLiteClient();
+    const tables = sqliteClient!
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='test_users'")
+      .all();
+
+    expect(tables).toHaveLength(1);
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#environment-variables
+   */
+  it('treats an unset, empty or whitespace-only DB_URL as no database, not as `:memory:`', async () => {
+    // From docs: "DB_URL has no default. Unset, empty or whitespace-only is not configured
+    // rather than :memory:: no connection is opened ... and every getDatabase() throws."
+    for (const value of [undefined, '', '   ']) {
+      DrizzleModule.clearOptions();
+      delete process.env.DB_URL;
+      delete process.env.DB_TYPE;
+      if (value !== undefined) {
+        process.env.DB_URL = value;
+        process.env.DB_TYPE = 'sqlite';
+      }
+
+      const { instance } = createTestService(DrizzleServiceCtor);
+      await instance.onModuleInit();
+
+      expect(instance.getSQLiteClient()).toBeNull();
+      expect(() => instance.getDatabase()).toThrow(/Database not initialized/);
+
+      await instance.close();
+    }
+
+    // ...and a value that IS set opens the database.
+    process.env.DB_URL = ':memory:';
+    process.env.DB_TYPE = 'sqlite';
+    process.env.DB_AUTO_MIGRATE = 'false';
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    expect(instance.getSQLiteClient()).not.toBeNull();
+
+    await instance.close();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#testing-with-drizzleservice
+ */
+describe('Testing recipe (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+
+  const createUsers = 'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)';
+
+  let drizzleService: DrizzleServiceCtor;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    drizzleService = instance;
+
+    // From docs: onModuleInit() is what the framework calls; tests call it themselves.
+    await drizzleService.onModuleInit();
+
+    // The page writes `sqliteClient!.exec(...)`; on bun:sqlite `run` is the same call.
+    const sqliteClient = drizzleService.getSQLiteClient();
+    sqliteClient!.run(createUsers);
+  });
+
+  afterEach(async () => {
+    await drizzleService.close();
+    DrizzleModule.clearOptions();
+  });
+
+  it('performs database operations after onModuleInit()', () => {
+    // From docs: "Database is ready after onModuleInit() - no need to call waitForInit()".
+    const db = drizzleService.getDatabase();
+
+    expect(db).toBeDefined();
+  });
+
+  it('has no onAsyncInit(): the hook the page used to name does not exist', () => {
+    // The recipe above threw on its first line while the page said `onAsyncInit()`.
+    expect(typeof drizzleService.onModuleInit).toBe('function');
+    expect((drizzleService as unknown as Record<string, unknown>).onAsyncInit).toBeUndefined();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#multiple-databases
+ */
+describe('Reaching a registration from outside the tree (docs/api/drizzle.md)', () => {
+  const mainDb = Symbol('DOCS_MAIN_DB');
+  const analyticsDb = Symbol('DOCS_ANALYTICS_DB');
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('throws OneBunAmbiguousServiceError from getService() and getLayer() with two registrations', async () => {
+    // From docs: "Without the token there is no correct answer once two registrations exist,
+    // so the call throws instead of choosing ... app.getLayer() ... throws the same error."
+    @Module({ imports: [DrizzleModule.forFeature(mainDb), DrizzleModule.forFeature(analyticsDb)] })
+    class ReadModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+          as: mainDb,
+        }),
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+          as: analyticsDb,
+        }),
+        ReadModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const untokened = (() => {
+      try {
+        app.getService(DrizzleServiceCtor);
+
+        return null;
+      } catch (error) {
+        return error as Error;
+      }
+    })();
+    const layer = (() => {
+      try {
+        app.getLayer();
+
+        return null;
+      } catch (error) {
+        return error as Error;
+      }
+    })();
+
+    // The name lives on a plain Error — there is no exported class to match with instanceof.
+    expect(untokened?.name).toBe('OneBunAmbiguousServiceError');
+    expect(untokened?.message).toContain('2 instances of DrizzleService');
+    expect(layer?.name).toBe('OneBunAmbiguousServiceError');
+    expect(layer?.message).toContain('one slot per service class');
+
+    // The tokened form is exempt, as the page says.
+    expect(app.getService(DrizzleServiceCtor, mainDb)).toBeDefined();
+    expect(app.getService(DrizzleServiceCtor, analyticsDb)).toBeDefined();
+
+    await app.stop();
+  });
+
+  it('still answers with a single registration', async () => {
+    // From docs: "Both checks fire only when the tree holds two or more instances under one
+    // key; a single registration, named or not, still answers."
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+        }),
+      ],
+    })
+    class SoloModule {}
+
+    const app = new OneBunApplication(SoloModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    expect(app.getService(DrizzleServiceCtor)).toBeDefined();
+    expect(app.getLayer()).toBeDefined();
+
+    await app.stop();
   });
 });

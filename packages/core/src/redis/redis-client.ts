@@ -127,7 +127,18 @@ export class RedisClient {
    * Check if connected
    */
   isConnected(): boolean {
-    return this.connected && this.client !== null;
+    if (!this.client) {
+      return false;
+    }
+
+    // Delegate to the driver's live flag rather than trusting our own. `connected` was set
+    // once in connect() and cleared only by disconnect(), so it kept reporting `true` after
+    // the server went away — measured: the server was stopped, `isConnected()` still said
+    // true, and the driver threw `Connection has failed` on the next command. Bun flips its
+    // own flag correctly, including back to true when auto-reconnect succeeds.
+    const driverConnected = (this.client as unknown as { connected?: boolean }).connected;
+
+    return this.connected && (driverConnected ?? true);
   }
 
   /**

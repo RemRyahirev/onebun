@@ -98,7 +98,7 @@ type('string.email')        // Valid email
 type('string.url')          // Valid URL
 type('string.uuid')         // Valid UUID
 type('string.date')         // Date string (YYYY-MM-DD)
-type('string.datetime')     // ISO datetime string
+type('string.date.iso')     // ISO 8601 date or datetime string
 type('string.numeric')      // String containing only digits
 
 // Length constraints
@@ -130,12 +130,14 @@ type('0 <= number <= 100')  // Range (inclusive)
 
 // Integer
 type('number.integer')      // Integer only
-type('integer > 0')         // Positive integer
+type('number.integer > 0')  // Positive integer
 
-// Special values
-type('number.positive')     // > 0
-type('number.negative')     // < 0
-type('number.nonNegative')  // >= 0
+// Other built-in number keywords
+type('number.safe')         // Within Number.MIN_SAFE_INTEGER..MAX_SAFE_INTEGER
+type('number.epoch')        // Integer usable as a Date timestamp
+type('number.NaN')          // Exactly NaN
+type('number.Infinity')     // Exactly Infinity
+type('number.NegativeInfinity') // Exactly -Infinity
 ```
 
 ### Arrays
@@ -186,7 +188,14 @@ const schema = type({
 
 // Index signatures
 const schema = type({
-  '+': 'string',  // Allow additional string properties
+  '[string]': 'string',  // Any string key must map to a string value
+});
+
+// Undeclared-key policy: 'reject', 'delete' or 'ignore' (default: 'ignore')
+// Keys that are not declared are accepted by default, so '+' only ever tightens an object
+const strictSchema = type({
+  name: 'string',
+  '+': 'reject',  // Error on any key not declared above
 });
 ```
 
@@ -279,6 +288,96 @@ try {
 }
 ```
 
+## Single ArkType Copy Requirement
+
+**An application must resolve exactly one physical copy of `arktype`.** Two copies are two sets of
+classes: a schema built by one copy produces failure objects belonging to that copy, and anything
+that identifies them by class identity (`result instanceof type.errors`) silently answers "no
+failure". Two copies of the *same version* are enough — version skew is not required.
+
+OneBun no longer fails open on this. `validate()`, `validateOrThrow()` and `@Body` requiredness
+identify ArkType failures by ArkType's own brand (the ` arkKind` key `@ark/schema` discriminates
+on), which is copy-independent. A duplicate install is still unsupported, though: composing schemas
+across copies (`.and`, `.or`, `.array()`) and cross-copy registry references remain broken, so
+deduplicate rather than rely on the framework's tolerance.
+
+### Detecting duplicates
+
+`@ark/schema` publishes its registry on `globalThis`: the first copy loaded claims `$ark`, every
+further copy claims `$ark2`, `$ark3`, and so on. OneBun uses that as its check, and you can too:
+
+```typescript
+import { hasDuplicateArkTypeCopies } from '@onebun/core';
+
+if (hasDuplicateArkTypeCopies()) {
+  // more than one physical arktype is loaded in this process
+}
+```
+
+At the package level, the listing must contain exactly one `arktype` entry:
+
+```bash
+bun pm ls --all | grep -E '(^|[^a-z-])arktype@'   # must print exactly one line
+```
+
+The pattern is anchored on purpose: a plain `grep arktype` also matches packages whose name merely
+ends in `-arktype`. If you use `@onebun/drizzle`, `drizzle-arktype` shows up in the unfiltered
+listing — that is expected and is not a second copy of arktype (see
+[Why `arktype` is a dependency, not a peer dependency](#why-arktype-is-a-dependency-not-a-peer-dependency)).
+
+### What OneBun does when it finds one
+
+- **One** startup warning, emitted the first time a schema is evaluated at decoration time. It names
+  the cause, lists the detected registries, and tells you to deduplicate.
+- If validation returns a value that is neither valid data nor a recognisable `ArkErrors` — an
+  ArkType internal this version cannot identify — the framework throws `DuplicateArkTypeError`
+  instead of handing that object back as the validated payload. Failing closed is deliberate: the
+  alternative was HTTP 200 with ArkType error objects as the response body.
+
+```typescript
+import { DuplicateArkTypeError, validate } from '@onebun/core';
+
+try {
+  validate(schema, input);
+} catch (error) {
+  if (error instanceof DuplicateArkTypeError) {
+    // error.message names the duplicate-arktype cause and the fix
+    // error.registries: ['$ark', '$ark2']
+  }
+}
+```
+
+### Fixing a duplicate
+
+Pin a single version at the workspace root and reinstall:
+
+```jsonc
+// package.json (bun / yarn)
+{
+  "resolutions": {
+    "arktype": "2.2.0"
+  }
+}
+```
+
+```jsonc
+// package.json (npm)
+{
+  "overrides": {
+    "arktype": "2.2.0"
+  }
+}
+```
+
+### Why `arktype` is a dependency, not a peer dependency
+
+`arktype` is a regular `dependencies` entry of `@onebun/core` and stays one. Making it a
+`peerDependency` looks like the textbook fix for duplicate copies, but it is the wrong trade here:
+`@onebun/drizzle` builds its schemas through `drizzle-arktype`, which already declares `arktype` as
+a *peer* and resolves its own. Peer-ifying core would break that path and force every existing
+install to add an explicit `arktype` entry, in exchange for a guarantee the package manager still
+would not give. The single-copy requirement is enforced by detection and a loud diagnostic instead.
+
 ## Common Schema Patterns
 
 ### Create/Update DTOs
@@ -344,7 +443,7 @@ const createOrderSchema = type({
     productId: 'string.uuid',
     quantity: 'number.integer > 0',
     'notes?': 'string',
-  }).array().configure({ minLength: 1 }),
+  }).array().atLeastLength(1),
   'shippingAddress?': {
     street: 'string',
     city: 'string',
@@ -373,7 +472,7 @@ const userResponseSchema = type({
   id: 'string.uuid',
   name: 'string',
   email: 'string.email',
-  createdAt: 'string.datetime',
+  createdAt: 'string.date.iso',
 });
 
 @Controller('/users')
@@ -412,7 +511,7 @@ const apiRequestSchema = type({
   // Request metadata
   meta: {
     requestId: 'string.uuid',
-    timestamp: 'string.datetime',
+    timestamp: 'string.date.iso',
     'source?': '"web" | "mobile" | "api"',
   },
 
@@ -444,6 +543,20 @@ if (result instanceof type.errors) {
 }
 ```
 
+`instanceof type.errors` compares against the classes of whichever `arktype` copy `type` came from.
+It is safe here because both the schema and `type` are imported from `@onebun/core`. If you hold a
+schema whose origin you do not control, use `isArkErrors()` instead — it identifies failures by
+ArkType's own brand, so it works across copies (see
+[Single ArkType Copy Requirement](#single-arktype-copy-requirement)):
+
+```typescript
+import { isArkErrors } from '@onebun/core';
+
+if (isArkErrors(result)) {
+  // result is an ArkErrors, whichever copy produced it
+}
+```
+
 ## JSON Schema Conversion
 
 Convert ArkType schemas to JSON Schema for OpenAPI/Swagger:
@@ -456,13 +569,11 @@ const userSchema = type({
   age: 'number > 0',
 });
 
-// Basic conversion
+// Strict: throws if any part of the type cannot be represented
 const jsonSchema = toJsonSchema(userSchema);
 
-// With fallback for unsupported types
-const jsonSchemaWithFallback = getJsonSchema(userSchema, {
-  fallback: (ctx) => ({ ...ctx.base, description: 'Custom fallback' }),
-});
+// Best-effort: converts as much as possible and marks what it could not
+const lenient = getJsonSchema(userSchema);
 
 // Result:
 // {
@@ -474,6 +585,64 @@ const jsonSchemaWithFallback = getJsonSchema(userSchema, {
 //   required: ['name', 'age'],
 // }
 ```
+
+### Types JSON Schema Cannot Express
+
+JSON Schema has no representation for a `Date`, for a `.narrow()` predicate, or for a
+`.pipe()` morph — eleven ArkType codes in all. `Date` alone makes this ordinary rather than
+exotic.
+
+The two helpers differ only in what they do about it:
+
+| | unrepresentable part |
+|---|---|
+| `toJsonSchema(schema, options?)` | **throws** ArkType's `ToJsonSchemaError` — you decide |
+| `getJsonSchema(schema, options?)` | converts everything else and **marks** the result |
+
+`getJsonSchema` keeps what ArkType did manage to build. A schema of
+`{ when: 'Date', name: 'string' }` yields the full object with `name` typed and `when` left
+as an empty schema — not a bare `{ type: 'object' }`.
+
+A partial result carries the `x-onebun-partial` key (exported as `JSON_SCHEMA_PARTIAL`)
+listing the ArkType codes responsible:
+
+```typescript
+import { getJsonSchema, JSON_SCHEMA_PARTIAL, type } from '@onebun/core';
+
+const schema = getJsonSchema(type({ when: 'Date', name: 'string' }));
+
+schema[JSON_SCHEMA_PARTIAL];  // { codes: ['date'] }
+```
+
+**Check for that key rather than trusting the shape.** A partial conversion is a
+structurally valid JSON Schema, so nothing downstream — an OpenAPI document, a form
+generator, a graph validator — can otherwise tell it from a schema for a genuinely
+unconstrained value. A schema that converts cleanly carries no marker at all.
+
+Both helpers forward ArkType's own options (`fallback`, `dialect`, `target`). Supplying a
+`fallback` gives you the real conversion context, including the partially built schema in
+`ctx.base`, and suppresses the marker for the codes you handle:
+
+```typescript
+const withDates = getJsonSchema(type({ when: 'Date', name: 'string' }), {
+  fallback: { date: () => ({ type: 'string', format: 'date-time' }) },
+});
+// properties.when is { type: 'string', format: 'date-time' }, and no marker is added
+```
+
+<llm-only>
+
+**Technical details for AI agents — JSON Schema conversion:**
+- `toJsonSchema` is a pure passthrough to ArkType's `Type.toJsonSchema(options)`; it throws exactly what ArkType throws
+- `getJsonSchema` does NOT catch and stub. It passes `fallback: { default: ctx => ctx.base }` INTO the conversion, so ArkType keeps every node it could build and only the unrepresentable one becomes `{}`
+- That order is forced, not stylistic: the thrown `ToJsonSchemaError` carries `code` but NOT the partially built schema, so a caught error can only ever produce a stub. The partial schema exists only inside the fallback context
+- The fallback context is `{ code, base }`, plus the constraint itself for some codes (e.g. `predicate`)
+- A caller's `fallback` takes precedence in both ArkType shapes — an object keyed by code, or a universal function — and the codes it handles are not marked, because the caller has handled them
+- The outer `catch` remains reachable only when the per-code mechanism cannot repair the failure, e.g. a caller's fallback that itself throws. It binds the error and reports its `code` in the marker; the previous bare `catch {}` discarded the one value that said what was unrepresentable
+- `JSON_SCHEMA_PARTIAL` is `'x-onebun-partial'` — an `x-` prefixed key, so it passes through OpenAPI tooling as a vendor extension rather than being rejected
+- `@onebun/docs`'s `arktypeToJsonSchema()` delegates straight to `getJsonSchema`, so the marker reaches the generated OpenAPI document.
+
+</llm-only>
 
 ## Best Practices
 
