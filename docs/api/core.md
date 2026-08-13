@@ -93,9 +93,10 @@ await app.start();
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
 - `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree)
 - `onApplicationInit()` - after all modules, before HTTP starts
-- `onModuleDestroy()` - during shutdown
-- `beforeApplicationDestroy(signal?)` - start of shutdown
-- `onApplicationDestroy(signal?)` - end of shutdown
+- `beforeApplicationDestroy(signal?)` - FIRST destroy hook, but NOT the start of shutdown: it runs after new requests are refused with 503, after the in-flight drain, and after the HTTP listener is closed. A request issued from inside it is refused (connection refused, not 503)
+- `onModuleDestroy()` - after `beforeApplicationDestroy`, WebSocket close, queue stop and trace flush; before `onApplicationDestroy`
+- `onApplicationDestroy(signal?)` - last destroy hook; only the DI scope disposal and the logger flush follow it
+- in multi-service mode `signal` is always `undefined` in both hooks — the parent owns the signal handler and stops each child with a bare `stop()`
 
 **Multi-Service Mode** — pass `{ services: ... }` to `OneBunApplication` constructor for running multiple services in one process. Each sub-application owns its DI scope: one global service instance per sub-application, and dynamic-module options are captured per application at import time.
 
@@ -516,6 +517,11 @@ for the process; child services never register their own. The handler runs
 requests), and the process exits only after the last service has finished its hooks. Pass
 `gracefulShutdown: false` in `MultiServiceApplicationOptions` to install no handler at all.
 
+The signal name is **not** forwarded to the children: `stopAll()` calls each child's `stop()`
+with no arguments, so `beforeApplicationDestroy(signal)` and `onApplicationDestroy(signal)` both
+receive `undefined` in multi-service mode — even when the parent was given an explicit
+`stop({ signal: 'SIGTERM' })`. Do not branch on `signal` there.
+
 ### Lifecycle Hooks
 
 Services and controllers can implement lifecycle hooks to execute code at specific points:
@@ -525,8 +531,12 @@ Services and controllers can implement lifecycle hooks to execute code at specif
 | `OnModuleInit` | `onModuleInit()` | After instantiation and DI |
 | `OnApplicationInit` | `onApplicationInit()` | After all modules, before HTTP server |
 | `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
-| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain and listener close — first hook of the teardown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown |
+
+The listener is already closed when `beforeApplicationDestroy` runs, so a hook cannot serve or
+self-call over HTTP — traffic was refused with `503` from the start of the drain, well before it.
+In multi-service mode `signal` is `undefined` in both hooks — see [Graceful Shutdown](#graceful-shutdown).
 
 See [Services API](./services.md#lifecycle-hooks) for detailed usage examples.
 
@@ -547,8 +557,6 @@ interface MultiServiceApplicationOptions {
   services: ServicesMap;
   envSchema?: TypedEnvSchema;
   envOptions?: EnvLoadOptions;
-  metrics?: MetricsOptions;
-  tracing?: TracingOptions;
   queue?: QueueApplicationOptions;
   enabledServices?: string[];
   excludedServices?: string[];
@@ -557,19 +565,53 @@ interface MultiServiceApplicationOptions {
   gracefulShutdown?: boolean;
   /** Shutdown deadline in ms for stopAll() and every child (default: 15000) */
   shutdownTimeout?: number;
+
+  // Defaults for every service — a service that sets the same key wins
+  host?: string;
+  basePath?: string;
+  routePrefix?: boolean;
+  envOverrides?: EnvOverrides;
+  logger?: { minLevel?: 'fatal' | 'error' | 'warning' | 'info' | 'debug' | 'trace' };
+  metrics?: MetricsOptions;
+  tracing?: TracingOptions;
+  middleware?: MiddlewareClass[];
+  static?: StaticApplicationOptions;
 }
 
 interface ServiceConfig {
-  module: Function;
+  /** Root module CLASS — a bare `Function` is not assignable */
+  module: new (...args: unknown[]) => object;
   port: number;
   host?: string;
   basePath?: string;
   routePrefix?: boolean;
   envOverrides?: EnvOverrides;
+  /** Extra ENV variables for this service only */
+  envSchemaExtend?: TypedEnvSchema;
+  logger?: { minLevel?: 'fatal' | 'error' | 'warning' | 'info' | 'debug' | 'trace' };
+  metrics?: MetricsOptions;
+  tracing?: TracingOptions;
+  middleware?: MiddlewareClass[];
+  static?: StaticApplicationOptions;
 }
 
 type ServicesMap = Record<string, ServiceConfig>;
 ```
+
+Two per-service keys are accepted but always overwritten with the services-map key:
+`tracing.serviceName` and `metrics.defaultLabels.service`. `tracing: { serviceName: 'users-service' }`
+on the `users` service reaches nothing — the tracer reports `users`. Rename the map key instead.
+`metrics.prefix` and the rest are merged service-over-application as documented above.
+
+`static` is the one option that does **not** cascade: it is honoured per service only, an
+application-level `static` is not passed to the children.
+
+::: warning envOverrides are not per-service yet
+Keys are **environment variable names** (`DB_NAME`), never `config.get()` paths — a wrong key is
+ignored silently. And with two or more services the scoping does not hold: every service reads the
+ENV resolved for the first service to start, so the other services' `envOverrides` are dropped.
+With a single service, or with overrides declared at application level, they apply as written.
+:::
 
 ### Usage Example
 

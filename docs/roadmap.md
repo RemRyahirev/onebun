@@ -132,7 +132,7 @@ Kubernetes-ready health endpoints.
 |----------|--------|
 | Migration guide (NestJS to OneBun) | Done — [Migration from NestJS](/migration-nestjs) |
 | Deployment guide (Docker, k8s, CI/CD) | Planned |
-| Testing guide | Planned |
+| Testing guide | Done — [Testing](/testing) |
 | Expanded Troubleshooting / FAQ | Planned |
 
 ---

@@ -65,7 +65,13 @@ cd my-onebun-app
 bun run dev
 ```
 
-This creates a ready-to-run project with all files from this guide. If you prefer to set up manually:
+This creates a ready-to-run **minimal** app — `src/index.ts`, `src/config.ts` (typed `PORT`/`HOST`),
+`src/app.module.ts` and an example `AppController`/`AppService` answering `GET /` — plus `tsconfig.json`,
+`.env.example` and a `docker-compose.yml` with Postgres + Redis, with dependencies already installed.
+`bun run dev` starts it.
+
+The rest of this guide builds the `hello` module from scratch. Follow it either on top of the generated
+project or from a manual setup:
 
 ```bash
 mkdir my-onebun-app
@@ -338,6 +344,9 @@ DEBUG=true
 }
 ```
 
+The CLI template ships only `dev` and `start`, so add `dev:once`, `test` and `typecheck` yourself if you
+scaffolded with `bun create @onebun`.
+
 ## Step 11: Run the Application
 
 ```bash
@@ -396,6 +405,8 @@ curl http://localhost:3000/metrics
 
 ## Project Structure Summary
 
+The layout you reach at the end of this guide (the CLI template starts from a smaller one — see Step 1):
+
 ```
 my-onebun-app/
 ├── src/
@@ -447,3 +458,10 @@ Ensure `experimentalDecorators` and `emitDecoratorMetadata` are `true` in tsconf
 
 ### Type Errors
 Run `bunx tsc --noEmit` to check TypeScript errors before starting the app.
+
+### Backend Unavailable at Startup
+A cache or database the application configures explicitly is a hard boot dependency: `app.start()`
+rejects and the HTTP server never binds. See
+[Cache — Unreachable Redis at startup](/api/cache#unreachable-redis-at-startup) and
+[Drizzle — Startup Contract](/api/drizzle#startup-contract) for the failure messages and the
+`allowDegradedStart` opt-out.

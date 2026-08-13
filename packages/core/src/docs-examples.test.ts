@@ -270,6 +270,37 @@ describe('Minimal Working Example (docs/index.md)', () => {
     expect(typeof app.start).toBe('function');
     expect(typeof app.stop).toBe('function');
   });
+
+  /**
+   * The sample's `.catch()` ends in `process.exit(1)` because a failed boot leaves a live
+   * process that never binds a port. Pins the half a test can assert: `start()` rejects,
+   * and nothing is listening afterwards.
+   *
+   * @source docs:index.md#minimal-working-example
+   */
+  it('should reject start() when boot fails, so the sample .catch() runs', async () => {
+    @Service()
+    class UnreachableBackendService extends BaseService implements OnModuleInit {
+      async onModuleInit(): Promise<void> {
+        throw new Error('backend unreachable at boot');
+      }
+    }
+
+    @Module({ providers: [UnreachableBackendService] })
+    class FailingModule {}
+
+    const app = new OneBunApplication(FailingModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      loggerLayer: makeMockLoggerLayer(),
+    });
+
+    await expect(app.start()).rejects.toThrow();
+
+    // The HTTP server never bound — which is why the catch must exit non-zero
+    expect(app.getPort()).toBe(0);
+  });
 });
 
 describe('Core README Examples', () => {
@@ -1672,7 +1703,7 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
       @Service()
       class GracefulService extends BaseService implements BeforeApplicationDestroy {
         beforeApplicationDestroy(signal?: string): void {
-          // Called at the very start of shutdown
+          // First destroy hook — after the drain, after the HTTP listener is closed
           this.logger.info(`Shutdown initiated by signal: ${signal || 'unknown'}`);
         }
       }
@@ -3232,7 +3263,8 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       class CacheService extends BaseService {}
 
       // No @Inject needed - automatic DI works via emitDecoratorMetadata
-      // @Inject is only needed for: interfaces, abstract classes, token-based injection
+      // @Inject is only needed for: token-based injection (which named registration),
+      // or overriding the type inferred from design:paramtypes
       @Controller('/users')
       class UserController extends BaseController {
         constructor(
@@ -3244,6 +3276,90 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       }
 
       expect(UserController).toBeDefined();
+    });
+
+    /**
+     * An abstract-class-typed parameter is the case that needs NO @Inject: DI matches a
+     * registered subclass by inheritance. @Inject(AbstractClass) does not even typecheck.
+     *
+     * @source docs:architecture.md#explicit-injection-edge-cases
+     */
+    it('should resolve an abstract-class-typed parameter without @Inject', async () => {
+      abstract class AbstractPaymentGateway extends BaseService {
+        abstract charge(): string;
+      }
+
+      @Service()
+      class StripeGateway extends AbstractPaymentGateway {
+        charge(): string {
+          return 'stripe';
+        }
+      }
+
+      @Controller('/billing')
+      class BillingController extends BaseController {
+        // no @Inject — the declared type is the ABSTRACT base
+        constructor(private gateway: AbstractPaymentGateway) {
+          super();
+        }
+
+        @Get('/charge')
+        async charge() {
+          return { via: this.gateway.charge(), ctor: this.gateway.constructor.name };
+        }
+      }
+
+      @Module({ controllers: [BillingController], providers: [StripeGateway] })
+      class BillingModule {}
+
+      const app = new OneBunApplication(BillingModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/billing/charge`);
+        expect(await response.json()).toEqual({
+          success: true,
+          result: { via: 'stripe', ctor: 'StripeGateway' },
+        });
+      } finally {
+        await app.stop();
+      }
+    });
+
+    /**
+     * @source docs:architecture.md#explicit-injection-edge-cases
+     */
+    it('should reject a { provide, useClass } object provider at startup', async () => {
+      abstract class AbstractPaymentGateway extends BaseService {
+        abstract charge(): string;
+      }
+
+      @Service()
+      class StripeGateway extends AbstractPaymentGateway {
+        charge(): string {
+          return 'stripe';
+        }
+      }
+
+      @Module({
+        // There is no binding form: OneBun takes classes, not object providers
+        providers: [{ provide: AbstractPaymentGateway, useClass: StripeGateway }],
+      })
+      class BadModule {}
+
+      const app = new OneBunApplication(BadModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+
+      await expect(app.start()).rejects.toThrow(/OneBun supports class-based providers only/);
     });
   });
 
@@ -3318,6 +3434,70 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
       const controller = mod.getControllerInstance(LocalController) as LocalController;
       expect(controller).toBeDefined();
       expect(controller.getData()).toBe('internal');
+    });
+
+    /**
+     * The documented Shutdown Phase: the HTTP listener is refused/drained/closed BEFORE the
+     * first destroy hook, then the three hooks run in order.
+     *
+     * @source docs:architecture.md#module-lifecycle
+     */
+    it('should close the HTTP listener before any destroy hook, then run hooks in order', async () => {
+      const order: string[] = [];
+      let probeUrl = '';
+      let fromInsideHook: number | string = 0;
+
+      @Service()
+      class ShutdownOrderService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        async beforeApplicationDestroy(signal?: string): Promise<void> {
+          order.push(`beforeApplicationDestroy:${String(signal)}`);
+          fromInsideHook = await fetch(probeUrl).then(
+            response => response.status,
+            () => 'connection-error',
+          );
+        }
+
+        async onModuleDestroy(): Promise<void> {
+          order.push('onModuleDestroy');
+        }
+
+        async onApplicationDestroy(signal?: string): Promise<void> {
+          order.push(`onApplicationDestroy:${String(signal)}`);
+        }
+      }
+
+      @Controller('/lifecycle')
+      class LifecycleController extends BaseController {
+        @Get('/ping')
+        async ping() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [LifecycleController], providers: [ShutdownOrderService] })
+      class LifecycleModule {}
+
+      const app = new OneBunApplication(LifecycleModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+      probeUrl = `http://localhost:${app.getPort()}/lifecycle/ping`;
+
+      expect((await fetch(probeUrl)).status).toBe(200);
+
+      await app.stop({ signal: 'SIGTERM' });
+
+      // Phases 1-3 already happened: the listener no longer serves by the time hooks run
+      expect([503, 'connection-error']).toContain(fromInsideHook);
+      expect(order).toEqual([
+        'beforeApplicationDestroy:SIGTERM',
+        'onModuleDestroy',
+        'onApplicationDestroy:SIGTERM',
+      ]);
     });
   });
 });

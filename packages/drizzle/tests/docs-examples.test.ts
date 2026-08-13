@@ -264,6 +264,10 @@ describe('Drizzle API Documentation Examples', () => {
       expect(BaseRepository.prototype.delete).toBeDefined();
       expect(BaseRepository.prototype.count).toBeDefined();
       expect(BaseRepository.prototype.transaction).toBeDefined();
+      // From docs: "findAll(): Promise<User[]> — the whole table, no pagination". The
+      // documented signature took an options object; an argument passed to this one is
+      // silently discarded, so the arity is what the page now promises.
+      expect(BaseRepository.prototype.findAll.length).toBe(0);
       /* eslint-enable jest/unbound-method */
     });
   });
@@ -1769,5 +1773,414 @@ describe('Startup Contract (docs)', () => {
     expect(warnings).not.toContain('hunter2');
 
     await instance.close();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#baserepository
+ */
+describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+  const { eq } = require('../src/index');
+
+  const docRepoUsers = sqliteTable('doc_repo_users', {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    name: text('name').notNull(),
+    email: text('email').notNull(),
+  });
+
+  type DocUser = typeof docRepoUsers.$inferSelect;
+
+  const createTable = 'CREATE TABLE doc_repo_users '
+    + '(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, email TEXT NOT NULL)';
+
+  // From docs: ONE type argument — the table — and the row/insert types are derived from it.
+  // Custom methods go through the inherited `drizzleService`: `this.db` is the raw dialect
+  // union, whose `.from()` has no callable signature.
+  class UserRepository extends BaseRepository<typeof docRepoUsers> {
+    constructor(db: DrizzleServiceCtor) {
+      super(db, docRepoUsers);
+    }
+
+    async findByEmail(email: string): Promise<DocUser | null> {
+      const result = await this.drizzleService.select()
+        .from(docRepoUsers)
+        .where(eq(docRepoUsers.email, email))
+        .limit(1);
+
+      return result[0] ?? null;
+    }
+  }
+
+  let service: DrizzleServiceCtor;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    service = instance;
+
+    await service.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+    service.getSQLiteClient()!.run(createTable);
+  });
+
+  afterEach(async () => {
+    await service.close();
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('derives the row types from the table alone, and findAll() reads the whole table', async () => {
+    // From docs: findAll(): Promise<User[]>, create(data: Partial<InsertUser>): Promise<User>,
+    // count(): Promise<number>.
+    const repository = new UserRepository(service);
+
+    await repository.create({ name: 'Ada', email: 'ada@example.com' });
+    await repository.create({ name: 'Grace', email: 'grace@example.com' });
+
+    const all: DocUser[] = await repository.findAll();
+
+    expect(all).toHaveLength(2);
+    expect(await repository.count()).toBe(2);
+    expect((await repository.findByEmail('ada@example.com'))?.name).toBe('Ada');
+    expect(await repository.findByEmail('nobody@example.com')).toBeNull();
+  });
+
+  it('resolves the database in its constructor, so it cannot be constructed before the boot', () => {
+    // From docs: "A repository is not a provider" — the constructor calls getDatabase().
+    const { instance } = createTestService(DrizzleServiceCtor);
+
+    expect(() => new UserRepository(instance)).toThrow(/Database not initialized/);
+  });
+
+  it('is built after the database is up — the lazy service the page shows', async () => {
+    // From docs: the UserService that holds DrizzleService and builds the repository on first use.
+    class UserService {
+      private repository: UserRepository | null = null;
+
+      constructor(private db: DrizzleServiceCtor) {}
+
+      private repo(): UserRepository {
+        this.repository ??= new UserRepository(this.db);
+
+        return this.repository;
+      }
+
+      async byEmail(email: string): Promise<DocUser | null> {
+        return await this.repo().findByEmail(email);
+      }
+    }
+
+    const users = new UserService(service);
+    await new UserRepository(service).create({ name: 'Ada', email: 'ada@example.com' });
+
+    expect((await users.byEmail('ada@example.com'))?.name).toBe('Ada');
+  });
+
+  it('fails the boot when it carries @Service() and something injects it', async () => {
+    // From docs: registering a repository as a provider makes app.start() reject with a
+    // CircularDependencyError naming the CONSUMER, not the repository.
+    @ServiceDecorator()
+    class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
+      constructor(db: DrizzleServiceCtor) {
+        super(db, docRepoUsers);
+      }
+    }
+
+    @ServiceDecorator()
+    class Consumer extends BaseService {
+      constructor(private repository: ProviderRepository) {
+        super();
+      }
+
+      async count(): Promise<number> {
+        return await this.repository.count();
+      }
+    }
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+        }),
+      ],
+      providers: [ProviderRepository, Consumer],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+    await app.stop().catch(() => undefined);
+
+    expect(String(failure)).toContain('CircularDependencyError');
+    expect(String(failure)).toContain('Consumer');
+  });
+});
+
+describe('Migrations and environment as the page writes them (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+    delete process.env.DB_URL;
+    delete process.env.DB_TYPE;
+    delete process.env.DB_AUTO_MIGRATE;
+  });
+
+  /**
+   * @source docs:api/drizzle.md#apply-migrations-at-runtime
+   */
+  it('throws a plain Error from a manual runMigrations() against a folder with no journal', async () => {
+    // From docs: "A manual runMigrations() requires the folder to exist ... it throws
+    // drizzle-orm's Error: Can't find meta/_journal.json file — a plain Error, not a
+    // DrizzleStartupError."
+    const missing = join(tmpdir(), 'onebun-docs-no-such-migrations');
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+
+    const failure = await instance.runMigrations({ migrationsFolder: missing })
+      .then(() => null, (error: unknown) => error as Error);
+
+    expect(failure?.message).toContain("Can't find meta/_journal.json file");
+    expect(failure?.name).toBe('Error');
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#key-testing-notes
+   */
+  it('treats a missing migrations folder as no migrations on the startup path', async () => {
+    // From docs: "autoMigrate defaults to true - a missing migrations folder is no migrations,
+    // not a failure, so leaving it on is safe".
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      migrationsFolder: join(tmpdir(), 'onebun-docs-no-such-migrations'),
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    expect(instance.getSQLiteClient()).not.toBeNull();
+    expect(instance.getDatabase()).toBeDefined();
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#testing-with-auto-migrations
+   */
+  it('runs the migrations on onModuleInit(), so the tables exist afterwards', async () => {
+    // From docs, "Testing with Auto-migrations": migrations run automatically by default and
+    // the tables they create are there once onModuleInit() has resolved.
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      migrationsFolder: migrationsFixture,
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    const sqliteClient = instance.getSQLiteClient();
+    const tables = sqliteClient!
+      .query("SELECT name FROM sqlite_master WHERE type='table' AND name='test_users'")
+      .all();
+
+    expect(tables).toHaveLength(1);
+
+    await instance.close();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#environment-variables
+   */
+  it('treats an unset, empty or whitespace-only DB_URL as no database, not as `:memory:`', async () => {
+    // From docs: "DB_URL has no default. Unset, empty or whitespace-only is not configured
+    // rather than :memory:: no connection is opened ... and every getDatabase() throws."
+    for (const value of [undefined, '', '   ']) {
+      DrizzleModule.clearOptions();
+      delete process.env.DB_URL;
+      delete process.env.DB_TYPE;
+      if (value !== undefined) {
+        process.env.DB_URL = value;
+        process.env.DB_TYPE = 'sqlite';
+      }
+
+      const { instance } = createTestService(DrizzleServiceCtor);
+      await instance.onModuleInit();
+
+      expect(instance.getSQLiteClient()).toBeNull();
+      expect(() => instance.getDatabase()).toThrow(/Database not initialized/);
+
+      await instance.close();
+    }
+
+    // ...and a value that IS set opens the database.
+    process.env.DB_URL = ':memory:';
+    process.env.DB_TYPE = 'sqlite';
+    process.env.DB_AUTO_MIGRATE = 'false';
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    await instance.onModuleInit();
+
+    expect(instance.getSQLiteClient()).not.toBeNull();
+
+    await instance.close();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#testing-with-drizzleservice
+ */
+describe('Testing recipe (docs/api/drizzle.md)', () => {
+  const { createTestService } = require('@onebun/core/testing');
+
+  const createUsers = 'CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL)';
+
+  let drizzleService: DrizzleServiceCtor;
+
+  beforeEach(async () => {
+    DrizzleModule.clearOptions();
+
+    DrizzleModule.forRoot({
+      connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+      autoMigrate: false,
+    });
+
+    const { instance } = createTestService(DrizzleServiceCtor);
+    drizzleService = instance;
+
+    // From docs: onModuleInit() is what the framework calls; tests call it themselves.
+    await drizzleService.onModuleInit();
+
+    // The page writes `sqliteClient!.exec(...)`; on bun:sqlite `run` is the same call.
+    const sqliteClient = drizzleService.getSQLiteClient();
+    sqliteClient!.run(createUsers);
+  });
+
+  afterEach(async () => {
+    await drizzleService.close();
+    DrizzleModule.clearOptions();
+  });
+
+  it('performs database operations after onModuleInit()', () => {
+    // From docs: "Database is ready after onModuleInit() - no need to call waitForInit()".
+    const db = drizzleService.getDatabase();
+
+    expect(db).toBeDefined();
+  });
+
+  it('has no onAsyncInit(): the hook the page used to name does not exist', () => {
+    // The recipe above threw on its first line while the page said `onAsyncInit()`.
+    expect(typeof drizzleService.onModuleInit).toBe('function');
+    expect((drizzleService as unknown as Record<string, unknown>).onAsyncInit).toBeUndefined();
+  });
+});
+
+/**
+ * @source docs:api/drizzle.md#multiple-databases
+ */
+describe('Reaching a registration from outside the tree (docs/api/drizzle.md)', () => {
+  const mainDb = Symbol('DOCS_MAIN_DB');
+  const analyticsDb = Symbol('DOCS_ANALYTICS_DB');
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+  });
+
+  it('throws OneBunAmbiguousServiceError from getService() and getLayer() with two registrations', async () => {
+    // From docs: "Without the token there is no correct answer once two registrations exist,
+    // so the call throws instead of choosing ... app.getLayer() ... throws the same error."
+    @Module({ imports: [DrizzleModule.forFeature(mainDb), DrizzleModule.forFeature(analyticsDb)] })
+    class ReadModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+          as: mainDb,
+        }),
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+          as: analyticsDb,
+        }),
+        ReadModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const untokened = (() => {
+      try {
+        app.getService(DrizzleServiceCtor);
+
+        return null;
+      } catch (error) {
+        return error as Error;
+      }
+    })();
+    const layer = (() => {
+      try {
+        app.getLayer();
+
+        return null;
+      } catch (error) {
+        return error as Error;
+      }
+    })();
+
+    // The name lives on a plain Error — there is no exported class to match with instanceof.
+    expect(untokened?.name).toBe('OneBunAmbiguousServiceError');
+    expect(untokened?.message).toContain('2 instances of DrizzleService');
+    expect(layer?.name).toBe('OneBunAmbiguousServiceError');
+    expect(layer?.message).toContain('one slot per service class');
+
+    // The tokened form is exempt, as the page says.
+    expect(app.getService(DrizzleServiceCtor, mainDb)).toBeDefined();
+    expect(app.getService(DrizzleServiceCtor, analyticsDb)).toBeDefined();
+
+    await app.stop();
+  });
+
+  it('still answers with a single registration', async () => {
+    // From docs: "Both checks fire only when the tree holds two or more instances under one
+    // key; a single registration, named or not, still answers."
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({
+          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+          autoMigrate: false,
+        }),
+      ],
+    })
+    class SoloModule {}
+
+    const app = new OneBunApplication(SoloModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    expect(app.getService(DrizzleServiceCtor)).toBeDefined();
+    expect(app.getLayer()).toBeDefined();
+
+    await app.stop();
   });
 });

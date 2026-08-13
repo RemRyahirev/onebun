@@ -90,17 +90,12 @@ const app = new OneBunApplication({
       port: config.get('users.port'),
       routePrefix: true,
       metrics: { prefix: 'users_' },
-      tracing: { serviceName: 'users-service' },
     },
     orders: {
       module: OrderModule,
       port: config.get('orders.port'),
       routePrefix: true,
-      envOverrides: {
-        'database.url': { fromEnv: 'ORDERS_DATABASE_URL' },
-      },
       metrics: { prefix: 'orders_' },
-      tracing: { serviceName: 'orders-service' },
     },
   },
   envSchema,
@@ -121,6 +116,11 @@ app.start().then(() => {
   logger.info(`Orders service: ${app.getServiceUrl('orders')}`);
 });
 ```
+
+Two things the type system accepts but the runtime overrides, so do not configure them per service:
+
+- **`tracing.serviceName`** is always replaced with the services-map key. `tracing: { serviceName: 'users-service' }` reaches nothing — the tracer reports `users`. An application-level `serviceName` is overwritten the same way. Name the map key what you want to see in traces. `metrics.prefix` is *not* affected and is honoured as written; only `metrics.defaultLabels.service` is forced to the key.
+- **`envOverrides`** keys are environment variable **names** (`ORDERS_DATABASE_URL`), never `config.get()` paths — a `'database.url'` key is silently ignored. And with two or more services the scoping does not hold today: every service reads the ENV resolved for the first service to start, so the other services' overrides are dropped. Here nothing is needed anyway — `orders.database.url` is already bound to `ORDERS_DATABASE_URL` by the schema.
 
 ## Inter-Service Communication
 
@@ -208,17 +208,31 @@ curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
 
 ## Graceful Shutdown
 
-`OneBunApplication` in multi-service mode supports graceful shutdown out of the box. When the process receives SIGTERM or SIGINT, it calls `stop()` on each running service, which triggers lifecycle hooks in order.
+`OneBunApplication` in multi-service mode supports graceful shutdown out of the box. A SINGLE handler on the parent application receives SIGTERM or SIGINT and stops every running service CONCURRENTLY. The child applications register no signal handlers of their own — when they did, the first service to finish stopping called `process.exit(0)` and truncated its siblings' teardown.
 
 ### Shutdown Sequence
 
-1. `beforeApplicationDestroy(signal)` — called on all services/controllers with the signal name
-2. WebSocket connections closed
-3. Queue service stopped, queue adapter disconnected
-4. HTTP servers stopped
-5. `onModuleDestroy()` — called on all services/controllers
-6. Shared Redis disconnected (if configured)
-7. `onApplicationDestroy(signal)` — final cleanup hook
+Each service runs the [full sequence](/api/core#graceful-shutdown), which begins by refusing new requests with `503` and draining the ones already in flight before anything is torn down:
+
+1. New requests answered `503`, listener still open
+2. In-flight requests drained, then force-closed at the deadline
+3. HTTP listener closed
+4. `beforeApplicationDestroy(signal)` — called on all services/controllers; in multi-service mode
+   `signal` is always `undefined` (see below), so do not branch on it
+5. WebSocket connections closed
+6. Queue service stopped, queue adapter disconnected
+7. `onModuleDestroy()` — called on all services/controllers
+8. Shared Redis disconnected (if configured)
+9. `onApplicationDestroy(signal)` — final cleanup hook; `signal` is `undefined` here too
+
+`shutdownTimeout` bounds the whole thing (default 15s) and is inherited by every service; if it expires the process exits with code 1, naming what was still running.
+
+::: warning The signal name does not reach the children
+The parent owns the one signal handler and stops each child with `stop()` and **no arguments**, so
+both destroy hooks receive `signal === undefined` in multi-service mode — even when the parent was
+given an explicit `stop({ signal: 'SIGTERM' })`. In single-service mode the same hooks do receive
+the name.
+:::
 
 ### Implementing Lifecycle Hooks
 
@@ -243,9 +257,10 @@ export class OrderService extends BaseService
     }, 60000);
   }
 
-  // Called at the start of shutdown — stop accepting new work
-  async beforeApplicationDestroy(signal?: string): Promise<void> {
-    this.logger.info('Shutdown signal received, stopping new order processing', { signal });
+  // Called after the drain, once the HTTP listener is closed — traffic has already stopped,
+  // so this is where background work (queues, cron, outbound polling) is wound down
+  async beforeApplicationDestroy(): Promise<void> {
+    this.logger.info('Shutting down, stopping new order processing');
   }
 
   // Called during shutdown — clean up resources
@@ -282,7 +297,7 @@ await app.stop();
 ```
 
 ::: tip
-`OneBunApplication.stop()` in multi-service mode calls `stop()` on each child `OneBunApplication` instance. Individual child `OneBunApplication.stop()` accepts `{ closeSharedRedis?: boolean; signal?: string }` if you need more control when stopping services directly.
+`OneBunApplication.stop()` in multi-service mode calls `stop()` on each child `OneBunApplication` instance. The parent accepts `{ closeSharedRedis?: boolean; signal?: string }` for signature compatibility but **discards it** — every child is stopped with defaults, so `closeSharedRedis: false` on the parent does not keep shared Redis open and a `signal` never reaches the hooks. To control that, reach the child yourself: `await app.getApplication('users')?.stop({ closeSharedRedis: false })` (`getApplication` returns `OneBunApplication | undefined`).
 :::
 
 ### Lifecycle Hook Reference
@@ -291,15 +306,17 @@ await app.stop();
 |-----------|--------|------------|
 | `OnModuleInit` | `onModuleInit()` | After DI resolution, before HTTP server starts |
 | `OnApplicationInit` | `onApplicationInit()` | After all modules initialized, before HTTP server starts |
-| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | Start of shutdown (stop accepting work) |
+| `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain, once the HTTP listener is already closed — cleanup, not the place to stop accepting work |
 | `OnModuleDestroy` | `onModuleDestroy()` | During shutdown, after HTTP server stops |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | End of shutdown (final cleanup) |
+
+`signal` is `undefined` in both destroy hooks in multi-service mode — the parent does not forward it.
 
 ## Key Patterns
 
 1. **OneBunApplication multi-service mode**: Run multiple services in one process
 2. **Service Isolation**: Each service has its own module, port, and route prefix
-3. **Environment Overrides**: Per-service environment variable customization
+3. **Environment Overrides**: `envOverrides` replaces ENV values by variable name (per-service scoping is not effective yet — see above)
 4. **Inter-service Communication**: Use `createHttpClient` with typed config URLs
 5. **Shared Configuration**: Common settings via `envSchema`
 6. **Trace Propagation**: Traces automatically flow between services

@@ -400,9 +400,6 @@ describe('Envs API Documentation Examples', () => {
         // Process.env overrides .env file (default: true)
         envOverridesDotEnv: true,
 
-        // Throw on missing required variables (default: false)
-        strict: false,
-
         // Default separator for arrays (default: ',')
         defaultArraySeparator: ',',
 
@@ -419,6 +416,25 @@ describe('Envs API Documentation Examples', () => {
   });
 
   describe('Validation (docs/api/envs.md)', () => {
+    afterEach(() => {
+      clearGetConfigCache();
+    });
+
+    // The exact schema the page shows under "Built-in Validation". A fresh object per call:
+    // getConfig caches by schema reference.
+    const builtInSchema = (): EnvSchema<{ server: { port: number }; app: { logLevel: string } }> => ({
+      server: {
+        port: Env.number({ default: 3000, min: 1, max: 65535 }),
+      },
+      app: {
+        logLevel: Env.string({
+          env: 'LOG_LEVEL',
+          default: 'info',
+          validate: Env.oneOf(['trace', 'debug', 'info', 'warn', 'error']),
+        }),
+      },
+    });
+
     it('should validate with custom function', async () => {
       // From docs: Built-in Validation example
       // Using flat schema with explicit env names to avoid conflicts
@@ -426,7 +442,6 @@ describe('Envs API Documentation Examples', () => {
         serverPort: Env.number({
           env: 'VALIDATION_TEST_PORT', // Explicit unique env name
           default: 3000,
-          // Validation can return Effect or boolean
           validate: Env.port(), // Built-in port validator
         }),
         logLevel: Env.string({
@@ -441,6 +456,252 @@ describe('Envs API Documentation Examples', () => {
 
       expect(config.get('serverPort')).toBe(3000);
       expect(config.get('logLevel')).toBe('info');
+    });
+
+    /**
+     * @source docs:api/envs.md#built-in-validation
+     */
+    it('should accept a port inside min/max and a level inside the allowed list', () => {
+      const config = getConfig(builtInSchema(), {
+        loadDotEnv: false,
+        valueOverrides: { SERVER_PORT: 8080, LOG_LEVEL: 'debug' },
+      });
+
+      expect(config.get('server.port')).toBe(8080);
+      expect(config.get('app.logLevel')).toBe('debug');
+    });
+
+    /**
+     * @source docs:api/envs.md#built-in-validation
+     */
+    it('should reject a port above max and a level outside the list', () => {
+      expect(() =>
+        getConfig(builtInSchema(), {
+          loadDotEnv: false,
+          valueOverrides: { SERVER_PORT: 99999, LOG_LEVEL: 'info' },
+        }),
+      ).toThrow('Value must be <= 65535');
+
+      expect(() =>
+        getConfig(builtInSchema(), {
+          loadDotEnv: false,
+          valueOverrides: { SERVER_PORT: 8080, LOG_LEVEL: 'nope' },
+        }),
+      ).toThrow('Value must be one of: trace, debug, info, warn, error');
+    });
+
+    /**
+     * From the tip under "Custom validation function failure": the built-in validators do not
+     * know the variable they were attached to, so they report it without a name. Pinned because
+     * the page states the message verbatim — fixing the validators must update the page too.
+     *
+     * @source docs:api/envs.md#validation-failures
+     */
+    it('should report a built-in validator failure without the variable name', () => {
+      expect(() =>
+        getConfig(builtInSchema(), {
+          loadDotEnv: false,
+          valueOverrides: { SERVER_PORT: 99999, LOG_LEVEL: 'info' },
+        }),
+      ).toThrow('Environment variable validation failed for "": Value must be <= 65535. Got: a number');
+    });
+
+    /**
+     * From "Custom validation function failure": the name is the validator's to pass, and a
+     * hand-built error carrying it reproduces the message the page prints.
+     *
+     * @source docs:api/envs.md#validation-failures
+     */
+    it('should name the variable when the custom validator passes it', () => {
+      const schema: EnvSchema<{ server: { port: number } }> = {
+        server: {
+          port: Env.number({
+            default: 3000,
+            // validate returns Effect.Effect<T, EnvValidationError>
+            validate: (value) =>
+              value > 0 && value < 65536
+                ? Effect.succeed(value)
+                : Effect.fail(
+                  new EnvValidationError('SERVER_PORT', value, 'Port must be between 1 and 65535'),
+                ),
+          }),
+        },
+      };
+
+      expect(() =>
+        getConfig(schema, { loadDotEnv: false, valueOverrides: { SERVER_PORT: 99999 } }),
+      ).toThrow(
+        'Environment variable validation failed for "SERVER_PORT":'
+        + ' Port must be between 1 and 65535. Got: a number',
+      );
+    });
+
+    /**
+     * From "Built-in Validation": a boolean predicate is not a validator. It fails at build time,
+     * and — if the type error is cast away — at runtime for EVERY variable it is attached to,
+     * including the ones that only ever take their default.
+     *
+     * @source docs:api/envs.md#built-in-validation
+     */
+    it('should fail even the default when validate returns a boolean instead of an Effect', () => {
+      const schema: EnvSchema<{ server: { port: number } }> = {
+        server: {
+          port: Env.number({
+            default: 3000,
+            validate: ((value: number) => value > 0 && value < 65536) as never,
+          }),
+        },
+      };
+
+      expect(() => getConfig(schema, { loadDotEnv: false })).toThrow('Not a valid effect: true');
+    });
+
+    /**
+     * @source docs:api/envs.md#validation-error
+     */
+    it('should expose the rejected variable as error.variable, not error.variableName', () => {
+      const schema: EnvSchema<{ database: { url: string } }> = {
+        database: { url: Env.string({ env: 'DOCS_XREF_REQUIRED_URL', required: true }) },
+      };
+
+      let thrown: (EnvValidationError & { variableName?: string }) | undefined;
+      try {
+        getConfig(schema, { loadDotEnv: false });
+      } catch (error) {
+        thrown = error as EnvValidationError & { variableName?: string };
+      }
+
+      expect(thrown).toBeInstanceOf(EnvValidationError);
+      expect(thrown?.variable).toBe('DOCS_XREF_REQUIRED_URL');
+      expect(thrown?.variableName).toBeUndefined();
+    });
+  });
+
+  describe('Deriving values (docs/api/envs.md)', () => {
+    afterEach(() => {
+      clearGetConfigCache();
+    });
+
+    /**
+     * @source docs:api/envs.md#deriving-values
+     */
+    it('should split and trim an array variable', () => {
+      const envSchema: EnvSchema<{ features: { flags: string[] } }> = {
+        features: { flags: Env.array({ env: 'DOCS_FEATURE_FLAGS', separator: ',' }) },
+      };
+
+      const config = getConfig(envSchema, {
+        loadDotEnv: false,
+        valueOverrides: { DOCS_FEATURE_FLAGS: 'a, b ,c' },
+      });
+
+      expect(config.get('features.flags')).toEqual(['a', 'b', 'c']);
+    });
+
+    /**
+     * @source docs:api/envs.md#deriving-values
+     */
+    it('should derive a unit at the call site rather than in the schema', () => {
+      const envSchema: EnvSchema<{ server: { timeoutSeconds: number } }> = {
+        server: { timeoutSeconds: Env.number({ env: 'DOCS_TIMEOUT_SECONDS', default: 30 }) },
+      };
+
+      const config = getConfig(envSchema, { loadDotEnv: false });
+
+      expect(config.get('server.timeoutSeconds')).toBe(30);
+      expect(config.get('server.timeoutSeconds') * 1000).toBe(30_000);
+    });
+
+    /**
+     * @source docs:api/envs.md#deriving-values
+     */
+    it('should never run a transform option — there is no such hook', () => {
+      // TypeScript rejects `transform` outright; this is the JS caller (or the cast) the page
+      // warns about: the key survives on the config object and nothing ever reads it.
+      const withTransform = {
+        ...Env.string({ env: 'DOCS_TRANSFORM_FLAGS' }),
+        transform: (value: string) => value.split(','),
+      };
+      const envSchema: EnvSchema<{ features: { flags: string } }> = {
+        features: { flags: withTransform },
+      };
+
+      const config = getConfig(envSchema, {
+        loadDotEnv: false,
+        valueOverrides: { DOCS_TRANSFORM_FLAGS: 'a,b' },
+      });
+
+      expect(config.get('features.flags')).toBe('a,b');
+    });
+  });
+
+  describe('Standalone Usage (docs/api/envs.md)', () => {
+    beforeEach(() => {
+      TypedEnv.clear();
+    });
+
+    afterEach(() => {
+      TypedEnv.clear();
+    });
+
+    const schemaA = (): EnvSchema<{ server: { port: number } }> => ({
+      server: { port: Env.number({ default: 3000, env: 'DOCS_STANDALONE_PORT' }) },
+    });
+    const schemaB = (): EnvSchema<{ database: { host: string } }> => ({
+      database: { host: Env.string({ default: 'db.example.com', env: 'DOCS_STANDALONE_HOST' }) },
+    });
+
+    /**
+     * From the warning under "Standalone Usage": `TypedEnv.create` is keyed, not per-schema. A
+     * second call on the same key returns the first instance and discards schema AND options.
+     *
+     * @source docs:api/envs.md#standalone-usage
+     */
+    it('should return the cached instance for a key and ignore the new schema', async () => {
+      const first = TypedEnv.create(schemaA(), { loadDotEnv: false });
+      await first.initialize();
+
+      const second = TypedEnv.create(schemaB(), { loadDotEnv: false });
+      await second.initialize();
+
+      expect(second as unknown).toBe(first as unknown);
+      expect(second.values as unknown).toEqual({ server: { port: 3000 } });
+      expect(second.get('database.host')).toBeUndefined();
+    });
+
+    /**
+     * @source docs:api/envs.md#standalone-usage
+     */
+    it('should isolate a standalone instance when a distinct key is passed', async () => {
+      const shared = TypedEnv.create(schemaA(), { loadDotEnv: false });
+      await shared.initialize();
+
+      const standalone = TypedEnv.create(schemaB(), { loadDotEnv: false }, 'standalone');
+      await standalone.initialize();
+
+      expect(standalone as unknown).not.toBe(shared as unknown);
+      expect(standalone.get('database.host')).toBe('db.example.com');
+    });
+
+    /**
+     * From "`strict` does nothing": the option is accepted by the types and read by nothing.
+     *
+     * @source docs:api/envs.md#strict-does-nothing
+     */
+    it('should behave identically with strict on and off', async () => {
+      const schema = (): EnvSchema<{ database: { url: string } }> => ({
+        database: { url: Env.string({ env: 'DOCS_STRICT_PROBE_URL' }) },
+      });
+
+      const strictOn = TypedEnv.create(schema(), { loadDotEnv: false, strict: true }, 'strict-on');
+      await strictOn.initialize();
+      const strictOff = TypedEnv.create(schema(), { loadDotEnv: false, strict: false }, 'strict-off');
+      await strictOff.initialize();
+
+      // Not "make everything required": an unset variable with no `required` flag still parses
+      // to the type's zero value under strict: true.
+      expect(strictOn.values).toEqual({ database: { url: '' } });
+      expect(strictOn.values).toEqual(strictOff.values);
     });
   });
 

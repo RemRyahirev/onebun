@@ -27,8 +27,10 @@ import { CacheInterceptor } from '@onebun/cache';
 
 **Three ways to create an interceptor:**
 1. `createInterceptor(fn)` — inline function-based interceptor (simplest)
-2. Class implementing `Interceptor` interface (class-based, no DI)
-3. Class extending `BaseInterceptor` (class-based with DI — provides `this.logger` and `this.config`)
+2. Class implementing `Interceptor` — constructor DI works, provided the class carries a **class** decorator (`@Service()` is the conventional one; a method decorator does not count)
+3. Class extending `BaseInterceptor` — same DI, plus `this.logger` and `this.config`
+
+**Interceptor lifetime:** an interceptor class is instantiated when handlers are REGISTERED, once per registration site (a global interceptor gets its own instance per route), and the same instance serves every request. Never keep per-request state on `this` — guards are the opposite (per-invocation) and that habit does not carry over
 
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
@@ -39,7 +41,7 @@ import { CacheInterceptor } from '@onebun/cache';
 **Interceptors work across all transports:**
 - HTTP controllers (`@Controller`)
 - WebSocket gateways (`@WebSocketGateway`)
-- Queue handlers (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`)
+- Queue subscribers (`@Subscribe`) only — `@Cron`/`@Interval`/`@Timeout` handlers are NOT intercepted
 
 **Built-in interceptors:**
 - `LoggingInterceptor` — logs with transport-aware labels: `Incoming METHOD /path` for HTTP, `Incoming WS pattern` for WebSocket, `Incoming Queue pattern` for Queue
@@ -157,9 +159,16 @@ class AddHeaderInterceptor implements Interceptor {
 }
 ```
 
+An interceptor is instantiated when handlers are registered, never per request: one instance per
+registration site (a global interceptor gets its own instance for each route it wraps), reused by
+every request or message that reaches that handler. Never hold per-request state on `this` — keep
+it in locals inside `intercept()`. Guards are the opposite: passing the guard CLASS constructs the
+guard per invocation, so state on `this` is safe there.
+
 ### With DI
 
-Extend `BaseInterceptor` to get constructor injection, `this.logger`, and `this.config` — just like controllers and services:
+Constructor injection works for any interceptor class that carries a class decorator; extend
+`BaseInterceptor` to additionally get `this.logger` and `this.config`:
 
 ```typescript
 import type { ExecutionContext } from '@onebun/core';
@@ -186,6 +195,18 @@ class AuditInterceptor extends BaseInterceptor {
   }
 }
 ```
+
+::: danger The interceptor class must carry a CLASS decorator
+DI is what `@Service()` buys here, not `BaseInterceptor`: TypeScript emits the `design:paramtypes`
+metadata the injector reads only for a class that carries a class decorator. A decorator on the
+`intercept` method does not count.
+
+- **Undecorated class with constructor parameters** — every parameter is `undefined` at run time and
+  nothing fails at startup. This is true whether or not the class extends `BaseInterceptor`;
+  extending it supplies `this.logger` and `this.config`, never the constructor arguments.
+- **Decorated class whose dependency cannot be resolved** — `app.start()` fails loudly with
+  `DependencyResolutionError`. Register the DEPENDENCY in a module's `providers`.
+:::
 
 ## Applying Interceptors
 
@@ -241,7 +262,10 @@ class ChatGateway extends BaseWebSocketGateway {
 
 ### Queue handler
 
-Applies to queue subscribers, cron jobs, intervals, and timeouts:
+A class-level `@UseInterceptors` wraps the queue subscribers (`@Subscribe`) declared on that class.
+Scheduled handlers — `@Cron`, `@Interval`, `@Timeout` — are **not** wrapped: the scheduler calls the
+bound method directly. If such a job publishes to a `pattern`, the interceptors of the class holding
+a `@Subscribe` on that pattern still run, once per delivered message.
 
 ```typescript
 import { Controller, Subscribe, UseInterceptors, LoggingInterceptor } from '@onebun/core';

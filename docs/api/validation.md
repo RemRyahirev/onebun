@@ -98,7 +98,7 @@ type('string.email')        // Valid email
 type('string.url')          // Valid URL
 type('string.uuid')         // Valid UUID
 type('string.date')         // Date string (YYYY-MM-DD)
-type('string.datetime')     // ISO datetime string
+type('string.date.iso')     // ISO 8601 date or datetime string
 type('string.numeric')      // String containing only digits
 
 // Length constraints
@@ -130,12 +130,14 @@ type('0 <= number <= 100')  // Range (inclusive)
 
 // Integer
 type('number.integer')      // Integer only
-type('integer > 0')         // Positive integer
+type('number.integer > 0')  // Positive integer
 
-// Special values
-type('number.positive')     // > 0
-type('number.negative')     // < 0
-type('number.nonNegative')  // >= 0
+// Other built-in number keywords
+type('number.safe')         // Within Number.MIN_SAFE_INTEGER..MAX_SAFE_INTEGER
+type('number.epoch')        // Integer usable as a Date timestamp
+type('number.NaN')          // Exactly NaN
+type('number.Infinity')     // Exactly Infinity
+type('number.NegativeInfinity') // Exactly -Infinity
 ```
 
 ### Arrays
@@ -186,7 +188,14 @@ const schema = type({
 
 // Index signatures
 const schema = type({
-  '+': 'string',  // Allow additional string properties
+  '[string]': 'string',  // Any string key must map to a string value
+});
+
+// Undeclared-key policy: 'reject', 'delete' or 'ignore' (default: 'ignore')
+// Keys that are not declared are accepted by default, so '+' only ever tightens an object
+const strictSchema = type({
+  name: 'string',
+  '+': 'reject',  // Error on any key not declared above
 });
 ```
 
@@ -305,7 +314,16 @@ if (hasDuplicateArkTypeCopies()) {
 }
 ```
 
-At the package level: `bun pm ls --all | grep arktype` should list exactly one entry.
+At the package level, the listing must contain exactly one `arktype` entry:
+
+```bash
+bun pm ls --all | grep -E '(^|[^a-z-])arktype@'   # must print exactly one line
+```
+
+The pattern is anchored on purpose: a plain `grep arktype` also matches packages whose name merely
+ends in `-arktype`. If you use `@onebun/drizzle`, `drizzle-arktype` shows up in the unfiltered
+listing — that is expected and is not a second copy of arktype (see
+[Why `arktype` is a dependency, not a peer dependency](#why-arktype-is-a-dependency-not-a-peer-dependency)).
 
 ### What OneBun does when it finds one
 
@@ -425,7 +443,7 @@ const createOrderSchema = type({
     productId: 'string.uuid',
     quantity: 'number.integer > 0',
     'notes?': 'string',
-  }).array().configure({ minLength: 1 }),
+  }).array().atLeastLength(1),
   'shippingAddress?': {
     street: 'string',
     city: 'string',
@@ -454,7 +472,7 @@ const userResponseSchema = type({
   id: 'string.uuid',
   name: 'string',
   email: 'string.email',
-  createdAt: 'string.datetime',
+  createdAt: 'string.date.iso',
 });
 
 @Controller('/users')
@@ -493,7 +511,7 @@ const apiRequestSchema = type({
   // Request metadata
   meta: {
     requestId: 'string.uuid',
-    timestamp: 'string.datetime',
+    timestamp: 'string.date.iso',
     'source?': '"web" | "mobile" | "api"',
   },
 

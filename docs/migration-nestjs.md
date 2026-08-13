@@ -148,7 +148,7 @@ These features are built into the framework -- no community packages needed:
 | NestJS | OneBun | Notes |
 |--------|--------|-------|
 | `@UseGuards()` | `@UseGuards()` | Same. Class-level and method-level, and it works on WebSocket `@OnMessage` and queue `@Subscribe` handlers as well as HTTP routes. Guards take the universal `ExecutionContext` -- narrow with `isHttpContext()` / `isWsContext()` / `isQueueContext()`. See [Guards](./api/guards.md) |
-| `@UseFilters()` | `@UseFilters()` | Same. Supports class-level and method-level |
+| `@UseFilters()` | `@UseFilters()` | Placement is the same (class-level and method-level), the argument is not: OneBun takes filter INSTANCES only — `@UseFilters(new MyFilter())` or `@UseFilters(createExceptionFilter(fn))`. NestJS's `@UseFilters(MyFilter)` does not port: `tsc` rejects it (`Property 'catch' is missing in type 'typeof MyFilter'`), and if typechecking is skipped the filter never runs — the route falls back to the default filter and answers 500 while the log shows `filters[...].catch is not a function`. Filters get no constructor DI, unlike `@UseGuards` and `@UseInterceptors`, which do accept classes. `ApplicationOptions.filters` is instances-only too |
 | `@UseInterceptors()` | `@UseInterceptors()` | Same. Supports class-level and method-level |
 | `@UsePipes()` | -- | Replaced by ArkType schemas in `@Body()` / `@Param()` |
 | `@UseMiddleware()` (custom) | `@UseMiddleware()` | Built-in. Class-level and method-level |
@@ -430,17 +430,28 @@ export const AuthGuard = createHttpGuard(async (context) => {
   const req = context.getRequest();
   return !!req.headers.get('Authorization');
 });
+```
 
-// Or class-based with DI
+Or class-based with DI:
+
+```typescript
+import { Service } from '@onebun/core';
 import type { HttpGuard, HttpExecutionContext } from '@onebun/core';
 
-export class AuthGuard implements HttpGuard {
+@Service()
+export class HeaderAuthGuard implements HttpGuard {
   async canActivate(context: HttpExecutionContext): Promise<boolean> {
     const req = context.getRequest();
     return !!req.headers.get('Authorization');
   }
 }
 ```
+
+The `@Service()` decorator is what makes constructor injection work: TypeScript emits the
+`design:paramtypes` metadata the injector reads only for a decorated class, so an undecorated guard
+with constructor dependencies gets `undefined` for each of them and throws on the first request —
+with a clean startup and nothing in the logs beforehand. See
+[Guards](./api/guards.md#creating-guards).
 
 ### Middleware
 

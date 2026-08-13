@@ -321,7 +321,7 @@ export class UserController extends BaseController {
 }
 ```
 
-### @All() — catch-all routes
+### @All() — catch-all routes {#all-catch-all-routes}
 
 `@All()` is a **true** catch-all, like NestJS `router.all()`: the decorated handler answers
 **every** HTTP method on that path, not just the seven with a decorator of their own. That

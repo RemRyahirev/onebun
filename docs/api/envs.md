@@ -31,7 +31,7 @@ Env.array(options?: ArrayEnvOptions)
 ### Options Interface
 
 ```typescript
-interface EnvVariableConfig {
+interface EnvVariableConfig<T = unknown> {
   /** Environment variable name (defaults to uppercase path) */
   env?: string;
 
@@ -39,9 +39,13 @@ interface EnvVariableConfig {
   type: 'string' | 'number' | 'boolean' | 'array';
 
   /** Default value if not set — also applied when the variable is set to an empty string */
-  default?: unknown;
+  default?: T;
 
-  /** Whether the variable is required (default: true if no default) */
+  /**
+   * Whether the variable is required. Must be set explicitly: with neither `default` nor
+   * `required` the variable takes the type's zero value instead of failing — see
+   * [Neither `default` nor `required`](#neither-default-nor-required).
+   */
   required?: boolean;
 
   /**
@@ -50,16 +54,24 @@ interface EnvVariableConfig {
    */
   sensitive?: boolean;
 
-  /** Validation function */
-  validate?: (value: unknown) => boolean;
+  /**
+   * Validation function. It returns an **Effect**, not a boolean: `Effect.succeed(value)` to
+   * accept, `Effect.fail(new EnvValidationError(...))` to reject. A boolean is not a valid
+   * Effect and fails every variable it is attached to, including the ones that use the default.
+   */
+  validate?: (value: T) => Effect.Effect<T, EnvValidationError>;
 
-  /** Transform function */
-  transform?: (value: unknown) => unknown;
+  /** Separator for array values (default: ',') */
+  separator?: string;
 
   /** Description for documentation */
   description?: string;
 }
 ```
+
+`Env.number()` additionally accepts `min`/`max`, and `Env.array()` accepts `minLength`/`maxLength`.
+Those are helper options that build the `validate` function for you — they are not fields of
+`EnvVariableConfig`. There is no `transform` option; see [Deriving values](#deriving-values).
 
 ## Defining Schema
 
@@ -214,7 +226,7 @@ Results are cached per schema reference — calling `getConfig()` multiple times
 - `getConfig()` is defined in `@onebun/envs`, re-exported from `@onebun/core`
 - Uses `readFileSync`/`existsSync` from `node:fs` for synchronous .env file loading
 - Returns `ConfigProxy<T>` — same class used by `TypedEnv.create()` and the framework internally
-- Accepts same `EnvLoadOptions` as async path (envFilePath, loadDotEnv, envOverridesDotEnv, valueOverrides, strict)
+- Accepts same `EnvLoadOptions` as async path (envFilePath, loadDotEnv, envOverridesDotEnv, valueOverrides, defaultArraySeparator). `strict` is also in the type but is read by nothing — see [`strict` does nothing](#strict-does-nothing)
 - Cache is `WeakMap<object, ConfigProxy>` keyed by schema reference; use `clearGetConfigCache()` for testing
 - When `OneBunApplication` later initializes with the same `envSchema`, it creates its own `ConfigProxy` via `TypedEnv.create()` — the values are parsed independently (cheap operation)
 - Signature: `getConfig<T>(schema: EnvSchema<T>, options?: EnvLoadOptions): ConfigProxy<T>`
@@ -242,9 +254,6 @@ const app = new OneBunApplication(AppModule, {
     // Process.env overrides .env file (default: true)
     envOverridesDotEnv: true,
 
-    // Throw on missing required variables (default: false)
-    strict: true,
-
     // Default separator for arrays (default: ',')
     defaultArraySeparator: ',',
 
@@ -263,10 +272,7 @@ const app = new OneBunApplication(AppModule, {
 ```typescript
 import { TypedEnv } from '@onebun/envs';
 
-const config = TypedEnv.create(envSchema, {
-  envFilePath: '.env',
-  loadDotEnv: true,
-});
+const config = TypedEnv.create(envSchema, { envFilePath: '.env', loadDotEnv: true }, 'standalone');
 
 // Must initialize before use
 await config.initialize();
@@ -274,6 +280,24 @@ await config.initialize();
 // Now safe to access
 const port = config.get('server.port');
 ```
+
+::: warning `TypedEnv.create` is process-global and cached by key
+The full signature is `TypedEnv.create<T>(schema, options?, key = 'default')`. When an instance
+already exists for `key`, **it is returned as-is and both `schema` and `options` are ignored** — no
+error, no warning.
+
+`OneBunApplication` creates its own configuration under that same default key, and whichever call
+runs first claims the slot — a standalone `TypedEnv.create(envSchema, options)` at module scope runs
+before the application is constructed. Measured: a standalone call followed by an application
+configured with `valueOverrides: { PORT: 4000 }` starts with `port` still `3000`, the override
+silently discarded. Passing a distinct key, as above, gives the application its own instance and the
+override applies.
+
+`TypedEnv.clear()` drops every cached instance; call it between tests.
+
+This is not the same rule as `getConfig()`, which caches per **schema reference** (see
+[Pre-init Config Access](#pre-init-config-access)) — distinct schemas there get distinct instances.
+:::
 
 ## Accessing Configuration
 
@@ -541,7 +565,7 @@ Environment variables are validated **at application startup** during the `Typed
 
 1. `OneBunApplication` constructor calls `TypedEnv.create(envSchema, options)` 
 2. `TypedEnv.create()` iterates over the schema and parses each variable
-3. For each variable: load value → parse type → run custom validation → apply transform
+3. For each variable: load value → parse type → run custom validation
 4. If any step fails, an `EnvValidationError` is thrown immediately
 
 ### Validation Failures
@@ -578,17 +602,23 @@ const envSchema = {
       validate: (value) =>
         value > 0 && value < 65536
           ? Effect.succeed(value)
-          : Effect.fail(new EnvValidationError('', value, 'Port must be between 1 and 65535')),
+          : Effect.fail(
+              new EnvValidationError('SERVER_PORT', value, 'Port must be between 1 and 65535'),
+            ),
     }),
   },
 };
 
-// If PORT=99999:
+// If SERVER_PORT=99999:
 // Throws: EnvValidationError: Environment variable validation failed for "SERVER_PORT":
 //         Port must be between 1 and 65535. Got: a number
 //
 // The value is described, never printed — see "Rejected Values Are Never Echoed".
 ```
+
+The first argument is the variable name and it is **yours to pass**: the error you construct is
+rethrown as-is, so `new EnvValidationError('', …)` produces `... failed for "":` and leaves the
+operator with nothing to grep for.
 
 ::: tip
 For common range validation, use `min`/`max` options instead of a custom `validate` function:
@@ -599,6 +629,10 @@ Or use built-in validators like `Env.port()`:
 ```typescript
 Env.number({ default: 3000, validate: Env.port() })
 ```
+Both reject the value with the right reason, but neither knows the variable it was attached to, so
+today they report it without a name — `Environment variable validation failed for "": Value must be
+<= 65535. Got: a number`. Where the operator needs the name, write the `validate` function above
+and pass the name yourself.
 :::
 
 ### Catching Startup Errors
@@ -609,12 +643,7 @@ import { AppModule } from './app.module';
 import { envSchema } from './config';
 
 try {
-  const app = new OneBunApplication(AppModule, {
-    envSchema,
-    envOptions: {
-      strict: true,  // Throw on any missing required variable
-    },
-  });
+  const app = new OneBunApplication(AppModule, { envSchema });
 
   await app.start();
 } catch (error) {
@@ -629,20 +658,15 @@ try {
 }
 ```
 
-### Strict Mode
+### `strict` does nothing
 
-By default, all environment variables (including ones not in the schema) are loaded from `process.env`. Enable `strict: true` to only load variables explicitly defined in the schema:
+`EnvLoadOptions.strict` is accepted by the types and **has no implementation** — nothing reads it.
+Setting it neither restricts loading to schema variables nor makes anything required; measured, a
+schema parsed with `strict: true` and with `strict: false` produces byte-identical values, and a
+missing variable with no `required` flag still yields the type's zero value under both. Do not
+reach for it as production hardening.
 
-```typescript
-const app = new OneBunApplication(AppModule, {
-  envSchema,
-  envOptions: {
-    strict: true,  // Only load variables defined in envSchema
-  },
-});
-```
-
-To make individual variables required (throw if missing), set `required: true` on each variable:
+What actually raises `EnvValidationError` is `required: true` on the variable:
 
 ```typescript
 const envSchema = {
@@ -667,7 +691,7 @@ const envSchema = {
 - `parseSchema()` uses `Effect.runSyncExit` + `Cause.squash`, not `runSync` inside `try`/`catch`: `runSync` throws a `FiberFailure` (not an `EnvValidationError`), which the old catch re-wrapped, printing the whole message twice
 - `required` must be explicitly set to `true` — if not set and no `default` is provided, a type-default is used (empty string, 0, false, []); a variable is therefore never absent, which keeps `InferConfigType` free of `| undefined`
 - Parsing order: resolve value → parse by type → validate (validate function must return `Effect.Effect<T, EnvValidationError>`)
-- `strict` option in `EnvLoadOptions` means "only load variables defined in schema" (default: false), NOT "make all variables required"
+- `strict` in `EnvLoadOptions` is DEAD: declared in `packages/envs/src/types.ts` and duplicated in `packages/core/src/types.ts` (`envOptions`), read nowhere. `EnvLoader.load`/`loadSync` destructure only `envFilePath`/`loadDotEnv`/`envOverridesDotEnv`/`valueOverrides`, and `EnvParser.parse` reads only `defaultArraySeparator`. It neither restricts loading to schema variables (`loadSync` never receives a schema) nor makes anything required. Do not describe it as doing either
 - `validate` function signature: `(value: T) => Effect.Effect<T, EnvValidationError>` — use `Effect.succeed(value)` for valid, `Effect.fail(new EnvValidationError(...))` for invalid
 
 </llm-only>
@@ -676,23 +700,28 @@ const envSchema = {
 
 ### Built-in Validation
 
+The declarative options cover the common cases and need no `Effect` import:
+
 ```typescript
 const envSchema = {
   server: {
-    port: Env.number({
-      default: 3000,
-      validate: (value) => value > 0 && value < 65536,
-    }),
+    port: Env.number({ default: 3000, min: 1, max: 65535 }),  // or: validate: Env.port()
   },
   app: {
     logLevel: Env.string({
+      env: 'LOG_LEVEL',
       default: 'info',
-      validate: (value) =>
-        ['trace', 'debug', 'info', 'warn', 'error'].includes(value as string),
+      validate: Env.oneOf(['trace', 'debug', 'info', 'warn', 'error']),
     }),
   },
 };
 ```
+
+A boolean predicate is **not** a validator. `validate` returns an `Effect`, so
+`validate: (value) => value > 0` fails at build time and, if the type error is cast away, at
+runtime — for every variable it is attached to, including the ones that just took their default:
+`EnvValidationError: ... Not a valid effect: true`. Write [a custom validation
+function](#validation-failures) when the built-ins do not fit.
 
 ### Validation Error
 
@@ -703,31 +732,37 @@ try {
   await config.initialize();
 } catch (error) {
   if (error instanceof EnvValidationError) {
-    console.error(`Invalid value for ${error.variableName}: ${error.message}`);
+    console.error(`Invalid value for ${error.variable}: ${error.message}`);
   }
 }
 ```
 
-## Transform
+The property is `variable` — there is no `variableName`. See the table under
+[Rejected Values Are Never Echoed](#rejected-values-are-never-echoed) for what `error.value` holds.
 
-Transform values after parsing:
+## Deriving values
+
+There is **no** `transform` option, and there never was one that ran: a value is resolved, parsed by
+its declared type and validated, and nothing rewrites it afterwards. TypeScript rejects a
+`transform` key; `Env.number()` also drops it on the floor, while `Env.string()` keeps it on the
+config object where nothing ever reads it — so a JS caller, or a TS caller who casts, silently gets
+the untransformed value.
+
+Declare the shape you actually receive, and derive at the call site:
 
 ```typescript
 const envSchema = {
   server: {
-    timeout: Env.number({
-      env: 'TIMEOUT_SECONDS',
-      default: 30,
-      transform: (value) => (value as number) * 1000,  // Convert to ms
-    }),
+    // Name the unit you are given; convert where you use it
+    timeoutSeconds: Env.number({ env: 'TIMEOUT_SECONDS', default: 30 }),
   },
   features: {
-    flags: Env.string({
-      env: 'FEATURE_FLAGS',
-      transform: (value) => (value as string).split(',').map(f => f.trim()),
-    }),
+    // FEATURE_FLAGS='a, b ,c' -> ['a', 'b', 'c'] — items are trimmed
+    flags: Env.array({ env: 'FEATURE_FLAGS', separator: ',' }),
   },
 };
+
+const timeoutMs = config.get('server.timeoutSeconds') * 1000;
 ```
 
 ## .env File Format
@@ -796,7 +831,7 @@ export const envSchema = {
     port: Env.number({
       default: 3000,
       env: 'PORT',
-      validate: (v) => (v as number) > 0 && (v as number) < 65536,
+      validate: Env.port(),
     }),
     host: Env.string({ default: '0.0.0.0' }),
   },
@@ -841,11 +876,11 @@ export const envSchema = {
   logging: {
     level: Env.string({
       default: 'info',
-      validate: (v) => ['trace', 'debug', 'info', 'warn', 'error'].includes(v as string),
+      validate: Env.oneOf(['trace', 'debug', 'info', 'warn', 'error']),
     }),
     format: Env.string({
       default: 'json',
-      validate: (v) => ['json', 'pretty'].includes(v as string),
+      validate: Env.oneOf(['json', 'pretty']),
     }),
   },
 };
@@ -867,7 +902,6 @@ const app = new OneBunApplication(AppModule, {
   envSchema,
   envOptions: {
     envFilePath: '.env',
-    strict: process.env.NODE_ENV === 'production',
   },
 });
 

@@ -29,7 +29,13 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
-**Rate limit response:** HTTP 429, `{ success: false, error: 'Too Many Requests', code: 429 }`
+**CORS preflight:** `CorsMiddleware` answers `OPTIONS` only on a path that declares an
+`OPTIONS`-capable route (`@Options()` or `@All()`). On any other path `OPTIONS` falls through to the
+`404` fallback with NO `Access-Control-*` headers. Headers are added to every response of a matched
+route (errors included), never to fallback 404s.
+
+**Rate limit response:** HTTP 429, `{ success: false, error: 'Too Many Requests', code: 429, details: {} }`.
+`Retry-After` is sent only when `legacyHeaders: true`
 
 **Rate limit backends:**
 - `MemoryRateLimitStore` — default, in-process only
@@ -71,7 +77,13 @@ Request → CorsMiddleware → RateLimitMiddleware → [your middleware] → Sec
 
 ## CorsMiddleware
 
-Handles preflight `OPTIONS` requests and adds `Access-Control-*` headers to all responses.
+Adds `Access-Control-*` headers to every response that comes from a matched route, including
+error responses. A preflight is answered only where the path carries an `OPTIONS`-capable route:
+declare `@Options()` — or [`@All()`](/api/decorators#all-catch-all-routes) — on any path a browser
+will preflight. Without one the `OPTIONS` request never enters the middleware chain and answers a
+bare `404` with no CORS headers, so a cross-origin `POST` to a path that only declares `@Post()` is
+blocked at preflight. The same bare `404` is what an unmatched path, or an unmatched verb on a
+matched path, returns — no CORS headers there either.
 
 ### Via `ApplicationOptions.cors`
 
@@ -214,9 +226,15 @@ hand-constructed one in a unit test, for example). The default key generator fal
 
 ### Redis-backed (multi-instance)
 
+`SharedRedisProvider` must be configured before the first `getClient()` call — there is no
+auto-configuration and no `REDIS_URL` fallback, so calling it unconfigured throws
+`SharedRedisProvider not configured`.
+
 ```typescript
 import { RateLimitMiddleware, RedisRateLimitStore } from '@onebun/core';
 import { SharedRedisProvider } from '@onebun/core';
+
+SharedRedisProvider.configure({ url: 'redis://localhost:6379' });
 
 const redis = await SharedRedisProvider.getClient();
 
@@ -230,6 +248,9 @@ const app = new OneBunApplication(AppModule, {
   ],
 });
 ```
+
+`getClient()` takes a lease on the shared connection — call `await SharedRedisProvider.release()`
+on shutdown to give it back.
 
 ### Custom key generator
 
@@ -250,7 +271,7 @@ RateLimitMiddleware.configure({
 | `keyGenerator` | `(req) => string` | `getClientAddress(req) ?? 'unknown'` | Key for grouping requests |
 | `message` | `string` | `'Too Many Requests'` | Error message when limit exceeded |
 | `standardHeaders` | `boolean` | `true` | Add `RateLimit-*` headers |
-| `legacyHeaders` | `boolean` | `false` | Add `X-RateLimit-*` headers |
+| `legacyHeaders` | `boolean` | `false` | Add the legacy `X-RateLimit-*` headers, plus `Retry-After` on the 429 |
 | `store` | `RateLimitStore` | `MemoryRateLimitStore` | Storage backend |
 
 ### Rate limit response (HTTP 429)
@@ -259,7 +280,8 @@ RateLimitMiddleware.configure({
 {
   "success": false,
   "error": "Too Many Requests",
-  "code": 429
+  "code": 429,
+  "details": {}
 }
 ```
 
@@ -267,6 +289,9 @@ Response headers (when `standardHeaders: true`):
 - `RateLimit-Limit: 100`
 - `RateLimit-Remaining: 0`
 - `RateLimit-Reset: 42` (seconds until window resets)
+
+`Retry-After` (same value as `RateLimit-Reset`) is sent only when `legacyHeaders: true`, and only
+on the 429 — never on a successful response. It does not depend on `standardHeaders`.
 
 ---
 

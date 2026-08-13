@@ -144,6 +144,10 @@ CACHE_TYPE=redis
 CACHE_DEFAULT_TTL=300000        # Default TTL in ms (default: 0 = no expiry)
 CACHE_MAX_SIZE=1000             # Max items for in-memory cache
 CACHE_CLEANUP_INTERVAL=60000   # Cleanup interval in ms
+CACHE_ALLOW_DEGRADED_START=true # Start on a process-local in-memory cache when the configured Redis
+                                # is unreachable, instead of failing app.start() (default: false;
+                                # only meaningful with CACHE_TYPE=redis) — see "Unreachable Redis
+                                # at startup" below for what it costs
 
 # Redis options (only used when CACHE_TYPE=redis)
 CACHE_REDIS_HOST=localhost
@@ -214,6 +218,32 @@ Set allowDegradedStart: true (or CACHE_ALLOW_DEGRADED_START=true) to accept a de
 ```
 
 An application that configures **nothing** is unaffected: with no `type` and no `CACHE_TYPE`, the cache is in-memory by choice and there is nothing to fail.
+
+#### Telling this failure apart from any other
+
+The boot failure is **not catchable by class**. `CacheBackendUnavailableError` is not exported from
+`@onebun/cache`, and because the failure is raised from `onModuleInit` the rejection reaches the
+caller wrapped by Effect: the constructor is `FiberFailureImpl` and the name is prefixed, so strict
+equality fails too. What works today is a substring test — the message survives intact:
+
+```typescript
+try {
+  await app.start();
+} catch (error) {
+  // error.name is '(FiberFailure) CacheBackendUnavailableError'
+  if (String((error as Error).name).includes('CacheBackendUnavailableError')) {
+    // the configured cache backend never became usable
+  }
+  throw error;
+}
+```
+
+The `error instanceof EnvValidationError` pattern from
+[Environment Configuration](./envs.md#catching-startup-errors) does **not** transfer here: env
+validation runs before the module hooks and surfaces its error unwrapped, this one does not.
+
+Once a start has succeeded under `allowDegradedStart` there is nothing to catch — use
+[`getBackendStatus()`](#which-backend-is-actually-serving) instead.
 
 #### Accepting a degraded cache
 
@@ -319,7 +349,7 @@ export class UserService extends BaseService {
 Retrieve value from cache.
 
 ```typescript
-async get<T>(key: string): Promise<T | null>
+async get<T = unknown>(key: string): Promise<T | undefined>
 ```
 
 ```typescript
@@ -332,6 +362,9 @@ if (user) {
 
 // Cache miss
 ```
+
+`undefined` is the only miss marker. A `null` that was written to the cache is a **hit** and comes
+back as `null` — `has()` returns `true` for it — so `value === null` never means "absent".
 
 #### set()
 
@@ -774,24 +807,64 @@ export class ProductModule {}
 
 ### Cache Failover (Redis → In-Memory)
 
-OneBun does not have built-in automatic failover between cache backends at runtime. However, you can implement a wrapper service that catches Redis errors and falls back to an in-memory cache:
+The **boot-time** half of this is built in and needs no wrapper: a configured backend that never
+becomes usable fails `app.start()`, `allowDegradedStart: true` (or
+`CACHE_ALLOW_DEGRADED_START=true`) turns that into a `WARN` plus a process-local in-memory cache,
+and `getBackendStatus()` reports which backend is actually serving. See
+[Accepting a degraded cache](#accepting-a-degraded-cache) and
+[Which backend is actually serving](#which-backend-is-actually-serving).
+
+What is genuinely not provided is **runtime** failover: once the application is up, a Redis that
+dies makes cache operations throw and nothing switches backends. A wrapper service can do that:
 
 ```typescript
-import { Service, BaseService } from '@onebun/core';
 import {
-  CacheService,
+  Service,
+  BaseService,
+  type OnModuleInit,
+} from '@onebun/core';
+import {
   createInMemoryCache,
   createRedisCache,
+  type CacheSetOptions,
   type InMemoryCache,
   type RedisCache,
-  type CacheSetOptions,
 } from '@onebun/cache';
+
+const CONNECT_DEADLINE_MS = 5000;
+const RETRY_INTERVAL_MS = 30000;
+
+/**
+ * Reject if `promise` has not settled within `ms`.
+ *
+ * Not optional. The driver connects with `reconnect: true`, so `connect()` against an unreachable
+ * host never rejects — it retries forever. A bare `await connect()` hangs the boot instead of
+ * throwing, and the `catch` below never runs. This is the same bound `CacheService` applies to its
+ * own connect.
+ */
+async function withDeadline<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  }
+}
 
 @Service()
 export class ResilientCacheService extends BaseService implements OnModuleInit {
   private primaryCache: RedisCache | null = null;
-  private fallbackCache: InMemoryCache;
+  private readonly fallbackCache: InMemoryCache;
   private usingFallback = false;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     super();
@@ -803,31 +876,21 @@ export class ResilientCacheService extends BaseService implements OnModuleInit {
   }
 
   async onModuleInit(): Promise<void> {
-    try {
-      this.primaryCache = createRedisCache({
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379'),
-        defaultTtl: 300000,
-      });
-      await this.primaryCache.connect();
-      this.logger.info('Redis cache connected (primary)');
-    } catch (error) {
-      this.logger.warn('Redis unavailable, using in-memory fallback', error);
-      this.usingFallback = true;
-    }
+    await this.connectPrimary();
   }
 
   async get<T>(key: string): Promise<T | undefined> {
     if (this.usingFallback || !this.primaryCache) {
-      return this.fallbackCache.get<T>(key);
+      return await this.fallbackCache.get<T>(key);
     }
 
     try {
       return await this.primaryCache.get<T>(key);
-    } catch (error) {
+    } catch {
       this.logger.warn('Redis get failed, falling back to memory', { key });
       this.switchToFallback();
-      return this.fallbackCache.get<T>(key);
+
+      return await this.fallbackCache.get<T>(key);
     }
   }
 
@@ -838,7 +901,7 @@ export class ResilientCacheService extends BaseService implements OnModuleInit {
     if (!this.usingFallback && this.primaryCache) {
       try {
         await this.primaryCache.set(key, value, options);
-      } catch (error) {
+      } catch {
         this.logger.warn('Redis set failed, using memory only', { key });
         this.switchToFallback();
       }
@@ -846,7 +909,7 @@ export class ResilientCacheService extends BaseService implements OnModuleInit {
   }
 
   async delete(key: string): Promise<boolean> {
-    this.fallbackCache.delete(key);
+    await this.fallbackCache.delete(key);
 
     if (!this.usingFallback && this.primaryCache) {
       try {
@@ -859,35 +922,52 @@ export class ResilientCacheService extends BaseService implements OnModuleInit {
     return true;
   }
 
+  private async connectPrimary(): Promise<void> {
+    const cache = createRedisCache({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: Number(process.env.REDIS_PORT || 6379),
+      defaultTtl: 300000,
+    });
+
+    try {
+      await withDeadline(cache.connect(), CONNECT_DEADLINE_MS);
+      this.primaryCache = cache;
+      this.usingFallback = false;
+      this.logger.info('Redis cache connected (primary)');
+    } catch (error) {
+      // The abandoned client keeps retrying for the life of the process unless it is closed.
+      await cache.close().catch(() => undefined);
+      this.primaryCache = null;
+      this.usingFallback = true;
+      this.logger.warn('Redis unavailable, using in-memory fallback', { error: String(error) });
+      this.scheduleRetry();
+    }
+  }
+
   private switchToFallback(): void {
     if (!this.usingFallback) {
       this.usingFallback = true;
       this.logger.warn('Switched to in-memory cache fallback');
-
-      // Try to reconnect periodically
-      setTimeout(() => this.tryReconnect(), 30000);
+      this.scheduleRetry();
     }
   }
 
-  private async tryReconnect(): Promise<void> {
-    try {
-      this.primaryCache = createRedisCache({
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379'),
-        defaultTtl: 300000,
-      });
-      await this.primaryCache.connect();
-      this.usingFallback = false;
-      this.logger.info('Redis cache reconnected');
-    } catch {
-      this.logger.warn('Redis reconnection failed, retrying in 30s');
-      setTimeout(() => this.tryReconnect(), 30000);
+  private scheduleRetry(): void {
+    if (this.retryTimer) {
+      return;
     }
+
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.connectPrimary();
+    }, RETRY_INTERVAL_MS);
   }
 }
 ```
 
 **Important considerations:**
+- Every `connect()` must be bounded, including the retry — without `withDeadline` an unreachable Redis hangs `app.start()` instead of failing over, because the driver retries forever rather than rejecting
+- A connect that timed out must be `close()`d — the abandoned client keeps reconnecting for the life of the process otherwise
 - This pattern provides availability over consistency — the in-memory cache is local to each process instance
 - When running multiple service instances, in-memory fallback means each instance has its own cache (no sharing)
 - After Redis recovery, the in-memory cache data is NOT synchronized back to Redis
