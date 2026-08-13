@@ -495,6 +495,12 @@ describe('CacheService backend requirements', () => {
       delete process.env[key];
     }
     CacheModule.clearOptions();
+    // Both, and BEFORE the test rather than only after it. clearOptions() empties the
+    // class-static slot; resetRegistrations() empties the registration record — and the
+    // service reads the registration FIRST. A file that ran earlier in the same process and
+    // left an unnamed forRoot() behind would otherwise decide this test's backend, which is
+    // exactly how these cases passed alone and failed in a full run.
+    resetRegistrations();
   });
 
   afterEach(() => {
