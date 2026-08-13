@@ -321,6 +321,54 @@ export class UserController extends BaseController {
 }
 ```
 
+### @All() — catch-all routes
+
+`@All()` is a **true** catch-all, like NestJS `router.all()`: the decorated handler answers
+**every** HTTP method on that path, not just the seven with a decorator of their own. That
+includes `OPTIONS` and `HEAD`, and it includes methods the framework has no decorator for at
+all — `PROPFIND`, `PURGE`, `LOCK`, `QUERY`, vendor verbs. This is what makes `@All()` usable
+for reverse proxies, webhook receivers and legacy-path shims.
+
+```typescript
+@Controller('/gateway')
+export class GatewayController extends BaseController {
+  @All('/proxy/:id')
+  async proxy(@Param('id') id: string, @Req() req: OneBunRequest) {
+    // req.method is whatever the client sent: GET, POST, PROPFIND, QUERY, ...
+    return { id, method: req.method };
+  }
+}
+```
+
+**Precedence — an explicitly declared verb always wins.** If the same path carries both
+`@All()` and a concrete verb decorator, the concrete one handles its verb and `@All()` handles
+everything else. The rule is fixed; it does not depend on the order the decorators are written
+in:
+
+```typescript
+@Controller('/webhooks')
+export class WebhookController extends BaseController {
+  @All('/github')
+  async fallback() {
+    return { handled: 'all' };   // PUT, DELETE, PROPFIND, ... land here
+  }
+
+  @Get('/github')
+  async health() {
+    return { handled: 'get' };   // GET lands here, not in fallback()
+  }
+}
+```
+
+> **CORS preflight.** Because an `@All()` path claims `OPTIONS`, a preflight request reaches
+> that route's middleware chain. When the application is configured with `cors`, the built-in
+> `CorsMiddleware` runs first and answers the preflight with `204` — the `@All()` handler body
+> never runs. Without `cors` configured, the `@All()` handler itself answers `OPTIONS`.
+
+> **OpenAPI.** An `@All()` route has no single HTTP method, so it cannot be expressed as one
+> OpenAPI operation. Document the individual verbs you care about with concrete decorators, or
+> exclude the route from the generated spec.
+
 ## Parameter Decorators
 
 All parameter decorators support an options object to control whether the parameter is required:

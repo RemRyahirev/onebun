@@ -13,8 +13,37 @@ import {
 import {
   createHttpClient,
   isErrorResponse,
+  DEFAULT_RETRY_CONFIG,
+  DEFAULT_RETRY_DELAY,
   HttpStatusCode,
 } from './';
+
+/** Counts the requests a client really sent, so retry claims can be checked end to end. */
+function startCountingServer(
+  respond: (attempt: number) => Response,
+): { baseUrl: string; methods: string[]; stop(): void } {
+  const methods: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      methods.push(req.method);
+
+      return respond(methods.length);
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    methods,
+    stop: () => server.stop(true),
+  };
+}
+
+const jsonStatus = (code: number, body: unknown = { ok: code < 400 }): Response =>
+  new Response(JSON.stringify(body), {
+    status: code,
+    headers: new Headers([['content-type', 'application/json']]),
+  });
 
 describe('Requests README Examples', () => {
   describe('Basic Usage with Promise API (README)', () => {
@@ -267,6 +296,123 @@ describe('Requests API Documentation Examples', () => {
       });
 
       expect(client).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should use the documented defaults when no retry config is given', () => {
+      // From docs: Retry Configuration - Defaults table
+      expect(DEFAULT_RETRY_CONFIG.max).toBe(3);
+      expect(DEFAULT_RETRY_CONFIG.delay).toBe(300);
+      expect(DEFAULT_RETRY_CONFIG.backoff).toBe('exponential');
+      expect(DEFAULT_RETRY_CONFIG.factor).toBe(2);
+      expect(DEFAULT_RETRY_CONFIG.retryOn).toEqual([408, 429, 500, 502, 503, 504]);
+      expect(DEFAULT_RETRY_CONFIG.methods).toEqual(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+      expect(DEFAULT_RETRY_CONFIG.retryOnNetworkError).toBe(true);
+      expect(DEFAULT_RETRY_CONFIG.retryOnTimeout).toBe(false);
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should not replay POST or PATCH without an opt-in', async () => {
+      // From docs: "POST and PATCH are not retried unless you ask for it"
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        await client.post('/charges', { amount: 100 }).catch(() => undefined);
+        await client.patch('/charges/1', { amount: 100 }).catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST', 'PATCH']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#overriding
+     */
+    it('should merge a partial retry config field-wise onto the defaults', async () => {
+      // From docs: "max becomes 5; delay stays 300, retryOn still includes 429"
+      const server = startCountingServer((attempt) =>
+        attempt === 1 ? jsonStatus(429) : jsonStatus(200));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 5 },
+        });
+
+        const started = Date.now();
+        const response = await client.get('/reports');
+        const elapsed = Date.now() - started;
+
+        expect(server.methods).toEqual(['GET', 'GET']);
+        expect(isErrorResponse(response)).toBe(false);
+        expect(elapsed).toBeGreaterThanOrEqual(DEFAULT_RETRY_DELAY - 50);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retrying-a-non-idempotent-method
+     */
+    it('should retry POST when the caller lists it in retries.methods', async () => {
+      // From docs: Retrying a non-idempotent method
+      const server = startCountingServer(() => jsonStatus(429));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        await client
+          .post('/charges', { amount: 100 }, {
+            /* eslint-disable @typescript-eslint/naming-convention */
+            headers: { 'Idempotency-Key': 'charge-1' },
+            /* eslint-enable @typescript-eslint/naming-convention */
+            retries: {
+              max: 2,
+              delay: 1,
+              methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'POST'],
+            },
+          })
+          .catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST', 'POST', 'POST']);
+
+        // The same POST without the opt-in is sent once
+        server.methods.length = 0;
+        await client.post('/charges', { amount: 100 }).catch(() => undefined);
+
+        expect(server.methods).toEqual(['POST']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#observing-retries
+     */
+    it('should report retryCount on the response', async () => {
+      // From docs: Observing retries
+      const server = startCountingServer((attempt) =>
+        attempt === 1 ? jsonStatus(429) : jsonStatus(200));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 3, delay: 1 },
+        });
+
+        const response = await client.get('/reports');
+
+        expect(response.retryCount).toBe(1);
+      } finally {
+        server.stop();
+      }
     });
 
     /**

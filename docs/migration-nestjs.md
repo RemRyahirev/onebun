@@ -123,7 +123,7 @@ These features are built into the framework -- no community packages needed:
 | `@Patch()` | `@Patch()` | Same |
 | `@Options()` | `@Options()` | Same |
 | `@Head()` | `@Head()` | Same |
-| `@All()` | `@All()` | Same |
+| `@All()` | `@All()` | Same. True catch-all like `router.all()` — answers every verb, including `OPTIONS`, `HEAD` and non-standard ones such as `PROPFIND` or `QUERY`. A concrete verb decorator on the same path wins for its verb. See [@All()](./api/decorators.md#all-catch-all-routes) |
 
 ### Parameter Extraction
 

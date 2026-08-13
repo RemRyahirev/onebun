@@ -60,6 +60,7 @@ import { createGlobalScope, OneBunModule } from './module/module';
 import { makeMockLoggerLayer } from './testing';
 
 import {
+  All,
   Controller,
   Get,
   Post,
@@ -524,6 +525,83 @@ describe('Decorators API Documentation Examples', () => {
       }
 
       expect(UserController).toBeDefined();
+    });
+
+    /**
+     * @source docs:api/decorators.md#all-catch-all-routes
+     */
+    it('should route every verb to the @All() handler', async () => {
+      // From docs: @All() — catch-all routes
+      @Controller('/gateway')
+      class GatewayController extends BaseController {
+        @All('/proxy/:id')
+        async proxy(@Param('id') id: string, @Req() req: OneBunRequest) {
+          // req.method is whatever the client sent: GET, POST, PROPFIND, QUERY, ...
+          return { id, method: req.method };
+        }
+      }
+
+      @Module({ controllers: [GatewayController] })
+      class GatewayModule {}
+
+      const app = new OneBunApplication(GatewayModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        for (const method of ['GET', 'POST', 'PROPFIND', 'QUERY']) {
+          const response = await fetch(`http://localhost:${app.getPort()}/gateway/proxy/9`, { method });
+          expect(response.status).toBe(200);
+          expect(await response.json()).toEqual({ success: true, result: { id: '9', method } });
+        }
+      } finally {
+        await app.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/decorators.md#all-catch-all-routes
+     */
+    it('should give a concrete verb decorator priority over @All() on the same path', async () => {
+      // From docs: @All() precedence example
+      @Controller('/webhooks')
+      class WebhookController extends BaseController {
+        @All('/github')
+        async fallback() {
+          return { handled: 'all' };
+        }
+
+        @Get('/github')
+        async health() {
+          return { handled: 'get' };
+        }
+      }
+
+      @Module({ controllers: [WebhookController] })
+      class WebhookModule {}
+
+      const app = new OneBunApplication(WebhookModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+
+      try {
+        const base = `http://localhost:${app.getPort()}/webhooks/github`;
+        const get = await fetch(base, { method: 'GET' });
+        expect(await get.json()).toEqual({ success: true, result: { handled: 'get' } });
+
+        const put = await fetch(base, { method: 'PUT' });
+        expect(await put.json()).toEqual({ success: true, result: { handled: 'all' } });
+      } finally {
+        await app.stop();
+      }
     });
   });
 

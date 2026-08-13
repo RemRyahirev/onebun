@@ -91,7 +91,7 @@ import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
 import {
   type ApplicationOptions,
-  type HttpMethod,
+  HttpMethod,
   type ModuleInstance,
   type OneBunRequest,
   ParamType,
@@ -159,6 +159,64 @@ function normalizePath(pathStr: string): string {
   }
 
   return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
+}
+
+/**
+ * Method keys Bun accepts inside the object form of a `routes` entry
+ * (`{ '/x': { GET: handler } }`).
+ *
+ * MEASURED against Bun 1.3.14, not assumed: these nine are accepted, and every
+ * other key — `ALL`, `PROPFIND`, `QUERY`, or any lowercase spelling — makes
+ * `Bun.serve` throw a bare `TypeError` reading
+ * `'routes' expects a Record<string, Response | HTMLBundle | {...}>`.
+ * That message names neither the controller nor the handler, so registration
+ * validates against this set first and raises `OneBunBootstrapError` instead.
+ */
+const BUN_ROUTE_METHOD_KEYS: ReadonlySet<string> = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'DELETE',
+  'PATCH',
+  'OPTIONS',
+  'HEAD',
+  'TRACE',
+  'CONNECT',
+]);
+
+/**
+ * Decorator names by `HttpMethod`, used to name the offending decorator in
+ * bootstrap diagnostics.
+ */
+const ROUTE_DECORATOR_NAMES: Readonly<Record<string, string>> = {
+  [HttpMethod.GET]: '@Get',
+  [HttpMethod.POST]: '@Post',
+  [HttpMethod.PUT]: '@Put',
+  [HttpMethod.DELETE]: '@Delete',
+  [HttpMethod.PATCH]: '@Patch',
+  [HttpMethod.OPTIONS]: '@Options',
+  [HttpMethod.HEAD]: '@Head',
+  [HttpMethod.ALL]: '@All',
+};
+
+/**
+ * A handler as Bun's `routes` option consumes it.
+ */
+type BunRouteHandler = (
+  req: OneBunRequest,
+  server: ReturnType<typeof Bun.serve>,
+) => Promise<Response>;
+
+/**
+ * Everything registered for one concrete path, collected before anything is
+ * handed to Bun so that precedence is decided by rule rather than by the order
+ * in which controllers happened to be walked.
+ */
+interface PathRegistration {
+  /** Handlers declared with a concrete verb decorator (`@Get`, `@Post`, …), keyed by uppercase verb. */
+  methods: Map<string, BunRouteHandler>;
+  /** Handler declared with `@All()` — the catch-all for every verb no concrete decorator claims. */
+  catchAll?: BunRouteHandler;
 }
 
 /**
@@ -763,6 +821,51 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const bunRoutes: Record<string, any> = {};
 
+      // Controller routes land here first, keyed by path, and are materialised into
+      // `bunRoutes` in one pass once every controller has been walked. Writing straight
+      // into a shared `bunRoutes[path]` object made precedence a function of walk order;
+      // it is now a rule (see materialisation below).
+      const routeRegistry = new Map<string, PathRegistration>();
+
+      /**
+       * Record one path/verb pair. `@All()` is stored apart from the concrete verbs
+       * rather than as a `bunRoutes[path].ALL` key: Bun's method map has no
+       * "every other verb" slot, and an `ALL` key makes `Bun.serve` throw.
+       */
+      function registerRoute(
+        controllerClass: Function,
+        route: RouteMetadata,
+        pathKey: string,
+        handler: BunRouteHandler,
+      ): void {
+        let registration = routeRegistry.get(pathKey);
+        if (!registration) {
+          registration = { methods: new Map() };
+          routeRegistry.set(pathKey, registration);
+        }
+
+        if (route.method === HttpMethod.ALL) {
+          registration.catchAll = handler;
+
+          return;
+        }
+
+        const verb = String(route.method);
+        if (!BUN_ROUTE_METHOD_KEYS.has(verb)) {
+          // Without this, Bun.serve throws a TypeError that names neither the
+          // controller nor the handler, so nobody can find the offending route.
+          const decorator = ROUTE_DECORATOR_NAMES[verb] ?? `@${verb}`;
+          throw new OneBunBootstrapError(
+            `Cannot register route ${verb} ${pathKey} declared by ` +
+              `${controllerClass.name}.${String(route.handler)}() via ${decorator}(): ` +
+              `Bun's routes option accepts only ${[...BUN_ROUTE_METHOD_KEYS].join(', ')} ` +
+              'as method keys. Use @All() for a catch-all route.',
+          );
+        }
+
+        registration.methods.set(verb, handler);
+      }
+
       /**
        * Create a route handler with the full OneBun request lifecycle:
        * tracing setup → per-request timeout → middleware chain → executeHandler → metrics → tracing end
@@ -794,12 +897,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // boundHandler(req) where executeHandler calls boundHandler(...args).
         const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
+        // An @All route answers every verb, so 'ALL' is not a method any client sent —
+        // emitting it as a metric label or span attribute would be a lie, and it would
+        // collapse every verb into one Prometheus series. Concrete routes keep the
+        // registered verb, which Bun guarantees equals req.method for a method-map route.
+        const isCatchAllRoute = method === HttpMethod.ALL;
 
         return async (req, server) => {
           return await requestContextStore.run({ traceContext: null }, async () => {
           // Capture outermost timestamp before any closure/ALS overhead
             const profiler = PROFILING_ENABLED ? getProfiler() : null;
             const outerStartNs = profiler ? Bun.nanoseconds() : 0;
+            const observedMethod = isCatchAllRoute ? req.method : method;
 
             const requestHandler = async (): Promise<Response> => {
             // Only measure time when metrics or tracing need it
@@ -838,7 +947,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
                   const contentLengthHeader = req.headers.get('content-length');
                   traceSpan = app.traceService.startHttpTraceSync({
-                    method,
+                    method: observedMethod,
                     url: req.url,
                     route: fullPath,
                     userAgent: req.headers.get('user-agent') ?? undefined,
@@ -1074,7 +1183,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 if (app.metricsService && app.metricsService.recordHttpRequest) {
                   const durationSeconds = duration / 1000;
                   app.metricsService.recordHttpRequest({
-                    method,
+                    method: observedMethod,
                     route: fullPath,
                     statusCode: response?.status || HttpStatusCode.OK,
                     duration: durationSeconds,
@@ -1135,7 +1244,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 if (app.metricsService && app.metricsService.recordHttpRequest) {
                   const durationSeconds = duration / 1000;
                   app.metricsService.recordHttpRequest({
-                    method,
+                    method: observedMethod,
                     route: fullPath,
                     statusCode: HttpStatusCode.INTERNAL_SERVER_ERROR,
                     duration: durationSeconds,
@@ -1341,22 +1450,47 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             resolvedInterceptors.length > 0 ? resolvedInterceptors : undefined,
           );
 
-          // Add to bunRoutes grouped by path and method
-          if (!bunRoutes[fullPath]) {
-            bunRoutes[fullPath] = {};
-          }
-          bunRoutes[fullPath][method] = wrappedHandler;
+          // Collect into the registry; bunRoutes is filled in once, below.
+          registerRoute(controllerClass, route, fullPath, wrappedHandler);
 
           // Register trailing slash variant for consistent matching
           // (e.g., /api/users and /api/users/ both map to the same handler)
           if (fullPath.length > 1 && !fullPath.endsWith('/')) {
-            const trailingPath = fullPath + '/';
-            if (!bunRoutes[trailingPath]) {
-              bunRoutes[trailingPath] = {};
-            }
-            bunRoutes[trailingPath][method] = wrappedHandler;
+            registerRoute(controllerClass, route, fullPath + '/', wrappedHandler);
           }
         }
+      }
+
+      // Materialise the registry into the two shapes Bun's `routes` option understands.
+      //
+      // PRECEDENCE RULE — an explicitly declared verb always beats `@All()` on the same
+      // path. `@Get('/x')` next to `@All('/x')` sends GET to the @Get handler and every
+      // other verb to the @All handler, whichever order the decorators were written in.
+      //
+      // A path with no `@All()` keeps the method-map form, so Bun itself rejects verbs
+      // nobody declared (405/404 via the fetch fallback). A path that carries an `@All()`
+      // becomes a bare function instead, because the method map has no "every other verb"
+      // slot: Bun then routes EVERY method to it — GET…DELETE, OPTIONS, HEAD, and
+      // non-standard verbs such as PROPFIND, PURGE, LOCK and QUERY — with `req.params`
+      // intact. That is what makes @All a true catch-all, matching NestJS `router.all()`.
+      // The dispatcher must always return a Response: a bare route function that returns
+      // undefined does NOT fall through to `fetch`, Bun logs
+      // "Expected a Response object" and serves its own welcome page.
+      for (const [pathKey, registration] of routeRegistry) {
+        const { methods, catchAll } = registration;
+
+        if (!catchAll) {
+          bunRoutes[pathKey] = Object.fromEntries(methods);
+
+          continue;
+        }
+
+        // `methods` stays a Map so that a request whose method spells an
+        // Object.prototype key cannot resolve to an inherited function.
+        bunRoutes[pathKey] = (
+          req: OneBunRequest,
+          server: ReturnType<typeof Bun.serve>,
+        ): Promise<Response> => (methods.get(req.method) ?? catchAll)(req, server);
       }
 
       // Add framework endpoints to routes (docs, metrics)

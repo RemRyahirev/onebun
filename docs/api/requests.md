@@ -136,18 +136,58 @@ const client = createHttpClient({
 
 ## Retry Configuration
 
+### Defaults
+
+With no `retries` at all, a client uses:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `max` | `3` | Retries **after** the first attempt — up to 4 requests in total |
+| `delay` | `300` | Base delay in milliseconds |
+| `backoff` | `'exponential'` | Waits 300ms, 600ms, 1200ms |
+| `factor` | `2` | Multiplier for exponential backoff |
+| `retryOn` | `[408, 429, 500, 502, 503, 504]` | Status codes a **server returned** |
+| `methods` | `['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']` | Methods allowed to be replayed |
+| `retryOnNetworkError` | `true` | Connection refused / DNS / TLS — the request never arrived |
+| `retryOnTimeout` | `false` | The client-side timeout fired |
+
+**POST and PATCH are not retried unless you ask for it.** Replaying them creates a second
+order, a second charge, a second message. The default list is the idempotent set of
+RFC 9110 §9.2.2, the same shape `axios-retry` and `got` use.
+
+A **client-side timeout is not retried either**, for any method: the request may well have
+reached the server and been processed, so re-sending it duplicates the effect just as a POST
+replay would. A transport failure carries `code: 0` (`TRANSPORT_FAILURE_CODE`) and the error
+name `TIMEOUT_ERROR`, `ABORT_ERROR` or `FETCH_ERROR` — it is never reported as a server 500,
+so `retryOn` stays a pure list of status codes.
+
+### Overriding
+
+A partial config is merged **field-wise** onto the defaults, so overriding one field keeps
+every other one:
+
+```typescript
+// max becomes 5; delay stays 300, retryOn still includes 429, POST is still not retried
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  retries: { max: 5 },
+});
+```
+
+The full shape:
+
 ```typescript
 const client = createHttpClient({
   baseUrl: 'https://api.example.com',
   retries: {
-    // Number of retry attempts
+    // Number of retry attempts after the first one
     max: 3,
 
     // Backoff strategy: 'fixed', 'linear', 'exponential'
     backoff: 'exponential',
 
     // Base delay in milliseconds
-    delay: 1000,
+    delay: 300,
 
     // Multiplier for exponential backoff (default: 2)
     factor: 2,
@@ -155,12 +195,50 @@ const client = createHttpClient({
     // HTTP status codes to retry
     retryOn: [408, 429, 500, 502, 503, 504],
 
+    // Methods allowed to be replayed
+    methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'],
+
+    // Retry when the request never reached the server
+    retryOnNetworkError: true,
+
+    // Retry when the client-side timeout fired
+    retryOnTimeout: false,
+
     // Callback on retry
     onRetry: (error, attempt) => {
-      console.log(`Retry attempt ${attempt}:`, error);
+      logger.warn(`Retry attempt ${attempt}`, error);
     },
   },
 });
+```
+
+### Retrying a non-idempotent method
+
+Only opt POST or PATCH in when the endpoint is safe to call twice — because it is guarded by
+an idempotency key, or because a duplicate is harmless:
+
+```typescript
+// This endpoint dedupes on Idempotency-Key, so a replay is safe
+const response = await client.post('/charges', payload, {
+  headers: { 'Idempotency-Key': chargeId },
+  retries: { methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE', 'POST'] },
+});
+```
+
+Per-request `retries` merge onto the client's config, which merges onto the defaults.
+
+### Observing retries
+
+Every retry emits a framework-level warning naming the method, URL, attempt number and the
+code that triggered it — independently of `onRetry`. After the fact, both success and error
+responses carry `retryCount`, the number of retries that were spent:
+
+```typescript
+const response = await client.get('/reports');
+
+if (response.retryCount && response.retryCount > 0) {
+  logger.warn('Upstream needed retries', { retryCount: response.retryCount });
+}
 ```
 
 ### Retry Strategies
