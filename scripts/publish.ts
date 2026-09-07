@@ -57,6 +57,11 @@ interface PublishResult {
 const ROOT_DIR = join(import.meta.dir, '..');
 const PACKAGES_DIR = join(ROOT_DIR, 'packages');
 const DRY_RUN = process.argv.includes('--dry-run');
+// Skips the test / typecheck / lint gates, which are duplicates of the CI job's own
+// steps. Set on pull requests so publish-specific validation (lockfile, secret scan,
+// change detection, workspace-dependency rewriting) is exercised BEFORE the merge
+// button rather than for the first time mid-release on master.
+const SKIP_SUITE = process.argv.includes('--skip-suite');
 
 /**
  * Compare semantic versions
@@ -125,7 +130,18 @@ async function runTests(): Promise<boolean> {
     const result = await $`bun run test`.nothrow();
     const output = result.stderr.toString() + result.stdout.toString();
 
-    // Check if tests passed by looking for "0 fail" in output
+    // The exit code decides — it is the only signal that survives a run which dies
+    // before printing a summary (a crash, an OOM, or the coverage hang that has to be
+    // SIGKILLed and reports 137). Scraping "0 fail" out of stdout used to be the
+    // verdict, so a truncated log from a killed run read as a green suite.
+    if (result.exitCode !== 0) {
+      log.error(`Tests failed (exit code ${result.exitCode})`);
+      console.log(output);
+      return false;
+    }
+
+    // Exit code 0 and a parsable summary: report the count, and refuse a run that
+    // exercised nothing at all rather than treating "no tests" as success.
     const failMatch = output.match(/(\d+)\s+fail/);
     const passMatch = output.match(/(\d+)\s+pass/);
 
@@ -133,23 +149,18 @@ async function runTests(): Promise<boolean> {
       const failCount = parseInt(failMatch[1], 10);
       const passCount = parseInt(passMatch[1], 10);
 
-      if (failCount === 0 && passCount > 0) {
-        log.success(`All tests passed (${passCount} tests)`);
-        return true;
+      if (failCount > 0 || passCount === 0) {
+        log.error(`Tests reported ${failCount} failed / ${passCount} passed despite exit code 0`);
+        console.log(output);
+        return false;
       }
-      log.error(`Tests failed: ${failCount} failed, ${passCount} passed`);
-      return false;
-    }
 
-    // Fallback to exit code if we can't parse output
-    if (result.exitCode === 0) {
-      log.success('All tests passed');
+      log.success(`All tests passed (${passCount} tests)`);
       return true;
     }
 
-    log.error('Tests failed');
-    console.log(output);
-    return false;
+    log.success('All tests passed');
+    return true;
   } catch (error) {
     log.error('Failed to run tests');
     console.error(error);
@@ -164,7 +175,8 @@ async function runTypeCheck(): Promise<boolean> {
   log.step('Running type check...');
 
   try {
-    const result = await $`bunx tsc --noEmit`.nothrow();
+    // The script, not `bunx tsc`: it also compiles each example against its own tsconfig.
+    const result = await $`bun run typecheck`.nothrow();
     if (result.exitCode === 0) {
       log.success('Type check passed');
       return true;
@@ -187,7 +199,7 @@ async function runLint(): Promise<boolean> {
 
   try {
     // Run eslint without --fix to just check, not modify
-    const result = await $`bunx eslint packages/`.nothrow();
+    const result = await $`bunx eslint packages/ --max-warnings=0`.nothrow();
     if (result.exitCode === 0) {
       log.success('Linter passed');
       return true;
@@ -578,19 +590,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Step 2: Run tests
-  if (!await runTests()) {
-    process.exit(1);
-  }
+  if (SKIP_SUITE) {
+    log.warn('--skip-suite: tests, type check and lint are the CI job\'s own steps; skipping the duplicates');
+  } else {
+    // Step 2: Run tests
+    if (!await runTests()) {
+      process.exit(1);
+    }
 
-  // Step 3: Run type check
-  if (!await runTypeCheck()) {
-    process.exit(1);
-  }
+    // Step 3: Run type check
+    if (!await runTypeCheck()) {
+      process.exit(1);
+    }
 
-  // Step 4: Run linter
-  if (!await runLint()) {
-    process.exit(1);
+    // Step 4: Run linter
+    if (!await runLint()) {
+      process.exit(1);
+    }
   }
 
   // Step 5: Check for secrets (warning only)

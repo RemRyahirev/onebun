@@ -23,8 +23,9 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 - `@UseGuards(MyGuard)` on a method — applies to that handler only
 - Both can be combined; class guards run first, then method guards
 - `@UseWsGuards` (WebSocket) and `@UseMessageGuards` (queue) still exist and still work. They are the narrower spelling for a guard that only makes sense on one transport; guards from both decorators are merged, shared `@UseGuards` first. On WebSocket a guard written under both decorators is deduplicated and runs once; on queue it is NOT — it runs twice per message. List a guard under one decorator only
+- **Deduplication is per level, not across levels — except on WebSocket.** Method-level guards are deduplicated by identity as they are collected up the prototype chain (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited and re-declared on an override runs once. What is NOT deduplicated on HTTP or queue is the merge of the class-level list with the method-level list — `[...ctrlGuards, ...routeGuards]`, exactly as written — so the same guard named at BOTH levels runs twice per request/message. WebSocket is the only transport that dedups that merge too. Harmless for a stateless guard, doubled work for one that hits a database. List a guard at one level only
 - Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@OnMessage`/`@Subscribe` behaves identically. Before 0.4.5 a route-level `@UseGuards` written ABOVE the method decorator was silently discarded and the route was reachable — audit any route guarded that way if you are upgrading from 0.4.4 or earlier. The same applied to `@UseInterceptors` and `@UseFilters`
-- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request, as it always did: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
+- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request, as it always did: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
 - **The guard class must carry a decorator for constructor DI to work at all** — `@Service()` is the conventional one. TypeScript only emits the `design:paramtypes` metadata the DI reads for a class that has at least one decorator; an undecorated guard class with constructor parameters receives `undefined` for each and throws inside `canActivate`. This applies on HTTP too
 - A DECORATED guard whose constructor dependency cannot be resolved fails the application at STARTUP with `DependencyResolutionError`, instead of being constructed with `undefined`. Register the DEPENDENCY in the module's `providers` — registering the guard itself does not help
 - A class-level `@UseGuards` is INHERITED by a subclass controller, base first then the subclass's own. `@UseMiddleware`, `@UseInterceptors` and `@UseFilters` inherit the same way; routes do not
@@ -47,7 +48,7 @@ isHttpContext(ctx)  // → getRequest(): OneBunRequest, getHandler(): string, ge
 isWsContext(ctx)    // → getClient(), getSocket(), getData(), getHandler(), getPatternParams()
 isQueueContext(ctx) // → getMessage(), getMetadata(), getPattern(), getHandler(), getClass()
 ```
-A guard that lands on a transport it cannot read must return `false`. Every built-in guard does exactly that, so `@UseGuards(AuthGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw.
+A guard that lands on a transport it cannot read must return `false`. Every built-in LEAF guard does exactly that, so `@UseGuards(AuthGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw. The four composites — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards`, `WsAnyGuard` — carry NO transport check of their own; they just delegate, so they deny off-transport only for as long as every child does. A hand-written child inside one will reach `getMetadata()` on an HTTP context and throw.
 
 **Built-in guards:**
 - HTTP: `AuthGuard` (checks `Authorization: Bearer <token>` presence), `RolesGuard` (comma-separated roles in `x-user-roles`; `new RolesGuard(['admin', 'user'])`)
@@ -111,7 +112,8 @@ import { Service, BaseService } from '@onebun/core';
 
 @Service()
 class ApiKeyGuard extends BaseService implements HttpGuard {
-  // BaseService provides this.config automatically — no need to inject ConfigService
+  // BaseService provides this.config automatically — no need to inject ConfigService,
+  // but the application must have been created with an `envSchema` (see below)
   canActivate(ctx: HttpExecutionContext): boolean {
     const key = ctx.getRequest().headers.get('x-api-key');
     return key === this.config.get('auth.apiKey');
@@ -120,6 +122,8 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 ```
 
 Constructor dependencies are injected the same way a service's are, and `this.config` / `this.logger` are available inside `canActivate`. The dependencies are resolved once, when handlers are registered; the guard instance itself is still constructed per invocation **when you pass the guard class**, so request state held on `this` cannot leak between concurrent requests.
+
+`this.config` is the application's own config object, which exists only when the application was created with an `envSchema`. Without one the framework installs a `NotInitializedConfig` stub, and every `get()` on it throws `Configuration not initialized. Provide envSchema in ApplicationOptions.` — so the guard above answers 500 rather than 403 on an app that never declared a schema. Declare the schema, or read the value from `process.env` as the function-based example does.
 
 ::: danger An instance passed to `@UseGuards` is shared
 `@UseGuards(new RolesGuard(['admin']))` hands the framework an already-built object, and that ONE
@@ -145,7 +149,7 @@ class ApiKeyGuard {                          // ← no decorator
 :::
 
 ::: warning Upgrading from 0.4.4 or earlier
-Guards received no dependency injection at all: they were constructed with no arguments on every request, so `this.config` and `this.logger` were `undefined` and the example above threw a `TypeError` at request time. On WebSocket and queue handlers that remained true until 0.4.5.
+Guards received no dependency injection at all: they were constructed with no arguments on every request, so `this.config` and `this.logger` were `undefined` and the `ApiKeyGuard` above threw a `TypeError` at request time. On WebSocket and queue handlers that remained true until 0.4.5. `this.config` now arrives, but it is only a working config when the app declared an `envSchema` — see above.
 :::
 
 ### Async guard
@@ -241,6 +245,8 @@ class AdminController extends BaseController {
 }
 ```
 
+The two lists are concatenated as written, not deduplicated: naming the same guard on the controller AND on the route runs it twice per request. Queue consumers merge class and method lists the same way; WebSocket is the one transport that drops duplicates by identity.
+
 ## One Decorator, Three Transports
 
 `@UseGuards` is the same decorator on an HTTP route, a WebSocket `@OnMessage` handler and a queue `@Subscribe` consumer — the shape `@UseInterceptors` has always had.
@@ -309,7 +315,9 @@ class TenantActiveGuard implements Guard {
 | Identity | request headers / cookies | `getClient()` — `auth`, `rooms`, `metadata` | `getMetadata()` — `authorization`, `serviceId`, `headers`, `traceId` |
 | Routing | `getHandler()`, `getController()` — strings | `getHandler()` — handler metadata, `getPatternParams()` | `getPattern()`, `getHandler()`, `getClass()` |
 
-A guard written for one transport must **deny** on the others, not fall through. Every built-in guard already does: `@UseGuards(AuthGuard)` on a `@Subscribe` handler denies every message rather than reading `getRequest()` off a context that has none. So do the guards produced by `createHttpGuard()`, `createGuard()` (WebSocket) and `createMessageGuard()` (queue).
+A guard written for one transport must **deny** on the others, not fall through. Every built-in leaf guard already does: `@UseGuards(AuthGuard)` on a `@Subscribe` handler denies every message rather than reading `getRequest()` off a context that has none. So do the guards produced by `createHttpGuard()`, `createGuard()` (WebSocket) and `createMessageGuard()` (queue).
+
+The composites are the exception — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards` and `WsAnyGuard` check nothing themselves, they only delegate to their children. Wrapping built-ins, that inherits their denial; wrapping a hand-written child, it does not, and the child reaches for an accessor the context does not have. Put the `isQueueContext()` / `isWsContext()` check in the child, as the built-ins do.
 
 ### What denial does on each transport
 
@@ -327,6 +335,7 @@ The framework also logs every denial itself, at `warn`, naming the guard, the ha
 
 `@UseWsGuards` and `@UseMessageGuards` are still exported and still work. Reach for them when a guard only makes sense on one transport, so the type system checks the context for you:
 
+<!-- typecheck: skip -->
 ```typescript
 @UseWsGuards(WsAuthGuard)                          // WsExecutionContext, checked
 @OnMessage('admin:*')
@@ -337,7 +346,7 @@ handleAdmin(@Client() client: WsClientData) { /* ... */ }
 async handleInternal(message: Message<EventData>) { /* ... */ }
 ```
 
-Guards from both decorators are merged on the same handler, shared `@UseGuards` first. On WebSocket the same guard written under both decorators is deduplicated and runs once; on a queue consumer it is not — it runs twice per message. List a guard under one decorator only. Both give class guards the same dependency injection `@UseGuards` does.
+Guards from both decorators are merged on the same handler, shared `@UseGuards` first. On WebSocket the same guard written under both decorators is deduplicated and runs once; on a queue consumer it is not — it runs twice per message. Deduplication is a WebSocket property, not a decorator one: it also covers the gateway-level + handler-level merge there, while HTTP and queue concatenate class and method lists as given. List a guard under one decorator, at one level. Both decorators give class guards the same dependency injection `@UseGuards` does.
 
 The composite helpers `MessageAllGuards` / `MessageAnyGuard` / `WsAllGuards` / `WsAnyGuard` are the exception: they take their children in their own constructor, at decoration time, before any module exists, so a child class with a constructor dependency gets nothing. Pass already-constructed children, or list the guards directly — `@UseGuards(A, B)` resolves each one with full DI and runs them in order.
 
@@ -366,6 +375,7 @@ It does **not** validate or decode the token. Combine with a custom guard or mid
 
 Reads a comma-separated list of roles from the `x-user-roles` request header and verifies that **all** required roles are present (AND logic).
 
+<!-- typecheck: skip -->
 ```typescript
 import { RolesGuard, UseGuards } from '@onebun/core';
 

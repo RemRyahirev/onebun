@@ -14,6 +14,7 @@ OneBun provides type-safe environment configuration with validation, default val
 
 ### Type Definitions
 
+<!-- typecheck: skip -->
 ```typescript
 // String variable
 Env.string(options?: StringEnvOptions)

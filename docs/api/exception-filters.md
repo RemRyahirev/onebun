@@ -28,6 +28,7 @@ import { ExceptionFilter, createExceptionFilter, UseFilters, HttpException } fro
 - Priority: route-level > controller-level > global > default
 
 **Signature:**
+<!-- typecheck: skip -->
 ```typescript
 filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Promise<OneBunResponse>
 ```
@@ -67,7 +68,7 @@ import { OneBunBaseError } from '@onebun/requests';
 const myFilter = createExceptionFilter((error, ctx) => {
   if (error instanceof OneBunBaseError) {
     return new Response(
-      JSON.stringify({ success: false, error: error.message, code: error.statusCode }),
+      JSON.stringify({ success: false, error: error.message, code: error.code }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   }
@@ -78,8 +79,13 @@ const myFilter = createExceptionFilter((error, ctx) => {
 
 ### Class-based filter
 
+`ValidationError` is a class from `@onebun/requests`, not from `@onebun/core` — `instanceof` needs the
+runtime value, and the similarly named `ValidationError` in core's validation module is an interface
+with no runtime existence:
+
 ```typescript
 import type { ExceptionFilter, HttpExecutionContext } from '@onebun/core';
+import { ValidationError } from '@onebun/requests';
 
 class ValidationExceptionFilter implements ExceptionFilter {
   catch(error: unknown, ctx: HttpExecutionContext): Response {
@@ -98,6 +104,7 @@ class ValidationExceptionFilter implements ExceptionFilter {
 
 Throw `HttpException` from handlers, guards, or middleware to return a specific HTTP status code:
 
+<!-- typecheck: skip -->
 ```typescript
 import { HttpException } from '@onebun/core';
 
@@ -118,7 +125,7 @@ The default exception filter converts `HttpException` to a JSON response with th
 | `throw new HttpException(404, 'Not found')` | HTTP 404 `{ success: false, error: "Not found", code: 404 }` |
 | `throw new HttpException(409, 'Conflict')` | HTTP 409 `{ success: false, error: "Conflict", code: 409 }` |
 
-> **Note:** Framework validation errors (`@Body(schema)`, `@Param`, `@File`) automatically throw `HttpException(400, ...)`, so validation failures return HTTP 400 with a descriptive error message.
+> **Note:** Framework validation errors (`@Body(schema)`, `@Param`, `@UploadedFile`) automatically throw `HttpException(400, ...)`, so validation failures return HTTP 400 with a descriptive error message. There is no `@File` decorator — the file-parameter decorators are `@UploadedFile`, `@UploadedFiles` and `@FormField`.
 
 ## Applying Filters
 
@@ -155,7 +162,7 @@ class UploadController extends BaseController {
     throw err;
   }))
   @Post('/')
-  async upload(@File() file: OneBunFile) { /* ... */ }
+  async upload(@UploadedFile() file: OneBunFile) { /* ... */ }
 }
 ```
 

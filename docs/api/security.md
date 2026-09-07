@@ -335,6 +335,7 @@ const app = new OneBunApplication(AppModule, {
 
 Each property accepts a `string` (custom value) or `false` (disable the header entirely).
 
+<!-- typecheck: skip -->
 ```typescript
 security: {
   contentSecurityPolicy: "default-src 'self'; connect-src 'self' https://api.example.com",

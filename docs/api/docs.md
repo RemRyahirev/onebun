@@ -8,6 +8,7 @@ description: "Automatic OpenAPI 3.1 documentation generation from decorators and
 
 **Setup**: Install `@onebun/docs` and it auto-enables. No manual configuration required.
 
+<!-- typecheck: skip -->
 ```typescript
 bun add @onebun/docs
 ```
@@ -176,6 +177,7 @@ export class UserController extends BaseController {
 
 Can also be used on individual methods (place above the route decorator):
 
+<!-- typecheck: skip -->
 ```typescript
 @ApiTags('Admin')
 @Get('/admins')
@@ -240,6 +242,7 @@ export class UserController extends BaseController {
 
 ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to OpenAPI-compatible JSON Schema. This means one schema definition serves as TypeScript type, runtime validation, and OpenAPI documentation — no separate declarations to keep in sync.
 
+<!-- typecheck: skip -->
 ```typescript
 import { type } from '@onebun/core';
 

@@ -112,6 +112,7 @@ Main application class that bootstraps and runs the HTTP server.
 
 ### Constructor
 
+<!-- typecheck: skip -->
 ```typescript
 // Single-service mode
 new OneBunApplication(
@@ -546,6 +547,7 @@ Run multiple services in a single process using the unified `OneBunApplication` 
 
 ### Constructor
 
+<!-- typecheck: skip -->
 ```typescript
 new OneBunApplication(options: MultiServiceApplicationOptions)
 ```

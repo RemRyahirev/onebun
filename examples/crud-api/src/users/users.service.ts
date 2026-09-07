@@ -51,7 +51,7 @@ export class UserService extends BaseService {
 
     if (!user) {
       this.logger.warn('User not found', { id });
-      throw new NotFoundError('User', id);
+      throw new NotFoundError('User not found', { id });
     }
 
     return user;
@@ -87,7 +87,7 @@ export class UserService extends BaseService {
     // Check if user exists
     const existing = await this.userRepository.findById(id);
     if (!existing) {
-      throw new NotFoundError('User', id);
+      throw new NotFoundError('User not found', { id });
     }
 
     // Check email uniqueness if email is being changed
@@ -100,7 +100,7 @@ export class UserService extends BaseService {
 
     const user = await this.userRepository.update(id, data);
     if (!user) {
-      throw new NotFoundError('User', id);
+      throw new NotFoundError('User not found', { id });
     }
 
     this.logger.info('User updated', { userId: id });
@@ -118,7 +118,7 @@ export class UserService extends BaseService {
     const deleted = await this.userRepository.delete(id);
 
     if (!deleted) {
-      throw new NotFoundError('User', id);
+      throw new NotFoundError('User not found', { id });
     }
 
     this.logger.info('User deleted', { userId: id });

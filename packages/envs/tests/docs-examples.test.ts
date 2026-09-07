@@ -20,6 +20,7 @@ import {
   EnvValidationError,
   getConfig,
   clearGetConfigCache,
+  type SensitiveValue,
 } from '../src';
 
 // Counter for unique instance keys to avoid cache conflicts between tests
@@ -83,59 +84,97 @@ describe('Envs README Examples', () => {
     });
 
     /**
-     * @source docs:api/envs.md#quick-start
+     * "Standalone Usage" hands the caller a proxy that is not usable yet — the snippet's
+     * "Must initialize before use" comment is the contract. Reads before `initialize()` has
+     * resolved throw; only afterwards does the instance carry the parsed environment.
+     *
+     * @source docs:api/envs.md#standalone-usage
      */
     it('should create typed configuration', async () => {
-      // From README: Create typed configuration
       const schema: EnvSchema<{
         app: { port: number; host: string };
         database: { url: string };
       }> = {
         app: {
-          port: Env.number({ default: 3000 }),
-          host: Env.string({ default: 'localhost' }),
+          port: Env.number({ default: 3000, env: 'APP_PORT' }),
+          host: Env.string({ default: 'localhost', env: 'DOCS_QUICKSTART_HOST' }),
         },
         database: {
           url: Env.string({ env: 'DATABASE_URL' }),
         },
       };
 
-      const config = await TypedEnv.createAsync(schema, {}, getUniqueKey());
+      // loadDotEnv: false — everything asserted below comes from process.env (set in beforeEach),
+      // so a stray .env in the working directory cannot move the result.
+      const config = TypedEnv.create(schema, { loadDotEnv: false }, getUniqueKey());
 
-      expect(config).toBeDefined();
-      expect(typeof config.get).toBe('function');
+      // create() only kicks initialization off; it does not await it.
+      expect(config.isInitialized).toBe(false);
+      expect(() => config.get('app.port')).toThrow('Configuration not initialized');
+      expect(() => config.values).toThrow('Configuration not initialized');
+
+      await config.initialize();
+
+      expect(config.isInitialized).toBe(true);
+      expect(config.get('app.port')).toBe(4000); // parsed from APP_PORT='4000'
+      expect(config.get('app.host')).toBe('localhost'); // declared default, variable unset
+      expect(config.get('database.url')).toBe('postgres://localhost:5432/testdb');
     });
 
     /**
-     * @source docs:api/envs.md#quick-start
+     * "Accessing Configuration" promises three things the page's snippets rely on: a dot path
+     * comes back already parsed into the schema's type, a `sensitive` entry comes back as the
+     * wrapper whose `.value` holds the real string, and `config.values` is the whole tree.
+     * The explicit annotations below are part of the pin — the page says "no casting needed",
+     * so a regression in path inference has to break `bun run typecheck`.
+     *
+     * @source docs:api/envs.md#accessing-configuration
      */
     it('should access values with full type safety', async () => {
       const schema: EnvSchema<{
-        app: { port: number };
-        database: { url: string };
+        app: { port: number; debug: boolean };
+        database: { url: string; password: string };
       }> = {
         app: {
           port: Env.number({ default: 3000, env: 'APP_PORT' }),
+          debug: Env.boolean({ default: false, env: 'DOCS_QUICKSTART_DEBUG' }),
         },
         database: {
           url: Env.string({ env: 'DATABASE_URL' }),
+          password: Env.string({ env: 'DATABASE_PASSWORD', sensitive: true }),
         },
       };
 
-      const config = await TypedEnv.createAsync(schema, {}, getUniqueKey());
+      const config = await TypedEnv.createAsync(schema, { loadDotEnv: false }, getUniqueKey());
 
-      // From README: Access values with full type safety
-      const port = config.get('app.port'); // number
-      const dbUrl = config.get('database.url'); // string
+      // Fully typed access - no casting needed
+      const port: number = config.get('app.port');
+      const debug: boolean = config.get('app.debug');
+      const dbUrl: string = config.get('database.url');
 
-      expect(typeof port).toBe('number');
-      expect(port).toBe(4000); // From env
-      expect(typeof dbUrl).toBe('string');
+      // The environment only ever holds strings; the schema's type is what comes back.
+      expect(port).toBe(4000);
+      expect(debug).toBe(false);
       expect(dbUrl).toBe('postgres://localhost:5432/testdb');
+
+      // "url.value for sensitive values" — get() hands back the wrapper, not the bare string.
+      const password = config.get('database.password') as unknown as SensitiveValue<string>;
+
+      expect(password.value).toBe('secret123');
+
+      // "Get all values" — one object holding the whole parsed tree.
+      expect(config.values).toEqual({
+        app: { port: 4000, debug: false },
+        database: { url: 'postgres://localhost:5432/testdb', password: 'secret123' },
+      });
     });
 
     /**
-     * @source docs:api/envs.md#quick-start
+     * "Sensitive Values" spells out every observable consequence of `sensitive: true`:
+     * `toString()` is '***', `.value` is the real secret, a logged payload prints the mask,
+     * and `getSafeConfig()` swaps the value for '***' while leaving every other field alone.
+     *
+     * @source docs:api/envs.md#sensitive-values
      */
     it('should get safe config for logging', async () => {
       const schema: EnvSchema<{
@@ -151,14 +190,28 @@ describe('Envs README Examples', () => {
         },
       };
 
-      const config = await TypedEnv.createAsync(schema, {}, getUniqueKey());
+      const config = await TypedEnv.createAsync(schema, { loadDotEnv: false }, getUniqueKey());
 
-      // From README: Get safe config for logging (sensitive data masked)
+      const password = config.get('database.password') as unknown as SensitiveValue<string>;
+
+      // password.toString() returns '***', password.value returns actual value
+      expect(password.toString()).toBe('***');
+      expect(`${password}`).toBe('***');
+      expect(password.value).toBe('secret123');
+
+      // Safe for logging: a logger serialising its payload emits the mask, never the secret.
+      expect(JSON.stringify({ password })).toBe('{"password":"***"}');
+
+      // getSafeConfig() replaces the sensitive value with '***' and touches nothing else.
       const safeConfig = config.getSafeConfig();
 
-      expect(safeConfig).toBeDefined();
-      // Password should be masked
-      expect((safeConfig as { database: { password: string } }).database.password).not.toBe('secret123');
+      expect(safeConfig).toEqual({
+        app: { port: 4000 },
+        database: { url: 'postgres://localhost:5432/testdb', password: '***' },
+      });
+
+      // The mask is a copy: `values` still carries the real secret for code that needs it.
+      expect(config.values.database.password).toBe('secret123');
     });
   });
 

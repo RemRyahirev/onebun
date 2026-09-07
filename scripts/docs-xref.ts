@@ -52,6 +52,28 @@ interface ForwardEntry {
   docPages: string[];
 }
 
+interface DeadAnchor {
+  file: string;
+  line: number;
+  page: string;
+  anchor: string;
+  suggestion?: string;
+}
+
+interface SymbolMiss {
+  file: string;
+  line: number;
+  symbol: string;
+  page: string;
+}
+
+interface PageCoverage {
+  page: string;
+  snippets: number;
+  covered: number;
+  uncovered: number;
+}
+
 interface XRefOutput {
   generated: string;
   stats: {
@@ -61,9 +83,28 @@ interface XRefOutput {
     unreferencedDocPages: string[];
     untestedDocPages: string[];
     missingDocPages: string[];
+    /** docs: tags whose #anchor names no heading on the target page. */
+    deadAnchors: DeadAnchor[];
+    /** @see tags whose symbol name never appears in the page they point at. */
+    symbolNotOnPage: SymbolMiss[];
+    /** Refs the symbol regex could not resolve — they verify nothing. */
+    unresolvedSymbolRefs: number;
+    totalSnippets: number;
+    coveredSnippets: number;
+    coverage: PageCoverage[];
   };
   forward: Record<string, ForwardEntry[]>;
   reverse: Record<string, XRefEntry[]>;
+}
+
+/**
+ * Known violations, so the check fails on NEW drift while the existing backlog is
+ * burned down. Regenerate with `bun run docs:xref --update-baseline`; the numbers may
+ * only ever go down — `--check` fails when a page's uncovered count grows.
+ */
+interface Baseline {
+  symbolNotOnPage: string[];
+  uncoveredSnippets: Record<string, number>;
 }
 
 // --- Constants ---
@@ -75,9 +116,22 @@ const DOCS_DIR = join(ROOT_DIR, 'docs');
 const MODE_JSON = process.argv.includes('--json');
 const MODE_MARKDOWN = process.argv.includes('--markdown');
 const MODE_CHECK = process.argv.includes('--check');
+const MODE_UPDATE_BASELINE = process.argv.includes('--update-baseline');
+
+const BASELINE_PATH = join(import.meta.dir, 'docs-xref-baseline.json');
 
 const SYMBOL_REGEX = /export\s+(?:default\s+)?(?:abstract\s+)?(?:function|class|interface|type|const|enum|let|var)\s+(\w+)/;
 const DESCRIBE_IT_REGEX = /(?:describe|it|test)\s*\(\s*['"`]([^'"`]+)['"`]/;
+
+/**
+ * Files scanned for `@source docs:` tags. A directory may already hold a `docs-examples.test.ts`,
+ * so `docs-coverage.test.ts` is the second name for tests added to pin sections that file does not.
+ * Both are ordinary test files; the distinction is only which one a directory already had.
+ */
+const DOCS_TEST_FILENAMES = new Set([
+  'docs-examples.test.ts',
+  'docs-coverage.test.ts',
+]);
 
 // Doc pages that are legitimately not referenced by code
 const EXCLUDED_DOC_PAGES = new Set([
@@ -125,7 +179,7 @@ async function collectTestFiles(dir: string): Promise<string[]> {
     if (entry.isDirectory()) {
       if (entry.name === 'node_modules' || entry.name === 'dist') continue;
       files.push(...await collectTestFiles(fullPath));
-    } else if (entry.name === 'docs-examples.test.ts') {
+    } else if (DOCS_TEST_FILENAMES.has(entry.name)) {
       files.push(fullPath);
     }
   }
@@ -291,6 +345,61 @@ async function processTestFiles(testFiles: string[]): Promise<TestRef[]> {
   return testRefs;
 }
 
+// --- Raw Ref Collection (with anchors and resolved symbols) ---
+
+interface RawRefLocation {
+  file: string;
+  line: number;
+  page: string;
+  anchor?: string;
+  tag: 'see' | 'source';
+  symbol: string;
+}
+
+/**
+ * Every docs: tag in the repo, with the anchor kept (the reverse/forward maps strip it)
+ * and the symbol or test name it sits on. This is what the content checks work from.
+ */
+async function collectRawRefs(sourceFiles: string[], testFiles: string[]): Promise<RawRefLocation[]> {
+  const refs: RawRefLocation[] = [];
+
+  const scan = async (filePath: string, isTest: boolean): Promise<void> => {
+    const content = await Bun.file(filePath).text();
+    const found = extractRefs(content);
+    if (found.length === 0) return;
+
+    const lines = content.split('\n');
+    const relPath = relative(ROOT_DIR, filePath);
+
+    for (const ref of found) {
+      const [page, anchor] = ref.docPage.split('#');
+      refs.push({
+        file: relPath,
+        line: ref.line,
+        page,
+        anchor,
+        tag: ref.tag,
+        symbol: isTest ? findTestName(lines, ref.line) : findSymbolName(lines, ref.line),
+      });
+    }
+  };
+
+  for (const file of sourceFiles) await scan(file, false);
+  for (const file of testFiles) await scan(file, true);
+
+  return refs;
+}
+
+async function loadBaseline(): Promise<Baseline> {
+  try {
+    return await Bun.file(BASELINE_PATH).json() as Baseline;
+  } catch {
+    return { symbolNotOnPage: [], uncoveredSnippets: {} };
+  }
+}
+
+const symbolMissKey = (miss: SymbolMiss): string => `${miss.file}:${miss.symbol} -> ${miss.page}`;
+
 // --- Doc Page Discovery ---
 
 async function collectDocPages(dir: string, prefix = ''): Promise<string[]> {
@@ -309,6 +418,114 @@ async function collectDocPages(dir: string, prefix = ''): Promise<string[]> {
   }
 
   return pages;
+}
+
+// --- Doc Page Contents ---
+
+/**
+ * Slugify a heading the way VitePress (via @mdit-vue/shared) does, so an `#anchor`
+ * in a docs: tag can be compared against the headings that actually exist.
+ */
+function slugifyHeading(heading: string): string {
+  // VitePress lets a heading declare its own id: `### Title {#custom-anchor}`. That id
+  // wins outright — deriving a slug from the visible text would invent an anchor the
+  // rendered page does not have.
+  const explicit = heading.match(/\{#([^}]+)\}\s*$/);
+  if (explicit) return explicit[1].trim();
+
+  return heading
+    .replace(/`/g, '')
+    .replace(/\*\*/g, '')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .trim()
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N} _-]/gu, '')
+    .replace(/[ _]+/g, '-');
+}
+
+interface Snippet {
+  line: number;
+  /** Slugs of every heading enclosing this fence, innermost last. */
+  headingPath: string[];
+}
+
+interface DocPageContent {
+  text: string;
+  /** Heading slugs in document order, deduplicated the way VitePress suffixes repeats. */
+  slugs: string[];
+  snippets: Snippet[];
+}
+
+/**
+ * Parse a page once: its heading slugs and every TypeScript fence with the heading
+ * path it sits under. Fenced blocks are skipped while scanning for headings, so a
+ * `#` comment inside a snippet cannot masquerade as a section.
+ */
+function parseDocPage(text: string): DocPageContent {
+  const lines = text.split('\n');
+  const slugs: string[] = [];
+  const snippets: Snippet[] = [];
+  const seen = new Map<string, number>();
+  const stack: { level: number; slug: string }[] = [];
+
+  let inFence = false;
+
+  for (let i = 0; i < lines.length; i++) {
+    const fenceMatch = lines[i].match(/^\s*```(\w*)/);
+
+    if (fenceMatch) {
+      if (inFence) {
+        inFence = false;
+      } else {
+        inFence = true;
+        // A fence marked `<!-- typecheck: skip -->` is a deliberate fragment — a bare `@Req()`, a
+        // method signature, a list of interface members. It is not a recipe a test can pin, so
+        // counting it as uncovered inflates the debt with work nobody should do.
+        const isFragment = i > 0 && /<!--\s*typecheck:\s*skip\s*-->/i.test(lines[i - 1]);
+        if (/^(ts|typescript)$/.test(fenceMatch[1]) && !isFragment) {
+          snippets.push({ line: i + 1, headingPath: stack.map(s => s.slug) });
+        }
+      }
+      continue;
+    }
+
+    if (inFence) continue;
+
+    const headingMatch = lines[i].match(/^(#{2,6})\s+(.*)$/);
+    if (!headingMatch) continue;
+
+    const level = headingMatch[1].length;
+    const base = slugifyHeading(headingMatch[2]);
+    const repeat = seen.get(base) ?? 0;
+    seen.set(base, repeat + 1);
+    const slug = repeat === 0 ? base : `${base}-${repeat}`;
+
+    slugs.push(slug);
+    while (stack.length > 0 && stack[stack.length - 1].level >= level) stack.pop();
+    stack.push({ level, slug });
+  }
+
+  return { text, slugs, snippets };
+}
+
+/** Nearest existing slug on the page, for a "did you mean" on a dead anchor. */
+function suggestAnchor(anchor: string, slugs: string[]): string | undefined {
+  const target = anchor.replace(/-/g, '');
+  let best: { slug: string; score: number } | undefined;
+
+  for (const slug of slugs) {
+    const candidate = slug.replace(/-/g, '');
+    let score = 0;
+    if (candidate === target) score = 100;
+    else if (candidate.includes(target) || target.includes(candidate)) score = 50;
+    else {
+      const parts = anchor.split('-').filter(p => p.length > 2);
+      score = parts.filter(p => slug.includes(p)).length * 10;
+    }
+    if (score > 0 && (!best || score > best.score)) best = { slug, score };
+  }
+
+  return best?.slug;
 }
 
 // --- Output ---
@@ -398,8 +615,9 @@ function outputMarkdown(output: XRefOutput) {
   }
 }
 
-function outputCheck(output: XRefOutput) {
+async function outputCheck(output: XRefOutput) {
   const { stats } = output;
+  const baseline = await loadBaseline();
   let hasErrors = false;
 
   if (stats.missingDocPages.length > 0) {
@@ -410,12 +628,58 @@ function outputCheck(output: XRefOutput) {
     }
   }
 
+  // Hard error, no baseline: an anchor either names a heading on the page or it does not,
+  // and every one of them is mechanically fixable.
+  if (stats.deadAnchors.length > 0) {
+    hasErrors = true;
+    log.error(`${stats.deadAnchors.length} dead anchor(s) — the section does not exist:`);
+    for (const dead of stats.deadAnchors) {
+      const hint = dead.suggestion ? ` (did you mean #${dead.suggestion}?)` : '';
+      log.dim(`${dead.file}:${dead.line} → docs:${dead.page}#${dead.anchor}${hint}`);
+    }
+  }
+
+  // Ratcheted: fail on a symbol miss that is not already recorded in the baseline.
+  const knownMisses = new Set(baseline.symbolNotOnPage);
+  const newMisses = stats.symbolNotOnPage.filter(m => !knownMisses.has(symbolMissKey(m)));
+  if (newMisses.length > 0) {
+    hasErrors = true;
+    log.error(`${newMisses.length} @see tag(s) naming a symbol the target page never mentions:`);
+    for (const miss of newMisses) {
+      log.dim(`${miss.file}:${miss.line} — ${miss.symbol} is absent from docs:${miss.page}`);
+    }
+  }
+
+  // Ratcheted: a page may not grow more uncovered snippets than the baseline records.
+  const regressions = stats.coverage
+    .map(c => ({ ...c, allowed: baseline.uncoveredSnippets[c.page] ?? 0 }))
+    .filter(c => c.uncovered > c.allowed);
+
+  if (regressions.length > 0) {
+    hasErrors = true;
+    log.error(`${regressions.length} page(s) gained undocumented-by-test snippets:`);
+    for (const reg of regressions) {
+      log.dim(`${reg.page} — ${reg.uncovered} uncovered snippet(s), baseline allows ${reg.allowed}`);
+    }
+  }
+
   if (!hasErrors) {
     log.success('All cross-references are valid');
     log.info(`${stats.totalCodeRefs} code refs, ${stats.totalTestRefs} test refs across ${new Set([...Object.keys(output.reverse)]).size} doc pages`);
+    log.info(`Snippet coverage: ${stats.coveredSnippets}/${stats.totalSnippets} (${(stats.coveredSnippets / Math.max(stats.totalSnippets, 1) * 100).toFixed(1)}%)`);
 
+    const backlog = Object.values(baseline.uncoveredSnippets).reduce((a, b) => a + b, 0);
+    if (backlog > 0) {
+      log.warn(`${backlog} uncovered snippet(s) across ${Object.keys(baseline.uncoveredSnippets).length} page(s) are allowed by the baseline — burn them down, they may only decrease`);
+    }
+    if (baseline.symbolNotOnPage.length > 0) {
+      log.warn(`${baseline.symbolNotOnPage.length} @see symbol mismatch(es) allowed by the baseline`);
+    }
+    if (stats.unresolvedSymbolRefs > 0) {
+      log.warn(`${stats.unresolvedSymbolRefs} @see tag(s) sit on something the symbol regex cannot name — they verify nothing`);
+    }
     if (stats.unreferencedDocPages.length > 0) {
-      log.warn(`${stats.unreferencedDocPages.length} doc page(s) have no references (not an error)`);
+      log.warn(`${stats.unreferencedDocPages.length} doc page(s) have no references`);
     }
     if (stats.untestedDocPages.length > 0) {
       log.warn(`${stats.untestedDocPages.length} doc page(s) have code refs but no test refs`);
@@ -523,6 +787,76 @@ async function main() {
     }
   }
 
+  // 4b. Content checks — these are the ones that see drift, so they read the pages.
+  log.info('Reading documentation pages...');
+  const pageContents = new Map<string, DocPageContent>();
+  for (const page of allDocPages) {
+    pageContents.set(page, parseDocPage(await Bun.file(join(DOCS_DIR, page)).text()));
+  }
+
+  const rawRefs = await collectRawRefs(sourceFiles, testFiles);
+
+  // Anchors: a tag pointing into a section that does not exist proves nothing, and
+  // silently detaches when a heading is renamed.
+  const deadAnchors: DeadAnchor[] = [];
+  for (const ref of rawRefs) {
+    if (!ref.anchor) continue;
+    const content = pageContents.get(ref.page);
+    if (!content || content.slugs.includes(ref.anchor)) continue;
+    deadAnchors.push({
+      file: ref.file,
+      line: ref.line,
+      page: ref.page,
+      anchor: ref.anchor,
+      suggestion: suggestAnchor(ref.anchor, content.slugs),
+    });
+  }
+
+  // A @see whose symbol is never named on the target page is a link in name only.
+  const symbolNotOnPage: SymbolMiss[] = [];
+  let unresolvedSymbolRefs = 0;
+  for (const ref of rawRefs) {
+    if (ref.tag !== 'see') continue;
+    if (ref.symbol === '<unknown>') {
+      unresolvedSymbolRefs++;
+      continue;
+    }
+    const content = pageContents.get(ref.page);
+    if (!content || content.text.includes(ref.symbol)) continue;
+    symbolNotOnPage.push({ file: ref.file, line: ref.line, symbol: ref.symbol, page: ref.page });
+  }
+
+  // Coverage is per snippet: a fence counts as covered when an @source anchor names
+  // one of the headings it sits under. A page-level tag with no anchor covers nothing —
+  // that laundering is what let `untestedDocPages` read empty while 368 fences had no test.
+  const anchorsByPage = new Map<string, Set<string>>();
+  for (const ref of rawRefs) {
+    if (ref.tag !== 'source' || !ref.anchor) continue;
+    if (!anchorsByPage.has(ref.page)) anchorsByPage.set(ref.page, new Set());
+    anchorsByPage.get(ref.page)!.add(ref.anchor);
+  }
+
+  const coverage: PageCoverage[] = [];
+  let totalSnippets = 0;
+  let coveredSnippets = 0;
+
+  for (const [page, content] of pageContents) {
+    if (content.snippets.length === 0) continue;
+    const tagged = anchorsByPage.get(page) ?? new Set<string>();
+    const covered = content.snippets.filter(s => s.headingPath.some(h => tagged.has(h))).length;
+
+    totalSnippets += content.snippets.length;
+    coveredSnippets += covered;
+    coverage.push({
+      page,
+      snippets: content.snippets.length,
+      covered,
+      uncovered: content.snippets.length - covered,
+    });
+  }
+
+  coverage.sort((a, b) => b.uncovered - a.uncovered);
+
   // 5. Build output
   const output: XRefOutput = {
     generated: new Date().toISOString(),
@@ -533,18 +867,37 @@ async function main() {
       unreferencedDocPages,
       untestedDocPages,
       missingDocPages,
+      deadAnchors,
+      symbolNotOnPage,
+      unresolvedSymbolRefs,
+      totalSnippets,
+      coveredSnippets,
+      coverage,
     },
     forward: Object.fromEntries(forward),
     reverse: Object.fromEntries(reverse),
   };
 
   // 6. Output
+  if (MODE_UPDATE_BASELINE) {
+    const baseline: Baseline = {
+      symbolNotOnPage: symbolNotOnPage.map(symbolMissKey).sort(),
+      uncoveredSnippets: Object.fromEntries(
+        coverage.filter(c => c.uncovered > 0).map(c => [c.page, c.uncovered]).sort(),
+      ),
+    };
+    await Bun.write(BASELINE_PATH, `${JSON.stringify(baseline, null, 2)}\n`);
+    log.success(`Baseline written: ${relative(ROOT_DIR, BASELINE_PATH)}`);
+    log.info(`${baseline.symbolNotOnPage.length} symbol misses, ${Object.keys(baseline.uncoveredSnippets).length} pages with uncovered snippets`);
+    return;
+  }
+
   if (MODE_JSON) {
     console.log(JSON.stringify(output, null, 2));
   } else if (MODE_MARKDOWN) {
     outputMarkdown(output);
   } else if (MODE_CHECK) {
-    outputCheck(output);
+    await outputCheck(output);
   } else {
     outputSummary(output);
   }

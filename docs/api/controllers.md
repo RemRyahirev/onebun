@@ -117,12 +117,14 @@ These methods are available on `BaseController` but are not the recommended defa
 
 Explicitly create a success response. Equivalent to returning plain data, but more verbose.
 
+<!-- typecheck: skip -->
 ```typescript
 protected success<T = unknown>(result: T, status: number = 200): Response
 ```
 
 **Examples:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Get('/')
 async getUser() {
@@ -141,6 +143,7 @@ async getUser() {
 
 Create an error response manually. Prefer `throw new HttpException()` instead.
 
+<!-- typecheck: skip -->
 ```typescript
 public error(
   message: string,
@@ -161,6 +164,7 @@ public error(
 
 **Examples:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Get('/:id')
 async findOne(@Param('id') id: string) {
@@ -180,6 +184,7 @@ async findOne(@Param('id') id: string) {
 
 Alias for `success()`. Creates JSON response.
 
+<!-- typecheck: skip -->
 ```typescript
 protected json<T = unknown>(data: T, status: number = 200): Response
 ```
@@ -188,12 +193,14 @@ protected json<T = unknown>(data: T, status: number = 200): Response
 
 Create plain text response.
 
+<!-- typecheck: skip -->
 ```typescript
 protected text(data: string, status: number = 200): Response
 ```
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Get('/health')
 async health(): Promise<Response> {
@@ -364,6 +371,7 @@ export class AuthController extends BaseController {
 
 ### Deleting Cookies
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/logout')
 async logout(@Req() req: OneBunRequest) {
@@ -484,7 +492,7 @@ class AuthMiddleware extends BaseMiddleware {
 }
 ```
 
-Middleware is instantiated **once** at application startup and reused for every request.
+Middleware is instantiated at application startup and reused for every request — but **once per attachment point**, not once per class. Each list is resolved separately (the application-wide list, each module, each controller, each route), so a class registered in two places gets two instances; module middleware inherited by a child module is instantiated again inside that child's DI scope, because the child resolves it against its own services. Keep cross-request state out of middleware fields — instances are never shared between attachment points.
 
 ### Route-Level Middleware
 
@@ -510,6 +518,7 @@ export class ApiController extends BaseController {
 
 You can pass multiple middleware to a single `@UseMiddleware()` — they execute left to right:
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/action')
 @UseMiddleware(LogMiddleware, AuthMiddleware, RateLimitMiddleware)
@@ -807,7 +816,7 @@ For `POST /admin/users`, the execution order is:
 4. `JsonOnlyMiddleware` (route)
 5. `createUser()` handler
 
-<!-- llm-only: Middleware is class-based, extending BaseMiddleware. All middleware classes have this.logger (SyncLogger scoped to class name) and this.config (IConfig). Full constructor DI is supported — inject any service from the module's DI scope. Middleware is instantiated once at startup. Pass class constructors (not instances) everywhere: @UseMiddleware(AuthMiddleware), ApplicationOptions.middleware: [CorsMiddleware], OnModuleConfigure.configureMiddleware(): [TenantMiddleware]. Middleware precedence is global → module → controller → route → handler. -->
+<!-- llm-only: Middleware is class-based, extending BaseMiddleware. All middleware classes have this.logger (SyncLogger scoped to class name) and this.config (IConfig). Full constructor DI is supported — inject any service from the module's DI scope. Middleware is instantiated at startup, once per attachment point — the application-wide list, each module (a module's own AND its inherited middleware are re-instantiated in every descendant module, against that module's DI scope), each controller, each route — not once per class; two attachment points never share an instance. Pass class constructors (not instances) everywhere: @UseMiddleware(AuthMiddleware), ApplicationOptions.middleware: [CorsMiddleware], OnModuleConfigure.configureMiddleware(): [TenantMiddleware]. Middleware precedence is global → module → controller → route → handler. -->
 
 ## Request Helpers
 
@@ -815,6 +824,7 @@ For `POST /admin/users`, the execution order is:
 
 Check if request has JSON content type.
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/')
 async create(@Req() req: OneBunRequest) {
@@ -829,6 +839,7 @@ async create(@Req() req: OneBunRequest) {
 
 Parse JSON from request body (when not using @Body decorator).
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/')
 async create(@Req() req: OneBunRequest) {
@@ -841,6 +852,7 @@ async create(@Req() req: OneBunRequest) {
 
 Import common status codes:
 
+<!-- typecheck: skip -->
 ```typescript
 import { HttpStatusCode } from '@onebun/core';
 
@@ -1025,6 +1037,7 @@ interface SseOptions {
 
 The `@Sse()` decorator marks a method as an SSE endpoint. The method should be an async generator that yields `SseEvent` objects. By default, a heartbeat is sent every 30 seconds and the per-request timeout is 600 seconds (10 minutes).
 
+<!-- typecheck: skip -->
 ```typescript
 @Sse()                           // defaults: heartbeat=30s, timeout=600s
 @Sse({ heartbeat: 15000 })      // custom heartbeat, default timeout
@@ -1349,6 +1362,7 @@ export class FileController extends BaseController {
 
 ### Multiple File Upload
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/documents')
 async uploadDocuments(
@@ -1367,6 +1381,7 @@ async uploadDocuments(
 
 ### File with Form Fields
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/profile')
 async createProfile(

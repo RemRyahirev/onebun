@@ -74,6 +74,7 @@ mix, and never a subset. The two shapes are mutually exclusive at the type level
 half-filled object is a compile error rather than a connection built from `undefined` that
 surfaces later as an unreachable server:
 
+<!-- typecheck: skip -->
 ```typescript
 // A URL
 options: { connectionString: 'postgresql://user:password@host:5432/database' }
@@ -234,6 +235,7 @@ Two `forRoot()` calls used to give you two `DrizzleService` instances **both con
 
 When `DrizzleModule` is not global (`isGlobal: false`), a submodule must import it to reach `DrizzleService`: a non-global service does not travel down the module tree, and `exports` travels up to the importing module rather than down to children. `forFeature()` is that import:
 
+<!-- typecheck: skip -->
 ```typescript
 // Root module with non-global DrizzleModule
 @Module({
@@ -596,6 +598,7 @@ const [deleted] = await this.db.delete(users)
 
 Execute queries in a transaction. The transaction callback receives a `UniversalTransactionClient` with the same API as `DrizzleService`.
 
+<!-- typecheck: skip -->
 ```typescript
 async transaction<T>(
   fn: (tx: UniversalTransactionClient) => Promise<T>
@@ -681,8 +684,14 @@ than a promise.
 
 Unchanged: the transaction runs on its own pooled connection through drizzle's own
 `transaction()`. Nothing is queued, nothing is refused — concurrent queries use other
-connections, nested `transaction()` calls are drizzle's savepoints, and the re-entrancy
-errors above cannot occur.
+connections, and the re-entrancy errors above cannot occur.
+
+**Nesting is not a savepoint.** `tx` exposes no `transaction()` at all, and a nested
+`db.transaction()` is dispatched on the root pooled instance rather than on the open
+transaction — so it takes a SECOND connection and begins an INDEPENDENT transaction, which
+can block on the locks the outer one holds and stays committed when the outer one rolls
+back. Drizzle's real savepoints are reachable only through the escape hatch,
+`tx.getRawTransaction().transaction(...)`.
 
 **A query issued through the service from inside the callback takes another connection.** It
 is therefore NOT part of the transaction and is NOT undone when the transaction rolls back —
@@ -702,6 +711,9 @@ given `tx`.
 - `getSQLiteDatabase()`, `getSQLiteClient()` and `.prepare()` are ungated escape hatches:
   statements issued through them during a transaction join it and are rolled back with it.
 - On PostgreSQL `getDatabase()` returns the drizzle instance itself, with no wrapper.
+- `DrizzleService.transaction()` always dispatches on `this.db` — the root pooled instance —
+  so it has no notion of an outer transaction to nest into; only SQLite tracks that, via the
+  gate's `AsyncLocalStorage`, and it refuses rather than splitting.
 </llm-only>
 
 ## BaseRepository

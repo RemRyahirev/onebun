@@ -4,7 +4,16 @@
  * @source docs:api/drizzle.md
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'path';
 
@@ -43,12 +52,15 @@ import {
   BaseRepository,
   getPrimaryKeyColumn,
   generateMigrations,
+  relations,
+  sql,
 } from '../src';
 import {
   pgTable,
   text as pgText,
   integer as pgInteger,
   timestamp,
+  uuid as pgUuid,
 } from '../src/pg';
 import {
   sqliteTable,
@@ -215,22 +227,162 @@ describe('Drizzle API Documentation Examples', () => {
    * @source docs:api/drizzle.md#schema-definition
    */
   describe('Schema Definition (docs/api/drizzle.md)', () => {
-    it('should define SQLite schema with timestamps', () => {
-      // From docs: SQLite Schema example
+    const { createTestService } = require('@onebun/core/testing');
+
+    /** The literal SQL a `.default(sql`...`)` / `.defaultNow()` / `.defaultRandom()` column carries. */
+    const defaultSql = (column: { default?: unknown }): string => {
+      const chunks = (column.default as { queryChunks?: { value?: string[] }[] } | undefined)?.queryChunks ?? [];
+
+      return chunks.map(chunk => (chunk.value ?? []).join('')).join('');
+    };
+
+    it('should define SQLite schema with timestamps', async () => {
+      // From docs, "SQLite Schema" — the snippet verbatim: builders from @onebun/drizzle/sqlite,
+      // `sql` from @onebun/drizzle, and both timestamps defaulting to CURRENT_TIMESTAMP.
       const users = sqliteTable('users', {
         id: text('id').primaryKey(),
         name: text('name').notNull(),
         email: text('email').notNull().unique(),
         age: integer('age'),
-        // Note: Using simpler timestamp representation for SQLite
-        createdAt: text('created_at').notNull(),
-        updatedAt: text('updated_at').notNull(),
+        createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+        updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
       });
 
-      expect(users).toBeDefined();
+      type User = typeof users.$inferSelect;
+      type InsertUser = typeof users.$inferInsert;
+
+      // The builder chain registers exactly the constraints the snippet spells out.
+      expect(users.id.primary).toBe(true);
+      expect(users.id.columnType).toBe('SQLiteText');
+      expect(users.name.notNull).toBe(true);
+      expect(users.email.isUnique).toBe(true);
+      expect(users.age.notNull).toBe(false);
+      expect(users.age.columnType).toBe('SQLiteInteger');
+      // camelCase property -> snake_case column, and both timestamps get a DB-side default.
+      expect(users.createdAt.name).toBe('created_at');
+      expect(users.updatedAt.name).toBe('updated_at');
+      expect(defaultSql(users.createdAt)).toBe('CURRENT_TIMESTAMP');
+      expect(defaultSql(users.updatedAt)).toBe('CURRENT_TIMESTAMP');
+
+      // And the schema drives real statements: the same table against in-memory SQLite.
+      const { instance } = createTestService(DrizzleServiceCtor);
+      await instance.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+      instance.getDatabase().run(`CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        age INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`);
+
+      try {
+        // $inferInsert leaves the defaulted timestamps out, so the DB fills them in.
+        const newUser: InsertUser = { id: 'u-1', name: 'John', email: 'john@example.com' };
+        await instance.insert(users).values(newUser);
+
+        const rows: User[] = await instance.select().from(users);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0].id).toBe('u-1');
+        expect(rows[0].name).toBe('John');
+        // age is the only nullable column; the timestamps came from CURRENT_TIMESTAMP,
+        // read back under their camelCase property names.
+        expect(rows[0].age).toBeNull();
+        expect(rows[0].createdAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+        expect(rows[0].updatedAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+        // .unique() on email is a real constraint, not decoration.
+        const duplicate = await instance.insert(users)
+          .values({ id: 'u-2', name: 'Jane', email: 'john@example.com' })
+          .then(() => null, (error: unknown) => error as Error);
+
+        expect(duplicate?.message).toContain('UNIQUE constraint failed: users.email');
+      } finally {
+        await instance.close();
+      }
     });
 
-    // PostgreSQL test skipped - see note at top of file
+    it('should define PostgreSQL schema with an identity id and defaultNow() timestamps', () => {
+      // From docs, "PostgreSQL Schema": generatedAlwaysAsIdentity() for the auto-increment
+      // primary key, timestamps in `date` mode defaulting to now().
+      const users = pgTable('users', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        name: pgText('name').notNull(),
+        email: pgText('email').notNull().unique(),
+        age: pgInteger('age'),
+        createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
+        updatedAt: timestamp('updated_at', { mode: 'date' }).notNull().defaultNow(),
+      });
+
+      expect(users.id.primary).toBe(true);
+      expect(users.id.columnType).toBe('PgInteger');
+      // generatedAlwaysAsIdentity() is what supplies the value, so no value is required on insert.
+      expect((users.id as unknown as { generatedIdentity?: { type: string } }).generatedIdentity)
+        .toEqual({ type: 'always' });
+      expect(users.id.hasDefault).toBe(true);
+      expect(users.email.isUnique).toBe(true);
+      expect(users.age.notNull).toBe(false);
+      expect(users.createdAt.name).toBe('created_at');
+      expect(users.createdAt.columnType).toBe('PgTimestamp');
+      // mode: 'date' — the driver hands back a Date, not a string.
+      expect(users.createdAt.dataType).toBe('date');
+      expect(defaultSql(users.createdAt)).toBe('now()');
+      expect(defaultSql(users.updatedAt)).toBe('now()');
+
+      // From docs, "Alternative with UUID".
+      const uuidUsers = pgTable('uuid_users', {
+        id: pgUuid('id').primaryKey().defaultRandom(),
+      });
+
+      expect(uuidUsers.id.columnType).toBe('PgUUID');
+      expect(defaultSql(uuidUsers.id)).toBe('gen_random_uuid()');
+    });
+
+    it('should bind relations() to its table and register the referenced foreign key', () => {
+      // From docs, "Relations".
+      const users = pgTable('users', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        name: pgText('name').notNull(),
+      });
+
+      const posts = pgTable('posts', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        title: pgText('title').notNull(),
+        content: pgText('content'),
+        authorId: pgInteger('author_id').notNull().references(() => users.id),
+        createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
+      });
+
+      const postsRelations = relations(posts, ({ one }) => ({
+        author: one(users, {
+          fields: [posts.authorId],
+          references: [users.id],
+        }),
+      }));
+
+      const usersRelations = relations(users, ({ many }) => ({
+        posts: many(posts),
+      }));
+
+      // Each relations() set is bound to the table it was declared on.
+      expect((postsRelations as unknown as { table: unknown }).table).toBe(posts);
+      expect((usersRelations as unknown as { table: unknown }).table).toBe(users);
+
+      // .references(() => users.id) registers a real foreign key: posts.author_id -> users.id.
+      type InlineForeignKey = {
+        reference: () => { columns: { name: string }[]; foreignColumns: { name: string }[] };
+      };
+      const inlineForeignKeys = (posts as unknown as Record<symbol, InlineForeignKey[]>)[
+        Symbol.for('drizzle:PgInlineForeignKeys')
+      ];
+
+      expect(inlineForeignKeys).toHaveLength(1);
+      const reference = inlineForeignKeys[0].reference();
+      expect(reference.columns.map(column => column.name)).toEqual(['author_id']);
+      expect(reference.foreignColumns.map(column => column.name)).toEqual(['id']);
+      expect(posts.authorId.notNull).toBe(true);
+    });
   });
 
   describe('Schema Utilities (docs/api/drizzle.md)', () => {
@@ -276,10 +428,64 @@ describe('Drizzle API Documentation Examples', () => {
    * @source docs:api/drizzle.md#migrations
    */
   describe('Migration Functions (docs/api/drizzle.md)', () => {
-    it('should have generateMigrations function', () => {
-      // From docs: Migration Management - generateMigrations
-      expect(generateMigrations).toBeDefined();
-      expect(typeof generateMigrations).toBe('function');
+    it('generateMigrations writes migration files for the schema, folder and dialect it is given', async () => {
+      // From docs, "Programmatic Generation": generateMigrations({ schemaPath,
+      // migrationsFolder, dialect }) produces migration files. Run it in a throwaway cwd so
+      // nothing lands in the repository, with node_modules linked in so `bunx drizzle-kit`
+      // resolves to the drizzle-kit this package depends on instead of hitting the registry.
+      const workDir = mkdtempSync(join(tmpdir(), 'onebun-docs-generate-'));
+      const linkedModules = join(workDir, 'node_modules');
+      const originalCwd = process.cwd();
+
+      try {
+        symlinkSync(join(__dirname, '..', '..', '..', 'node_modules'), linkedModules);
+        mkdirSync(join(workDir, 'schema'), { recursive: true });
+        writeFileSync(join(workDir, 'schema', 'index.ts'), [
+          "import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';",
+          '',
+          "export const docsUsers = sqliteTable('docs_users', {",
+          "  id: integer('id').primaryKey(),",
+          "  name: text('name').notNull(),",
+          '});',
+          '',
+        ].join('\n'));
+
+        process.chdir(workDir);
+
+        await generateMigrations({
+          schemaPath: './schema',
+          migrationsFolder: './migrations',
+          dialect: 'sqlite',
+        });
+
+        // migrationsFolder is where the SQL lands, and the SQL is the schema, not a stub.
+        const generated = readdirSync(join(workDir, 'migrations')).filter((name) => name.endsWith('.sql'));
+
+        expect(generated).toHaveLength(1);
+
+        const statements = readFileSync(join(workDir, 'migrations', generated[0]!), 'utf8');
+
+        expect(statements).toContain('CREATE TABLE `docs_users`');
+        expect(statements).toContain('`name` text NOT NULL');
+
+        // The dialect argument reaches drizzle-kit: the journal records it, and the SQL is
+        // SQLite's backtick-quoted form rather than PostgreSQL's.
+        const journal = JSON.parse(
+          readFileSync(join(workDir, 'migrations', 'meta', '_journal.json'), 'utf8'),
+        ) as { dialect: string; entries: { tag: string }[] };
+
+        expect(journal.dialect).toBe('sqlite');
+        expect(journal.entries).toHaveLength(1);
+        expect(generated[0]).toBe(`${journal.entries[0]!.tag}.sql`);
+
+        // The drizzle.config it writes to drive drizzle-kit is an implementation detail and
+        // must not outlive the call.
+        expect(existsSync(join(workDir, 'drizzle.config.temp.ts'))).toBe(false);
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(linkedModules, { force: true });
+        rmSync(workDir, { recursive: true, force: true });
+      }
     });
 
     it('should have pushSchema function', () => {

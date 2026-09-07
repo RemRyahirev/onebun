@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+#
+# Regenerate README.md when a commit touches something it is generated from, and stage the
+# result, so a docs edit cannot land with a stale README and a red CI behind it.
+#
+# Enabled by `git config core.hooksPath .githooks`, which the root `prepare` script sets on
+# `bun install`. To run a single commit without it: `git commit --no-verify`.
+#
+# Deliberately only the README. `docs:typecheck` compiles ~560 snippets and belongs in CI — a
+# pre-commit hook slow enough to notice is a pre-commit hook people turn off.
+set -euo pipefail
+
+# Files README.md is built from: the marked regions live in docs/, the package table comes from
+# the manifests, and the frame from the template and the generator itself.
+if ! git diff --cached --name-only --diff-filter=ACMR | grep -qE '^(docs/.*\.md|packages/[^/]+/package\.json|package\.json|scripts/(generate-readme\.ts|readme-template\.md))$'; then
+  exit 0
+fi
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "pre-commit: bun not found, skipping README generation." >&2
+  echo "            Run 'bun run readme:generate' before pushing, or CI will reject the commit." >&2
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+# A generation failure is worth blocking on: it means a region marker was removed or the template
+# references something that no longer exists, and the next person would hit it in CI instead.
+if ! bun "${repo_root}/scripts/generate-readme.ts" >/dev/null; then
+  echo "pre-commit: README generation failed — commit aborted." >&2
+  echo "            Run 'bun run readme:generate' to see the error." >&2
+  exit 1
+fi
+
+if git diff --quiet -- "${repo_root}/README.md"; then
+  exit 0
+fi
+
+git add -- "${repo_root}/README.md"
+echo "pre-commit: README.md regenerated from docs/ and added to this commit." >&2

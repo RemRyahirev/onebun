@@ -39,7 +39,11 @@ import {
   MessageAnyGuard,
   createMessageGuard,
   type Message,
+  type MessageHandler,
   type QueueAdapter,
+  type QueueEvents,
+  type SubscribeOptions,
+  type Subscription,
   CronExpression,
   parseCronExpression,
   getNextRun,
@@ -52,6 +56,7 @@ import {
   getCronMetadata,
   getIntervalMetadata,
   getTimeoutMetadata,
+  getLifecycleHandlers,
   hasQueueDecorators,
   QueueScheduler,
   QueueService,
@@ -398,37 +403,195 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
  * @source docs:api/queue.md#lifecycle-decorators
  */
 describe('Lifecycle Decorators Examples (docs/api/queue.md)', () => {
-  it('should define lifecycle handlers on controller', () => {
-    // From docs/api/queue.md: Lifecycle Decorators (handlers must be in controllers)
-    class EventProcessor {
-      @OnQueueReady()
-      handleReady() {
-        // console.log('Queue connected');
-      }
+  /**
+   * InMemoryQueueAdapter never reports a transport failure of its own, so `onError` — the event
+   * behind `@OnQueueError()` — is unreachable through it. This adapter keeps a handle on the
+   * `onError` listeners the service registers so the documented wiring can still be exercised
+   * in-process, without faking the delivery of the other four events.
+   */
+  class ErrorReportingAdapter extends InMemoryQueueAdapter {
+    private readonly errorListeners = new Set<(error: Error) => void>();
 
-      @OnQueueError()
-      handleError(_error: Error) {
-        // console.error('Queue error:', error);
-      }
+    /** Every pattern the queue service actually subscribed, in order. */
+    readonly subscribedPatterns: string[] = [];
 
-      @OnMessageReceived()
-      handleReceived(_message: Message<unknown>) {
-        // console.log(`Received: ${message.id}`);
-      }
+    override async subscribe<T>(
+      pattern: string,
+      handler: MessageHandler<T>,
+      options?: SubscribeOptions,
+    ): Promise<Subscription> {
+      this.subscribedPatterns.push(pattern);
 
-      @OnMessageProcessed()
-      handleProcessed(_message: Message<unknown>) {
-        // console.log(`Processed: ${message.id}`);
-      }
+      return await super.subscribe(pattern, handler, options);
+    }
 
-      @OnMessageFailed()
-      handleFailed(_message: Message<unknown>, _error: Error) {
-        // console.error(`Failed: ${message.id}`, error);
+    override on<E extends keyof QueueEvents>(event: E, handler: NonNullable<QueueEvents[E]>): void {
+      if (event === 'onError') {
+        this.errorListeners.add(handler as (error: Error) => void);
+      }
+      super.on(event, handler);
+    }
+
+    override off<E extends keyof QueueEvents>(event: E, handler: NonNullable<QueueEvents[E]>): void {
+      if (event === 'onError') {
+        this.errorListeners.delete(handler as (error: Error) => void);
+      }
+      super.off(event, handler);
+    }
+
+    /** Simulates the adapter reporting a transport error, exactly as a real backend would. */
+    reportError(error: Error): void {
+      for (const listener of this.errorListeners) {
+        listener(error);
+      }
+    }
+  }
+
+  // From docs/api/queue.md: Lifecycle Decorators — every handler of the documented snippet,
+  // recording what it was actually called with. @Subscribe is what makes the class discoverable
+  // as a queue controller (hasQueueDecorators ignores lifecycle decorators).
+  class EventProcessor {
+    readonly handled: string[] = [];
+    readonly received: string[] = [];
+    readonly processed: string[] = [];
+    readonly failed: Array<{ id: string; reason: string }> = [];
+    readonly errors: Error[] = [];
+    readyCount = 0;
+
+    @Subscribe('events.created')
+    async handleEvent(message: Message<{ shouldFail?: boolean }>) {
+      this.handled.push(message.id);
+
+      if (message.data.shouldFail) {
+        throw new Error('handler exploded');
       }
     }
 
-    // Class with lifecycle handlers only; hasQueueDecorators checks Subscribe/Cron/Interval/Timeout only
-    expect(EventProcessor).toBeDefined();
+    @OnQueueReady()
+    handleReady() {
+      this.readyCount += 1;
+    }
+
+    @OnQueueError()
+    handleError(error: Error) {
+      this.errors.push(error);
+    }
+
+    @OnMessageReceived()
+    handleReceived(message: Message<unknown>) {
+      this.received.push(message.id);
+    }
+
+    @OnMessageProcessed()
+    handleProcessed(message: Message<unknown>) {
+      this.processed.push(message.id);
+    }
+
+    @OnMessageFailed()
+    handleFailed(message: Message<unknown>, error: Error) {
+      this.failed.push({ id: message.id, reason: error.message });
+    }
+  }
+
+  let adapter: ErrorReportingAdapter;
+  let queueService: QueueService;
+  let processor: EventProcessor;
+
+  beforeEach(async () => {
+    adapter = new ErrorReportingAdapter();
+    queueService = new QueueService({ adapter: 'memory' });
+    processor = new EventProcessor();
+
+    await queueService.initialize(adapter);
+    // The application does exactly this for every controller in a module's `controllers` array.
+    await queueService.registerService(processor, EventProcessor);
+  });
+
+  afterEach(async () => {
+    await queueService.stop();
+    await adapter.disconnect();
+  });
+
+  it('should register one lifecycle handler per decorator on the controller class', () => {
+    expect(getLifecycleHandlers(EventProcessor, 'ON_READY').map(h => h.propertyKey)).toEqual(['handleReady']);
+    expect(getLifecycleHandlers(EventProcessor, 'ON_ERROR').map(h => h.propertyKey)).toEqual(['handleError']);
+    expect(getLifecycleHandlers(EventProcessor, 'ON_MESSAGE_RECEIVED').map(h => h.propertyKey))
+      .toEqual(['handleReceived']);
+    expect(getLifecycleHandlers(EventProcessor, 'ON_MESSAGE_PROCESSED').map(h => h.propertyKey))
+      .toEqual(['handleProcessed']);
+    expect(getLifecycleHandlers(EventProcessor, 'ON_MESSAGE_FAILED').map(h => h.propertyKey))
+      .toEqual(['handleFailed']);
+
+    // Discovery precondition: the application only wires controllers that report queue decorators.
+    expect(hasQueueDecorators(EventProcessor)).toBe(true);
+  });
+
+  it('should invoke @OnQueueReady once the queue service has started', async () => {
+    expect(processor.readyCount).toBe(0);
+
+    await queueService.start();
+
+    expect(processor.readyCount).toBe(1);
+  });
+
+  it('should invoke @OnMessageReceived and @OnMessageProcessed around a delivered message', async () => {
+    await queueService.start();
+
+    const messageId = await queueService.publish('events.created', {}, { messageId: 'msg-ok' });
+
+    expect(messageId).toBe('msg-ok');
+    expect(processor.handled).toEqual(['msg-ok']);
+    expect(processor.received).toEqual(['msg-ok']);
+    expect(processor.processed).toEqual(['msg-ok']);
+    expect(processor.failed).toEqual([]);
+  });
+
+  it('should invoke @OnMessageFailed with the message and the thrown error', async () => {
+    await queueService.start();
+
+    await queueService.publish('events.created', { shouldFail: true }, { messageId: 'msg-bad' });
+
+    expect(processor.received).toEqual(['msg-bad']);
+    expect(processor.failed).toEqual([{ id: 'msg-bad', reason: 'handler exploded' }]);
+    expect(processor.processed).toEqual([]);
+  });
+
+  it('should invoke @OnQueueError when the adapter reports an error', async () => {
+    await queueService.start();
+
+    const failure = new Error('connection lost');
+    adapter.reportError(failure);
+
+    expect(processor.errors).toHaveLength(1);
+    expect(processor.errors[0]).toBe(failure);
+  });
+
+  it('should subscribe nothing until a controller instance is registered', async () => {
+    // "Lifecycle handlers run only when the class is registered as a controller."
+    // Asserted at the adapter, because instance fields cannot express it: registerService binds
+    // handlers to the instance it is handed, so an instance the framework never saw is untouchable
+    // by construction — `expect(new EventProcessor().received).toEqual([])` cannot fail whatever
+    // the framework does. What CAN fail is the subscription: if decorated classes were ever wired
+    // by discovery rather than by registration, this service would subscribe 'events.created'.
+    const loneAdapter = new ErrorReportingAdapter();
+    const loneService = new QueueService({ adapter: 'memory' });
+
+    await loneService.initialize(loneAdapter);
+    await loneService.start();
+
+    try {
+      expect(loneAdapter.subscribedPatterns).toEqual([]);
+
+      await loneService.publish('events.created', {}, { messageId: 'msg-solo' });
+
+      // The registered service in this suite is a separate instance and must be unaffected.
+      expect(processor.handled).toEqual([]);
+    } finally {
+      await loneService.stop();
+    }
+
+    // ...and registration is what creates the subscription.
+    expect(adapter.subscribedPatterns).toEqual(['events.created']);
   });
 });
 

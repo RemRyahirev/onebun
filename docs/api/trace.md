@@ -119,6 +119,7 @@ export class UserService extends BaseService {
 
 Automatically records method arguments as span attributes. Works with `@Traced()`, `@Span()`, and auto-traced methods.
 
+<!-- typecheck: skip -->
 ```typescript
 @Traced('order.create')
 async createOrder(
@@ -332,7 +333,13 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format. On application shutdown, pending spans are flushed automatically.
+Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format. On application shutdown a
+final flush is attempted — attempted, not guaranteed: nothing retries a failed export, and the batch is
+dropped from the buffer before the send is tried, so an unreachable collector loses it.
+
+::: warning The shutdown flush is not isolated from the rest of the teardown
+The flush runs after the queue adapter disconnects and before `onModuleDestroy`, and it is awaited without a `try`/`catch`. If the collector is unreachable while spans are still buffered, the last batch export fails, the flush rejects, and the shutdown sequence stops there: `onModuleDestroy` / `onApplicationDestroy` hooks, the shared Redis release and the final log flush never run. `app.stop()` itself still resolves — the only trace of the failure is a `Shutdown sequence failed` error in the log. Until that step is guarded, point `exportOptions.endpoint` at a collector that outlives the app, or leave the endpoint unset in environments where it does not.
+:::
 
 ### SigNoz / OTel Collector Integration
 
@@ -394,6 +401,7 @@ const app = new OneBunApplication(AppModule, {
 
 ### Filtering
 
+<!-- typecheck: skip -->
 ```typescript
 tracing: {
   traceAll: true,
@@ -408,15 +416,9 @@ tracing: {
 
 ### Class-Level Control
 
+<!-- typecheck: skip -->
 ```typescript
 import { TraceAll, NoTrace, Traced } from '@onebun/trace';
-
-// Opt-in when traceAll is false
-@Service()
-@TraceAll()
-class ImportantService extends BaseService {
-  async findAll() { ... }  // auto-traced
-}
 
 // Opt-out when traceAll is true
 @Service()
@@ -427,19 +429,30 @@ class InternalService extends BaseService {
   @Traced()
   async critical() { ... } // traced (method override)
 }
+
+// @TraceAll() never opts a class in — see the warning below
+@Service()
+@TraceAll()
+class ImportantService extends BaseService {
+  async findAll() { ... }  // NOT traced while traceAll is false
+}
 ```
+
+::: warning `@TraceAll()` cannot opt a class in
+`@TraceAll()` has no effect today. The application hands auto-trace options to the module graph only when `traceAll: true`, and a class is inspected for `@TraceAll()` / `@NoTrace()` only when the module received those options — so with `traceAll: false` nothing is ever inspected, and with `traceAll: true` the class would have been traced anyway. To trace a subset, use `traceAll: true` narrowed by `traceFilter.includeClasses` / `excludeClasses`, or put `@Traced()` on the individual methods, which wraps at class-definition time and needs no wiring at all. `@NoTrace()` works as documented, because it only ever has to take effect while `traceAll` is true.
+:::
 
 ### Priority
 
-Method-level decorators always win over class-level, which win over global config:
+Method-level decorators always win over class-level. Class-level narrows the global setting but cannot widen it: `@NoTrace` takes a class out of `traceAll: true`, while `@TraceAll` cannot bring one into `traceAll: false`.
 
 | Global | Class | Method | Result |
 |--------|-------|--------|--------|
 | `traceAll: true` | — | — | auto-traced |
 | `traceAll: true` | `@NoTrace` | — | NOT traced |
 | `traceAll: true` | `@NoTrace` | `@Traced` | traced |
-| `traceAll: false` | `@TraceAll` | — | auto-traced |
-| `traceAll: false` | `@TraceAll` | `@NoTrace` | NOT traced |
+| `traceAll: false` | `@TraceAll` | — | NOT traced (`@TraceAll` is never read) |
+| `traceAll: false` | `@TraceAll` | `@Traced` | traced |
 | any | — | `@Traced` | traced |
 
 ### Excluded Methods
@@ -453,6 +466,7 @@ These are never auto-traced (framework internals):
 
 Control what percentage of requests are traced:
 
+<!-- typecheck: skip -->
 ```typescript
 tracing: {
   // Sample 10% of requests in production
@@ -464,6 +478,7 @@ tracing: {
 
 ### 1. Meaningful Span Names
 
+<!-- typecheck: skip -->
 ```typescript
 // Good: descriptive, includes operation type
 @Span('user-create')
@@ -477,6 +492,7 @@ tracing: {
 
 ### 2. Add Relevant Attributes
 
+<!-- typecheck: skip -->
 ```typescript
 @Span('user-find-by-id')
 async findById(id: string): Promise<User | null> {
@@ -498,6 +514,7 @@ async findById(id: string): Promise<User | null> {
 
 ### 3. Trace Error Boundaries
 
+<!-- typecheck: skip -->
 ```typescript
 @Span('process-order')
 async processOrder(orderId: string): Promise<Order> {
@@ -513,6 +530,7 @@ async processOrder(orderId: string): Promise<Order> {
 
 ### 4. Don't Over-Trace
 
+<!-- typecheck: skip -->
 ```typescript
 // Good: trace business-significant operations
 @Span('place-order')

@@ -12,8 +12,11 @@ import {
   afterEach,
 } from 'bun:test';
 import { Effect } from 'effect';
+import { Counter } from 'prom-client';
 
 import type { MetricsService as MetricsServiceInterface } from './metrics.service';
+
+import { BaseService, Service } from '@onebun/core';
 
 import {
   Timed,
@@ -119,18 +122,80 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('MetricsService (docs/api/metrics.md)', () => {
+    beforeEach(() => {
+      // The application publishes the service here; `this.metrics` reads it back
+      (globalThis as Record<string, unknown>).__onebunMetricsService = metricsService;
+    });
+
+    afterEach(() => {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    });
+
     /**
-     * @source docs:api/metrics.md#metricsservice
+     * @source docs:api/metrics.md#accessing-metricsservice
      */
-    it('should create metrics service instance', () => {
+    it('should record what a BaseService counts through this.metrics', async () => {
+      // From docs: `this.metrics` is available in any BaseService or Controller
+      @Service()
+      class OrderService extends BaseService {
+        async createOrder(status: string): Promise<{ status: string }> {
+          const counter = this.metrics?.createCounter({
+            name: 'orders_created_total',
+            help: 'Total number of orders created',
+            labelNames: ['status'],
+          });
+
+          counter?.inc({ status });
+
+          return { status };
+        }
+
+        // Exposes the protected getter so the test can assert which instance it resolves to
+        resolveMetrics(): MetricsServiceInterface | undefined {
+          return this.metrics;
+        }
+      }
+
+      const orderService = new OrderService();
+
+      // The getter hands back the very service the application registered, not a fresh one
+      expect(orderService.resolveMetrics()).toBe(metricsService);
+
+      expect(await orderService.createOrder('completed')).toEqual({ status: 'completed' });
+
+      // The counter the service created lives in the shared registry under the configured prefix
+      const registered = metricsService.getMetric<Counter<string>>('orders_created_total');
+      expect(registered).toBeInstanceOf(Counter);
+
+      // ...and writing through the registry keeps feeding the same series
+      registered?.inc({ status: 'completed' });
+
+      const output = await metricsService.getMetrics();
+      expect(output).toContain('# HELP test_orders_created_total Total number of orders created');
+      expect(output).toContain('# TYPE test_orders_created_total counter');
+      expect(output).toContain('test_orders_created_total{status="completed"} 2');
+    });
+
+    /**
+     * @source docs:api/metrics.md#accessing-metricsservice
+     */
+    it('should yield a usable service from createMetricsService', async () => {
       // From docs: MetricsService usage
       // Use createMetricsService() to get an Effect that yields the service
-      const service = Effect.runSync(createMetricsService());
+      const service = Effect.runSync(createMetricsService({ prefix: 'factory_' }));
 
-      expect(service).toBeDefined();
-      expect(typeof service.createCounter).toBe('function');
-      expect(typeof service.createGauge).toBe('function');
-      expect(typeof service.createHistogram).toBe('function');
+      service.createCounter({ name: 'orders_created_total', help: 'Total number of orders created' }).inc(3);
+      service.createGauge({ name: 'orders_pending', help: 'Number of pending orders' }).set(7);
+      service.createHistogram({
+        name: 'order_duration_seconds',
+        help: 'Order duration',
+        buckets: [1],
+      }).observe(0.5);
+
+      const output = await service.getMetrics();
+      expect(output).toContain('factory_orders_created_total 3');
+      expect(output).toContain('factory_orders_pending 7');
+      expect(output).toContain('factory_order_duration_seconds_bucket{le="1"} 1');
     });
   });
 

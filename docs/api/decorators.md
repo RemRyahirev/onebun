@@ -32,6 +32,7 @@ export class DbModule {}
 - Object providers (`{ provide: X, useValue: v }`) throw `OneBunInvalidProviderError`; providers are classes
 
 **Controller with Routes**:
+<!-- typecheck: skip -->
 ```typescript
 @Controller('/api/users')   // or @Controller('api/users') — leading slash is optional
 export class UserController extends BaseController {
@@ -46,6 +47,7 @@ export class UserController extends BaseController {
 ```
 
 **Parameter Extraction**:
+<!-- typecheck: skip -->
 ```typescript
 @Get('/:id')
 async getUser(
@@ -70,6 +72,7 @@ async raw(@Req() req: OneBunRequest) {
 ```
 
 **@Cookie & @Req**:
+<!-- typecheck: skip -->
 ```typescript
 // Read cookie by name (optional by default)
 @Cookie('session') session?: string
@@ -90,6 +93,7 @@ return new Response(body, { headers: { 'X-Custom': 'value' } })
 ```
 
 **File Upload** (multipart/form-data or JSON+base64, auto-detected):
+<!-- typecheck: skip -->
 ```typescript
 import { UploadedFile, UploadedFiles, FormField, OneBunFile, MimeType } from '@onebun/core';
 
@@ -130,6 +134,7 @@ Package: `@onebun/core`
 
 Defines a module that groups controllers, services, and imports. See [Architecture — Module System](/architecture#module-system) for concepts and lifecycle details.
 
+<!-- typecheck: skip -->
 ```typescript
 @Module(options: ModuleOptions)
 ```
@@ -185,6 +190,7 @@ export class FeatureModule {}
 
 Marks a module as global. Global modules export their providers to all modules automatically without explicit import. This is useful for modules that provide cross-cutting concerns like database access or caching.
 
+<!-- typecheck: skip -->
 ```typescript
 @Global()
 ```
@@ -234,6 +240,7 @@ function removeFromGlobalModules(target: Function): void;
 
 Marks a class as an HTTP controller with a base path.
 
+<!-- typecheck: skip -->
 ```typescript
 @Controller(basePath?: string)
 ```
@@ -257,6 +264,7 @@ export class UserController extends BaseController {
 
 Define HTTP endpoints on controller methods.
 
+<!-- typecheck: skip -->
 ```typescript
 @Get(path?: string, options?: RouteOptions)
 @Post(path?: string, options?: RouteOptions)
@@ -383,12 +391,14 @@ interface ParamDecoratorOptions {
 
 Extract path parameter from URL. **Path parameters are always required** per OpenAPI specification.
 
+<!-- typecheck: skip -->
 ```typescript
 @Param(name: string, schema?: Type<unknown>)
 ```
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 import { type } from '@onebun/core';
 
@@ -405,6 +415,7 @@ async findOne(
 
 Extract query parameter from URL. **Optional by default.**
 
+<!-- typecheck: skip -->
 ```typescript
 @Query(name: string, options?: ParamDecoratorOptions)
 @Query(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
@@ -412,6 +423,7 @@ Extract query parameter from URL. **Optional by default.**
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 // GET /users?page=1&limit=10
 @Get('/')
@@ -432,12 +444,14 @@ async search(
 
 Extract and optionally validate request body. **Required is determined from schema** - if the schema accepts `undefined`, the body is optional; otherwise it's required.
 
+<!-- typecheck: skip -->
 ```typescript
 @Body(schema?: Type<unknown>, options?: ParamDecoratorOptions)
 ```
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 import { type } from '@onebun/core';
 
@@ -482,6 +496,7 @@ async createSimple(
 
 Extract header value. **Optional by default.**
 
+<!-- typecheck: skip -->
 ```typescript
 @Header(name: string, options?: ParamDecoratorOptions)
 @Header(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
@@ -489,6 +504,7 @@ Extract header value. **Optional by default.**
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Get('/protected')
 async protected(
@@ -507,6 +523,7 @@ async api(
 
 Extract cookie value from request. Uses `BunRequest.cookies` (CookieMap) under the hood. **Optional by default.**
 
+<!-- typecheck: skip -->
 ```typescript
 @Cookie(name: string, options?: ParamDecoratorOptions)
 @Cookie(name: string, schema?: Type<unknown>, options?: ParamDecoratorOptions)
@@ -514,6 +531,7 @@ Extract cookie value from request. Uses `BunRequest.cookies` (CookieMap) under t
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 // GET /api/me (with Cookie: session=abc123; theme=dark)
 @Get('/me')
@@ -536,12 +554,14 @@ Inject the raw request object. The type is `OneBunRequest` (alias for `BunReques
 - `.cookies` — a `CookieMap` for reading and setting cookies
 - `.params` — route parameters extracted by Bun's routes API
 
+<!-- typecheck: skip -->
 ```typescript
 @Req()
 ```
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 import type { OneBunRequest } from '@onebun/core';
 
@@ -564,6 +584,7 @@ async handleRaw(@Req() req: OneBunRequest) {
 `@Res()` is deprecated and currently injects `undefined`. Use `return new Response(...)` from your handler instead. Direct response manipulation is not supported — return a `Response` object to set custom headers, status codes, and cookies.
 :::
 
+<!-- typecheck: skip -->
 ```typescript
 @Res()
 ```
@@ -576,6 +597,7 @@ Decorators for handling file uploads via `multipart/form-data` or JSON with base
 
 Extracts a single file from the request. Required by default.
 
+<!-- typecheck: skip -->
 ```typescript
 @UploadedFile(fieldName?: string, options?: FileUploadOptions)
 ```
@@ -617,6 +639,7 @@ export class FileController extends BaseController {
 
 Extracts multiple files from the request. Required by default (at least one file expected).
 
+<!-- typecheck: skip -->
 ```typescript
 @UploadedFiles(fieldName?: string, options?: FilesUploadOptions)
 ```
@@ -632,6 +655,7 @@ interface FilesUploadOptions extends FileUploadOptions {
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/documents')
 async uploadDocs(
@@ -656,12 +680,14 @@ async uploadBatch(
 
 Extracts a non-file form field from the request. Optional by default.
 
+<!-- typecheck: skip -->
 ```typescript
 @FormField(fieldName: string, options?: ParamDecoratorOptions)
 ```
 
 **Example:**
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/profile')
 async createProfile(
@@ -728,6 +754,7 @@ MimeType.OCTET_STREAM
 
 When sending files via `application/json`, the framework accepts two formats:
 
+<!-- typecheck: skip -->
 ```typescript
 // Full format with metadata
 { "avatar": { "data": "iVBORw0KGgo...", "filename": "photo.png", "mimeType": "image/png" } }
@@ -748,6 +775,7 @@ The same `@UploadedFile` decorator works for both multipart and JSON uploads.
 
 Marks a class as an injectable service.
 
+<!-- typecheck: skip -->
 ```typescript
 @Service(tag?: Context.Tag<T, T>)
 ```
@@ -782,6 +810,7 @@ export class CustomService extends BaseService {
 
 Explicit dependency injection for edge cases. **In most cases, automatic DI works without this decorator.** See [Architecture — Dependency Injection](/architecture#dependency-injection-system) for how DI resolution works.
 
+<!-- typecheck: skip -->
 ```typescript
 @Inject(type: new (...args: any[]) => T)
 @Inject(token: symbol | string)
@@ -847,6 +876,7 @@ alternative is being handed the other database, silently.
 
 Marks a constructor parameter as optional for dependency injection. When the dependency cannot be resolved, `undefined` is injected instead of throwing `DependencyResolutionError`.
 
+<!-- typecheck: skip -->
 ```typescript
 @Optional()
 ```
@@ -883,6 +913,7 @@ export class NotificationService extends BaseService {
 
 Class decorator for middleware. Apply it to classes that extend `BaseMiddleware` so that the framework can resolve constructor dependencies automatically (TypeScript emits `design:paramtypes` when the class has a decorator). Without `@Middleware()`, you would need `@Inject()` on each constructor parameter for DI to work.
 
+<!-- typecheck: skip -->
 ```typescript
 @Middleware()
 class AuthMiddleware extends BaseMiddleware {
@@ -897,6 +928,7 @@ class AuthMiddleware extends BaseMiddleware {
 
 Apply middleware to a route handler or to all routes in a controller. Works as both a **method decorator** and a **class decorator**. Pass **class constructors** extending `BaseMiddleware` (not instances).
 
+<!-- typecheck: skip -->
 ```typescript
 // Method decorator — applies to a single route
 @UseMiddleware(...middleware: MiddlewareClass[])
@@ -972,6 +1004,7 @@ Middleware classes support full DI through the constructor. Use `@Middleware()` 
 
 Define response schema for documentation and validation.
 
+<!-- typecheck: skip -->
 ```typescript
 @ApiResponse(statusCode: number, options?: {
   schema?: Type<unknown>;
@@ -1017,6 +1050,7 @@ These decorators add metadata for OpenAPI/Swagger documentation generation.
 
 Group endpoints under tags for documentation organization.
 
+<!-- typecheck: skip -->
 ```typescript
 import { ApiTags } from '@onebun/docs';
 
@@ -1048,6 +1082,7 @@ export class UserController extends BaseController {
 
 Describe an API operation with summary, description, and additional tags.
 
+<!-- typecheck: skip -->
 ```typescript
 import { ApiOperation } from '@onebun/docs';
 
@@ -1126,6 +1161,7 @@ export class UserController extends BaseController {
 
 Create a trace span for a method (from `@onebun/trace`).
 
+<!-- typecheck: skip -->
 ```typescript
 @Span(name?: string)
 ```
@@ -1143,9 +1179,9 @@ export class UserService extends BaseService {
     return this.repository.findById(id);
   }
 
-  @Span()  // Uses method name as span name
+  @Span()  // Default span name is `ClassName.methodName`
   async processUser(user: User): Promise<void> {
-    // Span name: "processUser"
+    // Span name: "UserService.processUser" — the class prefix is part of it
   }
 }
 ```

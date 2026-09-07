@@ -25,7 +25,7 @@ import {
   resetRegistrations,
   Service,
 } from '@onebun/core';
-import { createTestService } from '@onebun/core/testing';
+import { createTestService, useFakeTimers } from '@onebun/core/testing';
 
 import {
   createInMemoryCache,
@@ -98,98 +98,6 @@ describe('Cache README Examples', () => {
 
       expect(await cache.get('key1')).toBeUndefined();
       expect(await cache.get('key2')).toBeUndefined();
-    });
-  });
-
-  describe('TTL Examples (README)', () => {
-    /**
-     * @source docs:api/cache.md#ttl-management
-     */
-    it('should set with default TTL', async () => {
-      const cache = createInMemoryCache({
-        defaultTtl: 60000,
-        maxSize: 1000,
-      });
-
-      // From README: Set with default TTL
-      await cache.set('key1', 'value1');
-
-      const result = await cache.get<string>('key1');
-      expect(result).toBe('value1');
-    });
-
-    /**
-     * @source docs:api/cache.md#ttl-management
-     */
-    it('should set with custom TTL', async () => {
-      const cache = createInMemoryCache({
-        defaultTtl: 60000,
-        maxSize: 1000,
-      });
-
-      // From README: Set with custom TTL (5 seconds)
-      await cache.set('key2', 'value2', { ttl: 5000 });
-
-      const result = await cache.get<string>('key2');
-      expect(result).toBe('value2');
-    });
-
-    /**
-     * @source docs:api/cache.md#ttl-management
-     */
-    it('should set without expiration', async () => {
-      const cache = createInMemoryCache({
-        defaultTtl: 60000,
-        maxSize: 1000,
-      });
-
-      // From README: Set without expiration
-      await cache.set('key3', 'value3', { ttl: 0 });
-
-      const result = await cache.get<string>('key3');
-      expect(result).toBe('value3');
-    });
-  });
-
-  describe('Batch Operations (README)', () => {
-    /**
-     * @source docs:api/cache.md#batch-operations
-     */
-    it('should get multiple values', async () => {
-      const cache = createInMemoryCache({
-        defaultTtl: 60000,
-        maxSize: 1000,
-      });
-
-      await cache.set('key1', 'value1');
-      await cache.set('key2', 'value2');
-      await cache.set('key3', 'value3');
-
-      // From README: Get multiple values
-      const values = await cache.mget<string>(['key1', 'key2', 'key3']);
-
-      expect(values).toEqual(['value1', 'value2', 'value3']);
-    });
-
-    /**
-     * @source docs:api/cache.md#batch-operations
-     */
-    it('should set multiple values', async () => {
-      const cache = createInMemoryCache({
-        defaultTtl: 60000,
-        maxSize: 1000,
-      });
-
-      // From README: Set multiple values
-      await cache.mset([
-        { key: 'key1', value: 'value1' },
-        { key: 'key2', value: 'value2', options: { ttl: 10000 } },
-      ]);
-
-      const result1 = await cache.get<string>('key1');
-      const result2 = await cache.get<string>('key2');
-      expect(result1).toBe('value1');
-      expect(result2).toBe('value2');
     });
   });
 
@@ -337,6 +245,168 @@ describe('Cache API Documentation Examples', () => {
 
       expect(await cache.has('key1')).toBe(false);
       expect(await cache.has('key2')).toBe(false);
+    });
+  });
+
+  /**
+   * "set()" documents three different TTL behaviours behind one call: options omitted → the cache's
+   * `defaultTtl`, `{ ttl: N }` → N **milliseconds** instead of the default, `{ ttl: 0 }` → no
+   * expiration. Reading the value straight back cannot tell those apart — all three are a hit one
+   * microsecond after the write — so each case here drives a fake clock across the boundary the
+   * section promises.
+   */
+  describe('set() TTL semantics (docs/api/cache.md)', () => {
+    const DEFAULT_TTL = 60_000;
+    const CUSTOM_TTL = 600_000;
+
+    /**
+     * @source docs:api/cache.md#set
+     */
+    it('should set with default TTL', async () => {
+      const timers = useFakeTimers();
+      const cache = createInMemoryCache({ defaultTtl: DEFAULT_TTL, maxSize: 1000 });
+
+      try {
+        // From docs: `await this.cacheService.set('user:123', user)` — with default TTL
+        await cache.set('user:123', { name: 'John' });
+
+        // Still inside the default window
+        timers.advanceTime(DEFAULT_TTL - 1);
+        expect(await cache.get<{ name: string }>('user:123')).toEqual({ name: 'John' });
+
+        // The default TTL is a real deadline, not "forever": one tick past it the entry is gone
+        timers.advanceTime(2);
+        expect(await cache.get('user:123')).toBeUndefined();
+        expect(await cache.has('user:123')).toBe(false);
+      } finally {
+        await cache.close();
+        timers.restore();
+      }
+    });
+
+    /**
+     * @source docs:api/cache.md#set
+     */
+    it('should set with custom TTL', async () => {
+      const timers = useFakeTimers();
+      const cache = createInMemoryCache({ defaultTtl: DEFAULT_TTL, maxSize: 1000 });
+
+      try {
+        // From docs: `set(key, value, { ttl: 600_000 })` — custom TTL, in milliseconds
+        await cache.set('defaulted', 'value1');
+        await cache.set('custom', 'value2', { ttl: CUSTOM_TTL });
+
+        // Past the default deadline: the explicit ttl replaced it, it did not add to it
+        timers.advanceTime(DEFAULT_TTL + 1);
+        expect(await cache.get<string>('defaulted')).toBeUndefined();
+        expect(await cache.get<string>('custom')).toBe('value2');
+
+        // Milliseconds, not seconds: 600_000 dies after 600 seconds, not after 600_000 of them
+        timers.advanceTime(CUSTOM_TTL - DEFAULT_TTL);
+        expect(await cache.get<string>('custom')).toBeUndefined();
+      } finally {
+        await cache.close();
+        timers.restore();
+      }
+    });
+
+    /**
+     * @source docs:api/cache.md#set
+     */
+    it('should set without expiration', async () => {
+      const timers = useFakeTimers();
+      const cache = createInMemoryCache({
+        defaultTtl: DEFAULT_TTL,
+        maxSize: 1000,
+        // Documented in "Memory Configuration"; running it proves the sweep spares ttl: 0 too
+        cleanupInterval: 30_000,
+      });
+
+      try {
+        // From docs: `set(key, value, { ttl: 0 })` — no expiration
+        await cache.set('immortal', 'value3', { ttl: 0 });
+        await cache.set('mortal', 'value4');
+
+        // A hundred default windows, with the cleanup timer firing right through them
+        timers.advanceTime(DEFAULT_TTL * 100);
+
+        expect(await cache.get<string>('immortal')).toBe('value3');
+        expect(await cache.has('immortal')).toBe(true);
+        // Control: a defaulted entry did expire, so the clock really moved and 0 is not "falsy →
+        // fall back to defaultTtl"
+        expect(await cache.get<string>('mortal')).toBeUndefined();
+      } finally {
+        await cache.close();
+        timers.restore();
+      }
+    });
+  });
+
+  describe('Batch operations (docs/api/cache.md)', () => {
+    const DEFAULT_TTL = 60_000;
+    const CUSTOM_TTL = 300_000;
+
+    /**
+     * From "`mget<T>()`": the return type is `(T | undefined)[]` and the example indexes into it
+     * with `if (user)`, so the array must carry one slot per REQUESTED key, in the requested order,
+     * holding `undefined` where there is no value. An implementation that returned only the hits
+     * would still satisfy a three-keys-three-hits check.
+     *
+     * @source docs:api/cache.md#mgett
+     */
+    it('should get multiple values', async () => {
+      const cache = createInMemoryCache({ defaultTtl: DEFAULT_TTL, maxSize: 1000 });
+
+      try {
+        await cache.set('user:1', { name: 'Ann' });
+        await cache.set('user:3', { name: 'Cid' });
+
+        // From docs: mget over a list that includes a key nobody wrote
+        const results = await cache.mget<{ name: string }>(['user:1', 'user:2', 'user:3']);
+
+        expect(results).toHaveLength(3);
+        expect(results).toEqual([{ name: 'Ann' }, undefined, { name: 'Cid' }]);
+
+        // Slots follow the argument order, not the cache's insertion order
+        expect(await cache.mget<{ name: string }>(['user:3', 'user:1'])).toEqual([{ name: 'Cid' }, { name: 'Ann' }]);
+        expect(await cache.mget([])).toEqual([]);
+      } finally {
+        await cache.close();
+      }
+    });
+
+    /**
+     * From "`mset<T>()`": each entry may carry its own `options`, and the documented example gives
+     * exactly one of two entries a `ttl`. Reading both values back proves only that they were
+     * stored; it is the clock that proves the per-entry options were not dropped on the way in.
+     *
+     * @source docs:api/cache.md#msett
+     */
+    it('should set multiple values', async () => {
+      const timers = useFakeTimers();
+      const cache = createInMemoryCache({ defaultTtl: DEFAULT_TTL, maxSize: 1000 });
+
+      try {
+        // From docs: second entry carries its own options
+        await cache.mset([
+          { key: 'user:1', value: { name: 'Ann' } },
+          { key: 'user:2', value: { name: 'Bob' }, options: { ttl: CUSTOM_TTL } },
+        ]);
+
+        expect(await cache.mget<{ name: string }>(['user:1', 'user:2'])).toEqual([{ name: 'Ann' }, { name: 'Bob' }]);
+
+        // The entry without options follows the cache default; the one with options ignores it
+        timers.advanceTime(DEFAULT_TTL + 1);
+        expect(await cache.get('user:1')).toBeUndefined();
+        expect(await cache.get<{ name: string }>('user:2')).toEqual({ name: 'Bob' });
+
+        // ...and honours its own deadline when that one arrives
+        timers.advanceTime(CUSTOM_TTL - DEFAULT_TTL);
+        expect(await cache.get('user:2')).toBeUndefined();
+      } finally {
+        await cache.close();
+        timers.restore();
+      }
     });
   });
 

@@ -348,6 +348,7 @@ export class UserService extends BaseService {
 
 Retrieve value from cache.
 
+<!-- typecheck: skip -->
 ```typescript
 async get<T = unknown>(key: string): Promise<T | undefined>
 ```
@@ -370,6 +371,7 @@ back as `null` — `has()` returns `true` for it — so `value === null` never m
 
 Store value in cache.
 
+<!-- typecheck: skip -->
 ```typescript
 async set<T>(key: string, value: T, options?: CacheSetOptions): Promise<void>
 ```
@@ -389,6 +391,7 @@ await this.cacheService.set('user:123', user, { ttl: 0 });
 
 Remove value from cache.
 
+<!-- typecheck: skip -->
 ```typescript
 async delete(key: string): Promise<boolean>
 ```
@@ -401,6 +404,7 @@ const deleted = await this.cacheService.delete('user:123');
 
 Check if key exists.
 
+<!-- typecheck: skip -->
 ```typescript
 async has(key: string): Promise<boolean>
 ```
@@ -415,6 +419,7 @@ if (await this.cacheService.has('user:123')) {
 
 Clear all cache entries.
 
+<!-- typecheck: skip -->
 ```typescript
 async clear(): Promise<void>
 ```
@@ -427,6 +432,7 @@ await this.cacheService.clear();
 
 Get multiple values at once.
 
+<!-- typecheck: skip -->
 ```typescript
 async mget<T = unknown>(keys: string[]): Promise<(T | undefined)[]>
 ```
@@ -449,6 +455,7 @@ for (const user of results) {
 
 Set multiple values at once.
 
+<!-- typecheck: skip -->
 ```typescript
 async mset<T = unknown>(
   entries: Array<{ key: string; value: T; options?: CacheSetOptions }>

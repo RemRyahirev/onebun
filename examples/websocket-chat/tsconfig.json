@@ -1,8 +1,13 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "."
+    // Examples are never emitted — they run straight off `bun run`. This project
+    // exists so `bun run typecheck` compiles each example on its own, because all
+    // three augment the same global `OneBunAppConfig` and collide in one program.
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "incremental": false
   },
   "include": ["src/**/*", "client/**/*"]
 }

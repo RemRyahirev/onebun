@@ -284,6 +284,7 @@ The hook receives the bearer token from `?token=` or the `Authorization` header,
 
 Handles client connection events.
 
+<!-- typecheck: skip -->
 ```typescript
 @OnConnect()
 handleConnect(@Client() client: WsClientData) {
@@ -296,6 +297,7 @@ handleConnect(@Client() client: WsClientData) {
 
 Handles client disconnection events.
 
+<!-- typecheck: skip -->
 ```typescript
 @OnDisconnect()
 handleDisconnect(@Client() client: WsClientData) {
@@ -307,6 +309,7 @@ handleDisconnect(@Client() client: WsClientData) {
 
 Handles room join events. Optionally accepts a pattern.
 
+<!-- typecheck: skip -->
 ```typescript
 @OnJoinRoom('room:{roomId}')
 handleJoinRoom(
@@ -322,6 +325,7 @@ handleJoinRoom(
 
 Handles room leave events.
 
+<!-- typecheck: skip -->
 ```typescript
 @OnLeaveRoom('room:*')
 handleLeaveRoom(@Client() client: WsClientData, @RoomName() room: string) {
@@ -333,6 +337,7 @@ handleLeaveRoom(@Client() client: WsClientData, @RoomName() room: string) {
 
 Handles incoming messages. Requires an event pattern.
 
+<!-- typecheck: skip -->
 ```typescript
 @OnMessage('chat:message')
 handleMessage(@Client() client: WsClientData, @MessageData() data: { text: string }) {
@@ -383,6 +388,7 @@ Every gateway automatically receives `this.logger` (a child logger scoped to the
 
 ### Emit methods
 
+<!-- typecheck: skip -->
 ```typescript
 emit(clientId: string, event: string, data: unknown): void;
 broadcast(event: string, data: unknown, excludeClientIds?: string[]): void;
@@ -393,6 +399,7 @@ emitToRoomPattern(pattern: string, event: string, data: unknown, excludeClientId
 
 ### Connection and room management
 
+<!-- typecheck: skip -->
 ```typescript
 disconnectClient(clientId: string, reason?: string): void;
 disconnectAll(reason?: string): void;
@@ -418,6 +425,7 @@ Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessag
 
 `@UseInterceptors()` works on WebSocket gateways and individual message handlers — same decorator as HTTP. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
 
+<!-- typecheck: skip -->
 ```typescript
 @UseInterceptors(LoggingInterceptor)
 @WebSocketGateway({ path: '/ws' })

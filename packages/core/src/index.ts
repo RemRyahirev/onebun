@@ -54,6 +54,12 @@ export {
   type SseEvent,
   type SseOptions,
   type SseGenerator,
+  // Guard and pipeline context types. The docs tell readers to import these from
+  // '@onebun/core'; until they were listed here that import did not resolve, and the
+  // docs-examples tests reached into './types' instead, so nothing noticed.
+  type ExecutionContext,
+  type HttpExecutionContext,
+  type HttpGuard,
 } from './types';
 
 // Decorators and Metadata (exports Controller decorator, Module decorator, etc.)

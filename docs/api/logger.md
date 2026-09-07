@@ -476,31 +476,55 @@ Effect.runPromise(
 
 ### Mock Logger
 
+`makeMockLoggerLayer()` takes **no arguments** and returns a silent layer — use it to keep test output
+clean when you do not care what was logged:
+
 ```typescript
 import { makeMockLoggerLayer } from '@onebun/core/testing';
 
-describe('UserService', () => {
-  it('should log user creation', async () => {
-    const logs: Array<{ level: string; message: string }> = [];
-
-    const mockLogger = makeMockLoggerLayer((entry) => {
-      logs.push({ level: entry.level, message: entry.message });
-    });
-
-    // Use mock logger in tests
-    const app = new OneBunApplication(AppModule, {
-      loggerLayer: mockLogger,
-    });
-
-    // ... test code ...
-
-    expect(logs).toContainEqual({
-      level: 'info',
-      message: expect.stringContaining('User created'),
-    });
-  });
+const app = new OneBunApplication(AppModule, {
+  loggerLayer: makeMockLoggerLayer(),
 });
 ```
+
+To assert on what was logged, provide a layer that records. `Logger` is a plain object of methods
+returning `Effect`, so a capturing implementation is a few lines:
+
+```typescript
+import { Effect, Layer } from 'effect';
+import { LoggerService, type Logger } from '@onebun/logger';
+
+const logs: Array<{ level: string; message: string }> = [];
+
+const record = (level: string) => (message: string) =>
+  Effect.sync(() => {
+    logs.push({ level, message });
+  });
+
+const capturingLogger: Logger = {
+  trace: record('trace'),
+  debug: record('debug'),
+  info: record('info'),
+  warn: record('warn'),
+  error: record('error'),
+  fatal: record('fatal'),
+  child: () => capturingLogger,
+};
+
+const app = new OneBunApplication(AppModule, {
+  loggerLayer: Layer.succeed(LoggerService, capturingLogger),
+});
+
+// ... exercise the application ...
+
+expect(logs).toContainEqual({ level: 'info', message: 'User created' });
+```
+
+::: warning
+`makeMockLoggerLayer()` accepts no callback. Passing one is a compile error, and the mock it builds
+discards every entry — a test that expected to collect entries through it would assert against an
+empty array forever.
+:::
 
 ## Best Practices
 
@@ -543,6 +567,7 @@ this.logger.info('Order placed');
 
 ### 3. Use Child Loggers for Operations
 
+<!-- typecheck: skip -->
 ```typescript
 async processRequest(requestId: string, userId: string) {
   const logger = this.logger.child({ requestId, userId });
@@ -576,6 +601,7 @@ this.logger.info('User login', { email, password: '***' });
 
 ### 5. Log at Entry/Exit Points
 
+<!-- typecheck: skip -->
 ```typescript
 async processOrder(orderId: string): Promise<Order> {
   this.logger.info('Processing order started', { orderId });

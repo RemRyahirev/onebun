@@ -197,6 +197,7 @@ export class UserController extends BaseController {
 
 ### Effect.js in Module System
 
+<!-- typecheck: skip -->
 ```typescript
 // Module initialization returns Effect
 setup(): Effect.Effect<unknown, never, void> {
@@ -441,6 +442,7 @@ Example without exports (same-module only): a module with `providers: [MyService
 
 ### Route Registration
 
+<!-- typecheck: skip -->
 ```typescript
 @Controller('/users')
 export class UserController extends BaseController {
@@ -598,6 +600,7 @@ const childLogger = this.logger.child({ requestId: '123' });
 
 ### Tracing (OpenTelemetry-compatible)
 
+<!-- typecheck: skip -->
 ```typescript
 // Automatic HTTP request tracing
 // Headers: traceparent, tracestate, x-trace-id, x-span-id

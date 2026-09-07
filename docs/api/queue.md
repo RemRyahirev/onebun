@@ -211,7 +211,7 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - Because the check sits inside the `try`, a throw skips it entirely: nack-then-throw carries the THROWN error. The synthesised error carries no `cause`, because the handler never raised one
 - On JetStream the auto-ack is additionally gated: `if (acknowledgesAutomatically(entry.options) && !wasNacked(message))`. That `msg.ack()` is on the raw `JsMsg`, not the wrapper, so it bypasses the wrapper's first-call-wins guard — ungated, it settled a message the handler had just `nak()`ed and cancelled the redelivery
 - Two deliveries emit NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher (it returns before `onMessageReceived`, and no message object is constructed) and one whose payload fails `JSON.parse`. JetStream instead emits `onError` and `term()`s a poison message
-- `onMessageProcessed` does not mean "the handler ran": `QueueService` returns early when a message guard refuses a message, and that path still reports processed.
+- A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 </llm-only>
 
@@ -288,6 +288,7 @@ await app.start();
 
 The `@Subscribe` decorator marks a method as a message handler.
 
+<!-- typecheck: skip -->
 ```typescript
 @Subscribe('orders.*')
 async handleOrder(message: Message<OrderData>) {
@@ -328,6 +329,7 @@ for a stream declaration, and from the awaited `publish()` / `subscribe()` call 
 
 ### Subscribe Options
 
+<!-- typecheck: skip -->
 ```typescript
 @Subscribe('orders.*', {
   ackMode: 'manual',        // 'auto' (default), 'manual' or 'none'
@@ -368,6 +370,7 @@ there is no redelivery and no dead-letter routing on any adapter. Choose it when
 message costs less than processing it twice — a telemetry firehose, say, where a replayed
 sample is worse than a missing one.
 
+<!-- typecheck: skip -->
 ```typescript
 @Subscribe('telemetry.samples', { ackMode: 'none' })
 async ingest(message: Message<Sample>) {
@@ -461,6 +464,7 @@ Only the JetStream adapter populates `attempt` and `maxAttempts`; on the memory,
 
 Executes on a cron schedule. The decorated method returns data to publish.
 
+<!-- typecheck: skip -->
 ```typescript
 import { Cron, CronExpression } from '@onebun/core';
 
@@ -496,6 +500,7 @@ getHealthData() {
 
 Executes at fixed intervals.
 
+<!-- typecheck: skip -->
 ```typescript
 // Every 60 seconds
 @Interval(60000, { pattern: 'metrics.collect' })
@@ -508,6 +513,7 @@ getMetrics() {
 
 Executes once after a delay.
 
+<!-- typecheck: skip -->
 ```typescript
 // After 5 seconds
 @Timeout(5000, { pattern: 'init.complete' })
@@ -518,10 +524,11 @@ getInitData() {
 
 ## Message Guards
 
-Guards control access to message handlers, similar to WebSocket guards.
+Guards control access to message handlers, similar to WebSocket guards. A refused message never reaches the handler: it is nacked **without** requeue — a guard decision is deterministic, so redelivery would only be denied again — and the adapter reports it through `onMessageFailed`, not `onMessageProcessed`. A guard that *throws* also denies, because on the queue there is no filter chain to carry the exception; the framework logs the guard's name and the error instead.
 
 ### Built-in Guards
 
+<!-- typecheck: skip -->
 ```typescript
 import { 
   UseMessageGuards,
@@ -554,6 +561,7 @@ async handleTraced(message: Message) {}
 
 ### Composite Guards
 
+<!-- typecheck: skip -->
 ```typescript
 import { MessageAllGuards, MessageAnyGuard } from '@onebun/core';
 
@@ -574,8 +582,13 @@ async handleStrict(message: Message) {}
 async handleFlexible(message: Message) {}
 ```
 
+Both composites construct their children **themselves**, in their own constructor — a child passed as a class gets a bare `new guard()` at decoration time, before any module exists, so a guard with a constructor dependency receives nothing. Pass such a guard as an already constructed instance, or list the guards directly (`@UseMessageGuards(A, B)`): that form is resolved through the module owning the consumer, at startup, with full constructor DI per guard.
+
+Neither composite checks the transport either. The built-in leaves each deny on a non-queue context, so a composite built only from them denies too — but that is their children's doing, not the composite's. A hand-written child that reads `context.getMetadata()` will throw if the same composite is also listed under `@UseGuards` on an HTTP route or WebSocket handler, where that accessor does not exist. Narrow with `isQueueContext(context)` in your own guards; `createMessageGuard()` already does it for you.
+
 ### Custom Guards
 
+<!-- typecheck: skip -->
 ```typescript
 import { createMessageGuard } from '@onebun/core';
 
@@ -591,19 +604,24 @@ async handleCustom(message: Message) {}
 
 ## Interceptors
 
-`@UseInterceptors()` works on queue handlers — same decorator as HTTP and WebSocket. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
+`@UseInterceptors()` reaches queue handlers — same decorator as HTTP and WebSocket — but only in its **class-level** form. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
 
 ```typescript
 @UseInterceptors(LoggingInterceptor)
 @Controller('/processor')
 class EventProcessor extends BaseController {
   @Subscribe('events.created')
-  @UseInterceptors(new TimeoutInterceptor(10000))
   async handleEvent(message: Message<{ id: string }>) {
     // handler code
   }
 }
 ```
+
+::: warning Method-level `@UseInterceptors` never runs on a `@Subscribe` handler
+Applied to a method, the decorator records itself on the class **prototype**, while `QueueService.registerService()` reads interceptors off the **class** — the metadata store is keyed on the exact object and does not walk prototypes, so the interceptor is silently dropped and the handler runs unwrapped. Put it on the consumer class, or split handlers that need different interceptors into separate consumers. Guards are unaffected: `@UseMessageGuards` writes to the class, and the method form of `@UseGuards` is read back by walking the prototype chain.
+
+`@Cron`, `@Interval` and `@Timeout` handlers get no interceptors and no guards at all, at either level — the scheduler is handed the bound method directly.
+:::
 
 See [Interceptors](/api/interceptors) for full documentation.
 
@@ -1059,6 +1077,7 @@ Subscribing again with the same `(pattern, group)` after a delete creates a fres
 
 A message whose handler keeps failing eventually runs out of attempts. Without a dead-letter queue the server simply stops redelivering it and the application never hears about it again. `deadLetter` gives that message somewhere to go:
 
+<!-- typecheck: skip -->
 ```typescript
 @Subscribe('orders.created', {
   deadLetter: { queue: 'orders.dlq', maxRetries: 5 },
@@ -1076,6 +1095,7 @@ The same routing happens when a handler under `ackMode: 'manual'` calls `message
 
 **What arrives in the queue.** The republished message keeps the original `id`, and its `metadata` gains three provenance keys alongside whatever the producer set:
 
+<!-- typecheck: skip -->
 ```typescript
 @Subscribe('orders.dlq')
 async inspectFailures(message: Message<OrderData>) {

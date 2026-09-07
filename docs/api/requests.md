@@ -22,7 +22,7 @@ import { createHttpClient } from '@onebun/core';
 const client = createHttpClient({
   baseUrl: 'https://api.example.com',
   timeout: 10000,  // 10 seconds
-  defaultHeaders: {
+  headers: {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
   },
@@ -108,12 +108,20 @@ const client = createHttpClient({
 const client = createHttpClient({
   baseUrl: 'https://api.example.com',
   auth: {
-    type: 'apiKey',
-    key: 'your-api-key',
-    header: 'X-API-Key',  // or 'Authorization'
+    type: 'apikey',      // all lowercase — 'apiKey' is not a member of the union
+    key: 'X-API-Key',    // the HEADER NAME
+    value: 'your-api-key', // the secret
+    location: 'header',  // 'header' (default) or 'query'
   },
 });
 ```
+
+::: danger Get the spelling right or the request goes out unauthenticated
+`key` is the header name and `value` is the secret — the reverse of what the names suggest at a glance.
+And the discriminant is lowercase `'apikey'`: `'apiKey'` matches no member of `AuthConfig`, so
+`applyAuth` falls through its `default:` branch and sends the request with **no** auth header at all.
+No error, no warning — the call simply arrives unauthenticated and comes back 401.
+:::
 
 ### Basic Auth
 
@@ -250,6 +258,7 @@ if (response.retryCount && response.retryCount > 0) {
 
 ### Retry Strategies
 
+<!-- typecheck: skip -->
 ```typescript
 // Fixed delay
 // Retries after: 1000ms, 1000ms, 1000ms
@@ -364,6 +373,7 @@ export class UserService extends BaseService {
 Every per-request config argument is a `Partial<RequestConfig>` — `method` and `url` come from the
 method you call and the path you pass, so only these fields are yours to set:
 
+<!-- typecheck: skip -->
 ```typescript
 {
   /** Request timeout in milliseconds */
@@ -484,39 +494,59 @@ export class ExternalApiService extends BaseService {
 
 For type-safe inter-service communication:
 
+`createServiceDefinition()` takes the **module class** of the service being called and reflects its
+endpoints out of the decorator metadata already on its controllers. There is no literal to
+hand-maintain, and no way for the definition to drift from the routes it describes:
+
 ```typescript
 import { createServiceDefinition, createServiceClient } from '@onebun/core';
 
-// Define service API
-export const UsersServiceDefinition = createServiceDefinition({
-  name: 'users',
-  controllers: {
-    users: {
-      findAll: { method: 'GET', path: '/users' },
-      findById: { method: 'GET', path: '/users/:id' },
-      create: { method: 'POST', path: '/users' },
-      update: { method: 'PUT', path: '/users/:id' },
-      delete: { method: 'DELETE', path: '/users/:id' },
-    },
-  },
-});
+import { UsersModule } from './users/users.module';
 
-// Create typed client
-// In a service, use this.config.get() for secrets
+// Reflected from @Controller/@Get/@Post metadata — nothing to keep in step by hand
+export const UsersServiceDefinition = createServiceDefinition(UsersModule);
+```
+
+The client is configured with `url` (required), not `baseUrl` — `ServiceClientOptions` deliberately
+omits `baseUrl` so the two cannot be confused:
+
+```typescript
+// In a service, use this.config.get() for the address and secrets
 const usersClient = createServiceClient(UsersServiceDefinition, {
-  baseUrl: this.config.get('services.usersUrl'),
+  url: this.config.get('services.usersUrl'),
+  serviceName: 'orders-service',
   auth: {
     type: 'onebun',
     serviceId: 'orders-service',
     secretKey: this.config.get('services.secretKey'),
   },
 });
-
-// Use with full type safety
-const users = await usersClient.users.findAll();
-const user = await usersClient.users.findById({ id: '123' });
-const newUser = await usersClient.users.create({ body: { name: 'John' } });
 ```
+
+Controllers are reached by their **class name**, and handler arguments are passed **positionally**, in
+the order the handler declares its `@Param`/`@Body`/`@Query` parameters:
+
+```typescript
+const users = await usersClient.UsersController.findAll();
+const user = await usersClient.UsersController.findById('123');
+const newUser = await usersClient.UsersController.create({ name: 'John' });
+```
+
+<llm-only>
+
+Three mistakes this section exists to prevent, all of which typecheck-clean code used to make:
+
+- `createServiceDefinition({ name, controllers: {...} })` — an object literal is rejected; the function
+  signature is `createServiceDefinition(moduleClass)` and it throws
+  `"<X> is not decorated with @Module"` for anything else.
+- `{ baseUrl }` instead of `{ url }` — `ServiceClientOptions extends Omit<RequestsOptions, 'baseUrl'>`,
+  so `baseUrl` is an excess property AND `url` is missing: two errors, and at runtime the underlying
+  client would have `baseUrl: undefined`.
+- `client.users.findById({ id: '123' })` — the proxy keys controllers by `controller.name`
+  (`UsersController`), and `buildRequestParams` consumes `args[i]` positionally, so a wrapper object is
+  stringified into the URL rather than destructured.
+
+</llm-only>
 
 ## Response Format
 
@@ -591,7 +621,7 @@ export class UserApiService extends BaseService {
     this.client = createHttpClient({
       baseUrl: this.config.get('services.usersUrl'),
       timeout: 10000,
-      defaultHeaders: {
+      headers: {
         'Content-Type': 'application/json',
       },
       auth: {

@@ -5,6 +5,8 @@ export {
   makeLogger,
   makeLoggerFromOptions,
   makeDevLogger,
+  // The docs pair these two in one import line; without this export that line did not resolve.
+  makeProdLogger,
   parseLogLevel,
   shutdownLogger,
   type SyncLogger,

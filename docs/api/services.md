@@ -217,11 +217,14 @@ This makes it safe to use "standalone" services whose main work happens inside `
 Implement lifecycle interfaces to hook into the application lifecycle:
 
 ```typescript
-import { 
-  Service, 
-  BaseService, 
-  OnModuleInit, 
-  OnModuleDestroy 
+// The lifecycle interfaces are type-only exports, so they need `type` — the scaffold that
+// `bun create @onebun` writes sets `verbatimModuleSyntax`, under which a value import of them
+// is TS1484.
+import {
+  Service,
+  BaseService,
+  type OnModuleInit,
+  type OnModuleDestroy,
 } from '@onebun/core';
 
 @Service()
@@ -269,7 +272,7 @@ that finishes inside the budget exits **0**. Keep destroy hooks well under the b
 A service that is not injected anywhere but performs useful work via `onModuleInit`:
 
 ```typescript
-import { Service, BaseService, OnModuleInit, OnModuleDestroy } from '@onebun/core';
+import { Service, BaseService, type OnModuleInit, type OnModuleDestroy } from '@onebun/core';
 
 @Service()
 export class TaskSchedulerService extends BaseService implements OnModuleInit, OnModuleDestroy {
@@ -464,9 +467,9 @@ export class OrderService extends BaseService {
     return this.paymentGateway.charge(orderId, amount);
   }
 
-  @Span()  // Uses method name as span name
+  @Span()  // Default span name is `ClassName.methodName`
   async validateOrder(order: Order): Promise<boolean> {
-    // Span name: "validateOrder"
+    // Span name: "OrderService.validateOrder" — the class prefix is part of it
     return this.validator.validate(order);
   }
 }
@@ -511,6 +514,7 @@ export class DataService extends BaseService {
 
 The `runEffect` method handles Effect execution:
 
+<!-- typecheck: skip -->
 ```typescript
 protected async runEffect<A>(effect: Effect.Effect<never, never, A>): Promise<A> {
   try {
