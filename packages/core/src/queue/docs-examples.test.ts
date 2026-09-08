@@ -642,7 +642,10 @@ describe('Custom adapter NATS JetStream (docs/api/queue.md)', () => {
 
     const adapter = new NatsJetStreamAdapter({
       servers: 'nats://localhost:4222',
-      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+      // Mirrors the page: `JOBS` binds the `jobs.created` handler in the same snippet. The
+      // declaration and the subscription have to agree — with a real JetStream adapter,
+      // declaring only `events.>` beside a `jobs.created` handler refuses to boot.
+      streams: [{ name: 'JOBS', subjects: ['jobs.>'] }],
     });
     await adapter.connect();
     expect(adapter.name).toBe('nats-jetstream');

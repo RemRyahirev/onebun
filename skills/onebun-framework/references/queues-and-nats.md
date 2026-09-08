@@ -54,6 +54,49 @@ The memory adapter retries in-process only; retries do not survive a restart.
 
 ## Decorators
 
+### Stream resolution (JetStream): strict, local, no fallback
+
+`subscribe()` must name a stream, because `consumers.add` takes a stream NAME. It picks one from the
+streams THIS application declares, and refuses rather than guesses:
+
+1. Streams whose declared subjects **cover** the whole translated pattern. Exactly one wins; two or
+   more throw.
+2. Otherwise streams that merely **overlap** it. Exactly one wins; two or more throw.
+3. None throws.
+
+There is no fallback and no broker lookup. **Measured against nats-server 2.10: a `filter_subject`
+completely unrelated to what a stream holds is ACCEPTED, stored verbatim, and its consumer sits at
+zero pending forever.** The broker validates nothing here, so a guessed binding produces a
+subscription that is alive, healthy and permanently empty with nothing logged — which is why the
+declared stream set is the whole oracle. (The only thing nats-server does reject in this area is two
+entries of one consumer's own `filter_subjects` overlapping each other, code 10138.)
+
+Ambiguity throws rather than picking the first: `durableConsumerName` omits the stream, so resolving
+differently on a later boot creates the same durable elsewhere and orphans the first with its
+delivery position — and streams differ in retention, limits and storage.
+
+**`publish()` is not symmetric and never resolves a stream.** It addresses a subject and lets the
+server route it, so a producer-only service needs no declaration. That asymmetry is physical, not
+stylistic. It also means a `deadLetter.queue` that no stream binds is NOT caught at startup: dead
+letters are republished through `publish()`, so it surfaces as a republish failure the first time a
+message is dead-lettered (the original is left un-terminated, so nothing is lost).
+
+Consequence for configuration: every subject a service subscribes to must be bound by exactly one
+stream in that service's own `streams`. A service consuming from a stream another service owns must
+declare it with the **identical** definition, and "identical" is load-bearing — declaring a stream
+enrols the service in reconciling it:
+
+- identical -> the config hash matches, `decideStamp` returns `noop`, nothing is written;
+- **differing -> `decideStamp` returns `update`, and the consumer REWRITES the owner's stream.**
+  A copied declaration with `maxAge: 3d` where the owner set `7d` boots fine and silently shortens
+  the owner's retention. Only two kinds of difference are refused: one that narrows the subject set
+  (`streamNarrowingMessage`) and one that changes a create-only field such as `storage` or
+  `retention` (`streamCreateOnlyMessage`). A reconcile-cycle error means something else entirely:
+  two processes writing different configs in alternation inside the cycle window.
+
+Drop a catch-all you do not consume from: it makes this service a writer for a stream it has no
+opinion about.
+
 ### @Subscribe(pattern, options?)
 
 <!-- typecheck: skip -->
@@ -486,7 +529,7 @@ Key JetStream behaviors:
 - **Poison messages**: a payload that fails to parse, or valid JSON that is not a OneBun envelope, is `term()`ed and reported to `@OnQueueError` — never acked, never retried, never handed to the handler as `undefined`. Consume-loop errors reach `@OnQueueError` too rather than being swallowed.
 - **Consumer lifecycle**: framework-generated ephemerals (no `group`) are deleted on `unsubscribe()` and `disconnect()`; `group` durables are never deleted implicitly, because `QueueService.stop()` unsubscribes on every graceful shutdown and a durable exists to survive restarts. Delete one deliberately with `nats consumer rm <stream> <consumer>`.
 - **A `group` is a PERMANENT server resource on JetStream — never template it per run or per deploy.** The durable is named `${group}--${filterSubject}--${digest}`, so a group built from a build number, pod name or timestamp leaves a new orphaned consumer behind every deploy, each holding its own position and `max_ack_pending` budget. Name the ROLE. Note the same option means something else on `NatsQueueAdapter`: there it is a stateless NATS queue group that dies with its members.
-- **Decommission a durable in code with `deleteDurableConsumer(pattern, group)`** — not on the `QueueAdapter` interface (only JetStream has durables), so it needs `queueService.getAdapter() as JetStreamQueueAdapter`. Returns `true` when one was removed and `false` when there was none, so it is safe to call twice; rethrows a permissions denial rather than reporting it as already gone; and resolves the stream STRICTLY, throwing when no declared stream binds the pattern instead of falling back to the first. Re-subscribing afterwards creates a fresh durable with `deliver_policy: new`, so the old position is gone for good.
+- **Decommission a durable in code with `deleteDurableConsumer(pattern, group)`** — not on the `QueueAdapter` interface (only JetStream has durables), so it needs `queueService.getAdapter() as JetStreamQueueAdapter`. Returns `true` when one was removed and `false` when there was none, so it is safe to call twice; rethrows a permissions denial rather than reporting it as already gone; and resolves the stream through the SAME `resolveStreamForSubject` that `subscribe()` uses — it must, or it could not decommission what `subscribe()` created. Re-subscribing afterwards creates a fresh durable with `deliver_policy: new`, so the old position is gone for good.
 - **Ephemeral consumers** send no `durable_name` and are named `consumer-<uuid>` from
   `crypto.randomUUID()`, not from a timestamp two subscriptions created in the same millisecond
   would share and then fight over.

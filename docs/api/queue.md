@@ -366,7 +366,7 @@ otherwise.
 <llm-only>
 
 **Technical details for AI agents:**
-- `toNatsSubject is the only OneBun-to-NATS subject translation in the package.` It lives in `packages/nats/src/subject.ts`, is re-exported from `packages/nats/src/index.ts`, and has five call sites: `jetstream.adapter.ts:231` (stream declarations, in the constructor), `:315` (`publish`), `:352` (the consumer `filter_subject`), `:475` (`resolveStreamForSubject`) and `nats.adapter.ts:283` (the core-NATS subscription)
+- `toNatsSubject is the only OneBun-to-NATS subject translation in the package.` It lives in `packages/nats/src/subject.ts`, is re-exported from `packages/nats/src/index.ts`, and has six call sites, given here by function rather than line number because the numbers go stale on every edit: the `JetStreamQueueAdapter` constructor (stream declarations), `publish()`, `subscribe()` (the consumer `filter_subject`), `resolveStreamForSubject()`, `deleteDurableConsumer()` (deriving the durable name to remove), and `NatsQueueAdapter.subscribe()` (the core-NATS subscription)
 - The rules: a token containing a `{name}` parameter becomes `*`; a trailing `#` token becomes `>`; `*` and literal tokens pass through; a `#` in any other position throws
 - Translation only ever widens. The transport delivers a superset and `entry.matcher`, built by `createQueuePatternMatcher(pattern)` from the ORIGINAL pattern, narrows it back — which makes the match check in the consume loop load-bearing, not redundant. A non-matching message is `ack()`ed, never left unacked
 - Stream declarations are translated eagerly in the `JetStreamQueueAdapter` constructor, so `resolvedStreams[].natsSubjects` — the input to `ensureStream`'s subject-coverage guard and to `resolveStreamForSubject` — is already in NATS form. A declaration of `orders.{id}` binds `orders.*`
@@ -914,7 +914,10 @@ const app = new OneBunApplication(AppModule, {
     adapter: NatsJetStreamAdapter,
     options: {
       servers: 'nats://localhost:4222',
-      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+      // A stream must bind every subject the application subscribes to. `JOBS` binds
+      // `jobs.created`; with a real JetStream adapter, declaring only `events.>` here would
+      // refuse to boot rather than attach the handler to a stream that never receives it.
+      streams: [{ name: 'JOBS', subjects: ['jobs.>'] }],
     },
   },
 });
@@ -1003,7 +1006,40 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 ```
 
-Streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter automatically resolves the correct stream — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
+Streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter resolves the stream from these declarations — `agent_events`, whose `agent.events.>` binds it — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
+
+#### Stream resolution: exactly one, or the application does not start
+
+`consumers.add` takes a stream **name**, so `subscribe()` has to choose one. It chooses only from
+the streams this application declares:
+
+1. Streams whose declared subjects **cover** the whole pattern. Exactly one wins.
+2. Otherwise streams that merely **overlap** it — `events.*` against a stream declared
+   `['events.created', 'events.updated']` really does deliver, so that keeps working.
+3. Nothing matches, **or more than one matches on either pass**: `app.start()` throws, naming the
+   pattern, the NATS subject it translated to, and every stream you declared.
+
+::: danger There is no broker-side check to fall back on
+Measured against nats-server 2.10: a `filter_subject` completely unrelated to what the stream holds
+is **accepted**, stored verbatim, and its consumer sits at zero pending forever — a subscription
+that is alive, healthy and permanently empty, with nothing logged on either side. That is what the
+adapter used to produce whenever no declaration matched and it bound the consumer to your first
+stream instead. The declared stream set is the only oracle there is, which is why a miss is fatal
+rather than a warning.
+:::
+
+Two declarations that both qualify is also refused, and that one is new. It is not a neutral choice:
+the durable consumer name is derived from the group and the pattern and does **not** include the
+stream, so resolving differently on a later boot creates the same durable on another stream and
+orphans the first along with its delivery position — and streams carry their own retention, limits
+and storage. A catch-all archive stream declared beside topic streams is the usual way to hit it, as
+is a `ORDERS ['orders.>']` / `ORDERS_DLQ ['orders.dlq.>']` pair with `@Subscribe('orders.dlq.failed')`.
+Narrow the declarations until exactly one binds each subscribed subject, or drop the stream this
+service does not consume from.
+
+**`publish()` is not symmetric and needs no declaration at all.** It addresses a subject and lets the
+server route it, so a producer-only service declares nothing. `subscribe()` cannot do that, because
+the API it calls demands a stream name.
 
 **Supported Features:**
 - Pattern subscriptions
@@ -1031,7 +1067,7 @@ The reconciliation stamp lives in JetStream stream metadata, so streams, like co
 - Branch order once `info` resolves is load-bearing: ensureStream checks subject coverage first, then create-only divergence, then the hash. Coverage comes from the server's `config.subjects`, so a stale stamp cannot approve a narrowing declaration; the create-only guard sits ahead of the hash for the same reason the consumer path checks its ack policy first — a matching hash must not mask a field `streams.update` cannot carry
 - `buildStreamConfig(stream, forCreate)` emits ONLY declared keys — an undeclared key is absent, never present-and-undefined, because the client's update merges with a shallow `Object.assign` and `max_msgs: undefined` would overwrite the server's value. `forCreate` adds `name`, `retention ?? 'limits'`, `storage ?? 'file'` and `num_replicas ?? 1`; those defaults never reach `streams.update()`
 - The hash is `hashReconcileConfig(hashableStreamSubset(desired))` over `{ subjects, max_msgs, max_bytes, max_age, num_replicas }`. `name` and `metadata` are excluded so a stamp write does not change the hash; `retention` and `storage` are excluded because the create-only guard owns them
-- `droppedSubjects(existingSubjects, configured)` keeps the server's subjects that no configured pattern covers, matched through `natsSubjectMatches()`; `divergingCreateOnlyFields(config, stream)` compares `storage` and `retention` only when the application declared them
+- `droppedSubjects(existingSubjects, configured)` keeps the server's subjects that no configured pattern covers, matched through `natsSubjectCovers()` — coverage, not overlap, and correct on BOTH sides, so a declaration of `orders.*` against a server holding `orders.>` is now the narrowing it is rather than the widening the one-directional predicate reported. The test is per declared subject, not over the declared set: `['orders.*', 'orders.*.#']` covers a server-held `orders.>` only jointly and is reported as a narrowing it is not. That errs on the sound side — it can refuse a safe declaration, never wave a narrowing one through — and deciding union coverage is tracked separately; `divergingCreateOnlyFields(config, stream)` compares `storage` and `retention` only when the application declared them
 - `decideStamp(metadata, desiredHash)` drives the write: `noop` → `streams.update()` is not called at all; `update` → `stampMetadata(metadata, hash, prevHash)` copies the server's existing metadata map in first, then sets `onebun.config-hash`, `onebun.prev-config-hash` and `onebun.reconciled-at`; `cycle` → `streamCycleMessage()` naming `divergingStreamFields()`
 - Every failure routes through `failStream()`, which emits `onError` before the error is thrown — `ensureAllStreams()` runs during `connect()`, before any `@OnQueueError` handler is registered, so a throw alone would reach nobody
 - `streamWriteFailureMessage()` appends the nats-server 2.10 metadata hint when the cause matches `/requires server/i`
@@ -1223,7 +1259,7 @@ Subscribing again with the same `(pattern, group)` after a delete creates a fres
 - The delete goes through `entry.consumer.delete()`, not the manager — `this.jsm` is nulled during disconnect
 - `entry.paused` is checked BEFORE `consumer.consume()`, so a paused subscription pulls nothing; the restart timer keeps re-checking so `resume()` needs no extra wiring
 - A message pulled and then dropped because the subscription paused or stopped is `nak()`ed, never left to age out of `ackWait`
-- `deleteDurableConsumer(pattern, group)` is the ONLY code path that removes a durable. It resolves the stream through `requireStreamForSubject()`, a strict variant that THROWS when nothing matches — `resolveStreamForSubject()` keeps its `resolvedStreams[0]` fallback for publish/subscribe, which would be a footgun on a destructive call
+- `deleteDurableConsumer(pattern, group)` is the ONLY code path that removes a durable. It resolves the stream through the same `resolveStreamForSubject()` that `subscribe()` uses, and must: a delete has to name exactly the stream the subscription bound to, or it cannot decommission what `subscribe()` created. It used to have a private strict twin, `requireStreamForSubject()`, byte-identical except for the no-match branch — the twin threw, the public resolver fell back to `resolvedStreams[0]`. Neither handled ambiguity: both returned whichever candidate came first. Once the public resolver refuses rather than guesses, the twin has no reason to exist, and one implementation cannot drift from itself
 - It returns `false` only for `JetStreamApiCodes.ConsumerNotFound`; every other rejection is rethrown as itself, so a permissions denial is never reported as "already gone"
 - The consumer name is derived by the same `durableConsumerName(group, toNatsSubject(pattern))` that `subscribe()` uses, so the pair that created a durable is the pair that removes it
 
@@ -1261,7 +1297,9 @@ async inspectFailures(message: Message<OrderData>) {
 }
 ```
 
-**`deadLetter.queue` must be a literal subject, bound by a declared stream.** A wildcard (`*`, `#`, `>`) is rejected, because a message is published to exactly one subject; so is a queue equal to the subscription's own pattern, which would hand every dead letter straight back to the handler that just rejected it. Both throw from `subscribe()` at startup, not on the first failure. The `agent_dlq` stream in the [JetStreamQueueAdapter](#jetstreamqueueadapter) example above is the shape to copy — the dead-letter subject needs a stream just like any other.
+**`deadLetter.queue` must be a literal subject, and a declared stream must bind it.** A wildcard (`*`, `#`, `>`) is rejected, because a message is published to exactly one subject; so is a queue equal to the subscription's own pattern, which would hand every dead letter straight back to the handler that just rejected it. Those two throw from `subscribe()` at startup, not on the first failure.
+
+The stream requirement is on you, and is **not** checked at startup: dead letters are republished through `publish()`, which addresses a subject and lets the server route it rather than resolving a stream. An unbound dead-letter subject therefore surfaces the first time a message is actually dead-lettered, as a republish failure — the original is deliberately left un-terminated at that point, so it is redelivered rather than lost. The `agent_dlq` stream in the [JetStreamQueueAdapter](#jetstreamqueueadapter) example above is the shape to copy — the dead-letter subject needs a stream just like any other.
 
 **What happens to the original.** `term()` removes it under `retention: 'workqueue'` and `'interest'`. Under the default `retention: 'limits'` the payload stays in the source stream until retention evicts it — terminating only stops redelivery. Either way the dead-letter copy is a normal stored message with its own retention, so it survives independently of the original.
 
@@ -1275,7 +1313,7 @@ The Redis adapter routes dead letters to `queue:dlq:${pattern}` and ignores both
 - `deadLetter.maxRetries` is resolved once in `resolveConsumerConfig()` in `packages/nats/src/jetstream.adapter.ts`: `options?.retry?.attempts ?? options?.deadLetter?.maxRetries ?? consumerConfig?.maxDeliver ?? 3`. Nothing outside that function computes `max_deliver`
 - `routeToDeadLetter(entry, msg, message, error)` is the ONLY code that publishes to `deadLetter.queue`. It has exactly two triggers: the auto-nack branch of the consume loop when `msg.info.deliveryCount >= max_deliver`, and `JetStreamMessage.nack(false)` — which receives it as a closure built at message construction, so it is `undefined` when no queue is configured and the bare `term()` behaviour is unchanged
 - Order inside the helper is load-bearing: `await this.publish(queue, …)` first, `msg.term()` only after it resolves. On a rejected republish it emits `onError` with the rejection as `cause` and returns WITHOUT terminating
-- The republish goes through the adapter's own `publish()`, never a second raw `js.publish`, so subject translation, `resolveStreamForSubject()` and the publish diagnostics all apply to dead letters unchanged
+- The republish goes through the adapter's own `publish()`, never a second raw `js.publish`, so subject translation and the publish diagnostics apply to dead letters unchanged. `resolveStreamForSubject()` does NOT: `publish()` never calls it, on any path. A dead-letter subject that no declared stream binds is therefore not refused at startup — it surfaces as `deadLetterRepublishError` the first time a message is actually dead-lettered, and the original is left un-terminated so nothing is lost
 - Envelope: `messageId` carries the original id; `metadata` is the original map spread first, then `dlq.originalPattern`, `dlq.deliveryCount` and `dlq.error`. `MessageMetadata` has an index signature, so no `any` is involved
 - `validateDeadLetterQueue(queue, pattern)` runs in `subscribe()` before the consumer is created: it rejects any token that is `*`, `>` or contains `#`, and rejects `queue === pattern`
 - A dead-letter queue is impossible under a non-explicit ack policy — the server tracks no delivery state, so there is no terminal delivery to detect

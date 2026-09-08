@@ -50,6 +50,7 @@ const app = new OneBunApplication(AppModule, {
       servers: 'nats://localhost:4222',
       streamDefaults: { retention: 'limits', storage: 'file' },
       streams: [
+        { name: 'ORDERS', subjects: ['orders.>'] },
         { name: 'EVENTS', subjects: ['events.>'] },
         { name: 'agent_events', subjects: ['agent.events.>'] },
       ],
@@ -63,6 +64,14 @@ await app.start();
 Passing `adapter: JetStreamQueueAdapter` by itself enables the queue — no `@Subscribe` handler is required anywhere in
 the application, so a producer-only service works out of the box. The connection to JetStream is established during
 `app.start()`, so the application fails to boot if the broker is unreachable.
+
+`ORDERS` is declared because the handlers in the next section subscribe to `orders.*`. **Subscribing and publishing are
+not symmetric here.** `publish()` addresses a subject and lets the server route it, so a producer needs no stream
+declaration of its own — the broker decides. `subscribe()` cannot: `consumers.add` takes a stream NAME, so the adapter
+must choose one, and it chooses strictly and locally from the streams this application declares. A pattern no declared
+stream binds fails at startup rather than being attached to a guess: nats-server accepts a consumer whose filter matches
+nothing the stream holds, so a guess produces a subscription that is alive, healthy and permanently empty, with nothing
+logged on either side.
 
 ### Service with Queue Handlers
 

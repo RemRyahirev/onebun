@@ -788,4 +788,77 @@ describe('JetStreamQueueAdapter Integration', () => {
       }
     }
   }, CASE_TIMEOUT_MS);
+  it('accepts any filter_subject, however unrelated to what the stream binds', async () => {
+    // OQ-B, and the reason strict local resolution is the only defence there is.
+    //
+    // The question asked was whether nats-server requires `filter_subject` to be a SUBSET of the
+    // stream's subjects, or merely to overlap them. The measured answer is neither: it checks
+    // nothing at all. A filter completely disjoint from the stream is accepted, stored verbatim,
+    // and its consumer sits at `num_pending: 0` forever — a subscription that is alive, healthy
+    // and permanently empty, with nothing logged on either side.
+    //
+    // Two things follow. The overlap pass in `resolveStreamForSubject` is legitimate, because
+    // `events.*` really does deliver against a stream declared `['events.created', ...]`. And the
+    // enriched `consumers.add` failure message can never fire for a mis-bound subscription, so
+    // the declared stream set is the whole oracle. This test is the evidence for both.
+    const js = makeAdapter('ITEST_FILTER', ['filter.created', 'filter.updated']);
+    await js.connect();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const jsm = (js as any).jsm as AnyRecord;
+
+    const add = async (durable: string, filterSubject: string): Promise<string | null> => {
+      try {
+        await jsm.consumers.add('ITEST_FILTER', {
+           
+          durable_name: durable,
+           
+          ack_policy: AckPolicy.Explicit,
+           
+          filter_subject: filterSubject,
+        });
+
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    };
+
+    expect({
+      subset: await add('oqb_subset', 'filter.created'),
+      overlapping: await add('oqb_overlap', 'filter.*'),
+      broader: await add('oqb_broad', 'filter.>'),
+      universal: await add('oqb_universal', '>'),
+      // The one that matters: nothing this stream will ever hold matches it.
+      disjoint: await add('oqb_disjoint', 'nothing.to.do.with.this.stream'),
+    }).toEqual({
+      subset: null,
+      overlapping: null,
+      broader: null,
+      universal: null,
+      disjoint: null,
+    });
+
+    // Accepted AND dead: published messages reach the overlapping consumer and never the
+    // disjoint one. Without this half, "accepted" would not distinguish a server that quietly
+    // rewrote the filter from one that honoured it.
+    await js.publish('filter.created', { n: 1 });
+    await js.publish('filter.updated', { n: 2 });
+
+    await pollUntil(async () => {
+      const overlapping = await jsm.consumers.info('ITEST_FILTER', 'oqb_overlap');
+
+      return overlapping.num_pending === 2;
+    });
+
+    const disjoint = await jsm.consumers.info('ITEST_FILTER', 'oqb_disjoint');
+
+    expect({
+      storedFilter: disjoint.config.filter_subject,
+      pending: disjoint.num_pending,
+    }).toEqual({
+      storedFilter: 'nothing.to.do.with.this.stream',
+      pending: 0,
+    });
+  }, CASE_TIMEOUT_MS);
 });

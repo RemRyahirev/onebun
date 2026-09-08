@@ -353,9 +353,11 @@ afterEach(async () => {
 
 Only a genuine `ConsumerNotFound` yields `false`; everything else propagates. `deleteDurableConsumer()`
 starts with `ensureConnected()` (throws `JetStreamQueueAdapter not connected. Call connect() first.`)
-and then resolves the stream through the strict `requireStreamForSubject()`, which throws and lists
-every declared stream rather than guessing — deliberate, because on a destructive call a mistyped
-pattern would delete a consumer on an unrelated stream. A permissions denial is rethrown as itself.
+and then resolves the stream through the same `resolveStreamForSubject()` that `subscribe()` uses —
+a delete must name exactly the stream the subscription bound to, or it cannot decommission what
+`subscribe()` created. It throws and lists every declared stream rather than guessing, on BOTH the
+no-match case and the two-candidates case: on a destructive call a mistyped pattern would otherwise
+delete a consumer on an unrelated stream. A permissions denial is rethrown as itself.
 That is exactly the shape that bites in an `afterEach` after a failed case, where the adapter may
 never have connected.
 
