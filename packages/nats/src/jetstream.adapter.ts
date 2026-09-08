@@ -1840,6 +1840,23 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       const messages = await entry.consumer.consume({
         max_messages: entry.consumeBatch,
       });
+
+      // Checked AFTER consume(), which is a different question from the `paused` check above.
+      // A release that lands while this await is in flight sets `running = false` and looks at
+      // `entry.messages`, which is still null — so it closes nothing and moves on. Assigning
+      // the resolved handle here would install it on an entry nobody will release again.
+      //
+      // Nothing else would close it either. Breaking out of the `for await` below does run the
+      // iterator's `finally` and unsubscribes the inbox — but only once the loop has yielded at
+      // least once, and a subscription released before its first message never will. The loop
+      // parks on the internal signal forever, holding the inbox subscription and the monitor
+      // timer, with the consumer keeping its pull state on the server.
+      if (!entry.running) {
+        await messages.close().catch(() => undefined);
+
+        return;
+      }
+
       entry.messages = messages;
 
       // Watched alongside the loop, not instead of it. When the consumer is deleted the

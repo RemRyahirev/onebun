@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 439
+// NATS-SUITE-FLOOR: 441
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -3014,6 +3014,116 @@ describe('subscription lifecycle: the pull loop', () => {
     await asAny(adapter).consumeMessages(entry);
 
     expect(asAny(consumer.consume).mock.calls.length).toBe(before);
+  });
+
+  it('closes the handle when a release lands while consume() is still in flight', async () => {
+    // The race. `releaseSubscription` sets `running = false`, drains, then looks at
+    // `entry.messages` — still null, because the assignment happens after the await. It closes
+    // nothing. If the resolved handle were then installed, nobody would ever close it: the
+    // `for await` only reaches its `break` once the iterator has yielded, and a subscription
+    // released before its first message never yields. It parks forever holding the inbox
+    // subscription and the monitor timer, with the consumer keeping its pull state on the server.
+    const { adapter, consumer } = makeConnectedAdapter();
+    await adapter.subscribe('test.topic', async () => undefined, {});
+    const entry = asAny(adapter).subscriptions[0];
+
+    // A handle that would park forever if it were iterated: no messages, and an iterator that
+    // never completes. Only an explicit close() can end it.
+    const parked = makeDeferred();
+    parkedReleases.push(parked.resolve);
+    const handle: AnyRecord = {
+      async *[Symbol.asyncIterator]() {
+        await parked.promise;
+      },
+      close: mock(() => {
+        parked.resolve();
+
+        return Promise.resolve();
+      }),
+      closed: mock(() => Promise.resolve(true)),
+      status: mock(() => ({
+        async *[Symbol.asyncIterator]() {
+          await parked.promise;
+        },
+      })),
+    };
+
+    // consume() that resolves only when the test says so, so the release can be made to land
+    // strictly inside the await rather than hoped to.
+    const consuming = makeDeferred();
+    consumer.consume = mock(async () => {
+      await consuming.promise;
+
+      return handle;
+    });
+
+    entry.messages = null;
+    const loop = asAny(adapter).consumeMessages(entry);
+
+    // The release happens now, while consume() is unresolved — exactly the window.
+    entry.running = false;
+    consuming.resolve();
+    await loop;
+
+    expect(handle.close).toHaveBeenCalled();
+    // And never installed: an entry nobody will release again must not be holding a handle.
+    expect(entry.messages).toBeNull();
+  });
+
+  it('keeps the handle when the entry is merely paused during the consume', async () => {
+    // The guard above must key on `running`, not on "not usable right now". A pause that lands
+    // inside the same window is a different state: the subscription is still subscribed, the
+    // handle is still ours to hold, and the loop must schedule its restart so `resume()` has
+    // something to resume. Closing here instead would turn pause into a permanent stop.
+    const timers = useFakeTimers();
+
+    try {
+      const { adapter, consumer } = makeConnectedAdapter();
+      await adapter.subscribe('test.topic', async () => undefined, {});
+      const entry = asAny(adapter).subscriptions[0];
+
+      const parked = makeDeferred();
+      parkedReleases.push(parked.resolve);
+      const handle: AnyRecord = {
+        async *[Symbol.asyncIterator]() {
+          yield makeMockJsMsg();
+          await parked.promise;
+        },
+        close: mock(() => {
+          parked.resolve();
+
+          return Promise.resolve();
+        }),
+        closed: mock(() => Promise.resolve(true)),
+        status: mock(() => ({
+          async *[Symbol.asyncIterator]() {
+            await parked.promise;
+          },
+        })),
+      };
+
+      const consuming = makeDeferred();
+      consumer.consume = mock(async () => {
+        await consuming.promise;
+
+        return handle;
+      });
+
+      entry.messages = null;
+      const loop = asAny(adapter).consumeMessages(entry);
+
+      // Paused, not released — `running` stays true.
+      entry.paused = true;
+      consuming.resolve();
+      await loop;
+
+      // Not closed by the guard: the loop took the handle, handed the message back and ended
+      // through its own break, which is the path that leaves a restart pending.
+      expect(handle.close).not.toHaveBeenCalled();
+      expect(entry.restartTimer).not.toBeNull();
+    } finally {
+      timers.restore();
+    }
   });
 
   it('nacks a message it pulled but will not process', async () => {
