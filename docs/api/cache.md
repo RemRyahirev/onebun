@@ -446,16 +446,28 @@ falls back to the default.
 
 Which prefix applies depends on where the client comes from:
 
-| Mode | Prefix that applies |
-|---|---|
-| Standalone (`createRedisCache({ keyPrefix })`) | the cache's own `keyPrefix`, passed to the client it creates |
-| Shared (`useSharedClient: true`) | the **shared** client's prefix, from `SharedRedisProvider.configure()` |
-| Injected (`new RedisCache(client)`) | the prefix that client was constructed with |
+| Mode | Prefix that applies | Key on the wire for `set('user:1', …)` |
+|---|---|---|
+| Standalone (`createRedisCache({ keyPrefix: 'myapp:cache:' })`) | the cache's own `keyPrefix`, passed to the client it creates | `myapp:cache:user:1` |
+| Shared (`useSharedClient: true`) | the **shared** client's prefix, from `SharedRedisProvider.configure({ keyPrefix: 'shared:' })` | `shared:user:1` |
+| Injected (`new RedisCache(client)`) | the prefix that client was constructed with | that client's prefix + `user:1` |
 
-In every mode the prefix is applied exactly once, by the client. Before 0.5.1 the standalone path
-applied it twice — entries were stored under `prefix + prefix + key` — so any reader outside the
-cache (a runbook, `SCAN`, a Redis ACL key pattern, another service) looked in the wrong place. Caches
-warmed by an older release will miss on their first read after upgrading and refill normally.
+**The client is the sole owner of the prefix.** It applies one on every command, prefixes the
+patterns `clear()` and `getStats()` scope themselves with, and strips it back off results. Nothing
+above it prefixes as well, because two owners that do not know about each other is precisely how
+`myapp:cache:myapp:cache:user:1` happened.
+
+That is also why a `keyPrefix` **cannot** be combined with `useSharedClient: true` — the shared
+client owns the keyspace, so a cache-level prefix has nowhere to go. It is rejected at
+construction, naming `SharedRedisProvider.configure()` as the place to set it. It used to be
+dropped in silence, so keys landed under the shared prefix alone and anything written against the
+configured name found nothing. A `keyPrefix` cannot be supplied alongside an injected client
+either: the constructor takes options **or** a client, never both.
+
+Before 0.5.1 the standalone path applied the prefix twice — entries were stored under
+`prefix + prefix + key` — so any reader outside the cache (a runbook, `SCAN`, a Redis ACL key
+pattern, another service) looked in the wrong place. Caches warmed by an older release will miss
+on their first read after upgrading and refill normally.
 
 #### `mget<T>()`
 

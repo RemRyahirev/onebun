@@ -92,6 +92,25 @@ export class RedisCache implements CacheService {
         ...optionsOrClient,
       } as Required<RedisCacheOptions>;
       this.useShared = optionsOrClient.useSharedClient ?? false;
+
+      // Rejected rather than composed or ignored. The client is the sole owner of the prefix —
+      // it applies one on every command, prefixes the patterns `clear()` and `getStats()` scope
+      // themselves with, and strips it back off results. A cache prefix on top would give the
+      // keyspace two owners that do not know about each other, which is what produced
+      // `myapp:cache:myapp:cache:user:1` before.
+      //
+      // In shared mode the prefix belongs to the provider, so a cache-level one has nowhere to
+      // go. It used to be dropped in silence: keys landed under the shared prefix alone, and the
+      // dashboards, `KEYS` scans and migration scripts written against the configured name found
+      // nothing.
+      if (this.useShared && (optionsOrClient.keyPrefix ?? '').length > 0) {
+        throw new Error(
+          'RedisCache: keyPrefix cannot be set alongside useSharedClient. The shared client owns '
+          + 'the keyspace prefix, so a cache-level one would be silently ignored. Configure it on '
+          + "the provider instead — SharedRedisProvider.configure({ keyPrefix: '…' }) — or drop "
+          + 'useSharedClient to give this cache its own client and its own prefix.',
+        );
+      }
     }
   }
 

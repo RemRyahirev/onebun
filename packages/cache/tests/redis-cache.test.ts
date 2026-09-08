@@ -301,6 +301,33 @@ describe('RedisCache', () => {
       await expect(own.get('k')).rejects.toThrow(/not usable/);
     }, TEST_TIMEOUT_MS);
 
+    it('heals or throws on EVERY operation, not just get()', async () => {
+      // `ensureClient()` is called from get, set, delete, has, clear, mget, mset and getStats.
+      // Only `get()` was pinned, so reverting any of the other seven to the old
+      // `if (!this.client) throw` left the suite green — the silent regression the guard exists
+      // to prevent. Each is driven against a closed client and must REPORT, never answer as
+      // though the cache were merely empty.
+      const own = createRedisCache({
+        host: redis.host,
+        port: redis.port,
+        keyPrefix: 'unusable-all:',
+      });
+      await own.connect();
+      await own.set('k', 'v');
+      await own.close();
+
+      await expect(own.set('k', 'v2')).rejects.toThrow();
+      await expect(own.delete('k')).rejects.toThrow();
+      await expect(own.has('k')).rejects.toThrow();
+      await expect(own.mset([{ key: 'a', value: 1 }])).rejects.toThrow();
+      await expect(own.clear()).rejects.toThrow();
+      await expect(own.getStats()).rejects.toThrow();
+
+      // mget is the one that used to answer "every key absent" — a batch read against a dead
+      // connection reported all misses and skewed the hit rate on its way past.
+      await expect(own.mget(['k', 'other'])).rejects.toThrow();
+    }, TEST_TIMEOUT_MS);
+
     it('still reports a genuine absent key as undefined', async () => {
       // The distinction the throw exists to preserve: a missing key is still a miss.
       expect(await cache.get('definitely-not-set')).toBeUndefined();
@@ -365,5 +392,111 @@ describe('RedisCache', () => {
         await raw.disconnect();
       }
     }, 30_000);
+  });
+});
+
+/**
+ * Where the keys actually land.
+ *
+ * Every assertion here reads the raw keyspace through a SECOND client configured with
+ * `keyPrefix: ''`. Going through the cache's own `get()` proves nothing: it prefixes on write
+ * and on read symmetrically, so it round-trips under a single prefix, a doubled one, or none.
+ * That symmetry is why `myapp:cache:myapp:cache:user:1` shipped.
+ */
+describe('RedisCache key placement on the wire', () => {
+  let redis: TestContainer;
+
+  beforeAll(async () => {
+    redis = await createRedisContainer();
+  });
+
+  afterAll(async () => {
+    await redis.stop();
+  });
+
+  /** A client that adds nothing, so `keys('*')` returns the literal keyspace. */
+  async function rawClient() {
+    const raw = createRedisClient({
+      url: `redis://${redis.host}:${redis.port}`,
+      keyPrefix: '',
+    });
+    await raw.connect();
+
+    return raw;
+  }
+
+  it('applies a standalone prefix exactly once', async () => {
+    const cache = createRedisCache({
+      host: redis.host,
+      port: redis.port,
+      keyPrefix: 'placement:standalone:',
+    });
+    await cache.connect();
+
+    try {
+      await cache.set('user:1', { id: 1 });
+
+      const raw = await rawClient();
+      try {
+        const keys = await raw.keys('placement:standalone:*');
+
+        // Once. This used to be `placement:standalone:placement:standalone:user:1`, because the
+        // cache prefixed on top of a client that was already prefixing.
+        expect(keys).toEqual(['placement:standalone:user:1']);
+      } finally {
+        await raw.del('placement:standalone:user:1');
+        await raw.disconnect();
+      }
+    } finally {
+      await cache.close();
+    }
+  });
+
+  it('refuses a cache prefix in shared mode instead of dropping it', async () => {
+    // It used to be discarded without a word: keys landed under the shared client's prefix
+    // alone, and anything written against the configured name — a dashboard, a KEYS scan, a
+    // migration script — found nothing.
+    expect(() => createRedisCache({ useSharedClient: true, keyPrefix: 'myapp:cache:' }))
+      .toThrow(/keyPrefix cannot be set alongside useSharedClient/);
+  });
+
+  it('names the provider as the place to configure it', async () => {
+    // A refusal that does not say what to do instead just moves the confusion.
+    expect(() => createRedisCache({ useSharedClient: true, keyPrefix: 'x:' }))
+      .toThrow(/SharedRedisProvider\.configure/);
+  });
+
+  it('accepts shared mode without a cache prefix', async () => {
+    expect(() => createRedisCache({ useSharedClient: true })).not.toThrow();
+    expect(() => createRedisCache({ useSharedClient: true, keyPrefix: '' })).not.toThrow();
+  });
+
+  it('lets an injected client own the prefix, with no second one possible', async () => {
+    // The third mode. A `keyPrefix` cannot be supplied alongside a client at all — the
+    // constructor takes options OR a client — so there is no silent variant to get wrong.
+    const injected = createRedisClient({
+      url: `redis://${redis.host}:${redis.port}`,
+      keyPrefix: 'placement:injected:',
+    });
+    await injected.connect();
+
+    const cache = new RedisCache(injected);
+
+    try {
+      await cache.set('user:2', { id: 2 });
+
+      const raw = await rawClient();
+      try {
+        const keys = await raw.keys('placement:injected:*');
+
+        expect(keys).toEqual(['placement:injected:user:2']);
+      } finally {
+        await raw.del('placement:injected:user:2');
+        await raw.disconnect();
+      }
+    } finally {
+      await cache.close();
+      await injected.disconnect();
+    }
   });
 });
