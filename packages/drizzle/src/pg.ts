@@ -5,6 +5,12 @@
  * ```typescript
  * import { pgTable, text, integer, timestamp, uuid } from '@onebun/drizzle/pg';
  * ```
+ *
+ * A bare re-export: this package adds no column types of its own. The one behaviour it does add
+ * on the PostgreSQL path is the `json`/`jsonb` encoding fix, which lives in the encoders rather
+ * than in a column type so it covers `drizzle-orm/pg-core` imports too.
+ *
+ * @see docs:api/drizzle.md
  */
 
 // Table and schema builders

@@ -272,6 +272,18 @@ See `tests/integration/` for complete examples including:
 - Controller endpoints
 - Integration tests
 
+## JSON and JSONB columns (PostgreSQL)
+
+`json`/`jsonb` values round-trip as values, not as JSON strings: `@>` matches, `jsonb_array_length`
+works, and `jsonb_typeof` answers with the real type. `sql.placeholder()` on such a column works
+through `.prepare()` as well.
+
+Versions up to 0.5.0 stored every one of them double-encoded, as a jsonb string. Existing rows are
+not migrated automatically — see
+[JSON and JSONB columns](../../docs/api/drizzle.md#json-and-jsonb-columns) and
+[Repairing double-encoded JSON](../../docs/api/drizzle.md#repairing-double-encoded-json), and run
+the repair **before** deploying this version.
+
 ## Environment Variables
 
 ```bash

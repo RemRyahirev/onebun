@@ -21,9 +21,11 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
   beforeEach,
   afterEach,
 } from 'bun:test';
+import { drizzle as drizzleBunSql } from 'drizzle-orm/bun-sql';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
 import type { PostgreSQLConnectionOptions } from '../src/types';
@@ -56,12 +58,16 @@ import {
   sql,
 } from '../src';
 import {
+  json,
+  jsonb,
   pgTable,
   text as pgText,
   integer as pgInteger,
+  serial,
   timestamp,
   uuid as pgUuid,
 } from '../src/pg';
+import { applyBunSqlJsonEncodingFix } from '../src/pg-json-encoding';
 import {
   sqliteTable,
   text,
@@ -2388,5 +2394,119 @@ describe('Reaching a registration from outside the tree (docs/api/drizzle.md)', 
     expect(app.getLayer()).toBeDefined();
 
     await app.stop();
+  });
+});
+
+
+describe('JSON and JSONB columns (docs)', () => {
+  const events = pgTable('events', {
+    id: serial('id').primaryKey(),
+    payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+    raw: json('raw'),
+  });
+
+  /** A stub Bun SQL client: records what it was asked to run, answers no rows. */
+  function stubClient(): { client: unknown; calls: Array<{ query: string; params: unknown[] }> } {
+    const calls: Array<{ query: string; params: unknown[] }> = [];
+
+    const client = {
+      unsafe(query: string, params: unknown[]) {
+        calls.push({ query, params });
+
+        const thenable = Promise.resolve([] as unknown[]) as Promise<unknown[]> & {
+          values(): Promise<unknown[]>;
+        };
+        thenable.values = () => Promise.resolve([]);
+
+        return thenable;
+      },
+    };
+
+    return { client, calls };
+  }
+
+  beforeAll(() => {
+    // What `DrizzleService.initialize()` does on the PostgreSQL branch before building the driver.
+    applyBunSqlJsonEncodingFix();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#json-and-jsonb-columns
+   */
+  it('should round-trip objects, arrays and scalars as values, not as JSON strings', async () => {
+    // From docs: "Objects, arrays and scalars all round-trip as values, not as JSON strings"
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+
+    await db.insert(events).values({ payload: { kind: 'signup', tags: ['beta'] } });
+
+    expect(calls[0].query).toContain('$1::text::jsonb');
+    expect(calls[0].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#prepared-statements-and-placeholders
+   */
+  it('should round-trip sql.placeholder() through prepare(), including an explicit null', async () => {
+    // From docs: one prepared statement, executed any number of times with different payloads
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+
+    const insert = db.insert(events)
+      .values({ payload: sql.placeholder('payload') })
+      .prepare('insert_event');
+
+    await insert.execute({ payload: { kind: 'signup', tags: ['beta'] } });
+    await insert.execute({ payload: null });
+
+    expect(calls[0].query).toContain('$1::text::jsonb');
+    expect(calls[0].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+
+    // The cast is added to the statement text once, however many times it runs...
+    expect(calls[1].query).toBe(calls[0].query);
+    // ...and an explicit null binds SQL NULL, not the JSON text `null`.
+    expect(calls[1].params).toEqual([null]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#raw-sql-bypasses-this
+   */
+  it('should require an explicit double cast on raw SQL, which bypasses the column encoder', async () => {
+    // From docs: "The fix lives in the column encoders, so anything that does not go through a
+    // column does not get it"
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+    const payload = { kind: 'signup', tags: ['beta'] };
+
+    // WRONG — stores a jsonb string: no cast, and Bun JSON-encodes the object it is handed.
+    await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+    expect(calls[0].query).not.toContain('::text::jsonb');
+    expect(calls[0].params).toEqual([payload]);
+
+    // RIGHT — the double cast is what forces the value to be bound verbatim.
+    await db.execute(
+      sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`,
+    );
+    expect(calls[1].query).toContain('$1::text::jsonb');
+    expect(calls[1].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#repairing-double-encoded-json
+   */
+  it('should document the repair with its guard, and read an unrepaired row back as a string', () => {
+    // The guard is load-bearing: without it the same statement tries to parse every string scalar
+    // and the first non-JSON one fails the whole repair. Asserted against the page itself so the
+    // published snippet cannot drift away from that form.
+    const page = readFileSync(join(__dirname, '../../../docs/api/drizzle.md'), 'utf-8');
+
+    expect(page).toMatch(
+      /UPDATE t SET c = \(c #>> '\{\}'\)::jsonb\s*\n\s*WHERE jsonb_typeof\(c\) = 'string' AND \(c #>> '\{\}'\) ~ '\^\\s\*\[\\\[\{\]';/,
+    );
+
+    // From docs: "After it, mapFromDriverValue is identity: an unrepaired row reads back as the
+    // string it is on disk" — which is why the repair runs before the upgrade, not after.
+    expect(events.payload.mapFromDriverValue('{"kind":"signup"}')).toBe('{"kind":"signup"}');
+    expect(events.payload.mapFromDriverValue({ kind: 'signup' })).toEqual({ kind: 'signup' });
   });
 });

@@ -404,6 +404,52 @@ returns **zero rows with no error**. A silent empty result is worse than a crash
 filter did not run. Pass a `Date` (drizzle serializes it to ms) or, if you must stay in SQL,
 `unixepoch('now', '-7 days') * 1000`.
 
+## JSON and JSONB Columns (PostgreSQL)
+
+`json`/`jsonb` values round-trip as values, not as JSON strings — so `@>`, `->`, `jsonb_array_length`
+and `jsonb_typeof` all work on what was written:
+
+```typescript
+import { pgTable, serial, jsonb } from '@onebun/drizzle/pg';
+
+export const events = pgTable('events', {
+  id: serial('id').primaryKey(),
+  payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+});
+```
+
+The same holds for `sql.placeholder()`: a json column
+round-trips through .prepare() on both .values() and .set(),
+and an explicit `null` binds SQL NULL rather than the JSON text `null`.
+
+**Raw SQL bypasses it.** The fix lives in the column encoders, so `db.execute(sql`...`)` and the raw
+`$client` do not get it — there you must cast as $n::text::jsonb yourself, and hand it a
+pre-stringified value:
+
+<!-- typecheck: skip -->
+```typescript
+// WRONG — stores a jsonb string
+await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+
+// RIGHT
+await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+```
+
+On the Bun SQL driver a plain ::jsonb cast is a verified no-op — measured against
+`postgres:16-alpine`, `$1::jsonb` on a pre-stringified value still stores `jsonb_typeof='string'`.
+Only the double cast forces the parameter to be inferred as text and bound verbatim.
+
+**Rows written by OneBun ≤ 0.5.0 are double-encoded** and are not migrated automatically. Repair
+them *before* deploying, because the read path no longer compensates:
+
+```sql
+UPDATE t SET c = (c #>> '{}')::jsonb
+WHERE jsonb_typeof(c) = 'string' AND (c #>> '{}') ~ '^\s*[\[{]';
+```
+
+The `~ '^\s*[\[{]'` guard is not optional: without it the statement tries to parse every string
+scalar and the first non-JSON one fails the whole repair.
+
 ## Migration Commands
 
 ```bash

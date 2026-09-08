@@ -343,6 +343,108 @@ export const users = pgTable('users', {
 });
 ```
 
+### JSON and JSONB columns
+
+Declared as usual, and stored as what they are:
+
+```typescript
+import { pgTable, serial, jsonb, json } from '@onebun/drizzle/pg';
+
+export const events = pgTable('events', {
+  id: serial('id').primaryKey(),
+  payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+  raw: json('raw'),
+});
+```
+
+Objects, arrays and scalars all round-trip as **values**, not as JSON strings, so the SQL side works:
+
+```sql
+SELECT * FROM events WHERE payload @> '{"kind":"signup"}';
+SELECT jsonb_array_length(payload -> 'tags') FROM events;
+```
+
+`jsonb[]` columns (`jsonb('tags').array()`) round-trip too, and always did.
+
+::: danger Versions up to 0.5.0 stored double-encoded values
+Every value written to a `json`/`jsonb` column through `DrizzleService` was stored as a jsonb
+**string**: `jsonb_typeof` returned `'string'`, `@>` matched nothing, `jsonb_array_length` failed
+with `cannot get array length of a scalar`.
+
+It was invisible from the application that wrote it, because the read path decoded twice — so a
+round trip through the ORM looked correct while every SQL operator, every other service and every
+report saw a string. Existing rows are **not** migrated automatically; see
+[Repairing double-encoded JSON](#repairing-double-encoded-json), and run it **before** deploying
+this version, because the read path no longer compensates.
+:::
+
+#### Prepared statements and placeholders
+
+`sql.placeholder()` on a json/jsonb column round-trips through `.prepare()`, on both `.values()`
+and `.set()`:
+
+```typescript
+const insert = db.insert(events)
+  .values({ payload: sql.placeholder('payload') })
+  .prepare('insert_event');
+
+await insert.execute({ payload: { kind: 'signup', tags: ['beta'] } });
+await insert.execute({ payload: null });   // SQL NULL, not the JSON text `null`
+```
+
+One prepared statement can be executed any number of times with different payloads; the cast is
+added to its text once.
+
+#### Raw SQL bypasses this
+
+The fix lives in the column encoders, so anything that does not go through a column does not get
+it — ``db.execute(sql`...`)`` and the raw `$client`:
+
+```typescript
+// WRONG — stores a jsonb string
+await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+
+// RIGHT — the double cast is what forces the value to be bound verbatim
+await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+```
+
+A plain `::jsonb` is **not** enough — measured against `postgres:16-alpine`, `$1::jsonb` on a
+pre-stringified value still stores `jsonb_typeof='string'`. Only `::text::jsonb` works.
+
+### Repairing double-encoded JSON
+
+Rows written by an earlier version hold a jsonb string. Repair them **before** deploying, with the
+guard:
+
+```sql
+UPDATE t SET c = (c #>> '{}')::jsonb
+WHERE jsonb_typeof(c) = 'string' AND (c #>> '{}') ~ '^\s*[\[{]';
+```
+
+The guard is not optional. Without `~ '^\s*[\[{]'` the same statement tries to parse every string
+scalar and fails on the first one that is not JSON — `invalid input syntax for type json` — taking
+the whole repair with it. It is a heuristic for the same reason: a legitimately stored jsonb string
+whose content happens to look like JSON is indistinguishable from a double-encoded row, and this
+one deliberately errs toward leaving values alone.
+
+Run it before the upgrade, not after: from this version on `mapFromDriverValue` is identity, so an
+unrepaired row reads back as the **string** it is on disk, while `createSelectSchema` still types a
+`$type<T>()` column as `T`.
+
+<llm-only>
+
+**Technical details for AI agents — json/jsonb encoding:**
+- The fix is `applyBunSqlJsonEncodingFix()` in `packages/drizzle/src/pg-json-encoding.ts`, applied from the `POSTGRESQL` branch of `DrizzleService.initialize()` before `drizzlePostgres(connectionUrl)`. Idempotent
+- It patches TWO drizzle-orm internals, neither covered by that package's semver contract, pinned to **0.44.7**: (1) `PgJsonb`/`PgJson`/`PgArray.prototype.mapToDriverValue`, (2) `BunSQLPreparedQuery.prototype.execute`/`.all`
+- Non-placeholder writes: the encoder returns `` sql`${JSON.stringify(value)}::text::jsonb` ``, which `buildQueryFromSourceParams` inlines because it unwraps an `SQL` result. `mapFromDriverValue` is identity — Bun has already decoded the column, and re-parsing would corrupt a legitimately stored jsonb string scalar
+- Inside `PgArray` the encoder returns a plain string instead, tracked by an `arrayDepth` counter: `makePgArray` string-concatenates the base encoder's result, so an `SQL` chunk there renders `{[object Object]}`
+- Placeholder writes cannot take an `SQL` chunk: `fillPlaceholders` pushes the encoder's result straight into the params array and has NO `is(x, SQL)` unwrap — that exists only in `buildQueryFromSourceParams`. So a process-global `placeholderMode` flag makes the encoder return a plain string, and the `$N` token is rewritten to `$N::text::jsonb` in the prepared statement's text, once per instance
+- `fillPlaceholders` also has no null guard, unlike the value path, so the encoder returns `null` for `null` to keep SQL NULL on both paths
+- The `placeholderMode` window is safe only because it contains no `await`: `execute` awaits nothing before `tracer.startActiveSpan`, that helper invokes its callback synchronously, and `fillPlaceholders` is its first statement. The wrapper therefore captures the delegated promise INSIDE the `try` and lets the caller await it AFTER the `finally` — `return await original.call(...)` inside the try would hold the flag across the whole round trip and silently re-corrupt a concurrent non-placeholder write
+- `packages/drizzle/tests/drizzle-orm-shape.test.ts` pins every one of those structural assumptions and fails naming the fix file; `package.json` declares `^0.44.7`, a caret, so a minor bump can land without a code change
+
+</llm-only>
+
 ### Relations
 
 ```typescript

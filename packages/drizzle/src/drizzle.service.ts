@@ -44,6 +44,7 @@ import {
   UniversalTransactionClient,
 } from './builders';
 import { createGatedDatabase, SQLiteTransactionGate } from './builders/transaction-gate';
+import { applyBunSqlJsonEncodingFix } from './pg-json-encoding';
 import {
   type DatabaseConnectionOptions,
   type DatabaseInstance,
@@ -1203,6 +1204,12 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
 
       // Either shape: a connectionString is used as given, discrete fields are assembled.
       const connectionUrl = resolvePostgreSQLUrl(pgOptions);
+
+      // Before the driver exists, because it patches prototypes the driver will use. Without
+      // it every json/jsonb value written through this service is stored as a jsonb STRING —
+      // invisible to the application that wrote it, and broken for every SQL operator, every
+      // other service and every report. See the file for the measurements.
+      applyBunSqlJsonEncodingFix();
 
       // Use Bun.SQL - recommended way according to Drizzle docs
       // Pass connection string directly to drizzle()
