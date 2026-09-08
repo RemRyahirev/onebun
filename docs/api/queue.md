@@ -1249,7 +1249,17 @@ await adapter.deleteDurableConsumer('orders.created', 'order-processors');
 // false — there was no such consumer; safe to call twice
 ```
 
-It resolves the stream strictly: if no declared stream binds the pattern it throws and names every stream the application declares, rather than falling back to the first one. On a destructive call a mistyped pattern must not delete a consumer on an unrelated stream. A permissions denial is rethrown as itself — only a genuine consumer-not-found produces `false`.
+It resolves the stream strictly: if no declared stream binds the pattern — or if more than one does — it throws and names every stream the application declares, rather than falling back to the first one. On a destructive call a mistyped pattern must not delete a consumer on an unrelated stream. A permissions denial is rethrown as itself — only a genuine consumer-not-found produces `false`.
+
+**In teardown, use `tryDeleteDurableConsumer()`.** The strictness above is right for a call you make on purpose and wrong for one an `afterEach` makes unconditionally: on an adapter that never connected, after a case failed before `connect()`, or on a pattern nothing binds, the strict form throws — and a throw in teardown **replaces** the assertion failure in the output. The real breakage disappears behind a JetStream error from the cleanup.
+
+```typescript
+afterEach(async () => {
+  await adapter.tryDeleteDurableConsumer('orders.created', 'order-processors');
+});
+```
+
+It never throws. Not connected is a quiet `false` — nothing was attempted, so reporting it would make every clean teardown noisy. Anything else that goes wrong, including a permissions denial or an unbound pattern, is a `false` plus an `onError` event: swallowed for the caller, not for a listener. It calls the strict form, so the two cannot drift.
 
 Subscribing again with the same `(pattern, group)` after a delete creates a fresh durable under the same name. Fresh means fresh: a new consumer carries `deliver_policy: new`, so it starts from the moment it is created and does not replay what the stream still holds. Deleting a durable therefore discards its position permanently — that is the cost, and it is why `unsubscribe()` never does it for you.
 
@@ -1261,6 +1271,7 @@ Subscribing again with the same `(pattern, group)` after a delete creates a fres
 - The delete goes through `entry.consumer.delete()`, not the manager — `this.jsm` is nulled during disconnect
 - `entry.paused` is checked BEFORE `consumer.consume()`, so a paused subscription pulls nothing; the restart timer keeps re-checking so `resume()` needs no extra wiring
 - A message pulled and then dropped because the subscription paused or stopped is `nak()`ed, never left to age out of `ackWait`
+- `tryDeleteDurableConsumer(pattern, group)` is `deleteDurableConsumer` wrapped in a not-connected guard and a catch that emits `onError` and returns `false`. It adds no resolution or deletion logic of its own, deliberately — the strict path stays the only implementation
 - `deleteDurableConsumer(pattern, group)` is the ONLY code path that removes a durable. It resolves the stream through the same `resolveStreamForSubject()` that `subscribe()` uses, and must: a delete has to name exactly the stream the subscription bound to, or it cannot decommission what `subscribe()` created. It used to have a private strict twin, `requireStreamForSubject()`, byte-identical except for the no-match branch — the twin threw, the public resolver fell back to `resolvedStreams[0]`. Neither handled ambiguity: both returned whichever candidate came first. Once the public resolver refuses rather than guesses, the twin has no reason to exist, and one implementation cannot drift from itself
 - It returns `false` only for `JetStreamApiCodes.ConsumerNotFound`; every other rejection is rethrown as itself, so a permissions denial is never reported as "already gone"
 - The consumer name is derived by the same `durableConsumerName(group, toNatsSubject(pattern))` that `subscribe()` uses, so the pair that created a durable is the pair that removes it

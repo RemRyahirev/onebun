@@ -337,7 +337,7 @@ class OneBunApplication {
   getHttpUrl(): string;
 
   /** Get root module layer */
-  getLayer(): Layer.Layer<never, never, unknown>;
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown>;
 
   /** Get a service instance by class from the module container, optionally naming a registration */
   getService<T>(serviceClass: new (...args: unknown[]) => T, token?: symbol | string): T;
@@ -425,7 +425,18 @@ const main = app.getService(DrizzleService, MAIN_DB);
 
 Ask without naming one and there is no correct answer, so `app.getService(DrizzleService)` throws rather than choosing. The instance it would otherwise return depends on the order the modules were imported in, which is not something your code should depend on.
 
-**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last. There is no supported way to build a single layer holding two instances of one service class; reach a specific instance with `getService(Class, token)` or `@Inject(token)`.
+**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last.
+
+**Say which instance takes the slot.** `getLayer()` accepts `[ServiceClass, token]` pairs, the layer counterpart of `getService(Class, token)`:
+
+<!-- typecheck: skip -->
+```typescript
+const layer = app.getLayer([[MailerService, PRIMARY_MAILER]]);
+
+await Effect.runPromise(Effect.provide(program, layer));
+```
+
+`ServiceSelection` is the `[ServiceClass, token]` pair type. The layer still holds one instance per class — that is a property of `Context`, not a choice — but which one is yours to state rather than a function of module import order. Every ambiguous class must be named; leaving one out still refuses, and the message names only what is still unresolved. Naming an unambiguous class is allowed and simply pins what was already going to be there. To reach a single instance without building a layer at all, `getService(Class, token)` or `@Inject(token)`.
 
 **Two service classes with the same name.** Two classes called `CacheService` from different packages are separate services to the framework, and injection resolves each of them correctly. They mint the same tag key, so they cannot both appear in a layer. If your application needs both in one layer, give one an explicit tag:
 
@@ -445,7 +456,8 @@ The convention the framework packages follow is `@scope/package/ClassName`.
 <llm-only>
 **Technical details for AI agents:**
 - `@Service()` mints `Context.GenericTag(target.name)` — one tag OBJECT per class, and `tag.key` is the bare class name. Effect keys `Context`/`Layer` by `tag.key`; OneBun's own maps (`serviceInstances`, `GlobalScope.services`, overrides) are keyed by the tag OBJECT, which is why injection is unaffected by a name collision
-- `getService(Class)` and `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- `getService(Class)` and untokened `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration — and so is `getLayer(selections)` for every class the selections name; a class left unnamed still throws, and the message lists only the unresolved ones. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- `getLayer(selections)` builds the module layer and merges `Layer.succeed(tag, instance)` per selection ON TOP. Last-merged wins for a shared tag in Effect — the same rule that makes the untokened form ambiguous is what lets a selection resolve it
 - The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT. Keyed by name, two same-named provider classes made boot depend on the order of the `providers` array
 - The framework's own tag keys `LoggerService`, `ConfigService`, `QueueService` and `SharedRedisService` are NOT namespaced, so a user service with one of those names shares their key. It reaches nothing at runtime — the framework reads its logger from its own layer, never from `rootLayer` — but it does make `getLayer()` ambiguous
 </llm-only>
@@ -668,7 +680,7 @@ class OneBunModule implements Module {
   getControllers(): Function[];
   getControllerInstance(controllerClass: Function): Controller | undefined;
   getServiceInstance<T>(tag: Context.Tag<T, T>): T | undefined;
-  getLayer(): Layer.Layer<never, never, unknown>;
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown>;
   getExportedServices(): Map<Context.Tag<unknown, unknown>, unknown>;
 }
 ```

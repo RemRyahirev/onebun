@@ -22,6 +22,7 @@ import {
   it,
   expect,
 } from 'bun:test';
+import { Effect, type Layer } from 'effect';
 
 import type {
   WsClientData,
@@ -60,6 +61,7 @@ import type {
   ApplicationOptions,
 } from '@onebun/core';
 import { type } from '@onebun/core';
+
 
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
@@ -182,6 +184,8 @@ import {
   Optional,
   CircularDependencyError,
   DependencyResolutionError,
+  registerModule,
+  resetRegistrations,
 } from './';
 
 
@@ -9340,6 +9344,8 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
  */
 describe('Service identity (docs/api/core.md)', () => {
   const appOptions = { port: 0, metrics: { enabled: false }, gracefulShutdown: false } as const;
+  const FIRST_WIDGET = Symbol('first-widget');
+  const SECOND_WIDGET = Symbol('second-widget');
 
   it('refuses getService(Class) and getLayer() when one class has two instances', async () => {
     @Service()
@@ -9365,6 +9371,51 @@ describe('Service identity (docs/api/core.md)', () => {
       expect(() => app.getLayer()).toThrow(/one slot per service class/);
     } finally {
       await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/core.md#service-identity
+   */
+  it('builds the layer once the caller names which instance takes the slot', async () => {
+    // From docs: "getLayer() accepts [ServiceClass, token] pairs, the layer counterpart of
+    // getService(Class, token)" — the refusal above is a question, not a dead end.
+    @Service()
+    class Widget extends BaseService {
+      marker = 'unset';
+    }
+
+    const first = registerModule(class FirstBase {}, { id: 'first' }, FIRST_WIDGET, [Widget]);
+    const second = registerModule(class SecondBase {}, { id: 'second' }, SECOND_WIDGET, [Widget]);
+
+    @Module({ imports: [second] })
+    class FeatureModule {}
+
+    @Module({ imports: [first, FeatureModule] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      app.getService(Widget, FIRST_WIDGET).marker = 'first';
+      app.getService(Widget, SECOND_WIDGET).marker = 'second';
+
+      const provided = Effect.runSync(
+        Effect.provide(
+          getServiceTag(Widget),
+          app.getLayer([[Widget, SECOND_WIDGET]]) as unknown as Layer.Layer<never, never, never>,
+        ) as unknown as Effect.Effect<{ marker: string }, never, never>,
+      );
+
+      // Not "whichever was merged last": the selection decides.
+      expect(provided.marker).toBe('second');
+      // And an unnamed ambiguity is still refused.
+      expect(() => app.getLayer()).toThrow(/one slot per service class/);
+    } finally {
+      await app.stop();
+      resetRegistrations();
     }
   });
 

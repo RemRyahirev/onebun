@@ -19,6 +19,7 @@ import {
   expect,
   test,
 } from 'bun:test';
+import { Effect, type Layer } from 'effect';
 
 import { OneBunApplication } from '../application/application';
 import { Module } from '../decorators/decorators';
@@ -28,7 +29,11 @@ import {
   resetRegistrations,
   selectRegistration,
 } from './registration';
-import { BaseService, Service } from './service';
+import {
+  BaseService,
+  getServiceTag,
+  Service,
+} from './service';
 
 const appOptions = { port: 0, metrics: { enabled: false }, gracefulShutdown: false } as const;
 
@@ -152,6 +157,94 @@ describe('ambiguous untokened accessors', () => {
       // A Context has one slot per key. The layer used to carry whichever instance was
       // merged last, which is a deterministic function of import order and nothing else.
       expect(() => app.getLayer()).toThrow(/one slot per service class/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('getLayer([[Class, token]]) names the instance and resolves the refusal', async () => {
+    const [repo, primary, replica] = makeRegistrations();
+
+    @Module({ imports: [replica] })
+    class FeatureModule {}
+
+    @Module({ imports: [primary, FeatureModule] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      // Distinguish the two instances by something the layer can be read for.
+      app.getService(repo, token('primary')).marker = 'primary';
+      app.getService(repo, token('replica')).marker = 'replica';
+
+      const read = (layer: Layer.Layer<never, never, unknown>): string => Effect.runSync(
+        Effect.provide(
+          getServiceTag(repo),
+          layer as unknown as Layer.Layer<never, never, never>,
+        ) as unknown as Effect.Effect<{ marker: string }, never, never>,
+      ).marker;
+
+      // Not "whichever was merged last" — the caller says which, and gets that one.
+      expect(read(app.getLayer([[repo, token('replica')]]))).toBe('replica');
+      expect(read(app.getLayer([[repo, token('primary')]]))).toBe('primary');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('a selection that does not name every ambiguous class still refuses, naming what is left', async () => {
+    const [repo, primary, replica] = makeRegistrations();
+    const other = makePair('other');
+
+    @Module({ providers: [other[0], other[1]], exports: [other[0]] })
+    class ModuleA {}
+
+    @Module({ providers: [other[0], other[1]], exports: [other[0]] })
+    class ModuleB {}
+
+    @Module({ imports: [replica, ModuleA] })
+    class FeatureModule {}
+
+    @Module({ imports: [primary, FeatureModule, ModuleB] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      let message = '';
+      try {
+        app.getLayer([[repo, token('primary')]]);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      // The one still unresolved is named; the one the caller already answered is not, or the
+      // message would send them to fix something they had just fixed.
+      expect(message).toContain('Shared');
+      expect(message).not.toContain('Repo');
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('selecting an unambiguous class is allowed and pins what was already there', async () => {
+    const [shared, consumer] = makePair('only');
+    const registration = registerModule(class OnlyBase {}, { id: 'only' }, token('only'), [shared]);
+
+    @Module({ imports: [registration], providers: [consumer] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions);
+
+    try {
+      await app.start();
+
+      expect(app.getLayer([[shared, token('only')]])).toBeDefined();
     } finally {
       await app.stop();
     }

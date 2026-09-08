@@ -338,26 +338,29 @@ explicitly:
 
 ```typescript
 afterEach(async () => {
-  // `deleteDurableConsumer` is JetStream-only, so it is not on the QueueAdapter interface.
-  // It THROWS when the adapter is not connected or when no declared stream binds the pattern,
-  // so guard it — an unguarded throw here replaces the real assertion failure of the test.
-  try {
-    await adapter.deleteDurableConsumer('orders.created', 'test-workers');  // false if already gone
-  } catch {
-    // teardown must not mask the case's own failure
-  }
+  // The teardown form. JetStream-only, so not on the QueueAdapter interface. Never throws:
+  // not-connected is a quiet `false`, anything else is `false` plus an `onError` event.
+  await adapter.tryDeleteDurableConsumer('orders.created', 'test-workers');
 
   await adapter.disconnect();
 });
 ```
 
-Only a genuine `ConsumerNotFound` yields `false`; everything else propagates. `deleteDurableConsumer()`
-starts with `ensureConnected()` (throws `JetStreamQueueAdapter not connected. Call connect() first.`)
-and then resolves the stream through the same `resolveStreamForSubject()` that `subscribe()` uses —
-a delete must name exactly the stream the subscription bound to, or it cannot decommission what
-`subscribe()` created. It throws and lists every declared stream rather than guessing, on BOTH the
-no-match case and the two-candidates case: on a destructive call a mistyped pattern would otherwise
-delete a consumer on an unrelated stream. A permissions denial is rethrown as itself.
+**Use `tryDeleteDurableConsumer` in teardown and `deleteDurableConsumer` everywhere else.** The strict form
+is right for a call made on purpose and wrong for one an `afterEach` makes unconditionally: it opens with
+`ensureConnected()` (throws `JetStreamQueueAdapter not connected. Call connect() first.`) and resolves the
+stream strictly, so on an adapter that never connected — or after a case failed before `connect()` — it
+throws, and **a throw in `afterEach` replaces the assertion failure in the output**. The real breakage
+disappears behind a JetStream error from the cleanup. A hand-rolled `try/catch` around it works but
+swallows a permissions denial silently; the teardown form reports through `onError` instead.
+
+The strict form resolves through the same `resolveStreamForSubject()` that `subscribe()` uses — a delete
+must name exactly the stream the subscription bound to, or it cannot decommission what `subscribe()`
+created. It throws and lists every declared stream rather than guessing, on BOTH the no-match case and the
+two-candidates case: on a destructive call a mistyped pattern would otherwise delete a consumer on an
+unrelated stream. Only a genuine `ConsumerNotFound` yields `false`; a permissions denial is rethrown as
+itself. `tryDeleteDurableConsumer` calls it and adds nothing but the guard and the catch, so the two cannot
+drift.
 That is exactly the shape that bites in an `afterEach` after a failed case, where the adapter may
 never have connected.
 

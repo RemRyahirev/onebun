@@ -1274,6 +1274,43 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    *
    * @see docs:api/queue.md
    */
+  /**
+   * `deleteDurableConsumer` for teardown: best effort, and never throws.
+   *
+   * The strict form is right for the call an operator makes on purpose and wrong for the one an
+   * `afterEach` makes unconditionally. It opens with `ensureConnected()` and resolves the stream
+   * strictly, so on an adapter that never connected — or after a case failed before `connect()`,
+   * or after `disconnect()` — it throws, and that throw REPLACES the assertion failure in the
+   * test output. The real breakage disappears behind a JetStream error from the cleanup.
+   *
+   * So this one swallows, and reports through `onError` rather than silently: a teardown wants no
+   * exception, but a permissions denial or a mistyped pattern is still worth knowing about, and a
+   * listener can see it without the process dying. Nothing about the strict path changes — this
+   * calls it, so the two cannot drift.
+   *
+   * @param pattern - The subscription pattern the consumer was created for.
+   * @param group - The `group` the subscription declared.
+   * @returns `true` when a consumer was removed; `false` when there was nothing to remove, the
+   *   adapter is not connected, or the attempt failed.
+   *
+   * @see docs:api/queue.md
+   */
+  async tryDeleteDurableConsumer(pattern: string, group: string): Promise<boolean> {
+    // Not an error: an adapter that never connected has no consumer to remove, and saying so
+    // through `onError` would make every clean teardown noisy.
+    if (!this.isConnected()) {
+      return false;
+    }
+
+    try {
+      return await this.deleteDurableConsumer(pattern, group);
+    } catch (error) {
+      this.emit('onError', error as Error);
+
+      return false;
+    }
+  }
+
   async deleteDurableConsumer(pattern: string, group: string): Promise<boolean> {
     this.ensureConnected();
 

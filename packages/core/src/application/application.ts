@@ -4,7 +4,7 @@ import { trace as otelTrace } from '@opentelemetry/api';
 import {
   type Context,
   Effect,
-  type Layer,
+  Layer,
 } from 'effect';
 
 import type { Controller } from '../module/controller';
@@ -69,6 +69,7 @@ import {
   OneBunModule,
 } from '../module/module';
 import { assertRegistrationsConfigured } from '../module/registration';
+import { getServiceTag } from '../module/service';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -389,6 +390,21 @@ const DEFAULT_STATIC_FILE_EXISTENCE_CACHE_TTL_MS = 60_000;
 
 /** Cache key prefix for static file existence in CacheService */
 const STATIC_EXISTS_CACHE_PREFIX = 'onebun:static:exists:';
+
+/**
+ * One `[ServiceClass, token]` pair for {@link OneBunApplication.getLayer}.
+ *
+ * A `Context` has one slot per service class, so an application holding two instances of one
+ * class cannot be represented without saying which one takes the slot. This is how it is said —
+ * the layer counterpart of `getService(Class, token)`.
+ *
+ * @see docs:api/core.md
+ */
+export type ServiceSelection = readonly [
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  serviceClass: new (...args: any[]) => unknown,
+  token: symbol | string,
+];
 
 /**
  * Fallbacks for the OTLP `service.*` resource attributes. Deliberately the same strings
@@ -826,13 +842,48 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Get root module layer
+   * The application's services as one Effect `Layer`, for composing them into a program from
+   * outside the module tree — an Effect-native test, a script, an embedding host.
+   *
+   * A `Context` has exactly one slot per service class, so an application holding two instances
+   * of one class does not fit in one and the untokened form refuses rather than handing back
+   * whichever was merged last. `selections` is how you say which instance takes the slot — the
+   * layer counterpart of `getService(Class, token)`, and the reason the refusal is not a dead
+   * end. Every ambiguous class must be named; one left out still refuses, and names itself.
+   *
+   * Only ambiguous classes need naming. Selecting an unambiguous one is allowed and simply pins
+   * what was already going to be there.
+   *
+   * @param selections - `[ServiceClass, token]` pairs choosing an instance per class.
+   * @returns A layer providing every service the application built.
+   * @throws If the application holds two instances of a class that `selections` does not name.
+   *
+   * @example
+   * ```typescript
+   * const layer = app.getLayer([[MailerService, PRIMARY_MAILER]]);
+   * await Effect.runPromise(Effect.provide(program, layer));
+   * ```
+   *
+   * @see docs:api/core.md
    */
-  getLayer(): Layer.Layer<never, never, unknown> {
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown> {
     this.ensureSingleServiceMode('getLayer');
-    this.assertLayerUnambiguous();
 
-    return this.ensureModule().getLayer();
+    const selected = selections ?? [];
+    this.assertLayerUnambiguous(selected.map(([serviceClass]) => serviceClass.name));
+
+    // Merged last, because that is what wins for a shared tag — the same rule that makes the
+    // untokened form ambiguous in the first place is what lets a selection resolve it.
+    return selected.reduce<Layer.Layer<never, never, unknown>>(
+      (layer, [serviceClass, token]) => Layer.merge(
+        layer,
+        Layer.succeed(
+          getServiceTag(serviceClass) as unknown as Context.Tag<unknown, unknown>,
+          this.getService(serviceClass, token),
+        ) as unknown as Layer.Layer<never, never, unknown>,
+      ),
+      this.ensureModule().getLayer(),
+    );
   }
 
   /**
@@ -3515,22 +3566,33 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Refuse to hand out a layer that silently drops one of two instances.
    *
    * An Effect `Context` has exactly one slot per key, so an application with two instances of
-   * one service class does not fit in one. There is no supported way to build a layer that
-   * holds both — reach a specific instance with `getService(Class, token)`.
+   * one service class does not fit in one. A layer built without saying which instance takes the
+   * slot would carry whichever was merged last — a function of module import order.
+   *
+   * `resolved` are the classes a `getLayer(selections)` call named. Those are no longer
+   * ambiguous: the caller stated the answer. Everything else still refuses, and the message
+   * names only what is actually still unresolved, so a partial selection does not report the
+   * classes it already fixed.
    */
-  private assertLayerUnambiguous(): void {
+  private assertLayerUnambiguous(resolved: string[] = []): void {
     const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
     if (!ambiguous || ambiguous.size === 0) {
       return;
     }
 
-    const details = [...ambiguous.entries()]
+    const unresolved = [...ambiguous.entries()].filter(([key]) => !resolved.includes(key));
+    if (unresolved.length === 0) {
+      return;
+    }
+
+    const details = unresolved
       .map(([key, holders]) => `${key} (${holders.join(', ')})`)
       .join('; ');
     const error = new Error(
       'getLayer() cannot represent this application: an Effect Context has one slot per ' +
       `service class and this one holds two instances of ${details}. The layer would carry ` +
-      'whichever was merged last. Reach a specific instance with getService(Class, token) ' +
+      'whichever was merged last. Name the instance you mean — ' +
+      'getLayer([[Class, token]]) — or reach it directly with getService(Class, token) ' +
       'or @Inject(token).',
     );
     error.name = 'OneBunAmbiguousServiceError';

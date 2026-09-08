@@ -142,11 +142,15 @@ global behaviour, and `isGlobal: false` is about VISIBILITY, not about multiple 
 
 From outside the tree, `app.getService(Class, TOKEN)` is the **only** call that works once two registrations
 exist. The untokened `app.getService(Class)` and `app.getLayer()` both THROW an `Error` whose `name` is
-`OneBunAmbiguousServiceError`, naming every holder. `getLayer()` throws rather than quietly returning a
-Context because an Effect `Context` has exactly one slot per service class — the layer it built would carry
-whichever instance merged last, i.e. whatever the import order happened to be. There is no token form of
-`getLayer()` and no supported way to build a layer holding both, so **a multi-database application has no
-`getLayer()`**: reach each instance with `getService(Class, TOKEN)` or `@Inject(TOKEN)`.
+`OneBunAmbiguousServiceError`, naming every holder. Untokened `getLayer()` throws rather than quietly
+returning a Context because an Effect `Context` has exactly one slot per service class — the layer it built
+would carry whichever instance merged last, i.e. whatever the import order happened to be.
+
+**Say which one takes the slot:** `app.getLayer([[DrizzleService, ANALYTICS_DB]])`. The layer still holds one
+instance per class, because that is what a `Context` is, but which one is stated rather than inferred from
+import order. Every ambiguous class must be named; one left out still throws, and the message lists only what
+is still unresolved. To reach an instance without building a layer, `getService(Class, TOKEN)` or
+`@Inject(TOKEN)`.
 
 `CacheModule` works the same way: `forRoot({ ..., as: TOKEN })` and `forFeature(TOKEN)`.
 

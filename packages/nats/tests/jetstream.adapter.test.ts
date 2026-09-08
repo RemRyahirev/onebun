@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 433
+// NATS-SUITE-FLOOR: 439
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -4386,5 +4386,114 @@ describe('deleteDurableConsumer', () => {
 
     await expect(adapter.deleteDurableConsumer('orders.created', 'workers'))
       .rejects.toThrow('JetStreamQueueAdapter not connected');
+  });
+});
+
+/**
+ * The teardown form.
+ *
+ * The strict `deleteDurableConsumer` is right for a call an operator makes on purpose and wrong
+ * for one an `afterEach` makes unconditionally: it throws when the adapter never connected, when
+ * the pattern is unbound, and when the server refuses — and a throw in teardown REPLACES the
+ * assertion failure in the output, so the real breakage disappears behind a cleanup error.
+ */
+describe('tryDeleteDurableConsumer', () => {
+  it('lets the original failure through instead of replacing it with a teardown error', async () => {
+    // The whole point, written the way it is actually used: `runCase` is a test that failed, the
+    // `finally` is its teardown, and the broker refuses the delete. With the strict form the
+    // permissions error wins — `finally` replaces the in-flight exception — and the output names
+    // JetStream instead of the assertion that broke.
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() => Promise.reject(makeApiError(503, 'permissions violation')));
+    adapter.on('onError', () => undefined);
+
+    const runCase = async (): Promise<void> => {
+      try {
+        throw new Error('the assertion that actually failed');
+      } finally {
+        await adapter.tryDeleteDurableConsumer('orders.created', 'workers');
+      }
+    };
+
+    await expect(runCase()).rejects.toThrow('the assertion that actually failed');
+
+    // And the strict form is unchanged — it is still the one that refuses to be quiet.
+    await expect(adapter.deleteDurableConsumer('orders.created', 'workers'))
+      .rejects.toThrow(/permissions violation/);
+  });
+
+  it('returns false without attempting anything when never connected', async () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    // And quietly: an adapter that never connected has no consumer to remove, so reporting it
+    // would make every clean teardown noisy.
+    expect(errors).toHaveLength(0);
+  });
+
+  it('reports an unbound pattern through onError rather than throwing', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('typo.created', 'workers')).toBe(false);
+    expect(mockJsm.consumers.delete).not.toHaveBeenCalled();
+    // Swallowed for the caller, not for the listener: a mistyped pattern in teardown is still
+    // worth knowing about, and this is the channel that says so without killing the run.
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/No declared stream binds "typo\.created"/);
+  });
+
+  it('reports a permissions denial rather than reporting it as nothing to do', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() => Promise.reject(makeApiError(503, 'permissions violation')));
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/permissions violation/);
+  });
+
+  it('deletes and reports true on the happy path, exactly like the strict form', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    await adapter.subscribe('orders.created', async () => undefined, { group: 'workers' });
+    const expectedName = callArg(mockJsm.consumers.add, 0, 1).durable_name as string;
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(true);
+    expect(callArg(mockJsm.consumers.delete, 0, 0) as unknown as string).toBe('ORDERS');
+    expect(callArg(mockJsm.consumers.delete, 0, 1) as unknown as string).toBe(expectedName);
+  });
+
+  it('returns false, quietly, when there was no such consumer', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() =>
+      Promise.reject(makeApiError(CONSUMER_NOT_FOUND_CODE, 'consumer not found')));
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    // Idempotent: calling it twice, or on a case that never subscribed, is not an error.
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    expect(errors).toHaveLength(0);
   });
 });
