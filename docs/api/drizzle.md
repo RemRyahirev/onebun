@@ -44,6 +44,55 @@ import * as schema from './schema';
 export class UserModule {}
 ```
 
+#### SQLite pragmas and read-only files
+
+`SQLiteConnectionOptions` gives every connection a pragma set, applied immediately after the
+file opens. The default is `['journal_mode = WAL', 'synchronous = NORMAL']`, and `pragmas`
+replaces it wholesale:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/app.db',
+      pragmas: ['journal_mode = WAL', 'synchronous = NORMAL', 'foreign_keys = ON'],
+    },
+  },
+})
+```
+
+A **read-only** connection gets a different default — `['synchronous = NORMAL']`:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/reference.db',
+      options: { readonly: true },   // no pragmas needed: the default set adapts
+    },
+  },
+})
+```
+
+`journal_mode` is a property of the file rather than of the connection — setting it rewrites the
+database header — so a read-only handle answers `attempt to write a readonly database` and the
+application used to die at boot. A read-only SQLite file is an ordinary deployment: a shipped
+dataset, a mounted read-only volume. It now boots with no pragma list at all.
+
+An explicit `pragmas` array is always applied **exactly as given**, read-only or not. Ask for a
+write pragma on a read-only connection and the boot still fails, naming the pragma and saying it
+is yours to remove — the framework filters its own defaults, not your list.
+
+::: tip Why not just ignore the failure
+Because whether it fails depends on the file. Measured under bun:sqlite,
+`PRAGMA journal_mode = WAL` on a read-only handle fails only when the file is **not already in
+WAL mode**; on a file that is, the identical statement succeeds as a no-op. Swallowing the error
+would leave a deployment whose boot depends on how the database it was handed happened to be
+written.
+:::
+
 ### PostgreSQL Setup
 
 ```typescript

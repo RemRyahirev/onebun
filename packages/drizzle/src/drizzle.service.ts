@@ -135,6 +135,50 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
  */
 const DEFAULT_STARTUP_PROBE_TIMEOUT_MS = 5000;
 
+/** The pragmas applied to a writable SQLite connection when the caller names none. */
+const DEFAULT_SQLITE_PRAGMAS = ['journal_mode = WAL', 'synchronous = NORMAL'];
+
+/**
+ * The same set minus the one a read-only connection cannot apply.
+ *
+ * `journal_mode` is a property of the *file*, not of the connection: setting it rewrites the
+ * database header, so on a read-only handle SQLite answers `attempt to write a readonly
+ * database`. `synchronous` is per-connection and read-only accepts it.
+ *
+ * Measured under bun:sqlite, and the measurement is why this is a separate constant rather
+ * than a `try`/ignore: the WAL pragma fails on a read-only handle **only when the file is not
+ * already in WAL mode**. On a file that is, the identical statement succeeds as a no-op. A
+ * read-only deployment would therefore work or fail depending on how the file it was handed
+ * happened to be written — the kind of difference that survives staging and appears in
+ * production.
+ */
+const READONLY_SQLITE_PRAGMAS = ['synchronous = NORMAL'];
+
+/**
+ * What to do about a pragma the database refused, in the words of whoever chose it.
+ *
+ * Three different situations reach one `catch`, and the same sentence cannot serve all
+ * three: a pragma the caller wrote is theirs to remove, a default that failed on a writable
+ * database says nothing about read-only, and a default that failed on a read-only one means
+ * this function's own filtering missed a case.
+ */
+function sqlitePragmaHint(pragma: string, readonly: boolean, explicit: boolean): string {
+  if (explicit) {
+    return readonly
+      ? `The connection is read-only and PRAGMA ${pragma} writes. Drop it from \`pragmas\`, or `
+        + 'open the database without `readonly: true`.'
+      : `Remove PRAGMA ${pragma} from \`pragmas\`, or correct it — the list is applied exactly `
+        + 'as given, immediately after the file opens.';
+  }
+
+  return readonly
+    ? `PRAGMA ${pragma} is one of the defaults a read-only connection is given, so this is a `
+      + 'framework bug rather than a configuration one. Set `pragmas: []` to boot, and report it.'
+    : 'The default pragmas write to the database. A connection that may not write needs '
+      + '`readonly: true` — which selects a default set that does not — or an explicit '
+      + '`pragmas` list.';
+}
+
 /** The one option that turns a fatal startup into a degraded one. Quoted in every message. */
 const DEGRADED_START_OPTION = 'allowDegradedStart';
 
@@ -1175,6 +1219,12 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * unwritable one identically (`SQLITE_CANTOPEN`), and a write pragma against a read-only
    * database fails AFTER a perfectly successful open — three different fixes behind two
    * driver messages.
+   *
+   * A `readonly: true` connection takes {@link READONLY_SQLITE_PRAGMAS} instead of
+   * {@link DEFAULT_SQLITE_PRAGMAS}: a read-only SQLite file is an ordinary deployment — a
+   * shipped dataset, a mounted read-only volume — and the framework knowing that a read-only
+   * connection cannot set `journal_mode` is better than telling the operator to hand-write
+   * the pragma list. An explicit `pragmas` array is always applied exactly as given.
    */
   private openSQLite(options: SQLiteConnectionOptions): Database {
     let client: Database;
@@ -1188,8 +1238,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       );
     }
 
-    // Apply SQLite pragmas before creating drizzle instance
-    const pragmas = options.pragmas ?? ['journal_mode = WAL', 'synchronous = NORMAL'];
+    const readonly = options.options?.readonly === true;
+    const explicit = options.pragmas !== undefined;
+    const pragmas = options.pragmas ?? (readonly ? READONLY_SQLITE_PRAGMAS : DEFAULT_SQLITE_PRAGMAS);
+
     for (const pragma of pragmas) {
       try {
         client.run(`PRAGMA ${pragma}`);
@@ -1199,8 +1251,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
         throw new Error(
           `SQLite database "${options.url}" opened, but PRAGMA ${pragma} failed: `
           + `${error instanceof Error ? error.message : String(error)}. `
-          + 'The default pragmas write to the database; a read-only one needs `pragmas: []` '
-          + 'or a list that does not write.',
+          + sqlitePragmaHint(pragma, readonly, explicit),
           { cause: error },
         );
       }

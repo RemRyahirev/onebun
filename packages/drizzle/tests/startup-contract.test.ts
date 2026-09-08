@@ -323,24 +323,60 @@ describe('startup contract — a configured database is a required one', () => {
       }
     });
 
-    test('names the pragma when the file opens read-only and the default pragmas write', async () => {
-      // A separate failure from either of the two above: the open SUCCEEDS and the write
-      // pragma is what fails, so the message has to point at the pragma list, not the path.
-      const file = join(scratch, 'read-only-file.db');
+    test('starts read-only with no pragma list at all, and reads through the connection', async () => {
+      // A read-only SQLite file is an ordinary deployment — a shipped dataset, a mounted
+      // read-only volume — so it must boot without the operator hand-writing a pragma list.
+      // It did not: the default set opens with `journal_mode = WAL`, which rewrites the
+      // database header and cannot run on a read-only handle.
+      const file = join(scratch, 'read-only-default.db');
+      const seed = new Database(file);
+      seed.run('CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)');
+      seed.run("INSERT INTO t (id, name) VALUES (1, 'one')");
+      seed.close();
+
+      DrizzleModule.forRoot({
+        connection: {
+          type: DatabaseType.SQLITE,
+          options: { url: file, options: { readonly: true } },
+        },
+      });
+
+      const { instance } = createTestService(DrizzleService);
+      await instance.onModuleInit();
+
+      try {
+        const client = instance.getSQLiteClient();
+        expect(client).not.toBeNull();
+        // Reading is the whole point of the connection, so assert it rather than the boot.
+        expect(client?.query('SELECT name FROM t WHERE id = 1').all()).toEqual([{ name: 'one' }]);
+      } finally {
+        await instance.close();
+      }
+    });
+
+    test('still refuses a write pragma the caller asked for, naming it and how to drop it', async () => {
+      // The defaults are the framework's choice and it filters them. An explicit list is the
+      // caller's, so it is applied exactly as given — and the message has to say whose it is.
+      const file = join(scratch, 'read-only-explicit.db');
       new Database(file).close();
 
       const { rejection } = await startAndStop([
         DrizzleModule.forRoot({
           connection: {
             type: DatabaseType.SQLITE,
-            options: { url: file, options: { readonly: true } },
+            options: {
+              url: file,
+              options: { readonly: true },
+              pragmas: ['journal_mode = WAL'],
+            },
           },
         }),
       ]);
 
       expect(rejection).not.toBeNull();
       expect(rejection?.message).toContain('PRAGMA journal_mode = WAL failed');
-      expect(rejection?.message).toContain('pragmas: []');
+      expect(rejection?.message).toContain('read-only');
+      expect(rejection?.message).toContain('`pragmas`');
     });
 
     test('opens read-only when the pragmas do not write', async () => {

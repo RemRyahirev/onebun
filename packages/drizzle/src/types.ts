@@ -17,7 +17,12 @@ export enum DatabaseType {
 }
 
 /**
- * SQLite connection options
+ * SQLite connection options.
+ *
+ * `readonly: true` also changes which pragmas are applied by default: `journal_mode` rewrites
+ * the database header and a read-only handle cannot, so the default set drops it.
+ *
+ * @see docs:api/drizzle.md
  */
 export interface SQLiteConnectionOptions {
   /**

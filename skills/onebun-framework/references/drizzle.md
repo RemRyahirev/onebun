@@ -169,6 +169,36 @@ export default defineConfig({
 });
 ```
 
+## SQLite Pragmas and Read-Only Files
+
+Every SQLite connection gets a pragma set right after the file opens. The default is
+`['journal_mode = WAL', 'synchronous = NORMAL']`; `pragmas` replaces it wholesale.
+
+A `readonly: true` connection gets `['synchronous = NORMAL']` instead, so a read-only database boots with
+**no pragma list at all**:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/reference.db',
+      options: { readonly: true },
+    },
+  },
+})
+```
+
+`journal_mode` is a property of the file, not of the connection — setting it rewrites the database header —
+so a read-only handle answers `attempt to write a readonly database`.
+
+**An explicit `pragmas` array is applied exactly as given, read-only or not.** The framework filters its own
+defaults, never your list; a write pragma you asked for still fails the boot, naming it.
+
+Do not "just ignore" a failing pragma: measured under bun:sqlite, `PRAGMA journal_mode = WAL` on a read-only
+handle fails only when the file is **not already in WAL mode** — on a file that is, the same statement
+succeeds as a no-op. Swallowing it makes boot depend on how the database happened to be written.
+
 ## Connection Pool (PostgreSQL)
 
 `pool` sits next to either connection shape, and every option in it reaches the driver:

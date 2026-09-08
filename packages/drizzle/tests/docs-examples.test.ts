@@ -532,6 +532,72 @@ describe('Drizzle API Documentation Examples', () => {
     });
 
     /**
+     * @source docs:api/drizzle.md#sqlite-pragmas-and-read-only-files
+     */
+    it('gives a read-only connection a default pragma set it can actually apply', async () => {
+      // From docs: "A read-only connection gets a different default — ['synchronous = NORMAL']"
+      // and "It now boots with no pragma list at all."
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-readonly-'));
+      const file = join(dir, 'reference.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      const seed = new Database(file);
+      seed.run('CREATE TABLE reference (id INTEGER PRIMARY KEY, label TEXT)');
+      seed.run("INSERT INTO reference (id, label) VALUES (1, 'shipped')");
+      seed.close();
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await service.initialize({
+          type: DatabaseType.SQLITE,
+          options: { url: file, options: { readonly: true } },
+        });
+
+        const client = service.getSQLiteClient();
+        expect(client?.query('SELECT label FROM reference WHERE id = 1').all())
+          .toEqual([{ label: 'shipped' }]);
+      } finally {
+        await service.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * @source docs:api/drizzle.md#sqlite-pragmas-and-read-only-files
+     */
+    it('applies an explicit pragma list exactly as given, read-only or not', async () => {
+      // From docs: "An explicit `pragmas` array is always applied exactly as given, read-only
+      // or not... naming the pragma and saying it is yours to remove"
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-pragma-'));
+      const file = join(dir, 'explicit.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      new Database(file).close();
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await expect(service.initialize({
+          type: DatabaseType.SQLITE,
+          options: {
+            url: file,
+            options: { readonly: true },
+            pragmas: ['journal_mode = WAL'],
+          },
+        })).rejects.toThrow(/PRAGMA journal_mode = WAL failed/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
      * @source docs:api/drizzle.md#postgresql-connection
      */
     it('passes every documented pool option to the driver, in milliseconds', async () => {
