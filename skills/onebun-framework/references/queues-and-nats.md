@@ -11,11 +11,12 @@ of these holds:
 2. `queue.enabled: true` is set in `ApplicationOptions`, or
 3. a backend is explicitly configured via `queue.adapter`, `queue.options`, or `queue.redis`.
 
-**`queue.redis` enables the queue but does not select the Redis adapter.** Enablement and adapter
-selection are two independent decisions and only `queue.adapter` makes the second one — the adapter is
-literally `queueOptions?.adapter ?? 'memory'`. So `queue: { redis: { url } }` on its own boots the
-**in-memory** adapter, logs "Queue system initialized with in-memory adapter", and silently ignores
-every Redis setting you passed. Always write both: `queue: { adapter: 'redis', redis: { url } }`.
+**`queue.redis` both enables the queue and selects the Redis adapter.** The choice is
+`queueOptions?.adapter ?? (queueOptions?.redis !== undefined ? 'redis' : 'memory')`, so
+`queue: { redis: { url } }` connects to Redis; writing `queue: { adapter: 'redis', redis: { url } }`
+is equivalent. An explicit `adapter` wins, so `queue: { adapter: 'memory', redis: { url } }` runs in
+memory with the Redis settings unused. This changed: `queue.redis` used to enable the queue without
+selecting the adapter, so that config booted in-memory and discarded the Redis settings silently.
 
 An explicit `queue.enabled: false` overrides all three and keeps the queue disabled: the app
 logs exactly one warning naming the contradiction and does not throw — the adapter is never

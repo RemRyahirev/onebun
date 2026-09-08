@@ -17,8 +17,18 @@ OneBun provides a unified queue system for message-based communication. It suppo
 
 The queue system is **enabled** when any one of three conditions holds: a controller in your application uses queue decorators (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`); `queue.enabled: true` is present in application options; or a backend is explicitly configured via `queue.adapter`, `queue.options` or `queue.redis`. Setting `queue.enabled` to `false` overrides all three and keeps the queue disabled. No explicit configuration is required for basic usage with the in-memory adapter, which remains the default.
 
-::: warning `queue.redis` does not select the Redis adapter on its own
-`queue.redis` carries Redis *settings*; it does not choose the adapter. The adapter is chosen by `queue.adapter`, which defaults to `'memory'`. So `queue: { redis: { url } }` on its own enables the queue with the **in-memory** adapter and the Redis settings are ignored. Always pair them: `queue: { adapter: 'redis', redis: { url } }`.
+::: tip `queue.redis` selects the Redis adapter
+A `queue.redis` block both enables the queue and chooses the Redis adapter, so
+`queue: { redis: { url } }` connects to Redis. Writing `queue: { adapter: 'redis', redis: { url } }`
+is equivalent and still fine.
+
+An explicit `adapter` always wins: `queue: { adapter: 'memory', redis: { url } }` runs in memory
+with the Redis settings staged but unused.
+
+This used to be a trap — `queue.redis` enabled the queue without selecting the adapter, so the same
+configuration ran in process and discarded the Redis settings silently. Now it connects, which
+means an application pointed at an unreachable Redis fails to boot instead of quietly running
+in-memory.
 :::
 
 ### Application Configuration
@@ -124,7 +134,7 @@ An application with **zero** queue decorators still gets a live queue as soon as
 **Technical details for AI agents:**
 - Queue enablement is resolved by `resolveQueueEnablement(queueOptions, hasQueueHandlers)` in `application/queue-enablement.ts`. Resolution order: `queue.enabled === false` is evaluated **first** and always wins — the queue stays disabled and the adapter is never constructed. Otherwise the queue is enabled when **any** of: `queue.enabled === true`, or any **controller** (not provider) passes `hasQueueDecorators()` which inspects `@Subscribe`, `@Cron`, `@Interval`, `@Timeout` metadata, or `hasExplicitQueueAdapterConfig()` finds an explicit `queue.adapter`, `queue.options` or `queue.redis`
 - When `queue.enabled === false` suppresses a configured backend, the decision reports `contradiction: true` and the caller logs exactly one warning (`QUEUE_DISABLED_WITH_ADAPTER_WARNING`); nothing throws
-- `hasExplicitQueueAdapterConfig()` treats `queue.redis` as an enabling signal, but the adapter itself is still `queueOptions?.adapter ?? 'memory'` (`application.ts`). A config of `queue: { redis: {...} }` with no `adapter` therefore enables the queue with `InMemoryQueueAdapter` and silently drops the Redis settings — pre-existing, but newly reachable now that a backend config alone enables the queue
+- Enablement and selection are two functions in `packages/core/src/application/queue-enablement.ts`: `hasExplicitQueueAdapterConfig()` / `resolveQueueEnablement()` decide WHETHER, `resolveQueueAdapterType()` decides WHICH. The second is `queueOptions?.adapter ?? (queueOptions?.redis !== undefined ? 'redis' : 'memory')` — an explicit `adapter` wins, including `adapter: 'memory'` beside a `redis` block. Both are pure and unit-tested in `queue-enablement.test.ts`, which is what makes the redis leg provable without a live broker
 - Controllers are collected recursively from the entire module tree via `getControllers()` (root + all child modules)
 - `initializeQueue(controllers)` is called during `app.start()` after `ensureModule().setup()` — it receives `getControllers()` result
 - Both `controllerClass` and `instance.constructor` are checked for queue decorators (defensive against `@Controller` wrapping edge cases)

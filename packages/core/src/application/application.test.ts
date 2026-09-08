@@ -64,7 +64,11 @@ import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
 
 
 import { OneBunApplication } from './application';
-import { QUEUE_DISABLED_WITH_ADAPTER_WARNING } from './queue-enablement';
+import {
+  QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  resolveQueueAdapterType,
+  resolveQueueEnablement,
+} from './queue-enablement';
 
 // Helper function to create app with mock logger to suppress logs in tests
 function createTestApp(
@@ -4511,14 +4515,27 @@ describe('OneBunApplication', () => {
       await app.stop();
     });
 
-    test('enables queue when only queue.redis is present', async () => {
+    test('queue.redis alone enables the queue AND selects the Redis adapter', async () => {
+      // Two facts, and the second used to be false: `queue.redis` enabled the queue while the
+      // adapter choice ignored it, so this configuration booted an in-memory queue and threw the
+      // Redis settings away without a word.
+      expect(resolveQueueEnablement({ redis: { useSharedProvider: true } }, false).enabled).toBe(true);
+      expect(resolveQueueAdapterType({ redis: { useSharedProvider: true } })).toBe('redis');
+    });
+
+    test('a half-specified redis config fails loudly instead of falling back to memory', async () => {
+      // The behavioural half, asserted at application level with no broker involved: the Redis
+      // branch rejects this configuration before it ever opens a socket. Reaching that error at
+      // all proves the redis branch was selected — before the fix the same options built an
+      // in-memory adapter and started cleanly.
       const app = createTestApp(ProducerOnlyModule, {
         port: 0,
-        queue: { redis: { useSharedProvider: true } },
+        queue: { redis: { useSharedProvider: false } },
       });
-      await app.start();
 
-      expect(app.getQueueService()).not.toBeNull();
+      await expect(app.start()).rejects.toThrow(
+        'Redis queue adapter requires either useSharedProvider: true or a url',
+      );
 
       await app.stop();
     });

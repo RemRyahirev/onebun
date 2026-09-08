@@ -18,6 +18,7 @@ import type { QueueApplicationOptions } from '../types';
 import {
   hasExplicitQueueAdapterConfig,
   QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  resolveQueueAdapterType,
   resolveQueueEnablement,
 } from './queue-enablement';
 
@@ -168,5 +169,43 @@ describe('QUEUE_DISABLED_WITH_ADAPTER_WARNING', () => {
   it('names the contradiction so the operator can act on it', () => {
     expect(QUEUE_DISABLED_WITH_ADAPTER_WARNING).toContain('queue.enabled: false');
     expect(QUEUE_DISABLED_WITH_ADAPTER_WARNING).toContain('queue.adapter');
+  });
+});
+
+describe('resolveQueueAdapterType', () => {
+  it('selects the Redis adapter from queue.redis alone', () => {
+    // The bug this function exists for: `queue.redis` enabled the queue without selecting the
+    // adapter, so this configuration booted an in-memory queue and discarded the url silently.
+    expect(resolveQueueAdapterType({ redis: { url: 'redis://x' } })).toBe('redis');
+  });
+
+  it('selects Redis from a redis block that carries no url', () => {
+    // `useSharedProvider: true` is a complete Redis configuration — the connection comes from
+    // the shared provider. Requiring a url here would re-create the silent memory fallback for
+    // the most common spelling.
+    expect(resolveQueueAdapterType({ redis: { useSharedProvider: true } })).toBe('redis');
+    expect(resolveQueueAdapterType({ redis: {} })).toBe('redis');
+  });
+
+  it('lets an explicit adapter win over the inference', () => {
+    // Redis settings staged alongside a deliberate `memory` choice stay staged. Inference
+    // must never overrule what the caller wrote.
+    expect(resolveQueueAdapterType({ adapter: 'memory', redis: { url: 'redis://x' } })).toBe('memory');
+  });
+
+  it('returns a custom adapter constructor untouched', () => {
+    const options = { adapter: StubAdapterCtor, redis: { url: 'redis://x' } } as unknown as QueueApplicationOptions;
+
+    // Identity, not equality: the constructor is handed back untouched, never coerced to a
+    // built-in name. Compared through `options.adapter` because the stub deliberately does not
+    // implement `QueueAdapter` — it is never constructed here.
+    expect(resolveQueueAdapterType(options)).toBe(options.adapter!);
+  });
+
+  it('stays on memory when neither adapter nor redis is configured', () => {
+    expect(resolveQueueAdapterType(undefined)).toBe('memory');
+    expect(resolveQueueAdapterType({})).toBe('memory');
+    expect(resolveQueueAdapterType({ enabled: true })).toBe('memory');
+    expect(resolveQueueAdapterType({ options: { some: 'thing' } } as unknown as QueueApplicationOptions)).toBe('memory');
   });
 });

@@ -107,7 +107,11 @@ import {
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
-import { QUEUE_DISABLED_WITH_ADAPTER_WARNING, resolveQueueEnablement } from './queue-enablement';
+import {
+  QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  resolveQueueAdapterType,
+  resolveQueueEnablement,
+} from './queue-enablement';
 import {
   createDeadline,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
@@ -2723,8 +2727,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return;
     }
 
-    // Create the appropriate adapter
-    const adapterOpt = queueOptions?.adapter ?? 'memory';
+    // Create the appropriate adapter. `queue.redis` selects the Redis adapter when no explicit
+    // `adapter` is given — it used to only ENABLE the queue, so a redis-only config quietly ran
+    // in memory with every Redis setting discarded.
+    const adapterOpt = resolveQueueAdapterType(queueOptions);
 
     if (typeof adapterOpt === 'function') {
       // Custom adapter constructor (e.g. NATS JetStream)
