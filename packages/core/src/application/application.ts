@@ -1174,13 +1174,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   const xSpanId = req.headers.get('x-span-id') ?? undefined;
 
                   // Sync hot path: no Effect.runPromise overhead
-                  traceContext = app.traceService.extractFromHeadersSync({
+                  // Kept apart from the generated fallback: only an ACTUALLY inbound context can
+                  // parent this request's span, and `||` had already erased the difference by the
+                  // time the span was created.
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const inboundContext: any = app.traceService.extractFromHeadersSync({
                     traceparent,
                     // eslint-disable-next-line @typescript-eslint/naming-convention
                     'x-trace-id': xTraceId,
                     // eslint-disable-next-line @typescript-eslint/naming-convention
                     'x-span-id': xSpanId,
-                  }) || app.traceService.generateTraceContextSync();
+                  });
+
+                  traceContext = inboundContext || app.traceService.generateTraceContextSync();
 
                   const contentLengthHeader = req.headers.get('content-length');
                   traceSpan = app.traceService.startHttpTraceSync({
@@ -1195,6 +1201,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     requestSize: contentLengthHeader
                       ? parseInt(contentLengthHeader, 10)
                       : undefined,
+                    // Continues the caller's trace instead of starting a new one. Without it the
+                    // inbound `traceparent` reached the logs and nothing else: the exported spans
+                    // of two services sat in two unrelated traces, and following a trace id out of
+                    // the logs showed half a picture that looked whole.
+                    parentContext: inboundContext ?? undefined,
                   });
 
                   // Make the HTTP span the parent of everything the request goes on to do.

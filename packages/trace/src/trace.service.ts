@@ -1,7 +1,9 @@
 import {
   context,
+  type Context as OtelContext,
   type Span as OtelSpan,
   SpanStatusCode as OtelSpanStatusCode,
+  ROOT_CONTEXT,
   SpanKind,
   trace,
 } from '@opentelemetry/api';
@@ -36,6 +38,33 @@ const TRACE_FLAGS_MATCH_INDEX = 3;
  * Pre-compiled W3C traceparent header regex (avoids re-compilation per request)
  */
 const TRACEPARENT_REGEX = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+
+/**
+ * Turn a caller's trace context into an OpenTelemetry context a span can be started from.
+ *
+ * `isRemote: true` so the SDK knows the parent lives in another process — `ParentBasedSampler`
+ * reads it, and so do backends deciding where a trace begins.
+ *
+ * The ids are deliberately NOT re-validated here. Only the `traceparent` branch of
+ * `extractFromHeadersSync` is regex-checked; the `x-trace-id` / `x-span-id` pair is taken verbatim
+ * from headers anyone can set, and the all-zero ids are the spec's "invalid" sentinels that
+ * OpenTelemetry hands out routinely for non-recording spans. All of them arrive here — and
+ * `Tracer.startSpan` already discards a parent that fails `isSpanContextValid`, producing a root
+ * span, which is exactly the wanted outcome. A check here would be a second copy of that rule with
+ * no test able to tell the two apart. The behaviour is pinned instead, in `context-nesting.test.ts`.
+ */
+function remoteParentContext(parent: TraceContext | undefined): OtelContext | undefined {
+  if (!parent) {
+    return undefined;
+  }
+
+  return trace.setSpanContext(ROOT_CONTEXT, {
+    traceId: parent.traceId,
+    spanId: parent.spanId,
+    traceFlags: parent.traceFlags,
+    isRemote: true,
+  });
+}
 
 /**
  * Trace service interface
@@ -450,8 +479,13 @@ export class TraceServiceImpl implements TraceService {
     let httpAttributes: Record<string, string | number | boolean> = {};
 
     if (this.hasExporter) {
-      // Full OTel span path — only when spans will be exported
-      const currentOtelContext = context.active();
+      // Full OTel span path — only when spans will be exported.
+      //
+      // The caller's context when the inbound headers carried one, so the span continues that
+      // trace instead of starting its own. `context.active()` cannot supply it: the request
+      // boundary re-roots to ROOT_CONTEXT deliberately (a keep-alive connection would otherwise
+      // chain request N+1 under request N), so a remote parent has to be handed in.
+      const currentOtelContext = remoteParentContext(data.parentContext) ?? context.active();
       const otelSpan = this.tracer.startSpan(
         spanName,
         {

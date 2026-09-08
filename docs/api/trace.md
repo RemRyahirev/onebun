@@ -249,10 +249,13 @@ const client = createHttpClient({ baseUrl: '…', tracing: false });   // never 
 await client.get('/api/data', { tracing: false });                   // just this call
 ```
 
-::: warning The receiving side does not yet honour it
-`traceparent` reaches the callee and becomes the trace ids in its **logs**, so log correlation works
-across services today. Its exported **spans** are still a separate trace: the inbound context is not
-converted into an OpenTelemetry remote parent. Tracked separately.
+The receiving side honours it: the callee starts its HTTP span as a child of the span named in the
+header, so the two services share one trace in the backend as well as one trace id in the logs.
+
+::: warning The log `spanId` is the caller's, not the callee's
+`getCurrentTraceContext()` on the receiving side reports the **inbound** span id, so log lines from
+the callee are stamped with a span that lives in the calling service. The `traceId` is right and the
+span graph is right; joining a log line to the span that emitted it is not. Tracked separately.
 :::
 
 Outside an application — a standalone `createHttpClient()` with no `OneBunApplication` in the
@@ -418,14 +421,15 @@ To link a background job back to what caused it, carry the trace ids in the mess
 span link is a deliberate reference, not an accident of scheduling.
 :::
 
-Two cases still produce root spans, by design:
+An inbound `traceparent` continues the caller's trace: the request's HTTP span is started as a child
+of the span the header names, marked as a remote parent, so two services produce one trace and not
+two. A malformed or all-zero inbound context starts a fresh root instead — a span parented to
+garbage belongs to a trace that can never be assembled.
 
-- **No `exportOptions.endpoint`.** `startHttpTraceSync` then takes a lightweight path that generates
-  trace ids for log correlation without creating an OpenTelemetry span, so there is no HTTP span for
-  methods to hang off. Configure an endpoint and the nesting appears.
-- **An inbound `traceparent`.** It becomes the request's `TraceContext` — which is what the logger
-  stamps on every line — but is not yet fed to the OpenTelemetry span as a remote parent, so a
-  distributed trace still breaks at the service boundary.
+One case still produces a root span, by design: with no `exportOptions.endpoint`,
+`startHttpTraceSync` takes a lightweight path that generates trace ids for log correlation without
+creating an OpenTelemetry span, so there is no HTTP span for methods to hang off. Configure an
+endpoint and the nesting appears.
 
 A `TraceSpan` also carries the OpenTelemetry span it was started from under the `OTEL_SPAN` symbol
 key. Ending depends on that field rather than on what happens to be active, so a span is finished the

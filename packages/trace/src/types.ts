@@ -311,4 +311,14 @@ export interface HttpTraceData {
   requestSize?: number;
   responseSize?: number;
   duration?: number;
+
+  /**
+   * The caller's trace, extracted from the inbound headers, when there is one.
+   *
+   * Makes the request's span a child of the caller's rather than the root of a new trace, which
+   * is the difference between one distributed trace and one per service. Omitted — or carrying
+   * ids the W3C format cannot express — starts a fresh trace, because a span parented to garbage
+   * is worse than a span parented to nothing.
+   */
+  parentContext?: TraceContext;
 }

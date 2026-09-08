@@ -360,3 +360,99 @@ describe('context manager ownership', () => {
     expect(propagates).toBe(true);
   });
 });
+
+/**
+ * An inbound `traceparent` continues the caller's trace.
+ *
+ * It already became the trace ids in this service's LOGS, so log correlation across services
+ * worked. Its exported spans did not: `startHttpTraceSync` built its span from `context.active()`,
+ * which the request boundary re-roots to `ROOT_CONTEXT` on purpose, and the parsed inbound context
+ * reached the span not at all. Two services, one trace id in the logs, two unrelated traces in the
+ * backend — and the half an operator found by following the logs looked complete.
+ */
+describe('inbound trace context', () => {
+  const REMOTE_TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
+  const REMOTE_SPAN_ID = '00f067aa0ba902b7';
+  const REMOTE_TRACEPARENT = `00-${REMOTE_TRACE_ID}-${REMOTE_SPAN_ID}-01`;
+
+  @Controller('/inbound')
+  class InboundController extends BaseController {
+    @Get('/')
+    async read(): Promise<{ ok: boolean }> {
+      return { ok: true };
+    }
+  }
+
+  @Module({ controllers: [InboundController] })
+  class InboundModule {}
+
+  async function requestWith(headers: Record<string, string>): Promise<void> {
+    const app = new OneBunApplication(InboundModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      loggerLayer: makeMockLoggerLayer(),
+      tracing: {
+        enabled: true,
+        serviceName: 'callee',
+        exportOptions: { endpoint: UNUSED_COLLECTOR },
+      },
+    });
+
+    await app.start();
+
+    try {
+      const response = await fetch(`http://localhost:${app.getPort()}/inbound`, { headers });
+      await response.json();
+    } finally {
+      await app.stop();
+    }
+  }
+
+  it('parents the HTTP span to the caller span named in the traceparent', async () => {
+    await requestWith({ traceparent: REMOTE_TRACEPARENT });
+
+    const http = span('HTTP GET /inbound');
+
+    expect(http.spanContext().traceId).toBe(REMOTE_TRACE_ID);
+    expect(http.parentSpanContext?.spanId).toBe(REMOTE_SPAN_ID);
+    // Marked remote so the SDK and the backend know the parent lives in another process.
+    expect(http.parentSpanContext?.isRemote).toBe(true);
+  });
+
+  it('starts a fresh root when the caller sends nothing', async () => {
+    await requestWith({});
+
+    const http = span('HTTP GET /inbound');
+
+    expect(http.parentSpanContext).toBeUndefined();
+    expect(http.spanContext().traceId).not.toBe(REMOTE_TRACE_ID);
+  });
+
+  it('starts a fresh root rather than parenting to garbage', async () => {
+    // The `x-trace-id` / `x-span-id` pair is taken verbatim from headers anyone can set — only
+    // the `traceparent` branch is regex-checked — so the ids are re-validated at the span.
+    await requestWith({
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'x-trace-id': 'not-a-trace-id',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'x-span-id': REMOTE_SPAN_ID,
+    });
+
+    const http = span('HTTP GET /inbound');
+
+    expect(http.parentSpanContext).toBeUndefined();
+    expect(http.spanContext().traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it('starts a fresh root for the all-zero invalid ids', async () => {
+    // OpenTelemetry hands these out for non-recording spans, so they arrive routinely rather than
+    // as corruption; a span parented to them belongs to a trace that does not exist.
+    await requestWith({ traceparent: `00-${'0'.repeat(32)}-${'0'.repeat(16)}-01` });
+
+    const http = span('HTTP GET /inbound');
+
+    expect(http.parentSpanContext).toBeUndefined();
+    expect(http.spanContext().traceId).not.toBe('0'.repeat(32));
+  });
+});

@@ -56,10 +56,16 @@ on `BaseService` / `BaseController` — resolves to the innermost open span.
   `@Timeout`), queue message delivery in every adapter, WebSocket `open`/`message`/`close`/`drain`. Each
   request re-roots too, because Bun reuses a keep-alive connection's async context. Use `inRootTraceScope()`
   for your own background work; to link a job back to its cause, carry the trace ids in the message.
-- **Still flat in two cases**, both by design: with no `exportOptions.endpoint` the request takes the
-  lightweight path and no HTTP span exists for methods to hang off; and an inbound `traceparent` becomes the
-  request's `TraceContext` (what the logger stamps) but is not fed to the OpenTelemetry span as a remote
-  parent, so a distributed trace still breaks at the service boundary.
+- **An inbound `traceparent` continues the caller's trace.** The HTTP span is started as a child of the span
+  the header names, marked `isRemote`, so two services share one trace in the backend. A malformed or
+  all-zero inbound context starts a fresh root — `Tracer.startSpan` discards a parent that fails
+  `isSpanContextValid`, which is why there is no second copy of that check in OneBun.
+- **Still flat with no `exportOptions.endpoint`**: the request takes the lightweight path and no HTTP span
+  exists for methods to hang off.
+- **The log `spanId` on a called service is the CALLER's.** `getCurrentTraceContext()` returns the inbound
+  context verbatim, so a log line from the callee is stamped with a span living in the calling service. The
+  `traceId` and the span graph are right; joining a log line to the span that emitted it is not. Tracked
+  separately — do not build correlation tooling on `trace.spanId` yet.
 - **Sampling reads differently now.** The sampler is `ParentBased`, so the decision is made once at the root
   and inherited: `samplingRate: 0.1` means one request in ten with all of its spans, not one span in ten.
 
