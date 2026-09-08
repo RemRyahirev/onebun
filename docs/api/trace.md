@@ -337,6 +337,43 @@ Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format. On ap
 final flush is attempted — attempted, not guaranteed: nothing retries a failed export, and the batch is
 dropped from the buffer before the send is tried, so an unreachable collector loses it.
 
+::: tip What shutdown does to the process-global registration
+OpenTelemetry keeps **one** tracer provider per process, and it refuses a duplicate
+registration. So in a process running several applications, only the first one to start
+actually installs its provider; the others create theirs and are quietly refused.
+
+Shutdown accounts for that:
+
+- **An application that did not install the global leaves it alone.** If you registered your
+  own OpenTelemetry SDK before starting the app, stopping the app does not touch it. It used to:
+  the teardown called `trace.disable()` unconditionally, which unregisters the global whoever
+  put it there.
+- **When the owner stops and another OneBun application is still running, the global is handed
+  over to it.** Tracing keeps working for the survivors instead of going silently dark.
+- **Only when the last one stops is the registration removed.** Leaving a shut-down provider
+  installed would accept spans and drop them without a word.
+
+The failure this replaces was quiet and total: one `app.stop()` left every other application in
+the process resolving a non-recording tracer, so every subsequent span carried an all-zero trace
+id, correlated with nothing and was never exported.
+
+One limit remains, and it is not fixed here: because duplicate registration is refused, a
+non-first application's spans go to the FIRST application's provider and exporter, not to its
+own. Its configured endpoint and service name are not used while it is a guest. Run one
+application per process if the applications need different trace destinations.
+:::
+
+<llm-only>
+
+**Technical details for AI agents — the global tracer provider slot:**
+- `initTracerProvider(options)` in `packages/trace/src/provider.ts` builds the `BasicTracerProvider`, registers it, and returns `{ provider, shutdown }`. `TraceServiceImpl` holds that result and calls `shutdown()` from `OneBunApplication.stop()`
+- Ownership is recorded from the RETURN VALUE of `trace.setGlobalTracerProvider(provider)`, which is `false` when something already holds the slot. A successful registration means the slot was empty and is now ours, regardless of what the module remembered — an earlier draft also required the remembered owner to be `null`, which left a provider installed but unowned after any external `trace.disable()`, so its own shutdown declined to release it
+- `installedTracerProvider()` is exported and re-derives ownership from reality: `trace.getTracerProvider()` returns a `ProxyTracerProvider` wrapper, so identity is read through its public `getDelegate()`. Shutdown releases the global only when the remembered owner AND the installed delegate are both this provider
+- Teardown has three cases and only the last disables anything: not the owner -> touch nothing; owner with another live provider -> `trace.disable()` immediately followed by `setGlobalTracerProvider(successor)`, because a duplicate registration would be refused; owner with nothing left -> `trace.disable()`
+- `shutdown()` is idempotent via a `shutdownStarted` flag, and removes the provider from the live set BEFORE flushing so a concurrent shutdown cannot elect a provider that is on its way down. `releaseGlobal` runs in a `finally`, because a failed flush is still a dead provider
+
+</llm-only>
+
 ::: warning The shutdown flush is not isolated from the rest of the teardown
 The flush runs after the queue adapter disconnects and before `onModuleDestroy`, and it is awaited without a `try`/`catch`. If the collector is unreachable while spans are still buffered, the last batch export fails, the flush rejects, and the shutdown sequence stops there: `onModuleDestroy` / `onApplicationDestroy` hooks, the shared Redis release and the final log flush never run. `app.stop()` itself still resolves — the only trace of the failure is a `Shutdown sequence failed` error in the log. Until that step is guarded, point `exportOptions.endpoint` at a collector that outlives the app, or leave the endpoint unset in environments where it does not.
 :::

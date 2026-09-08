@@ -1,13 +1,17 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import { trace } from '@opentelemetry/api';
+import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   test,
   expect,
   afterEach,
+  beforeEach,
 } from 'bun:test';
 
-import { initTracerProvider } from '../src/provider';
+import { initTracerProvider, installedTracerProvider } from '../src/provider';
+
+const ZERO_TRACE_ID = '00000000000000000000000000000000';
 
 describe('initTracerProvider', () => {
   afterEach(async () => {
@@ -117,7 +121,7 @@ describe('initTracerProvider', () => {
   });
 
   describe('shutdown()', () => {
-    test('should call provider.shutdown() and trace.disable()', async () => {
+    test('unregisters the global once the last provider it owns is gone', async () => {
       const result = initTracerProvider({
         serviceName: 'shutdown-test',
       });
@@ -128,10 +132,27 @@ describe('initTracerProvider', () => {
 
       await result.shutdown();
 
-      // After shutdown + disable, the global provider should be a noop
-      // Calling getTracer still works but returns a noop tracer
-      const tracerAfter = trace.getTracer('test');
-      expect(tracerAfter).toBeDefined();
+      // The safety property, and the only one a shared process can promise: a provider that
+      // has been shut down is never left installed. Whether the slot then holds a Noop or
+      // another live provider depends on what else in the process is running, and the old
+      // assertion — `expect(tracer).toBeDefined()` — held for every behaviour, so it could not
+      // tell them apart at all.
+      expect(installedTracerProvider()).not.toBe(result.provider);
+    });
+
+    test('releases the slot even when it acquired it after someone else disabled the global', async () => {
+      // The stale-owner case. `trace.disable()` clears the OpenTelemetry slot but not this
+      // module's memory of who owned it, so the next successful registration must overwrite
+      // that memory. Requiring the remembered owner to be `null` first left this provider
+      // installed but unowned, and its shutdown then declined to release it.
+      trace.disable();
+
+      const result = initTracerProvider({ serviceName: 'solo-shutdown-test' });
+      expect(installedTracerProvider()).toBe(result.provider);
+
+      await result.shutdown();
+
+      expect(installedTracerProvider()).not.toBe(result.provider);
     });
 
     test('should not throw when called multiple times', async () => {
@@ -182,5 +203,112 @@ describe('initTracerProvider', () => {
         await result.shutdown();
       }
     });
+  });
+});
+
+/**
+ * Teardown against the PROCESS-GLOBAL OpenTelemetry slot.
+ *
+ * `trace.disable()` runs before and after each case: the global is one shared slot, and a
+ * registration left behind would be visible to every later file in the run. Ownership inside
+ * the module is re-derived from what is actually installed, so clearing the slot is enough.
+ */
+describe('initTracerProvider teardown ownership', () => {
+  beforeEach(() => {
+    trace.disable();
+  });
+
+  afterEach(() => {
+    trace.disable();
+  });
+
+  /** Resolve a tracer from scratch and report what the global currently yields. */
+  function probeFreshTracer(): { recording: boolean; traceId: string } {
+    const span = trace.getTracer('probe').startSpan('probe-span');
+    const result = {
+      recording: span.isRecording(),
+      traceId: span.spanContext().traceId,
+    };
+    span.end();
+
+    return result;
+  }
+
+  test('leaves a foreign provider installed when it did not own the global', async () => {
+    // A user who wired their own OpenTelemetry SDK before starting a OneBun application. Our
+    // registration is refused as a duplicate, so shutdown has no business unregistering theirs
+    // — and it used to, with a bare `trace.disable()`.
+    const foreign = new BasicTracerProvider({});
+    expect(trace.setGlobalTracerProvider(foreign)).toBe(true);
+
+    const ours = initTracerProvider({ serviceName: 'guest' });
+    await ours.shutdown();
+
+    const probe = probeFreshTracer();
+
+    expect(probe.recording).toBe(true);
+    expect(probe.traceId).not.toBe(ZERO_TRACE_ID);
+
+    await foreign.shutdown();
+  });
+
+  test('hands the global to a surviving provider when the owner stops', async () => {
+    // Two applications in one process. The first installs the global; the second's
+    // registration is refused. Stopping the first used to zero tracing for the second.
+    const first = initTracerProvider({ serviceName: 'app-a' });
+    const second = initTracerProvider({ serviceName: 'app-b' });
+
+    await first.shutdown();
+
+    const probe = probeFreshTracer();
+
+    expect(probe.recording).toBe(true);
+    expect(probe.traceId).not.toBe(ZERO_TRACE_ID);
+
+    await second.shutdown();
+  });
+
+  test('stopping the non-owner first does not move the global', async () => {
+    const first = initTracerProvider({ serviceName: 'app-a' });
+    const second = initTracerProvider({ serviceName: 'app-b' });
+
+    await second.shutdown();
+    expect(probeFreshTracer().recording).toBe(true);
+    // The owner is untouched by a guest leaving.
+    expect(installedTracerProvider()).toBe(first.provider);
+
+    await first.shutdown();
+    expect(installedTracerProvider()).not.toBe(first.provider);
+  });
+
+  test('is idempotent, so a second stop does not disturb a live neighbour', async () => {
+    // `app.stop()` is reachable more than once. A second pass must not re-enter the handover
+    // and move the global on behalf of a provider that is already gone.
+    const first = initTracerProvider({ serviceName: 'app-a' });
+    const second = initTracerProvider({ serviceName: 'app-b' });
+
+    await first.shutdown();
+    await first.shutdown();
+
+    expect(probeFreshTracer().recording).toBe(true);
+
+    await second.shutdown();
+  });
+
+  test('does not tear out a registration that changed hands underneath it', async () => {
+    // Ownership is re-checked against what is actually installed. Someone else calling
+    // `trace.disable()` and registering their own provider must not have it removed by a
+    // OneBun shutdown that still remembers owning the slot.
+    const ours = initTracerProvider({ serviceName: 'app-a' });
+
+    trace.disable();
+    const foreign = new BasicTracerProvider({});
+    expect(trace.setGlobalTracerProvider(foreign)).toBe(true);
+
+    await ours.shutdown();
+
+    expect(probeFreshTracer().recording).toBe(true);
+
+    await foreign.shutdown();
   });
 });
