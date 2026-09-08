@@ -15,7 +15,11 @@
  */
 
 import type { ExecutionContext } from '@onebun/core';
-import { BaseInterceptor, isHttpContext } from '@onebun/core';
+import {
+  BaseInterceptor,
+  isHttpContext,
+  Service,
+} from '@onebun/core';
 
 import { CacheService } from './cache.service';
 
@@ -56,6 +60,16 @@ interface CachedResponse {
  * }
  * ```
  */
+// `@Service()` is load-bearing, not decoration. TypeScript emits `design:paramtypes` only for a
+// DECORATED class, and `resolveInterceptors()` reads exactly that metadata to find constructor
+// dependencies. Without it the interceptor was built with an empty argument list, `cacheService`
+// landed `undefined`, and every GET this wrapped answered HTTP 500 — while the class was
+// exported, documented and presented as ready to use.
+//
+// The same trap applies to any shipped guard, filter or middleware that declares constructor
+// dependencies: undecorated means uninjected, and the failure is at request time rather than at
+// startup.
+@Service()
 export class CacheInterceptor extends BaseInterceptor {
   constructor(private readonly cacheService: CacheService) {
     super();

@@ -32,6 +32,7 @@ import type {
 import {
   BaseController,
   BaseInterceptor,
+  getConstructorParamTypes,
   BaseService,
   BaseWebSocketGateway,
   Client,
@@ -1043,5 +1044,57 @@ describe('docs/api/interceptors.md — one interceptor across HTTP, WebSocket an
 
     expect(info).toContain('INFO Incoming Queue xt.job');
     expect(info.some((line) => /^INFO Completed Queue xt\.job \d+ms$/.test(line))).toBe(true);
+  });
+});
+
+/**
+ * The `::: warning Writing your own interceptor with constructor dependencies` block.
+ *
+ * @source docs:api/interceptors.md#cacheinterceptor
+ */
+describe('an interceptor with constructor dependencies must be decorated', () => {
+  it('injects the dependency when the class carries @Service()', () => {
+    @Service()
+    class AuditService extends BaseService {
+      readonly entries: string[] = [];
+    }
+
+    @Service()
+    class AuditInterceptor extends BaseInterceptor {
+      constructor(private readonly audit: AuditService) {
+        super();
+      }
+
+      async intercept(_ctx: ExecutionContext, next: () => Promise<unknown>): Promise<unknown> {
+        this.audit.entries.push('seen');
+
+        return await next();
+      }
+    }
+
+    // `design:paramtypes` is emitted only for a DECORATED class, and it is exactly what the
+    // resolver reads to find constructor dependencies. This assertion is the whole difference
+    // between an interceptor that works and one that answers 500 at request time.
+    expect(getConstructorParamTypes(AuditInterceptor)).toEqual([AuditService]);
+  });
+
+  it('emits no parameter metadata for the same class without a decorator', () => {
+    class AuditService extends BaseService {}
+
+    class UndecoratedInterceptor extends BaseInterceptor {
+      constructor(private readonly audit: AuditService) {
+        super();
+      }
+
+      async intercept(_ctx: ExecutionContext, next: () => Promise<unknown>): Promise<unknown> {
+        void this.audit;
+
+        return await next();
+      }
+    }
+
+    // The trap, pinned: the resolver finds nothing, builds with zero arguments, and the
+    // dependency is `undefined` at request time rather than at startup.
+    expect(getConstructorParamTypes(UndecoratedInterceptor)).toBeUndefined();
   });
 });

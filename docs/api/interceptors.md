@@ -46,7 +46,7 @@ import { CacheInterceptor } from '@onebun/cache';
 **Built-in interceptors:**
 - `LoggingInterceptor` — logs with transport-aware labels: `Incoming METHOD /path` for HTTP, `Incoming WS pattern` for WebSocket, `Incoming Queue pattern` for Queue
 - `TimeoutInterceptor` — pass as **instance**: `new TimeoutInterceptor(5000)` (takes `timeoutMs` constructor arg); throws `HttpException(408)` for HTTP, generic `Error` for other transports
-- `CacheInterceptor` — from `@onebun/cache`, caches GET 2xx HTTP responses via `CacheService`; non-HTTP transports pass through. **Not usable as a class**: it carries no class decorator, so `@UseInterceptors(CacheInterceptor)` builds it with zero arguments and every GET 500s — subclass it with `@Service()` and keep `CacheModule` imported
+- `CacheInterceptor` — from `@onebun/cache`, caches GET 2xx HTTP responses via `CacheService`; non-HTTP transports pass through. Use it directly: `@UseInterceptors(CacheInterceptor)` with `CacheModule` imported. It carries `@Service()`, which is what makes TypeScript emit `design:paramtypes` and lets the resolver inject `CacheService` — an undecorated class with constructor dependencies is built with zero arguments and fails at request time
 
 **ExecutionContext — discriminated union:**
 ```typescript
@@ -426,23 +426,12 @@ The route-level `timeout` option (in `@Get('/path', { timeout: 10 })`) sets Bun'
 
 From `@onebun/cache` — caches successful (2xx) HTTP GET responses via `CacheService`. Non-GET requests and non-HTTP transports pass through without caching. Requires `CacheModule` to be imported so that `CacheService` is available for DI.
 
-Pass a **decorated subclass**, not `CacheInterceptor` itself. The shipped class carries no class
-decorator, so TypeScript emits no `design:paramtypes` for it, the resolver constructs it with zero
-arguments, and every GET answers 500 `undefined is not an object (evaluating 'this.cacheService.get')`.
-Importing `CacheModule` does not help — the missing piece is the metadata, not the provider:
+Use it directly — `CacheInterceptor` carries `@Service()`, so the resolver injects `CacheService`:
 
 ```typescript
-import { CacheInterceptor, CacheModule, CacheService } from '@onebun/cache';
-import { Service } from '@onebun/core';
+import { CacheInterceptor, CacheModule } from '@onebun/cache';
 
-@Service()
-class AppCacheInterceptor extends CacheInterceptor {
-  constructor(cacheService: CacheService) {
-    super(cacheService);
-  }
-}
-
-@UseInterceptors(AppCacheInterceptor)
+@UseInterceptors(CacheInterceptor)
 @Controller('/api/data')
 class DataController extends BaseController {
   @Get('/')
@@ -456,8 +445,27 @@ class DataController extends BaseController {
 class DataModule {}
 ```
 
-The subclass itself does not belong in `providers` — the interceptor resolver instantiates it; only
-its dependency has to be resolvable, which is what `CacheModule` provides.
+The interceptor does not belong in `providers` — the resolver instantiates it; only its
+dependency has to be resolvable, which is what `CacheModule` provides.
+
+::: warning Writing your own interceptor with constructor dependencies
+Decorate it. TypeScript emits `design:paramtypes` only for a **decorated** class, and that is the
+metadata the resolver reads to find constructor dependencies. Without a decorator the class is
+built with zero arguments, the dependency lands `undefined`, and the failure arrives at request
+time as a 500 rather than at startup.
+
+```typescript
+@Service()                       // ← load-bearing, not decoration
+class AuditInterceptor extends BaseInterceptor {
+  constructor(private readonly audit: AuditService) {
+    super();
+  }
+}
+```
+
+This applies to guards, filters and middleware alike. `CacheInterceptor` shipped without it and
+answered 500 on every GET it wrapped.
+:::
 
 ## Execution Order
 

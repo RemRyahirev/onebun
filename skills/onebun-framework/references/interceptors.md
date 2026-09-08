@@ -188,39 +188,39 @@ Two queue-side traps, both silent:
 | Interceptor | Package | How to pass | Transports |
 |---|---|---|---|
 | `LoggingInterceptor` | `@onebun/core` | Class — `@UseInterceptors(LoggingInterceptor)` | HTTP, WS, `@Subscribe` |
-| `TimeoutInterceptor` | `@onebun/core` | **Instance only** — `new TimeoutInterceptor(5000)` | HTTP, WS, `@Subscribe` |
-| `CacheInterceptor` | `@onebun/cache` | **Not usable as a class** — subclass it, see below | HTTP GET only |
+| `TimeoutInterceptor` | `@onebun/core` | **Instance only** — `new TimeoutInterceptor(5000)`; the class form throws at construction | HTTP, WS, `@Subscribe` |
+| `CacheInterceptor` | `@onebun/cache` | Class — `@UseInterceptors(CacheInterceptor)` with `CacheModule` imported | HTTP GET only |
 
 - **LoggingInterceptor** — transport-aware: `Incoming GET /path`, `Incoming WS chat:general`,
   `Incoming Queue orders.created`. Safe as a class: it has no constructor arguments, and
   `this.logger` comes from the ambient init context, not from DI.
-- **TimeoutInterceptor** — throws `HttpException(408)` for HTTP, plain `Error` elsewhere. Passing the
-  CLASS instead of an instance does not error: `timeoutMs` is injected as `undefined`, the budget
-  collapses to ~0 ms, and every handler that awaits real work answers
-  `408 "Request timed out after undefinedms"`.
+- **TimeoutInterceptor** — throws `HttpException(408)` for HTTP, plain `Error` elsewhere. A number
+  cannot come from DI, so the class form is rejected at CONSTRUCTION with a message naming the
+  mistake. It used to accept it silently: `timeoutMs` was `undefined`, the budget collapsed to
+  ~0 ms, and every handler answered `408 "Request timed out after undefinedms"`.
 - **CacheInterceptor** — caches 2xx GET responses via `CacheService`, passes through non-GET and
-  non-HTTP. It is declared with **no class decorator**, so `@UseInterceptors(CacheInterceptor)`
-  injects `cacheService: undefined` and every GET 500s with
-  `undefined is not an object (evaluating 'this.cacheService.get')` — importing `CacheModule` does
-  not help, because the problem is missing metadata, not a missing provider.
+  non-HTTP. Use it directly as a class, with `CacheModule` in the module `imports` so
+  `CacheService` is resolvable. It used to ship with **no class decorator**, so
+  `@UseInterceptors(CacheInterceptor)` injected `cacheService: undefined` and every GET 500ed;
+  importing `CacheModule` did not help, because the missing piece was metadata rather than a
+  provider. The workaround of wrapping it in a decorated subclass is no longer needed.
 
-Wrap it in a decorated subclass of your own; that is the whole fix:
+**Writing your own interceptor with constructor dependencies: decorate it.** TypeScript emits
+`design:paramtypes` only for a decorated class, and that is exactly the metadata
+`resolveInterceptors()` reads. Undecorated means uninjected, and the failure lands at request time
+as a 500 rather than at startup:
 
 ```typescript
-import { CacheInterceptor, CacheService } from '@onebun/cache';
-import { Service } from '@onebun/core';
-
-@Service()
-export class AppCacheInterceptor extends CacheInterceptor {
-  constructor(cacheService: CacheService) {
-    super(cacheService);
+@Service()                       // load-bearing, not decoration
+export class AuditInterceptor extends BaseInterceptor {
+  constructor(private readonly audit: AuditService) {
+    super();
   }
 }
 ```
 
-Then apply `@UseInterceptors(AppCacheInterceptor)` and keep `CacheModule` in the module `imports`
-so `CacheService` is resolvable. Verified: the raw class returns 500, the subclass returns 200 and
-caches.
+The same trap applies to guards, filters and middleware. The interceptor itself does not go in
+`providers` — the resolver instantiates it; only its dependency must be resolvable.
 
 ## Execution order by transport
 

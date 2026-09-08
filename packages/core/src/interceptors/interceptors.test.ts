@@ -404,6 +404,22 @@ describe('LoggingInterceptor', () => {
 // ============================================================================
 
 describe('TimeoutInterceptor', () => {
+  it('refuses the class form immediately instead of timing out every request', () => {
+    // `@UseInterceptors(TimeoutInterceptor)` is a natural mistake — every other shipped
+    // interceptor is used that way. The framework then constructs this one with no arguments,
+    // and `setTimeout(fn, undefined)` fires on the next tick, so EVERY request answered 408
+    // with "Request timed out after undefinedms". A number cannot come from DI, so the only
+    // useful thing to do is say so at construction.
+    expect(() => new (TimeoutInterceptor as unknown as new () => unknown)())
+      .toThrow(/Pass an INSTANCE, not the class/);
+  });
+
+  it('refuses a non-positive or non-finite timeout', () => {
+    expect(() => new TimeoutInterceptor(0)).toThrow(TypeError);
+    expect(() => new TimeoutInterceptor(-1)).toThrow(TypeError);
+    expect(() => new TimeoutInterceptor(Number.POSITIVE_INFINITY)).toThrow(TypeError);
+  });
+
   it('returns response when handler completes within timeout', async () => {
     const interceptor = new TimeoutInterceptor(1000);
     const logger = makeMockLogger();
