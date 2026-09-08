@@ -65,6 +65,24 @@ function wireMessage(pattern: string, data: unknown): string {
   });
 }
 
+/**
+ * Put a message where the adapter takes it from, and ring the bell.
+ *
+ * The list is the delivery path and the channel is a wake-up signal — publishing the payload to
+ * the channel alone reaches no handler, by design: pub/sub fans out to every subscriber with no
+ * way to claim a message, which is what used to deliver each one twice.
+ */
+async function enqueue(
+  client: RedisClient,
+  prefix: string,
+  pattern: string,
+  data: unknown,
+): Promise<void> {
+  const wire = wireMessage(pattern, data);
+  await client.rpush(`${prefix}queue:q:${pattern}`, wire);
+  await client.publish(`${prefix}queue:ch:${pattern}`, wire);
+}
+
 async function waitForDelivery(received: unknown[]): Promise<void> {
   const deadline = Date.now() + DELIVERY_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -146,14 +164,8 @@ describe('RedisQueueAdapter (docs/api/queue.md)', () => {
         // Both publishes go out on the same connection in order, so Redis hands the
         // subscriber whatever it is subscribed to in that same order. If `prefix` were
         // ignored, the default-prefix message would be the one that lands.
-        await publisher.publish(
-          `${DEFAULT_PREFIX}queue:ch:orders.created`,
-          wireMessage('orders.created', { id: 'default-prefix' }),
-        );
-        await publisher.publish(
-          `${SHARED_PREFIX}queue:ch:orders.created`,
-          wireMessage('orders.created', { id: 'configured-prefix' }),
-        );
+        await enqueue(publisher, DEFAULT_PREFIX, 'orders.created', { id: 'default-prefix' });
+        await enqueue(publisher, SHARED_PREFIX, 'orders.created', { id: 'configured-prefix' });
 
         await waitForDelivery(received);
 
@@ -207,10 +219,7 @@ describe('RedisQueueAdapter (docs/api/queue.md)', () => {
         expect(SharedRedisProvider.isConnected()).toBe(false);
         expect(SharedRedisProvider.leaseCount()).toBe(0);
 
-        await publisher.publish(
-          `${DEDICATED_PREFIX}queue:ch:orders.created`,
-          wireMessage('orders.created', { id: 'over-dedicated-connection' }),
-        );
+        await enqueue(publisher, DEDICATED_PREFIX, 'orders.created', { id: 'over-dedicated-connection' });
 
         await waitForDelivery(received);
 

@@ -6,6 +6,7 @@ import {
   it,
 } from 'bun:test';
 
+import { createRedisClient } from '@onebun/core';
 import { createRedisContainer, type TestContainer } from '@onebun/core/testing';
 
 import { createRedisCache, RedisCache } from '../src/redis-cache';
@@ -230,13 +231,20 @@ describe('RedisCache', () => {
       const value = await prefixCache.get('test-key');
       expect(value).toBe('test-value');
 
-      // Check that the key exists in Redis with prefix
-      const client = prefixCache.getClient();
-      if (!client) {
-        throw new Error('Client is null');
+      // The prefix is applied ONCE. This used to assert `client.exists('custom:prefix:test-key')`,
+      // but the client prefixes what it is given, so that asked for
+      // `custom:prefix:custom:prefix:test-key` — and passed, because the cache stored the doubled
+      // key too. Checked here through a client with no prefix of its own, which sees the literal
+      // name Redis holds.
+      const raw = createRedisClient({ url: `redis://${redis.host}:${redis.port}` });
+      await raw.connect();
+
+      try {
+        expect(await raw.exists('custom:prefix:test-key')).toBe(true);
+        expect(await raw.exists('custom:prefix:custom:prefix:test-key')).toBe(false);
+      } finally {
+        await raw.disconnect();
       }
-      const exists = await client.exists('custom:prefix:test-key');
-      expect(exists).toBeTruthy();
 
       await prefixCache.clear();
       await prefixCache.close();
@@ -297,5 +305,65 @@ describe('RedisCache', () => {
       // The distinction the throw exists to preserve: a missing key is still a miss.
       expect(await cache.get('definitely-not-set')).toBeUndefined();
     });
+  });
+
+  describe('clear() blast radius', () => {
+    it('leaves foreign keys alone and refuses when it cannot name its own keyspace', async () => {
+      const raw = createRedisClient({ url: `redis://${redis.host}:${redis.port}` });
+      await raw.connect();
+
+      try {
+        // Two keys this cache did not write, of the kind that share a database with it.
+        await raw.set('onebun:queue:job:1', 'queued');
+        await raw.set('ratelimit:1.2.3.4', '7');
+
+        const unscoped = createRedisCache({
+          host: redis.host,
+          port: redis.port,
+          keyPrefix: '',
+        });
+        await unscoped.connect();
+
+        try {
+          await unscoped.set('page:home', 'cached');
+
+          // Pre-fix this issued `KEYS *` and deleted every hit: the queued job and the rate-limit
+          // counter went with it, and the promise resolved as if nothing unusual had happened.
+          await expect(unscoped.clear()).rejects.toThrow(/no key prefix/);
+          await expect(unscoped.getStats()).rejects.toThrow(/no key prefix/);
+
+          expect(await raw.exists('onebun:queue:job:1')).toBe(true);
+          expect(await raw.exists('ratelimit:1.2.3.4')).toBe(true);
+        } finally {
+          await unscoped.close();
+        }
+
+        // A scoped cache clears its own keys and only its own.
+        const scoped = createRedisCache({
+          host: redis.host,
+          port: redis.port,
+          keyPrefix: 'scoped:cache:',
+        });
+        await scoped.connect();
+
+        try {
+          await scoped.set('user:2', { id: 2 });
+          expect(await raw.exists('scoped:cache:user:2')).toBe(true);
+
+          await scoped.clear();
+
+          expect(await scoped.has('user:2')).toBe(false);
+          expect(await raw.exists('scoped:cache:user:2')).toBe(false);
+          expect(await raw.exists('onebun:queue:job:1')).toBe(true);
+          expect(await raw.exists('ratelimit:1.2.3.4')).toBe(true);
+        } finally {
+          await scoped.close();
+        }
+      } finally {
+        await raw.del('onebun:queue:job:1');
+        await raw.del('ratelimit:1.2.3.4');
+        await raw.disconnect();
+      }
+    }, 30_000);
   });
 });

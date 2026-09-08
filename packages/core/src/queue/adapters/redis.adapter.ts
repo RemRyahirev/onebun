@@ -33,7 +33,12 @@ import {
   wasNacked,
   type NackAwareMessage,
 } from '../ack-mode';
-import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
+import {
+  createQueuePatternMatcher,
+  isQueuePattern,
+  type QueuePatternMatch,
+} from '../pattern-matcher';
+import { toRedisQueueGlob } from '../redis-glob';
 import { QueueScheduler } from '../scheduler';
 
 // ============================================================================
@@ -212,13 +217,14 @@ export class RedisQueueAdapter implements QueueAdapter {
   private messageIdCounter = 0;
   private running = false;
   private delayedInterval?: ReturnType<typeof setInterval>;
+  private wakeSubscribed = false;
 
   // Key prefixes
   private keys = {
     delayed: 'queue:delayed',
     priority: 'queue:priority',
     queue: (pattern: string) => `queue:q:${pattern}`,
-    channel: (pattern: string) => `queue:ch:${pattern}`,
+    wake: 'queue:wake',
     processing: (group: string) => `queue:processing:${group}`,
     deadLetter: (pattern: string) => `queue:dlq:${pattern}`,
   };
@@ -242,7 +248,7 @@ export class RedisQueueAdapter implements QueueAdapter {
       delayed: `${prefix}queue:delayed`,
       priority: `${prefix}queue:priority`,
       queue: (pattern: string) => `${prefix}queue:q:${pattern}`,
-      channel: (pattern: string) => `${prefix}queue:ch:${pattern}`,
+      wake: `${prefix}queue:wake`,
       processing: (group: string) => `${prefix}queue:processing:${group}`,
       deadLetter: (pattern: string) => `${prefix}queue:dlq:${pattern}`,
     };
@@ -312,6 +318,11 @@ export class RedisQueueAdapter implements QueueAdapter {
     // Clear subscriptions
     this.subscriptions = [];
 
+    // The wake subscription belongs to the connection, so a reconnect has to establish it again.
+    // Leaving the flag set would leave the adapter believing it is listening when it is not, and
+    // delivery would silently fall back to the poll interval.
+    this.wakeSubscribed = false;
+
     // Disconnect client only if we own it
     if (this.ownsClient && this.client) {
       await this.client.disconnect();
@@ -348,14 +359,14 @@ export class RedisQueueAdapter implements QueueAdapter {
     if (options?.delay && options.delay > 0) {
       // Delayed message - use sorted set
       const score = timestamp + options.delay;
-      await this.client!.raw('ZADD', this.keys.delayed, String(score), serialized);
+      await this.client!.zadd(this.keys.delayed, score, serialized);
     } else if (options?.priority && options.priority > 0) {
       // Priority message - use sorted set with negative priority (higher = more important)
-      await this.client!.raw('ZADD', this.keys.priority, String(-options.priority), serialized);
+      await this.client!.zadd(this.keys.priority, -options.priority, serialized);
     } else {
       // Normal message - push to list and publish to channel
-      await this.client!.raw('RPUSH', this.keys.queue(pattern), serialized);
-      await this.client!.publish(this.keys.channel(pattern), serialized);
+      await this.client!.rpush(this.keys.queue(pattern), serialized);
+      await this.client!.publish(this.keys.wake, pattern);
     }
 
     return messageId;
@@ -394,23 +405,15 @@ export class RedisQueueAdapter implements QueueAdapter {
       consumerGroup: options?.group,
     };
 
+    // Fails here, at the call that named the pattern, rather than producing a glob that quietly
+    // matches the wrong keys.
+    toRedisQueueGlob(pattern);
+
     this.subscriptions.push(entry);
+    await this.ensureWakeSubscription();
 
-    // Subscribe to Redis pub/sub channel
-    await this.client!.subscribe(this.keys.channel(pattern), (message) => {
-      if (entry.paused) {
-        return;
-      }
-
-      try {
-        const parsed = JSON.parse(message);
-        this.processMessage(entry, parsed);
-      } catch {
-        // Silently ignore message parsing errors
-      }
-    });
-
-    // Also start polling the queue for messages that were published before subscription
+    // The poll loop covers what pub/sub cannot: messages published before this subscription
+    // existed, and any notification missed while disconnected.
     this.startQueuePolling(entry);
 
     const subscription = new RedisSubscription(entry, async () => {
@@ -418,10 +421,48 @@ export class RedisQueueAdapter implements QueueAdapter {
       if (index !== -1) {
         this.subscriptions.splice(index, 1);
       }
-      await this.client!.unsubscribe(this.keys.channel(pattern));
+
+      // The wake channel is shared by every subscription on this adapter, so it is released only
+      // when the last one goes. Unsubscribing per entry would silence the others.
+      if (this.subscriptions.length === 0 && this.wakeSubscribed) {
+        this.wakeSubscribed = false;
+        await this.client!.unsubscribe(this.keys.wake);
+      }
     });
 
     return subscription;
+  }
+
+  /**
+   * Subscribe the one wake channel, once per adapter.
+   *
+   * There is a single channel rather than one per topic because a pattern subscription does not
+   * know the topics it will match: `orders.{id}` cannot subscribe to a per-topic channel for
+   * `orders.123` before anyone publishes it. The frame carries the TOPIC, every subscription
+   * tests it with its own
+   * in-process matcher, and a match claims the message from that topic's list with an atomic LPOP.
+   *
+   * Bun's client has no usable `psubscribe` — it offers no listener form and drops pattern
+   * messages — so a channel-glob design is not available.
+   */
+  private async ensureWakeSubscription(): Promise<void> {
+    if (this.wakeSubscribed) {
+      return;
+    }
+
+    this.wakeSubscribed = true;
+
+    await this.client!.subscribe(this.keys.wake, (topic: string) => {
+      for (const entry of [...this.subscriptions]) {
+        if (!entry.matcher(topic).matched) {
+          continue;
+        }
+
+        void this.drainTopic(entry, topic).catch((error: unknown) => {
+          this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+        });
+      }
+    });
   }
 
   // ============================================================================
@@ -520,15 +561,13 @@ export class RedisQueueAdapter implements QueueAdapter {
 
           if (requeue) {
             // Re-queue the message
-            await this.client!.raw(
-              'LPUSH',
+            await this.client!.lpush(
               this.keys.queue(messageData.pattern),
               JSON.stringify(messageData),
             );
           } else if (entry.options?.deadLetter) {
             // Move to dead letter queue
-            await this.client!.raw(
-              'RPUSH',
+            await this.client!.rpush(
               this.keys.deadLetter(messageData.pattern),
               JSON.stringify(messageData),
             );
@@ -566,26 +605,128 @@ export class RedisQueueAdapter implements QueueAdapter {
     }
   }
 
-  private startQueuePolling(entry: RedisSubscriptionEntry): void {
-    // Poll the queue for existing messages
-    const poll = async () => {
-      if (!this.running || entry.paused) {
+  /**
+   * Take messages off this subscription's list and run the handler for each.
+   *
+   * `LPOP` is the claim: it is atomic, so a message goes to exactly one consumer even when several
+   * replicas drain the same list. That is what makes the list the single source of truth and the
+   * pub/sub channel a wake-up signal rather than a second delivery path — previously both carried
+   * the payload and both delivered it, so every handler ran twice per message.
+   *
+   * Bounded per call so one busy list cannot starve the others sharing this event loop.
+   */
+  /**
+   * Take messages off ONE topic's list and run the handler for each.
+   *
+   * `LPOP` is the claim: it is atomic, so a message goes to exactly one consumer even when several
+   * replicas drain the same list. That is what makes the list the single source of truth and the
+   * wake channel a signal rather than a second delivery path.
+   *
+   * The topic is concrete, never the subscription's pattern — `queue:q:orders.{id}` is a key
+   * nobody writes to, which is what made pattern subscriptions silently dead.
+   *
+   * Bounded per call so one busy topic cannot starve the others sharing this event loop.
+   */
+  private async drainTopic(
+    entry: RedisSubscriptionEntry,
+    topic: string,
+    maxMessages = 50,
+  ): Promise<void> {
+    if (!this.running || entry.paused || !this.client) {
+      return;
+    }
+
+    for (let drained = 0; drained < maxMessages; drained++) {
+      let result: string | null;
+
+      try {
+        result = await this.client.lpop(this.keys.queue(topic));
+      } catch (error) {
+        // Reported, not discarded. This was a bare `catch {}`, so a poll that could not reach
+        // Redis looked exactly like an empty queue: messages sat in the list, no consumer ran,
+        // and nothing was logged.
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+
+        return;
+      }
+
+      if (!result) {
         return;
       }
 
       try {
-        // Get message from queue (LPOP for FIFO)
-        const result = await this.client!.raw<string | null>(
-          'LPOP',
-          this.keys.queue(entry.pattern),
-        );
+        await this.processMessage(entry, JSON.parse(result));
+      } catch (error) {
+        // The message is already claimed at this point, so a handler failure must not stop the
+        // drain — the next message is a different message.
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+      }
 
-        if (result) {
-          const messageData = JSON.parse(result);
-          await this.processMessage(entry, messageData);
+      if (entry.paused || !this.running) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * Every queue key this subscription could own, resolved from the server.
+   *
+   * `SCAN`, never `KEYS`: this runs once per poll interval per pattern subscription (100 ms by
+   * default), and `KEYS` walks the whole keyspace with the server blocked for the duration.
+   *
+   * The glob is a superset — Redis globs are character-based, so `orders.*` also matches
+   * `orders.a.b` — and the in-process matcher is what decides. Widening here and narrowing there
+   * is the only safe order; a narrower glob would drop messages the pattern does say it wants.
+   */
+  private async scanTopics(entry: RedisSubscriptionEntry): Promise<string[]> {
+    if (!this.client) {
+      return [];
+    }
+
+    const keyPrefix = this.keys.queue('');
+    const match = `${keyPrefix}${toRedisQueueGlob(entry.pattern)}`;
+    const topics: string[] = [];
+    let cursor = '0';
+
+    do {
+      const reply = await this.client.raw<[string, string[]]>(
+        'SCAN', cursor, 'MATCH', match, 'COUNT', '100',
+      );
+
+      if (!Array.isArray(reply) || reply.length < 2) {
+        return topics;
+      }
+
+      cursor = String(reply[0]);
+      const keys = Array.isArray(reply[1]) ? reply[1] : [];
+
+      for (const key of keys) {
+        const topic = String(key).slice(keyPrefix.length);
+        if (topic.length > 0 && entry.matcher(topic).matched) {
+          topics.push(topic);
         }
-      } catch {
-        // Silently ignore polling errors
+      }
+    } while (cursor !== '0');
+
+    return topics;
+  }
+
+  private startQueuePolling(entry: RedisSubscriptionEntry): void {
+    // Poll the queue for messages published before this subscription existed, and as the
+    // fallback path when a pub/sub notification is missed.
+    const poll = async () => {
+      // An exact pattern owns exactly one key, so ask for it directly. A pattern subscription has
+      // to discover the topics that exist — SCAN, because this runs every pollInterval.
+      if (isQueuePattern(entry.pattern)) {
+        try {
+          for (const topic of await this.scanTopics(entry)) {
+            await this.drainTopic(entry, topic);
+          }
+        } catch (error) {
+          this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+        }
+      } else {
+        await this.drainTopic(entry, entry.pattern);
       }
 
       // Continue polling
@@ -607,46 +748,33 @@ export class RedisQueueAdapter implements QueueAdapter {
         const now = Date.now();
 
         // Get delayed messages that are ready
-        const messages = await this.client.raw<string[]>(
-          'ZRANGEBYSCORE',
-          this.keys.delayed,
-          '0',
-          String(now),
-          'LIMIT',
-          '0',
-          '100',
-        );
+        const messages = await this.client.zrangebyscore(this.keys.delayed, '0', String(now), 100);
 
         if (messages && messages.length > 0) {
           for (const msg of messages) {
             // Remove from delayed set
-            await this.client.raw('ZREM', this.keys.delayed, msg);
+            await this.client.zrem(this.keys.delayed, msg);
 
             // Parse and publish
             const messageData = JSON.parse(msg);
-            await this.client.raw('RPUSH', this.keys.queue(messageData.pattern), msg);
-            await this.client.publish(this.keys.channel(messageData.pattern), msg);
+            await this.client.rpush(this.keys.queue(messageData.pattern), msg);
+            await this.client.publish(this.keys.wake, String(messageData.pattern));
           }
         }
 
         // Also process priority queue
-        const priorityMessages = await this.client.raw<string[]>(
-          'ZPOPMIN',
-          this.keys.priority,
-          '10',
-        );
+        const priorityMessages = await this.client.zpopmin(this.keys.priority, 10);
 
-        if (priorityMessages && priorityMessages.length > 0) {
-          // ZPOPMIN returns [member, score, member, score, ...]
-          for (let i = 0; i < priorityMessages.length; i += 2) {
-            const msg = priorityMessages[i];
-            const messageData = JSON.parse(msg);
-            await this.client.raw('RPUSH', this.keys.queue(messageData.pattern), msg);
-            await this.client.publish(this.keys.channel(messageData.pattern), msg);
-          }
+        for (const { member } of priorityMessages) {
+          const messageData = JSON.parse(member);
+          await this.client.rpush(this.keys.queue(messageData.pattern), member);
+          await this.client.publish(this.keys.wake, String(messageData.pattern));
         }
-      } catch {
-        // Silently ignore delayed message processing errors
+      } catch (error) {
+        // Reported rather than discarded: a delayed or priority message that cannot be promoted
+        // to its queue never fires, and the bare catch this replaces made that indistinguishable
+        // from "nothing was due".
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
       }
     }, this.options.pollInterval);
   }

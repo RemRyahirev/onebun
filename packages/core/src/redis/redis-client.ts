@@ -51,6 +51,19 @@ export class RedisClient {
   }
 
   /**
+   * The namespace every key of this client lives under.
+   *
+   * This client IS the namespace: `prefixKey()` applies it on every read and write, and `keys()`
+   * both prefixes the pattern and strips the prefix off the results. An owner that needs to reason
+   * about its own keyspace — to scope a bulk delete, say — has to be able to ask what that
+   * namespace is, and an empty answer means "the whole database", which is rarely what the caller
+   * wants and never what they want to delete.
+   */
+  get keyPrefix(): string {
+    return this.options.keyPrefix ?? '';
+  }
+
+  /**
    * Connect to Redis
    */
   async connect(): Promise<void> {
@@ -496,12 +509,120 @@ export class RedisClient {
   }
 
   /**
-   * Execute a raw command
+   * Execute a raw command.
+   *
+   * Dispatched through the driver's `send(command, args)`, which is how Bun's client takes an
+   * arbitrary command. This used to index the driver by the command name instead, so every
+   * uppercase name rejected with "is not a function", and the whole Redis queue adapter, which
+   * reached Redis only through here, could not write a single message.
+   *
+   * The key is NOT prefixed: a raw command may take keys in any position, or none, so the caller
+   * gives fully-qualified names. Prefer the typed methods below where one exists.
    */
   async raw<T = unknown>(command: string, ...args: string[]): Promise<T> {
     const client = this.ensureConnected();
 
-    return await client[command](...args);
+    return await client.send(command, args) as T;
+  }
+
+  // ============================================================================
+  // List and Sorted-Set Operations
+  // ============================================================================
+
+  /**
+   * Append values to a list. Returns the list's new length.
+   */
+  async rpush(key: string, ...values: string[]): Promise<number> {
+    const client = this.ensureConnected();
+
+    return Number(await client.send('RPUSH', [this.prefixKey(key), ...values]));
+  }
+
+  /**
+   * Remove and return the head of a list, or `null` when it is empty.
+   */
+  async lpop(key: string): Promise<string | null> {
+    const client = this.ensureConnected();
+    const result = await client.send('LPOP', [this.prefixKey(key)]);
+
+    return (result as string | null) ?? null;
+  }
+
+  /**
+   * Add a member to a sorted set with the given score.
+   */
+  async zadd(key: string, score: number, member: string): Promise<number> {
+    const client = this.ensureConnected();
+
+    return Number(await client.send('ZADD', [this.prefixKey(key), String(score), member]));
+  }
+
+  /**
+   * Remove a member from a sorted set. Returns how many members were removed.
+   */
+  async zrem(key: string, member: string): Promise<number> {
+    const client = this.ensureConnected();
+
+    return Number(await client.send('ZREM', [this.prefixKey(key), member]));
+  }
+
+  /**
+   * Prepend values to a list. Returns the list's new length.
+   */
+  async lpush(key: string, ...values: string[]): Promise<number> {
+    const client = this.ensureConnected();
+
+    return Number(await client.send('LPUSH', [this.prefixKey(key), ...values]));
+  }
+
+  /**
+   * Members of a sorted set whose score falls in `[min, max]`, lowest score first.
+   *
+   * `limit` maps to Redis's `LIMIT offset count`.
+   */
+  async zrangebyscore(key: string, min: string, max: string, limit?: number): Promise<string[]> {
+    const client = this.ensureConnected();
+    const args = [this.prefixKey(key), min, max];
+
+    if (limit !== undefined) {
+      args.push('LIMIT', '0', String(limit));
+    }
+
+    const result = await client.send('ZRANGEBYSCORE', args);
+
+    return Array.isArray(result) ? result as string[] : [];
+  }
+
+  /**
+   * Pop up to `count` lowest-scored members.
+   *
+   * Returns `{ member, score }` pairs rather than the wire shape. RESP2 answers with a flat
+   * `[member, score, member, score, …]` list and RESP3 with nested `[member, score]` pairs, so a
+   * caller that indexes the raw result gets an array where it expected a string on one protocol
+   * and not the other — and finds out at run time, inside whatever it does with the value.
+   */
+  async zpopmin(key: string, count: number): Promise<Array<{ member: string; score: number }>> {
+    const client = this.ensureConnected();
+    const result = await client.send('ZPOPMIN', [this.prefixKey(key), String(count)]);
+
+    if (!Array.isArray(result) || result.length === 0) {
+      return [];
+    }
+
+    // Nested: [[member, score], …]
+    if (Array.isArray(result[0])) {
+      return (result as unknown[][])
+        .filter((pair) => pair.length >= 2)
+        .map((pair) => ({ member: String(pair[0]), score: Number(pair[1]) }));
+    }
+
+    // Flat: [member, score, …]
+    const pairs: Array<{ member: string; score: number }> = [];
+    for (let i = 0; i + 1 < result.length; i += 2) {
+      pairs.push({ member: String(result[i]), score: Number(result[i + 1]) });
+    }
+
+    return pairs;
   }
 }
 

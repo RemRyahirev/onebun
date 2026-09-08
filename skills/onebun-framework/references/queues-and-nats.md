@@ -353,6 +353,13 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
+Delivery is list-based: a message is pushed onto `queue:q:<topic>` and a wake-up frame naming
+that topic goes out on the single `queue:wake` channel. Two replicas on the same pattern compete
+for a message with an atomic `LPOP` rather than both receiving it, and a message published before
+anyone subscribed is still delivered — the list holds it. Pattern subscriptions additionally poll,
+finding backlog keys with `SCAN` (never `KEYS`) over the translated glob — see
+[Pattern Wildcards](#pattern-wildcards).
+
 ## NATS Configuration
 
 ### NatsQueueAdapter (fire-and-forget)
@@ -522,13 +529,22 @@ Key JetStream behaviors:
 
 ### Pattern Wildcards
 
-| OneBun | NATS | Meaning |
-|---|---|---|
-| `events.*` | `events.*` | Single-level wildcard |
-| `events.#` | `events.>` | Multi-level wildcard (auto-converted) |
-| `events.{id}` | `events.*` | Named parameter — widened on the wire, re-checked in process |
-| `events.created` | `events.created` | Exact match |
+| OneBun | NATS | Redis key glob | Meaning |
+|---|---|---|---|
+| `events.*` | `events.*` | `events.*` | Single-level wildcard |
+| `events.#` | `events.>` | `events.*` | Multi-level wildcard (auto-converted) |
+| `events.{id}` | `events.*` | `events.*` | Named parameter — widened on the wire, re-checked in process |
+| `events.created` | `events.created` | `events.created` | Exact match |
 
 A # is only translated as the final token; toNatsSubject throws on a # in any other position.
 The throw surfaces from the `JetStreamQueueAdapter` constructor for a stream declaration, and
 from the awaited `publish()` / `subscribe()` call otherwise.
+
+On the Redis adapter {name}, * and a trailing # all translate to the glob *; a non-trailing # throws.
+Redis could serve `*.created` — the rejection keeps one pattern language across every adapter. The
+glob only narrows which keys `SCAN` walks; `createQueuePatternMatcher(pattern)`, built from the
+original pattern, decides what a handler actually receives, so a glob that over-matches is safe.
+
+A captured `{name}` value never reaches the handler on any adapter: the matcher computes it and the
+adapter discards it. `message.pattern` carries the concrete topic (`orders.123`); parse it yourself
+if you need the id.

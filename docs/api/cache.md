@@ -417,7 +417,7 @@ if (await this.cacheService.has('user:123')) {
 
 #### clear()
 
-Clear all cache entries.
+Delete every entry **in this cache's key prefix**.
 
 <!-- typecheck: skip -->
 ```typescript
@@ -427,6 +427,35 @@ async clear(): Promise<void>
 ```typescript
 await this.cacheService.clear();
 ```
+
+The scope is the prefix, and only the prefix. A cache configured with `keyPrefix: 'myapp:cache:'`
+deletes `myapp:cache:*` and nothing else, so sessions, queues and rate-limit counters sharing that
+Redis database are untouched.
+
+::: danger A cache with no prefix refuses to clear
+`clear()` and `getStats()` throw when the client they run on has an empty `keyPrefix`, because a
+cache that cannot name its own keyspace cannot delete inside it either — the pattern would be `*`,
+and the deletion would take every other tenant of the database with it. The error names the mode and
+what to configure.
+
+This is reachable: `CacheModule.forRoot({ redisOptions: { keyPrefix: '' } })`, an explicit
+`createRedisCache({ keyPrefix: '' })`, or a `RedisClient` you construct without one and pass in.
+Environment configuration cannot reach it — an empty `CACHE_REDIS_KEY_PREFIX` reads as unset and
+falls back to the default.
+:::
+
+Which prefix applies depends on where the client comes from:
+
+| Mode | Prefix that applies |
+|---|---|
+| Standalone (`createRedisCache({ keyPrefix })`) | the cache's own `keyPrefix`, passed to the client it creates |
+| Shared (`useSharedClient: true`) | the **shared** client's prefix, from `SharedRedisProvider.configure()` |
+| Injected (`new RedisCache(client)`) | the prefix that client was constructed with |
+
+In every mode the prefix is applied exactly once, by the client. Before 0.5.1 the standalone path
+applied it twice — entries were stored under `prefix + prefix + key` — so any reader outside the
+cache (a runbook, `SCAN`, a Redis ACL key pattern, another service) looked in the wrong place. Caches
+warmed by an older release will miss on their first read after upgrading and refill normally.
 
 #### `mget<T>()`
 

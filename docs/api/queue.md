@@ -298,22 +298,36 @@ async handleOrder(message: Message<OrderData>) {
 
 ### Pattern Syntax
 
-| Pattern | Example Match | Description | NATS subject |
-|---------|--------------|-------------|--------------|
-| `orders.created` | `orders.created` | Exact match | `orders.created` |
-| `orders.*` | `orders.created`, `orders.updated` | Single-level wildcard | `orders.*` |
-| `events.#` | `events.user.created`, `events.order.paid` | Multi-level wildcard | `events.>` |
-| `orders.{id}` | `orders.123` → `{ id: '123' }` | Named parameter | `orders.*` |
+| Pattern | Example Match | Description | NATS subject | Redis key glob |
+|---------|--------------|-------------|--------------|----------------|
+| `orders.created` | `orders.created` | Exact match | `orders.created` | `orders.created` |
+| `orders.*` | `orders.created`, `orders.updated` | Single-level wildcard | `orders.*` | `orders.*` |
+| `events.#` | `events.user.created`, `events.order.paid` | Multi-level wildcard | `events.>` | `events.*` |
+| `orders.{id}` | `orders.123` → `{ id: '123' }` | Named parameter | `orders.*` | `orders.*` |
+
+::: warning A captured `{name}` value is not handed to the handler
+The pattern matcher does capture it, but no adapter passes it on. A handler subscribed to
+`orders.{id}` receives `message.pattern === 'orders.123'` and has to parse the value out itself.
+`{name}` is, for now, a single-token wildcard that documents its own meaning.
+:::
 
 The **NATS subject** column applies to the `NatsQueueAdapter` and `JetStreamQueueAdapter`
 only. NATS has no equivalent of a named parameter, so `{name}` widens to `*` on the wire
 and the pattern is re-checked in process — a subscription never receives a message its
 pattern does not match.
 
-On those two adapters `#` **must be the final token**: it translates to the NATS `>`
-wildcard, which NATS accepts only at the end of a subject. A `#` anywhere else
-(`#.created`, `events.#.created`) throws — from the `JetStreamQueueAdapter` constructor
-for a stream declaration, and from the awaited `publish()` / `subscribe()` call otherwise.
+The **Redis key glob** column applies to the `RedisQueueAdapter`, which uses it to `SCAN` for
+topics that already hold a backlog. The mapping is `{name}` → `*`, `*` → `*`, and a
+**trailing `#`** → `*` — a Redis glob `*` spans separators, so `events.*` also matches the key
+for `events.user.created`. Every translation only widens: the in-process matcher, built from the
+original pattern, decides what a handler actually receives.
+
+On all three adapters `#` **must be the final token**. On NATS it translates to the `>`
+wildcard, which NATS accepts only at the end of a subject; Redis could serve `*.created`
+perfectly well, and rejects it anyway so that one pattern means one thing everywhere. A `#`
+anywhere else (`#.created`, `events.#.created`) throws — from the `JetStreamQueueAdapter`
+constructor for a stream declaration, and from the awaited `publish()` / `subscribe()` call
+otherwise.
 
 <llm-only>
 
@@ -324,6 +338,10 @@ for a stream declaration, and from the awaited `publish()` / `subscribe()` call 
 - Stream declarations are translated eagerly in the `JetStreamQueueAdapter` constructor, so `resolvedStreams[].natsSubjects` — the input to `ensureStream`'s subject-coverage guard and to `resolveStreamForSubject` — is already in NATS form. A declaration of `orders.{id}` binds `orders.*`
 - The publish path translates the pattern but does not widen a concrete subject: `publish('orders.123', …)` sends `orders.123`
 - Publishing is not pre-validated against the locally declared streams; a failed publish reports both the OneBun pattern and the translated NATS subject, with the broker's rejection attached as `cause`
+- `toRedisQueueGlob` in `packages/core/src/queue/redis-glob.ts` is the Redis-side sibling, exported from `packages/core/src/queue/index.ts`. Same rule, different output: `{name}` and a trailing `#` both become `*`, and a non-final `#` throws. Its call sites are `RedisQueueAdapter.subscribe` (eager, so a bad pattern throws at the subscribe call) and `scanTopics` (the `SCAN … MATCH` argument)
+- Redis queue keys: queue:q:\<topic\> per topic plus one fixed wake channel — `queue:wake`, whose frames carry the topic name. There is no channel per topic: a pattern subscription cannot know its topics in advance, and Bun's client offers no usable `psubscribe`
+- Pattern backlog keys are resolved with SCAN, never KEYS — the scan runs once per poll interval per pattern subscription, and `KEYS` blocks the server for the whole keyspace walk
+- The captured parameters of a `{name}` pattern are computed as `entry.matcher(topic).params` and then discarded by every adapter. Nothing in `Message` or `MessageMetadata` carries them
 
 </llm-only>
 
@@ -714,7 +732,39 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 **Supported Features:**
-- All features (pattern subscriptions, delayed messages, priority, consumer groups, DLQ, retry, scheduled jobs)
+- Publishing and delivery, pattern subscriptions, delayed messages, priority messages, consumer
+  groups, scheduled jobs
+
+::: warning Not yet delivered by this adapter
+`supports()` reports these as available, and they are not:
+
+- **Retry** — `retry.attempts` is read by neither the memory nor the Redis adapter. Under
+  `ackMode: 'auto'` a handler that throws loses its message on the first failure, with no
+  redelivery.
+- **Dead-letter queue** — `deadLetter.queue` and `deadLetter.maxRetries` are ignored; failed
+  messages go to a hardcoded `queue:dlq:<pattern>` key that no `@Subscribe` can address.
+:::
+
+::: tip How delivery works
+Delivery is **list-based**. A message is pushed onto a Redis list keyed by its topic, and a
+**wake-up** frame naming that topic is published on one shared channel. The list is the only
+delivery path: a consumer claims a message with an atomic `LPOP`, so two replicas subscribed to
+the same pattern **compete rather than both receive** it. The channel carries no payload — it only
+wakes the drain, which is why a message published while nothing was subscribed is still delivered
+when a subscriber starts.
+
+A pattern subscription (`orders.{id}`, `events.#`) cannot know its topics in advance, so it also
+polls: the pattern is translated to a Redis glob and matching topic keys are found with `SCAN`,
+then drained through the same `LPOP` claim. The wake channel short-circuits the wait; the scan is
+what finds a backlog that predates the subscription.
+
+Do not publish to the wake channel by hand expecting delivery: the frame is a signal, and the
+message has to be on the list to be taken.
+
+For durable, retried, dead-lettered delivery today, use the NATS/JetStream adapter
+([`@onebun/nats`](/api/queue#custom-adapter-nats-jetstream)), where the retry and dead-letter
+precedence chain is implemented.
+:::
 
 ### Custom adapter: NATS JetStream
 

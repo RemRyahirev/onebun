@@ -51,6 +51,7 @@ import {
   matchQueuePattern,
   isQueuePatternMatch,
   createQueuePatternMatcher,
+  toRedisQueueGlob,
   InMemoryQueueAdapter,
   getSubscribeMetadata,
   getCronMetadata,
@@ -1095,5 +1096,47 @@ describe("ackMode 'none' (docs/api/queue.md)", () => {
     expect(tracksDelivery({ ackMode: 'manual' })).toBe(true);
     expect(acknowledgesAutomatically({ ackMode: 'none' })).toBe(false);
     expect(acknowledgesAutomatically({ ackMode: 'auto' })).toBe(true);
+  });
+});
+
+/**
+ * @source docs:api/queue.md#pattern-syntax
+ */
+describe('Pattern Syntax — the Redis key glob column', () => {
+  it('translates each documented pattern to the glob the table promises', () => {
+    // The table's fourth column, row by row. A glob is only ever a SUPERSET of the pattern:
+    // Redis walks fewer keys, the in-process matcher decides what a handler actually receives.
+    expect(toRedisQueueGlob('orders.created')).toBe('orders.created');
+    expect(toRedisQueueGlob('orders.*')).toBe('orders.*');
+    expect(toRedisQueueGlob('events.#')).toBe('events.*');
+    expect(toRedisQueueGlob('orders.{id}')).toBe('orders.*');
+  });
+
+  it('rejects a # that is not the final token, on Redis as on NATS', () => {
+    // Redis could serve `*.created` — the rejection is about one pattern language across adapters.
+    expect(() => toRedisQueueGlob('#.created')).toThrow(/final token/i);
+    expect(() => toRedisQueueGlob('events.#.created')).toThrow(/final token/i);
+  });
+
+  it('does not hand the captured {name} value to the handler', async () => {
+    // The warning under the table. The matcher captures it...
+    expect(matchQueuePattern('orders.{id}', 'orders.123').params).toEqual({ id: '123' });
+
+    // ...and the adapter delivers a message that carries no trace of it.
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const delivered: Array<Message<unknown>> = [];
+    await adapter.subscribe('orders.{id}', async (message) => {
+      delivered.push(message);
+    });
+
+    await adapter.publish('orders.123', { total: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await adapter.disconnect();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.pattern).toBe('orders.123');
+    expect(Object.keys(delivered[0]!.metadata ?? {})).not.toContain('params');
   });
 });

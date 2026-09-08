@@ -68,6 +68,9 @@ export {
   type QueuePatternMatch,
 } from './pattern-matcher';
 
+// Redis key glob translation — the Redis-side sibling of `toNatsSubject`
+export { toRedisQueueGlob } from './redis-glob';
+
 // Acknowledgment semantics
 export {
   resolveAckMode,
