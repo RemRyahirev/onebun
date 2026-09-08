@@ -101,6 +101,7 @@ import {
   HttpMethod,
   type ModuleInstance,
   type OneBunRequest,
+  type ResolvedMiddleware,
   ParamType,
   type RouteMetadata,
 } from '../types';
@@ -1445,6 +1446,30 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         ? (this.ensureModule().resolveMiddleware?.(allGlobalClasses) ?? [])
         : [];
 
+      // The resolved CORS middleware, if one is in the chain — used to answer a browser
+      // preflight BEFORE routing. Global middleware is concatenated into registered route
+      // handlers only, so an OPTIONS to a path whose controller declares just GET reached the
+      // 404 fallback with no Access-Control-* headers, and the browser blocked every
+      // cross-origin request carrying Authorization or a JSON content type.
+      //
+      // `resolveMiddleware` preserves input order 1:1, so the class index is the instance index.
+      // Subclass detection is required because `CorsMiddleware.configure()` returns an anonymous
+      // subclass, which is also how a user writing `middleware: [CorsMiddleware.configure(...)]`
+      // by hand keeps working.
+      const corsIndex = allGlobalClasses.findIndex((cls) =>
+        cls === CorsMiddleware
+        || (cls as { prototype?: unknown }).prototype instanceof CorsMiddleware);
+      const corsPreflight = corsIndex === -1
+        ? undefined
+        : (globalMiddleware[corsIndex] as ResolvedMiddleware | undefined);
+      // `preflightContinue: true` means the caller wants a downstream handler to produce the
+      // preflight response, so the short-circuit must not fire. Read off the resolved instance
+      // rather than `this.options.cors`, because a manually supplied
+      // `middleware: [CorsMiddleware.configure({ preflightContinue: true })]` never goes
+      // through `options.cors` at all.
+      const corsContinues = (corsPreflight as { _middlewareInstance?: CorsMiddleware } | undefined)
+        ?._middlewareInstance?.continuesPreflight === true;
+
       // Add routes from controllers
       for (const controllerClass of controllers) {
         const controllerMetadata = getControllerMetadata(controllerClass);
@@ -1779,6 +1804,45 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // the unmatched path from falling back to one shared identity the moment
           // anything downstream starts asking who called.
           bindRequestClientAddress(req, server);
+
+          // Answer a browser preflight before anything else looks at the request.
+          //
+          // Bun's `routes` table has already run, so an explicitly declared `@Options` route
+          // never reaches here and cannot be shadowed — precedence is free. Reaching this point
+          // means no route matched the method and path, which for a preflight is the normal
+          // case: a controller declaring only `@Get` has no OPTIONS route, and the browser's
+          // preflight was answered with a bare 404 carrying no `Access-Control-*` headers, so
+          // every cross-origin request with `Authorization` or a JSON content type was blocked.
+          //
+          // BEFORE the WebSocket block on purpose. `isSocketIoPath` below is method-agnostic, so
+          // with Socket.IO enabled a cross-origin `OPTIONS /socket.io/...` would enter
+          // `handleUpgrade()`, fail to upgrade, and return 400 with no CORS headers. Placing the
+          // short-circuit after that block would leave the bug alive for every Socket.IO app.
+          //
+          // Gated on `Access-Control-Request-Method`, which the Fetch spec requires on every real
+          // preflight: a bare `curl -X OPTIONS` is API probing, not CORS, and keeps its honest
+          // 404. Only the CORS middleware runs — rate limiting and auth must never see a
+          // credential-less preflight, and they already never do on the routed path, because
+          // CORS sits first in the chain and returns without calling `next()`.
+          if (
+            corsPreflight !== undefined
+            && !corsContinues
+            && req.method === 'OPTIONS'
+            && req.headers.has('access-control-request-method')
+          ) {
+            // `OneBunRequest` is Bun's `BunRequest`, which carries `params` and `cookies`; the
+            // fallback `req` is a plain `Request`. A subclass overriding `use()` and reading
+            // either would throw on `undefined`, so both are supplied rather than cast away.
+            const preflightRequest = Object.assign(req, {
+              params: {},
+              cookies: new Map<string, string>(),
+            }) as unknown as OneBunRequest;
+
+            return await corsPreflight(
+              preflightRequest,
+              async () => new Response('Not Found', { status: HttpStatusCode.NOT_FOUND }),
+            );
+          }
 
           // Handle WebSocket upgrade if gateways exist
           if (hasWebSocketGateways && app.wsHandler) {

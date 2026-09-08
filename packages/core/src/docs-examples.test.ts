@@ -8949,7 +8949,13 @@ describe('docs/api/security.md', () => {
     const mw = new CorsMiddleware();
     const req = new Request('http://localhost/', {
       method: 'OPTIONS',
-      headers: { origin: 'https://example.com' },
+      headers: {
+        origin: 'https://example.com',
+        // Required on every real preflight by the Fetch spec, and required by the middleware:
+        // without it an OPTIONS is API discovery and is passed through to the application.
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'access-control-request-method': 'GET',
+      },
     }) as unknown as OneBunRequest;
 
     const res = await mw.use(req, async () => new Response('ok'));

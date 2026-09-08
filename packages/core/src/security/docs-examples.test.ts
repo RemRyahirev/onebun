@@ -130,6 +130,11 @@ function originHeaders(origin: string): Headers {
   return new Headers([['origin', origin]]);
 }
 
+/** Headers a browser actually sends on a preflight: the origin AND the method it intends. */
+function preflightHeaders(origin: string, method = 'POST'): Headers {
+  return new Headers([['origin', origin], ['access-control-request-method', method]]);
+}
+
 async function call(app: OneBunApplication, path: string, init?: RequestInit): Promise<Response> {
   return await fetch(`http://127.0.0.1:${app.getPort()}${path}`, init);
 }
@@ -244,37 +249,59 @@ describe('docs: api/security.md', () => {
     /**
      * @source docs:api/security.md#quick-reference-for-ai
      */
-    it('answers a preflight only where an OPTIONS-capable route exists', async () => {
+    it('answers a preflight whether or not the path declares an OPTIONS route', async () => {
       app = createApp({ cors: { origin: 'https://front.example.com' } });
       await app.start();
 
-      const headers = originHeaders('https://front.example.com');
+      const headers = preflightHeaders('https://front.example.com');
       const onOptionsRoute = await call(app, '/api/ping', { method: 'OPTIONS', headers });
       const onPostOnlyRoute = await call(app, '/api/submit', { method: 'OPTIONS', headers });
-      const posted = await call(app, '/api/submit', { method: 'POST', headers });
-      const unmatched = await call(app, '/api/nothing-here', { method: 'GET', headers });
+      const onNoRoute = await call(app, '/api/nothing-here', { method: 'OPTIONS', headers });
+      const posted = await call(app, '/api/submit', {
+        method: 'POST', headers: originHeaders('https://front.example.com'),
+      });
 
       expect(onOptionsRoute.status).toBe(204);
       expect(onOptionsRoute.headers.get('Access-Control-Allow-Origin')).toBe('https://front.example.com');
       expect(onOptionsRoute.headers.get('Access-Control-Allow-Methods')).toContain('POST');
 
-      // A path that declares only @Post() has no OPTIONS route: the preflight falls
-      // through to the bare 404 with no CORS headers, and the browser blocks the POST.
-      expect(onPostOnlyRoute.status).toBe(404);
-      expect(onPostOnlyRoute.headers.get('Access-Control-Allow-Origin')).toBeNull();
+      // A path that declares only @Post() has no OPTIONS route, and used to answer the browser
+      // with a bare 404 carrying no CORS headers — so the POST it was preflighting was blocked.
+      // The preflight is now answered before routing.
+      expect(onPostOnlyRoute.status).toBe(204);
+      expect(onPostOnlyRoute.headers.get('Access-Control-Allow-Origin')).toBe('https://front.example.com');
+
+      // Same for a path that does not exist: the browser gets a well-formed answer and makes
+      // its own decision, rather than an opaque failure.
+      expect(onNoRoute.status).toBe(204);
+      expect(onNoRoute.headers.get('Access-Control-Allow-Origin')).toBe('https://front.example.com');
 
       // The matched route itself still gets the headers.
       expect(posted.headers.get('Access-Control-Allow-Origin')).toBe('https://front.example.com');
 
-      expect(unmatched.status).toBe(404);
-      expect(unmatched.headers.get('Access-Control-Allow-Origin')).toBeNull();
-
       await Promise.all([
         onOptionsRoute.text(),
         onPostOnlyRoute.text(),
+        onNoRoute.text(),
         posted.text(),
-        unmatched.text(),
       ]);
+    });
+
+    /**
+     * @source docs:api/security.md#quick-reference-for-ai
+     */
+    it('leaves a non-preflight OPTIONS to the application', async () => {
+      // No `Access-Control-Request-Method` means this is API discovery, not CORS. It keeps its
+      // honest 404 where nothing is declared, instead of a 204 that says nothing true.
+      app = createApp({ cors: { origin: 'https://front.example.com' } });
+      await app.start();
+
+      const headers = originHeaders('https://front.example.com');
+      const probe = await call(app, '/api/submit', { method: 'OPTIONS', headers });
+
+      expect(probe.status).toBe(404);
+
+      await probe.text();
     });
 
     /**
@@ -359,7 +386,9 @@ describe('docs: api/security.md', () => {
 
       const headers = originHeaders('https://my-frontend.example.com');
       const simple = await call(app, '/api/ping', { headers });
-      const preflight = await call(app, '/api/ping', { method: 'OPTIONS', headers });
+      const preflight = await call(app, '/api/ping', {
+        method: 'OPTIONS', headers: preflightHeaders('https://my-frontend.example.com', 'PUT'),
+      });
       const stranger = await call(app, '/api/ping', { headers: originHeaders('https://attacker.test') });
 
       expect(simple.headers.get('Access-Control-Allow-Origin')).toBe('https://my-frontend.example.com');

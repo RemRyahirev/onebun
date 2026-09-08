@@ -1013,6 +1013,11 @@ export class OneBunModule implements ModuleInstance {
       // Preserve class name for profiling and debugging
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (bound as any)._middlewareName = cls.name;
+      // And the instance itself, so a caller that needs to ask the middleware a question —
+      // rather than run it — does not have to instantiate a second one with different DI.
+      // The application's CORS preflight short-circuit reads `continuesPreflight` this way.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (bound as any)._middlewareInstance = instance;
 
       return bound;
     });

@@ -296,15 +296,29 @@ const app = new OneBunApplication(AppModule, {
 
 ### CORS
 
-**Configuring `cors` is not enough on its own.** `CorsMiddleware` answers a preflight only on a path
-that already declares an `OPTIONS`-capable route — `@Options()` or `@All()`. On any other path the
-`OPTIONS` request never enters the middleware chain at all: Bun's method map rejects the verb and
-the fallback returns a bare `404 Not Found` with no `Access-Control-*` headers. So a cross-origin
-`POST` to a path that only declares `@Post()` is blocked at preflight even with `cors` correctly
-configured, while a plain `POST` to that same path does get the headers. Declare `@Options()` (or
-`@All()`) on every path a browser will preflight — anything beyond a simple GET/POST with a
-form-encoded body. Headers are attached to every response of a matched route, error responses
-included, and never to a fallback 404.
+**Configuring `cors` is enough.** A browser preflight is answered before routing, so no
+`@Options()` route is needed on the paths a frontend calls. A path declaring only `@Post()` answers
+its preflight correctly, and so does a path that does not exist.
+
+This changed: previously the preflight never entered the middleware chain — Bun's method map
+rejected the verb and the fallback returned a bare `404` with no `Access-Control-*` headers — so a
+cross-origin `POST` to a `@Post()`-only path was blocked at preflight even with `cors` configured
+correctly. Any advice to "declare `@Options()` on every path a browser will preflight" is obsolete.
+
+Four details worth keeping straight:
+
+- The split between a preflight and an API probe is the `Access-Control-Request-Method` header,
+  which the Fetch spec requires on every real preflight. A bare `curl -X OPTIONS` reaches the
+  application — your `@Options()` handler, or an honest `404`.
+- A declared `@Options()` route is never shadowed by the short-circuit: Bun's router runs first, so
+  a matched path never reaches the fallback the short-circuit lives in.
+- A real preflight is still answered by CORS even where an `@Options()` route exists, because a
+  preflight response without the grant is a blocked request whatever its status. `preflightContinue:
+  true` hands it back to you and disables the short-circuit.
+- A disallowed origin gets a well-formed `204` with no `Access-Control-Allow-Origin`. The browser
+  blocks it, which is its decision to make.
+
+Headers are attached to every response of a matched route, error responses included.
 
 <!-- typecheck: skip -->
 ```typescript
