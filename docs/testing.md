@@ -22,12 +22,13 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `_testProviders` is an internal option; the application copies it into its `GlobalScope.overrides` before building the module tree (there is no post-hoc pass over the root module any more)
 - No `envSchema` in `setOptions()` + a service reading `this.config` in its constructor = `DependencyResolutionError: Could not resolve dependency X`. `module.ts` re-throws only `OneBun*`-named errors; the config stub's plain `Error` is logged to the silent mock logger and the service is dropped
 
-**Testcontainers** (`createRedisContainer`, `createNatsContainer`):
+**Testcontainers** (`createRedisContainer`, `createNatsContainer`, `createPostgresContainer`):
 - `testcontainers` is a REQUIRED peer dependency of `@onebun/core`, declared without `peerDependenciesMeta.optional`. The `@onebun/core/testing` barrel value-imports it, so it must be installed for any import from that subpath, not only for the container helpers. That is the intended contract: integration tests are the default, and the subpath is a boundary of concern rather than a way to make the peer conditional
 - Belongs in the consumer's `devDependencies`; a production install never resolves the subpath
 - Require Docker daemon running
 - Return `TestContainer` with `url`, `host`, `port`, `container`, `stop()`
-- Default images: `redis:7-alpine`, `nats:2.10-alpine`
+- Default images: `redis:7-alpine`, `nats:2.10-alpine`, `postgres:16-alpine`
+- `createPostgresContainer` waits for the SECOND `database system is ready to accept connections` line. The image starts a temporary server for its init scripts, logs that line for it, stops it, and only then starts the real one — waiting for the first hands back a URL that is about to stop working
 - NATS supports `enableJetStream: true` option
 - Always call `stop()` in `afterAll` to clean up containers
 
@@ -61,6 +62,7 @@ import {
   createMockSyncLogger,
   createRedisContainer,
   createNatsContainer,
+  createPostgresContainer,
 } from '@onebun/core/testing';
 ```
 
@@ -275,7 +277,7 @@ Returns the application config. Requires `envSchema` to be set via `setOptions()
 
 Stops the test server and releases resources. Always call this in `afterEach` or `afterAll`.
 
-## Testcontainers — `createRedisContainer` / `createNatsContainer`
+## Testcontainers — `createRedisContainer` / `createNatsContainer` / `createPostgresContainer`
 
 Helpers for spinning up Redis and NATS containers in tests. Requires Docker.
 
@@ -323,6 +325,37 @@ afterAll(async () => {
 - `image` — Docker image (default: `nats:2.10-alpine`)
 - `startupTimeout` — timeout in ms (default: `30000`)
 - `enableJetStream` — enable JetStream (default: `false`)
+
+### `createPostgresContainer`
+
+```typescript
+import { createPostgresContainer, type TestContainer } from '@onebun/core/testing';
+
+let postgres: TestContainer;
+
+beforeAll(async () => {
+  postgres = await createPostgresContainer();
+  // postgres.url → 'postgresql://onebun:onebun@localhost:55231/onebun_test'
+});
+
+afterAll(async () => {
+  await postgres.stop();
+});
+```
+
+**Options** (`PostgresContainerOptions`):
+- `image` — Docker image (default: `postgres:16-alpine`)
+- `startupTimeout` — timeout in ms (default: `30000`, `60000` under CI)
+- `database` — database to create (default: `onebun_test`)
+- `username` — role to create (default: `onebun`)
+- `password` — its password (default: `onebun`)
+
+::: tip It waits for the second "ready" line, deliberately
+The postgres image starts a temporary server to run its initialisation scripts and logs
+`database system is ready to accept connections` for it, then shuts it down and starts the real
+one. Waiting for the first line returns a URL that is about to stop working, and the failure lands
+in whichever test connects first rather than in the helper.
+:::
 
 ### `TestContainer` interface
 

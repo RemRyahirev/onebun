@@ -63,7 +63,7 @@ jobs:
         run: bun run readme:check
 
       - name: Pre-pull testcontainer images
-        run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & wait
+        run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & docker pull postgres:16-alpine & wait
 
       - name: Test with coverage
         timeout-minutes: 25

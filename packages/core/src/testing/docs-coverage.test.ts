@@ -10,6 +10,7 @@
 
 import { connect } from 'node:net';
 
+import { SQL } from 'bun';
 import {
   describe,
   expect,
@@ -30,6 +31,7 @@ import {
   createMockConfig,
   createMockSyncLogger,
   createNatsContainer,
+  createPostgresContainer,
   createRedisContainer,
   createTestService,
   makeMockLoggerLayer,
@@ -327,6 +329,82 @@ describe('docs/testing.md — createRedisContainer', () => {
       if (!stopped) {
         await redis.stop();
       }
+    }
+  }, CONTAINER_TEST_TIMEOUT_MS);
+});
+
+// ============================================================================
+// createPostgresContainer
+// ============================================================================
+
+describe('docs/testing.md — createPostgresContainer', () => {
+  /**
+   * The snippet's comment claims `postgres.url` addresses a running server, and the tip claims
+   * the helper waits for the SECOND "ready to accept connections" line because the first belongs
+   * to the temporary server the image uses for its init scripts.
+   *
+   * Both are checked by connecting immediately: the URL the helper returns must already accept a
+   * query. Waiting on the first line returns while the init server is on its way down, so this
+   * case fails — not always, which is the point of pinning it rather than trusting the strategy.
+   *
+   * @source docs:testing.md#createpostgrescontainer
+   */
+  it('returns a url that already accepts queries, with the documented database and user', async () => {
+    const postgres = await createPostgresContainer();
+
+    try {
+      expect(postgres.url).toBe(
+        `postgresql://onebun:onebun@${postgres.host}:${postgres.port}/onebun_test`,
+      );
+
+      const sql = new SQL(postgres.url);
+
+      try {
+        const rows = await sql`SELECT current_database() AS db, current_user AS usr` as Array<{
+          db: string;
+          usr: string;
+        }>;
+
+        expect(rows).toEqual([{ db: 'onebun_test', usr: 'onebun' }]);
+      } finally {
+        await sql.close();
+      }
+    } finally {
+      await postgres.stop();
+    }
+  }, CONTAINER_TEST_TIMEOUT_MS);
+
+  /**
+   * The documented `database` / `username` / `password` options.
+   *
+   * @source docs:testing.md#createpostgrescontainer
+   */
+  it('creates the database and role the options name', async () => {
+    const postgres = await createPostgresContainer({
+      database: 'custom_db',
+      username: 'custom_user',
+      password: 'custom_pass',
+    });
+
+    try {
+      expect(postgres.url).toBe(
+        `postgresql://custom_user:custom_pass@${postgres.host}:${postgres.port}/custom_db`,
+      );
+
+      const sql = new SQL(postgres.url);
+
+      try {
+        const rows = await sql`SELECT current_database() AS db, current_user AS usr` as Array<{
+          db: string;
+          usr: string;
+        }>;
+
+        expect(rows).toEqual([{ db: 'custom_db', usr: 'custom_user' }]);
+      } finally {
+        await sql.close();
+      }
+    } finally {
+      await postgres.stop();
     }
   }, CONTAINER_TEST_TIMEOUT_MS);
 });
