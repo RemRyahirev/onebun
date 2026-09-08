@@ -432,6 +432,193 @@ describe('RedisQueueAdapter', () => {
         client.lpop = originalLpop;
       }
     }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('republishes an exhausted message to deadLetter.queue, consumable with subscribe()', async () => {
+      // The whole point of the change. The old implementation RPUSHed to a per-pattern list that
+      // had no reader — no LPOP, no SCAN, no subscription — so a "dead-lettered" message was
+      // indistinguishable from a dropped one unless you went in with redis-cli.
+      let attempts = 0;
+      const dead: Array<{ pattern: string; data: unknown; id: string; timestamp: number }> = [];
+
+      await adapter.subscribe('orders.dlq-src', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dead', maxRetries: 2 } });
+
+      await adapter.subscribe('orders.dead', async (message) => {
+        dead.push({
+          pattern: message.pattern,
+          data: message.data,
+          id: message.id,
+          timestamp: message.timestamp,
+        });
+      });
+
+      const messageId = await adapter.publish('orders.dlq-src', { orderId: 42 });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(600);
+
+      // `maxRetries: 2` capped the attempts, then the terminal delivery was routed.
+      expect(attempts).toBe(2);
+      expect(dead).toHaveLength(1);
+      expect(dead[0].data).toEqual({ orderId: 42 });
+      expect(dead[0].id).toBe(messageId);
+      expect(dead[0].timestamp).toBeGreaterThan(0);
+      // The dead-lettered copy is addressed to the DLQ; its origin lives in metadata.
+      expect(dead[0].pattern).toBe('orders.dead');
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('lets retry.attempts win over deadLetter.maxRetries when both are set', async () => {
+      // The cap chain is `retry.attempts ?? deadLetter.maxRetries ?? 1`, the same precedence
+      // JetStream uses for `max_deliver`. With both present the explicit retry budget decides.
+      let attempts = 0;
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.prec-src', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 }, deadLetter: { queue: 'orders.prec-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.prec-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.prec-src', { orderId: 11 });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(600);
+
+      // 3, not the 1 that `maxRetries` alone would have given.
+      expect(attempts).toBe(3);
+      expect(dead).toEqual([{ orderId: 11 }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('stamps the dead letter with its origin, delivery count and error', async () => {
+      const dead: Array<Record<string, unknown>> = [];
+
+      await adapter.subscribe('orders.stamped-src', async () => {
+        throw new Error('inventory unavailable');
+      }, { deadLetter: { queue: 'orders.stamped-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.stamped-dead', async (message) => {
+        dead.push(message.metadata as Record<string, unknown>);
+      });
+
+      await adapter.publish('orders.stamped-src', { orderId: 7 }, { metadata: { headers: { tenant: 'acme' } } });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(400);
+
+      expect(dead[0]['dlq.originalPattern']).toBe('orders.stamped-src');
+      expect(dead[0]['dlq.deliveryCount']).toBe(1);
+      expect(dead[0]['dlq.error']).toBe('inventory unavailable');
+      // The caller's own metadata survives — the `dlq.` prefix is what keeps them apart.
+      expect(dead[0].headers).toEqual({ tenant: 'acme' });
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('does not dead-letter a message whose handler succeeds', async () => {
+      const dead: unknown[] = [];
+      let handled = 0;
+
+      await adapter.subscribe('orders.happy-src', async () => {
+        handled += 1;
+      }, { deadLetter: { queue: 'orders.happy-dead', maxRetries: 3 } });
+
+      await adapter.subscribe('orders.happy-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.happy-src', { orderId: 1 });
+
+      await waitFor(() => handled > 0);
+      await Bun.sleep(600);
+
+      expect(handled).toBe(1);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('dead-letters a message at most once, even when the DLQ handler also throws', async () => {
+      // Without the marker this ping-pongs: the DLQ subscriber fails, routes to its own DLQ,
+      // which is itself, forever.
+      let sourceAttempts = 0;
+      let deadAttempts = 0;
+
+      await adapter.subscribe('orders.loop-src', async () => {
+        sourceAttempts += 1;
+        throw new Error('source exploded');
+      }, { deadLetter: { queue: 'orders.loop-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.loop-dead', async () => {
+        deadAttempts += 1;
+        throw new Error('dead-letter handler exploded too');
+      }, { deadLetter: { queue: 'orders.loop-dead', maxRetries: 1 } });
+
+      await adapter.publish('orders.loop-src', { orderId: 5 });
+
+      await waitFor(() => deadAttempts > 0, 10_000);
+      // Long enough for a loop to be obvious if the guard were missing.
+      await Bun.sleep(1200);
+
+      expect(sourceAttempts).toBe(1);
+      expect(deadAttempts).toBe(1);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('retries without dead-lettering when retry is set and deadLetter is not', async () => {
+      // The two options are independent: `retry` alone must not invent a destination.
+      let attempts = 0;
+
+      await adapter.subscribe('orders.no-dlq', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.no-dlq', { orderId: 3 });
+      await waitFor(() => attempts >= 3, 10_000);
+      await Bun.sleep(600);
+
+      expect(attempts).toBe(3);
+
+      // Nothing was written anywhere under this adapter's prefix.
+      const client = (adapter as unknown as {
+        client: { raw: (cmd: string, ...args: string[]) => Promise<[string, string[]]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const [, keys] = await client.raw('SCAN', '0', 'MATCH', `${prefix}queue:q:*`, 'COUNT', '1000');
+
+      expect(keys).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reports a dead letter that could not be republished instead of losing it silently', async () => {
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { rpush: (key: string, ...values: string[]) => Promise<number> };
+      }).client;
+      const originalRpush = client.rpush.bind(client);
+
+      // Broken from inside the handler, so the original publish still lands and only the
+      // dead-letter republish that follows this throw fails.
+      await adapter.subscribe('orders.dlq-broken', async () => {
+        client.rpush = () => Promise.reject(new Error('RPUSH exploded'));
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dlq-broken-dead', maxRetries: 1 } });
+
+      try {
+        await adapter.publish('orders.dlq-broken', { orderId: 9 });
+        await waitFor(() => errors.some((e) => e.message.includes('dead letter')), 10_000);
+
+        const reported = errors.find((e) => e.message.includes('dead letter'))!;
+        expect(reported.message).toContain('orders.dlq-broken');
+        expect(reported.message).toContain('orders.dlq-broken-dead');
+        expect((reported.cause as Error).message).toBe('RPUSH exploded');
+      } finally {
+        client.rpush = originalRpush;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
   });
 
 

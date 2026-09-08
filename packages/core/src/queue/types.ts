@@ -182,11 +182,23 @@ export interface RetryOptions {
 
 /**
  * Dead Letter Queue configuration
+ *
+ * Honoured by the Redis and JetStream adapters. The memory and core-NATS adapters report
+ * `supports('dead-letter-queue') === false` and ignore it.
+ *
+ * @see docs:api/queue.md
  */
 export interface DeadLetterOptions {
-  /** Queue name for dead letters */
+  /**
+   * Where a terminally-failed message goes. A QUEUE PATTERN, not a broker-specific key: the
+   * message is republished through the normal publish path, so `@Subscribe(queue)` consumes it.
+   */
   queue: string;
-  /** Maximum retries before sending to DLQ */
+  /**
+   * Deliveries before the message is dead-lettered, used only when `retry.attempts` is absent —
+   * the cap resolves as `retry.attempts ?? deadLetter.maxRetries ?? 1` on Redis, and
+   * `retry.attempts ?? deadLetter.maxRetries ?? consumerConfig.maxDeliver ?? 3` on JetStream.
+   */
   maxRetries?: number;
 }
 

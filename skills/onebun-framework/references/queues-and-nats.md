@@ -97,7 +97,13 @@ an acknowledgement protocol to begin with. A failing handler still emits `onMess
 
 JetStream routes the terminal delivery to deadLetter.queue and term()s the original — republishing first, terminating only once that succeeded, so a failed republish leaves the message for the server to redeliver rather than losing it.
 
-Redis ignores deadLetter.queue and deadLetter.maxRetries: it treats `deadLetter` as an on/off flag and routes to `queue:dlq:${pattern}`.
+Redis honours both fields. `deadLetter.queue` is a queue PATTERN — the message is republished
+through the normal publish path, so `@Subscribe('orders.dead')` consumes it — and
+`deadLetter.maxRetries` joins the cap chain as `retry.attempts ?? deadLetter.maxRetries ?? 1`.
+The republished envelope gains `dlq.originalPattern`, `dlq.deliveryCount` and `dlq.error`, and a
+message carrying `dlq.originalPattern` is dropped rather than dead-lettered twice.
+
+deadLetter is honoured by the Redis and JetStream adapters only; memory and NatsQueueAdapter report supports(dead-letter-queue) === false.
 
 The same routing applies to `message.nack(false)` (and the bare `nack()`) under `ackMode: 'manual'`;
 `nack(true)` still asks for redelivery. The republished message keeps its original `id` and gains

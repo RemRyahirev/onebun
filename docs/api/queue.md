@@ -227,6 +227,11 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - Memory keeps the counter in the delivery closure and retries the ONE failing `SubscriptionEntry`, not `dispatch()`. Going back through `dispatch()` re-invoked every matching subscription, so one broken consumer re-ran its healthy neighbours
 - Redis keeps the counter in the persisted envelope (`attempt` on the JSON on the list) because a retry is a re-push and the replica that claims it next may not be the one that failed; an in-process counter would restart at 1 on every hop. A delayed retry is parked in the existing `queue:delayed` sorted set rather than awaited in a closure, so the wait survives a restart; a zero delay skips the set, which would otherwise cost a poll tick
 - All three of `attempt`, `maxAttempts` and `redelivered` are `undefined`/`false` under `ackMode: 'none'` on both adapters — the mode tracks no delivery, so there is no attempt to number
+- Redis dead-letter cap precedence: retry.attempts ?? deadLetter.maxRetries ?? 1. `resolveMaxAttempts` takes the `deadLetter` as an optional SECOND argument and the memory adapter does not pass it — that adapter reports `supports('dead-letter-queue') === false`, so `maxRetries` there would cap a route that does not exist
+- `RedisQueueAdapter.routeToDeadLetter` republishes through the adapter's own `publish()`, so `deadLetter.queue` is a queue pattern consumable with `@Subscribe`. The `keys.deadLetter` builder and its `queue:dlq:` list are gone: nothing ever LPOPped, SCANned or subscribed to them
+- On the terminal delivery a message is dead-lettered at most once. The guard is `metadata['dlq.originalPattern'] !== undefined` on the INCOMING envelope, checked before the republish; the marker shape (`dlq.originalPattern`, `dlq.deliveryCount`, `dlq.error`) matches `JetStreamQueueAdapter.routeToDeadLetter` so both read the same on the consuming side
+- Two call sites reach it and the split is load-bearing: the exhaustion branch in the consume loop under `'auto'`, and `onNack(false)` under `'manual'` only. The `onNack` route is gated on `!acknowledgesAutomatically(entry.options)` because the `'auto'` loop calls `nack(false)` as bookkeeping on EVERY failed attempt — ungated, one message was dead-lettered once per attempt plus once more at exhaustion
+- A failed republish emits `onError` with the rejection as `cause` and does NOT fall back to dropping silently
 
 </llm-only>
 
@@ -508,7 +513,7 @@ everywhere:
 | Adapter | `nack(false)` |
 |---|---|
 | JetStream | terminated on the server; never redelivered, and the delivery does not count against `maxDeliver` |
-| Redis | moved to the dead-letter queue if `deadLetter` is configured, otherwise dropped |
+| Redis | republished to `deadLetter.queue` if configured, otherwise dropped |
 | In-memory | dropped; this adapter has no dead-letter queue |
 | NATS (pub/sub) | no effect — plain NATS has no acknowledgement, so neither form does anything |
 
@@ -781,16 +786,44 @@ const app = new OneBunApplication(AppModule, {
 
 **Supported Features:**
 - Publishing and delivery, pattern subscriptions, delayed messages, priority messages, consumer
-  groups, scheduled jobs
+  groups, retry, dead-letter queue, scheduled jobs
 
-::: warning Not yet delivered by this adapter
-`supports()` reports these as available, and they are not:
+::: tip Dead-letter queue
+`DeadLetterOptions.queue` is a **queue pattern, not a Redis key**. On the terminal delivery the
+message is **republished through the normal publish path** to that pattern, so an ordinary
+subscriber consumes it:
 
-- **Retry** — `retry.attempts` is read by neither the memory nor the Redis adapter. Under
-  `ackMode: 'auto'` a handler that throws loses its message on the first failure, with no
-  redelivery.
-- **Dead-letter queue** — `deadLetter.queue` and `deadLetter.maxRetries` are ignored; failed
-  messages go to a hardcoded `queue:dlq:<pattern>` key that no `@Subscribe` can address.
+<!-- typecheck: skip -->
+```typescript
+@Subscribe('orders.created', {
+  deadLetter: { queue: 'orders.dead', maxRetries: 3 },
+})
+async handleOrder(message: Message<OrderData>) {
+  await this.processOrder(message.data);
+}
+
+@Subscribe('orders.dead')
+async handleDeadOrder(message: Message<OrderData>) {
+  this.logger.error('order gave up', { origin: message.metadata['dlq.originalPattern'] });
+}
+```
+
+The attempt cap is `retry.attempts ?? deadLetter.maxRetries ?? 1` — the same precedence
+JetStream uses for `max_deliver`. With neither option set a failing handler still gets exactly
+one delivery, and is then dead-lettered if a queue is configured or dropped if not.
+
+The republished envelope keeps the original `id`, `data`, `timestamp` and metadata, and gains
+`dlq.originalPattern`, `dlq.deliveryCount` and `dlq.error`. Its `pattern` is the dead-letter
+queue — the origin lives in the metadata. A message is **dead-lettered at most once**: one
+arriving with `dlq.originalPattern` already set is dropped rather than routed again, so a
+dead-letter queue whose own subscriber throws does not republish to itself forever.
+
+Under `ackMode: 'none'` the whole path is skipped, along with `retry` — that mode tracks no
+delivery, so there is no terminal delivery to detect.
+
+A republish that fails is reported through `onError` with the broker's rejection as `cause`,
+rather than swallowed: a dead letter that cannot be written is a message lost in the one path
+that exists to not lose it.
 :::
 
 ::: tip How delivery works
@@ -809,9 +842,9 @@ what finds a backlog that predates the subscription.
 Do not publish to the wake channel by hand expecting delivery: the frame is a signal, and the
 message has to be on the list to be taken.
 
-For durable, retried, dead-lettered delivery today, use the NATS/JetStream adapter
-([`@onebun/nats`](/api/queue#custom-adapter-nats-jetstream)), where the retry and dead-letter
-precedence chain is implemented.
+For delivery that survives the broker itself — persistence, server-tracked redelivery, durable
+consumers — use the NATS/JetStream adapter
+([`@onebun/nats`](/api/queue#custom-adapter-nats-jetstream)).
 :::
 
 ### Custom adapter: NATS JetStream

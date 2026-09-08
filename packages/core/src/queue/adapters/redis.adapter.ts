@@ -243,7 +243,6 @@ export class RedisQueueAdapter implements QueueAdapter {
     queue: (pattern: string) => `queue:q:${pattern}`,
     wake: 'queue:wake',
     processing: (group: string) => `queue:processing:${group}`,
-    deadLetter: (pattern: string) => `queue:dlq:${pattern}`,
   };
 
   // Event handlers
@@ -267,7 +266,6 @@ export class RedisQueueAdapter implements QueueAdapter {
       queue: (pattern: string) => `${prefix}queue:q:${pattern}`,
       wake: `${prefix}queue:wake`,
       processing: (group: string) => `${prefix}queue:processing:${group}`,
-      deadLetter: (pattern: string) => `${prefix}queue:dlq:${pattern}`,
     };
   }
 
@@ -486,9 +484,26 @@ export class RedisQueueAdapter implements QueueAdapter {
   // Features
   // ============================================================================
 
-  supports(_feature: QueueFeature): boolean {
-    // Redis supports all features
-    return true;
+  /**
+   * One `case` per member of `QueueFeature`, never a blanket `return true`.
+   *
+   * The blanket form advertised every feature the union would ever gain, which is how this
+   * adapter came to report `dead-letter-queue` and `retry` as available while reading neither
+   * option. An explicit switch means the next feature added to the union arrives as a
+   * compile-time gap here rather than as a claim nobody made.
+   */
+  supports(feature: QueueFeature): boolean {
+    switch (feature) {
+      case 'delayed-messages':
+      case 'priority':
+      case 'pattern-subscriptions':
+      case 'consumer-groups':
+      case 'retry':
+      case 'dead-letter-queue':
+        return true;
+      default:
+        return false;
+    }
   }
 
   // ============================================================================
@@ -548,7 +563,7 @@ export class RedisQueueAdapter implements QueueAdapter {
     }
 
     const tracked = tracksDelivery(entry.options);
-    const maxAttempts = resolveMaxAttempts(entry.options?.retry);
+    const maxAttempts = resolveMaxAttempts(entry.options?.retry, entry.options?.deadLetter);
     // The counter rides in the envelope, not in this process: a retry goes back onto the list,
     // and the replica that claims it next may not be the one that failed. An in-memory counter
     // would restart at 1 on every hop and turn `attempts: 3` into an unbounded loop.
@@ -586,12 +601,16 @@ export class RedisQueueAdapter implements QueueAdapter {
             // consumer knows which attempt it is running. Uncapped by design: `nack(true)` is
             // the handler's instruction, and `Message.attempt` is how a handler stops itself.
             await this.requeue(messageData, attempt + 1);
-          } else if (entry.options?.deadLetter) {
-            // Move to dead letter queue
-            await this.client!.rpush(
-              this.keys.deadLetter(messageData.pattern),
-              JSON.stringify(messageData),
-            );
+          } else if (!acknowledgesAutomatically(entry.options)) {
+            // `nack(false)` under 'manual' is the handler saying "never redeliver this one" —
+            // the same terminal disposition as an exhausted retry budget, so it takes the same
+            // route. Without a `deadLetter` the message is simply dropped.
+            //
+            // Gated on the mode because under 'auto' the framework owns the disposition: the
+            // consume loop calls `nack(false)` as bookkeeping on EVERY failed attempt and then
+            // decides separately whether the budget is spent. Routing from both places
+            // dead-lettered a message once per attempt plus once more at the end.
+            await this.routeToDeadLetter(entry, messageData, attempt);
           }
         },
       },
@@ -627,12 +646,75 @@ export class RedisQueueAdapter implements QueueAdapter {
       await message.nack(false);
 
       if (attempt >= maxAttempts) {
-        // Exhausted. Dead-letter routing on exhaustion is not wired here — `deadLetter.queue`
-        // and `.maxRetries` are still ignored by this adapter, which the docs say plainly.
+        // Exhausted: the terminal delivery. Route it, or drop it when nothing is configured.
+        await this.routeToDeadLetter(entry, messageData, attempt, error as Error);
+
         return;
       }
 
       await this.scheduleRetry(messageData, attempt + 1, retryDelayMs(entry.options?.retry, attempt));
+    }
+  }
+
+  /**
+   * Republish a terminally-failed message to its configured dead-letter queue.
+   *
+   * `deadLetter.queue` is a QUEUE PATTERN, not a Redis key, and the republish goes through this
+   * adapter's own `publish()` — so a plain `@Subscribe('orders.dead')` consumes it. The previous
+   * implementation RPUSHed to a hardcoded per-pattern DLQ list that nothing ever read:
+   * no LPOP, no SCAN, no subscription. A message sent there was unreachable by any subscriber,
+   * which made the feature indistinguishable from dropping the message.
+   *
+   * With no `deadLetter` configured the message is dropped, exactly as before.
+   *
+   * A message is dead-lettered AT MOST ONCE. The republished envelope carries
+   * `dlq.originalPattern` in its metadata, and a message arriving with that key already set is
+   * dropped rather than routed again — otherwise a dead-letter queue whose own subscriber throws
+   * would republish to itself forever. The marker shape matches the JetStream adapter's, so the
+   * two read the same on the consuming side.
+   */
+  private async routeToDeadLetter(
+    entry: RedisSubscriptionEntry,
+    messageData: RedisQueueEnvelope,
+    attempt: number,
+    error?: Error,
+  ): Promise<void> {
+    const queue = entry.options?.deadLetter?.queue;
+
+    if (queue === undefined) {
+      return;
+    }
+
+    const metadata = messageData.metadata ?? {};
+
+    if (metadata['dlq.originalPattern'] !== undefined) {
+      // Already dead-lettered once. Dropping here is the loop guard.
+      return;
+    }
+
+    try {
+      await this.publish(queue, messageData.data, {
+        messageId: messageData.id,
+        /* eslint-disable @typescript-eslint/naming-convention -- namespaced provenance keys;
+           the `dlq.` prefix keeps them from colliding with the caller's own metadata. */
+        metadata: {
+          ...metadata,
+          'dlq.originalPattern': messageData.pattern,
+          'dlq.deliveryCount': attempt,
+          'dlq.error': error?.message ?? 'negative acknowledgement',
+        },
+        /* eslint-enable @typescript-eslint/naming-convention */
+      });
+    } catch (cause) {
+      // Reported, not swallowed: a dead letter that could not be republished is a message lost
+      // in the one path that exists to not lose it.
+      this.emit(
+        'onError',
+        new Error(
+          `Failed to republish a dead letter from "${messageData.pattern}" to "${queue}"`,
+          { cause },
+        ),
+      );
     }
   }
 

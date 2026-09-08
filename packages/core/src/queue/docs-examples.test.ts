@@ -1231,3 +1231,54 @@ describe('RetryOptions — the documented defaults and formulas', () => {
     expect(retryDelayMs(undefined, 1)).toBe(0);
   });
 });
+
+/**
+ * @source docs:api/queue.md#redisqueueadapter
+ */
+describe('Redis dead-letter cap precedence', () => {
+  it('resolves retry.attempts ?? deadLetter.maxRetries ?? 1, in that order', () => {
+    // Each position of the chain, asserted on its own. The order mirrors JetStream's
+    // `max_deliver` resolution so the same options mean the same thing on both adapters.
+    expect(resolveMaxAttempts({ attempts: 3 }, { queue: 'd', maxRetries: 1 })).toBe(3);
+    expect(resolveMaxAttempts(undefined, { queue: 'd', maxRetries: 2 })).toBe(2);
+    expect(resolveMaxAttempts(undefined, undefined)).toBe(1);
+    // A `deadLetter` without `maxRetries` falls through to the default, not to zero attempts.
+    expect(resolveMaxAttempts(undefined, { queue: 'd' })).toBe(1);
+  });
+
+  it('ignores deadLetter.maxRetries on an adapter that is not given one', () => {
+    // The memory adapter reports `supports('dead-letter-queue') === false` and passes no second
+    // argument, so the field caps a route that does not exist there.
+    expect(resolveMaxAttempts(undefined)).toBe(1);
+  });
+
+  it('registers the documented deadLetter snippet as written', () => {
+    // The pair from the RedisQueueAdapter section: a producer that dead-letters, and an ordinary
+    // `@Subscribe` on the dead-letter pattern. The second decorator is the whole claim — the old
+    // implementation wrote to a key no subscription could name.
+    class OrderProcessor {
+      @Subscribe('orders.created', {
+        deadLetter: { queue: 'orders.dead', maxRetries: 3 },
+      })
+      async handleOrder(message: Message<{ orderId: string }>) {
+        expect(message.data.orderId).toBeDefined();
+      }
+
+      @Subscribe('orders.dead')
+      async handleDeadOrder(message: Message<{ orderId: string }>) {
+        expect(message.metadata['dlq.originalPattern']).toBeDefined();
+      }
+    }
+
+    const subscriptions = getSubscribeMetadata(OrderProcessor);
+    expect(subscriptions).toHaveLength(2);
+
+    const source = subscriptions.find((s) => s.pattern === 'orders.created')!;
+    expect(source.options?.deadLetter?.queue).toBe('orders.dead');
+    expect(source.options?.deadLetter?.maxRetries).toBe(3);
+
+    // The dead-letter destination is reachable by a plain subscription, with no options at all.
+    const dead = subscriptions.find((s) => s.pattern === 'orders.dead')!;
+    expect(dead.options?.deadLetter).toBeUndefined();
+  });
+});

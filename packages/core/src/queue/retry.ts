@@ -10,7 +10,7 @@
  * differently would be a second dialect of the same three words.
  */
 
-import type { RetryOptions } from './types';
+import type { DeadLetterOptions, RetryOptions } from './types';
 
 /**
  * Attempts a subscription makes when `retry` says nothing.
@@ -32,10 +32,16 @@ export const DEFAULT_RETRY_DELAY_MS = 100;
  * already uses. A value below 1 is raised to 1 — refusing to deliver at all is not a retry
  * policy, and silently accepting `attempts: 0` would make a subscription that never fires.
  *
+ * `deadLetter.maxRetries` is the second source, in the same precedence order JetStream uses to
+ * resolve `max_deliver`: `retry.attempts` first, `deadLetter.maxRetries` second, the default
+ * last. Pass it only on an adapter that has a dead-letter queue — on one that reports
+ * `supports('dead-letter-queue') === false` the field caps a route that does not exist, and
+ * honouring it there would give the same options two different attempt counts for no reason.
+ *
  * @see docs:api/queue.md
  */
-export function resolveMaxAttempts(retry?: RetryOptions): number {
-  const attempts = retry?.attempts ?? DEFAULT_RETRY_ATTEMPTS;
+export function resolveMaxAttempts(retry?: RetryOptions, deadLetter?: DeadLetterOptions): number {
+  const attempts = retry?.attempts ?? deadLetter?.maxRetries ?? DEFAULT_RETRY_ATTEMPTS;
 
   return attempts < 1 ? 1 : Math.floor(attempts);
 }
