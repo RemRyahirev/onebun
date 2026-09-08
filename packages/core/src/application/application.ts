@@ -183,6 +183,27 @@ function normalizePath(pathStr: string): string {
 }
 
 /**
+ * Compose a route path from a prefix, a controller path and a route path.
+ *
+ * Concatenating them naively is what made `@Controller('/')` unusable: with `@Get('/health')`
+ * it produced `//health`, which matches NOTHING — neither `/health` nor `//health`. A whole
+ * controller silently disappeared, and the startup log printed the broken path, confirming the
+ * wrong route to whoever wrote it.
+ *
+ * `normalizePath` alone does not save this: it strips a TRAILING slash, and the duplicate is in
+ * the middle. Runs of separators are collapsed first, then the trailing one is dropped.
+ *
+ * This is also the real cause of the reported "a root wildcard does not match nested paths"
+ * gotcha. Raw `Bun.serve({ routes: { '/*': { OPTIONS } } })` matches them fine;
+ * `@Controller('/') + @Options('/*')` composed to `//*`.
+ *
+ * @see docs:api/controllers.md
+ */
+export function joinRoutePath(...segments: string[]): string {
+  return normalizePath(segments.join('').replace(/\/{2,}/g, '/'));
+}
+
+/**
  * Method keys Bun accepts inside the object form of a `routes` entry
  * (`{ '/x': { GET: handler } }`).
  *
@@ -1517,7 +1538,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         for (const route of controllerMetadata.routes) {
           // Combine: appPrefix + controllerPath + routePath
           // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
-          const fullPath = normalizePath(`${appPrefix}${controllerPath}${route.path}`);
+          const fullPath = joinRoutePath(appPrefix, controllerPath, route.path);
           const method = this.mapHttpMethod(route.method);
           const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
             controller,
@@ -1678,7 +1699,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
 
         for (const route of metadata.routes) {
-          const fullPath = normalizePath(`${appPrefix}${metadata.path}${route.path}`);
+          const fullPath = joinRoutePath(appPrefix, metadata.path, route.path);
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }

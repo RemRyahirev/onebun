@@ -9,6 +9,7 @@ import {
 import {
   Controller,
   Get,
+  Options,
   Param,
   Post,
 } from '../decorators/decorators';
@@ -280,5 +281,87 @@ describe('Route specificity', () => {
       expect(res.status).toBe(200);
       expect(body.result).toEqual({ orgId: 'acme', userId: '42' });
     });
+  });
+});
+
+// ============================================================================
+// Path composition — a controller path of '/' must not double the separator
+// ============================================================================
+
+/** `@Controller('/')` is the spelling that produced `//health`, matching nothing. */
+@Controller('/')
+class RootPathController extends BaseController {
+  @Get('/health')
+  health() {
+    return { handler: 'health' };
+  }
+
+  @Options('/*')
+  anyPath() {
+    return { handler: 'wildcard' };
+  }
+}
+
+describe('route path composition', () => {
+  let module: CompiledTestingModule;
+
+  afterEach(async () => {
+    await module.close();
+  });
+
+  test('a controller path of "/" does not double the separator', async () => {
+    // `@Controller('/') + @Get('/health')` composed to `//health`, which matches NOTHING —
+    // not `/health`, not `//health`. A whole controller silently disappeared, and the startup
+    // log printed the broken path, confirming the wrong route to the developer.
+    module = await TestingModule.create({ controllers: [RootPathController] }).compile();
+
+    const response = await module.inject('GET', '/health');
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ result: { handler: 'health' } });
+  });
+
+  test('a root wildcard matches nested paths', async () => {
+    // Reported as "a bare root wildcard does not match nested paths in OneBun/Bun's router".
+    // Raw `Bun.serve({ routes: { '/*': { OPTIONS } } })` matches them fine — the failure was
+    // `@Controller('/') + @Options('/*')` composing to `//*`.
+    module = await TestingModule.create({ controllers: [RootPathController] }).compile();
+
+    for (const path of ['/api/x', '/api/projects/demo/work-items', '/nothing']) {
+      const response = await module.inject('OPTIONS', path);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ result: { handler: 'wildcard' } });
+    }
+  });
+
+  test('composes with basePath without doubling either separator', async () => {
+    module = await TestingModule.create({ controllers: [RootPathController] })
+      .setOptions({ basePath: '/api' })
+      .compile();
+
+    const prefixed = await module.inject('GET', '/api/health');
+    const unprefixed = await module.inject('GET', '/health');
+
+    expect(prefixed.status).toBe(200);
+    // The prefix is not optional: an unprefixed path must not also match.
+    expect(unprefixed.status).toBe(404);
+  });
+
+  test('an empty controller path behaves identically', async () => {
+    // `@Controller()` already worked; the two spellings must not diverge.
+    @Controller()
+    class EmptyPathController extends BaseController {
+      @Get('/ping')
+      ping() {
+        return { handler: 'ping' };
+      }
+    }
+
+    module = await TestingModule.create({ controllers: [EmptyPathController] }).compile();
+
+    const response = await module.inject('GET', '/ping');
+
+    expect(response.status).toBe(200);
   });
 });

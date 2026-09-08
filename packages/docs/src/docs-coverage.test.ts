@@ -254,7 +254,7 @@ describe('docs/api/docs.md — documentation decorators', () => {
 
     const spec = generateOpenApiSpec([TaggedUserController], { title: 'Test API', version: '1.0.0' });
 
-    expect(spec.paths['/users/']?.get?.tags).toEqual(['Users', 'User Management']);
+    expect(spec.paths['/users']?.get?.tags).toEqual(['Users', 'User Management']);
     expect(spec.paths['/users/{id}']?.get?.tags).toEqual(['Users', 'User Management']);
   });
 
@@ -281,7 +281,7 @@ describe('docs/api/docs.md — documentation decorators', () => {
 
     expect(spec.paths['/mixed-users/admins']?.get?.tags).toEqual(['Users', 'Admin']);
     // The sibling route must not pick up the method-level tag.
-    expect(spec.paths['/mixed-users/']?.get?.tags).toEqual(['Users']);
+    expect(spec.paths['/mixed-users']?.get?.tags).toEqual(['Users']);
   });
 
   /**

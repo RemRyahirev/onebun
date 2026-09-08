@@ -79,6 +79,8 @@ export class UserController extends BaseController {
 
 ::: tip Leading Slash is Optional
 The leading slash in `@Controller()` and route decorators is optional. `@Controller('users')` equals `@Controller('/users')`, and `@Get(':id')` equals `@Get('/:id')`. This makes NestJS-style paths work out of the box.
+
+`@Controller('/')` and `@Controller()` are equivalent, and a route on either mounts at the root: `@Controller('/') + @Get('/health')` serves `GET /health`. `joinRoutePath` collapses runs of separators wherever the prefix, the controller path and the route path meet, so no combination of them can produce a path that matches nothing — and the OpenAPI generator uses the same helper, so a route is documented at the path it serves.
 :::
 
 The framework automatically wraps plain return values into `{ success: true, result: <data> }`. For errors, throw `HttpException` — the exception filter converts it to `{ success: false, error: <message>, code: <statusCode> }` with the matching HTTP status code.

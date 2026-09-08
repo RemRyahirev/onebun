@@ -6,7 +6,11 @@ import type {
 } from '../types';
 
 import type { HttpMethod, RouteMetadata } from '@onebun/core';
-import { getControllerMetadata, getResponseSchemasMetadata } from '@onebun/core';
+import {
+  getControllerMetadata,
+  getResponseSchemasMetadata,
+  joinRoutePath,
+} from '@onebun/core';
 
 import { getApiOperationMetadata, getApiTagsMetadata } from '../decorators';
 
@@ -45,7 +49,12 @@ export function generateOpenApiSpec(
     }
 
     for (const route of metadata.routes) {
-      const rawPath = `${metadata.path}${route.path}`;
+      // The same composition the server uses, from the same helper. Two implementations of
+      // this drifted before: `@Controller('/') + @Get('/health')` produced `//health` in both,
+      // consistently broken. Fixing only the server would have made the route SERVE at
+      // `/health` while being DOCUMENTED as `//health` — a worse failure, because it looks
+      // like the documentation is merely wrong rather than that both were.
+      const rawPath = joinRoutePath(metadata.path, route.path);
       const path = rawPath.replace(/:([^/]+)/g, '{$1}');
       const method = route.method.toLowerCase() as Lowercase<HttpMethod>;
 
