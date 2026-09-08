@@ -37,6 +37,10 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
 - `OneBunBaseError` subclasses → `{ success: false, error: message, code: errorCode }` (HTTP status = error's code)
 - Any other `Error` → `{ success: false, error: message, code: 500 }` (HTTP 500)
+- `createErrorResponse` always emits a `details` key, defaulting to `{}`. Only the unhandled branch ever populated it, and it no longer does unless `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
+- The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
+- The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
+- The stack still reaches the operator: the application logs `'Unhandled error in ...'` with the error object before the filter runs, so withholding it from the response costs no debuggability
 
 </llm-only>
 
@@ -216,9 +220,32 @@ The `defaultExceptionFilter` is always active. It handles:
 
 | Error type | Response body | Status |
 |------------|---------------|--------|
-| `HttpException` | `{ success: false, error: message, code: statusCode }` | exception's statusCode |
+| `HttpException` | `{ success: false, error: message, code: statusCode, details: {} }` | exception's statusCode |
 | `OneBunBaseError` subclass | `{ success: false, error: message, code: errorCode }` | error's code |
-| Any other `Error` or value | `{ success: false, error: message, code: 500 }` | 500 |
+| Any other `Error` or value | `{ success: false, error: message, code: 500, details: {} }` | 500 |
+
+Every body carries a `details` object, and on the default filter it is **empty**. It used to
+carry the error's stack trace, class name and non-HTTP `code` for any unhandled throw — the
+default path, taken by every error that is not an `HttpException` or a `OneBunBaseError`. A stack
+trace in an API response discloses absolute filesystem paths, dependency versions and internal
+module layout to whoever can provoke a 500, so it is withheld.
+
+Nothing is lost operationally: the application logs the whole error, stack included, before the
+filter runs.
+
+::: warning exposeErrorDetails puts it back
+```typescript
+const app = new OneBunApplication(AppModule, { exposeErrorDetails: true });
+```
+
+`details` then carries `originalErrorName`, `originalCode` and the full `stack` for unhandled
+errors. Off by default, and deliberately **not** tied to `NODE_ENV` — a deployment with an unset
+or mistyped `NODE_ENV` would start disclosing stack traces silently, which is the failure this
+guards against. Turn it on knowingly, in a development configuration you can read.
+
+`HttpException` and `OneBunBaseError` bodies are unaffected by the flag: they never carried
+details.
+:::
 
 ## Accessing the Request in a Filter
 

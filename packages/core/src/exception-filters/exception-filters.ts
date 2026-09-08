@@ -101,10 +101,22 @@ function toHttpStatus(code: unknown): number {
     : HttpStatusCode.INTERNAL_SERVER_ERROR;
 }
 
+/**
+ * Build the framework's fallback exception filter.
+ *
+ * @param options.httpEnvelope - Always answer HTTP 200 and carry the real code in the body.
+ * @param options.exposeErrorDetails - Add `details` — the error's class name, its non-HTTP
+ *   `code`, and its **stack trace** — to the response for an unhandled error. Off by default,
+ *   and deliberately not tied to `NODE_ENV`: a deployment with an unset or mistyped `NODE_ENV`
+ *   would then disclose stack traces publicly, which is the failure mode this guards against.
+ *   Turn it on knowingly, in a development configuration you can read.
+ *
+ * @see docs:api/exception-filters.md
+ */
 export function createDefaultExceptionFilter(
-  options: { httpEnvelope?: boolean } = {},
+  options: { httpEnvelope?: boolean; exposeErrorDetails?: boolean } = {},
 ): ExceptionFilter {
-  const { httpEnvelope = false } = options;
+  const { httpEnvelope = false, exposeErrorDetails = false } = options;
 
   return {
     catch(error: unknown): OneBunResponse {
@@ -144,11 +156,18 @@ export function createDefaultExceptionFilter(
       // 500 instead, with the original preserved in `details.originalCode`.
       const code = toHttpStatus(originalCode);
 
-      const errorResponse = createErrorResponse(message, code, undefined, {
-        originalErrorName: error instanceof Error ? error.name : 'UnknownError',
-        originalCode,
-        stack: error instanceof Error ? error.stack : undefined,
-      });
+      // `details` is withheld unless explicitly asked for. It used to be unconditional, so
+      // every unhandled error answered the caller with `error.stack` — absolute filesystem
+      // paths, dependency versions and internal module layout, on the DEFAULT path taken by
+      // every unhandled throw rather than by some unusual one. Nothing is lost by withholding
+      // it: the application logs the whole error, stack included, before this filter runs.
+      const errorResponse = exposeErrorDetails
+        ? createErrorResponse(message, code, undefined, {
+          originalErrorName: error instanceof Error ? error.name : 'UnknownError',
+          originalCode,
+          stack: error instanceof Error ? error.stack : undefined,
+        })
+        : createErrorResponse(message, code);
 
       return new Response(JSON.stringify(errorResponse), {
         status: httpEnvelope ? HttpStatusCode.OK : code,

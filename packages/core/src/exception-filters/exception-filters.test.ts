@@ -156,6 +156,92 @@ describe('defaultExceptionFilter', () => {
     expect(body.success).toBe(false);
     expect(body.error).toBe('Not found');
   });
+
+  it('does not put a stack trace in the body of an unhandled error', async () => {
+    // The response used to carry `error.stack` verbatim on this branch — the DEFAULT path for
+    // every unhandled throw. That discloses absolute filesystem paths, dependency versions and
+    // internal module layout to any caller who can provoke a 500.
+    const response = await defaultExceptionFilter.catch(new Error('boom'), makeContext());
+    const body = await response.json() as Record<string, unknown>;
+
+    // `createErrorResponse` always emits the key; what must be gone is its CONTENT.
+    expect(body.details).toEqual({});
+
+    // Asserted on the serialised body, not on the parsed object: a stack could arrive nested
+    // under a key this test does not name, and the point is that it is not shipped AT ALL.
+    const raw = JSON.stringify(body);
+    expect(raw).not.toContain('stack');
+    expect(raw).not.toContain(import.meta.dir);
+  });
+
+  it('withholds the internal error class name and non-HTTP code as well', async () => {
+    // Same class of disclosure, same undocumented `details` field: `ECONNREFUSED` names the
+    // infrastructure and `PostgresConnectionError` names the internals.
+    const error = new Error('connect failed');
+    error.name = 'PostgresConnectionError';
+    (error as Error & { code: string }).code = 'ECONNREFUSED';
+
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+    const raw = JSON.stringify(await response.json());
+
+    expect(raw).not.toContain('PostgresConnectionError');
+    expect(raw).not.toContain('ECONNREFUSED');
+    // The documented contract is unchanged: the message still goes out.
+    expect(raw).toContain('connect failed');
+  });
+
+  it('still answers 500 when a non-HTTP code cannot become a status', async () => {
+    // `toHttpStatus` maps `ECONNREFUSED` to 500 rather than letting `new Response` throw.
+    // Withholding `details` must not disturb that — the status is computed from the same
+    // value either way.
+    const error = new Error('socket died');
+    (error as Error & { code: string }).code = 'ECONNREFUSED';
+
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+  });
+});
+
+describe('createDefaultExceptionFilter({ exposeErrorDetails })', () => {
+  it('is off by default, so an unhandled error carries no details', async () => {
+    const filter = createDefaultExceptionFilter();
+    const response = await filter.catch(new Error('boom'), makeContext());
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(body.details).toEqual({});
+  });
+
+  it('adds the stack and the original error identity when explicitly enabled', async () => {
+    // The escape hatch exists so a developer can get the old behaviour back deliberately. It
+    // is not tied to NODE_ENV: an unset or mistyped NODE_ENV would then leak stacks silently,
+    // which is the failure being guarded against.
+    const filter = createDefaultExceptionFilter({ exposeErrorDetails: true });
+    const error = new Error('boom');
+    error.name = 'PostgresConnectionError';
+
+    const response = await filter.catch(error, makeContext());
+    const body = await response.json() as { details?: Record<string, unknown> };
+
+    expect(body.details).toBeDefined();
+    expect(body.details!.originalErrorName).toBe('PostgresConnectionError');
+    expect(typeof body.details!.stack).toBe('string');
+  });
+
+  it('leaves the HttpException branch alone in both modes', async () => {
+    // Only the unhandled branch ever built `details`; the flag must not start adding one to a
+    // deliberate HttpException, whose body is a documented contract.
+    for (const exposeErrorDetails of [false, true]) {
+      const filter = createDefaultExceptionFilter({ exposeErrorDetails });
+      const response = await filter.catch(new HttpException(400, 'Bad input'), makeContext());
+      const body = await response.json() as Record<string, unknown>;
+
+      expect(response.status).toBe(400);
+      // Empty on this branch before the change and after it — the flag must not start
+      // populating a body that was never carrying details in the first place.
+      expect(body.details).toEqual({});
+    }
+  });
 });
 
 // ============================================================================

@@ -5311,6 +5311,68 @@ describe('OneBunApplication', () => {
         await app.stop();
       }
     });
+
+    test('a 500 body carries no stack trace and no filesystem path', async () => {
+      // Asserted against the body of a REAL request, not against the filter in isolation: the
+      // application builds its own default filter, and the disclosure was on that path.
+      @Controller('/api')
+      class ExplodingController {
+        @Get('/boom')
+        boom() {
+          throw new Error('internal failure');
+        }
+      }
+
+      @Module({ controllers: [ExplodingController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/boom`);
+
+        expect(response.status).toBe(500);
+
+        // Raw text, not the parsed object: a stack nested under an unexpected key would still
+        // be shipped, and shipping it at all is the defect.
+        const raw = await response.text();
+        expect(raw).not.toContain('stack');
+        expect(raw).not.toContain('at ');
+        expect(raw).not.toContain(import.meta.dir);
+        expect(raw).not.toContain('/packages/core');
+
+        // The documented contract is intact.
+        expect(JSON.parse(raw)).toMatchObject({ success: false, error: 'internal failure', code: 500 });
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('exposeErrorDetails: true puts the stack back, deliberately', async () => {
+      @Controller('/api')
+      class ExplodingController {
+        @Get('/boom')
+        boom() {
+          throw new Error('internal failure');
+        }
+      }
+
+      @Module({ controllers: [ExplodingController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0, exposeErrorDetails: true });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/boom`);
+        const body = await response.json() as { details?: { stack?: string } };
+
+        expect(typeof body.details?.stack).toBe('string');
+      } finally {
+        await app.stop();
+      }
+    });
   });
 
   /**

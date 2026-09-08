@@ -752,6 +752,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Default exception filter respects httpEnvelope option
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
       httpEnvelope: this.options.httpEnvelope,
+      exposeErrorDetails: this.options.exposeErrorDetails,
     });
     // `applyExceptionFilters` is a function declaration at method-body scope, so it
     // cannot see `const app = this` — that one is block-scoped inside the try below.

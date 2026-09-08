@@ -47,6 +47,7 @@ import { makeMockLoggerLayer } from '../testing/test-utils';
 
 const HTTP_TEAPOT = 418;
 const HTTP_GONE = 410;
+const HTTP_INTERNAL_SERVER_ERROR = 500;
 const AUDIT_DELAY_MS = 30;
 
 interface ErrorBody {
@@ -683,5 +684,97 @@ describe('docs/api/exception-filters.md — global filters', () => {
 
     expect(response.status).toBe(HTTP_GONE);
     expect(body).toEqual({ handledBy: 'controller' });
+  });
+});
+
+/**
+ * The "Default Filter Behaviour" table, and the `exposeErrorDetails` warning beneath it,
+ * exercised against a live application rather than against the filter object — the disclosure
+ * was on the application's own default filter, which it constructs itself.
+ *
+ * @source docs:api/exception-filters.md#default-filter-behaviour
+ */
+describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
+  @Controller('/default-filter')
+  class UnhandledController extends BaseController {
+    @Get('/boom')
+    boom(): never {
+      throw new Error('internal failure');
+    }
+
+    @Get('/http-exception')
+    httpException(): never {
+      throw new HttpException(HTTP_GONE, 'Gone for good');
+    }
+  }
+
+  @Module({ controllers: [UnhandledController] })
+  class DefaultFilterModule {}
+
+   
+  async function withApp(options: Record<string, unknown>, run: (base: string) => Promise<void>): Promise<void> {
+    const app = new OneBunApplication(DefaultFilterModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer() as never,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      ...options,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    await app.start();
+
+    try {
+      await run(app.getHttpUrl());
+    } finally {
+      await app.stop();
+    }
+  }
+
+  it('answers an unhandled error with an EMPTY details object', async () => {
+    // The table's third row plus the paragraph under it: `details` is present and empty.
+    await withApp({}, async (base) => {
+      const response = await fetch(`${base}/default-filter/boom`);
+      const body = await response.json() as ErrorBody;
+
+      expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(body.success).toBe(false);
+      expect(body.error).toBe('internal failure');
+      expect(body.code).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(body.details).toEqual({});
+    });
+  });
+
+  it('ships no stack trace and no filesystem path in that body', async () => {
+    await withApp({}, async (base) => {
+      const raw = await (await fetch(`${base}/default-filter/boom`)).text();
+
+      // Raw text, not the parsed object: a stack under an unexpected key would still be sent.
+      expect(raw).not.toContain('stack');
+      expect(raw).not.toContain(import.meta.dir);
+    });
+  });
+
+  it('puts the stack back only when exposeErrorDetails is set', async () => {
+    // The `::: warning` block. Opt-in, and off unless written down.
+    await withApp({ exposeErrorDetails: true }, async (base) => {
+      const body = await (await fetch(`${base}/default-filter/boom`)).json() as ErrorBody;
+
+      expect(typeof body.details?.stack).toBe('string');
+      expect(body.details?.originalErrorName).toBe('Error');
+    });
+  });
+
+  it('leaves the HttpException row unaffected by the flag', async () => {
+    // The last sentence of the warning: these bodies never carried details.
+    for (const exposeErrorDetails of [false, true]) {
+      await withApp({ exposeErrorDetails }, async (base) => {
+        const response = await fetch(`${base}/default-filter/http-exception`);
+        const body = await response.json() as ErrorBody;
+
+        expect(response.status).toBe(HTTP_GONE);
+        expect(body.error).toBe('Gone for good');
+        expect(body.details).toEqual({});
+      });
+    }
   });
 });

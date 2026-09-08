@@ -587,6 +587,23 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   httpEnvelope?: boolean;
 
   /**
+   * Add `details` — the error's class name, its non-HTTP `code`, and its **stack trace** — to
+   * the response body for an unhandled error.
+   *
+   * Off by default, and deliberately not tied to `NODE_ENV`. A stack trace in a public API
+   * response discloses absolute filesystem paths, dependency versions and internal module
+   * layout, and a deployment with an unset or mistyped `NODE_ENV` would then leak it silently
+   * — which is the failure this guards against. Turn it on knowingly, in a development
+   * configuration you can read.
+   *
+   * The stack reaches the application log either way, so leaving this off costs no
+   * debuggability on the operator's side.
+   *
+   * @defaultValue false
+   */
+  exposeErrorDetails?: boolean;
+
+  /**
    * CORS configuration. When provided, `CorsMiddleware` is automatically prepended
    * to the global middleware chain.
    *
