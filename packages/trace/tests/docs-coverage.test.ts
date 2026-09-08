@@ -70,6 +70,8 @@ const TRACE_ID_HEX_LENGTH = 32;
 const W3C_TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
 const W3C_SPAN_ID = '00f067aa0ba902b7';
 const W3C_TRACEPARENT = `00-${W3C_TRACE_ID}-${W3C_SPAN_ID}-01`;
+/** `00-` plus the 32-character trace id — the part of a traceparent that must match. */
+const W3C_TRACEPARENT_PREFIX_LENGTH = 35;
 
 /** The two process-wide slots the documented recipes read. */
 type TraceGlobals = typeof globalThis & {
@@ -639,21 +641,20 @@ describe('docs/api/trace.md — Trace Context', () => {
   });
 
   /**
-   * "When making HTTP calls, trace context is automatically propagated" — it is not. The client
-   * built by `createHttpClient` sends no W3C headers even from inside a traced request; the single
-   * propagation path it has is the `X-Trace-Id` header, and only when the process-wide
-   * `__onebunCurrentTraceContext` slot is filled, which the framework never fills.
+   * "A call made while handling a request carries that request's trace" — and now it does.
    *
-   * Both halves are asserted, so this test goes red the day propagation is wired up (fix the doc
-   * and this test together) and equally red if the `X-Trace-Id` path is dropped.
+   * This test used to pin the opposite, with a note that it would go red the day propagation was
+   * wired up: the client sent no W3C headers from inside a traced request, and its only
+   * propagation path was an `X-Trace-Id` read from a process-wide slot the framework never
+   * filled. That day arrived; this is the inverted assertion.
    *
-   * The two absences are asserted in the same object as the request count and the client's
-   * `User-Agent` on purpose, and must stay there: on their own they would hold just as well for a
-   * request that was never made, or one made by plain `fetch` instead of `createHttpClient`.
+   * The headers are asserted in the same object as the request count and the client's
+   * `User-Agent`, and must stay there: without them a header assertion would hold just as well
+   * for a request made by plain `fetch` instead of `createHttpClient`.
    *
    * @source docs:api/trace.md#context-propagation
    */
-  it('should send no trace headers on outgoing calls unless the trace-id slot is filled', async () => {
+  it('should carry the inbound trace onto the outgoing call', async () => {
     let echoRequests = 0;
     const echo = Bun.serve({
       port: 0,
@@ -700,31 +701,25 @@ describe('docs/api/trace.md — Trace Context', () => {
         seen: Record<string, string | undefined>;
       }>;
 
-      // The handler *had* a trace context — the outgoing request simply carried none of it.
+      // The inbound `traceparent` became this request's trace, and the outgoing call carries it.
       expect(body.result.inbound).toBe(W3C_TRACE_ID);
       expect({
         requests: echoRequests,
         userAgent: body.result.seen['user-agent'],
-        traceparent: body.result.seen['traceparent'],
+        traceparent: body.result.seen['traceparent']?.slice(0, W3C_TRACEPARENT_PREFIX_LENGTH),
         traceId: body.result.seen['x-trace-id'],
+        hasSpanId: Boolean(body.result.seen['x-span-id']),
       }).toEqual({
-        // One call, made by `createHttpClient` — that is what makes the two absences mean
-        // "the client sent no trace headers" rather than "nothing was sent".
+        // One call, made by `createHttpClient` — that is what makes the headers mean "the client
+        // sent them" rather than "something reached the echo server".
         requests: 1,
         userAgent: 'OneBun-Requests/1.0',
-        traceparent: undefined,
-        traceId: undefined,
+        traceparent: `00-${W3C_TRACE_ID}`,
+        traceId: W3C_TRACE_ID,
+        // Sent WITH the trace id. Alone the id joins nothing, which is what the old path did.
+        hasSpanId: true,
       });
-
-      // The one path that does propagate: the trace-id slot the client reads.
-      traceGlobals.__onebunCurrentTraceContext = { traceId: W3C_TRACE_ID };
-      const second = await fetch(url);
-      const withSlot = (await second.json()) as Envelope<{ seen: Record<string, string> }>;
-
-      expect(withSlot.result.seen['x-trace-id']).toBe(W3C_TRACE_ID);
-      expect(echoRequests).toBe(2);
     } finally {
-      delete traceGlobals.__onebunCurrentTraceContext;
       await app.stop();
       echo.stop(true);
     }

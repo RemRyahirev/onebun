@@ -8,6 +8,8 @@ import {
   describe,
   it,
   expect,
+  beforeEach,
+  afterEach,
 } from 'bun:test';
 import {
   Cause,
@@ -24,6 +26,7 @@ import {
   DEFAULT_RETRY_CONFIG,
   DEFAULT_RETRY_DELAY,
   HttpStatusCode,
+  setTraceContextProvider,
   TRANSPORT_FAILURE_CODE,
 } from './';
 
@@ -1019,5 +1022,106 @@ describe('Request Client API Methods', () => {
     it('should have deleteEffect method', () => {
       expect(typeof client.deleteEffect).toBe('function');
     });
+  });
+});
+
+/**
+ * docs/api/trace.md, "Context Propagation": three headers go out, the parent id is the innermost
+ * open span, `tracing: false` suppresses them, and nothing is sent when there is no trace to join.
+ *
+ * Driven through a registered provider rather than a whole application — that is the seam the
+ * page documents for anyone using `createHttpClient()` outside OneBun, and it keeps the assertion
+ * on what reaches the wire.
+ */
+describe('Outgoing trace context (docs/api/trace.md)', () => {
+  const TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
+  const SPAN_ID = '00f067aa0ba902b7';
+  const NOT_SAMPLED = 0;
+
+  let received: Headers[];
+  let upstream: ReturnType<typeof Bun.serve>;
+  let upstreamUrl: string;
+
+  beforeEach(() => {
+    received = [];
+    upstream = Bun.serve({
+      port: 0,
+      fetch(request) {
+        received.push(request.headers);
+
+        return Response.json({ ok: true });
+      },
+    });
+    upstreamUrl = `http://localhost:${upstream.port}/echo`;
+  });
+
+  afterEach(() => {
+    setTraceContextProvider(null);
+    upstream.stop(true);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send traceparent plus the X-Trace-Id / X-Span-Id pair', async () => {
+    setTraceContextProvider(() => ({ traceId: TRACE_ID, spanId: SPAN_ID, traceFlags: 1 }));
+
+    await createHttpClient().get(upstreamUrl);
+
+    const [headers] = received;
+    expect(headers.get('traceparent')).toBe(`00-${TRACE_ID}-${SPAN_ID}-01`);
+    expect(headers.get('x-trace-id')).toBe(TRACE_ID);
+    // Sent WITH the trace id, never without: the receiver needs both, so a lone id joins nothing.
+    expect(headers.get('x-span-id')).toBe(SPAN_ID);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should carry the sampling decision rather than claiming everything is sampled', async () => {
+    setTraceContextProvider(() => ({
+      traceId: TRACE_ID,
+      spanId: SPAN_ID,
+      traceFlags: NOT_SAMPLED,
+    }));
+
+    await createHttpClient().get(upstreamUrl);
+
+    expect(received[0].get('traceparent')).toBe(`00-${TRACE_ID}-${SPAN_ID}-00`);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send nothing when tracing is off, per client and per call', async () => {
+    setTraceContextProvider(() => ({ traceId: TRACE_ID, spanId: SPAN_ID }));
+
+    await createHttpClient({ tracing: false }).get(upstreamUrl);
+    await createHttpClient().get(upstreamUrl, { tracing: false });
+
+    expect(received.map((headers) => headers.get('traceparent'))).toEqual([null, null]);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send nothing when there is no trace to join, or when the ids are unusable', async () => {
+    await createHttpClient().get(upstreamUrl);
+
+    // The all-zero ids are OpenTelemetry's "invalid" sentinels, handed out for non-recording
+    // spans — so they arrive routinely, and a peer honouring them would join a trace that does
+    // not exist. A malformed `traceparent` can also get the request rejected outright.
+    setTraceContextProvider(() => ({ traceId: '0'.repeat(32), spanId: '0'.repeat(16) }));
+    await createHttpClient().get(upstreamUrl);
+
+    setTraceContextProvider(() => ({ traceId: 'not-hex', spanId: SPAN_ID }));
+    await createHttpClient().get(upstreamUrl);
+
+    setTraceContextProvider(() => {
+      throw new Error('provider exploded');
+    });
+    await createHttpClient().get(upstreamUrl);
+
+    expect(received.map((headers) => headers.get('traceparent'))).toEqual([null, null, null, null]);
   });
 });

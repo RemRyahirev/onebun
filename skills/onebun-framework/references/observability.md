@@ -63,6 +63,31 @@ on `BaseService` / `BaseController` — resolves to the innermost open span.
 - **Sampling reads differently now.** The sampler is `ParentBased`, so the decision is made once at the root
   and inherited: `samplingRate: 0.1` means one request in ten with all of its spans, not one span in ten.
 
+## Outgoing Trace Propagation
+
+A call made through `@onebun/requests` while handling a request carries that request's trace. Three headers:
+`traceparent` (W3C, the only one a collector or non-OneBun peer understands), plus `X-Trace-Id` and
+`X-Span-Id` **together** — a lone trace id joins nothing, because the receiver's `extractFromHeadersSync`
+needs both or a `traceparent`.
+
+- The parent id is the innermost open span, so a call from inside a `@Traced` method hangs off that method
+  rather than off the request. `traceFlags` carries the request's sampling decision.
+- Nothing is sent outside a request scope (startup, cron, queue handler), or when the ids are unusable —
+  a malformed `traceparent` can get the request rejected outright, so no header is the safer failure.
+- Suppress with `tracing: false` on the client or on one call.
+- `@onebun/requests` has no `@onebun/*` dependencies (core depends on it, not the reverse), so the seam is
+  `setTraceContextProvider()`, which `OneBunApplication` registers at construction. Outside an application,
+  register your own or nothing propagates. It used to be `globalThis.__onebunCurrentTraceContext`, which
+  nothing ever assigned — so every outgoing call went out untraced, silently, and one global cell would
+  have been the wrong shape anyway with concurrent requests.
+- `client.get(url, { tracing: false })` now reaches the config arm of the `get` overload. The markers are
+  `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`; `retries` and `query` are deliberately excluded
+  (`{ query: ... }` is documented as producing a literal `?query=[object Object]`), so those still need the
+  three-argument form `get(url, query, config)`.
+- **The receiving side does not yet honour it for spans.** The inbound `traceparent` becomes the callee's
+  trace ids in logs — cross-service log correlation works — but is not converted into an OpenTelemetry
+  remote parent, so the exported spans are still two traces. Tracked separately.
+
 ## Auto-Tracing (traceAll)
 
 Zero-boilerplate tracing — all async methods on services/controllers are auto-wrapped:

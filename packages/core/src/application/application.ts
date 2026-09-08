@@ -1,5 +1,6 @@
 import path from 'node:path';
 
+import { trace as otelTrace } from '@opentelemetry/api';
 import {
   type Context,
   Effect,
@@ -32,6 +33,7 @@ import {
   createSuccessResponse,
   HttpStatusCode,
   OneBunBaseError,
+  setTraceContextProvider,
 } from '@onebun/requests';
 
 import {
@@ -634,6 +636,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           (globalThis as Record<string, unknown>).__onebunTraceService = this.traceService;
         }
 
+        // Outgoing calls join the trace from here on. Wired next to the trace service because it
+        // is the same capability seen from the other side, and because a failure above must not
+        // leave the client emitting headers for a trace nothing is recording.
+        this.wireOutgoingTraceContext();
+
         this.logger.info('Trace service initialized successfully');
       } catch (error) {
         this.logger.error(
@@ -656,6 +663,45 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Note: root module creation is deferred to start() to ensure
     // config is fully initialized before services are created.
+  }
+
+  /**
+   * Point `@onebun/requests` at this process's per-request trace context.
+   *
+   * `@onebun/requests` cannot import core — core depends on requests, not the reverse — so the
+   * seam is a registered function. It used to be a process-global cell that nothing ever wrote,
+   * which made every outgoing call leave untraced and silent; a single cell would have been the
+   * wrong shape anyway, since concurrent requests share it and the last writer would win.
+   *
+   * The OpenTelemetry active span comes first when there is one: it is the innermost open span,
+   * so a call made from inside a `@Traced` method hangs off that method rather than off the
+   * request. `getCurrentTraceContext()` is the fallback, and covers the path where no exporter is
+   * configured and therefore no OpenTelemetry span exists at all.
+   */
+  private wireOutgoingTraceContext(): void {
+    setTraceContextProvider(() => {
+      const activeSpan = otelTrace.getActiveSpan();
+
+      if (activeSpan) {
+        const spanContext = activeSpan.spanContext();
+
+        return {
+          traceId: spanContext.traceId,
+          spanId: spanContext.spanId,
+          traceFlags: spanContext.traceFlags,
+        };
+      }
+
+      const traceContext = getCurrentTraceContext();
+
+      return traceContext
+        ? {
+          traceId: traceContext.traceId,
+          spanId: traceContext.spanId,
+          traceFlags: traceContext.traceFlags,
+        }
+        : null;
+    });
   }
 
   /**

@@ -212,7 +212,7 @@ export class MyService extends BaseService {
 
 ### Context Propagation
 
-When making HTTP calls, trace context is automatically propagated:
+A call made while handling a request carries that request's trace:
 
 ```typescript
 import { createHttpClient } from '@onebun/core';
@@ -221,9 +221,56 @@ const client = createHttpClient({
   baseUrl: 'http://other-service:3000',
 });
 
-// Trace headers are automatically added to outgoing requests
+// Sends `traceparent`, plus `X-Trace-Id` and `X-Span-Id`
 const response = await client.get('/api/data');
 ```
+
+Three headers go out, and they are the whole of what is propagated:
+
+| Header | Value |
+| --- | --- |
+| `traceparent` | `00-<trace-id>-<parent-id>-<flags>`, W3C Trace Context. The only one a collector, a service mesh or a non-OneBun peer understands. |
+| `X-Trace-Id` | The trace id, for anything already reading it. |
+| `X-Span-Id` | The parent span id. Sent **with** `X-Trace-Id`, never without: a lone trace id joins nothing, because the receiver needs both. |
+
+The parent id is the innermost open span — a call made inside a `@Traced` method hangs off that
+method, not off the request. `traceFlags` carries this request's sampling decision, so a downstream
+service inherits it instead of being told everything is sampled.
+
+Nothing is sent when there is no trace to join — startup code, a cron tick, a queue handler — and
+nothing is sent when the ids are not well-formed. A malformed `traceparent` can get a request
+rejected outright, so no header is the safer failure.
+
+Suppress it with `tracing: false`, on the client or on one call:
+
+<!-- typecheck: skip -->
+```typescript
+const client = createHttpClient({ baseUrl: '…', tracing: false });   // never propagate
+await client.get('/api/data', { tracing: false });                   // just this call
+```
+
+::: warning The receiving side does not yet honour it
+`traceparent` reaches the callee and becomes the trace ids in its **logs**, so log correlation works
+across services today. Its exported **spans** are still a separate trace: the inbound context is not
+converted into an OpenTelemetry remote parent. Tracked separately.
+:::
+
+Outside an application — a standalone `createHttpClient()` with no `OneBunApplication` in the
+process — there is no ambient context to read, and nothing is propagated. Register your own source
+if you need one:
+
+<!-- typecheck: skip -->
+```typescript
+import { setTraceContextProvider } from '@onebun/requests';
+
+setTraceContextProvider(() => ({ traceId, spanId, traceFlags: 1 }));
+```
+
+The provider returns an `OutgoingTraceContext` — `{ traceId, spanId, traceFlags? }` — or `null`.
+`@onebun/requests` has no `@onebun/*` and no OpenTelemetry dependencies (core depends on requests,
+not the reverse), so three plain fields are what crosses the seam; `formatTraceparent` renders them.
+A provider that throws, or that answers with ids the W3C format cannot express, drops the headers
+rather than sending something malformed.
 
 ## Manual Span Creation
 

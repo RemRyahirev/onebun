@@ -16,6 +16,7 @@ import {
   executeRequest,
   HttpClient,
 } from './client.js';
+import { setTraceContextProvider } from './trace-context.js';
 import {
   createErrorResponse,
   DEFAULT_REQUESTS_OPTIONS,
@@ -102,10 +103,17 @@ describe('client.executeRequest', () => {
     expect(calls.length).toBe(2);
   });
 
-  it('propagates trace id header and records metrics', async () => {
+  it('propagates the caller trace on the wire and records metrics', async () => {
     const calls: RequestInit[] = [];
     let recorded: any | undefined;
-    (globalThis as any).__onebunCurrentTraceContext = { traceId: 'trace-xyz' };
+    const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+    const spanId = '00f067aa0ba902b7';
+
+    // Through the registered provider, not `globalThis.__onebunCurrentTraceContext`. This test
+    // used to set that global itself and assert the header appeared — which proved only that the
+    // client could read a global the framework never wrote. The header was absent in every real
+    // application, and the suite was green.
+    setTraceContextProvider(() => ({ traceId, spanId, traceFlags: 1 }));
     (globalThis as any).__onebunMetricsService = {
       recordHttpRequest(input: any) {
         recorded = input;
@@ -118,24 +126,23 @@ describe('client.executeRequest', () => {
       return Promise.resolve(jsonResponse({ ok: true }));
     }) as any;
 
-    await Effect.runPromise(
-      executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/m' }),
-    );
+    try {
+      await Effect.runPromise(
+        executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/m' }),
+      );
 
-    // headers is Headers or object; in Bun, RequestInit.headers can be a Headers or plain object
-    const h = calls[0]!.headers as Record<string, string>;
-    // Either directly or via Headers; we normalize
-    const hasTrace = ((): boolean => {
-      if (h && typeof h === 'object' && 'get' in h && typeof (h as any).get === 'function') {
-        return Boolean((h as any).get('X-Trace-Id'));
-      }
+      const headers = calls[0]!.headers as Record<string, string>;
 
-      return Boolean((h as any)['X-Trace-Id']);
-    })();
-    expect(hasTrace).toBe(true);
+      expect(headers.traceparent).toBe(`00-${traceId}-${spanId}-01`);
+      expect(headers['X-Trace-Id']).toBe(traceId);
+      // With the pair, never the trace id alone — on its own the receiver ignores it.
+      expect(headers['X-Span-Id']).toBe(spanId);
 
-    expect(recorded).toBeDefined();
-    expect(recorded.method).toBe('GET');
+      expect(recorded).toBeDefined();
+      expect(recorded.method).toBe('GET');
+    } finally {
+      setTraceContextProvider(null);
+    }
   });
 
   it('fails with AUTH_ERROR when auth interceptor throws', async () => {
@@ -229,32 +236,36 @@ describe('client helpers via executeRequest', () => {
     expect(seen.url).toBe('https://api.example.com/path?x=1&a=2');
   });
 
-  it('does not add X-Trace-Id header when tracing disabled in request config', async () => {
-    (globalThis as any).__onebunCurrentTraceContext = { traceId: 'trace-abc' };
-    let headersSeen: Headers | Record<string, string> | undefined;
+  it('sends no trace headers when tracing is disabled on the request', async () => {
+    // Through the provider, so the absence means "suppressed" and not "there was never a trace
+    // to send" — the previous version set a global the client no longer reads, which made the
+    // assertion hold for the wrong reason.
+    setTraceContextProvider(() => ({
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+      spanId: '00f067aa0ba902b7',
+    }));
+
+    let headersSeen: Record<string, string> | undefined;
     globalThis.fetch = ((_: string, init: RequestInit) => {
-      headersSeen = init.headers as any;
+      headersSeen = init.headers as Record<string, string>;
 
       return Promise.resolve(jsonResponse({ ok: true }));
     }) as any;
 
-    await Effect.runPromise(
-      executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/no-trace', tracing: false }),
-    );
+    try {
+      await Effect.runPromise(
+        executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/no-trace', tracing: false }),
+      );
 
-    const hasTrace = (() => {
-      const h = headersSeen as any;
-      if (!h) {
-        return false;
-      }
-      if (typeof h.get === 'function') {
-        return Boolean(h.get('X-Trace-Id'));
-      }
-
-      return Boolean(h['X-Trace-Id']);
-    })();
-
-    expect(hasTrace).toBe(false);
+      expect(headersSeen!['X-Trace-Id']).toBeUndefined();
+      expect(headersSeen!['X-Span-Id']).toBeUndefined();
+      expect(headersSeen!.traceparent).toBeUndefined();
+      // Asserted against a request that WAS made, with the client's own header present, so the
+      // three absences cannot be satisfied by a call that never happened.
+      expect(headersSeen!['User-Agent']).toBe('OneBun-Requests/1.0');
+    } finally {
+      setTraceContextProvider(null);
+    }
   });
 
   it('stops retrying and returns RETRY_CALLBACK_ERROR when onRetry throws', async () => {

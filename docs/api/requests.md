@@ -522,7 +522,7 @@ method you call and the path you pass, so only these fields are yours to set:
   /** Override auth for this request */
   auth?: AuthConfig;
 
-  /** Set to `false` to skip the span / the metrics for this one request */
+  /** Set to `false` to skip the trace headers / the metrics for this one request */
   tracing?: boolean;
   metrics?: boolean;
 }

@@ -3,6 +3,11 @@ import { Effect, pipe } from 'effect';
 import { applyAuth, isSigningAuth } from './auth.js';
 import { signOneBunRequest } from './onebun-auth.js';
 import {
+  currentOutgoingTraceContext,
+  formatTraceparent,
+  type OutgoingTraceContext,
+} from './trace-context.js';
+import {
   type ApiResponse,
   createErrorResponse,
   createSuccessResponse,
@@ -30,6 +35,28 @@ import {
 
 /** Methods whose body is sent, and therefore signed. */
 const BODY_CARRYING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH'];
+
+/**
+ * Fields that mark the second argument of `get`/`delete` as a config rather than query data.
+ *
+ * The overload is ambiguous by construction — both arms take a plain object — so this list is the
+ * whole of the decision. It used to name four fields, which left `tracing` on the wrong side:
+ * `client.get(url, { tracing: false })` was read as query data and went out as `?tracing=false`,
+ * with the header it was meant to suppress still attached.
+ *
+ * `retries` and `query` are deliberately NOT here. `query` is documented as producing a literal
+ * `?query=[object Object]` — the page warns against wrapping the query in a key and a test pins
+ * it — and a `?retries=3` is a plausible query param in a way that `?tracing=` is not. Both still
+ * need the three-argument form, as does any caller whose query really contains one of these names.
+ */
+const REQUEST_CONFIG_MARKERS: readonly string[] = [
+  'method',
+  'headers',
+  'timeout',
+  'auth',
+  'tracing',
+  'metrics',
+];
 
 /**
  * Build full URL from base URL and request URL
@@ -238,22 +265,24 @@ const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, nev
 };
 
 /**
- * Get trace ID if available
+ * The trace this call belongs to, or `undefined` when it belongs to none.
+ *
+ * Read through the registered provider (`setTraceContextProvider`), which `OneBunApplication`
+ * points at its per-request `AsyncLocalStorage`. It used to read
+ * `globalThis.__onebunCurrentTraceContext` — a global nothing in the framework ever assigned, so
+ * the answer was permanently `undefined` and every outgoing call left untraced without a word.
+ * One global cell would have been wrong anyway: concurrent requests share it, so a call would be
+ * attributed to whichever request wrote to it last.
  */
-const getTraceId = (config: RequestConfig, mergedOptions: RequestsOptions): string | undefined => {
-  if (config.tracing !== false && mergedOptions.tracing) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const g = globalThis as unknown as { __onebunCurrentTraceContext?: { traceId: string } };
-      if (typeof globalThis !== 'undefined' && g.__onebunCurrentTraceContext) {
-        return g.__onebunCurrentTraceContext.traceId;
-      }
-    } catch {
-      // Tracing not available, continue without it
-    }
+const getTraceContext = (
+  config: RequestConfig,
+  mergedOptions: RequestsOptions,
+): OutgoingTraceContext | undefined => {
+  if (config.tracing === false || !mergedOptions.tracing) {
+    return undefined;
   }
 
-  return undefined;
+  return currentOutgoingTraceContext();
 };
 
 /**
@@ -305,7 +334,7 @@ const applyAuthIfNeeded = (
 const buildHeaders = (
   config: RequestConfig,
   mergedOptions: RequestsOptions,
-  traceId?: string,
+  traceContext?: OutgoingTraceContext,
 ): Record<string, string> => {
   const headers: Record<string, string> = {
     // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -318,9 +347,18 @@ const buildHeaders = (
     ...config.headers,
   };
 
-  // Add trace headers if tracing is enabled
-  if (traceId && config.tracing !== false && mergedOptions.tracing) {
-    headers['X-Trace-Id'] = traceId;
+  if (traceContext && config.tracing !== false && mergedOptions.tracing) {
+    // W3C `traceparent` first, because it is the only one a collector, a service mesh or a
+    // non-OneBun peer understands.
+     
+    headers.traceparent = formatTraceparent(traceContext);
+    // The pair, not `X-Trace-Id` alone. On its own it joined nothing — even the receiving OneBun
+    // service requires trace and span id together, so a lone id fell through and the callee
+    // started a fresh trace. Kept alongside `traceparent` for anything already reading them.
+     
+    headers['X-Trace-Id'] = traceContext.traceId;
+     
+    headers['X-Span-Id'] = traceContext.spanId;
   }
 
   return headers;
@@ -622,7 +660,11 @@ export const executeRequest = <
   requestOptions: RequestsOptions = {},
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const mergedOptions = mergeRequestsOptions(requestOptions);
-  const traceId = getTraceId(config, mergedOptions);
+  // Resolved once, before the first attempt: a retry belongs to the same trace as the attempt it
+  // replaces, and re-reading the ambient context per attempt would let a slow retry pick up
+  // whatever scope the process happened to be in by then.
+  const traceContext = getTraceContext(config, mergedOptions);
+  const traceId = traceContext?.traceId;
 
   return pipe(
     applyAuthIfNeeded(config, mergedOptions, traceId),
@@ -631,7 +673,7 @@ export const executeRequest = <
       // before, so `apikey` with `location: 'query'` added its key to a `config.query` the URL had
       // already been assembled from — the key never reached the wire and nothing said so.
       const fullUrl = buildUrl(mergedOptions.baseUrl, finalConfig.url, finalConfig.query);
-      const headers = buildHeaders(finalConfig, mergedOptions, traceId);
+      const headers = buildHeaders(finalConfig, mergedOptions, traceContext);
 
       return { finalConfig, headers, fullUrl };
     }),
@@ -704,11 +746,7 @@ export class HttpClient {
       !Array.isArray(queryOrConfig)
     ) {
       // Check if it's a RequestConfig (has method, url, etc.) or query data
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
+      const hasConfigFields = REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig);
       if (hasConfigFields) {
         // It's config
         finalConfig = {

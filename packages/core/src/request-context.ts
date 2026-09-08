@@ -7,6 +7,15 @@ export interface TraceInfo {
   traceId: string;
   spanId: string;
   parentSpanId?: string;
+  /**
+   * W3C trace flags; bit 0 is "sampled".
+   *
+   * Always present at runtime — the trace service puts it there — and declared optional only
+   * because a caller constructing a `TraceInfo` by hand has nothing meaningful to say about it.
+   * Read when rendering an outgoing `traceparent`, so that a downstream service inherits this
+   * request's sampling decision instead of being told everything is sampled.
+   */
+  traceFlags?: number;
 }
 
 /**

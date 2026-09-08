@@ -14,6 +14,16 @@ export {
   calculateRetryDelay, createHttpClient, executeRequest, HttpClient, 
 } from './client.js';
 
+// Outgoing trace context
+export {
+  currentOutgoingTraceContext,
+  formatTraceparent,
+  isUsableTraceContext,
+  type OutgoingTraceContext,
+  setTraceContextProvider,
+  type TraceContextProvider,
+} from './trace-context.js';
+
 // Service for dependency injection
 export {
   makeRequestsService,
