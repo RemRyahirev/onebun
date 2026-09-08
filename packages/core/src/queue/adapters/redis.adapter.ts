@@ -39,6 +39,7 @@ import {
   type QueuePatternMatch,
 } from '../pattern-matcher';
 import { toRedisQueueGlob } from '../redis-glob';
+import { resolveMaxAttempts, retryDelayMs } from '../retry';
 import { QueueScheduler } from '../scheduler';
 
 // ============================================================================
@@ -60,6 +61,22 @@ export interface RedisQueueOptions {
 
   /** Poll interval for delayed messages (ms, default: 100) */
   pollInterval?: number;
+}
+
+/**
+ * What a queued message looks like on the list.
+ *
+ * `attempt` is the one field the wire format carries beyond the message itself: a retry is a
+ * re-push, so the counter has to travel with the message or it restarts at 1 in whichever
+ * process claims it next. Absent on a first publish, which reads as attempt 1.
+ */
+interface RedisQueueEnvelope {
+  id: string;
+  pattern: string;
+  data: unknown;
+  timestamp: number;
+  metadata?: MessageMetadata;
+  attempt?: number;
 }
 
 interface RedisSubscriptionEntry {
@@ -522,19 +539,20 @@ export class RedisQueueAdapter implements QueueAdapter {
 
   private async processMessage(
     entry: RedisSubscriptionEntry,
-    messageData: {
-      id: string;
-      pattern: string;
-      data: unknown;
-      timestamp: number;
-      metadata?: MessageMetadata;
-    },
+    messageData: RedisQueueEnvelope,
   ): Promise<void> {
     // Check if pattern matches
     const match = entry.matcher(messageData.pattern);
     if (!match.matched) {
       return;
     }
+
+    const tracked = tracksDelivery(entry.options);
+    const maxAttempts = resolveMaxAttempts(entry.options?.retry);
+    // The counter rides in the envelope, not in this process: a retry goes back onto the list,
+    // and the replica that claims it next may not be the one that failed. An in-memory counter
+    // would restart at 1 on every hop and turn `attempts: 3` into an unbounded loop.
+    const attempt = messageData.attempt ?? 1;
 
     const message = new RedisMessage(
       messageData.id,
@@ -543,6 +561,10 @@ export class RedisQueueAdapter implements QueueAdapter {
       messageData.timestamp,
       messageData.metadata ?? {},
       {
+        // Inert under 'none', where nothing tracks delivery and there is no attempt to number.
+        redelivered: tracked ? attempt > 1 : false,
+        attempt: tracked ? attempt : undefined,
+        maxAttempts: tracked ? maxAttempts : undefined,
         onAck: async () => {
           // Remove from processing set if using consumer groups
           if (entry.consumerGroup) {
@@ -555,16 +577,15 @@ export class RedisQueueAdapter implements QueueAdapter {
         onNack: async (requeue) => {
           // Under 'none' the broker tracks nothing, so neither requeue nor dead-letter
           // routing can be honoured without inventing delivery state that does not exist.
-          if (!tracksDelivery(entry.options)) {
+          if (!tracked) {
             return;
           }
 
           if (requeue) {
-            // Re-queue the message
-            await this.client!.lpush(
-              this.keys.queue(messageData.pattern),
-              JSON.stringify(messageData),
-            );
+            // Back to the head of the list, carrying an incremented counter so the next
+            // consumer knows which attempt it is running. Uncapped by design: `nack(true)` is
+            // the handler's instruction, and `Message.attempt` is how a handler stops itself.
+            await this.requeue(messageData, attempt + 1);
           } else if (entry.options?.deadLetter) {
             // Move to dead letter queue
             await this.client!.rpush(
@@ -599,22 +620,60 @@ export class RedisQueueAdapter implements QueueAdapter {
       this.emit('onMessageFailed', message, error as Error);
 
       // Same rule on the failure side. Under 'none' the message is simply gone.
-      if (acknowledgesAutomatically(entry.options)) {
-        await message.nack(false);
+      if (!acknowledgesAutomatically(entry.options)) {
+        return;
       }
+
+      await message.nack(false);
+
+      if (attempt >= maxAttempts) {
+        // Exhausted. Dead-letter routing on exhaustion is not wired here — `deadLetter.queue`
+        // and `.maxRetries` are still ignored by this adapter, which the docs say plainly.
+        return;
+      }
+
+      await this.scheduleRetry(messageData, attempt + 1, retryDelayMs(entry.options?.retry, attempt));
     }
   }
 
   /**
-   * Take messages off this subscription's list and run the handler for each.
+   * Hand a failed message back for another attempt.
    *
-   * `LPOP` is the claim: it is atomic, so a message goes to exactly one consumer even when several
-   * replicas drain the same list. That is what makes the list the single source of truth and the
-   * pub/sub channel a wake-up signal rather than a second delivery path — previously both carried
-   * the payload and both delivered it, so every handler ran twice per message.
+   * The wait goes into Redis, not into a `sleep` here. A retry that waits in a closure is a
+   * message held by one process and written nowhere: kill that process and it is gone, exactly
+   * when the point of retrying was to not lose it. The delayed sorted set already exists for
+   * `publish({ delay })` and promotes to the same list, so the wait survives a restart and any
+   * replica can serve the redelivery.
    *
-   * Bounded per call so one busy list cannot starve the others sharing this event loop.
+   * A zero delay skips the set: a score of `now` would still wait out a poll tick, which would
+   * quietly make `delay: 0` mean `pollInterval`.
    */
+  private async scheduleRetry(
+    messageData: RedisQueueEnvelope,
+    attempt: number,
+    delayMs: number,
+  ): Promise<void> {
+    const serialized = JSON.stringify({ ...messageData, attempt });
+
+    if (delayMs > 0) {
+      await this.client!.zadd(this.keys.delayed, Date.now() + delayMs, serialized);
+
+      return;
+    }
+
+    await this.requeue(messageData, attempt);
+    // Wake a consumer for it rather than leaving it to the next poll tick.
+    await this.client!.publish(this.keys.wake, messageData.pattern);
+  }
+
+  /** Put a message back at the head of its topic list, stamped with the attempt it will be. */
+  private async requeue(messageData: RedisQueueEnvelope, attempt: number): Promise<void> {
+    await this.client!.lpush(
+      this.keys.queue(messageData.pattern),
+      JSON.stringify({ ...messageData, attempt }),
+    );
+  }
+
   /**
    * Take messages off ONE topic's list and run the handler for each.
    *

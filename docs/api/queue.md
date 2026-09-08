@@ -186,7 +186,13 @@ class OrderProcessor extends BaseController {
 }
 ```
 
-Only the JetStream adapter populates `attempt` and `maxAttempts`; on the memory, Redis and core-NATS adapters both fields are always `undefined`.
+The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`. Core NATS tracks
+no delivery state at all, so both stay `undefined` there — and so does `redelivered`.
+
+Under `ackMode: 'auto'` you do not have to write this at all: a handler that throws is retried up
+to `retry.attempts` times and then dropped, with `onMessageFailed` on every attempt. The recipe
+above is for `'manual'`, where `nack(true)` is **uncapped** — it is your instruction, not the
+framework's policy, and `message.attempt` is how a handler stops itself.
 
 **A handler written this way never throws, and it is still reported as a failure.** That matters
 because it is the shape this page recommends: the `catch` swallows the exception and calls
@@ -212,6 +218,15 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - On JetStream the auto-ack is additionally gated: `if (acknowledgesAutomatically(entry.options) && !wasNacked(message))`. That `msg.ack()` is on the raw `JsMsg`, not the wrapper, so it bypasses the wrapper's first-call-wins guard — ungated, it settled a message the handler had just `nak()`ed and cancelled the redelivery
 - Two deliveries emit NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher (it returns before `onMessageReceived`, and no message object is constructed) and one whose payload fails `JSON.parse`. JetStream instead emits `onError` and `term()`s a poison message
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
+
+**Technical details for AI agents — the retry policy under `'auto'`:**
+- `resolveMaxAttempts` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory and Redis adapters call both. Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent, which is what an unconfigured subscription has always done. `attempts < 1` is raised to 1: a subscription that never fires is not a retry policy
+- `attempts` counts TOTAL deliveries, not extra ones, matching the `attempt >= maxAttempts` comparison the documented recipe already uses. `attempt` is 1-based, `redelivered` is `attempt > 1`
+- Backoff formulas are the same three `@onebun/requests` ships: `fixed` -> `delay`, `linear` -> `delay * n`, `exponential` -> `delay * 2^(n-1)`, where `n` is the 1-based attempt that just failed. `delay` defaults to 100 ms
+- By contrast manual nack(true) is uncapped on both adapters — it is the handler's instruction, not the framework's policy, which is why `Message.attempt` has to be real: it is the only way a handler stops itself
+- Memory keeps the counter in the delivery closure and retries the ONE failing `SubscriptionEntry`, not `dispatch()`. Going back through `dispatch()` re-invoked every matching subscription, so one broken consumer re-ran its healthy neighbours
+- Redis keeps the counter in the persisted envelope (`attempt` on the JSON on the list) because a retry is a re-push and the replica that claims it next may not be the one that failed; an in-process counter would restart at 1 on every hop. A delayed retry is parked in the existing `queue:delayed` sorted set rather than awaited in a closure, so the wait survives a restart; a zero delay skips the set, which would otherwise cost a poll tick
+- All three of `attempt`, `maxAttempts` and `redelivered` are `undefined`/`false` under `ackMode: 'none'` on both adapters — the mode tracks no delivery, so there is no attempt to number
 
 </llm-only>
 
@@ -381,6 +396,32 @@ Whatever the adapter, a handler that nacks and returns normally is reported as a
 success: `onMessageFailed` fires with an error naming the message, and `onMessageProcessed` does
 not fire at all.
 
+#### retry {#retry}
+
+`RetryOptions` decides how many times a failing handler is delivered to, and how long the wait
+between attempts is:
+
+| Field | Meaning | Default |
+|-------|---------|---------|
+| `attempts` | **Total** deliveries, not extra ones — `attempts: 3` runs the handler at most three times | `1` |
+| `backoff` | `'fixed'` → `delay`, `'linear'` → `delay * n`, `'exponential'` → `delay * 2^(n-1)`, where `n` is the attempt that just failed | `'fixed'` |
+| `delay` | Base delay in milliseconds | `100` |
+
+The default of 1 means an unconfigured subscription delivers once, as it always has — retries are
+opt-in, so a handler with a non-idempotent side effect is never quietly upgraded to three of them.
+
+`attempts` counts total deliveries because that is what the
+[error-handling recipe](#error-handling-in-handlers) compares against: `message.attempt` is
+1-based, and `attempt >= maxAttempts` is the terminal delivery.
+
+Honoured by the memory, Redis and JetStream adapters. Core NATS tracks no delivery state and
+ignores it. Under `ackMode: 'none'` it goes inert on every adapter, along with `deadLetter` and
+the `attempt` / `maxAttempts` / `redelivered` fields.
+
+Retries apply to `ackMode: 'auto'`, where the framework owns the decision. Under `'manual'`,
+`nack(true)` is **uncapped** — it is your instruction, not a policy — and `message.attempt` is
+how a handler stops itself.
+
 #### ackMode: 'none'
 
 Fire-and-forget. The message is delivered exactly once and nothing is acknowledged, so
@@ -427,7 +468,7 @@ would otherwise resurrect a message in the one mode that promises a single deliv
 - memory suppresses requeue: `nack(true)` no longer re-dispatches under `'none'`, because that is the one mode promising a single delivery
 - NatsQueueAdapter is already a no-op on this axis: core NATS has no acknowledgement protocol, so nothing on the wire varies with the mode. It resolves the mode once onto the subscription entry so the choice is named in one place
 - The consume loop calls neither `msg.ack()` nor `msg.nak()` under `'none'`, on either the success or the failure path
-- Only the JetStream adapter populates `attempt` and `maxAttempts`; on the memory, Redis and core-NATS adapters both fields are always `undefined`.
+- - The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves both `undefined`, along with `redelivered`, because it tracks no delivery state
 
 </llm-only>
 
@@ -474,7 +515,8 @@ everywhere:
 So `nack(false)` never redelivers, but it does not universally mean "send to the dead-letter
 queue". Publish the payload somewhere yourself if you need to keep it.
 
-Only the JetStream adapter populates `attempt` and `maxAttempts`; on the memory, Redis and core-NATS adapters both fields are always `undefined`.
+The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves
+both `undefined`.
 
 ## Scheduling Decorators
 
@@ -705,7 +747,13 @@ This snippet by itself enables the queue: an explicit `queue.adapter` is a backe
 - Pattern subscriptions
 - Delayed messages
 - Priority
+- Retry (in-process, non-persistent)
 - Scheduled jobs
+
+Retries here live in the process: the attempt counter is a closure variable, so a restart loses
+it along with the message. That is the adapter, not a caveat on `retry` — nothing in this adapter
+survives a restart. There is no dead-letter queue, so a message that exhausts its attempts is
+dropped, having been reported through `onMessageFailed` on every attempt.
 
 ### RedisQueueAdapter
 
@@ -1185,7 +1233,7 @@ The Redis adapter routes dead letters to `queue:dlq:${pattern}` and ignores both
 | Priority | ✅ | ✅ | ❌ | ❌ |
 | Consumer groups | ❌ | ✅ | ✅ | ✅ |
 | Dead letter queue | ❌ | ✅ | ❌ | ✅ |
-| Retry | ❌ | ✅ | ❌ | ✅ |
+| Retry | ✅ | ✅ | ❌ | ✅ |
 | Scheduled jobs | ✅ | ✅ | ✅ | ✅ |
 | Persistence | ❌ | ✅ | ❌ | ✅ |
 | Publish deduplication | ❌ | ❌ | ❌ | ✅ |

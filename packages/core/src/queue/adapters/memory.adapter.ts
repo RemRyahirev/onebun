@@ -26,6 +26,7 @@ import {
   type NackAwareMessage,
 } from '../ack-mode';
 import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
+import { resolveMaxAttempts, retryDelayMs } from '../retry';
 import { QueueScheduler } from '../scheduler';
 
 // ============================================================================
@@ -346,10 +347,13 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       case 'delayed-messages':
       case 'priority':
       case 'pattern-subscriptions':
+      // In-process and non-persistent — a restart loses the attempt counter along with the
+      // message. That is a property of this adapter, not a reason to report `false`: it does
+      // honour `retry.attempts`, and claiming otherwise is the `supports()`-lies pattern.
+      case 'retry':
         return true;
       case 'consumer-groups':
       case 'dead-letter-queue':
-      case 'retry':
         return false;
       default:
         return false;
@@ -410,47 +414,97 @@ export class InMemoryQueueAdapter implements QueueAdapter {
         continue;
       }
 
-      const message = new InMemoryMessage<T>(messageId, pattern, data, fullMetadata, {
-        onNack: (requeue) => {
-          // Under 'none' a requeue would resurrect a message in the one mode that
-          // promises a single delivery, so it is suppressed rather than honoured.
-          if (requeue && tracksDelivery(entry.options)) {
-            // Re-dispatch the message
-            setImmediate(() => {
-              this.dispatch(pattern, data, messageId, metadata);
-            });
-          }
-        },
-      });
-
-      // Emit received event
-      this.emit('onMessageReceived', message);
-
-      try {
-        await entry.handler(message);
-
-        // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
-        if (acknowledgesAutomatically(entry.options)) {
-          await message.ack();
-        }
-
-        // A handler that catches its own exception and nacks returns normally, so control
-        // flow alone cannot tell the drop apart from a success.
-        if (wasNacked(message)) {
-          this.emit('onMessageFailed', message, nackedError(message));
-        } else {
-          this.emit('onMessageProcessed', message);
-        }
-      } catch (error) {
-        // A throw is the failure, whether or not the handler also nacked — one event either way.
-        this.emit('onMessageFailed', message, error as Error);
-
-        // Same rule on the failure side. Under 'none' the message is simply gone.
-        if (acknowledgesAutomatically(entry.options)) {
-          await message.nack(false);
-        }
-      }
+      await this.deliver(entry, pattern, data, messageId, fullMetadata, 1);
     }
+  }
+
+  /**
+   * Deliver one message to ONE subscription, retrying that subscription alone.
+   *
+   * The retry used to go back through `dispatch()`, which walks every matching subscription — so
+   * one failing handler re-invoked its healthy neighbours. Retrying is a property of the delivery
+   * that failed, not of the topic, and this is where that distinction lives.
+   */
+  private async deliver<T>(
+    entry: SubscriptionEntry,
+    pattern: string,
+    data: T,
+    messageId: string,
+    metadata: MessageMetadata,
+    attempt: number,
+  ): Promise<void> {
+    const maxAttempts = resolveMaxAttempts(entry.options?.retry);
+
+    const message = new InMemoryMessage<T>(messageId, pattern, data, metadata, {
+      // Delivery bookkeeping is meaningless under 'none' — nothing tracks delivery, so there is
+      // no attempt to number. Reporting `attempt: 1` there would suggest a counter that is not
+      // running; the documented contract is that these three fields go inert with the mode.
+      redelivered: tracksDelivery(entry.options) ? attempt > 1 : false,
+      attempt: tracksDelivery(entry.options) ? attempt : undefined,
+      maxAttempts: tracksDelivery(entry.options) ? maxAttempts : undefined,
+      onNack: (requeue) => {
+        // Under 'none' a requeue would resurrect a message in the one mode that
+        // promises a single delivery, so it is suppressed rather than honoured.
+        if (requeue && tracksDelivery(entry.options)) {
+          // Uncapped, and deliberately so: `nack(true)` is the handler's own instruction, not
+          // the framework's policy. `Message.attempt` is what lets a handler stop itself.
+          setImmediate(() => {
+            void this.deliver(entry, pattern, data, messageId, metadata, attempt + 1);
+          });
+        }
+      },
+    });
+
+    // Emit received event
+    this.emit('onMessageReceived', message);
+
+    try {
+      await entry.handler(message);
+
+      // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
+      if (acknowledgesAutomatically(entry.options)) {
+        await message.ack();
+      }
+
+      // A handler that catches its own exception and nacks returns normally, so control
+      // flow alone cannot tell the drop apart from a success.
+      if (wasNacked(message)) {
+        this.emit('onMessageFailed', message, nackedError(message));
+      } else {
+        this.emit('onMessageProcessed', message);
+      }
+    } catch (error) {
+      // A throw is the failure, whether or not the handler also nacked — one event either way.
+      this.emit('onMessageFailed', message, error as Error);
+
+      // Same rule on the failure side. Under 'none' the message is simply gone.
+      if (!acknowledgesAutomatically(entry.options)) {
+        return;
+      }
+
+      await message.nack(false);
+
+      if (attempt >= maxAttempts) {
+        // Exhausted. This adapter reports `supports('dead-letter-queue') === false`, and that
+        // stays true: the message is dropped, having been reported through `onMessageFailed`
+        // on every attempt.
+        return;
+      }
+
+      await this.sleep(retryDelayMs(entry.options?.retry, attempt));
+      await this.deliver(entry, pattern, data, messageId, metadata, attempt + 1);
+    }
+  }
+
+  /** Awaitable pause that resolves immediately for a zero delay, so `retry` without a `delay` costs no tick. */
+  private async sleep(ms: number): Promise<void> {
+    if (ms <= 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, ms);
+    });
   }
 
   private processDelayedMessages(): void {

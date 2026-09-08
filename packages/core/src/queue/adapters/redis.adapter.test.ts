@@ -24,11 +24,14 @@ import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
 const CONTAINER_TEST_TIMEOUT_MS = 30_000;
 
 /** Poll until `predicate` holds, so a test never depends on a fixed sleep being long enough. */
-async function waitFor(predicate: () => boolean, timeoutMs = 5000): Promise<void> {
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5000,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    if (predicate()) {
+    if (await predicate()) {
       return;
     }
     await Bun.sleep(20);
@@ -318,6 +321,94 @@ describe('RedisQueueAdapter', () => {
 
     it('refuses a pattern whose # is not the final token', async () => {
       await expect(adapter.subscribe('#.created', async () => undefined)).rejects.toThrow(/final token/i);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('delivers exactly once when no retry is configured, and keeps nothing afterwards', async () => {
+      let calls = 0;
+
+      await adapter.subscribe('orders.oneshot', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      });
+
+      await adapter.publish('orders.oneshot', { orderId: 1 });
+      await waitFor(() => calls > 0);
+      await Bun.sleep(500);
+
+      expect(calls).toBe(1);
+
+      // Nothing under this adapter's prefix still holds it. Without `deadLetter` the message is
+      // dropped, and the docs say so — what must not happen is it sitting on a list forever.
+      const client = (adapter as unknown as {
+        client: { raw: (cmd: string, ...args: string[]) => Promise<[string, string[]]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const [, keys] = await client.raw('SCAN', '0', 'MATCH', `${prefix}queue:q:orders.oneshot`, 'COUNT', '100');
+
+      expect(keys).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('honours retry.attempts, numbering the attempts it delivers', async () => {
+      const seen: Array<{ attempt?: number; maxAttempts?: number; redelivered?: boolean }> = [];
+
+      await adapter.subscribe('orders.retried', async (message) => {
+        seen.push({
+          attempt: message.attempt,
+          maxAttempts: message.maxAttempts,
+          redelivered: message.redelivered,
+        });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.retried', { orderId: 1 });
+      await waitFor(() => seen.length >= 3, 10_000);
+      await Bun.sleep(600);
+
+      expect(seen).toEqual([
+        { attempt: 1, maxAttempts: 3, redelivered: false },
+        { attempt: 2, maxAttempts: 3, redelivered: true },
+        { attempt: 3, maxAttempts: 3, redelivered: true },
+      ]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('parks a delayed retry in Redis, carrying the attempt counter, not in this process', async () => {
+      // Two claims in one test, and both matter. The counter has to survive the round trip
+      // through Redis — a retry is a re-push, and the replica that claims it next is not
+      // necessarily the one that failed, so an in-process counter would restart at 1 on every
+      // hop and make `attempts: 2` loop forever. And the WAIT has to be in Redis too: a retry
+      // sleeping in a closure is a message held by one process and written nowhere.
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      // Long enough to look at the delayed set while the retry is still waiting in it.
+      await adapter.subscribe('orders.persisted', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 2, backoff: 'fixed', delay: 900 } });
+
+      await adapter.publish('orders.persisted', { orderId: 1 });
+      await waitFor(() => calls >= 1);
+
+      let parked: string[] = [];
+      await waitFor(async () => {
+        parked = await client.zrangebyscore(delayedKey, '-inf', '+inf');
+
+        return parked.length > 0;
+      });
+
+      const envelope = JSON.parse(parked[0]);
+      expect(envelope.attempt).toBe(2);
+      expect(envelope.pattern).toBe('orders.persisted');
+      expect(envelope.data).toEqual({ orderId: 1 });
+
+      // And it does come back — the parked copy is a real redelivery, not a leak.
+      await waitFor(() => calls >= 2, 10_000);
+      await Bun.sleep(600);
+      expect(calls).toBe(2);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
     it('reports a polling failure instead of discarding it', async () => {

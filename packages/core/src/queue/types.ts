@@ -10,8 +10,15 @@
 
 /**
  * Message acknowledgment mode
- * - 'auto': Message is automatically acknowledged after successful handler execution
- * - 'manual': Handler must call message.ack() or message.nack() explicitly
+ * - 'auto': Message is automatically acknowledged after successful handler execution. A handler
+ *   that throws is retried up to `retry.attempts` times (default 1 — one delivery, as before),
+ *   with `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
+ *   fires on every failed attempt. Once the attempts are exhausted the message is dropped on the
+ *   memory adapter, and dropped on the Redis adapter too until `deadLetter.queue` is honoured
+ *   there; JetStream dead-letters it.
+ * - 'manual': Handler must call message.ack() or message.nack() explicitly. `nack(true)` is
+ *   uncapped — it is the handler's instruction, not the framework's policy, and `Message.attempt`
+ *   is what lets a handler stop itself.
  * - 'none': Fire-and-forget. The message is delivered exactly once and nothing is
  *   acknowledged, so there is **no redelivery** and **no dead-letter routing** on any
  *   adapter. Everything that depends on the broker tracking delivery state goes inert
@@ -156,13 +163,20 @@ export interface PublishOptions {
 
 /**
  * Retry configuration
+ *
+ * @see docs:api/queue.md
  */
 export interface RetryOptions {
-  /** Maximum number of attempts */
+  /**
+   * Total deliveries, not extra ones: `attempts: 3` runs the handler at most three times.
+   * Defaults to 1 — one delivery, which is what an unconfigured subscription has always done.
+   * Honoured by the memory, Redis and JetStream adapters; core NATS tracks no delivery state
+   * and ignores it.
+   */
   attempts?: number;
-  /** Backoff strategy */
+  /** Backoff strategy. Same three formulas as `@onebun/requests`: fixed, `delay * n`, `delay * 2^(n-1)`. */
   backoff?: 'fixed' | 'linear' | 'exponential';
-  /** Base delay in milliseconds */
+  /** Base delay in milliseconds (default 100). */
   delay?: number;
 }
 

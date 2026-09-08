@@ -52,6 +52,10 @@ import {
   isQueuePatternMatch,
   createQueuePatternMatcher,
   toRedisQueueGlob,
+  resolveMaxAttempts,
+  retryDelayMs,
+  DEFAULT_RETRY_ATTEMPTS,
+  DEFAULT_RETRY_DELAY_MS,
   InMemoryQueueAdapter,
   getSubscribeMetadata,
   getCronMetadata,
@@ -750,10 +754,11 @@ describe('Feature Support Matrix (docs/api/queue.md)', () => {
     expect(adapter.supports('pattern-subscriptions')).toBe(true);
     expect(adapter.supports('delayed-messages')).toBe(true);
     expect(adapter.supports('priority')).toBe(true);
+    // In-process and non-persistent, but genuinely honoured — the matrix says ✅.
+    expect(adapter.supports('retry')).toBe(true);
     // Not supported
     expect(adapter.supports('consumer-groups')).toBe(false);
     expect(adapter.supports('dead-letter-queue')).toBe(false);
-    expect(adapter.supports('retry')).toBe(false);
   });
 });
 
@@ -1138,5 +1143,91 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(delivered).toHaveLength(1);
     expect(delivered[0]!.pattern).toBe('orders.123');
     expect(Object.keys(delivered[0]!.metadata ?? {})).not.toContain('params');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#error-handling-in-handlers
+ */
+describe('Error Handling in Handlers — the documented recipe, executed', () => {
+  it('reaches the terminal nack(false) branch once attempt equals maxAttempts', async () => {
+    // The recipe on the page branches on `message.attempt >= (message.maxAttempts || 3)`. With
+    // `attempt` permanently undefined that branch was unreachable on this adapter, so the handler
+    // took `nack(true)` forever. This runs the recipe's shape and asserts it terminates.
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    const dispositions: Array<'requeue' | 'terminate'> = [];
+    const seen: Array<{ attempt?: number; maxAttempts?: number }> = [];
+
+    await adapter.subscribe('orders.created', async (message) => {
+      seen.push({ attempt: message.attempt, maxAttempts: message.maxAttempts });
+
+      try {
+        throw new Error('order processing failed');
+      } catch {
+        if (message.attempt && message.attempt >= (message.maxAttempts || 3)) {
+          dispositions.push('terminate');
+          await message.nack(false);
+        } else {
+          dispositions.push('requeue');
+          await message.nack(true);
+        }
+      }
+    }, { ackMode: 'manual', retry: { attempts: 3, backoff: 'exponential', delay: 1 } });
+
+    await adapter.publish('orders.created', { orderId: 'o-1' });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await adapter.disconnect();
+
+    // Two requeues, then the terminal branch — and nothing after it.
+    expect(dispositions).toEqual(['requeue', 'requeue', 'terminate']);
+    expect(seen).toEqual([
+      { attempt: 1, maxAttempts: 3 },
+      { attempt: 2, maxAttempts: 3 },
+      { attempt: 3, maxAttempts: 3 },
+    ]);
+  });
+});
+
+/**
+ * @source docs:api/queue.md#retry
+ */
+describe('RetryOptions — the documented defaults and formulas', () => {
+  it('defaults to a single delivery, so retries stay opt-in', () => {
+    expect(resolveMaxAttempts(undefined)).toBe(1);
+    expect(resolveMaxAttempts({})).toBe(1);
+    expect(DEFAULT_RETRY_ATTEMPTS).toBe(1);
+  });
+
+  it('counts total deliveries, not extra ones', () => {
+    // The table says `attempts: 3` runs the handler at most three times — the same number the
+    // `attempt >= maxAttempts` comparison in the error-handling recipe reaches.
+    expect(resolveMaxAttempts({ attempts: 3 })).toBe(3);
+  });
+
+  it('refuses to turn a subscription into one that never fires', () => {
+    expect(resolveMaxAttempts({ attempts: 0 })).toBe(1);
+    expect(resolveMaxAttempts({ attempts: -5 })).toBe(1);
+  });
+
+  it('computes each documented backoff formula', () => {
+    // fixed -> delay; linear -> delay * n; exponential -> delay * 2^(n-1).
+    expect(retryDelayMs({ backoff: 'fixed', delay: 200 }, 3)).toBe(200);
+
+    expect(retryDelayMs({ backoff: 'linear', delay: 200 }, 1)).toBe(200);
+    expect(retryDelayMs({ backoff: 'linear', delay: 200 }, 3)).toBe(600);
+
+    expect(retryDelayMs({ backoff: 'exponential', delay: 200 }, 1)).toBe(200);
+    expect(retryDelayMs({ backoff: 'exponential', delay: 200 }, 3)).toBe(800);
+  });
+
+  it('falls back to fixed, and to a 100 ms base delay', () => {
+    expect(retryDelayMs({ attempts: 3 }, 4)).toBe(DEFAULT_RETRY_DELAY_MS);
+    expect(DEFAULT_RETRY_DELAY_MS).toBe(100);
+  });
+
+  it('asks for no wait when there is no retry to schedule', () => {
+    expect(retryDelayMs(undefined, 1)).toBe(0);
   });
 });

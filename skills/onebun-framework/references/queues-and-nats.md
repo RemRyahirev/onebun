@@ -48,7 +48,8 @@ interface Message<T> {
 }
 ```
 
-Only the JetStream adapter populates `attempt` and `maxAttempts`; on the memory, Redis and core-NATS adapters both fields are always `undefined`.
+The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves both `undefined`, along with `redelivered`.
+The memory adapter retries in-process only; retries do not survive a restart.
 
 ## Decorators
 
@@ -77,6 +78,13 @@ async handleEvent(message: Message<MyPayload>) { ... }
 On JetStream `prefetch` becomes the consumer's `max_ack_pending` and also caps the pull batch,
 `retry.attempts` becomes `max_deliver`, and `ackTimeout` becomes `ack_wait`; all three override the
 adapter-level `consumerConfig`.
+
+On the memory and Redis adapters `retry.attempts` is the total number of deliveries under
+`ackMode: 'auto'`, defaulting to 1 — an unconfigured subscription still delivers once. `backoff`
+uses the same formulas as `@onebun/requests`: fixed `delay`, `delay * n`, `delay * 2^(n-1)`, with
+`delay` defaulting to 100 ms. Redis carries the counter in the queued envelope and parks a delayed
+retry in its `queue:delayed` sorted set, so both survive a restart; memory keeps them in process.
+Manual `nack(true)` is uncapped on every adapter — read `message.attempt` to stop yourself.
 
 Under 'none' there is no redelivery and no dead-letter routing on any adapter. `retry`, `deadLetter`,
 `ack_wait`, `max_deliver` and the `attempt`/`maxAttempts`/`redelivered` fields all go inert with it;
@@ -316,7 +324,7 @@ child class with a constructor dependency gets nothing: pass already-constructed
 | Priority | Yes | Yes | No | No |
 | Consumer groups | No | Yes | Yes | Yes |
 | Dead letter queue | No | Yes | No | Yes |
-| Retry | No | Yes | No | Yes |
+| Retry | Yes | Yes | No | Yes |
 | Persistence | No | Yes | No | Yes |
 | Scheduled jobs | Yes | Yes | Yes | Yes |
 
