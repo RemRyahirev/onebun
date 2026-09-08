@@ -193,16 +193,66 @@ export function WithMetrics(
 }
 
 /**
+ * Fetch the metric a decorator writes to, creating it on first use.
+ *
+ * The decorators used to only LOOK IT UP, and do nothing when the name was absent from the
+ * registry. Since nothing ever created it, `@Timed('order_duration_seconds')` copied from the
+ * documentation recorded nothing at all — and did so in the direction that hides itself: the
+ * method ran, the scrape answered, and the series simply never appeared. The reader went looking
+ * for the fault in Prometheus.
+ *
+ * Creating on first use is what the documentation already promises ("execution time is
+ * automatically recorded"). The alternative — refusing an unregistered name — would mean
+ * demanding a manual `createHistogram()` alongside every decorator, which is a worse API and not
+ * what the page says.
+ *
+ * `labelNames` is derived from the decorator's own labels, which are fixed at decoration time, so
+ * a given decorated method always produces the same shape. Two decorators sharing one name with
+ * different label sets is a real conflict, and `prom-client` reports it rather than this silently
+ * papering over it.
+ */
+function resolveMetric(
+  kind: 'histogram' | 'counter' | 'gauge',
+  metricName: string,
+  labels?: string[],
+): any {
+  const metricsService = getMetricsService();
+  if (!metricsService) {
+    return undefined;
+  }
+
+  const existing = metricsService.getMetric(metricName);
+  if (existing) {
+    return existing;
+  }
+
+  const config = {
+    name: metricName,
+    help: `Recorded by the @${kind === 'histogram' ? 'Timed' : kind === 'counter' ? 'Counted' : 'Gauged'} decorator`,
+    labelNames: labels ? ['labels'] : [],
+  };
+
+  try {
+    if (kind === 'histogram') {
+      return metricsService.createHistogram(config);
+    }
+
+    return kind === 'counter'
+      ? metricsService.createCounter(config)
+      : metricsService.createGauge(config);
+  } catch {
+    // A name already taken by a metric of a different type, or a label-set conflict. The
+    // registry owns that diagnosis; re-reading is enough to keep recording where it can.
+    return metricsService.getMetric(metricName);
+  }
+}
+
+/**
  * Helper functions for metric operations
  */
 function recordDuration(metricName: string, startTime: number, labels?: string[]): void {
-  const metricsService = getMetricsService();
-  if (!metricsService) {
-    return;
-  }
-
   const duration = (Date.now() - startTime) / 1000;
-  const histogram = metricsService.getMetric(metricName);
+  const histogram = resolveMetric('histogram', metricName, labels);
 
   if (histogram && typeof histogram.observe === 'function') {
     histogram.observe(labels ? { labels: labels.join(',') } : {}, duration);
@@ -210,12 +260,7 @@ function recordDuration(metricName: string, startTime: number, labels?: string[]
 }
 
 function incrementCounter(metricName: string, labels?: string[]): void {
-  const metricsService = getMetricsService();
-  if (!metricsService) {
-    return;
-  }
-
-  const counter = metricsService.getMetric(metricName);
+  const counter = resolveMetric('counter', metricName, labels);
 
   if (counter && typeof counter.inc === 'function') {
     counter.inc(labels ? { labels: labels.join(',') } : {});
@@ -223,12 +268,7 @@ function incrementCounter(metricName: string, labels?: string[]): void {
 }
 
 function setGaugeValue(metricName: string, value: number, labels?: string[]): void {
-  const metricsService = getMetricsService();
-  if (!metricsService) {
-    return;
-  }
-
-  const gauge = metricsService.getMetric(metricName);
+  const gauge = resolveMetric('gauge', metricName, labels);
 
   if (gauge && typeof gauge.set === 'function') {
     gauge.set(labels ? { labels: labels.join(',') } : {}, value);

@@ -193,6 +193,29 @@ processingHistogram.observe({ order_type: 'standard' }, duration);
 
 ## Decorator-based Metrics
 
+The decorator creates its metric on first use, so applying one is enough — there is no
+`createHistogram()` to write first. It used to only look the name up and do nothing when it was
+absent, which meant a decorator copied from this page recorded nothing at all: the method ran, the
+scrape answered, and the series never appeared.
+
+::: warning The name you pass is unprefixed; the scrape shows it prefixed
+`@Counted('emails_sent_total')` with `metrics: { prefix: 'myapp_' }` appears in `/metrics` as
+`myapp_emails_sent_total`. Query the prefixed name in Prometheus — searching for the name you
+wrote is its own source of "my metric is missing".
+:::
+
+Registering the metric yourself still wins, and is worth doing when you want real help text or
+histogram buckets chosen for your latencies — the decorator's generated ones are generic:
+
+```typescript
+// In onModuleInit, before the first decorated call
+this.metrics.createHistogram({
+  name: 'order_processing_duration_seconds',
+  help: 'How long an order takes end to end',
+  buckets: [0.05, 0.1, 0.5, 1, 5],
+});
+```
+
 ### @Timed()
 
 Automatically time method execution.

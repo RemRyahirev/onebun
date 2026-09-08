@@ -2725,6 +2725,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.queueAdapter = null;
     }
 
+    // Stop the system-metric sampler. `startSystemMetricsCollection()` is called at startup and
+    // nothing ever called its counterpart, so the interval outlived the application: in a test
+    // suite or a multi-service process, every stopped application left a timer sampling memory
+    // and CPU into a registry nobody reads.
+    if (this.metricsService?.stopSystemMetricsCollection) {
+      await this.runShutdownStep(outcome, 'stopping system metrics collection', async () => {
+        this.logger.debug('Stopping system metrics collection');
+        this.metricsService!.stopSystemMetricsCollection!();
+      });
+    }
+
     // Shutdown trace service — flush pending spans before module destroy
     if (this.traceService?.shutdown) {
       await this.runShutdownStep(outcome, 'flushing traces', async () => {

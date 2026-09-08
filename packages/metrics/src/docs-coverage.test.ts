@@ -405,9 +405,15 @@ describe('docs/api/metrics.md — Decorator-based Metrics', () => {
       expect(output).toContain('test_order_processing_duration_seconds_sum 0.25');
       expect(output).toContain('test_order_processing_duration_seconds_count 1');
 
-      // Documented gap: without a pre-registered histogram the call succeeds and records nothing.
+      // No pre-registration needed: the decorator creates its histogram on first use, with
+      // generic buckets and a generated help string. This assertion used to be the opposite —
+      // it pinned "records nothing" as a documented gap, which is exactly the silent failure
+      // the decorators were fixed to stop producing.
       expect(await orders.processUntracked('o-2')).toBe('untracked:o-2');
-      expect(await service.getMetrics()).not.toContain('never_registered_duration_seconds');
+
+      const afterUntracked = await service.getMetrics();
+      expect(afterUntracked).toContain('test_never_registered_duration_seconds_count 1');
+      expect(afterUntracked).toContain('Recorded by the @Timed decorator');
     } finally {
       timers.restore();
     }

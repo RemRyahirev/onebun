@@ -5686,6 +5686,35 @@ describe('OneBunApplication', () => {
       expect(await hanging).toBe('force-closed');
     });
 
+    test('stops the system-metric sampler so no timer survives shutdown', async () => {
+      // `startSystemMetricsCollection()` is called at startup and nothing ever called its
+      // counterpart, so the interval outlived the application. In a test suite or a
+      // multi-service process every stopped application left a timer sampling memory and CPU
+      // into a registry nobody reads.
+      let started = 0;
+      let stopped = 0;
+
+      @Module({})
+      class EmptyModule {}
+
+      const app = createRealApp(EmptyModule);
+      await app.start();
+
+      (app as unknown as { metricsService: unknown }).metricsService = {
+        startSystemMetricsCollection() {
+          started += 1;
+        },
+        stopSystemMetricsCollection() {
+          stopped += 1;
+        },
+      };
+
+      await app.stop();
+
+      expect(stopped).toBe(1);
+      expect(started).toBe(0);
+    });
+
     test('a rejecting trace flush does not cancel the rest of the teardown', async () => {
       // The trace flush pushes the last span batch to a collector that is usually going down
       // with the pod, so it is the step most likely to reject in practice. It used to abandon
