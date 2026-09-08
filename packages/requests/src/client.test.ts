@@ -1074,3 +1074,74 @@ describe('retry backoff strategies', () => {
     expect(callCount).toBe(maxRetries + 1);
   });
 });
+
+/**
+ * The outgoing-request metric used to label every success `status_code="200"`:
+ * `statusCode: result.success ? HttpStatusCode.OK : result.code`. Every 2xx that is not 200 —
+ * 201 Created, 202 Accepted, 204 No Content — was misreported, so a dashboard could not tell them
+ * apart and an alert on non-200 responses never fired.
+ */
+describe('outgoing request metrics', () => {
+  const HTTP_CREATED = 201;
+  const HTTP_ACCEPTED = 202;
+  const HTTP_NO_CONTENT = 204;
+  const HTTP_NOT_FOUND = 404;
+
+  // `globalThis.fetch` is process-wide and bun runs every test file in one process: leaving a
+  // canned response installed makes every later file's HTTP test answer from this mock instead of
+  // its own server. Restored per test, not per suite.
+  const fetchBeforeSuite = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = fetchBeforeSuite;
+    delete (globalThis as any).__onebunMetricsService;
+  });
+
+  async function statusRecordedFor(upstreamStatus: number): Promise<number | undefined> {
+    let recorded: { statusCode: number } | undefined;
+    (globalThis as any).__onebunMetricsService = {
+      recordHttpRequest(input: { statusCode: number }) {
+        recorded = input;
+      },
+    };
+
+    globalThis.fetch = (() => Promise.resolve(
+      upstreamStatus === HTTP_NO_CONTENT
+        ? new Response(null, { status: upstreamStatus })
+        : jsonResponse({ ok: true }, { status: upstreamStatus }),
+    )) as any;
+
+    try {
+      await Effect.runPromise(
+        executeRequest({ method: HttpMethod.GET, url: '/thing' }, { retries: { max: 0 } }),
+      ).catch(() => undefined);
+    } finally {
+      delete (globalThis as any).__onebunMetricsService;
+    }
+
+    return recorded?.statusCode;
+  }
+
+  it('records the status the upstream actually returned', async () => {
+    expect(await statusRecordedFor(HTTP_CREATED)).toBe(HTTP_CREATED);
+    expect(await statusRecordedFor(HTTP_ACCEPTED)).toBe(HTTP_ACCEPTED);
+    expect(await statusRecordedFor(HTTP_NO_CONTENT)).toBe(HTTP_NO_CONTENT);
+  });
+
+  it('still records the status of a failure', async () => {
+    expect(await statusRecordedFor(HTTP_NOT_FOUND)).toBe(HTTP_NOT_FOUND);
+  });
+
+  it('exposes the upstream status on the success response', async () => {
+    globalThis.fetch = (() =>
+      Promise.resolve(jsonResponse({ ok: true }, { status: HTTP_CREATED }))) as any;
+
+    const response = await Effect.runPromise(
+      executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/thing' }),
+    );
+
+    // 201, 202 and 204 each mean something a caller may need to branch on, and the metric label
+    // is derived from this rather than assumed.
+    expect(response.statusCode).toBe(HTTP_CREATED);
+  });
+});

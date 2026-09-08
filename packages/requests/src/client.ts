@@ -538,7 +538,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
             response.status < HttpStatusCode.MOVED_PERMANENTLY;
 
           if (success) {
-            return createSuccessResponse(responseData, traceId);
+            return createSuccessResponse(responseData, traceId, response.status);
           }
 
           return createErrorResponse(
@@ -586,7 +586,11 @@ const executeWithRetry = <T, E extends string, R extends string>(
           ? recordRequestMetrics({
             method: config.method,
             url: fullUrl,
-            statusCode: result.success ? HttpStatusCode.OK : result.code,
+            // The status the upstream actually returned. It used to be `HttpStatusCode.OK` for
+            // every success, so a 201, 202 or 204 was recorded as 200 — a dashboard could not
+            // tell them apart and an alert on non-200 responses never fired. `?? OK` covers the
+            // one path that has no upstream status: a success synthesized without a response.
+            statusCode: result.success ? result.statusCode ?? HttpStatusCode.OK : result.code,
             duration,
             success: result.success,
             retryCount: result.retryCount || 0,

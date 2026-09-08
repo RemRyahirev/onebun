@@ -1060,3 +1060,81 @@ describe('OTLP Log Export (docs/api/logger.md)', () => {
     expect(line.context).toEqual({ service: 'my-service', userId: 'abc-123' });
   });
 });
+
+/**
+ * docs/api/logger.md, "When the Collector Rejects a Batch". The response is inspected, retryable
+ * failures hold the batch, permanent ones discard it, the buffer is bounded, and every loss is
+ * reported.
+ */
+describe('OTLP delivery failures (docs/api/logger.md)', () => {
+  const HTTP_UNAVAILABLE = 503;
+  const HTTP_BAD_REQUEST = 400;
+  const NO_AUTO_FLUSH = 600000;
+
+  function entry(message: string): LogEntry {
+    return { level: LogLevel.Info, message, timestamp: new Date('2024-01-01T00:00:00Z') };
+  }
+
+  /**
+   * @source docs:api/logger.md#when-the-collector-rejects-a-batch
+   */
+  it('should hold a rejected batch, report it, and bound what it keeps', async () => {
+    const failures: Array<{ message: string; recordCount: number }> = [];
+    let sends = 0;
+
+    const transport = new OtlpLogTransport({
+      endpoint: 'http://collector:4318',
+      batchTimeout: NO_AUTO_FLUSH,
+      maxBufferedRecords: 2,
+      fetchFn: (async () => {
+        sends += 1;
+
+        return new Response('down', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' });
+      }) as unknown as typeof fetch,
+      onExportFailure(error, recordCount) {
+        failures.push({ message: error.message, recordCount });
+      },
+    });
+
+    for (const message of ['one', 'two', 'three']) {
+      await Effect.runPromise(transport.log(message, entry(message)));
+    }
+    await transport.flush();
+
+    // Reported rather than swallowed, and trimmed to `otlpMaxBufferedRecords` rather than grown
+    // until the process dies.
+    expect(failures).toHaveLength(1);
+    expect(failures[0].message).toContain('503');
+    expect(failures[0].message).toContain('dropped 1 buffered record(s)');
+
+    // Held: the next flush sends what is left instead of sending nothing.
+    await transport.flush();
+    expect(sends).toBe(2);
+  });
+
+  /**
+   * @source docs:api/logger.md#when-the-collector-rejects-a-batch
+   */
+  it('should discard a batch the collector will reject identically', async () => {
+    const failures: unknown[] = [];
+    let sends = 0;
+
+    const transport = new OtlpLogTransport({
+      endpoint: 'http://collector:4318',
+      batchTimeout: NO_AUTO_FLUSH,
+      fetchFn: (async () => {
+        sends += 1;
+
+        return new Response('bad payload', { status: HTTP_BAD_REQUEST, statusText: 'Bad Request' });
+      }) as unknown as typeof fetch,
+      onExportFailure: () => failures.push(1),
+    });
+
+    await Effect.runPromise(transport.log('x', entry('x')));
+    await transport.flush();
+    await transport.flush();
+
+    expect(sends).toBe(1);
+    expect(failures).toHaveLength(1);
+  });
+});

@@ -385,6 +385,19 @@ export const shutdownLogger = async (): Promise<void> => {
  *
  * @see docs:api/logger.md
  */
+/**
+ * Where an undelivered batch of log records is announced by default.
+ *
+ * `console.error` and not the logger: routing a log-transport failure back through the logger
+ * feeds the transport that just failed, and the loop is tightest exactly when the collector is
+ * down. Silence was the previous behaviour and is what this replaces — a misconfigured endpoint
+ * swallowed every line without a word.
+ */
+const reportOtlpExportFailure = (error: Error, recordCount: number): void => {
+  // eslint-disable-next-line no-console
+  console.error(`[onebun/logger] dropped ${recordCount} log record(s): ${error.message}`);
+};
+
 export const resolveOtlpLogEndpoint = (options?: LoggerOptions): string | undefined =>
   options?.otlpEndpoint
   || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
@@ -445,6 +458,8 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
       batchSize: options?.otlpBatchSize,
       batchTimeout: options?.otlpBatchTimeout,
       resourceAttributes: options?.otlpResourceAttributes,
+      maxBufferedRecords: options?.otlpMaxBufferedRecords,
+      onExportFailure: options?.otlpOnExportFailure ?? reportOtlpExportFailure,
     });
     transport = new CompositeTransport([new ConsoleTransport(), otlpTransport]);
     activeTransports.add(transport);

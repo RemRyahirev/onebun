@@ -59,6 +59,15 @@ export interface SuccessResponse<T = unknown> {
    * `0` means the request was sent exactly once.
    */
   retryCount?: number;
+  /**
+   * The HTTP status the upstream actually returned.
+   *
+   * Present on responses the HTTP client produced; absent when a handler's return value was
+   * wrapped by the framework, which has no upstream. Every 2xx is a success, and they are not
+   * interchangeable — 201 Created, 202 Accepted and 204 No Content each mean something a caller
+   * may need to branch on, and the metric label is derived from this rather than assumed.
+   */
+  statusCode?: number;
 }
 
 /**
@@ -288,11 +297,16 @@ export class GatewayTimeoutError<
 /**
  * Helper function to create success response
  */
-export function createSuccessResponse<T>(result: T, traceId?: string): SuccessResponse<T> {
+export function createSuccessResponse<T>(
+  result: T,
+  traceId?: string,
+  statusCode?: number,
+): SuccessResponse<T> {
   return {
     success: true,
     result,
     traceId,
+    ...(statusCode === undefined ? {} : { statusCode }),
   };
 }
 

@@ -318,6 +318,35 @@ Log entries are sent as OTLP JSON to `{endpoint}/v1/logs`:
 - Context fields become OTLP attributes
 - Pending logs are flushed on application shutdown
 
+### When the Collector Rejects a Batch
+
+The response is inspected. A 503, a 404 and a success used to be indistinguishable — nothing looked
+at the status — so a misconfigured endpoint swallowed every log line in silence.
+
+- **Held and retried** on a transport failure (connection refused, DNS, TLS, timeout) and on
+  408/429/500/502/503/504. The records go back to the head of the buffer, in order, and the next
+  scheduled flush sends them again.
+- **Discarded** on any other status. A 400 means the collector refused the payload and will refuse
+  it identically; holding it would fill the buffer with records that can never leave.
+- **Bounded** by `otlpMaxBufferedRecords` (default 1000). A collector that stays down would
+  otherwise grow the buffer until the process dies, and a logger that kills the application to
+  preserve its own backlog has its priorities backwards. Oldest go first, and the drop is reported.
+- **Reported** through `otlpOnExportFailure`, which defaults to a line on stderr. It cannot go
+  through the logger — that feeds the transport which just failed, and the loop is tightest exactly
+  when the collector is down.
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    otlpEndpoint: 'http://localhost:4318',
+    otlpMaxBufferedRecords: 5000,
+    otlpOnExportFailure: (error, recordCount) => {
+      process.stderr.write(`lost ${recordCount} log records: ${error.message}\n`);
+    },
+  },
+});
+```
+
 ## Getting Logger from Application
 
 ```typescript

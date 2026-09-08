@@ -90,9 +90,13 @@ needs both or a `traceparent`.
   `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`; `retries` and `query` are deliberately excluded
   (`{ query: ... }` is documented as producing a literal `?query=[object Object]`), so those still need the
   three-argument form `get(url, query, config)`.
-- **The receiving side does not yet honour it for spans.** The inbound `traceparent` becomes the callee's
-  trace ids in logs — cross-service log correlation works — but is not converted into an OpenTelemetry
-  remote parent, so the exported spans are still two traces. Tracked separately.
+- **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header
+  names, so the two services share one trace in the backend as well as one trace id in the logs. The one
+  remaining gap is the callee's log `spanId` — see the Span Nesting section.
+- **The outgoing metric records the real upstream status.** `onebun_http_requests_total` used to label every
+  success `status_code="200"` (`result.success ? HttpStatusCode.OK : result.code`), so 201, 202 and 204 were
+  all reported as 200 and an alert on non-200 responses never fired. `SuccessResponse.statusCode` now carries
+  what the upstream returned, and the label is derived from it.
 
 ## Auto-Tracing (traceAll)
 
@@ -226,6 +230,12 @@ Key points:
 - `shutdownLogger()` flushes **every** transport built in the process, not only the most recent one. A
   multi-service application builds one logger per child; a single active-transport slot used to drop all but
   the last, leaving their flush timers rescheduling forever with nobody holding a reference.
+- **Delivery failures are inspected.** `flush()` never looked at the response, so a 503, a 404 and a success
+  were indistinguishable and a misconfigured endpoint swallowed every line. Now: transport failures and
+  408/429/500/502/503/504 put the batch back at the head of the buffer for the next flush; any other status
+  discards it (a 400 will be refused identically); `otlpMaxBufferedRecords` (default 1000) caps what is held,
+  dropping oldest first; every loss goes to `otlpOnExportFailure`, which defaults to stderr — it cannot go
+  through the logger, which would feed the transport that just failed.
 
 LogLevel → OTLP severity mapping:
 | LogLevel | OTLP SeverityNumber |

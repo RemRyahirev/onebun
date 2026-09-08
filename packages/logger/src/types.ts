@@ -123,4 +123,21 @@ export interface LoggerOptions {
    * Automatically populated from tracing config when available.
    */
   otlpResourceAttributes?: Record<string, string>;
+
+  /**
+   * Called when a batch of log records could not be delivered to the OTLP collector.
+   *
+   * Defaults to a line on stderr. It cannot go through the logger itself — a failing log backend
+   * is exactly when that loop would run hottest — which is why the default reaches for the one
+   * channel that does not depend on the thing that broke.
+   */
+  otlpOnExportFailure?: (error: Error, recordCount: number) => void;
+
+  /**
+   * Ceiling on how many log records may wait in the buffer for a collector that is refusing
+   * them. Beyond it the oldest are dropped, and the drop is reported.
+   *
+   * @defaultValue 1000
+   */
+  otlpMaxBufferedRecords?: number;
 }

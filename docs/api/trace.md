@@ -450,7 +450,7 @@ const app = new OneBunApplication(AppModule, {
         'Authorization': 'Bearer token',
       },
       timeout: 10000,    // request timeout (default: 10000ms)
-      batchSize: 100,     // spans per batch (default: 100)
+      batchSize: 100,     // spans per batch — see below, OneBun adds no default
       batchTimeout: 5000, // max wait before flush (default: 5000ms)
       retryAttempts: 3,   // retries after the first attempt (default: 3)
       retryDelay: 200,    // ms before the first retry, doubling (default: 200ms)
@@ -461,6 +461,11 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format.
+
+`batchSize` and `batchTimeout` are forwarded to `BatchSpanProcessor` with **no OneBun default**, so
+omitting them leaves the SDK's own: `batchSize` becomes `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` or **512**,
+not 100. `batchTimeout` is forwarded the same way and the SDK's default is also 5000ms, so that
+number holds either way. `timeout` really does default to 10000ms, in the exporter.
 
 ### Export Retry
 
