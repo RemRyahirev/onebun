@@ -753,8 +753,20 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     // Flush any buffered logs now that logger is available
     this.flushLogBuffer();
 
-    // Run auto-initialization
-    await this.autoInitialize();
+    // Publish the in-flight initialization so `waitForInit()` has something to wait ON.
+    // The field was declared and read but never assigned, so the latch resolved instantly and
+    // every caller that awaited it — `initialize()`, `runMigrations()`, `transaction()`,
+    // `close()` — got no synchronisation at all.
+    this.initPromise = this.autoInitialize();
+
+    try {
+      await this.initPromise;
+    } finally {
+      // Cleared either way. A failed start is not an initialization still in flight, and
+      // leaving a rejected promise here would make every later `waitForInit()` re-throw a
+      // failure `app.start()` has already reported.
+      this.initPromise = null;
+    }
   }
 
   /**
@@ -874,7 +886,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     const startedAt = Date.now();
 
     try {
-      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      // skipWait: we ARE the initialization, so the latch would be waiting on itself.
       await this.initialize(plan.connection, true);
       await this.verifyReachable(plan, target, timeoutMs, startedAt);
 
@@ -893,7 +905,8 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       if (!plan.allowDegradedStart) {
         // Nothing may keep a socket or a file handle for a database this process has just
         // refused to start with: the container has to exit, not linger holding a connection.
-        await this.close().catch(() => undefined);
+        // Inside the initialization: `close()` must not wait on the promise it is part of.
+        await this.close(true).catch(() => undefined);
         this.initialized = false;
 
         throw failure;
@@ -1048,7 +1061,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
 
     try {
-      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      // skipWait: we ARE the initialization, so the latch would be waiting on itself.
       await this.runMigrations({
         migrationsFolder,
         migrationsTable: plan.migrationsTable,
@@ -1095,7 +1108,18 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   }
 
   /**
-   * Wait for initialization to complete
+   * Wait for an in-flight `onModuleInit()` to finish.
+   *
+   * Resolves immediately when nothing is initializing — which is the normal case for client
+   * code, because the framework awaits `onModuleInit()` before anything else runs. It matters
+   * for the entry points a caller can reach WHILE startup is still going: `initialize()`,
+   * `runMigrations()`, `transaction()` and `close()` all pass through here so a manual call
+   * cannot race the automatic one into a double-open.
+   *
+   * Callers that are themselves running inside the initialization pass `skipWait`, because
+   * waiting on the promise you are part of is a deadlock, not a synchronisation.
+   *
+   * @see docs:api/drizzle.md
    */
   async waitForInit(): Promise<void> {
     if (this.initPromise) {
@@ -1151,15 +1175,16 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
    */
   async initialize(options: DatabaseConnectionOptions, skipWait = false): Promise<void> {
-    // Skip waitForInit when called from autoInitialize to avoid deadlock
-    // (autoInitialize is the function that creates initPromise)
+    // Skipped when called from autoInitialize: that call is what `initPromise` resolves.
     if (!skipWait) {
       await this.waitForInit();
     }
 
     if (this.initialized && this.connectionOptions) {
       this.safeLog('warn', 'Database already initialized, closing existing connection');
-      await this.close();
+      // Carries the caller's context through: a re-initialize from inside `autoInitialize()`
+      // would otherwise deadlock here on the promise that IS `autoInitialize()`.
+      await this.close(skipWait);
     }
 
     this.connectionOptions = options;
@@ -1449,7 +1474,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * @throws Error if database is not initialized
    */
   async runMigrations(options?: MigrationOptions, skipWait = false): Promise<void> {
-    // Skip waitForInit when called from autoInitialize to avoid deadlock
+    // Skipped when called from autoInitialize: that call is what `initPromise` resolves.
     if (!skipWait) {
       await this.waitForInit();
     }
@@ -1562,12 +1587,19 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     await this.close();
   }
 
-  async close(): Promise<void> {
-    // Only wait for init if there are actual database clients to close
-    // This prevents hanging when close() is called on an uninitialized service
-    // Note: we check clients directly, not `initialized` flag, because autoInitialize()
-    // may still be running and `initialized` could be false while initPromise is pending
-    if (this.postgresClient || this.sqliteClient) {
+  /**
+   * Close the database connections.
+   *
+   * @param skipWait - Internal. Set by callers that are already running inside
+   *   `onModuleInit()`; awaiting the initialization promise from within it would deadlock.
+   *   The degraded-start cleanup path is exactly that case: it closes a client the failing
+   *   initialization had already opened.
+   */
+  async close(skipWait = false): Promise<void> {
+    // Only wait for init if there are actual database clients to close.
+    // Checked on the clients rather than the `initialized` flag, because `autoInitialize()`
+    // may still be running and `initialized` is false while `initPromise` is pending.
+    if (!skipWait && (this.postgresClient || this.sqliteClient)) {
       await this.waitForInit();
     }
 
