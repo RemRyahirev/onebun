@@ -1329,6 +1329,100 @@ describe('OneBunApplication', () => {
       expect(body.result).toEqual({ id: 123, name: 'User 123' });
     });
 
+    test('ignores a URL fragment when reading query parameters', async () => {
+      // OneBun parsed the request target with two disagreeing parsers: the router uses
+      // `new URL()`, which drops everything from `#`, while the @Query() extractor searched for
+      // `?` in the raw string and fed the fragment to URLSearchParams. Anyone able to write a
+      // request target could inject parameters the router never saw — and because
+      // URLSearchParams is last-wins, OVERRIDE real ones.
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('page') page?: string, @Query('admin') admin?: string) {
+          return { page, admin };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // A parameter smuggled in entirely: routed as no query at all.
+      const injected = new Request('http://localhost:3000/api/search#?admin=true', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const injectedBody = await (await (mockServer as any).fetchHandler(injected)).json();
+
+      expect(injectedBody.result.admin).toBeUndefined();
+
+      // A real parameter overridden: the router sees page=1, the handler used to see page=99.
+      const overridden = new Request('http://localhost:3000/api/search?page=1#&page=99', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const overriddenBody = await (await (mockServer as any).fetchHandler(overridden)).json();
+
+      expect(overriddenBody.result.page).toBe('1');
+
+      await app.stop();
+    });
+
+    test('treats an encoded %23 as a value, not a fragment delimiter', async () => {
+      // The cut is on a literal `#` only. A parameter whose value legitimately contains a hash
+      // arrives percent-encoded and must survive intact.
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('tag') tag?: string) {
+          return { tag };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/search?tag=c%23sharp', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = await (await (mockServer as any).fetchHandler(request)).json();
+
+      expect(body.result.tag).toBe('c#sharp');
+
+      await app.stop();
+    });
+
+    test('handles a bare trailing hash and a fragment containing a question mark', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('q') q?: string, @Query('evil') evil?: string) {
+          return { q, evil };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const trailing = new Request('http://localhost:3000/api/search?q=hello#', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const trailingBody = await (await (mockServer as any).fetchHandler(trailing)).json();
+
+      expect(trailingBody.result.q).toBe('hello');
+
+      // A fragment carrying its own `?`: the cut happens first, so the inner `?` is never found.
+      const nested = new Request('http://localhost:3000/api/search#/other?evil=1', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const nestedBody = await (await (mockServer as any).fetchHandler(nested)).json();
+
+      expect(nestedBody.result.evil).toBeUndefined();
+
+      await app.stop();
+    });
+
     test('should handle query parameters', async () => {
       @Controller('/api')
       class ApiController extends BaseController {

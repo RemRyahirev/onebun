@@ -279,15 +279,26 @@ const EMPTY_QUERY_PARAMS: Record<string, string | string[]> = Object.freeze({});
  * extractQueryParams('http://x.com/?tag=a&tag=b')  // { tag: ['a', 'b'] }
  * extractQueryParams('http://x.com/?tag[]=a')       // { tag: ['a'] }
  * extractQueryParams('http://x.com/users')          // {} (frozen empty object, zero alloc)
+ * extractQueryParams('http://x.com/?a=1#&a=9')      // { a: '1' } (fragment ignored, as the router does)
  */
 function extractQueryParams(rawUrl: string): Record<string, string | string[]> {
-  const qIdx = rawUrl.indexOf('?');
+  // The fragment is cut FIRST, before looking for the query. Skipping this made OneBun parse the
+  // request target with two disagreeing parsers: the router uses `new URL()`, which drops
+  // everything from `#`, while this one fed the fragment straight to URLSearchParams. Anyone able
+  // to write a request target — an in-path attacker, or any client that is not a browser — could
+  // therefore inject parameters the router never saw, and because URLSearchParams is last-wins,
+  // OVERRIDE real ones: `/x?page=1#&page=99` routed as `page=1` and reached the handler as
+  // `page=99`. Bun passes the fragment through verbatim, so nothing upstream removes it.
+  const hashIdx = rawUrl.indexOf('#');
+  const requestTarget = hashIdx === -1 ? rawUrl : rawUrl.slice(0, hashIdx);
+
+  const qIdx = requestTarget.indexOf('?');
   if (qIdx === -1) {
     return EMPTY_QUERY_PARAMS;
   }
 
   const queryParams: Record<string, string | string[]> = {};
-  const searchParams = new URLSearchParams(rawUrl.slice(qIdx + 1));
+  const searchParams = new URLSearchParams(requestTarget.slice(qIdx + 1));
 
   for (const [rawKey, value] of searchParams.entries()) {
     // Handle array notation: tag[] -> tag (as array)
