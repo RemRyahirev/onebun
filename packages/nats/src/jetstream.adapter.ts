@@ -40,6 +40,7 @@ import {
   acknowledgesAutomatically,
   createQueuePatternMatcher,
   createQueueScheduler,
+  inRootTraceScope,
   nackedError,
   resolveAckMode,
   tracksDelivery,
@@ -1749,7 +1750,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           // handler to finish and acknowledge. `nc.drain()` flushes subscriptions but
           // never the application's loop body, and an ack published after close() is
           // buffered and then silently dropped.
-          entry.inFlight = entry.handler(message);
+          // A delivered message begins its own trace. Context follows the async graph, so a
+          // message published from inside a request would otherwise make its handler — and
+          // every later redelivery of it — a child of that finished request.
+          entry.inFlight = inRootTraceScope(() => entry.handler(message));
           await entry.inFlight;
         } catch (error) {
           // Emit failed event

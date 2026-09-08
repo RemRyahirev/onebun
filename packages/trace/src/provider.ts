@@ -10,6 +10,7 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic
 
 import type { TraceOptions } from './types.js';
 
+import { installContextManager, releaseContextManager } from './context-manager.js';
 import { DEFAULT_RETRY_BUDGET, OtlpFetchSpanExporter } from './otlp-exporter.js';
 
 /**
@@ -25,6 +26,15 @@ export interface TracerProviderResult {
    * The initialized BasicTracerProvider
    */
   provider: BasicTracerProvider;
+
+  /**
+   * Whether spans started from here will nest.
+   *
+   * `false` when the OpenTelemetry context-manager slot already belongs to somebody else, which
+   * this package does not take. Spans are still recorded and exported; they arrive as separate
+   * roots.
+   */
+  contextPropagates: boolean;
 
   /**
    * Shutdown function that flushes pending spans and shuts down the provider
@@ -190,10 +200,19 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
     globalOwner = provider;
   }
 
+  // A tracer provider decides what a span IS; the context manager decides what a span is a CHILD
+  // of. Without one, `context.active()` is always `ROOT_CONTEXT`, so every span the framework
+  // starts — the HTTP span, each `@Traced` method — is a separate root with its own trace id, and
+  // a request that fans out to five methods produces six unrelated traces. Installed here rather
+  // than at import time for the reason the provider is: an import must not claim a process-global
+  // slot on behalf of an application that may never be configured.
+  const contextPropagates = installContextManager();
+
   let shutdownStarted = false;
 
   return {
     provider,
+    contextPropagates,
     async shutdown() {
       // Idempotent: `app.stop()` can be reached more than once, and a second pass must not
       // re-enter the handover and move the global for a provider already gone.
@@ -212,6 +231,13 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
         // In the `finally` because a failed flush is still a dead provider: leaving it
         // installed as the global would accept spans and silently drop them.
         releaseGlobal(provider);
+
+        // Refcounted, and only released by whoever took a claim. `contextPropagates` is false
+        // when the slot was somebody else's, and releasing on that path would remove a manager
+        // this package never installed.
+        if (contextPropagates) {
+          releaseContextManager();
+        }
       }
     },
   };

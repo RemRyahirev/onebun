@@ -23,6 +23,7 @@ import type { SyncLogger } from '@onebun/logger';
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
+import { inRootTraceScope } from '../trace-scope';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import { getGatewayMetadata, isWebSocketGateway } from './ws-decorators';
@@ -251,11 +252,15 @@ export class WsHandler {
     close: (ws: ServerWebSocket<WsClientData>, code: number, reason: string) => void;
     drain: (ws: ServerWebSocket<WsClientData>) => void;
   } {
+    // Every socket callback starts its own trace. Bun invokes them from the async context of
+    // the upgrade, so without re-rooting a long-lived connection would file every message it
+    // ever receives under the one HTTP request that opened it — a trace that keeps growing for
+    // as long as the socket is open, attributed to a request that finished long ago.
     return {
-      open: (ws) => this.handleOpen(ws),
-      message: (ws, message) => this.handleMessage(ws, message),
-      close: (ws, code, reason) => this.handleClose(ws, code, reason),
-      drain: (ws) => this.handleDrain(ws),
+      open: (ws) => inRootTraceScope(() => this.handleOpen(ws)),
+      message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message)),
+      close: (ws, code, reason) => inRootTraceScope(() => this.handleClose(ws, code, reason)),
+      drain: (ws) => inRootTraceScope(() => this.handleDrain(ws)),
     };
   }
 

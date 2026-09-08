@@ -38,6 +38,15 @@ export {
   type TraceFilterOptions,
 } from './auto-trace.js';
 
+// Context propagation
+export {
+  activateSpanInCurrentScope,
+  installContextManager,
+  OneBunContextManager,
+  releaseContextManager,
+  resetContextManagerStateForTests,
+} from './context-manager.js';
+
 // OTLP exporter
 export {
   DEFAULT_RETRY_BUDGET,

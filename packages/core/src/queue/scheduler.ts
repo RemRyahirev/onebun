@@ -14,6 +14,8 @@ import type {
   MessageMetadata,
 } from './types';
 
+import { inRootTraceScope } from '../trace-scope';
+
 import {
   parseCronExpression,
   getNextRun,
@@ -497,6 +499,13 @@ export class QueueScheduler {
    * Execute a scheduled job
    */
   private async executeJob(job: ScheduledJob): Promise<void> {
+    // A tick belongs to the schedule, not to whatever was in flight when the timer was armed.
+    // Context follows the async graph into `setInterval`, so without this a cron job started
+    // during a request would file every future tick under that one finished request.
+    return await inRootTraceScope(async () => await this.runJob(job));
+  }
+
+  private async runJob(job: ScheduledJob): Promise<void> {
     try {
       job.isRunning = true;
       job.lastRun = new Date();

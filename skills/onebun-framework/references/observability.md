@@ -37,6 +37,32 @@ Key points:
 - Both apply `@SpanAttribute()` argument attributes
 - Span is ended in `finally` block (always ends, even on error)
 
+## Span Nesting and Context
+
+OneBun installs its own `ContextManager` (`OneBunContextManager`, `AsyncLocalStorage`-backed) when tracing
+starts, so spans nest: the HTTP span is the root of a request and every `@Traced`/`@Span`/auto-traced method
+called while handling it is a child, sharing one trace id. `trace.getActiveSpan()` — and therefore `this.span`
+on `BaseService` / `BaseController` — resolves to the innermost open span.
+
+- **Ownership.** The context manager is a process-global slot, treated like the tracer provider: if one is
+  already registered (a user's own SDK, another library), OneBun uses it and does not take the slot. Shutdown
+  removes only a manager OneBun installed, refcounted so the first application to stop does not strip context
+  from its siblings. Ownership is re-derived by probing the global, never remembered — `context.disable()` is a
+  process-global wipe anyone can call.
+- **Background work is re-rooted on purpose.** Context follows the async graph, which is not causality: a
+  timer armed during a request keeps that request's context, and so do WebSocket callbacks registered at
+  upgrade and queue handlers reached from a mid-request publish. Three boundaries call
+  `inRootTraceScope()` from `@onebun/core` and start a fresh trace — scheduled jobs (`@Cron`/`@Interval`/
+  `@Timeout`), queue message delivery in every adapter, WebSocket `open`/`message`/`close`/`drain`. Each
+  request re-roots too, because Bun reuses a keep-alive connection's async context. Use `inRootTraceScope()`
+  for your own background work; to link a job back to its cause, carry the trace ids in the message.
+- **Still flat in two cases**, both by design: with no `exportOptions.endpoint` the request takes the
+  lightweight path and no HTTP span exists for methods to hang off; and an inbound `traceparent` becomes the
+  request's `TraceContext` (what the logger stamps) but is not fed to the OpenTelemetry span as a remote
+  parent, so a distributed trace still breaks at the service boundary.
+- **Sampling reads differently now.** The sampler is `ParentBased`, so the decision is made once at the root
+  and inherited: `samplingRate: 0.1` means one request in ten with all of its spans, not one span in ten.
+
 ## Auto-Tracing (traceAll)
 
 Zero-boilerplate tracing — all async methods on services/controllers are auto-wrapped:

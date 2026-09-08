@@ -14,6 +14,7 @@ import {
 
 import { HttpStatusCode } from '@onebun/requests';
 
+import { activateSpanInCurrentScope } from './context-manager.js';
 import { initTracerProvider, type TracerProviderResult } from './provider.js';
 import {
   type HttpTraceData,
@@ -507,6 +508,23 @@ export class TraceServiceImpl implements TraceService {
       // no-op there without consulting instance configuration.
       [OTEL_SPAN]: startedOtelSpan,
     };
+  }
+
+  /**
+   * Make an HTTP span the parent of everything the request goes on to do.
+   *
+   * Separate from `startHttpTraceSync` because the caller enters the request's context scope
+   * before the span exists — see `ContextScope` in `context-manager.ts` for why that order is
+   * the cheap one. Returns whether the span became active; `false` means spans from this request
+   * will arrive as separate roots, which is what happens when the context-manager slot belongs to
+   * someone else's SDK.
+   *
+   * @see docs:api/trace.md
+   */
+  activateSpanSync(span: TraceSpan): boolean {
+    const otelSpan = span[OTEL_SPAN];
+
+    return otelSpan === undefined ? false : activateSpanInCurrentScope(otelSpan);
   }
 
   endHttpTraceSync(span: TraceSpan, data: Partial<HttpTraceData>): void {

@@ -11,7 +11,11 @@
  * @source docs:api/trace.md
  */
 
-import { SpanStatusCode as OtelSpanStatusCode, trace as otelTrace } from '@opentelemetry/api';
+import {
+  context as otelContext,
+  SpanStatusCode as OtelSpanStatusCode,
+  trace as otelTrace,
+} from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
 import {
   BasicTracerProvider,
@@ -49,6 +53,11 @@ import {
   TRACE_ALL,
   NO_TRACE,
 } from '../src';
+import {
+  installContextManager,
+  releaseContextManager,
+  resetContextManagerStateForTests,
+} from '../src/context-manager';
 
 const HTTP_OK = 200;
 const SAMPLED_FLAG = 1;
@@ -677,6 +686,63 @@ describe('OTLP Exporter (docs/api/trace.md)', () => {
       expect(resourceKeys).toContain('service.name');
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  /**
+   * docs: "Spans nest. A request arrives as one trace: the HTTP span is the root, and every
+   * `@Traced` method ... is a child", and "`trace.getActiveSpan()` ... resolves to the innermost
+   * open span".
+   *
+   * Asserted on the exported spans rather than on the decorator existing: one trace id across
+   * all three, and the parent of each method span being the span that was open when it was
+   * called. The context manager is the framework's own, installed the way an application
+   * installs it.
+   *
+   * @source docs:api/trace.md#span-nesting
+   */
+  it('should nest @Traced methods under the span that was open when they were called', async () => {
+    resetContextManagerStateForTests();
+    otelContext.disable();
+
+    expect(installContextManager()).toBe(true);
+
+    try {
+      class CheckoutService {
+        @Traced('checkout.load')
+        async load(): Promise<string> {
+          return 'loaded';
+        }
+
+        @Traced('checkout.charge')
+        async charge(): Promise<string> {
+          return 'charged';
+        }
+      }
+
+      const service = new CheckoutService();
+
+      await otelTrace.getTracer('docs').startActiveSpan('HTTP POST /checkout', async (request) => {
+        await service.load();
+        await service.charge();
+        request.end();
+      });
+
+      const request = recordedSpan('HTTP POST /checkout');
+      const load = recordedSpan('checkout.load');
+      const charge = recordedSpan('checkout.charge');
+
+      expect([load.spanContext().traceId, charge.spanContext().traceId])
+        .toEqual([request.spanContext().traceId, request.spanContext().traceId]);
+      expect([load.parentSpanContext?.spanId, charge.parentSpanContext?.spanId])
+        .toEqual([request.spanContext().spanId, request.spanContext().spanId]);
+
+      // "resolves to the innermost open span" — and to nothing once every span is closed.
+      expect(otelTrace.getActiveSpan()).toBeUndefined();
+    } finally {
+      releaseContextManager();
+      otelContext.disable();
+      resetContextManagerStateForTests();
     }
   });
 

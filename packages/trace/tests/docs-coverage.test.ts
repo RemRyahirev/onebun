@@ -95,11 +95,14 @@ interface SeenTraceContext {
 /**
  * OpenTelemetry's own AsyncLocalStorage context manager, inlined.
  *
- * `@opentelemetry/context-async-hooks` is not a dependency of this repository and OneBun never
- * registers a context manager of its own, so `context.active()` is the noop manager by default and
- * `trace.getActiveSpan()` can never see the span `startActiveSpan` opened. Tests that assert on the
- * *contract* of `this.span` install this manager first; the ones that assert on what a stock
- * application does deliberately do not.
+ * OneBun installs its own manager (`packages/trace/src/context-manager.ts`) when an application
+ * starts tracing. This one exists for the tests that exercise `this.span` WITHOUT an application:
+ * a bare class and a hand-rolled span have nobody to install a manager for them, and without one
+ * `context.active()` is the noop manager and `trace.getActiveSpan()` can never see the span
+ * `startActiveSpan` opened.
+ *
+ * Deliberately a foreign implementation rather than OneBun's: a test that reached for the
+ * framework's own manager would prove the framework agrees with itself.
  */
 class TestAsyncLocalStorageContextManager implements ContextManager {
   private readonly storage = new AsyncLocalStorage<OtelContextType>();
@@ -125,9 +128,9 @@ class TestAsyncLocalStorageContextManager implements ContextManager {
     return this;
   }
 
+  // No `storage.disable()`: tearing down an AsyncLocalStorage under code that is inside it
+  // breaks async continuation process-wide, and every later async test simply hangs.
   disable(): this {
-    this.storage.disable();
-
     return this;
   }
 }
@@ -336,9 +339,10 @@ describe('docs/api/trace.md — this.span', () => {
    * inside a `@Traced()` method it is the active span, so `setAttribute` / `addEvent` land on the
    * span that gets exported, and when no span is active it is `undefined`.
    *
-   * The context manager is installed by this test, not by OneBun. What is pinned here is the
-   * contract — the getter reads the *active* span and the span honours the writes. What a stock
-   * application does instead is pinned by the next test.
+   * The context manager is installed by this test because there is no application here to install
+   * one — a bare class, called directly. What is pinned is the contract: the getter reads the
+   * *active* span and the span honours the writes. That a stock application now arrives at the
+   * same answer is pinned by the next test.
    *
    * @source docs:api/trace.md#thisspan
    */
@@ -400,20 +404,21 @@ describe('docs/api/trace.md — this.span', () => {
   });
 
   /**
-   * The same snippet in a stock application, pinned as the drift it is. OneBun registers no
-   * OpenTelemetry `ContextManager` — `packages/trace/src/provider.ts` installs a tracer provider
-   * and nothing else — and `this.span` is only `trace.getActiveSpan()`, which without a context
-   * manager can never resolve the span `@Traced` opened. So the span is opened, closed and
-   * exported, and the service is still handed `undefined`: every `this.span?.…` line of the
-   * documented recipe is a silent no-op for a real reader.
+   * The same snippet in a stock application — which is now the same answer.
    *
-   * The exported-span half is what makes this discriminating rather than an absence check: it
-   * proves tracing ran. The test goes red the day a context manager is registered — the day the
-   * page becomes true — and equally red if `@Traced` stops producing a span.
+   * This test used to pin the opposite: OneBun registered no OpenTelemetry `ContextManager`, so
+   * `this.span` (which is only `trace.getActiveSpan()`) could never resolve the span `@Traced`
+   * had opened, and every `this.span?.…` line of the documented recipe was a silent no-op. It
+   * carried a note saying it would go red the day a context manager was registered. That day
+   * arrived; this is the inverted assertion.
+   *
+   * Still discriminating in both directions: the service is handed the *identity* of the span
+   * that was exported, so it fails if `@Traced` stops producing a span, and it fails again if the
+   * span produced is not the one the service can see.
    *
    * @source docs:api/trace.md#thisspan
    */
-  it('should hand a stock application undefined inside @Traced, while still exporting the span', async () => {
+  it('should hand a stock application the exported span inside @Traced', async () => {
     @Service()
     class StockOrderService extends BaseService {
       @Traced()
@@ -451,8 +456,13 @@ describe('docs/api/trace.md — this.span', () => {
       const response = await fetch(`http://localhost:${app.getPort()}/stock`);
       const body = (await response.json()) as Envelope<{ seen: string }>;
 
+      const exported = recordedSpan('StockOrderService.processOrder');
+
       expect({ seen: body.result.seen, exported: recordedSpanNames() }).toEqual({
-        seen: 'no active span',
+        seen: `span:${exported.spanContext().spanId}`,
+        // No `exportOptions.endpoint`, so `startHttpTraceSync` takes the lightweight path and
+        // creates no OpenTelemetry span for the request itself — only the trace ids the logger
+        // correlates on. The method span is therefore the only one exported, and it is a root.
         exported: ['StockOrderService.processOrder'],
       });
     } finally {

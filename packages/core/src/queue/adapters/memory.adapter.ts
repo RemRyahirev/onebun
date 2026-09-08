@@ -18,6 +18,7 @@ import type {
   MessageHandler,
 } from '../types';
 
+import { inRootTraceScope } from '../../trace-scope';
 import {
   acknowledgesAutomatically,
   nackedError,
@@ -459,7 +460,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     this.emit('onMessageReceived', message);
 
     try {
-      await entry.handler(message);
+      // A delivered message begins its own trace. Context follows the async graph, so a
+      // message published from inside a request would otherwise make its handler — and every
+      // later retry of it — a child of that finished request.
+      await inRootTraceScope(async () => await entry.handler(message));
 
       // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
       if (acknowledgesAutomatically(entry.options)) {

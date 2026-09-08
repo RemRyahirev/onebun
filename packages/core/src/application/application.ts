@@ -97,6 +97,7 @@ import {
 import { CorsMiddleware } from '../security/cors-middleware';
 import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
+import { inRootTraceScope } from '../trace-scope';
 import {
   type ApplicationOptions,
   HttpMethod,
@@ -1079,6 +1080,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // collapse every verb into one Prometheus series. Concrete routes keep the
         // registered verb, which Bun guarantees equals req.method for a method-map route.
         const isCatchAllRoute = method === HttpMethod.ALL;
+        // Whether this application will create an OpenTelemetry span for the request itself, and
+        // therefore whether entering a context scope per request buys anything. Resolved once at
+        // registration rather than per request — none of these can change while serving.
+        const tracesHttpSpans = Boolean(
+          app.traceService
+          && app.options.tracing?.exportOptions?.endpoint
+          && app.options.tracing?.traceHttpRequests !== false,
+        );
 
         return async (req, server) => {
           // Outermost point of a routed request: bind before the middleware chain, the
@@ -1141,6 +1150,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       ? parseInt(contentLengthHeader, 10)
                       : undefined,
                   });
+
+                  // Make the HTTP span the parent of everything the request goes on to do.
+                  // Without this the span is exported but adopts nobody: each `@Traced` method
+                  // arrives as its own root with its own trace id, and one request reads as N
+                  // unrelated traces. The scope it is promoted into was opened around
+                  // `requestHandler` below, before the span existed.
+                  app.traceService.activateSpanSync?.(traceSpan);
 
                   // Store trace context in AsyncLocalStorage for per-request isolation
                   const store = requestContextStore.getStore();
@@ -1470,13 +1486,29 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
               }
             };
 
+            // Each request begins its own trace. `ROOT_CONTEXT` and not `context.active()`:
+            // Bun reuses the connection's async context across keep-alive requests, and
+            // inheriting it would file the second request as a child of the first.
+            //
+            // This is also the scope `activateSpanSync` promotes the HTTP span into — entering it
+            // here rather than around the span keeps the entire request body out of another
+            // closure on a hot path that has been measured.
+            //
+            // Skipped entirely when no exporter is configured: `startHttpTraceSync` then takes
+            // the lightweight path and creates no OpenTelemetry span, so there would be nothing
+            // to promote and the extra AsyncLocalStorage frame would buy nothing. `@Traced`
+            // methods still nest among themselves — `startActiveSpan` opens its own scope.
+            const scopedRequestHandler = tracesHttpSpans
+              ? (): Promise<Response> => inRootTraceScope(requestHandler)
+              : requestHandler;
+
             // Wrap in profiling scope for per-request mark isolation
             let response: Response;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let innerReport: any = null;
             if (profiler) {
               response = await runProfileScope(async () => {
-                const res = await requestHandler();
+                const res = await scopedRequestHandler();
                 // Flush inside ALS scope to capture request-scoped marks
                 innerReport = profiler.flush({ route: fullPath, method });
 
@@ -1497,7 +1529,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 app.handleProfileReport(innerReport);
               }
             } else {
-              response = await requestHandler();
+              response = await scopedRequestHandler();
             }
 
             return response;

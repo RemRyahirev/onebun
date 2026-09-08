@@ -25,6 +25,7 @@ import type {
 import {
   createQueuePatternMatcher,
   createQueueScheduler,
+  inRootTraceScope,
   nackedError,
   resolveAckMode,
   wasNacked,
@@ -458,7 +459,10 @@ export class NatsQueueAdapter implements QueueAdapter {
       this.emit('onMessageReceived', message);
 
       try {
-        await entry.handler(message);
+        // A delivered message begins its own trace. Context follows the async graph, so a
+        // message published from inside a request would otherwise make its handler — and every
+        // later retry of it — a child of that finished request.
+        await inRootTraceScope(async () => await entry.handler(message));
 
         // A handler that catches its own exception and nacks returns normally, so control
         // flow alone cannot tell the drop apart from a success.
