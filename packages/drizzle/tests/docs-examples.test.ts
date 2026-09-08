@@ -532,6 +532,54 @@ describe('Drizzle API Documentation Examples', () => {
     });
 
     /**
+     * @source docs:api/drizzle.md#transaction
+     */
+    it('rolls back a repository call made from inside the callback', async () => {
+      // From docs: "Anything called from inside the callback is in the transaction, on both
+      // dialects." Asserted here on SQLite, which needs no container; the PostgreSQL half —
+      // the one that used to be wrong — is `ambient-transaction.test.ts`, against a server.
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-tx-'));
+      const file = join(dir, 'orders.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      const seed = new Database(file);
+      seed.run('CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+      seed.close();
+
+      const orders = sqliteTable('orders', {
+        id: integer('id').primaryKey({ autoIncrement: true }),
+        label: text('label').notNull(),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await service.initialize({ type: DatabaseType.SQLITE, options: { url: file } });
+
+        class OrdersRepository extends BaseRepository<typeof orders> {
+          constructor(drizzle: InstanceType<typeof DrizzleServiceCtor>) {
+            super(drizzle, orders);
+          }
+        }
+        const repository = new OrdersRepository(service);
+
+        await expect(service.transaction(async () => {
+          await repository.create({ label: 'through the repository' });
+
+          throw new Error('nope');
+        })).rejects.toThrow('nope');
+
+        expect(await repository.findAll()).toEqual([]);
+      } finally {
+        await service.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
      * @source docs:api/drizzle.md#sqlite-pragmas-and-read-only-files
      */
     it('gives a read-only connection a default pragma set it can actually apply', async () => {

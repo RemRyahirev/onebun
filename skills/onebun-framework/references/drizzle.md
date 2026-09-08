@@ -352,10 +352,10 @@ export class UserRepository extends BaseService {
 
 ## Transactions
 
-Always use transactions for multi-table writes to ensure atomicity, and **issue every statement that belongs
-to the transaction through the `tx` argument**. `tx` is the one form that means the same thing on both
-dialects; a query issued through `DrizzleService` — or through a repository — from inside the callback does
-NOT (see the dialect split below).
+Always use transactions for multi-table writes to ensure atomicity. **Everything called from inside the
+callback is in the transaction, on both dialects** — a query through `DrizzleService`, a repository method, a
+call into another service. Nothing has to be rewritten to take `tx`, though passing it is still valid and
+still means the same thing.
 
 <!-- typecheck: skip -->
 ```typescript
@@ -391,7 +391,8 @@ async transferFunds(fromId: string, toId: string, amountCents: number) {
 ```
 
 The callback may `await` freely, and a throw rolls the whole thing back with the original error reaching the
-caller — on both dialects. What differs is everything *not* issued through `tx`:
+caller. What still differs between the dialects is what happens to work issued from **elsewhere** in the
+application while a transaction is open:
 
 **SQLite** — one connection, so the transaction owns the database for its whole duration:
 
@@ -407,19 +408,22 @@ caller — on both dialects. What differs is everything *not* issued through `tx
   ROLLBACK — never enrolled in the transaction, never rolled back with it. Two transactions are serialized.
 
 **PostgreSQL** — a pooled connection through drizzle's own `transaction()`; nothing is queued, nothing is
-refused, and the SQLite re-entrancy errors cannot occur. There is no nesting through this API either: `tx`
-has no `transaction()` method (writing it is a compile error), and calling `db.transaction()` again from
-inside the callback takes another pooled connection and starts an **independent** transaction that can block
-on the outer one's locks. Drizzle's savepoints exist only under the escape hatch
-`tx.getRawTransaction().transaction(...)`. And the counter-rule:
+refused, and the SQLite re-entrancy errors cannot occur.
 
-- A query issued through the service or a repository from inside the callback takes **another** pooled
-  connection. It does NOT join the transaction and it **survives the rollback** — the exact opposite of the
-  SQLite rule above.
-
-This is the trap in the Repository Pattern section above: `await this.userRepo.create(...)` inside
-`db.transaction()` is atomic on SQLite and silently non-atomic on PostgreSQL. Thread `tx` into the
-repository method (or inline the write as `tx.insert(...)`) and the code means the same thing everywhere.
+- A query issued through the service or a repository from **inside** the callback runs ON the transaction and
+  is rolled back with it, exactly as on SQLite. Earlier releases took another pooled connection here, so such
+  a write **survived the rollback** — silently. If you threaded `tx` into repository methods to work around
+  that, it still works.
+- A **nested** `db.transaction()` is a SAVEPOINT on the connection the outer one holds: it sees the outer's
+  uncommitted rows, an inner rollback keeps the outer work, an outer rollback undoes everything.
+  `tx.getRawTransaction().transaction(...)` is the same thing, reached explicitly.
+- `Promise.all` inside the callback is safe and is **not parallel** — one connection runs one statement at a
+  time and the driver queues them.
+- Work that **outlives** the callback goes back to the pool rather than onto the finished transaction.
+- Concurrent transactions are independent: routing is keyed by async context, so two overlapping callbacks
+  see only their own uncommitted rows, one rollback never touches the other's writes, and a query issued
+  outside any transaction goes to the pool even while one is open. Two `DrizzleService` instances never see
+  each other's transactions.
 
 `DrizzleTransactionError` is exported from `@onebun/drizzle`; `name` is stable, so it can be matched without
 importing the class.

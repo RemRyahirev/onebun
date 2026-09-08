@@ -43,6 +43,7 @@ import {
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,
 } from './builders';
+import { AmbientTransaction, createTransactionAwareDatabase } from './builders/ambient-transaction';
 import { createGatedDatabase, SQLiteTransactionGate } from './builders/transaction-gate';
 import { applyBunSqlJsonEncodingFix } from './pg-json-encoding';
 import {
@@ -596,6 +597,13 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * a transaction takes a pooled connection and nothing has to wait.
    */
   private gatedDb: DatabaseInstance | null = null;
+
+  /**
+   * What `getDatabase()` hands out on PostgreSQL: the same database with every query routed
+   * to the open transaction, when the caller is inside one. `null` on SQLite, where
+   * {@link gatedDb} already does it.
+   */
+  private routedDb: DatabaseInstance | null = null;
   private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
   private initialized = false;
@@ -604,6 +612,9 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   private postgresClient: SQL | null = null;
   /** Serializes SQLite transactions and queues ordinary queries behind them. */
   private readonly sqliteGate = new SQLiteTransactionGate();
+
+  /** Carries the open PostgreSQL transaction to everything called inside its callback. */
+  private readonly pgAmbient = new AmbientTransaction();
   /**
    * Which folder claimed each journal, keyed by `schema.table`.
    *
@@ -1306,6 +1317,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       this.db = drizzlePostgres({
         connection: { url: connectionUrl, ...poolDriverOptions(pgOptions.pool) },
       });
+      this.routedDb = createTransactionAwareDatabase(this.db, this.pgAmbient);
 
       // Store client reference for closing if needed
       // Drizzle returns database with $client property
@@ -1340,6 +1352,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * rolls back, instead of joining it. `getSQLiteDatabase()` and `getSQLiteClient()` are the
    * ungated escape hatches.
    *
+   * On PostgreSQL it is routed instead of gated: a query built from it while the caller is
+   * inside a `transaction()` callback is issued ON that transaction, so a repository holding
+   * this object is atomic with it. `db.$client` is the escape hatch.
+   *
    * @see docs:api/drizzle.md
    */
   getDatabase(): DatabaseInstance {
@@ -1347,7 +1363,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    return this.gatedDb ?? this.db;
+    return this.gatedDb ?? this.routedDb ?? this.db;
   }
 
   /**
@@ -1380,7 +1396,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database is not PostgreSQL');
     }
 
-    return this.db as BunSQLDatabase<Record<string, PgTable>>;
+    // The same instance `getDatabase()` hands out, transaction routing included: this is a
+    // narrower TYPE, not an opt-out of the transaction the caller is inside. `db.$client` is
+    // the escape hatch for that, and is documented as one.
+    return this.getDatabase() as BunSQLDatabase<Record<string, PgTable>>;
   }
 
   /**
@@ -1715,6 +1734,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
 
     this.db = null;
     this.gatedDb = null;
+    this.routedDb = null;
     this.dbType = null;
     this.connectionOptions = null;
     this.initialized = false;
@@ -1768,11 +1788,21 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       return await this.runSQLiteTransaction(callback);
     }
 
+    // A transaction opened from inside a transaction is a SAVEPOINT on the connection
+    // already held, not a second one from the pool — the latter can block on a row its own
+    // outer transaction holds, which is a deadlock with itself.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return await (this.db as any).transaction(async (rawTx: DatabaseInstance) => {
+    const root = (this.pgAmbient.activeDatabase() ?? this.db) as any;
+
+    return await root.transaction(async (rawTx: DatabaseInstance) => {
       const wrappedTx = new UniversalTransactionClient(rawTx);
 
-      return await callback(wrappedTx);
+      // Everything called from inside the callback — a repository, a service query, another
+      // service — is issued on this transaction rather than on a second pooled connection.
+      return await this.pgAmbient.runInContext(
+        rawTx as object,
+        async () => await callback(wrappedTx),
+      );
     });
   }
 

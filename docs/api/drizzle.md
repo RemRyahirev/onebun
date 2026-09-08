@@ -823,12 +823,25 @@ try {
 }
 ```
 
-**Prefer `tx` for every statement that belongs to the transaction.** What happens to a query
-issued through the service — or through a repository — from inside the callback depends on
-the dialect: on SQLite it runs ON the open transaction and is rolled back with it (see the
-SQLite rules below); on PostgreSQL it takes another pooled connection, so it does NOT join
-the transaction and survives the rollback. `tx` is the one form that means the same thing on
-both.
+**Anything called from inside the callback is in the transaction, on both dialects.** A query
+issued through the service, a repository method, a call into another service — all of them run
+on the open transaction and are rolled back with it. Nothing has to be rewritten to take `tx`:
+
+```typescript
+await this.db.transaction(async () => {
+  await this.orders.create(order);        // repository — in the transaction
+  await this.orderItems.createMany(items); // another repository — same transaction
+
+  throw new Error('nope');                 // rolls back BOTH
+});
+```
+
+::: warning This used to be dialect-dependent
+On PostgreSQL a repository call inside the callback used to take another pooled connection, so
+its writes survived the ROLLBACK — silently, with no error and no warning, showing up only as
+inconsistent data afterwards. On SQLite the same code was already correct. If you added a `tx`
+argument to work around it, that still works and still means the same thing.
+:::
 
 ##### SQLite
 
@@ -870,21 +883,27 @@ than a promise.
 
 ##### PostgreSQL
 
-Unchanged: the transaction runs on its own pooled connection through drizzle's own
-`transaction()`. Nothing is queued, nothing is refused — concurrent queries use other
-connections, and the re-entrancy errors above cannot occur.
+The transaction runs on its own pooled connection through drizzle's own `transaction()`.
+Nothing is queued and nothing is refused — concurrent queries use other connections, and the
+re-entrancy errors above cannot occur.
 
-**Nesting is not a savepoint.** `tx` exposes no `transaction()` at all, and a nested
-`db.transaction()` is dispatched on the root pooled instance rather than on the open
-transaction — so it takes a SECOND connection and begins an INDEPENDENT transaction, which
-can block on the locks the outer one holds and stays committed when the outer one rolls
-back. Drizzle's real savepoints are reachable only through the escape hatch,
-`tx.getRawTransaction().transaction(...)`.
-
-**A query issued through the service from inside the callback takes another connection.** It
-is therefore NOT part of the transaction and is NOT undone when the transaction rolls back —
-the opposite of the SQLite rule above. A repository method that has to take part must be
-given `tx`.
+- **A query issued through the service or a repository from inside the callback runs ON the
+  transaction**, exactly as on SQLite, and is rolled back with it.
+- **A nested `transaction()` is a SAVEPOINT.** It runs on the connection the outer one already
+  holds, so it sees the outer's uncommitted rows, an inner rollback keeps the outer work, and
+  an outer rollback undoes everything. Before this it took a second connection and began an
+  independent transaction — one that could block on the locks its own caller held.
+- **`Promise.all` inside the callback is safe, and is not parallel.** One connection runs one
+  statement at a time; the driver queues them rather than failing.
+- **Work that OUTLIVES the transaction goes back to the pool.** A statement issued after the
+  callback has returned is not put on the finished transaction — it would land on whatever
+  connection the pool has since handed that transaction's slot to, and be rolled back by
+  somebody else's failure.
+- **Concurrent transactions are independent.** Routing is keyed by async context, so two
+  overlapping callbacks each see only their own uncommitted rows, one rollback never touches
+  the other's writes, and a query issued outside any transaction goes to the pool even while
+  one is open. Two `DrizzleService` instances never see each other's transactions either,
+  including against the same database.
 
 <llm-only>
 **Technical details for AI agents:**
@@ -898,10 +917,20 @@ given `tx`.
   created inside the callback, so "concurrent" means an async context that began outside it.
 - `getSQLiteDatabase()`, `getSQLiteClient()` and `.prepare()` are ungated escape hatches:
   statements issued through them during a transaction join it and are rolled back with it.
-- On PostgreSQL `getDatabase()` returns the drizzle instance itself, with no wrapper.
-- `DrizzleService.transaction()` always dispatches on `this.db` — the root pooled instance —
-  so it has no notion of an outer transaction to nest into; only SQLite tracks that, via the
-  gate's `AsyncLocalStorage`, and it refuses rather than splitting.
+- On PostgreSQL `getDatabase()` returns `createTransactionAwareDatabase(db, ambient)` — the
+  drizzle instance as prototype with the query entry points redefined to ask an
+  `AsyncLocalStorage` at CALL time which client the statement belongs on. Call time is what
+  makes a repository work: it captured the object in its constructor, long before any
+  transaction existed
+- The store holds a mutable cell, not a bare handle, and the cell is closed in a `finally`
+  when the transaction ends. Without that, work the callback left running would be issued on
+  a finished handle — measured: with `max: 1` the row it wrote was deleted by the ROLLBACK of
+  an unrelated transaction that had since taken the connection
+- `DrizzleService.transaction()` dispatches on the ambient transaction when there is one, so a
+  nested call is drizzle's own `tx.transaction()` — a SAVEPOINT — rather than a second pooled
+  connection. `tx.getRawTransaction().transaction(...)` remains available and is the same thing
+- The store is keyed by the owning `AmbientTransaction` instance, so two `DrizzleService`s (two
+  databases) never see each other's transactions
 </llm-only>
 
 ## BaseRepository
