@@ -374,8 +374,24 @@ application per process if the applications need different trace destinations.
 
 </llm-only>
 
-::: warning The shutdown flush is not isolated from the rest of the teardown
-The flush runs after the queue adapter disconnects and before `onModuleDestroy`, and it is awaited without a `try`/`catch`. If the collector is unreachable while spans are still buffered, the last batch export fails, the flush rejects, and the shutdown sequence stops there: `onModuleDestroy` / `onApplicationDestroy` hooks, the shared Redis release and the final log flush never run. `app.stop()` itself still resolves — the only trace of the failure is a `Shutdown sequence failed` error in the log. Until that step is guarded, point `exportOptions.endpoint` at a collector that outlives the app, or leave the endpoint unset in environments where it does not.
+::: tip A failed flush no longer cancels the rest of the teardown
+The flush runs after the queue adapter disconnects and before `onModuleDestroy`. If the collector
+is unreachable while spans are still buffered — the usual case when it goes down with the pod —
+the last batch export fails and the flush rejects.
+
+Every step of the shutdown sequence is individually guarded, so that rejection is logged as
+`Shutdown step "flushing traces" failed` and the teardown continues: `onModuleDestroy` and
+`onApplicationDestroy` hooks run, the shared Redis lease is released, and the logger flushes. A
+summary line names every phase that failed, so the tail of the log shows the whole picture rather
+than whichever failure happened to be last. `app.stop()` resolves either way.
+
+This used to abandon everything after the flush, with a single `Shutdown sequence failed` line as
+the only trace — precisely the work graceful shutdown exists to do, skipped by the step most
+likely to fail.
+
+The shutdown order is: drain in-flight HTTP → `beforeApplicationDestroy` → WebSocket cleanup →
+queue service → queue adapter → **trace flush** → `onModuleDestroy` → shared Redis release →
+`onApplicationDestroy` → log flush.
 :::
 
 ### SigNoz / OTel Collector Integration

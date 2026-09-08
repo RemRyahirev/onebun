@@ -231,7 +231,13 @@ Backend (Bun)
 
 The trace flush is step 6, not step 2 — spans emitted from `beforeApplicationDestroy` and from the
 queue/WebSocket teardown are still captured. Anything traced from `onModuleDestroy` onward is not: put
-span-producing cleanup in `beforeApplicationDestroy`, not in the later hooks. Logs are flushed last — provided
-the sequence gets that far. If the step-6 flush rejects (collector unreachable), steps 7–11 are skipped,
-`shutdownLogger()` among them, so pending OTLP log batches die with the process; `executeShutdown` catches the
-rejection, logs `Shutdown sequence failed`, and reports the stop as done.
+span-producing cleanup in `beforeApplicationDestroy`, not in the later hooks.
+
+Every step is individually guarded, so one that rejects does not cancel the rest. A failing step-6 flush
+against an unreachable collector is logged as `Shutdown step "flushing traces" failed` and steps 7–11 still
+run, `shutdownLogger()` among them. A summary line names every phase that failed. `app.stop()` resolves
+either way — it never throws.
+
+This changed: the sequence used to be a chain of bare awaits, so the first rejection abandoned everything
+after it and the only trace was one `Shutdown sequence failed` line. The step most likely to reject is the
+one whose collector is going down with the pod, which made it the common case rather than an edge one.

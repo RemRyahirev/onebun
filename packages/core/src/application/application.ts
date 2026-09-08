@@ -423,6 +423,13 @@ interface ShutdownOutcome {
   phase: string | null;
   /** Connections force-closed because the drain window expired. */
   forceClosed: number;
+  /**
+   * Phases that rejected. Every one of them was logged and the sequence carried on.
+   *
+   * Named rather than counted, because "the trace flush failed" and "the destroy hooks
+   * failed" send an operator to entirely different places.
+   */
+  failures: string[];
 }
 
 /**
@@ -2562,14 +2569,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     options?: { closeSharedRedis?: boolean; signal?: string },
   ): Promise<ShutdownOutcome> {
     const budgetMs = this.resolveShutdownTimeout();
-    const outcome: ShutdownOutcome = { timedOut: false, phase: null, forceClosed: 0 };
+    const outcome: ShutdownOutcome = {
+      timedOut: false, phase: null, forceClosed: 0, failures: [], 
+    };
     const deadline = createDeadline(budgetMs);
 
+    // A backstop, not the error path. Every step inside `performShutdown` is individually
+    // guarded, so a rejection reaching here means the guard itself is broken — which is worth
+    // saying differently from a step that failed and was handled.
     const sequence = this.performShutdown(options, outcome).then(
       () => 'done' as const,
       (error: unknown) => {
         this.logger.error(
-          'Shutdown sequence failed:',
+          'Shutdown sequence failed outside any guarded step — this is a framework bug:',
           error instanceof Error ? error : new Error(String(error)),
         );
 
@@ -2588,6 +2600,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       );
     }
 
+    if (outcome.failures.length > 0) {
+      // One summary line naming every phase that failed. The per-step lines carry the errors;
+      // this one exists so an operator scanning the tail of the log sees the whole picture
+      // rather than whichever failure happened to be last.
+      this.logger.error(
+        `Shutdown completed with ${outcome.failures.length} failed step(s): `
+        + outcome.failures.join(', '),
+      );
+    }
+
     return outcome;
   }
 
@@ -2602,6 +2624,38 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
+   * Run one shutdown step, and keep going if it rejects.
+   *
+   * The sequence used to be a chain of bare awaits, so the FIRST step that rejected abandoned
+   * every later one — and the only trace was a single line the process was about to stop being
+   * able to emit. In practice the likely rejecter is the trace flush, which pushes the last span
+   * batch to a collector that is usually going down with the pod. When it rejected, user
+   * `onModuleDestroy` hooks never ran, the shared Redis lease was never released, and the logger
+   * never flushed: precisely the work graceful shutdown exists to do.
+   *
+   * `outcome.phase` is set before the step so a timeout can still name what was running, and the
+   * failure is recorded by phase so an operator is told WHICH part failed rather than that
+   * something did.
+   */
+  private async runShutdownStep(
+    outcome: ShutdownOutcome,
+    phase: string,
+    step: () => Promise<void>,
+  ): Promise<void> {
+    outcome.phase = phase;
+
+    try {
+      await step();
+    } catch (error) {
+      outcome.failures.push(phase);
+      this.logger.error(
+        `Shutdown step "${phase}" failed; continuing with the rest of the teardown:`,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  /**
    * The shutdown sequence itself. `outcome.phase` is updated as it advances so a timeout
    * can name what was still running.
    */
@@ -2610,9 +2664,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     outcome: ShutdownOutcome,
   ): Promise<void> {
     if (this.multiServiceMode) {
-      outcome.phase = 'stopping services';
       if (this.orchestrator) {
-        await this.orchestrator.stopAll();
+        await this.runShutdownStep(outcome, 'stopping services', async () => {
+          await this.orchestrator!.stopAll();
+        });
       }
 
       return;
@@ -2627,54 +2682,63 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // was still accepting new work — a hook that deregisters from discovery or flushes a
     // buffer ran under live traffic, and the request that was mid-response was severed by
     // the process.exit that followed.
-    outcome.phase = 'draining in-flight HTTP requests';
     const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
-    outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+    await this.runShutdownStep(outcome, 'draining in-flight HTTP requests', async () => {
+      outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+    });
 
     // Call beforeApplicationDestroy lifecycle hook
     if (this.rootModule?.callBeforeApplicationDestroy) {
-      outcome.phase = 'running beforeApplicationDestroy hooks';
-      this.logger.debug('Calling beforeApplicationDestroy hooks');
-      await this.rootModule.callBeforeApplicationDestroy(signal);
+      await this.runShutdownStep(outcome, 'running beforeApplicationDestroy hooks', async () => {
+        this.logger.debug('Calling beforeApplicationDestroy hooks');
+        await this.rootModule!.callBeforeApplicationDestroy!(signal);
+      });
     }
 
     // Cleanup WebSocket resources
     if (this.wsHandler) {
-      outcome.phase = 'closing WebSocket connections';
-      this.logger.debug('Cleaning up WebSocket handler');
-      await this.wsHandler.cleanup();
+      await this.runShutdownStep(outcome, 'closing WebSocket connections', async () => {
+        this.logger.debug('Cleaning up WebSocket handler');
+        await this.wsHandler!.cleanup();
+      });
+      // Dropped whether or not cleanup succeeded: the handle is dead either way, and keeping
+      // it would let a later teardown path re-run a cleanup that has already failed once.
       this.wsHandler = null;
     }
 
     // Stop queue service
     if (this.queueService) {
-      outcome.phase = 'stopping the queue service';
-      this.logger.debug('Stopping queue service');
-      await this.queueService.stop();
+      await this.runShutdownStep(outcome, 'stopping the queue service', async () => {
+        this.logger.debug('Stopping queue service');
+        await this.queueService!.stop();
+      });
       this.queueService = null;
     }
     this.queueServiceProxy?.setDelegate(null);
 
     // Disconnect queue adapter
     if (this.queueAdapter) {
-      outcome.phase = 'disconnecting the queue adapter';
-      this.logger.debug('Disconnecting queue adapter');
-      await this.queueAdapter.disconnect();
+      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
+        this.logger.debug('Disconnecting queue adapter');
+        await this.queueAdapter!.disconnect();
+      });
       this.queueAdapter = null;
     }
 
     // Shutdown trace service — flush pending spans before module destroy
     if (this.traceService?.shutdown) {
-      outcome.phase = 'flushing traces';
-      this.logger.debug('Shutting down trace service');
-      await this.traceService.shutdown();
+      await this.runShutdownStep(outcome, 'flushing traces', async () => {
+        this.logger.debug('Shutting down trace service');
+        await this.traceService!.shutdown!();
+      });
     }
 
     // Call onModuleDestroy lifecycle hook
     if (this.rootModule?.callOnModuleDestroy) {
-      outcome.phase = 'running onModuleDestroy hooks';
-      this.logger.debug('Calling onModuleDestroy hooks');
-      await this.rootModule.callOnModuleDestroy();
+      await this.runShutdownStep(outcome, 'running onModuleDestroy hooks', async () => {
+        this.logger.debug('Calling onModuleDestroy hooks');
+        await this.rootModule!.callOnModuleDestroy!();
+      });
     }
 
     // Release this application's hold on the shared Redis client. It is disconnected only
@@ -2682,15 +2746,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // outright, so in multi-service mode the FIRST one to stop tore the client out from
     // under its still-running siblings.
     if (closeRedis && SharedRedisProvider.isConnected()) {
-      this.logger.debug('Releasing shared Redis');
-      await SharedRedisProvider.release();
+      await this.runShutdownStep(outcome, 'releasing the shared Redis client', async () => {
+        this.logger.debug('Releasing shared Redis');
+        await SharedRedisProvider.release();
+      });
     }
 
     // Call onApplicationDestroy lifecycle hook
     if (this.rootModule?.callOnApplicationDestroy) {
-      outcome.phase = 'running onApplicationDestroy hooks';
-      this.logger.debug('Calling onApplicationDestroy hooks');
-      await this.rootModule.callOnApplicationDestroy(signal);
+      await this.runShutdownStep(outcome, 'running onApplicationDestroy hooks', async () => {
+        this.logger.debug('Calling onApplicationDestroy hooks');
+        await this.rootModule!.callOnApplicationDestroy!(signal);
+      });
     }
 
     // Dispose this application's DI scope AFTER every destroy hook has run — the hooks read
@@ -2709,9 +2776,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         : 'OneBun application stopped',
     );
 
-    // Shutdown logger transport LAST — flush OTLP log batches after final log message
-    outcome.phase = 'flushing logs';
-    await shutdownLogger();
+    // Shutdown logger transport LAST — flush OTLP log batches after final log message.
+    // Guarded like the rest, with one caveat: if this is what failed, the line reporting it is
+    // written through the transport that is going down, so it may not land. Continuing is still
+    // right — the alternative is an unhandled rejection at the very end of the process.
+    await this.runShutdownStep(outcome, 'flushing logs', async () => {
+      await shutdownLogger();
+    });
   }
 
   /**

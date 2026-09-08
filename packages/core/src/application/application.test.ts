@@ -5686,6 +5686,117 @@ describe('OneBunApplication', () => {
       expect(await hanging).toBe('force-closed');
     });
 
+    test('a rejecting trace flush does not cancel the rest of the teardown', async () => {
+      // The trace flush pushes the last span batch to a collector that is usually going down
+      // with the pod, so it is the step most likely to reject in practice. It used to abandon
+      // everything after it: destroy hooks never ran, the shared Redis lease was never
+      // released, the logger never flushed — exactly the work graceful shutdown exists to do.
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        beforeApplicationDestroy(): void {
+          counters.before++;
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      // Substituted on the instance, not through mock.module: the replacement must not be
+      // visible to any other file in the run.
+      (app as unknown as { traceService: { shutdown: () => Promise<void> } }).traceService = {
+        async shutdown() {
+          throw new Error('OTLP collector unreachable');
+        },
+      };
+
+      // Still resolves — that half of today's behaviour is correct and must not regress.
+      await app.stop();
+
+      // Every later step ran anyway.
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+
+      // And the failure is attributed to its phase, not reported as "something failed".
+      expect(hasLine('error', 'Shutdown step "flushing traces" failed')).toBe(true);
+      expect(hasLine('error', 'OTLP collector unreachable')
+        || logLines.some(l => l.message.includes('flushing traces'))).toBe(true);
+    });
+
+    test('a rejecting queue adapter disconnect does not cancel the rest either', async () => {
+      // The same shape one step earlier, so the fix is the sequence rather than a special case
+      // for tracing.
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements OnModuleDestroy, OnApplicationDestroy {
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      (app as unknown as { queueAdapter: { disconnect: () => Promise<void> } }).queueAdapter = {
+        async disconnect() {
+          throw new Error('broker went away first');
+        },
+      };
+
+      await app.stop();
+
+      expect(counters).toEqual({ before: 0, module: 1, application: 1 });
+      expect(hasLine('error', 'Shutdown step "disconnecting the queue adapter" failed')).toBe(true);
+    });
+
+    test('names every failed phase in one summary line', async () => {
+      // Two failures in one teardown. Scanning the tail of a log should show the whole picture
+      // rather than whichever failure happened to be last.
+      @Module({})
+      class EmptyModule {}
+
+      const app = createRealApp(EmptyModule);
+      await app.start();
+
+      (app as unknown as { traceService: { shutdown: () => Promise<void> } }).traceService = {
+        async shutdown() {
+          throw new Error('collector unreachable');
+        },
+      };
+      (app as unknown as { queueAdapter: { disconnect: () => Promise<void> } }).queueAdapter = {
+        async disconnect() {
+          throw new Error('broker unreachable');
+        },
+      };
+
+      await app.stop();
+
+      expect(hasLine('error', 'Shutdown completed with 2 failed step(s)')).toBe(true);
+      expect(hasLine('error', 'disconnecting the queue adapter')).toBe(true);
+      expect(hasLine('error', 'flushing traces')).toBe(true);
+    });
+
     test('stop() called twice sequentially runs every destroy hook exactly once', async () => {
       const counters: HookCounters = { before: 0, module: 0, application: 0 };
 
