@@ -7,6 +7,7 @@
 
 // Authentication
 export * from './auth.js';
+export * from './onebun-auth.js';
 // HTTP client
 // Export the createHttpClient function specifically to avoid conflicts
 export {

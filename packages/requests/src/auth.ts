@@ -92,7 +92,13 @@ export const applyAuth = (
       );
 
     case 'onebun':
-      return applyOneBunAuth(auth, config);
+      // Deliberately a no-op here. `onebun` is the one scheme that signs the request, and a
+      // signature has to cover what is FINAL — the URL with its query built, the Content-Type
+      // that will be sent, the exact body bytes. None of that exists yet at this point in the
+      // pipeline, which is precisely how the old implementation came to sign a path with no
+      // query and no body. Signing happens in `client.ts`, per attempt, over the assembled
+      // request. See `signOneBunRequest`.
+      return Effect.succeed(config);
 
     default:
       return Effect.succeed(config);
@@ -100,123 +106,19 @@ export const applyAuth = (
 };
 
 /**
- * Apply OneBun framework internal authentication
+ * Whether this scheme SIGNS the request rather than shaping it.
+ *
+ * The distinction drives the pipeline order: shaping schemes (`bearer`, `apikey`, `basic`,
+ * `custom`) run before the URL is built, signing runs after, over what is final. Getting that
+ * backwards is what made `apikey` in query mode a silent no-op — the key was added to
+ * `config.query` one line after the URL had already been assembled from it — and what left the
+ * HMAC signature covering neither the query string nor the body.
+ *
+ * A type predicate, so a caller that branches on it gets the narrowed config rather than
+ * re-checking `type` and hoping the two checks stay in step.
+ *
+ * @see docs:api/requests.md
  */
-const applyOneBunAuth = (
-  auth: OneBunAuthConfig,
-  config: RequestConfig,
-): Effect.Effect<RequestConfig, Error> => {
-  const timestamp = Date.now().toString();
-  const nonce = generateNonce();
-  const algorithm = auth.algorithm || 'hmac-sha256';
-
-  // Create signature payload
-  const payload = [config.method, config.url, timestamp, nonce, auth.serviceId].join('\n');
-
-  return pipe(
-    generateSignature(payload, auth.secretKey, algorithm),
-    Effect.map((signature) => ({
-      ...config,
-      headers: {
-        ...config.headers,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'X-OneBun-Service-Id': auth.serviceId,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'X-OneBun-Timestamp': timestamp,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'X-OneBun-Nonce': nonce,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'X-OneBun-Algorithm': algorithm,
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        'X-OneBun-Signature': signature,
-      },
-    })),
-  );
-};
-
-/**
- * Generate cryptographic signature for OneBun auth
- */
-const generateSignature = (
-  payload: string,
-  secretKey: string,
-  algorithm: 'hmac-sha256' | 'hmac-sha512',
-): Effect.Effect<string, Error> => {
-  return Effect.tryPromise({
-    async try() {
-      const encoder = new TextEncoder();
-      const keyData = encoder.encode(secretKey);
-      const payloadData = encoder.encode(payload);
-
-      const algorithmName = algorithm === 'hmac-sha256' ? 'SHA-256' : 'SHA-512';
-
-      const cryptoKey = await crypto.subtle.importKey(
-        'raw',
-        keyData,
-        { name: 'HMAC', hash: algorithmName },
-        false,
-        ['sign'],
-      );
-
-      const signature = await crypto.subtle.sign('HMAC', cryptoKey, payloadData);
-
-      return Array.from(new Uint8Array(signature))
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-    },
-    catch: (error) => new Error(`Failed to generate signature: ${error}`),
-  });
-};
-
-/**
- * Generate random nonce for request uniqueness
- */
-const generateNonce = (): string => {
-  const array = new Uint8Array(16);
-  crypto.getRandomValues(array);
-
-  return Array.from(array)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-};
-
-/**
- * Validate OneBun authentication headers from incoming request
- */
-export const validateOneBunAuth = (
-  headers: Record<string, string>,
-  secretKey: string,
-  maxAge: number = 300000, // 5 minutes
-): Effect.Effect<{ serviceId: string; valid: boolean }, Error> => {
-  const serviceId = headers['x-onebun-service-id'];
-  const timestamp = headers['x-onebun-timestamp'];
-  const nonce = headers['x-onebun-nonce'];
-  const algorithm = headers['x-onebun-algorithm'] as 'hmac-sha256' | 'hmac-sha512';
-  const signature = headers['x-onebun-signature'];
-
-  if (!serviceId || !timestamp || !nonce || !algorithm || !signature) {
-    return Effect.succeed({ serviceId: serviceId || 'unknown', valid: false });
-  }
-
-  // Check timestamp age
-  const requestTime = parseInt(timestamp, 10);
-  const now = Date.now();
-  if (now - requestTime > maxAge) {
-    return Effect.succeed({ serviceId, valid: false });
-  }
-
-  // Reconstruct payload (method and URL should be provided separately)
-  const method = headers['x-onebun-method'] || 'GET';
-  const url = headers['x-onebun-url'] || '/';
-
-  const payload = [method, url, timestamp, nonce, serviceId].join('\n');
-
-  // Verify signature
-  return pipe(
-    generateSignature(payload, secretKey, algorithm),
-    Effect.map((expectedSignature) => ({
-      serviceId,
-      valid: signature === expectedSignature,
-    })),
-  );
-};
+export function isSigningAuth(auth: AuthConfig): auth is OneBunAuthConfig {
+  return auth.type === 'onebun';
+}

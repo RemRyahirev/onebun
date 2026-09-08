@@ -401,11 +401,32 @@ export interface CustomAuthConfig {
   interceptor?: (request: RequestConfig) => RequestConfig | Promise<RequestConfig>;
 }
 
+/**
+ * Inter-service HMAC authentication.
+ *
+ * @see docs:api/requests.md
+ */
 export interface OneBunAuthConfig {
   type: 'onebun';
+  /** Who is calling. Signed, and reported to the callee once the signature verifies. */
   serviceId: string;
   secretKey: string;
   algorithm?: 'hmac-sha256' | 'hmac-sha512';
+  /**
+   * Which key this is, for rotation. Signed. Defaults to `'default'`.
+   *
+   * A callee resolving secrets by `(serviceId, keyId)` can accept both the old and the new key
+   * during a rollover; without it, rotating a secret means a flag day.
+   */
+  keyId?: string;
+  /**
+   * Which callee this signature is for.
+   *
+   * Bind it unless the verifier runs with `audience: false`. Without it, a request captured en
+   * route to one service can be replayed at another that shares the secret — which is the default
+   * shape when a fleet is given one `secretKey`.
+   */
+  audience?: string;
 }
 
 /**

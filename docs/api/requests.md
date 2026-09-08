@@ -138,16 +138,144 @@ const client = createHttpClient({
 
 ### OneBun HMAC (Inter-service)
 
+Signs each outgoing request so the callee can tell which service sent it.
+
 ```typescript
 const client = createHttpClient({
-  baseUrl: 'https://internal-service.example.com',
+  baseUrl: 'https://billing.internal',
   auth: {
     type: 'onebun',
-    serviceId: 'my-service',
+    serviceId: 'orders-service',
     secretKey: 'shared-secret',
+    audience: 'billing-service',
   },
 });
 ```
+
+The client attaches one header:
+
+```
+X-OneBun-Signature: v=1;svc=orders-service;kid=default;alg=hmac-sha256;aud=billing-service;ts=…;nonce=…;sig=…
+```
+
+#### What the signature covers {#hmac-coverage}
+
+| Covered | Not covered |
+|---------|-------------|
+| Method | Scheme, host and port — bind `audience` instead |
+| Path | Every header except `Content-Type` |
+| Query string, exactly as sent | The response |
+| `Content-Type` | Request ordering |
+| Every byte of the body | Confidentiality |
+| The whole parameter line: `svc`, `kid`, `alg`, `aud`, `ts`, `nonce` | |
+
+Because only `Content-Type` is covered, **a verified request tells you who called, and nothing
+else.** Derive authorization from the verified `serviceId` alone — not from a second
+`Authorization` header, not from `X-Forwarded-For`, not from anything else that arrived unsigned
+alongside it.
+
+This scheme authenticates the caller; it does not encrypt. Run it over a transport that provides
+confidentiality and response integrity — mTLS, or a service mesh — because an attacker who cannot
+forge a single request byte can still rewrite every reply.
+
+#### Verifying on the callee {#hmac-verify}
+
+<!-- typecheck: skip -->
+```typescript
+import {
+  makeSingleReplicaNonceStore,
+  oneBunAuthFailureStatus,
+  verifyOneBunRequest,
+} from '@onebun/requests';
+
+const nonceStore = makeSingleReplicaNonceStore();
+
+const result = await Effect.runPromise(verifyOneBunRequest(
+  { method: req.method, url: req.url, headers: req.headers, body: await req.text() },
+  { secret: 'shared-secret', audience: 'billing-service', nonceStore },
+));
+
+if (!result.valid) {
+  // `result.reason` is for YOUR logs. Never put it in the response body: `unknown-key` versus
+  // `signature-mismatch` tells an attacker which service ids and key ids exist.
+  logger.warn('inter-service auth failed', { reason: result.reason, serviceId: result.serviceId });
+
+  return new Response('Unauthorized', { status: oneBunAuthFailureStatus(result.reason!) });
+}
+```
+
+`audience` and `nonceStore` are **required**, and `false` is a legal value for each. Both defend
+against attacks a default would silently leave open, so going without has to be written down in
+your code rather than inherited.
+
+::: warning The body is yours to read, deliberately
+`verifyOneBunRequest` takes body bytes you have already read. It cannot check the MAC without
+hashing the body, so whoever reads it is choosing to hash unauthenticated input — and that
+decision, with its size cap, belongs to the code that owns the server. Cap the read before you
+make it.
+:::
+
+::: danger One shared secret across a fleet means every service can impersonate every other
+The scheme authenticates *a holder of the secret*. If `billing`, `orders` and `inventory` all hold
+the same `secretKey`, any one of them can sign a request claiming `svc=` any of the others, and
+`audience` does not help — the caller chooses that too.
+
+Use a secret per (caller, callee) pair and resolve it on the verifier:
+
+```typescript
+{ secret: (serviceId, keyId) => secretsFor(serviceId)[keyId] }
+```
+:::
+
+::: warning `makeSingleReplicaNonceStore` is single-replica, as its name says
+Behind N replicas a captured request is accepted up to once per replica per freshness window,
+because each process keeps its own set. A library that does not own your deployment cannot fix
+that. Supply your own `OneBunNonceStore` backed by shared storage when you run more than one
+replica — the interface is one method.
+
+When full it refuses rather than evicting. Evicting would hand an attacker a bypass: flood the
+store, push out the entry for the request being replayed, replay it.
+:::
+
+#### Rotating a secret {#hmac-rotation}
+
+`keyId` travels in the signature, so a verifier can accept the old and the new key at once:
+
+<!-- typecheck: skip -->
+```typescript
+// Callers move to keyId: 'k2' one at a time; the callee already accepts both.
+{ secret: (serviceId, keyId) => keyId === 'k2' ? NEW_SECRET : OLD_SECRET }
+```
+
+#### API reference {#hmac-api}
+
+| Symbol | What it is |
+|--------|------------|
+| `OneBunAuthConfig` | The `auth: { type: 'onebun', … }` shape: `serviceId`, `secretKey`, and the optional `algorithm`, `keyId` and `audience` |
+| `signOneBunRequest` | Produces the header value. The client calls it per attempt; call it yourself only when you are not using `createHttpClient` |
+| `verifyOneBunRequest` | Verifies a request on the callee |
+| `OneBunVerifyInput` | What the verifier needs: `method`, `url`, `headers`, and the body bytes you already read |
+| `OneBunVerifyOptions` | `secret`, `audience`, `nonceStore`, plus optional `algorithms`, `maxAgeMs`, `maxSkewMs` and an injectable `now` |
+| `OneBunAuthResult` | `{ valid, serviceId?, keyId?, reason? }` |
+| `OneBunAuthFailureReason` | The closed set of failure causes, for logs and metrics only |
+| `OneBunNonceStore` | One method: `remember(key, expiresAtMs, nowMs)`. The verifier passes its own clock in, so a store cannot disagree with the freshness check that just ran |
+| `makeSingleReplicaNonceStore` | The in-process implementation |
+| `oneBunAuthFailureStatus` | Maps a reason to 401 or 503 — a full or unreachable store is your outage, not the caller's fault |
+| `isSigningAuth` | Whether a scheme signs the request (`onebun`) rather than shaping it (`bearer`, `apikey`, `basic`, `custom`). Drives pipeline order: shaping runs before the URL is built, signing after |
+
+#### Upgrading from the previous scheme {#hmac-v1-migration}
+
+The previous implementation signed one payload and verified another, so **only a literal `GET /`
+ever validated** — every POST and every path failed. It also covered neither the query string nor
+the body, compared signatures with `===`, and never recorded the nonce it generated, so a captured
+header set replayed for five minutes.
+
+Fixing any one of those changes the wire format, so they changed together and the format now
+carries `v=1`. A caller on the old version fails against a new callee with
+`reason: 'legacy-unversioned-signature'` rather than mysteriously. The five `X-OneBun-*` headers
+are replaced by the single `X-OneBun-Signature` above, and `validateOneBunAuth` is gone —
+`verifyOneBunRequest` replaces it, and takes the request rather than a header set, because the
+method, path, query and body it must check are not in a header set.
 
 ## Retry Configuration
 

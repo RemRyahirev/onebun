@@ -26,12 +26,15 @@ import {
   NotFoundError,
   OneBunBaseError,
   TRANSPORT_FAILURE_CODE,
-  validateOneBunAuth,
+  makeSingleReplicaNonceStore,
+  verifyOneBunRequest,
 } from '@onebun/requests';
 
 interface RecordedCall {
   method: string;
   path: string;
+  /** The absolute URL as it arrived, which is what a signature is verified against. */
+  url: string;
   headers: Headers;
   body: string;
 }
@@ -58,6 +61,7 @@ function startStubServer(
       const call: RecordedCall = {
         method: req.method,
         path: url.pathname + url.search,
+        url: req.url,
         headers: req.headers,
         body: hasBody ? await req.text() : '',
       };
@@ -87,22 +91,32 @@ function asErrorResponse(error: unknown): ErrorResponse | undefined {
 }
 
 /**
- * The header set `validateOneBunAuth` reads: the five signed headers the client attached, plus
- * the method and the url it signed over — those two are part of the payload but do not travel
- * as headers, so the verifier has to be told them.
+ * Verify a recorded call the way a callee would: from the request itself.
+ *
+ * The header set is taken verbatim from what the client sent — nothing is added. An earlier
+ * version of this helper synthesised `x-onebun-method` and `x-onebun-url`, headers the client
+ * never emitted, which is how a protocol nobody could speak stayed green.
  */
-function oneBunAuthHeaders(call: RecordedCall, signedUrl: string): Record<string, string> {
-  /* eslint-disable @typescript-eslint/naming-convention */
-  return {
-    'x-onebun-service-id': call.headers.get('x-onebun-service-id') ?? '',
-    'x-onebun-timestamp': call.headers.get('x-onebun-timestamp') ?? '',
-    'x-onebun-nonce': call.headers.get('x-onebun-nonce') ?? '',
-    'x-onebun-algorithm': call.headers.get('x-onebun-algorithm') ?? '',
-    'x-onebun-signature': call.headers.get('x-onebun-signature') ?? '',
-    'x-onebun-method': call.method,
-    'x-onebun-url': signedUrl,
-  };
-  /* eslint-enable @typescript-eslint/naming-convention */
+async function verifyRecordedCall(
+  call: RecordedCall,
+  secret: string,
+): Promise<{ serviceId?: string; valid: boolean }> {
+  const headers: Record<string, string> = {};
+  call.headers.forEach((value, name) => {
+    headers[name.toLowerCase()] = value;
+  });
+
+  const result = await Effect.runPromise(verifyOneBunRequest(
+    {
+      method: call.method,
+      url: call.url,
+      headers,
+      body: call.body === undefined || call.body === '' ? undefined : call.body,
+    },
+    { secret, audience: false, nonceStore: makeSingleReplicaNonceStore() },
+  ));
+
+  return { serviceId: result.serviceId, valid: result.valid };
 }
 
 interface RecordedLog {
@@ -299,24 +313,20 @@ describe('Authentication (docs/api/requests.md)', () => {
       await client.get('/internal');
 
       const [first, second] = server.calls;
-      // The signed payload is `method\nurl\ntimestamp\nnonce\nserviceId`
-      const headersOf = (call: RecordedCall): Record<string, string> =>
-        oneBunAuthHeaders(call, '/internal');
 
-      expect(first.headers.get('x-onebun-service-id')).toBe('my-service');
-      expect(first.headers.get('x-onebun-algorithm')).toBe('hmac-sha256');
+      // One self-describing header carries the whole claim.
+      expect(first.headers.get('x-onebun-signature')).toContain('v=1;svc=my-service;');
+      expect(first.headers.get('x-onebun-signature')).toContain('alg=hmac-sha256;');
 
       // The callee accepts the signature when it holds the same secret...
-      expect(await Effect.runPromise(validateOneBunAuth(headersOf(first), 'shared-secret')))
+      expect(await verifyRecordedCall(first, 'shared-secret'))
         .toEqual({ serviceId: 'my-service', valid: true });
 
       // ...and rejects it when it does not.
-      expect(await Effect.runPromise(validateOneBunAuth(headersOf(first), 'other-secret')))
+      expect(await verifyRecordedCall(first, 'other-secret'))
         .toEqual({ serviceId: 'my-service', valid: false });
 
       // Each request is signed afresh: the nonce, and therefore the signature, is not reused.
-      expect(first.headers.get('x-onebun-nonce'))
-        .not.toBe(second.headers.get('x-onebun-nonce'));
       expect(first.headers.get('x-onebun-signature'))
         .not.toBe(second.headers.get('x-onebun-signature'));
     } finally {
@@ -813,16 +823,13 @@ describe('Complete Example (docs/api/requests.md)', () => {
       expect(server.calls[1].body).toBe('{"name":"Jane","email":"jane@example.com"}');
       expect(server.calls[2].body).toBe('{"name":"Johnny"}');
 
-      // Every call is signed with the identity and the secret the constructor read off config.
-      // The identity header on its own would travel even if nothing were signed, so each call
-      // is verified the way a callee would: the digest holds only if the method and the url of
-      // *that* call went into the payload (the query string is not part of it — `config.url`
-      // is what gets signed, so findAll's payload carries a bare '/users').
-      const signedUrls = ['/users', '/users', '/users/1'];
-      const verified = await Promise.all(server.calls.map(async (call, index) =>
-        await Effect.runPromise(
-          validateOneBunAuth(oneBunAuthHeaders(call, signedUrls[index]), 'shared-secret'),
-        )));
+      // Every call is signed with the identity and the secret the constructor read off config,
+      // and verified the way a callee would: from the request that actually arrived. The
+      // signature now covers the method, the full path, the query string and the body, so it
+      // holds only if all four match what was sent.
+      const verified = await Promise.all(
+        server.calls.map(async (call) => await verifyRecordedCall(call, 'shared-secret')),
+      );
 
       expect(verified).toEqual([
         { serviceId: 'my-service', valid: true },
