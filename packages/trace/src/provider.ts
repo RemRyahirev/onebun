@@ -10,7 +10,12 @@ import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic
 
 import type { TraceOptions } from './types.js';
 
-import { OtlpFetchSpanExporter } from './otlp-exporter.js';
+import { DEFAULT_RETRY_BUDGET, OtlpFetchSpanExporter } from './otlp-exporter.js';
+
+/**
+ * How far the processor's export timeout sits above the exporter's own retry budget.
+ */
+const EXPORT_TIMEOUT_MARGIN = 1000;
 
 /**
  * Result of TracerProvider initialization
@@ -130,16 +135,27 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
   const spanProcessors = [];
 
   if (options.exportOptions?.endpoint) {
+    const retryBudget = options.exportOptions.retryBudget ?? DEFAULT_RETRY_BUDGET;
+
     const exporter = new OtlpFetchSpanExporter({
       endpoint: options.exportOptions.endpoint,
       headers: options.exportOptions.headers,
       timeout: options.exportOptions.timeout,
+      retryAttempts: options.exportOptions.retryAttempts,
+      retryDelay: options.exportOptions.retryDelay,
+      retryBudget,
+      onExportFailure: options.exportOptions.onExportFailure,
     });
 
     spanProcessors.push(
       new BatchSpanProcessor(exporter, {
         maxExportBatchSize: options.exportOptions.batchSize,
         scheduledDelayMillis: options.exportOptions.batchTimeout,
+        // The processor has its own export timeout, and its default (30s) would cut a longer
+        // retry budget short — the exporter would still be waiting on a retry the processor had
+        // already written off. Keeping it strictly above the budget leaves the exporter's
+        // deadline the only one that decides, which is the one that knows about the retries.
+        exportTimeoutMillis: retryBudget + EXPORT_TIMEOUT_MARGIN,
       }),
     );
   }

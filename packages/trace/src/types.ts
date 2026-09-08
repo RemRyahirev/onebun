@@ -254,6 +254,48 @@ export interface TraceExportOptions {
    * @defaultValue 5000
    */
   batchTimeout?: number;
+
+  /**
+   * Retries after the first attempt when an export fails.
+   *
+   * `BatchSpanProcessor` splices a batch out of its buffer before handing it to the exporter,
+   * so a batch the exporter gives up on is gone — there is no second chance and no queue to
+   * put it back on. Retrying here is the only thing standing between a collector redeploy and
+   * a hole in the traces.
+   *
+   * Set to `0` to restore at-most-once delivery.
+   *
+   * @defaultValue 3
+   */
+  retryAttempts?: number;
+
+  /**
+   * Delay in milliseconds before the first retry. Doubles on each subsequent retry, capped at
+   * 5000ms. A `Retry-After` header from the collector overrides it.
+   *
+   * @defaultValue 200
+   */
+  retryDelay?: number;
+
+  /**
+   * Ceiling on the total wall time one batch may spend being exported, retries and waits
+   * included. Retrying stops once the next attempt would cross it.
+   *
+   * This is what keeps a dead collector from holding shutdown open: the final flush is a
+   * normal export and obeys the same budget.
+   *
+   * @defaultValue 10000
+   */
+  retryBudget?: number;
+
+  /**
+   * Called once for a batch that was given up on, with the failure, the number of spans lost
+   * and how many attempts were made.
+   *
+   * `OneBunApplication` wires this to its own logger when you do not, because an export that
+   * fails without a word is the defect this option exists to prevent.
+   */
+  onExportFailure?: (error: Error, spanCount: number, attempts: number) => void;
 }
 
 /**

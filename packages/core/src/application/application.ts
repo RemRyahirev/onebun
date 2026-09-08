@@ -20,9 +20,10 @@ import {
 import {
   createSyncLogger,
   type Logger,
+  type LoggerOptions,
   LoggerService,
-  makeLogger,
   makeLoggerFromOptions,
+  resolveOtlpLogEndpoint,
   shutdownLogger,
   type SyncLogger,
 } from '@onebun/logger';
@@ -387,6 +388,14 @@ const DEFAULT_STATIC_FILE_EXISTENCE_CACHE_TTL_MS = 60_000;
 const STATIC_EXISTS_CACHE_PREFIX = 'onebun:static:exists:';
 
 /**
+ * Fallbacks for the OTLP `service.*` resource attributes. Deliberately the same strings
+ * `initTracerProvider` uses, so logs and spans from an unconfigured service land under one name
+ * in the backend instead of two.
+ */
+const DEFAULT_OTLP_SERVICE_NAME = 'onebun-service';
+const DEFAULT_OTLP_SERVICE_VERSION = '1.0.0';
+
+/**
  * Resolve a relative path under a root directory and ensure the result stays inside the root (path traversal protection).
  * @param rootDir - Absolute path to the static root directory
  * @param relativePath - URL path segment (e.g. from request path after prefix); must not contain '..' that escapes root
@@ -508,8 +517,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       } as ApplicationOptions;
       this.config = new NotInitializedConfig();
 
-      // Initialize logger (simplified — no config/metrics/tracing at parent level)
-      this.loggerLayer = makeLogger();
+      // Initialize logger (simplified — no config/metrics/tracing at parent level, but the
+      // OTLP environment variables still apply: an orchestrator whose own logs stop at stdout
+      // while its children ship theirs is the half that breaks when something goes wrong)
+      this.loggerLayer = makeLoggerFromOptions(this.resolveLoggerOptions());
       const effectLogger = Effect.runSync(
         Effect.provide(
           Effect.map(LoggerService, (logger: Logger) =>
@@ -555,27 +566,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Use provided logger layer, or create from options, or use default
     // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
-    // Auto-populate OTLP resource attributes from tracing config if available
-    const loggerOptions = this.options.loggerOptions
-      ? {
-        ...this.options.loggerOptions,
-        otlpResourceAttributes: this.options.loggerOptions.otlpResourceAttributes ?? (
-          this.options.loggerOptions.otlpEndpoint && this.options.tracing
-            ? {
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'service.name': this.options.tracing.serviceName ?? 'onebun-service',
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'service.version': this.options.tracing.serviceVersion ?? '1.0.0',
-            }
-            : undefined
-        ),
-      }
-      : undefined;
-
     this.loggerLayer = this.options.loggerLayer
-      ?? (loggerOptions
-        ? makeLoggerFromOptions(loggerOptions)
-        : makeLogger());
+      ?? makeLoggerFromOptions(this.resolveLoggerOptions());
 
     // Initialize logger with application class name as context
     const effectLogger = Effect.runSync(
@@ -631,7 +623,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.logger.debug('Tracing options:', this.options.tracing);
 
         const trace = require('@onebun/trace') as typeof import('@onebun/trace');
-        const traceLayer = trace.makeTraceService(this.options.tracing || {});
+        const traceLayer = trace.makeTraceService(this.resolveTracingOptions());
         this.traceService = Effect.runSync(Effect.provide(trace.TraceService, traceLayer));
 
         this.logger.debug('Trace service Effect run successfully');
@@ -663,6 +655,67 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Note: root module creation is deferred to start() to ensure
     // config is fully initialized before services are created.
+  }
+
+  /**
+   * The tracing options actually used, with a default reporter for abandoned span exports.
+   *
+   * An export that fails without a word is how tracing came to deliver nothing for so long, and
+   * the exporter has no logger of its own. Anything the user supplied wins — this only fills the
+   * gap where the alternative is silence.
+   */
+  private resolveTracingOptions(): NonNullable<ApplicationOptions['tracing']> {
+    const tracing = this.options.tracing ?? {};
+
+    if (!tracing.exportOptions?.endpoint || tracing.exportOptions.onExportFailure) {
+      return tracing;
+    }
+
+    return {
+      ...tracing,
+      exportOptions: {
+        ...tracing.exportOptions,
+        onExportFailure: (error: Error, spanCount: number, attempts: number) => {
+          this.logger.warn(
+            `Dropped ${spanCount} span(s) after ${attempts} export attempt(s): ${error.message}`,
+          );
+        },
+      },
+    };
+  }
+
+  /**
+   * The logger options actually used, with the OTLP resource attributes filled in.
+   *
+   * Every path goes through `makeLoggerFromOptions`, including the one where nothing was
+   * configured, because it — and not `makeLogger` — is what reads
+   * `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`. Sending the
+   * no-options case to `makeLogger` meant setting either variable did nothing whatsoever,
+   * which defeats the reason the variables exist: one image promoted from dev to prod with
+   * observability turned on by injection rather than by a code change.
+   */
+  private resolveLoggerOptions(): LoggerOptions | undefined {
+    const configured = this.options.loggerOptions;
+    const otlpEndpoint = resolveOtlpLogEndpoint(configured);
+
+    if (!otlpEndpoint) {
+      return configured;
+    }
+
+    return {
+      ...configured,
+      // Attached on whichever path enabled OTLP, not only the explicit-endpoint one. Records
+      // that arrive with an empty resource cannot be attributed to a service, and telling the
+      // services apart is most of what a log backend is for.
+      otlpResourceAttributes: configured?.otlpResourceAttributes ?? {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'service.name': this.options.tracing?.serviceName
+          ?? process.env.OTEL_SERVICE_NAME
+          ?? DEFAULT_OTLP_SERVICE_NAME,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'service.version': this.options.tracing?.serviceVersion ?? DEFAULT_OTLP_SERVICE_VERSION,
+      },
+    };
   }
 
   /**

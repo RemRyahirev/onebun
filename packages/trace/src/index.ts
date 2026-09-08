@@ -39,7 +39,12 @@ export {
 } from './auto-trace.js';
 
 // OTLP exporter
-export { OtlpFetchSpanExporter, type OtlpExporterOptions } from './otlp-exporter.js';
+export {
+  DEFAULT_RETRY_BUDGET,
+  OtlpExportError,
+  OtlpFetchSpanExporter,
+  type OtlpExporterOptions,
+} from './otlp-exporter.js';
 
 // Core service
 export {

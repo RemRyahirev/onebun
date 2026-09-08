@@ -350,14 +350,50 @@ const app = new OneBunApplication(AppModule, {
       timeout: 10000,    // request timeout (default: 10000ms)
       batchSize: 100,     // spans per batch (default: 100)
       batchTimeout: 5000, // max wait before flush (default: 5000ms)
+      retryAttempts: 3,   // retries after the first attempt (default: 3)
+      retryDelay: 200,    // ms before the first retry, doubling (default: 200ms)
+      retryBudget: 10000, // ceiling on one batch's total export time (default: 10000ms)
     },
   },
 });
 ```
 
-Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format. On application shutdown a
-final flush is attempted — attempted, not guaranteed: nothing retries a failed export, and the batch is
-dropped from the buffer before the send is tried, so an unreachable collector loses it.
+Traces are batched and sent to `{endpoint}/v1/traces` in OTLP JSON format.
+
+### Export Retry
+
+`BatchSpanProcessor` removes a batch from its buffer before handing it to the exporter, so a batch
+the exporter gives up on is gone — there is no queue it returns to. A collector redeploy or a
+network blip would otherwise take every span in flight with it, silently.
+
+So a failed export is retried:
+
+- **Retried:** a transport failure (connection refused, DNS, TLS, the client-side timeout), and the
+  statuses that mean "try again" — 408, 429, 500, 502, 503, 504. A `Retry-After` header from the
+  collector overrides the backoff.
+- **Not retried:** every other status. A 400 means the collector rejected the payload itself and
+  will reject it identically; a 401 or 403 does not become authorized by waiting. Retrying those
+  turns one lost batch into four and blocks the batches behind it.
+- **Bounded:** `retryBudget` caps the total wall time one batch may spend being exported, waits
+  included, and retries never overlap — the exporter holds the one batch it is retrying. This is
+  also what keeps a dead collector from holding shutdown open, since the final flush is an ordinary
+  export under the same budget. Overflow beyond that is dropped by `BatchSpanProcessor`'s own
+  `maxQueueSize`, unchanged.
+
+Set `retryAttempts: 0` for at-most-once delivery.
+
+A batch that is finally abandoned is reported — `OneBunApplication` logs a warning naming the span
+count and the attempt count. The failure itself is an `OtlpExportError` carrying `spanCount` and
+`attempts`, so the size of the hole is available and not only the fact of one. Supply
+`exportOptions.onExportFailure` to route it somewhere else:
+
+<!-- typecheck: skip -->
+```typescript
+onExportFailure: (error, spanCount, attempts) => {
+  metrics.counter('otlp_spans_dropped_total').inc(spanCount);
+  logger.error(`OTLP gave up after ${attempts}: ${error.message}`);
+},
+```
 
 ::: tip What shutdown does to the process-global registration
 OpenTelemetry keeps **one** tracer provider per process, and it refuses a duplicate

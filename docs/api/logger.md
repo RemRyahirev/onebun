@@ -290,15 +290,24 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-When `otlpEndpoint` is set, logs are sent to **both** console and OTLP collector. The `service.name` and `service.version` resource attributes are automatically populated from `tracing` config.
+When `otlpEndpoint` is set, logs are sent to **both** console and OTLP collector. The `service.name` and `service.version` resource attributes are populated from `tracing` config.
 
 ### Environment Variable
 
-OTLP export is also enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set:
+OTLP export is also enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set —
+**with no `loggerOptions` at all**, which is the point: the same image goes to dev, staging and prod
+and observability is switched on by injection rather than by a code change.
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 bun run start
 ```
+
+Priority is `otlpEndpoint` > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+Records exported this way carry the same resource attributes as the explicit path: `service.name`
+from `tracing.serviceName`, then `OTEL_SERVICE_NAME`, then `onebun-service`; `service.version` from
+`tracing.serviceVersion`, then `1.0.0`. A record that arrives with an empty resource cannot be
+attributed to a service, which is most of what a log backend is for.
 
 ### OTLP Format
 
@@ -428,7 +437,9 @@ The `trace` field is automatically injected by the logger when a span is active.
 - `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext, otlpEndpoint, otlpHeaders, otlpBatchSize, otlpBatchTimeout, otlpResourceAttributes }` and creates the appropriate layer
 - When `otlpEndpoint` is set, `makeLoggerFromOptions()` creates a `CompositeTransport` with both `ConsoleTransport` and `OtlpLogTransport`
 - OTLP log transport auto-enables from env: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
-- `shutdownLogger()` flushes pending OTLP batches — called automatically in `app.stop()`
+- `resolveOtlpLogEndpoint(options?)` is that resolution as a function — the application calls it to decide whether to attach resource attributes BEFORE building the logger
+- `OneBunApplication` always builds through `makeLoggerFromOptions()`, including when no `loggerOptions` are given; routing that case to `makeLogger()` is what used to make the env variables inert
+- `shutdownLogger()` flushes every transport built in the process, not only the most recent one — a multi-service application builds one logger per child, and a single active-transport slot dropped all but the last
 - Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
 
 </llm-only>

@@ -342,3 +342,110 @@ describe('sampling', () => {
     expect(recordsSpans(undefined)).toBe(true);
   });
 });
+
+/**
+ * `BatchSpanProcessor` splices a batch out of its buffer before handing it to the exporter, so a
+ * batch given up on is gone — there is no queue it goes back to. These two tests are the whole
+ * argument for retrying at all, and for stopping.
+ */
+describe('export retry through the provider', () => {
+  const RETRY_DELAY = 5;
+  const HTTP_UNAVAILABLE = 503;
+  const FAILING_ATTEMPTS = 2;
+  const SPANS_IN_BATCH = 20;
+
+  afterEach(() => {
+    trace.disable();
+  });
+
+  test('a span survives a collector that is unavailable for its first attempts', async () => {
+    const received: string[] = [];
+    let attempts = 0;
+
+    const collector = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        attempts++;
+        const body = await request.text();
+
+        if (attempts <= FAILING_ATTEMPTS) {
+          return new Response('collector restarting', { status: HTTP_UNAVAILABLE });
+        }
+
+        received.push(body);
+
+        return new Response('{}');
+      },
+    });
+
+    const result = initTracerProvider({
+      serviceName: 'retry-probe',
+      exportOptions: {
+        endpoint: `http://localhost:${collector.port}`,
+        retryDelay: RETRY_DELAY,
+      },
+    });
+
+    try {
+      const span = result.provider.getTracer('probe').startSpan('survives-the-restart');
+      span.end();
+
+      await result.provider.forceFlush();
+
+      expect(attempts).toBe(FAILING_ATTEMPTS + 1);
+      expect(received).toHaveLength(1);
+      // The span itself, not merely a third request: a retry that posts an empty batch would
+      // satisfy the attempt count and deliver nothing.
+      expect(received[0]).toContain('survives-the-restart');
+    } finally {
+      await result.shutdown();
+      collector.stop(true);
+    }
+  });
+
+  test('a permanently dead collector costs a bounded number of attempts and no overlapping sends', async () => {
+    let posts = 0;
+    let inFlight = 0;
+    let maxInFlight = 0;
+
+    const collector = Bun.serve({
+      port: 0,
+      async fetch() {
+        posts++;
+        inFlight++;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await Bun.sleep(RETRY_DELAY);
+        inFlight--;
+
+        return new Response('down', { status: HTTP_UNAVAILABLE });
+      },
+    });
+
+    const result = initTracerProvider({
+      serviceName: 'dead-collector-probe',
+      exportOptions: {
+        endpoint: `http://localhost:${collector.port}`,
+        retryAttempts: FAILING_ATTEMPTS,
+        retryDelay: RETRY_DELAY,
+      },
+    });
+
+    try {
+      const tracer = result.provider.getTracer('probe');
+      for (let i = 0; i < SPANS_IN_BATCH; i++) {
+        tracer.startSpan(`span-${i}`).end();
+      }
+
+      await result.provider.forceFlush().catch(() => undefined);
+
+      // Retries do not multiply into a resend loop: one batch, `retryAttempts` retries, done.
+      expect(posts).toBe(FAILING_ATTEMPTS + 1);
+      // And they never overlap — a retry holds the one batch it is retrying, so a collector
+      // that stays down cannot accumulate concurrent in-flight copies of the backlog.
+      expect(maxInFlight).toBe(1);
+    } finally {
+      await result.shutdown();
+      collector.stop(true);
+    }
+  });
+});

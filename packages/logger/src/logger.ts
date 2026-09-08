@@ -343,20 +343,52 @@ export const createSyncLogger = (
 };
 
 /**
- * Active transport reference for shutdown support
+ * Every transport built here that still has buffered records to flush.
+ *
+ * A set rather than a single reference because one process can hold several loggers — a
+ * multi-service application builds one per child, and a test file builds several. With a single
+ * slot the last one built silently replaced the others: their buffered records were never sent
+ * and their flush timers went on rescheduling themselves forever, because nothing held a
+ * reference that `shutdownLogger()` could reach.
+ *
+ * Only transports that have something to shut down are tracked, so a console-only logger does
+ * not accumulate entries here.
  */
-let activeTransport: LogTransport | null = null;
+const activeTransports = new Set<LogTransport>();
 
 /**
- * Shutdown the active logger transport (flush OTLP batches, etc.)
+ * Shutdown every logger transport built by this module (flush OTLP batches, etc.)
  * Should be called as the very last step in application shutdown.
  */
 export const shutdownLogger = async (): Promise<void> => {
-  if (activeTransport?.shutdown) {
-    await activeTransport.shutdown();
-  }
-  activeTransport = null;
+  const transports = [...activeTransports];
+  activeTransports.clear();
+
+  // One failing flush must not strand the others: a collector that is down is exactly when the
+  // remaining transports most need their chance to drain.
+  await Promise.all(transports.map(async (transport) => {
+    try {
+      await transport.shutdown?.();
+    } catch {
+      // Shutdown is best-effort — there is nowhere left to report a logging failure to.
+    }
+  }));
 };
+
+/**
+ * Resolve the endpoint OTLP log export should use, if any.
+ *
+ * Priority: explicit option > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT`.
+ *
+ * Exported because the caller has to answer "will this logger export?" BEFORE building it — the
+ * resource attributes that identify the service are only worth attaching when it will.
+ *
+ * @see docs:api/logger.md
+ */
+export const resolveOtlpLogEndpoint = (options?: LoggerOptions): string | undefined =>
+  options?.otlpEndpoint
+  || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+  || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
 /**
  * Create a logger layer from LoggerOptions.
@@ -402,9 +434,7 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
   }
 
   // Build transport: Console + optional OTLP
-  const otlpEndpoint = options?.otlpEndpoint
-    || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-    || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const otlpEndpoint = resolveOtlpLogEndpoint(options);
 
   let transport: LogTransport;
 
@@ -417,11 +447,10 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
       resourceAttributes: options?.otlpResourceAttributes,
     });
     transport = new CompositeTransport([new ConsoleTransport(), otlpTransport]);
+    activeTransports.add(transport);
   } else {
     transport = new ConsoleTransport();
   }
-
-  activeTransport = transport;
 
   return Layer.succeed(
     LoggerService,

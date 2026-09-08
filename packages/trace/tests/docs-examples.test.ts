@@ -12,6 +12,7 @@
  */
 
 import { SpanStatusCode as OtelSpanStatusCode, trace as otelTrace } from '@opentelemetry/api';
+import { ExportResultCode } from '@opentelemetry/core';
 import {
   BasicTracerProvider,
   InMemorySpanExporter,
@@ -26,6 +27,7 @@ import {
   mock,
 } from 'bun:test';
 import { Effect } from 'effect';
+
 
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
@@ -673,6 +675,76 @@ describe('OTLP Exporter (docs/api/trace.md)', () => {
       // provider the application configures, so only the key is asserted here).
       const resourceKeys = payload.resourceSpans[0].resource.attributes.map((attr) => attr.key);
       expect(resourceKeys).toContain('service.name');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  /**
+   * docs: "a failed export is retried" — 503 is on the retryable list, 400 is not, and
+   * `onExportFailure` reports what was abandoned.
+   *
+   * @source docs:api/trace.md#export-retry
+   */
+  it('should retry a retryable failure and report the batch it abandons', async () => {
+    const RETRY_DELAY = 1;
+    const HTTP_UNAVAILABLE = 503;
+    const HTTP_BAD_REQUEST = 400;
+    const originalFetch = globalThis.fetch;
+
+    class RetriedService {
+      @Traced('retried.span')
+      async run(): Promise<string> {
+        return 'ok';
+      }
+    }
+
+    await new RetriedService().run();
+    const span = recordedSpan('retried.span');
+
+    try {
+      let call = 0;
+      globalThis.fetch = mock(() => {
+        call++;
+
+        return Promise.resolve(
+          call === 1
+            ? new Response('', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' })
+            : new Response('', { status: HTTP_OK }),
+        );
+      }) as unknown as typeof globalThis.fetch;
+
+      const retrying = new OtlpFetchSpanExporter({
+        endpoint: 'http://collector:4318',
+        retryDelay: RETRY_DELAY,
+      });
+      const recovered = await new Promise<ExportResult>((resolve) => {
+        retrying.export([span], resolve);
+      });
+
+      expect(recovered.code).toBe(ExportResultCode.SUCCESS);
+      expect(call).toBe(2);
+
+      // "Not retried: every other status" — a 400 is rejected identically every time.
+      const rejectingFetch = mock(() =>
+        Promise.resolve(new Response('bad payload', { status: HTTP_BAD_REQUEST, statusText: 'Bad Request' })));
+      globalThis.fetch = rejectingFetch as unknown as typeof globalThis.fetch;
+
+      const abandoned: Array<{ spanCount: number; attempts: number }> = [];
+      const rejecting = new OtlpFetchSpanExporter({
+        endpoint: 'http://collector:4318',
+        retryDelay: RETRY_DELAY,
+        onExportFailure(_error, spanCount, attempts) {
+          abandoned.push({ spanCount, attempts });
+        },
+      });
+      const lost = await new Promise<ExportResult>((resolve) => {
+        rejecting.export([span], resolve);
+      });
+
+      expect(lost.code).toBe(ExportResultCode.FAILED);
+      expect(rejectingFetch).toHaveBeenCalledTimes(1);
+      expect(abandoned).toEqual([{ spanCount: 1, attempts: 1 }]);
     } finally {
       globalThis.fetch = originalFetch;
     }

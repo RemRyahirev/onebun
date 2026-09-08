@@ -485,6 +485,39 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
        * @defaultValue 5000
        */
       batchTimeout?: number;
+
+      /**
+       * Retries after the first attempt when an export fails.
+       *
+       * The batch processor removes a batch from its buffer before handing it over, so a batch
+       * the exporter gives up on is gone. Set to `0` for at-most-once delivery.
+       *
+       * @defaultValue 3
+       */
+      retryAttempts?: number;
+
+      /**
+       * Delay in milliseconds before the first retry; doubles each retry, capped at 5000ms.
+       * A `Retry-After` header from the collector overrides it.
+       *
+       * @defaultValue 200
+       */
+      retryDelay?: number;
+
+      /**
+       * Ceiling on the total wall time one batch may spend being exported, retries included.
+       * This is what keeps a dead collector from holding shutdown open.
+       *
+       * @defaultValue 10000
+       */
+      retryBudget?: number;
+
+      /**
+       * Called once for a batch that was given up on. Defaults to a warning through the
+       * application logger — an export that fails without a word is the defect this exists
+       * to prevent.
+       */
+      onExportFailure?: (error: Error, spanCount: number, attempts: number) => void;
     };
   };
 
