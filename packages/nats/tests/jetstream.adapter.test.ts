@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 422
+// NATS-SUITE-FLOOR: 433
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -2410,6 +2410,32 @@ describe('ensureStream: guards', () => {
     await expect(adapter.connect()).rejects.toThrow(/a\.y/);
     expect(mockJsm.streams.update).not.toHaveBeenCalled();
     expect(mockJsm.streams.add).not.toHaveBeenCalled();
+  });
+
+  it('allows a declaration that covers an existing subject only as a union', async () => {
+    // `orders.*` and `orders.*.>` partition `orders.>` exactly: neither half covers it, together
+    // they cover it with nothing left over. Asking the coverage question per declared subject
+    // answered "narrowing" and refused to boot, naming a subject that would still be stored.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['orders.*', 'orders.*.#'] }],
+    });
+    mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['orders.>'] })));
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('still refuses when the union leaves a hole', async () => {
+    // One token deeper than the declarations reach: `orders.a.b.c` is stored under `orders.>` and
+    // named by neither `orders.*` nor `orders.*.*`.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['orders.*', 'orders.*.*'] }],
+    });
+    mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['orders.>'] })));
+
+    await expect(adapter.connect()).rejects.toThrow(/orders\.>/);
+    expect(mockJsm.streams.update).not.toHaveBeenCalled();
   });
 
   it('rejects a wildcard declaration that narrows a broader wildcard on the server', async () => {

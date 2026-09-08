@@ -59,6 +59,11 @@ import {
 } from './config-stamp';
 import { NatsClient } from './nats-client';
 import { toNatsSubject } from './subject';
+import {
+  natsSubjectCovers,
+  natsSubjectsOverlap,
+  unionCoversSubject,
+} from './subject-match';
 
 const DEFAULT_ACK_WAIT_NANOSECONDS = 30_000_000_000; // 30 seconds in nanoseconds
 /**
@@ -1362,114 +1367,26 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   /**
    * Does `declared` bind every concrete subject `subject` can name?
    *
-   * COVERAGE — asymmetric, and strictly stronger than {@link natsSubjectsOverlap}. This is what
-   * `droppedSubjects` needs: "is a subject the server already holds still bound by what I
-   * declare". Answering overlap there would wave a narrowing declaration through, and the
-   * messages would stop being stored without a word.
-   *
-   * Both sides may carry wildcards, which is the correction. The previous `natsSubjectMatches`
-   * honoured `*` and `>` on the FIRST argument only, so `('orders.*', 'orders.>')` answered true —
-   * false, because `orders.a.b` matches `orders.>` and not `orders.*`. Where the second argument
-   * is wildcard-free this is bit-for-bit the old behaviour.
-   *
-   * Branch order is load-bearing: `s` exhausted before `d[i] === '*'`, `s[j] === '>'` before
-   * `d[i] === '*'`, and `d[i] === '*'` before `s[j] === '*'`.
+   * Coverage, asymmetric, correct on both sides. Lives in `subject-match.ts` with the rest of the
+   * subject algebra and its reasoning; kept as a method because it reads as one at the call sites
+   * and because the tests reach it here.
    *
    * @see docs:api/queue.md
    */
   private natsSubjectCovers(declared: string, subject: string): boolean {
-    const d = declared.split('.');
-    const s = subject.split('.');
-    let i = 0;
-    let j = 0;
-
-    for (;;) {
-      const dDone = i >= d.length;
-      const sDone = j >= s.length;
-
-      if (dDone && sDone) {
-        return true;
-      }
-
-      // `s` reaches deeper than `d` binds.
-      if (dDone) {
-        return false;
-      }
-
-      // `>` absorbs one or more tokens, never zero.
-      if (d[i] === '>') {
-        return !sDone;
-      }
-
-      // `d` still requires tokens that `s` cannot produce.
-      if (sDone) {
-        return false;
-      }
-
-      // `s` permits any depth from here; a single `d` token cannot cover that.
-      if (s[j] === '>') {
-        return false;
-      }
-
-      // `*` covers any single token, `*` included.
-      if (d[i] === '*') {
-        i++;
-        j++;
-        continue;
-      }
-
-      // `s` permits any token here; `d[i]` is one literal.
-      if (s[j] === '*') {
-        return false;
-      }
-
-      if (d[i] !== s[j]) {
-        return false;
-      }
-
-      i++;
-      j++;
-    }
+    return natsSubjectCovers(declared, subject);
   }
 
   /**
    * Is there any concrete subject that both `a` and `b` name?
    *
-   * Symmetric, and strictly weaker than {@link natsSubjectCovers} — coverage implies overlap,
-   * which is what makes consulting coverage first well-founded.
-   *
-   * Kept as a SEPARATE predicate rather than relaxing the coverage one. That is not tidiness: one
-   * `natsSubjectMatches` already served both `droppedSubjects` (which needs coverage) and stream
-   * resolution (which wants overlap), and the mismatch is the defect being closed here. A future
-   * refactor that "notices the duplication" and merges them re-opens it in the reconciler, where
-   * it is silent. The names carry the entire distinction.
+   * Overlap, symmetric, strictly weaker than coverage — deliberately a separate predicate, never
+   * a relaxation of the coverage one. See `subject-match.ts`.
    *
    * @see docs:api/queue.md
    */
   private natsSubjectsOverlap(a: string, b: string): boolean {
-    const left = a.split('.');
-    const right = b.split('.');
-    const common = Math.min(left.length, right.length);
-
-    for (let i = 0; i < common; i++) {
-      const ta = left[i];
-      const tb = right[i];
-
-      // Reaching `i < common` guarantees both sides still hold a token here, so the `>` has at
-      // least one token to absorb and everything beyond it is free on both sides.
-      if (ta === '>' || tb === '>') {
-        return true;
-      }
-
-      if (ta === '*' || tb === '*' || ta === tb) {
-        continue;
-      }
-
-      return false;
-    }
-
-    // No `>` anywhere in the common prefix, so neither side can reach the other's surplus.
-    return left.length === right.length;
+    return natsSubjectsOverlap(a, b);
   }
 
   private async ensureAllStreams(): Promise<void> {
@@ -1629,19 +1546,16 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   }
 
   /**
-   * Existing subjects that no configured subject would still cover.
+   * Existing subjects that the declaration would no longer cover.
    *
-   * Asks the question per declared subject, which is not the same as asking whether the declared
-   * SET still covers `existing`. A declaration of `['orders.*', 'orders.*.>']` covers a
-   * server-held `orders.>` only jointly, and is reported here as a narrowing it is not. Deciding
-   * union coverage is set cover over subject patterns rather than a pairwise predicate; it is
-   * tracked separately. Erring this way keeps the guard sound — it can refuse a safe declaration,
-   * never wave a narrowing one through.
+   * Asks whether the declared SET covers each one, not whether any single declared subject does.
+   * The two differ: `['orders.*', 'orders.*.>']` covers a server-held `orders.>` only jointly —
+   * neither half covers it, together they cover it exactly — and the per-subject question
+   * reported that as a narrowing, refusing to boot while naming a subject that would in fact
+   * still be stored.
    */
   private droppedSubjects(existingSubjects: string[], configured: string[]): string[] {
-    return existingSubjects.filter(
-      existing => !configured.some(pattern => this.natsSubjectCovers(pattern, existing)),
-    );
+    return existingSubjects.filter(existing => !unionCoversSubject(configured, existing));
   }
 
   /** Declared create-only fields whose value differs from the server's. */

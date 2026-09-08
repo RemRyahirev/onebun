@@ -94,6 +94,13 @@ enrols the service in reconciling it:
   `retention` (`streamCreateOnlyMessage`). A reconcile-cycle error means something else entirely:
   two processes writing different configs in alternation inside the cycle window.
 
+The narrowing check asks whether the declared SET still covers each subject the server holds, not
+whether any single declared subject does — `['orders.*', 'orders.*.#']` partitions a server-held
+`orders.>` exactly and must not be refused. It is decided by witness enumeration in
+`packages/nats/src/subject-match.ts` (`unionCoversSubject`), and a declaration pathological enough
+to exceed its witness cap answers "not covered": refusing a safe declaration rather than admitting
+one that silently stops messages being stored.
+
 Drop a catch-all you do not consume from: it makes this service a writer for a stream it has no
 opinion about.
 
