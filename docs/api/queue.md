@@ -226,7 +226,7 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - `NackAwareMessage` is deliberately NOT part of the public `Message` interface. Whether a message was nacked is the adapter's bookkeeping — a handler already knows what it called, and widening `Message` would invite handlers to read the flag back and branch on it
 - Because the check sits inside the `try`, a throw skips it entirely: nack-then-throw carries the THROWN error. The synthesised error carries no `cause`, because the handler never raised one
 - On JetStream the auto-ack is additionally gated: `if (acknowledgesAutomatically(entry.options) && !wasNacked(message))`. That `msg.ack()` is on the raw `JsMsg`, not the wrapper, so it bypasses the wrapper's first-call-wins guard — ungated, it settled a message the handler had just `nak()`ed and cancelled the redelivery
-- Two deliveries emit NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher (it returns before `onMessageReceived`, and no message object is constructed) and one whose payload fails `JSON.parse`. JetStream instead emits `onError` and `term()`s a poison message
+- One delivery emits NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher — it returns before `onMessageReceived`, and no message object is constructed. A payload that fails `JSON.parse` now emits `onError` naming the subject, with the parse failure as `cause`. Core NATS cannot `term()` it, so reporting is the only disposition available; JetStream both reports and `term()`s
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 **Technical details for AI agents — the retry policy under `'auto'`:**
@@ -242,6 +242,10 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - On the terminal delivery a message is dead-lettered at most once. The guard is `metadata['dlq.originalPattern'] !== undefined` on the INCOMING envelope, checked before the republish; the marker shape (`dlq.originalPattern`, `dlq.deliveryCount`, `dlq.error`) matches `JetStreamQueueAdapter.routeToDeadLetter` so both read the same on the consuming side
 - Two call sites reach it and the split is load-bearing: the exhaustion branch in the consume loop under `'auto'`, and `onNack(false)` under `'manual'` only. The `onNack` route is gated on `!acknowledgesAutomatically(entry.options)` because the `'auto'` loop calls `nack(false)` as bookkeeping on EVERY failed attempt — ungated, one message was dead-lettered once per attempt plus once more at exhaustion
 - A failed republish emits `onError` with the rejection as `cause` and does NOT fall back to dropping silently
+- Poll-loop error handling: `drainTopic` REPORTS and returns rather than throwing, so one unreachable topic does not abort the others in a pattern subscription; it sets `entry.drainFailed`, which the poll loop reads through `consumeDrainFailure()` because a reported-and-returned failure is otherwise indistinguishable from an empty queue by control flow. `pollDelay(consecutiveFailures)` is `min(pollInterval * 2^min(n, 6), 1000)`, reset by any successful poll
+- The poll body is wrapped in its own try/catch and invoked as `void poll()`. It is re-scheduled by a bare `setTimeout`, so an escaping rejection would land on the process as an `unhandledRejection` rather than on the adapter as `onError`
+- `emit()` keeps a deliberate swallow — the only one in this adapter. A listener that throws must not abort the listeners after it nor propagate into the delivery path that emitted the event, and re-emitting as `onError` would let a throwing `onError` handler recurse forever. It reports to `console.error` instead, the one place that does not route through the framework, because the framework's reporting channel is what just failed
+- `OneBunApplication.initializeQueue` attaches a default `onError` listener that logs through the application logger. Before it, the only listeners were the application's `@OnQueueError` handlers, so an application without one saw nothing at all
 
 </llm-only>
 
@@ -851,6 +855,17 @@ what finds a backlog that predates the subscription.
 
 Do not publish to the wake channel by hand expecting delivery: the frame is a signal, and the
 message has to be on the list to be taken.
+
+**A failing poll is reported, not swallowed.** A command that cannot reach Redis emits `onError`
+and the poll backs off exponentially from `pollInterval` to a one-second ceiling, resetting on the
+first poll that gets through. Both halves matter: the failure used to be discarded by a bare
+`catch {}`, so an unreachable broker looked exactly like an empty queue — messages sitting in
+Redis, no consumer, no log — and reporting it at the full 100 ms rate would trade that silence for
+ten error events a second per subscription.
+
+The application logs every adapter `onError` through its own logger, so an operator sees it
+without writing an `@OnQueueError` handler. Adding one is still worth it when you want to act on
+the failure rather than read about it.
 
 For delivery that survives the broker itself — persistence, server-tracked redelivery, durable
 consumers — use the NATS/JetStream adapter

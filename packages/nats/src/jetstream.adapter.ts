@@ -953,14 +953,24 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     return `js-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /**
+   * Invoke every listener for an event, isolating each from the others.
+   *
+   * The swallow is deliberate: a listener is application code, and one that throws must not abort
+   * the listeners after it nor propagate into the delivery path that emitted the event. Reporting
+   * it as `onError` would let a throwing `onError` handler recurse forever, so it goes to
+   * `console.error` — the one path here that does not route through the framework, because the
+   * framework's reporting channel is what just failed.
+   */
   private emit<E extends keyof QueueEvents>(event: E, ...args: unknown[]): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
           handler(...args);
-        } catch {
-          // Silently ignore event handler errors
+        } catch (error) {
+          // eslint-disable-next-line no-console -- the framework's own reporting channel is what failed
+          console.error(`[JetStreamQueueAdapter] a "${event}" listener threw`, error);
         }
       }
     }

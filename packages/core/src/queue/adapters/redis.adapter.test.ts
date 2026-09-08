@@ -433,6 +433,104 @@ describe('RedisQueueAdapter', () => {
       }
     }, CONTAINER_TEST_TIMEOUT_MS);
 
+    it('never lets a polling failure become a process-level unhandled rejection', async () => {
+      // The poll loop is invoked without an `await` and re-scheduled by a bare `setTimeout`, so
+      // anything escaping it lands on the process, not on the adapter. An operator got
+      // `[unhandledRejection] ...` instead of the queue error event the adapter defines for it.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        await adapter.subscribe('orders.unhandled', async () => undefined);
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+
+        await waitFor(() => errors.length > 0);
+        // Let several poll cycles run: one escaping rejection anywhere in the loop is enough.
+        await Bun.sleep(600);
+
+        expect(errors.length).toBeGreaterThan(0);
+        expect(unhandled).toEqual([]);
+      } finally {
+        client.lpop = originalLpop;
+        process.off('unhandledRejection', onUnhandled);
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('backs off a repeatedly failing poll instead of retrying at full rate', async () => {
+      // A 100 ms poll against a dead broker is ten connection attempts and ten error events per
+      // second, per subscription — reporting the failure without slowing down turns an outage
+      // into a flood. The backoff is what makes the report survivable.
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        await adapter.subscribe('orders.backoff', async () => undefined);
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+
+        await waitFor(() => errors.length > 0);
+        await Bun.sleep(1000);
+
+        // At the unthrottled 100 ms interval this second would hold ~10 failures. The backoff
+        // doubles from 100 ms to the 1000 ms ceiling, so it holds far fewer.
+        expect(errors.length).toBeLessThan(8);
+      } finally {
+        client.lpop = originalLpop;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('recovers the full poll rate once a poll succeeds again', async () => {
+      // A backoff that never resets is an outage that outlives itself.
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        const received: unknown[] = [];
+        await adapter.subscribe('orders.recover', async (message) => {
+          received.push(message.data);
+        });
+
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+        await waitFor(() => errors.length > 0);
+        await Bun.sleep(400);
+
+        client.lpop = originalLpop;
+        await adapter.publish('orders.recover', { orderId: 1 });
+
+        // Delivered on the normal cadence, not after a backed-off wait.
+        await waitFor(() => received.length > 0, 3000);
+        expect(received).toEqual([{ orderId: 1 }]);
+      } finally {
+        client.lpop = originalLpop;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
     it('republishes an exhausted message to deadLetter.queue, consumable with subscribe()', async () => {
       // The whole point of the change. The old implementation RPUSHed to a per-pattern list that
       // had no reader — no LPOP, no SCAN, no subscription — so a "dead-lettered" message was

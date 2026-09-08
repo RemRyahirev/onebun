@@ -2790,6 +2790,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.logger.warn(`Scheduled job "${jobName}" failed: ${error instanceof Error ? error.message : String(error)}`);
     });
 
+    // An adapter-level failure — an unreachable broker, a rejected command — reaches the
+    // application only through `onError`, and until this was wired the only listeners were the
+    // application's own `@OnQueueError` handlers. An application without one saw nothing at all:
+    // no consumer running, no log line, no clue. Additive — user handlers still fire.
+    this.queueAdapter.on('onError', (error: unknown) => {
+      this.logger.error(
+        `Queue adapter "${this.queueAdapter?.name}" reported an error: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
     // Register handlers from controllers using registerService
     for (const controllerClass of controllers) {
       const instance = this.ensureModule().getControllerInstance?.(controllerClass);

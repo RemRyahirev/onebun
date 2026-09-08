@@ -43,6 +43,16 @@ import { resolveMaxAttempts, retryDelayMs } from '../retry';
 import { QueueScheduler } from '../scheduler';
 
 // ============================================================================
+// Constants
+// ============================================================================
+
+/** Ceiling for the poll backoff, so an outage never stretches recovery past a second. */
+const MAX_POLL_INTERVAL_MS = 1000;
+
+/** Doublings applied before the ceiling takes over; bounds the exponent, not the delay. */
+const MAX_POLL_BACKOFF_DOUBLINGS = 6;
+
+// ============================================================================
 // Types
 // ============================================================================
 
@@ -86,6 +96,14 @@ interface RedisSubscriptionEntry {
   matcher: (topic: string) => QueuePatternMatch;
   paused: boolean;
   consumerGroup?: string;
+  /**
+   * Set by `drainTopic` when a command against Redis fails, read and cleared by the poll loop.
+   *
+   * `drainTopic` reports and returns rather than throwing, because one unreachable topic must
+   * not abort the others in a pattern subscription. That leaves the poll loop unable to
+   * distinguish a failed drain from an empty queue, which is what the backoff needs to know.
+   */
+  drainFailed?: boolean;
 }
 
 // ============================================================================
@@ -539,14 +557,28 @@ export class RedisQueueAdapter implements QueueAdapter {
     return `msg-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /**
+   * Invoke every listener for an event, isolating each from the others.
+   *
+   * The swallow is deliberate and is the one bare catch that stays. A listener is application
+   * code: one that throws must not abort the listeners after it, and must not propagate into
+   * the delivery path that emitted the event — a broken `@OnMessageFailed` handler would
+   * otherwise turn a reported failure into a second, different failure.
+   *
+   * Re-emitting the listener's own error as `onError` would be worse than silence: an `onError`
+   * handler that throws would re-enter this loop with its own throw, forever. So the failure is
+   * reported to `console.error` — the one place in this adapter that does not route through the
+   * framework, precisely because the framework's own reporting channel is what just failed.
+   */
   private emit<E extends keyof QueueEvents>(event: E, ...args: unknown[]): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
           handler(...args);
-        } catch {
-          // Silently ignore event handler errors
+        } catch (error) {
+          // eslint-disable-next-line no-console -- see above: the logger path is the one that failed
+          console.error(`[RedisQueueAdapter] a "${event}" listener threw`, error);
         }
       }
     }
@@ -785,7 +817,9 @@ export class RedisQueueAdapter implements QueueAdapter {
       } catch (error) {
         // Reported, not discarded. This was a bare `catch {}`, so a poll that could not reach
         // Redis looked exactly like an empty queue: messages sat in the list, no consumer ran,
-        // and nothing was logged.
+        // and nothing was logged. The flag lets the poll loop back off — reporting alone turns a
+        // 100 ms poll against a dead broker into ten error events a second.
+        entry.drainFailed = true;
         this.emit('onError', error instanceof Error ? error : new Error(String(error)));
 
         return;
@@ -853,30 +887,80 @@ export class RedisQueueAdapter implements QueueAdapter {
   }
 
   private startQueuePolling(entry: RedisSubscriptionEntry): void {
+    // Consecutive failures for THIS subscription. Reset by the first poll that gets through.
+    let consecutiveFailures = 0;
+
     // Poll the queue for messages published before this subscription existed, and as the
     // fallback path when a pub/sub notification is missed.
     const poll = async () => {
-      // An exact pattern owns exactly one key, so ask for it directly. A pattern subscription has
-      // to discover the topics that exist — SCAN, because this runs every pollInterval.
-      if (isQueuePattern(entry.pattern)) {
-        try {
+      let failed = false;
+
+      try {
+        // An exact pattern owns exactly one key, so ask for it directly. A pattern subscription
+        // has to discover the topics that exist — SCAN, because this runs every pollInterval.
+        if (isQueuePattern(entry.pattern)) {
           for (const topic of await this.scanTopics(entry)) {
             await this.drainTopic(entry, topic);
           }
-        } catch (error) {
-          this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+        } else {
+          await this.drainTopic(entry, entry.pattern);
         }
+
+        failed = this.consumeDrainFailure(entry);
+      } catch (error) {
+        // The whole body is guarded, not just the SCAN. `poll` is invoked without an `await`
+        // below and re-scheduled by a bare `setTimeout`, so anything escaping here becomes a
+        // process-level unhandled rejection rather than a queue error the adapter can report.
+        failed = true;
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+      }
+
+      if (failed) {
+        consecutiveFailures += 1;
       } else {
-        await this.drainTopic(entry, entry.pattern);
+        consecutiveFailures = 0;
       }
 
       // Continue polling
       if (this.running && this.subscriptions.includes(entry)) {
-        setTimeout(poll, this.options.pollInterval);
+        setTimeout(poll, this.pollDelay(consecutiveFailures));
       }
     };
 
-    poll();
+    void poll();
+  }
+
+  /**
+   * Whether the drain just attempted for `entry` reported a failure, clearing the flag.
+   *
+   * `drainTopic` reports its own errors and returns normally, so the poll loop cannot tell a
+   * failed drain from an empty queue by control flow alone — which is exactly how an unreachable
+   * Redis used to look identical to "nothing to do". The flag is how the two are told apart.
+   */
+  private consumeDrainFailure(entry: RedisSubscriptionEntry): boolean {
+    const failed = entry.drainFailed === true;
+    entry.drainFailed = false;
+
+    return failed;
+  }
+
+  /**
+   * How long to wait before the next poll, given consecutive failures.
+   *
+   * A failing poll used to be retried at the full rate — with a 100 ms interval and an
+   * unreachable Redis that is ten connection attempts and ten error events per second, per
+   * subscription. Backing off exponentially to a one-second ceiling keeps the loop alive for the
+   * reconnect without turning an outage into a flood; the ceiling is low enough that recovery is
+   * still prompt, and a single success resets it.
+   */
+  private pollDelay(consecutiveFailures: number): number {
+    if (consecutiveFailures === 0) {
+      return this.options.pollInterval;
+    }
+
+    const backoff = this.options.pollInterval * 2 ** Math.min(consecutiveFailures, MAX_POLL_BACKOFF_DOUBLINGS);
+
+    return Math.min(backoff, MAX_POLL_INTERVAL_MS);
   }
 
   private startDelayedProcessor(): void {
