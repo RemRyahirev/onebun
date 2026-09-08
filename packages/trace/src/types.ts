@@ -1,3 +1,23 @@
+import type { Span as OtelSpan } from '@opentelemetry/api';
+
+/**
+ * Where a `TraceSpan` keeps the OpenTelemetry span it was started from.
+ *
+ * The OTel span used to be created and then dropped, with `endHttpTraceSync` trying to recover it
+ * through `trace.getActiveSpan()` — which is `undefined`, because nothing ever makes the span
+ * active. So `.end()` never ran, `BatchSpanProcessor.onEnd` never fired, and the collector stayed
+ * empty however it was configured. The span object survives the whole request already; carrying
+ * the OTel span on it means ending never depends on ambient state.
+ *
+ * A SYMBOL key, not a field. `JSON.stringify` and `Object.keys` skip own symbol properties, so a
+ * user logging a span cannot serialize the live span graph — which reaches the
+ * `BatchSpanProcessor` and through it the exporter's `Authorization` header. `Symbol.for` matches
+ * this package's existing convention and survives a duplicated copy of the package.
+ *
+ * @see docs:api/trace.md
+ */
+export const OTEL_SPAN: unique symbol = Symbol.for('onebun:trace:otelSpan');
+
 /**
  * Trace context interface
  */
@@ -66,6 +86,15 @@ export interface TraceSpan {
    * Span status
    */
   status: SpanStatus;
+
+  /**
+   * The OpenTelemetry span this was started from, when one was created.
+   *
+   * Present only when an exporter is configured — without one no OTel span is built and the
+   * lightweight path generates ids directly. Cleared once the span has been ended, which is what
+   * makes a second end a no-op rather than a lie.
+   */
+  [OTEL_SPAN]?: OtelSpan;
 }
 
 /**

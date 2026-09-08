@@ -1102,20 +1102,25 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 }
               }
 
-              if (pMark) {
-                profiler!.end(pMark);
-              }
-
-              // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
-              if (profiler && needsQueryParams) {
-                pMark = profiler.start('framework', 'url:parse');
-              }
-              const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
-              if (pMark) {
-                profiler!.end(pMark);
-              }
-
               try {
+                // Inside the try, deliberately. The trace span is created above; everything
+                // between its creation and a `catch` that ends it is a window where a throw
+                // loses the span outright — and `profiler` is a user-supplied object whose
+                // `end()` can throw. It used to sit outside every try that reaches
+                // `endHttpTraceSync`.
+                if (pMark) {
+                  profiler!.end(pMark);
+                }
+
+                // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
+                if (profiler && needsQueryParams) {
+                  pMark = profiler.start('framework', 'url:parse');
+                }
+                const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
+                if (pMark) {
+                  profiler!.end(pMark);
+                }
+
                 let response: Response;
 
                 // Fast path: no params, no response schemas — inline handler call, skip executeHandler entirely

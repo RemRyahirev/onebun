@@ -1,6 +1,11 @@
 import { trace } from '@opentelemetry/api';
 import { resourceFromAttributes } from '@opentelemetry/resources';
-import { BatchSpanProcessor, BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
+import {
+  BasicTracerProvider,
+  BatchSpanProcessor,
+  ParentBasedSampler,
+  TraceIdRatioBasedSampler,
+} from '@opentelemetry/sdk-trace-base';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 
 import type { TraceOptions } from './types.js';
@@ -142,6 +147,17 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
   const provider = new BasicTracerProvider({
     resource,
     spanProcessors,
+    // `samplingRate` used to reach nothing that decides what is exported — it set a traceFlags bit
+    // on OneBun's own record and no more, while the provider sampled everything. That was
+    // invisible only because no span was ever exported. Wiring it here is part of THIS change:
+    // shipping export without it would take a documented `samplingRate: 0.1` and send ten times
+    // the spans the operator asked for, in the same release that made sending work at all.
+    //
+    // `ParentBased` so a sampled incoming trace keeps its children: dropping a child whose parent
+    // was sampled produces a trace with holes, which is worse to read than a trace that is absent.
+    sampler: new ParentBasedSampler({
+      root: new TraceIdRatioBasedSampler(options.samplingRate ?? 1),
+    }),
   });
 
   liveProviders.add(provider);

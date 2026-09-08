@@ -312,6 +312,28 @@ Logs automatically include trace context:
 
 OneBun exports traces via OTLP HTTP using a custom `fetch()`-based exporter (guaranteed Bun compatibility). When `exportOptions.endpoint` is configured, a `BasicTracerProvider` with `BatchSpanProcessor` is automatically registered.
 
+`samplingRate` decides what is exported: it is wired into the provider's sampler, parent-based, so
+a sampled incoming trace keeps its children rather than arriving with holes. Every request still
+gets a trace id for log correlation, whether or not its span is exported.
+
+::: warning Spans arrive flat, not nested
+There is no OpenTelemetry `ContextManager` installed, so `trace.getActiveSpan()` is always
+`undefined` and nothing links one span to another. The HTTP span, each `@Traced` method and each
+auto-traced method arrive at the collector as **separate root spans with different trace ids** —
+you will see them, and you will not see them as one trace.
+
+Nesting needs a context manager, which is a process-global claim with consequences beyond this
+package — an `AsyncLocalStorage` context reaches `setTimeout`, cron ticks and WebSocket callbacks,
+so every scheduled job would otherwise be parented to whichever request happened to start it. That
+is tracked separately rather than folded in here.
+
+Because there is no ambient context to find the span in, a `TraceSpan` carries the OpenTelemetry
+span it was started from under the `OTEL_SPAN` symbol key. Ending therefore depends on the span
+itself rather than on what happens to be active — which is what makes it work at all. Treat the
+field as internal: it is a symbol so that logging a span cannot serialize the exporter's
+credentials along with it.
+:::
+
 ### OTLP Exporter
 
 ```typescript

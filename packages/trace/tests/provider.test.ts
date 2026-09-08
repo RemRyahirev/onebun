@@ -312,3 +312,33 @@ describe('initTracerProvider teardown ownership', () => {
     await foreign.shutdown();
   });
 });
+
+describe('sampling', () => {
+  afterEach(() => {
+    trace.disable();
+  });
+
+  /** What the provider decides, read from the span it produces. */
+  function recordsSpans(samplingRate?: number): boolean {
+    const result = initTracerProvider({ serviceName: 'sampling-probe', samplingRate });
+    const span = result.provider.getTracer('probe').startSpan('s');
+    const recording = span.isRecording();
+    span.end();
+
+    return recording;
+  }
+
+  test('samplingRate reaches the decision about what is exported', () => {
+    // It used to set a traceFlags bit on OneBun's own record and nothing more, while the provider
+    // sampled everything. That was invisible only because no span was ever exported — the moment
+    // export works, a documented `samplingRate: 0.1` would ship ten times what was asked for.
+    expect(recordsSpans(0)).toBe(false);
+    expect(recordsSpans(1)).toBe(true);
+  });
+
+  test('defaults to recording everything when no rate is configured', () => {
+    // The existing teardown tests build providers without a rate and assert `isRecording()`, so
+    // the default has to stay always-on.
+    expect(recordsSpans(undefined)).toBe(true);
+  });
+});

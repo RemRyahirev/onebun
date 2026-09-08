@@ -1,4 +1,10 @@
 /* eslint-disable @typescript-eslint/naming-convention, @typescript-eslint/no-shadow */
+import { trace as otelTrace, SpanStatusCode as OtelSpanStatusCode } from '@opentelemetry/api';
+import {
+  BasicTracerProvider,
+  InMemorySpanExporter,
+  SimpleSpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   test,
@@ -353,5 +359,141 @@ describe('TraceService', () => {
 
       expect(result).toBe('nested-success');
     });
+  });
+});
+
+/**
+ * Spans actually reaching an exporter.
+ *
+ * Every case here installs a FOREIGN provider as the OpenTelemetry global and reads the spans out
+ * of an `InMemorySpanExporter`. No network, and the service's own OTLP processor never sees the
+ * span — which is the point: what is being tested is that the span is ENDED, not that the
+ * exporter works.
+ */
+describe('span export', () => {
+  let spanExporter: InMemorySpanExporter;
+  let provider: BasicTracerProvider;
+
+  beforeEach(() => {
+    // A provider left registered by another file would make this registration a silent no-op.
+    otelTrace.disable();
+    spanExporter = new InMemorySpanExporter();
+    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(spanExporter)] });
+    otelTrace.setGlobalTracerProvider(provider);
+  });
+
+  afterEach(async () => {
+    await provider.shutdown();
+    otelTrace.disable();
+  });
+
+  /** A service that takes the OTel path — `hasExporter` is true — pointed at a port nothing serves. */
+  function exportingService(): TraceServiceImpl {
+    return new TraceServiceImpl({
+      enabled: true,
+      serviceName: 'export-test',
+      exportOptions: { endpoint: 'http://127.0.0.1:1' },
+    });
+  }
+
+  test('ends the HTTP span, so something is actually exported', async () => {
+    // The defect: `startHttpTraceSync` created a real OTel span and kept only its spanContext,
+    // and `endHttpTraceSync` tried to recover it via `trace.getActiveSpan()` — undefined, because
+    // nothing makes the span active. `.end()` never ran, so no processor ever saw it and the
+    // collector stayed empty however it was configured.
+    const service = exportingService();
+
+    const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/x', route: '/x' });
+    service.endHttpTraceSync(span, { statusCode: 200, duration: 12 });
+
+    const finished = spanExporter.getFinishedSpans();
+
+    expect(finished).toHaveLength(1);
+    expect(finished[0].name).toBe('HTTP GET /x');
+
+    await service.shutdown();
+  });
+
+  test('carries the attributes and events the request accumulated', async () => {
+    // `finishOtelSpan` is the single sink, so attributes set at start, attributes set at end, and
+    // events pushed onto the record by the framework all reach OpenTelemetry. The framework
+    // pushes its `error` event straight onto `span.events`, which used to reach nothing.
+    const service = exportingService();
+
+    const span = service.startHttpTraceSync({ method: 'POST', url: 'http://h/orders', route: '/orders' });
+    span.events.push({ name: 'error', timestamp: Date.now(), attributes: { errorType: 'Boom' } });
+    service.endHttpTraceSync(span, { statusCode: 500 });
+
+    const [finished] = spanExporter.getFinishedSpans();
+
+    expect(finished.attributes['http.method']).toBe('POST');
+    expect(finished.attributes['http.route']).toBe('/orders');
+    expect(finished.attributes['http.status_code']).toBe(500);
+    expect(finished.events.map((e) => e.name)).toEqual(['error']);
+    expect(finished.status.code).toBe(OtelSpanStatusCode.ERROR);
+
+    await service.shutdown();
+  });
+
+  test('records the same attributes on the OneBun span and the exported one', async () => {
+    // One accumulator. Writing http.* to OTel at start and to the record separately used to leave
+    // `TraceSpan.attributes` holding only the defaults — a record that claimed less than the span.
+    const service = exportingService();
+
+    const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/y', route: '/y' });
+    service.endHttpTraceSync(span, { statusCode: 204 });
+
+    const [finished] = spanExporter.getFinishedSpans();
+
+    expect(span.attributes['http.route']).toBe('/y');
+    expect(span.attributes['http.status_code']).toBe(204);
+    expect(finished.attributes).toMatchObject(span.attributes);
+
+    await service.shutdown();
+  });
+
+  test('a second end does not export the span twice', async () => {
+    // Ending is idempotent through clearing the carried span. Without that, a duplicate end
+    // exports a second, contradictory copy of the same span id.
+    const service = exportingService();
+
+    const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/z', route: '/z' });
+    service.endHttpTraceSync(span, { statusCode: 200 });
+    service.endHttpTraceSync(span, { statusCode: 500 });
+
+    expect(spanExporter.getFinishedSpans()).toHaveLength(1);
+
+    await service.shutdown();
+  });
+
+  test('exports nothing when no exporter is configured', async () => {
+    // The lightweight path is unchanged: no endpoint means no OTel span, so a stock application
+    // emits exactly what it emits today. The end is a no-op because the SPAN carries no OTel
+    // span — not because the service consults its own configuration at end time.
+    const service = new TraceServiceImpl({ enabled: true, serviceName: 'no-exporter' });
+
+    const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/q', route: '/q' });
+    service.endHttpTraceSync(span, { statusCode: 200 });
+
+    expect(spanExporter.getFinishedSpans()).toHaveLength(0);
+
+    await service.shutdown();
+  });
+});
+
+describe('layer laziness', () => {
+  test('importing the package does not claim the OpenTelemetry global', () => {
+    // `Layer.succeed` evaluates eagerly, so the module-level `traceServiceLive = makeTraceService()`
+    // constructed a service at IMPORT time and registered a provider with no span processors.
+    // The application's own exporter-carrying provider was then refused as a duplicate, silently.
+    otelTrace.disable();
+
+    // Building the layer's argument is what registration used to happen inside.
+    makeTraceService({ serviceName: 'lazy-probe', enabled: true });
+
+    const proxy = otelTrace.getTracerProvider() as { getDelegate?: () => object };
+    const installed = proxy.getDelegate === undefined ? proxy : proxy.getDelegate();
+
+    expect(installed.constructor.name).toBe('NoopTracerProvider');
   });
 });
