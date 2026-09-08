@@ -117,7 +117,7 @@ describe('DrizzleModule', () => {
             database: 'testdb',
             pool: {
               max: 20,
-              min: 5,
+              idleTimeout: 30000,
               timeout: 10000,
             },
           },

@@ -532,6 +532,40 @@ describe('Drizzle API Documentation Examples', () => {
     });
 
     /**
+     * @source docs:api/drizzle.md#postgresql-connection
+     */
+    it('passes every documented pool option to the driver, in milliseconds', async () => {
+      // From docs: "`pool` is accepted alongside either shape, and every option in it reaches
+      // the driver" — max as given, both timeouts in ms, and `timeout` also bounding the probe.
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      await service.initialize({
+        type: DatabaseType.POSTGRESQL,
+        options: {
+          connectionString: 'postgresql://user:password@host:5432/app',
+          pool: {
+            max: 20,
+            idleTimeout: 30000,
+            timeout: 2000,
+          },
+        },
+      });
+
+      const client = service.getPostgreSQLClient();
+      const options = (client as unknown as {
+        options: { max?: number; idleTimeout?: number; connectionTimeout?: number };
+      }).options;
+
+      expect(options.max).toBe(20);
+      expect(options.idleTimeout).toBe(30000);
+      expect(options.connectionTimeout).toBe(2000);
+
+      await service.close();
+    });
+
+    /**
      * @source docs:api/drizzle.md#one-journal-per-migration-set
      */
     it('gives each migration set its own journal, as the docs show', async () => {

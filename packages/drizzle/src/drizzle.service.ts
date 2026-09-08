@@ -53,6 +53,7 @@ import {
   type DrizzleModuleOptions,
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
+  type PostgreSQLPoolOptions,
   type SQLiteConnectionOptions,
 } from './types';
 
@@ -218,8 +219,46 @@ function describeTarget(connection: DatabaseConnectionOptions): string {
 }
 
 /**
+ * A configured pool value the driver can use, or `undefined`.
+ *
+ * Zero and negative numbers are not passed on: to Bun a zero timeout means *no* timeout, so
+ * forwarding `timeout: 0` would turn a misconfiguration into an unbounded connect rather than
+ * the default one.
+ */
+function positiveOrUndefined(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Translate a `pool` block into the options Bun's `SQL` actually takes.
+ *
+ * Bun's timeouts are **seconds** and it accepts fractional values, so the conversion from the
+ * milliseconds this API uses is a plain division with nothing to round away — measured against
+ * a black-holed host, `connectionTimeout: 0.25` failed the connect after 251 ms. Bun normalises
+ * them back to milliseconds on `client.options`, which is what `pool-options.test.ts` asserts.
+ *
+ * `min` has no counterpart and never had one; see {@link PostgreSQLPoolOptions}.
+ */
+function poolDriverOptions(pool: PostgreSQLPoolOptions | undefined): {
+  max?: number;
+  idleTimeout?: number;
+  connectionTimeout?: number;
+} {
+  const max = positiveOrUndefined(pool?.max);
+  const idleTimeoutMs = positiveOrUndefined(pool?.idleTimeout);
+  const connectTimeoutMs = positiveOrUndefined(pool?.timeout);
+
+  return {
+    ...(max === undefined ? {} : { max }),
+    ...(idleTimeoutMs === undefined ? {} : { idleTimeout: idleTimeoutMs / 1000 }),
+    ...(connectTimeoutMs === undefined ? {} : { connectionTimeout: connectTimeoutMs / 1000 }),
+  };
+}
+
+/**
  * The bound for the reachability probe: the timeout the options already carry, or the
- * default. `pool.timeout` is documented as the connection timeout in milliseconds.
+ * default. `pool.timeout` is the connection timeout in milliseconds — the same number the
+ * driver gets as its own `connectionTimeout`, so one setting cannot mean two things.
  */
 function startupProbeTimeoutOf(connection: DatabaseConnectionOptions): number {
   if (connection.type === DatabaseType.POSTGRESQL) {
@@ -1211,9 +1250,11 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       // other service and every report. See the file for the measurements.
       applyBunSqlJsonEncodingFix();
 
-      // Use Bun.SQL - recommended way according to Drizzle docs
-      // Pass connection string directly to drizzle()
-      this.db = drizzlePostgres(connectionUrl);
+      // Bun.SQL, through the config form rather than the bare URL: the URL alone is what made
+      // every `pool.*` option a value the framework accepted and then dropped on the floor.
+      this.db = drizzlePostgres({
+        connection: { url: connectionUrl, ...poolDriverOptions(pgOptions.pool) },
+      });
 
       // Store client reference for closing if needed
       // Drizzle returns database with $client property

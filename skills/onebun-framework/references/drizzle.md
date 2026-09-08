@@ -48,7 +48,7 @@ must see a container that refuses to come up, not one that passes readiness and 
 | Aspect | Behaviour |
 |---|---|
 | Error | `DrizzleStartupError`, carrying `stage` (`'open' \| 'connect' \| 'migrate'`), `target` (password redacted), `waitedMs`, `timeoutMs` |
-| Connect probe bound | `connection.options.pool.timeout` (ms) when set, otherwise 5000 ms |
+| Connect probe bound | `connection.options.pool.timeout` (ms) when set, otherwise 5000 ms — the same number the driver gets as its connect timeout |
 | SQLite | no `connect` stage — opening the file *is* the check |
 | Missing migrations folder | "no migrations", not a failure (`migrationsFolder` defaults to `./drizzle`) |
 
@@ -168,6 +168,35 @@ export default defineConfig({
   dbCredentials: { url: process.env.DB_PATH || './data/app.db' },
 });
 ```
+
+## Connection Pool (PostgreSQL)
+
+`pool` sits next to either connection shape, and every option in it reaches the driver:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.POSTGRESQL,
+    options: {
+      connectionString: process.env.DB_URL!,
+      pool: {
+        max: 20,            // connections the pool may open (driver default: 10)
+        idleTimeout: 30000, // ms an idle connection is kept (default: kept forever)
+        timeout: 2000,      // ms a connect may take (driver default: 30000)
+      },
+    },
+  },
+})
+```
+
+Both timeouts are **milliseconds**; the driver takes seconds and the framework divides on the way through,
+fractions included, so a 250 ms timeout stays 250 ms. `pool.timeout` has exactly one meaning: it bounds the
+driver's connect **and** the startup reachability probe, one number for both. A zero or negative value is
+not forwarded — to the driver a zero timeout means *no* timeout, so it would turn a misconfiguration into an
+unbounded connect.
+
+**There is no `pool.min`.** It was accepted and discarded on every release that had it, because Bun's `SQL`
+opens connections on demand and has no minimum-pool concept. It is now a compile error.
 
 ## Schema Definition
 

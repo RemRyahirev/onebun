@@ -53,20 +53,33 @@ export interface SQLiteConnectionOptions {
  */
 /**
  * Connection pool options, shared by both PostgreSQL connection shapes.
+ *
+ * Every option here reaches the driver. `min` used to sit alongside them and is gone: Bun's
+ * `SQL` opens connections on demand and has no minimum-pool concept, so the option could only
+ * ever be accepted and discarded. An option the framework silently drops is worse than an
+ * absent one, because nothing tells the operator their tuning did nothing.
+ *
+ * @see docs:api/drizzle.md
  */
 export interface PostgreSQLPoolOptions {
   /**
-   * Maximum number of connections in the pool
+   * Maximum number of connections the pool may open. The driver's default is 10.
    */
   max?: number;
 
   /**
-   * Minimum number of connections in the pool
+   * How long an idle connection is kept before the driver closes it, in **milliseconds**.
+   *
+   * Omitted — or 0 — keeps connections indefinitely, which is the driver's default.
    */
-  min?: number;
+  idleTimeout?: number;
 
   /**
-   * Connection timeout in milliseconds
+   * How long establishing a connection may take, in **milliseconds**.
+   *
+   * One number with one meaning, used in two places: it bounds the driver's own connect
+   * attempt, and it bounds the startup reachability probe. Omitted, the driver waits 30 s and
+   * the probe waits 5000 ms.
    */
   timeout?: number;
 }

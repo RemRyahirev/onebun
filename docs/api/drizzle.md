@@ -93,7 +93,43 @@ Options arriving from an untyped source (a JSON config, a cast) are validated at
 accompanied a `connectionString`, or which of the five are missing. Neither case is resolved
 by picking a winner.
 
-`pool` is accepted alongside either shape.
+`pool` is accepted alongside either shape, and every option in it reaches the driver:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.POSTGRESQL,
+    options: {
+      connectionString: 'postgresql://user:password@host:5432/app',
+      pool: {
+        max: 20,            // connections the pool may open (driver default: 10)
+        idleTimeout: 30000, // ms an idle connection is kept (default: kept forever)
+        timeout: 2000,      // ms a connect may take (driver default: 30000)
+      },
+    },
+  },
+})
+```
+
+The block is typed as `PostgreSQLPoolOptions`. Both timeouts are **milliseconds**, like every
+other duration in this framework. The driver takes seconds, so they are divided on the way
+through — it accepts fractional values, so a 250 ms timeout stays 250 ms rather than rounding to
+nothing.
+
+`timeout` has one meaning in both places it is used: it bounds the driver's own connect *and*
+the [startup reachability probe](#startup-contract). It is one number, so the two cannot drift
+apart.
+
+A zero or negative value is **not** forwarded. To the driver a zero timeout means *no* timeout,
+so passing it on would turn a misconfiguration into an unbounded connect; the driver's default
+applies instead.
+
+::: warning `pool.min` is gone
+Bun's `SQL` opens connections on demand and has no minimum-pool concept, so the option was
+accepted and discarded on every release that had it. Delete it from your configuration —
+TypeScript now rejects it, and nothing about your pool changes, because nothing about it ever
+depended on the value.
+:::
 
 ### Global Module (Default Behavior)
 
@@ -524,7 +560,7 @@ await app.start();
 
 The error is a `DrizzleStartupError` carrying `stage` (`'open' | 'connect' | 'migrate'`), `target`, `waitedMs` and `timeoutMs`. **The password is never printed** — not in the error, not in the log line that names the connection.
 
-**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied.
+**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied. That is the same number the driver gets as its own connect timeout — see [`pool`](#postgresql-connection).
 
 **What does not fail.** An application that configures no database at all is untouched: no connection is opened and nothing is checked. A missing migrations folder is *no migrations*, not a failure — `migrationsFolder` defaults to `./drizzle`, and an application that has never generated a migration starts normally.
 
@@ -551,6 +587,7 @@ On the environment path the same switch is `DB_ALLOW_DEGRADED_START=true` (with 
 - PostgreSQL: `drizzle(url)` from `drizzle-orm/bun-sql` is lazy — no socket is opened until the first query — so the probe is what makes an unreachable server visible at boot
 - SQLite: `SQLITE_CANTOPEN` covers both "the directory does not exist" and "the directory is there and unwritable"; the service asks the file system directly and says which one. A write pragma against a read-only database fails after a successful open and is reported as the pragma it was
 - The bound comes from `connection.options.pool.timeout` (ms) or `DEFAULT_STARTUP_PROBE_TIMEOUT_MS` (5000). On timeout the in-flight query is left settled with a no-op catch, so it cannot surface as an unhandled rejection
+- The same `pool.timeout` also becomes the driver's `connectionTimeout` via `poolDriverOptions()`, so the probe cannot outlive the connect it is probing. The probe default (5000 ms) and the driver default (30000 ms) differ only when neither is configured
 - On the fatal path the service closes whatever it opened before rethrowing, so a refused boot leaves no socket or file handle behind
 - `allowDegradedStart` is read from module options on the `forRoot()` path and from `<PREFIX>_ALLOW_DEGRADED_START` on the environment path. The variable is read straight from `process.env` rather than through the env schema, so it still works when parsing the rest of the configuration is what failed
 </llm-only>
