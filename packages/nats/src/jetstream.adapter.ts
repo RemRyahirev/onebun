@@ -487,6 +487,7 @@ interface ResolvedStream extends StreamDefinition {
 class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -513,6 +514,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
@@ -523,6 +525,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -1928,6 +1931,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         const message = new JetStreamMessage(
           id,
           messagePattern,
+          // The consumer's `filter_subject` is the WIDENED subject — `{id}` binds `*` — so
+          // the values come from the in-process match that just narrowed it back, at line
+          // `entry.matcher(...)` above.
+          match.params,
           messageData.data,
           messageData.timestamp || Date.now(),
           metadata,

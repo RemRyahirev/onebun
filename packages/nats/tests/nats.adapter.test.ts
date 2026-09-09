@@ -221,6 +221,69 @@ describe('NatsQueueAdapter', () => {
     });
   });
 
+  describe('captured pattern parameters', () => {
+    /**
+     * Same shape as the disposition tests above: `processMessage` is the whole delivery path
+     * once a frame has arrived, and what is under test is entirely local. NATS widens `{id}`
+     * to `*` on the wire, so the broker captures nothing — the values can only come from the
+     * in-process match that narrows the subject back.
+     */
+    async function deliverTo(pattern: string, subject: string): Promise<Message | null> {
+      let received: Message | null = null;
+
+      const entry = {
+        pattern,
+        async handler(message: Message) {
+          received = message;
+        },
+        options: undefined,
+        matcher: createQueuePatternMatcher(pattern),
+        paused: false,
+        ackMode: resolveAckMode(undefined),
+      };
+      const natsMsg = {
+        subject,
+        data: JSON.stringify({
+          id: 'msg-1',
+          pattern: subject,
+          data: { n: 1 },
+          timestamp: 1,
+          metadata: {},
+        }),
+      };
+
+      await asAny(adapter).processMessage(entry, natsMsg);
+
+      return received;
+    }
+
+    it('hands the handler the value its {name} captured', async () => {
+      const message = await deliverTo('orders.{id}', 'orders.123');
+
+      expect(message?.params).toEqual({ id: '123' });
+      expect(message?.pattern).toBe('orders.123');
+    });
+
+    it('captures every parameter of a multi-parameter pattern', async () => {
+      const message = await deliverTo('orders.{id}.items.{itemId}', 'orders.42.items.abc');
+
+      expect(message?.params).toEqual({ id: '42', itemId: 'abc' });
+    });
+
+    it('answers with an empty object for a pattern that captures nothing', async () => {
+      expect((await deliverTo('orders.*', 'orders.created'))?.params).toEqual({});
+      expect((await deliverTo('events.#', 'events.user.signed'))?.params).toEqual({});
+      expect((await deliverTo('orders.created', 'orders.created'))?.params).toEqual({});
+    });
+
+    it('does not put the captured values on the wire as metadata', async () => {
+      // They are a function of the SUBSCRIBER's pattern, so the envelope never carries them.
+      const message = await deliverTo('orders.{id}', 'orders.9');
+
+      expect(Object.keys(message?.metadata ?? {})).not.toContain('params');
+    });
+  });
+
   describe('event handlers', () => {
     it('should register and unregister event handlers', () => {
       // eslint-disable-next-line @typescript-eslint/no-empty-function

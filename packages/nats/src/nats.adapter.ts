@@ -47,6 +47,7 @@ import { toNatsSubject } from './subject';
 class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -60,12 +61,14 @@ class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -450,6 +453,9 @@ export class NatsQueueAdapter implements QueueAdapter {
       const message = new NatsQueueMessage(
         messageData.id || this.generateMessageId(),
         messageData.pattern || natsMsg.subject,
+        // `{id}` widened to `*` on the wire, so the broker cannot capture anything — the
+        // values come from the in-process match that just narrowed the subject back.
+        match.params,
         messageData.data,
         messageData.timestamp || Date.now(),
         messageData.metadata || {},

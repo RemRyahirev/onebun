@@ -130,6 +130,148 @@ describe('InMemoryQueueAdapter', () => {
     });
   });
 
+  describe('captured pattern parameters', () => {
+    it('hands the handler the value its {name} captured', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.123', { total: 10 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].params).toEqual({ id: '123' });
+      // The pattern stays the DELIVERED topic; the captured values are the new information.
+      expect(received[0].pattern).toBe('orders.123');
+    });
+
+    it('captures every parameter of a multi-parameter pattern, in the right order', async () => {
+      // A single-parameter case passes on a coincidence — one captured group cannot be
+      // mismatched with another, and a regex that captured the wrong segment would still
+      // produce something. Two parameters at different depths cannot.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}.items.{itemId}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.42.items.abc', { qty: 1 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].params).toEqual({ id: '42', itemId: 'abc' });
+    });
+
+    it('gives each subscription its own values for one published topic', async () => {
+      // Params are a function of the SUBSCRIBER's pattern, not of the publish. One topic
+      // reaching two patterns must not give both the same object, or the second handler
+      // reads the first one's capture.
+      await adapter.connect();
+
+      const byName: Record<string, Record<string, string>> = {};
+      await adapter.subscribe('orders.{id}', async (message) => {
+        byName.single = message.params;
+      });
+      await adapter.subscribe('orders.{orderId}', async (message) => {
+        byName.renamed = message.params;
+      });
+      await adapter.subscribe('orders.*', async (message) => {
+        byName.wildcard = message.params;
+      });
+
+      await adapter.publish('orders.777', { total: 1 });
+
+      expect(byName.single).toEqual({ id: '777' });
+      expect(byName.renamed).toEqual({ orderId: '777' });
+      // A `*` captures nothing, and answers with an object rather than undefined.
+      expect(byName.wildcard).toEqual({});
+    });
+
+    it('answers with an empty object for a pattern that captures nothing', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push(message);
+      });
+      await adapter.subscribe('events.#', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.created', { a: 1 });
+      await adapter.publish('events.user.signed.up', { b: 2 });
+
+      expect(received).toHaveLength(2);
+      // Never undefined: a handler reads `message.params.x` without guarding the access.
+      expect(received[0].params).toEqual({});
+      expect(received[1].params).toEqual({});
+    });
+
+    it('carries the same values into every retry of a failed delivery', async () => {
+      await adapter.connect();
+
+      const seen: Array<Record<string, string>> = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        seen.push(message.params);
+
+        if (seen.length < 3) {
+          throw new Error('not yet');
+        }
+      }, { retry: { attempts: 3, delay: 0 } });
+
+      await adapter.publish('orders.555', { total: 1 });
+
+      expect(seen).toEqual([{ id: '555' }, { id: '555' }, { id: '555' }]);
+    });
+
+    it('gives two subscriptions distinct objects, and one delivery one object across retries', async () => {
+      // The documented ownership rule, as identity rather than as equal values: a handler that
+      // mutates `params` can only affect its own next attempt, never another subscription.
+      await adapter.connect();
+
+      const first: Array<Record<string, string>> = [];
+      const second: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        first.push(message.params);
+
+        if (first.length < 2) {
+          throw new Error('retry me');
+        }
+      }, { retry: { attempts: 2, delay: 0 } });
+
+      await adapter.subscribe('orders.{orderId}', async (message) => {
+        second.push(message.params);
+      });
+
+      await adapter.publish('orders.5', { total: 1 });
+
+      // Same delivery, two attempts: one object.
+      expect(first).toHaveLength(2);
+      expect(first[0]).toBe(first[1]);
+      // Different subscription: a different object, and different names.
+      expect(second[0]).not.toBe(first[0]);
+      expect(second[0]).toEqual({ orderId: '5' });
+    });
+
+    it('does not put the captured values on the wire as metadata', async () => {
+      // They are derived per subscription, so a publisher never sends them and a
+      // metadata key of the same name is the publisher's own.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.9', { total: 1 });
+
+      expect(Object.keys(received[0].metadata)).not.toContain('params');
+    });
+  });
+
   describe('delayed messages', () => {
     let advanceTime: (ms: number) => void;
     let restore: () => void;

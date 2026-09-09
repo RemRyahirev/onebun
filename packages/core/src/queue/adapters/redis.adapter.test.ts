@@ -250,9 +250,11 @@ describe('RedisQueueAdapter', () => {
 
     it('delivers to a {param} subscription, carrying the concrete topic', async () => {
       const seen: string[] = [];
+      const captured: Array<Record<string, string>> = [];
 
       await adapter.subscribe('orders.{id}', async (message) => {
         seen.push(message.pattern);
+        captured.push(message.params);
       });
 
       await adapter.publish('orders.123', { total: 10 });
@@ -264,9 +266,41 @@ describe('RedisQueueAdapter', () => {
       // literal key `queue:q:orders.{id}` — names nothing ever writes to — so it was silently dead.
       expect(seen).toEqual(['orders.123']);
 
-      // The captured `{id}` value is NOT asserted here because no adapter exposes it: the matcher
-      // computes `match.params` and every adapter discards it. Tracked separately — pinning a
-      // value the framework never delivers would be a test of nothing.
+      // And the captured value reaches the handler. It is derived from the delivered topic on
+      // this side of the wire — the envelope carries the topic, never the captures, so a
+      // requeued message cannot deliver another subscription's values.
+      expect(captured).toEqual([{ id: '123' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('captures every parameter of a multi-parameter pattern', async () => {
+      // One parameter can be right by coincidence — a regex capturing the wrong segment still
+      // produces something. Two at different depths cannot.
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}.items.{itemId}', async (message) => {
+        captured.push(message.params);
+      });
+
+      await adapter.publish('orders.42.items.abc', { qty: 1 });
+
+      await waitFor(() => captured.length > 0);
+
+      expect(captured).toEqual([{ id: '42', itemId: 'abc' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('answers with an empty object for a pattern that captures nothing', async () => {
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('events.*', async (message) => {
+        captured.push(message.params);
+      });
+
+      await adapter.publish('events.created', { a: 1 });
+
+      await waitFor(() => captured.length > 0);
+
+      // Never undefined, so a handler reads `message.params.x` without guarding the access.
+      expect(captured[0]).toEqual({});
     }, CONTAINER_TEST_TIMEOUT_MS);
 
     it('matches * for one token only, not for a deeper topic', async () => {

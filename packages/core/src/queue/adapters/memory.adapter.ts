@@ -59,6 +59,7 @@ interface DelayedMessage {
 class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -74,6 +75,7 @@ class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     metadata: MessageMetadata,
     options?: {
@@ -86,6 +88,7 @@ class InMemoryMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = Date.now();
     this.metadata = metadata;
@@ -415,7 +418,10 @@ export class InMemoryQueueAdapter implements QueueAdapter {
         continue;
       }
 
-      await this.deliver(entry, pattern, data, messageId, fullMetadata, 1);
+      // The values this SUBSCRIPTION captured from this topic. Computed here, once, and
+      // carried through every retry: the same entry matching the same topic captures the same
+      // values, and a second subscription with a different pattern gets its own.
+      await this.deliver(entry, pattern, match.params, data, messageId, fullMetadata, 1);
     }
   }
 
@@ -429,6 +435,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   private async deliver<T>(
     entry: SubscriptionEntry,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     messageId: string,
     metadata: MessageMetadata,
@@ -436,7 +443,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   ): Promise<void> {
     const maxAttempts = resolveMaxAttempts(entry.options?.retry);
 
-    const message = new InMemoryMessage<T>(messageId, pattern, data, metadata, {
+    const message = new InMemoryMessage<T>(messageId, pattern, params, data, metadata, {
       // Delivery bookkeeping is meaningless under 'none' — nothing tracks delivery, so there is
       // no attempt to number. Reporting `attempt: 1` there would suggest a counter that is not
       // running; the documented contract is that these three fields go inert with the mode.
@@ -450,7 +457,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
           // Uncapped, and deliberately so: `nack(true)` is the handler's own instruction, not
           // the framework's policy. `Message.attempt` is what lets a handler stop itself.
           setImmediate(() => {
-            void this.deliver(entry, pattern, data, messageId, metadata, attempt + 1);
+            void this.deliver(entry, pattern, params, data, messageId, metadata, attempt + 1);
           });
         }
       },
@@ -496,7 +503,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
       }
 
       await this.sleep(retryDelayMs(entry.options?.retry, attempt));
-      await this.deliver(entry, pattern, data, messageId, metadata, attempt + 1);
+      await this.deliver(entry, pattern, params, data, messageId, metadata, attempt + 1);
     }
   }
 

@@ -8786,6 +8786,7 @@ describe('docs/api/guards.md', () => {
     const message = {
       id: 'm1',
       pattern: 'orders.created',
+      params: {},
       data: {},
       timestamp: 0,
       // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -8809,6 +8810,7 @@ describe('docs/api/guards.md', () => {
     const message = {
       id: 'm2',
       pattern: 'orders.created',
+      params: {},
       data: {},
       timestamp: 0,
       metadata: { authorization: 'Bearer token' },

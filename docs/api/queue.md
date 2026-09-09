@@ -339,11 +339,32 @@ async handleOrder(message: Message<OrderData>) {
 | `events.#` | `events.user.created`, `events.order.paid` | Multi-level wildcard | `events.>` | `events.*` |
 | `orders.{id}` | `orders.123` → `{ id: '123' }` | Named parameter | `orders.*` | `orders.*` |
 
-::: warning A captured `{name}` value is not handed to the handler
-The pattern matcher does capture it, but no adapter passes it on. A handler subscribed to
-`orders.{id}` receives `message.pattern === 'orders.123'` and has to parse the value out itself.
-`{name}` is, for now, a single-token wildcard that documents its own meaning.
-:::
+A captured value is read from `message.params`, on every adapter:
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  Subscribe,
+  type Message,
+} from '@onebun/core';
+
+// A controller, not a provider: queue handlers are only discovered in a module's
+// `controllers` array — see "Registering Controllers with Queue Decorators".
+@Controller('/orders')
+export class OrderConsumer extends BaseController {
+  @Subscribe('orders.{id}.{event}')
+  async handle(message: Message<{ total: number }>): Promise<void> {
+    // Delivered `orders.123.created`:
+    message.params.id;      // '123'
+    message.params.event;   // 'created'
+    message.pattern;        // 'orders.123.created' — the topic as delivered
+  }
+}
+```
+
+`{name}` matches exactly one token, like `*`; the difference is that it also names what it
+matched. A pattern with no `{name}` gives `params === {}` rather than `undefined`.
 
 The **NATS subject** column applies to the `NatsQueueAdapter` and `JetStreamQueueAdapter`
 only. NATS has no equivalent of a named parameter, so `{name}` widens to `*` on the wire
@@ -375,7 +396,9 @@ otherwise.
 - `toRedisQueueGlob` in `packages/core/src/queue/redis-glob.ts` is the Redis-side sibling, exported from `packages/core/src/queue/index.ts`. Same rule, different output: `{name}` and a trailing `#` both become `*`, and a non-final `#` throws. Its call sites are `RedisQueueAdapter.subscribe` (eager, so a bad pattern throws at the subscribe call) and `scanTopics` (the `SCAN … MATCH` argument)
 - Redis queue keys: queue:q:\<topic\> per topic plus one fixed wake channel — `queue:wake`, whose frames carry the topic name. There is no channel per topic: a pattern subscription cannot know its topics in advance, and Bun's client offers no usable `psubscribe`
 - Pattern backlog keys are resolved with SCAN, never KEYS — the scan runs once per poll interval per pattern subscription, and `KEYS` blocks the server for the whole keyspace walk
-- The captured parameters of a `{name}` pattern are computed as `entry.matcher(topic).params` and then discarded by every adapter. Nothing in `Message` or `MessageMetadata` carries them
+- The captured parameters of a `{name}` pattern are `entry.matcher(topic).params`, and all four adapters put that same object on `Message.params` at the single point where each builds its message — `InMemoryQueueAdapter.deliver`, `RedisQueueAdapter.processMessage`, `NatsQueueAdapter.processMessage` and the `JetStreamQueueAdapter` consume loop. The match is already computed there for the `matched` check, so it costs nothing extra
+- `params` is deliberately NOT in `MessageMetadata` and NOT in the wire envelope. Three reasons, each independently sufficient: `PublishOptions.metadata` would let a publisher forge it; the Redis retry path copies the envelope verbatim (`{ ...messageData, attempt }`), so a receiver-written key would be persisted and then handed to whichever subscription claims the message next — possibly one with a different pattern; and `InMemoryQueueAdapter.dispatch` builds `fullMetadata` once per publish and aliases it into every matching subscription's message, so two patterns would clobber each other's captures
+- The in-memory adapter is the only one where the match and the construction are in different stack frames, so `deliver()` takes `params` positionally. It self-re-enters on the `nack(true)` requeue and on the retry tail, and each re-entry builds a fresh message — a required parameter is what makes a missed call site a compile error rather than a silent `undefined`
 
 </llm-only>
 
@@ -496,7 +519,8 @@ would otherwise resurrect a message in the one mode that promises a single deliv
 ```typescript
 interface Message<T> {
   id: string;              // Unique message ID
-  pattern: string;         // Message pattern/topic
+  pattern: string;         // Message pattern/topic — the topic as DELIVERED
+  params: Record<string, string>; // Values captured by the pattern's {name} parameters; {} when none
   data: T;                 // Message payload
   timestamp: number;       // Unix timestamp in ms
   metadata: MessageMetadata;
@@ -517,6 +541,23 @@ interface MessageMetadata {
   parentSpanId?: string;
 }
 ```
+
+`params` carries what the **subscriber's** pattern captured from the delivered topic:
+`@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
+
+It is always an object — `{}` for an exact pattern and for a `*` or `#` wildcard — so a handler
+never guards the access. It is captured **per subscription, not per publish**: one topic
+reaching two subscriptions with different patterns gives each handler its own values, in its
+own object, and it is therefore not part of the published envelope and does not travel over
+the wire. A `metadata` key of the same name would be the publisher's, and would be wrong for
+exactly that reason.
+
+Treat it as read-only: one object is captured per delivery and reused across every retry of
+that delivery, so mutating it changes what the next attempt of the same delivery sees.
+
+A `@Cron`, `@Interval` or `@Timeout` method receives no message at all — it is the data
+*provider*, and what it returns is published to the job's pattern. A `@Subscribe` handler
+matching that pattern captures from it like any other.
 
 `nack(true)` asks for the message to be delivered again. `nack(false)` — and the bare `nack()`,
 since `requeue` defaults to `false` — says the opposite: do not deliver this message again.
@@ -843,8 +884,10 @@ that exists to not lose it.
 ::: tip How delivery works
 Delivery is **list-based**. A message is pushed onto a Redis list keyed by its topic, and a
 **wake-up** frame naming that topic is published on one shared channel. The list is the only
-delivery path: a consumer claims a message with an atomic `LPOP`, so two replicas subscribed to
-the same pattern **compete rather than both receive** it. The channel carries no payload — it only
+delivery path: a consumer claims a message with an atomic `LPOP`, so two subscriptions that
+both match a topic **compete rather than both receive** it — whether they are two replicas on
+one pattern or two different patterns in one process. Per-subscription `params` do not change
+that: only the subscription that wins the claim gets the message, and it gets its own captures. The channel carries no payload — it only
 wakes the drain, which is why a message published while nothing was subscribed is still delivered
 when a subscriber starts.
 

@@ -63,6 +63,8 @@ export interface MessageMetadata {
 
 /**
  * Queue message interface
+ *
+ * @see docs:api/queue.md
  */
 export interface Message<T = unknown> {
   /** Unique message ID */
@@ -70,6 +72,24 @@ export interface Message<T = unknown> {
 
   /** Message pattern/topic */
   pattern: string;
+
+  /**
+   * Values captured by the `{name}` parameters of the pattern this handler subscribed with.
+   *
+   * `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
+   * Always an object — `{}` for a pattern with no named parameters, and for a `*` or `#`
+   * wildcard — so a handler never has to guard the access itself.
+   *
+   * Captured **per subscription**, not per publish: one topic delivered to two subscriptions
+   * with different patterns gives each handler its own values, in its own object. It is
+   * therefore not part of the published envelope and does not travel over the wire — a value
+   * in `metadata` would.
+   *
+   * **Treat it as read-only.** One object is captured per delivery and reused across every
+   * retry of that delivery, so a handler that mutates it changes what its own next attempt
+   * sees. Nothing else can observe the mutation: a second subscription has its own object.
+   */
+  params: Record<string, string>;
 
   /** Message payload */
   data: T;

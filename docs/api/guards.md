@@ -313,7 +313,7 @@ class TenantActiveGuard implements Guard {
 | `ctx.type` | `'http'` | `'ws'` | `'queue'` |
 | Payload | `getRequest(): OneBunRequest` | `getData<T>()`, `getSocket()` | `getMessage<T>()` |
 | Identity | request headers / cookies | `getClient()` — `auth`, `rooms`, `metadata` | `getMetadata()` — `authorization`, `serviceId`, `headers`, `traceId` |
-| Routing | `getHandler()`, `getController()` — strings | `getHandler()` — handler metadata, `getPatternParams()` | `getPattern()`, `getHandler()`, `getClass()` |
+| Routing | `getHandler()`, `getController()` — strings | `getHandler()` — handler metadata, `getPatternParams()` | `getPattern()` — the SUBSCRIPTION pattern, `getHandler()`, `getClass()`; the captured values are on the message, `getMessage().params` |
 
 A guard written for one transport must **deny** on the others, not fall through. Every built-in leaf guard already does: `@UseGuards(AuthGuard)` on a `@Subscribe` handler denies every message rather than reading `getRequest()` off a context that has none. So do the guards produced by `createHttpGuard()`, `createGuard()` (WebSocket) and `createMessageGuard()` (queue).
 

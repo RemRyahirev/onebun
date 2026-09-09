@@ -215,7 +215,10 @@ export function isQueuePattern(value: string): boolean {
 }
 
 /**
- * Extract parameter names from a pattern
+ * Extract parameter NAMES from a pattern — `'orders.{id}'` gives `['id']`.
+ *
+ * Not the captured values: those come from matching a topic, and a handler reads them from
+ * `Message.params`. This answers what a pattern declares, without a topic to match against.
  */
 export function getQueuePatternParams(pattern: string): string[] {
   const params: string[] = [];

@@ -1126,11 +1126,62 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(() => toRedisQueueGlob('events.#.created')).toThrow(/final token/i);
   });
 
-  it('does not hand the captured {name} value to the handler', async () => {
-    // The warning under the table. The matcher captures it...
-    expect(matchQueuePattern('orders.{id}', 'orders.123').params).toEqual({ id: '123' });
+  it('hands the captured {name} values to the handler as message.params', async () => {
+    // The worked example under the table, run: `orders.{id}.{event}` delivered
+    // `orders.123.created` gives `params.id === '123'` and `params.event === 'created'`.
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
 
-    // ...and the adapter delivers a message that carries no trace of it.
+    const delivered: Array<Message<unknown>> = [];
+    await adapter.subscribe('orders.{id}.{event}', async (message) => {
+      delivered.push(message);
+    });
+
+    await adapter.publish('orders.123.created', { total: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await adapter.disconnect();
+
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.params).toEqual({ id: '123', event: 'created' });
+    // "the topic as delivered" — the pattern field is unchanged by the capture.
+    expect(delivered[0]!.pattern).toBe('orders.123.created');
+    // "A pattern with no {name} gives params === {} rather than undefined."
+    expect(matchQueuePattern('orders.*', 'orders.created').params).toEqual({});
+  });
+
+  it('reaches a @Subscribe handler on a controller, through QueueService', async () => {
+    // The surface the docs actually show. The adapter tests above drive delivery directly;
+    // this one goes the whole way — decorator metadata, registerService, the guard and
+    // interceptor wrapping in QueueService — because that chain forwards the message by
+    // reference and a field added to it is exactly the kind of thing a re-wrap would drop.
+    class OrderConsumer {
+      readonly seen: Array<Record<string, string>> = [];
+
+      @Subscribe('orders.{id}.{event}')
+      async handle(message: Message<{ total: number }>): Promise<void> {
+        this.seen.push(message.params);
+      }
+    }
+
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new OrderConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, OrderConsumer);
+
+    await adapter.publish('orders.123.created', { total: 10 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen).toEqual([{ id: '123', event: 'created' }]);
+  });
+
+  it('keeps the captured values off the wire, where a metadata key would sit', async () => {
+    // "It is therefore not part of the published envelope and does not travel over the wire —
+    // a value in `metadata` would."
     const adapter = new InMemoryQueueAdapter();
     await adapter.connect();
 
@@ -1143,8 +1194,7 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await adapter.disconnect();
 
-    expect(delivered).toHaveLength(1);
-    expect(delivered[0]!.pattern).toBe('orders.123');
+    expect(delivered[0]!.params).toEqual({ id: '123' });
     expect(Object.keys(delivered[0]!.metadata ?? {})).not.toContain('params');
   });
 });

@@ -79,6 +79,7 @@ function makeQueueMessage(metadata: Message['metadata'] = {}): Message<{ orderId
   return {
     id: 'msg-1',
     pattern: 'orders.created',
+    params: {},
     data: { orderId: 'o-1' },
     timestamp: 0,
     metadata,

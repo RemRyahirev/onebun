@@ -986,6 +986,7 @@ function documentedMessage<T>(data: T) {
   const message = {
     id: 'order-1',
     pattern: 'orders.created',
+    params: {},
     data,
     timestamp: Date.now(),
     redelivered: false,

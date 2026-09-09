@@ -105,6 +105,7 @@ describe('docs/api/interceptors.md — Interface', () => {
   const makeMessage = (pattern: string, data: unknown): Message => ({
     id: 'msg-1',
     pattern,
+    params: {},
     data,
     timestamp: 1_700_000_000_000,
     metadata: { serviceId: 'orders-service' } as MessageMetadata,

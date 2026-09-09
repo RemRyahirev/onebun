@@ -117,6 +117,7 @@ interface RedisSubscriptionEntry {
 class RedisMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -132,6 +133,7 @@ class RedisMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
@@ -145,6 +147,7 @@ class RedisMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -605,6 +608,10 @@ export class RedisQueueAdapter implements QueueAdapter {
     const message = new RedisMessage(
       messageData.id,
       messageData.pattern,
+      // What THIS subscription's pattern captured from the delivered topic. The envelope
+      // carries the topic; the values are a function of the subscriber's pattern, so they are
+      // derived here rather than transported.
+      match.params,
       messageData.data,
       messageData.timestamp,
       messageData.metadata ?? {},
@@ -834,6 +841,11 @@ export class RedisQueueAdapter implements QueueAdapter {
       }
 
       try {
+        // `topic` — the key this LPOP claimed from — is deliberately not passed on. The
+        // envelope's own `pattern` is the authoritative delivered topic: it is what the
+        // publisher wrote, it is what a requeue copies verbatim, and it is what
+        // `processMessage` captures `Message.params` from. Threading `topic` in as well would
+        // create two candidate topics and a way for the captures to come from the wrong one.
         await this.processMessage(entry, JSON.parse(result));
       } catch (error) {
         // The message is already claimed at this point, so a handler failure must not stop the

@@ -33,7 +33,8 @@ boot when the broker is unreachable, where it previously started fine and discar
 ```typescript
 interface Message<T> {
   id: string;                    // unique message ID
-  pattern: string;               // message topic/pattern
+  pattern: string;               // message topic as DELIVERED
+  params: Record<string, string>; // values captured by the pattern's {name}s; {} when none
   data: T;                       // payload
   timestamp: number;             // unix timestamp (ms)
   metadata: MessageMetadata;     // headers, auth token, service ID, trace context
@@ -48,6 +49,19 @@ interface Message<T> {
                                            // plain NATS does nothing
 }
 ```
+
+`params` is what the **subscriber's** pattern captured: `@Subscribe('orders.{id}.{event}')` receiving
+`orders.123.created` reads `message.params.id === '123'` and `message.params.event === 'created'`. All four
+adapters populate it. It is always an object — `{}` for an exact pattern, for `*` and for `#` — so never
+write `message.params?.id`. Treat it as read-only: one object per delivery, reused across that delivery's
+retries. A `@Cron`/`@Interval`/`@Timeout` method receives no message at all — it is the data provider, and
+what it returns is published to the job's pattern.
+
+Captured **per subscription, not per publish**: one topic reaching two subscriptions with different patterns
+gives each handler its own values. It is therefore NOT in the published envelope and does not cross the wire —
+do not look for it in `metadata`, and do not put it there: `PublishOptions.metadata` is the publisher's, and on
+Redis a receiver-written metadata key would be persisted into the requeued envelope and handed to whichever
+subscription claims the message next.
 
 The memory, Redis and JetStream adapters populate `attempt` and `maxAttempts`; core NATS leaves both `undefined`, along with `redelivered`.
 The memory adapter retries in-process only; retries do not survive a restart.
@@ -611,6 +625,7 @@ Redis could serve `*.created` — the rejection keeps one pattern language acros
 glob only narrows which keys `SCAN` walks; `createQueuePatternMatcher(pattern)`, built from the
 original pattern, decides what a handler actually receives, so a glob that over-matches is safe.
 
-A captured `{name}` value never reaches the handler on any adapter: the matcher computes it and the
-adapter discards it. `message.pattern` carries the concrete topic (`orders.123`); parse it yourself
-if you need the id.
+A captured `{name}` value reaches the handler as `message.params` on every adapter — the same match
+that narrows the widened subject back also fills it. `message.pattern` carries the concrete topic
+(`orders.123`) and `message.params.id` carries `'123'`; do not parse the topic yourself, and do not
+reach for `matchQueuePattern` in a handler.

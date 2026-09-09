@@ -136,9 +136,52 @@ describe('JetStreamQueueAdapter Integration', () => {
 
     expect(received[0].data.n).toBe(7);
     expect(received[0].pattern).toBe('params.123');
-    // The transport widened to `params.*`; the parameter value survives in the
-    // delivered pattern and the in-process matcher recovers it.
+    // The transport widened to `params.*`, so the broker captured nothing. The value comes
+    // from the in-process match that narrowed it back, and reaches the handler as `params` —
+    // re-running the matcher by hand, which this test used to do, is no longer necessary.
+    expect(received[0].params).toEqual({ id: '123' });
     expect(matchQueuePattern('params.{id}', received[0].pattern).params.id).toBe('123');
+  }, CASE_TIMEOUT_MS);
+
+  it('captures every parameter of a multi-parameter pattern', async () => {
+    // A single capture can be right by coincidence; two at different depths cannot. Both
+    // segments have to survive the widening to `params.*.items.*` and come back apart.
+    // Its own subject prefix: NATS refuses a stream whose subjects overlap another stream's,
+    // and `ITEST_PARAMS` above already binds `params.>`.
+    const js = makeAdapter('ITEST_MULTIPARAMS', ['multiparams.>']);
+    await js.connect();
+
+    const received: Array<Message<{ n: number }>> = [];
+
+    await js.subscribe<{ n: number }>('multiparams.{id}.items.{itemId}', async (message) => {
+      received.push(message);
+      await message.ack();
+    }, { group: 'itest-multiparams', ackMode: 'manual' });
+
+    await js.publish('multiparams.42.items.abc', { n: 1 });
+
+    await pollUntil(() => received.length === 1);
+
+    expect(received[0].params).toEqual({ id: '42', itemId: 'abc' });
+  }, CASE_TIMEOUT_MS);
+
+  it('answers with an empty object for a pattern that captures nothing', async () => {
+    const js = makeAdapter('ITEST_NOPARAMS', ['noparams.>']);
+    await js.connect();
+
+    const received: Array<Message<{ n: number }>> = [];
+
+    await js.subscribe<{ n: number }>('noparams.*', async (message) => {
+      received.push(message);
+      await message.ack();
+    }, { group: 'itest-noparams', ackMode: 'manual' });
+
+    await js.publish('noparams.created', { n: 1 });
+
+    await pollUntil(() => received.length === 1);
+
+    // Never undefined, so a handler reads `message.params.x` without guarding the access.
+    expect(received[0].params).toEqual({});
   }, CASE_TIMEOUT_MS);
 
   it('round-trips a config-hash stamp through stream and consumer metadata', async () => {
