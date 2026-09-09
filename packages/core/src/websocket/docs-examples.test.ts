@@ -1008,6 +1008,16 @@ describe('docs/examples/websocket-chat.md', () => {
 
       alice.disconnect();
       bob.disconnect();
+
+      // Awaited, not assumed. `disconnect()` closes the socket and the client emits its
+      // `disconnect` event from the resulting `onclose` — which Bun 1.3 delivered synchronously,
+      // inside the call, and 1.4 does not. The assertion read `['connect']` and the runtime was
+      // the only thing that had changed.
+      await waitUntil(
+        () => (lifecycle.length === 2 ? lifecycle : undefined),
+        'the disconnect lifecycle event',
+      );
+
       expect(lifecycle).toEqual(['connect', 'disconnect']);
     } finally {
       await app.stop();

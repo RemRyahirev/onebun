@@ -439,12 +439,20 @@ describe('Drizzle API Documentation Examples', () => {
       // migrationsFolder, dialect }) produces migration files. Run it in a throwaway cwd so
       // nothing lands in the repository, with node_modules linked in so `bunx drizzle-kit`
       // resolves to the drizzle-kit this package depends on instead of hitting the registry.
+      //
+      // THIS package's node_modules, not the workspace root's. Bun 1.3 hoisted a workspace
+      // dependency to the root as an absolute symlink, so linking the root exposed drizzle-kit
+      // and drizzle-orm; 1.4 does not, and the root no longer contains them at all. `bunx` then
+      // went to the registry, installed a drizzle-kit of its own, and that one refused the
+      // drizzle-orm it found: `Please install latest version of drizzle-orm`. A package's own
+      // node_modules holds its dependencies under either layout, which is what makes this the
+      // stable answer rather than a fix aimed at one version.
       const workDir = mkdtempSync(join(tmpdir(), 'onebun-docs-generate-'));
       const linkedModules = join(workDir, 'node_modules');
       const originalCwd = process.cwd();
 
       try {
-        symlinkSync(join(__dirname, '..', '..', '..', 'node_modules'), linkedModules);
+        symlinkSync(join(__dirname, '..', 'node_modules'), linkedModules);
         mkdirSync(join(workDir, 'schema'), { recursive: true });
         writeFileSync(join(workDir, 'schema', 'index.ts'), [
           "import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';",
