@@ -21,11 +21,7 @@ import {
   ROOT_CONTEXT,
   trace as otelTrace,
 } from '@opentelemetry/api';
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from '@opentelemetry/sdk-trace-base';
+import { BasicTracerProvider, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   it,
@@ -63,14 +59,42 @@ const FOREIGN_MARKER: unique symbol = Symbol.for('onebun:test:foreignContextMark
 /** Endpoint that is never reached — `hasExporter` only has to be true for the OTel path. */
 const UNUSED_COLLECTOR = 'http://127.0.0.1:9/unused';
 
-let spanExporter: InMemorySpanExporter;
+/**
+ * Spans this test recorded, in an array the TEST owns.
+ *
+ * Not an `InMemorySpanExporter`: these cases assert after `app.stop()`, and stopping the
+ * application shuts its provider down, which shuts the exporter down, which **clears** the
+ * spans it had collected. An array the test holds survives that.
+ */
+let recorded: ReadableSpan[];
 let tracerProvider: BasicTracerProvider;
+
+/**
+ * A processor that only remembers, attached to the APPLICATION's provider.
+ *
+ * Every application's spans are created from its own provider — that is what makes a guest
+ * application's `service.name` its own — so a processor registered on the process-global
+ * provider sees none of them. Capturing has to be per application, which is what
+ * `tracing.spanProcessors` is for.
+ */
+function recordingProcessor(): SpanProcessor {
+  return {
+    onStart: () => undefined,
+    onEnd(ended: ReadableSpan) {
+      recorded.push(ended);
+    },
+    forceFlush: async () => undefined,
+    shutdown: async () => undefined,
+  };
+}
 
 beforeEach(() => {
   otelTrace.disable();
-  spanExporter = new InMemorySpanExporter();
+  recorded = [];
+  // Still installed as the global: these cases also assert what the framework does to the
+  // process-global slot, and a foreign provider has to be there to be left alone.
   tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+    spanProcessors: [recordingProcessor()],
   });
   otelTrace.setGlobalTracerProvider(tracerProvider);
 });
@@ -81,12 +105,12 @@ afterEach(async () => {
 });
 
 function span(name: string): ReadableSpan {
-  const found = spanExporter.getFinishedSpans().find((finished) => finished.name === name);
+  const found = recorded.find((finished) => finished.name === name);
 
   if (!found) {
-    const recorded = spanExporter.getFinishedSpans().map((s) => s.name).join(', ') || '(none)';
+    const names = recorded.map((s) => s.name).join(', ') || '(none)';
 
-    throw new Error(`No span named "${name}" was recorded. Recorded: ${recorded}`);
+    throw new Error(`No span named "${name}" was recorded. Recorded: ${names}`);
   }
 
   return found;
@@ -131,6 +155,9 @@ describe('spans nest within a request', () => {
         enabled: true,
         serviceName: 'nesting-service',
         exportOptions: { endpoint: UNUSED_COLLECTOR },
+        // Captured on THIS application's provider. Every application's spans come from its
+        // own provider, so a processor on the process-global one would see none of them.
+        spanProcessors: [recordingProcessor()],
       },
     });
 
@@ -171,6 +198,9 @@ describe('spans nest within a request', () => {
         enabled: true,
         serviceName: 'nesting-service',
         exportOptions: { endpoint: UNUSED_COLLECTOR },
+        // Captured on THIS application's provider. Every application's spans come from its
+        // own provider, so a processor on the process-global one would see none of them.
+        spanProcessors: [recordingProcessor()],
       },
     });
 
@@ -187,7 +217,7 @@ describe('spans nest within a request', () => {
       await app.stop();
     }
 
-    const httpSpans = spanExporter.getFinishedSpans().filter((s) => s.name === 'HTTP GET /orders');
+    const httpSpans = recorded.filter((s) => s.name === 'HTTP GET /orders');
     const traceIds = new Set(httpSpans.map((s) => s.spanContext().traceId));
 
     expect(httpSpans).toHaveLength(2);
@@ -224,7 +254,7 @@ describe('background work starts its own trace', () => {
   /** The trace ids of every span named `name`, deduplicated. */
   function traceIdsOf(name: string): Set<string> {
     return new Set(
-      spanExporter.getFinishedSpans()
+      recorded
         .filter((finished) => finished.name === name)
         .map((finished) => finished.spanContext().traceId),
     );
@@ -254,7 +284,7 @@ describe('background work starts its own trace', () => {
     scheduler.stop();
     await adapter.disconnect();
 
-    const ticks = spanExporter.getFinishedSpans().filter((finished) => finished.name === 'job.work');
+    const ticks = recorded.filter((finished) => finished.name === 'job.work');
     const request = span('HTTP POST /start');
 
     expect(ticks.length).toBeGreaterThan(0);
@@ -396,6 +426,9 @@ describe('inbound trace context', () => {
         enabled: true,
         serviceName: 'callee',
         exportOptions: { endpoint: UNUSED_COLLECTOR },
+        // Captured on THIS application's provider. Every application's spans come from its
+        // own provider, so a processor on the process-global one would see none of them.
+        spanProcessors: [recordingProcessor()],
       },
     });
 

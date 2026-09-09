@@ -2,8 +2,8 @@
 import { trace as otelTrace, SpanStatusCode as OtelSpanStatusCode } from '@opentelemetry/api';
 import {
   BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
+  type ReadableSpan,
+  type SpanProcessor,
 } from '@opentelemetry/sdk-trace-base';
 import {
   describe,
@@ -365,20 +365,33 @@ describe('TraceService', () => {
 /**
  * Spans actually reaching an exporter.
  *
- * Every case here installs a FOREIGN provider as the OpenTelemetry global and reads the spans out
- * of an `InMemorySpanExporter`. No network, and the service's own OTLP processor never sees the
- * span — which is the point: what is being tested is that the span is ENDED, not that the
- * exporter works.
+ * The service under test is given a recording processor of its OWN, because a service's spans
+ * come from its own provider — a processor on the process-global provider would see none of
+ * them, which is exactly the property that lets a guest application keep its own `service.name`.
+ * No network: the OTLP endpoint points at a port nothing serves, and what is being tested is
+ * that the span is ENDED, not that the exporter works.
  */
 describe('span export', () => {
-  let spanExporter: InMemorySpanExporter;
+  let recorded: ReadableSpan[];
   let provider: BasicTracerProvider;
+
+  /** Remembers ended spans in an array this test owns. */
+  function recordingProcessor(): SpanProcessor {
+    return {
+      onStart: () => undefined,
+      onEnd(ended: ReadableSpan) {
+        recorded.push(ended);
+      },
+      forceFlush: async () => undefined,
+      shutdown: async () => undefined,
+    };
+  }
 
   beforeEach(() => {
     // A provider left registered by another file would make this registration a silent no-op.
     otelTrace.disable();
-    spanExporter = new InMemorySpanExporter();
-    provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(spanExporter)] });
+    recorded = [];
+    provider = new BasicTracerProvider({ spanProcessors: [recordingProcessor()] });
     otelTrace.setGlobalTracerProvider(provider);
   });
 
@@ -387,12 +400,19 @@ describe('span export', () => {
     otelTrace.disable();
   });
 
-  /** A service that takes the OTel path — `hasExporter` is true — pointed at a port nothing serves. */
+  /**
+   * A service that takes the OTel path, recording into this test's array.
+   *
+   * No OTLP endpoint: `hasExporter` is true because a span processor is configured, which is
+   * the same question — does this application record spans anywhere. An endpoint here would
+   * make the service's own batch processor retry against a dead port for over a second per
+   * case, and then throw the give-up error into the test.
+   */
   function exportingService(): TraceServiceImpl {
     return new TraceServiceImpl({
       enabled: true,
       serviceName: 'export-test',
-      exportOptions: { endpoint: 'http://127.0.0.1:1' },
+      spanProcessors: [recordingProcessor()],
     });
   }
 
@@ -406,7 +426,7 @@ describe('span export', () => {
     const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/x', route: '/x' });
     service.endHttpTraceSync(span, { statusCode: 200, duration: 12 });
 
-    const finished = spanExporter.getFinishedSpans();
+    const finished = recorded;
 
     expect(finished).toHaveLength(1);
     expect(finished[0].name).toBe('HTTP GET /x');
@@ -424,7 +444,7 @@ describe('span export', () => {
     span.events.push({ name: 'error', timestamp: Date.now(), attributes: { errorType: 'Boom' } });
     service.endHttpTraceSync(span, { statusCode: 500 });
 
-    const [finished] = spanExporter.getFinishedSpans();
+    const [finished] = recorded;
 
     expect(finished.attributes['http.method']).toBe('POST');
     expect(finished.attributes['http.route']).toBe('/orders');
@@ -443,7 +463,7 @@ describe('span export', () => {
     const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/y', route: '/y' });
     service.endHttpTraceSync(span, { statusCode: 204 });
 
-    const [finished] = spanExporter.getFinishedSpans();
+    const [finished] = recorded;
 
     expect(span.attributes['http.route']).toBe('/y');
     expect(span.attributes['http.status_code']).toBe(204);
@@ -461,7 +481,7 @@ describe('span export', () => {
     service.endHttpTraceSync(span, { statusCode: 200 });
     service.endHttpTraceSync(span, { statusCode: 500 });
 
-    expect(spanExporter.getFinishedSpans()).toHaveLength(1);
+    expect(recorded).toHaveLength(1);
 
     await service.shutdown();
   });
@@ -475,7 +495,7 @@ describe('span export', () => {
     const span = service.startHttpTraceSync({ method: 'GET', url: 'http://h/q', route: '/q' });
     service.endHttpTraceSync(span, { statusCode: 200 });
 
-    expect(spanExporter.getFinishedSpans()).toHaveLength(0);
+    expect(recorded).toHaveLength(0);
 
     await service.shutdown();
   });

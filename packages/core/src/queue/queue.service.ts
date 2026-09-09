@@ -30,11 +30,13 @@ import type {
 } from './types';
 import type { Guard } from '../http-guards/http-guards';
 import type { ResolvedInterceptor } from '../types';
+import type { Tracer } from '@opentelemetry/api';
 
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getMetadata } from '../decorators/metadata';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
+import { runWithAppTracer } from '../trace-scope';
 
 import {
   getSubscribeMetadata,
@@ -62,12 +64,34 @@ import { QueueScheduler } from './scheduler';
  */
 export class QueueService {
   private adapter: QueueAdapter | null = null;
+
+  /**
+   * The owning application's tracer, established around every handler this service invokes.
+   *
+   * The queue adapters cannot supply it: they are constructed from plain option objects and
+   * hold no reference to an application, and the in-memory one has no constructor at all. This
+   * service is per-application by construction, and every delivery — a `@Subscribe` handler, a
+   * `@Cron`/`@Interval`/`@Timeout` data provider — goes through a closure it builds here, so
+   * one place covers all four adapters without changing any adapter signature.
+   */
+  private ownerTracer: Tracer | undefined = undefined;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: Subscription[] = [];
   private started = false;
   private config: QueueConfig;
   private onReadyHandlers: Array<() => void> = [];
   private adapterOnReadyRegistered = false;
+
+  /**
+   * Name the application whose tracer every handler of this service runs under.
+   *
+   * Set by `OneBunApplication` right after construction, before any handler is registered.
+   *
+   * @see docs:api/trace.md
+   */
+  setOwnerTracer(tracer: Tracer | undefined): void {
+    this.ownerTracer = tracer;
+  }
 
   constructor(config: QueueConfig) {
     this.config = config;
@@ -355,7 +379,7 @@ export class QueueService {
         : [];
 
       // Wrap handler with guards and interceptors
-      const wrappedHandler = async (message: Message) => {
+      const wrappedHandler = async (message: Message) => await runWithAppTracer(this.ownerTracer, async () => {
         if (guards.length > 0) {
           const context = new MessageExecutionContextImpl(
             message,
@@ -399,7 +423,7 @@ export class QueueService {
         }
 
         await method(message);
-      };
+      });
 
       await this.subscribe(sub.pattern, wrappedHandler, sub.options);
     }
@@ -407,7 +431,11 @@ export class QueueService {
     // Register cron jobs
     const cronJobs = getCronMetadata(serviceClass);
     for (const cron of cronJobs) {
-      const method = serviceInstance[cron.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[cron.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addCronJob(
         cron.options.name ?? String(cron.propertyKey),
         cron.expression,
@@ -424,7 +452,11 @@ export class QueueService {
     // Register interval jobs
     const intervalJobs = getIntervalMetadata(serviceClass);
     for (const interval of intervalJobs) {
-      const method = serviceInstance[interval.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[interval.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addIntervalJob(
         interval.options.name ?? String(interval.propertyKey),
         interval.milliseconds,
@@ -437,7 +469,11 @@ export class QueueService {
     // Register timeout jobs
     const timeoutJobs = getTimeoutMetadata(serviceClass);
     for (const timeout of timeoutJobs) {
-      const method = serviceInstance[timeout.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[timeout.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addTimeoutJob(
         timeout.options.name ?? String(timeout.propertyKey),
         timeout.milliseconds,

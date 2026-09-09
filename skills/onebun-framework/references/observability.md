@@ -189,7 +189,21 @@ Implementation details:
   fallback, so when you omit it the effective value is the SDK's own — `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` or
   **512**, not 100. Set it explicitly if 512 matters. (`batchTimeout` is forwarded the same way, but the SDK's
   own default is also 5000ms, so that number holds; `timeout` really does default to 10000ms in the exporter.)
-- Provider registered globally via `trace.setGlobalTracerProvider()`
+- Each application builds its OWN provider and creates every framework span from it — the HTTP request span,
+  `TraceService` spans, and `@Traced`/`@Span`/auto-trace spans reached from a request, a WebSocket callback, a
+  queue message or a scheduled job. The provider is ALSO registered globally via
+  `trace.setGlobalTracerProvider()`, but that registration is best-effort: OpenTelemetry keeps one per process
+  and refuses a duplicate, so only the first application to start wins it
+- **In a process running several applications** — multi-service mode, where the orchestrator gives each
+  service its own `serviceName` — the framework's own spans still carry the right `service.name` and go to the
+  right endpoint. Which application owns a piece of work travels in the OpenTelemetry context alongside the
+  parent span, established at each boundary where work enters an application. What still resolves through the
+  global slot: `trace.getTracer()` called by user code, third-party instrumentation, and framework spans
+  created outside every boundary (during `start()`, for instance). Those go to the first starter's provider
+- `tracing.spanProcessors` attaches a processor to THIS application's provider, appended to whatever
+  `exportOptions` produces. A processor on the process-global provider sees none of an application's spans.
+  An application with a processor and no OTLP endpoint records real spans rather than taking the lightweight
+  path — the question is whether anything will see the span, not how it is shipped
 - On `app.stop()`, provider is shut down (flushes pending spans), then `trace.disable()` clears the global —
   not reached if that flush rejects
 

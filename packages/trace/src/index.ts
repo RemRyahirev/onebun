@@ -38,6 +38,15 @@ export {
   type TraceFilterOptions,
 } from './auto-trace.js';
 
+// The owning application's tracer, carried in the OpenTelemetry context
+export {
+  APP_TRACER_KEY,
+  appTracer,
+  currentAppTracer,
+  runWithAppTracer,
+  withAppTracer,
+} from './app-tracer.js';
+
 // Context propagation
 export {
   activateSpanInCurrentScope,

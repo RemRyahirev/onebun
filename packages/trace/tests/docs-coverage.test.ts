@@ -22,11 +22,7 @@ import {
   ROOT_CONTEXT,
   trace as otelTrace,
 } from '@opentelemetry/api';
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from '@opentelemetry/sdk-trace-base';
+import { BasicTracerProvider, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   it,
@@ -137,17 +133,37 @@ class TestAsyncLocalStorageContextManager implements ContextManager {
   }
 }
 
-let spanExporter: InMemorySpanExporter;
+let recorded: ReadableSpan[];
 let tracerProvider: BasicTracerProvider;
 let savedTraceService: TraceServiceImpl | undefined;
+
+/**
+ * A processor that only remembers, attached to the APPLICATION's provider.
+ *
+ * Every application's spans are created from its OWN provider, so a processor on the
+ * process-global one sees none of them. The array is the test's own rather than an
+ * `InMemorySpanExporter` because these cases assert after `app.stop()`, and stopping the
+ * application shuts its provider down, which shuts an exporter down, which clears what it
+ * collected.
+ */
+function recordingProcessor(): SpanProcessor {
+  return {
+    onStart: () => undefined,
+    onEnd(ended: ReadableSpan) {
+      recorded.push(ended);
+    },
+    forceFlush: async () => undefined,
+    shutdown: async () => undefined,
+  };
+}
 
 beforeEach(() => {
   // A provider left registered by another test would make registration a silent no-op, and the
   // application registers one of its own in its constructor.
   otelTrace.disable();
-  spanExporter = new InMemorySpanExporter();
+  recorded = [];
   tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+    spanProcessors: [recordingProcessor()],
   });
   otelTrace.setGlobalTracerProvider(tracerProvider);
 
@@ -171,17 +187,17 @@ afterEach(async () => {
 
 /** Names of the spans that were started AND ended, in completion order. */
 function recordedSpanNames(): string[] {
-  return spanExporter.getFinishedSpans().map((finished) => finished.name);
+  return recorded.map((finished) => finished.name);
 }
 
 /** The finished span with this name, or a loud failure listing what was recorded. */
 function recordedSpan(name: string): ReadableSpan {
-  const found = spanExporter.getFinishedSpans().find((finished) => finished.name === name);
+  const found = recorded.find((finished) => finished.name === name);
 
   if (!found) {
-    const recorded = recordedSpanNames().join(', ') || '(none)';
+    const names = recordedSpanNames().join(', ') || '(none)';
 
-    throw new Error(`No span named "${name}" was recorded. Recorded spans: ${recorded}`);
+    throw new Error(`No span named "${name}" was recorded. Recorded spans: ${names}`);
   }
 
   return found;
@@ -225,6 +241,7 @@ describe('docs/api/trace.md — Enabling Tracing', () => {
           // eslint-disable-next-line @typescript-eslint/naming-convention
           'deployment.environment': process.env.NODE_ENV ?? 'test',
         },
+        spanProcessors: [recordingProcessor()],
       },
     });
 
@@ -273,7 +290,12 @@ describe('docs/api/trace.md — Enabling Tracing', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service', samplingRate: 1.0 },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        samplingRate: 1.0,
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     await app.start();
@@ -449,7 +471,12 @@ describe('docs/api/trace.md — this.span', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service', samplingRate: 1.0 },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        samplingRate: 1.0,
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     await app.start();
@@ -462,10 +489,12 @@ describe('docs/api/trace.md — this.span', () => {
 
       expect({ seen: body.result.seen, exported: recordedSpanNames() }).toEqual({
         seen: `span:${exported.spanContext().spanId}`,
-        // No `exportOptions.endpoint`, so `startHttpTraceSync` takes the lightweight path and
-        // creates no OpenTelemetry span for the request itself — only the trace ids the logger
-        // correlates on. The method span is therefore the only one exported, and it is a root.
-        exported: ['StockOrderService.processOrder'],
+        // Both, and in completion order: the method span ends inside the request, the HTTP
+        // span when the response is written. The request span exists because this application
+        // records spans somewhere — a `spanProcessors` entry counts for that exactly as an
+        // `exportOptions.endpoint` does, since the question the OTel path asks is whether
+        // anything will see the span, not how it is shipped.
+        exported: ['StockOrderService.processOrder', 'HTTP GET /stock'],
       });
     } finally {
       await app.stop();
@@ -515,7 +544,11 @@ describe('docs/api/trace.md — Trace Context', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service' },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     await app.start();
@@ -557,7 +590,11 @@ describe('docs/api/trace.md — Trace Context', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service' },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     try {
@@ -620,7 +657,11 @@ describe('docs/api/trace.md — Trace Context', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service' },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     try {
@@ -688,7 +729,11 @@ describe('docs/api/trace.md — Trace Context', () => {
       metrics: { enabled: false },
       gracefulShutdown: false,
       loggerLayer: makeMockLoggerLayer(),
-      tracing: { enabled: true, serviceName: 'my-service' },
+      tracing: {
+        enabled: true,
+        serviceName: 'my-service',
+        spanProcessors: [recordingProcessor()],
+      },
     });
 
     await app.start();
@@ -927,6 +972,7 @@ describe('docs/api/trace.md — Complete Example', () => {
           // eslint-disable-next-line @typescript-eslint/naming-convention
           'service.name': 'order-service',
         },
+        spanProcessors: [recordingProcessor()],
       },
     });
   }
@@ -959,11 +1005,15 @@ describe('docs/api/trace.md — Complete Example', () => {
         },
       });
 
-      // Inner spans close before the outer one that awaits them.
+      // Inner spans close before the outer one that awaits them, and the request span closes
+      // last of all — it ends when the response is written. It is recorded because this
+      // application has somewhere to record spans: a `spanProcessors` entry counts for that
+      // exactly as an OTLP endpoint does.
       expect(recordedSpanNames()).toEqual([
         'inventory-check-stock',
         'order-validate-items',
         'order-create',
+        'HTTP POST /orders',
       ]);
 
       const paid = await fetch(`${base}/order-1/pay`, { method: 'POST' });
@@ -978,8 +1028,10 @@ describe('docs/api/trace.md — Complete Example', () => {
         'inventory-check-stock',
         'order-validate-items',
         'order-create',
+        'HTTP POST /orders',
         'payment-charge',
         'order-process-payment',
+        'HTTP POST /orders/:id/pay',
       ]);
     } finally {
       await app.stop();

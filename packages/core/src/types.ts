@@ -519,6 +519,18 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
        */
       onExportFailure?: (error: Error, spanCount: number, attempts: number) => void;
     };
+
+    /**
+     * Extra span processors for THIS application's provider, appended to whatever
+     * `exportOptions` produces.
+     *
+     * Every application's spans are created from its own provider, so a processor registered
+     * on the process-global one does not see them. This is how to observe or fan out the spans
+     * of a specific application. Values must be `SpanProcessor`s from
+     * `@opentelemetry/sdk-trace-base`; typed as `unknown[]` so this file does not depend on the
+     * OpenTelemetry SDK.
+     */
+    spanProcessors?: unknown[];
   };
 
   /**

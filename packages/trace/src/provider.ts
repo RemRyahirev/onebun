@@ -3,6 +3,7 @@ import { resourceFromAttributes } from '@opentelemetry/resources';
 import {
   BasicTracerProvider,
   BatchSpanProcessor,
+  type SpanProcessor,
   ParentBasedSampler,
   TraceIdRatioBasedSampler,
 } from '@opentelemetry/sdk-trace-base';
@@ -142,7 +143,14 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
     [ATTR_SERVICE_VERSION]: options.serviceVersion ?? '1.0.0',
   });
 
-  const spanProcessors = [];
+  const spanProcessors: SpanProcessor[] = [];
+
+  // Appended, not replacing: a caller wanting to observe or fan out this application's spans
+  // has to be able to do so alongside the configured OTLP export, and a processor on the
+  // process-global provider would not see them — every application's spans come from its own.
+  if (options.spanProcessors) {
+    spanProcessors.push(...options.spanProcessors as SpanProcessor[]);
+  }
 
   if (options.exportOptions?.endpoint) {
     const retryBudget = options.exportOptions.retryBudget ?? DEFAULT_RETRY_BUDGET;

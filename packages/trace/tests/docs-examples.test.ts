@@ -17,11 +17,7 @@ import {
   trace as otelTrace,
 } from '@opentelemetry/api';
 import { ExportResultCode } from '@opentelemetry/core';
-import {
-  BasicTracerProvider,
-  InMemorySpanExporter,
-  SimpleSpanProcessor,
-} from '@opentelemetry/sdk-trace-base';
+import { BasicTracerProvider, type SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   it,
@@ -85,15 +81,35 @@ interface OtlpPayload {
   }>;
 }
 
-let spanExporter: InMemorySpanExporter;
+let recorded: ReadableSpan[];
 let tracerProvider: BasicTracerProvider;
+
+/**
+ * A processor that only remembers, attached to the APPLICATION's provider.
+ *
+ * Every application's spans are created from its OWN provider, so a processor on the
+ * process-global one sees none of them. And the array is the test's own rather than an
+ * `InMemorySpanExporter`, because these cases assert after `app.stop()` — stopping the
+ * application shuts its provider down, which shuts an exporter down, which clears what it
+ * collected.
+ */
+function recordingProcessor(): SpanProcessor {
+  return {
+    onStart: () => undefined,
+    onEnd(ended: ReadableSpan) {
+      recorded.push(ended);
+    },
+    forceFlush: async () => undefined,
+    shutdown: async () => undefined,
+  };
+}
 
 beforeEach(() => {
   // A previously registered global provider would make registration a no-op.
   otelTrace.disable();
-  spanExporter = new InMemorySpanExporter();
+  recorded = [];
   tracerProvider = new BasicTracerProvider({
-    spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+    spanProcessors: [recordingProcessor()],
   });
   otelTrace.setGlobalTracerProvider(tracerProvider);
 });
@@ -105,17 +121,17 @@ afterEach(async () => {
 
 /** Names of the spans that were started AND ended, in completion order. */
 function recordedSpanNames(): string[] {
-  return spanExporter.getFinishedSpans().map((finished) => finished.name);
+  return recorded.map((finished) => finished.name);
 }
 
 /** The finished span with this name, or a loud failure listing what was recorded. */
 function recordedSpan(name: string): ReadableSpan {
-  const found = spanExporter.getFinishedSpans().find((finished) => finished.name === name);
+  const found = recorded.find((finished) => finished.name === name);
 
   if (!found) {
-    const recorded = recordedSpanNames().join(', ') || '(none)';
+    const names = recordedSpanNames().join(', ') || '(none)';
 
-    throw new Error(`No span named "${name}" was recorded. Recorded spans: ${recorded}`);
+    throw new Error(`No span named "${name}" was recorded. Recorded spans: ${names}`);
   }
 
   return found;
@@ -622,7 +638,7 @@ describe('OTLP Exporter (docs/api/trace.md)', () => {
 
     try {
       const result = await new Promise<ExportResult>((resolve) => {
-        exporter.export(spanExporter.getFinishedSpans(), resolve);
+        exporter.export(recorded, resolve);
       });
 
       expect(result.code).toBe(0); // ExportResultCode.SUCCESS
@@ -668,7 +684,7 @@ describe('OTLP Exporter (docs/api/trace.md)', () => {
 
     try {
       await new Promise<ExportResult>((resolve) => {
-        exporter.export(spanExporter.getFinishedSpans(), resolve);
+        exporter.export(recorded, resolve);
       });
 
       const [url, init] = fetchMock.mock.calls[0];

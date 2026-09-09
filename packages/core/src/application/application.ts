@@ -12,6 +12,7 @@ import type { ResolvedInterceptor } from '../types';
 import type { MultiServiceOrchestrator } from './multi-service-orchestrator';
 import type { MultiServiceApplicationOptions, ServicesMap } from './multi-service.types';
 import type { WsClientData } from '../websocket/ws.types';
+import type { Tracer } from '@opentelemetry/api';
 
 import {
   type DeepPaths,
@@ -1028,7 +1029,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.logger.debug(`Loaded ${controllers.length} controllers`);
 
       // Initialize WebSocket handler and detect gateways
-      this.wsHandler = new WsHandler(this.logger, this.options.websocket);
+      // The tracer is passed so a `@Traced` method reached from a socket callback is recorded
+      // by THIS application's provider. `getTracer` is impl-only on the trace service, hence
+      // the optional call.
+      this.wsHandler = new WsHandler(this.logger, this.options.websocket, this.traceService?.getTracer?.());
 
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
       for (const controllerClass of controllers) {
@@ -1185,6 +1189,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           && app.options.tracing?.exportOptions?.endpoint
           && app.options.tracing?.traceHttpRequests !== false,
         );
+
+        // The tracer whose provider this application's spans belong to, and whether stating it
+        // buys anything. OpenTelemetry keeps one provider per process and refuses a duplicate,
+        // so an application that did NOT win that slot must name itself or its `@Traced` spans
+        // are recorded by the winner's provider, under the winner's `service.name`.
+        //
+        // Gated on not owning the slot rather than applied unconditionally: a trace service is
+        // created for every application by default, so an unconditional scope would add an
+        // AsyncLocalStorage frame to every request of every OneBun application in existence to
+        // fix a multi-application problem. The single-application hot path is unchanged.
+        //
+        // Resolved once at registration: a first application owns the slot for as long as it
+        // runs, and a later sibling knows at its own registration time that it does not.
+        const ownerTracer = app.traceService?.getTracer?.() as Tracer | undefined;
+        const needsOwnerScope = ownerTracer !== undefined
+          && app.traceService?.ownsInstalledProvider?.() === false;
+        const entersTraceScope = tracesHttpSpans || needsOwnerScope;
 
         return async (req, server) => {
           // Outermost point of a routed request: bind before the middleware chain, the
@@ -1606,8 +1627,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             // the lightweight path and creates no OpenTelemetry span, so there would be nothing
             // to promote and the extra AsyncLocalStorage frame would buy nothing. `@Traced`
             // methods still nest among themselves — `startActiveSpan` opens its own scope.
-            const scopedRequestHandler = tracesHttpSpans
-              ? (): Promise<Response> => inRootTraceScope(requestHandler)
+            const scopedRequestHandler = entersTraceScope
+              ? (): Promise<Response> => inRootTraceScope(requestHandler, ownerTracer)
               : requestHandler;
 
             // Wrap in profiling scope for per-request mark isolation
@@ -3158,6 +3179,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           : queueOptions?.redis,
     };
     this.queueService = new QueueService(queueServiceConfig);
+    // Before any handler is registered: every delivery and every scheduled job this service
+    // invokes then runs under THIS application's tracer, whichever adapter delivered it.
+    this.queueService.setOwnerTracer(this.traceService?.getTracer?.());
 
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);

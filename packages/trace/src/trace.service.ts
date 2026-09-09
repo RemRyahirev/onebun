@@ -6,6 +6,7 @@ import {
   ROOT_CONTEXT,
   SpanKind,
   trace,
+  type Tracer,
 } from '@opentelemetry/api';
 import {
   Context,
@@ -17,7 +18,11 @@ import {
 import { HttpStatusCode } from '@onebun/requests';
 
 import { activateSpanInCurrentScope } from './context-manager.js';
-import { initTracerProvider, type TracerProviderResult } from './provider.js';
+import {
+  initTracerProvider,
+  installedTracerProvider,
+  type TracerProviderResult,
+} from './provider.js';
 import {
   type HttpTraceData,
   OTEL_SPAN,
@@ -194,10 +199,22 @@ export class TraceServiceImpl implements TraceService {
       traceDatabaseQueries: true,
       defaultAttributes: {},
       exportOptions: {},
+      spanProcessors: [],
       ...options,
     };
 
-    this.hasExporter = !!this.options.exportOptions?.endpoint;
+    // "Does this application record spans anywhere", which is the question the OTel path
+    // actually depends on — not "is an OTLP endpoint configured".
+    //
+    // `enabled` and not the endpoint alone: derived from the endpoint by itself, a service built
+    // with `{ enabled: false, exportOptions: { endpoint } }` starts spans that
+    // `endHttpTraceSync` — which returns early when disabled — never ends.
+    //
+    // And `spanProcessors` counts: a caller that attached its own processor wants real spans
+    // even with no OTLP endpoint, and gating on the endpoint would hand it the lightweight
+    // path and nothing to observe.
+    this.hasExporter = this.options.enabled
+      && (!!this.options.exportOptions?.endpoint || this.options.spanProcessors.length > 0);
     this.hasDefaultAttributes = Object.keys(this.options.defaultAttributes).length > 0;
 
     // Initialize TracerProvider BEFORE creating the tracer
@@ -206,7 +223,46 @@ export class TraceServiceImpl implements TraceService {
       this.providerResult = initTracerProvider(this.options);
     }
 
-    this.tracer = trace.getTracer('@onebun/trace');
+    // THIS application's provider, not the process-global one. OpenTelemetry keeps a single
+    // tracer provider per process and refuses a duplicate registration, so in a process running
+    // several applications only the first installs its own. Reading the global here is what
+    // made every later application's provider dead weight: it was built with that
+    // application's `service.name` resource and its own OTLP exporter, and then never used —
+    // its spans went to the FIRST application's collector, labelled as the first
+    // application's service. Measured with `serviceName: 'users'` and `'orders'`: each own
+    // provider reports its own name, the global reports 'users' for both.
+    //
+    // The global registration in `initTracerProvider` stays, as a best-effort answer for
+    // third-party instrumentation that resolves through `trace.getTracer()` on its own.
+    this.tracer = this.providerResult?.provider.getTracer('@onebun/trace')
+      ?? trace.getTracer('@onebun/trace');
+  }
+
+  /**
+   * The tracer this application's spans are created from.
+   *
+   * Exposed so the framework can establish it as the ambient owner at each boundary where work
+   * enters the application — see `appTracer()` in `app-tracer.ts`, which is what the
+   * decoration-time wrappers (`@Traced`, `@Span`, auto-trace) resolve through. Those are
+   * installed on a prototype before any application exists and cannot capture one.
+   *
+   * @see docs:api/trace.md
+   */
+  getTracer(): Tracer {
+    return this.tracer;
+  }
+
+  /**
+   * Is this application's provider the one installed in the process-global slot?
+   *
+   * `false` for every application but the first, which is exactly when resolving through the
+   * global gives the wrong answer and the ambient owner has to be established instead.
+   *
+   * @see docs:api/trace.md
+   */
+  ownsInstalledProvider(): boolean {
+    return this.providerResult !== null
+      && installedTracerProvider() === this.providerResult.provider;
   }
 
   async shutdown(): Promise<void> {

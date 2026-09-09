@@ -16,6 +16,7 @@ import type {
 } from './ws.types';
 import type { WsAuthResult, WsHandlerResponse } from './ws.types';
 import type { OneBunRequest } from '../types';
+import type { Tracer } from '@opentelemetry/api';
 import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -112,6 +113,13 @@ export class WsHandler {
   constructor(
     private logger: SyncLogger,
     private options: WebSocketApplicationOptions = {},
+    /**
+     * The owning application's tracer, so a `@Traced` method reached from a socket callback is
+     * recorded by THIS application's provider rather than by whichever application happened to
+     * register its provider with OpenTelemetry first. Optional: a handler constructed without
+     * one behaves exactly as before.
+     */
+    private ownerTracer?: Tracer,
   ) {
     this.storage = new InMemoryWsStorage();
     const socketio = options.socketio;
@@ -257,10 +265,13 @@ export class WsHandler {
     // ever receives under the one HTTP request that opened it — a trace that keeps growing for
     // as long as the socket is open, attributed to a request that finished long ago.
     return {
-      open: (ws) => inRootTraceScope(() => this.handleOpen(ws)),
-      message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message)),
-      close: (ws, code, reason) => inRootTraceScope(() => this.handleClose(ws, code, reason)),
-      drain: (ws) => inRootTraceScope(() => this.handleDrain(ws)),
+      // Bun invokes these from the event loop, not from a continuation of anything this
+      // application ran, so neither the parent span nor the owning application is inherited —
+      // both have to be stated here.
+      open: (ws) => inRootTraceScope(() => this.handleOpen(ws), this.ownerTracer),
+      message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message), this.ownerTracer),
+      close: (ws, code, reason) => inRootTraceScope(() => this.handleClose(ws, code, reason), this.ownerTracer),
+      drain: (ws) => inRootTraceScope(() => this.handleDrain(ws), this.ownerTracer),
     };
   }
 

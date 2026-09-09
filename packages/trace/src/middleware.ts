@@ -1,10 +1,11 @@
-import { SpanStatusCode as OtelSpanStatusCode, trace as otelTrace } from '@opentelemetry/api';
+import { SpanStatusCode as OtelSpanStatusCode } from '@opentelemetry/api';
 import { Effect } from 'effect';
 
 import type { HttpTraceData, TraceHeaders } from './types.js';
 
 import { HttpStatusCode } from '@onebun/requests';
 
+import { appTracer } from './app-tracer.js';
 import { ALREADY_TRACED } from './auto-trace.js';
 import { traceService } from './trace.service.js';
 
@@ -350,7 +351,9 @@ export function trace(operationName?: string): MethodDecorator {
     const decoratorTarget = target;
 
     const wrapped = async function (this: unknown, ...args: unknown[]) {
-      const tracer = otelTrace.getTracer('@onebun/trace');
+      // Resolved per CALL, not captured: this wrapper is installed on a prototype at
+      // class-decoration time and serves every application in the process.
+      const tracer = appTracer();
 
       return await tracer.startActiveSpan(spanName, async (activeSpan) => {
         applySpanAttributes(decoratorTarget, propertyKey, args, activeSpan);
@@ -400,7 +403,9 @@ export function span(name?: string): MethodDecorator {
     const decoratorTarget = target;
 
     const wrapped = async function (this: unknown, ...args: unknown[]) {
-      const tracer = otelTrace.getTracer('@onebun/trace');
+      // Resolved per CALL, not captured: this wrapper is installed on a prototype at
+      // class-decoration time and serves every application in the process.
+      const tracer = appTracer();
 
       return await tracer.startActiveSpan(resolvedName, async (activeSpan) => {
         applySpanAttributes(decoratorTarget, propertyKey, args, activeSpan);

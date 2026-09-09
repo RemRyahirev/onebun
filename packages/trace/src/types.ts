@@ -221,6 +221,24 @@ export interface TraceOptions {
    * Export traces to external system
    */
   exportOptions?: TraceExportOptions;
+
+  /**
+   * Extra span processors for THIS application's provider, appended to whatever
+   * `exportOptions` produces.
+   *
+   * OpenTelemetry keeps one tracer provider per process and refuses a duplicate, so in a
+   * process running several applications only the first installs its own globally. Every
+   * application's spans are created from its OWN provider, which means a processor registered
+   * on the process-global provider does not see them — this is how to observe or export the
+   * spans of a specific application, and how a test captures them without going through the
+   * global.
+   *
+   * Typed as `unknown[]` so `TraceOptions` stays importable without the OpenTelemetry SDK in
+   * scope; the values must be `SpanProcessor`s from `@opentelemetry/sdk-trace-base`.
+   *
+   * @see docs:api/trace.md
+   */
+  spanProcessors?: unknown[];
 }
 
 /**

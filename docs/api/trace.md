@@ -522,10 +522,68 @@ The failure this replaces was quiet and total: one `app.stop()` left every other
 the process resolving a non-recording tracer, so every subsequent span carried an all-zero trace
 id, correlated with nothing and was never exported.
 
-One limit remains, and it is not fixed here: because duplicate registration is refused, a
-non-first application's spans go to the FIRST application's provider and exporter, not to its
-own. Its configured endpoint and service name are not used while it is a guest. Run one
-application per process if the applications need different trace destinations.
+The registration is no longer what decides where an application's spans go. Every span the
+framework creates comes from the application's OWN provider, so a guest application uses its own
+endpoint and its own `service.name` even though the global slot belongs to the first starter —
+see [Several applications in one process](#several-applications-in-one-process).
+:::
+
+### Several applications in one process
+
+Multi-service mode runs several applications in one process and gives each its own
+`serviceName`. That name reaches the backend:
+
+<!-- typecheck: skip -->
+```typescript
+// Each service exports under its own identity, to its own endpoint if it has one.
+const app = new MultiServiceApplication({
+  services: {
+    users: { module: UsersModule },
+    orders: { module: OrdersModule },
+  },
+  tracing: { exportOptions: { endpoint: 'http://collector:4318/v1/traces' } },
+});
+```
+
+Every span the framework creates is created from the owning application's provider: the HTTP
+request span, the spans from `TraceService`, and the `@Traced` / `@Span` / auto-trace spans
+reached from a request, a WebSocket callback, a queue message or a scheduled job. Which
+application owns a piece of work travels in the OpenTelemetry context, alongside the parent
+span, and is re-established at every boundary where work enters an application.
+
+**What still resolves through the process-global provider**, because nothing can tell it which
+application is asking:
+
+- code that calls `trace.getTracer()` itself rather than using `@Traced` or `TraceService`;
+- third-party instrumentation with its own tracer;
+- a framework span created outside every entry boundary — during `start()` before the first
+  request, for instance.
+
+Those go to the first-registered provider, which is the behaviour that predates this and is
+unchanged. `appTracer()` is the accessor the framework's own decorators use — it answers with
+the owning application's tracer when there is one and falls back to the global otherwise — and
+`runWithAppTracer(tracer, fn)` is what establishes ownership at a boundary. Both are exported
+for code that needs to state ownership itself; neither is needed for ordinary use. In a single-application process it is that application's own provider, so nothing is
+lost; in a multi-application process it is the first starter's.
+
+::: tip Observing one application's spans
+A processor registered on the process-global provider sees none of an application's spans, since
+they come from its own. Pass `tracing.spanProcessors` to attach one to a specific application —
+appended to whatever `exportOptions` produces:
+
+```typescript
+import { SimpleSpanProcessor, ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
+
+const options = {
+  tracing: {
+    serviceName: 'orders',
+    spanProcessors: [new SimpleSpanProcessor(new ConsoleSpanExporter())],
+  },
+};
+```
+
+An application with a processor and no OTLP endpoint records real spans rather than taking the
+lightweight path: the question is whether anything will see the span, not how it is shipped.
 :::
 
 <llm-only>

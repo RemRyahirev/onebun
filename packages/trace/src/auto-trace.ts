@@ -1,5 +1,6 @@
-import { SpanStatusCode as OtelSpanStatusCode, trace as otelTrace } from '@opentelemetry/api';
+import { SpanStatusCode as OtelSpanStatusCode } from '@opentelemetry/api';
 
+import { appTracer } from './app-tracer.js';
 import { type SpanAttributeEntry, SPAN_ATTRIBUTES } from './middleware.js';
 
 /**
@@ -135,7 +136,10 @@ function wrapMethodWithSpan(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     ...args: any[]
   ) {
-    const tracer = otelTrace.getTracer('@onebun/trace');
+    // Resolved per CALL: `wrapMethodWithSpan` mutates the PROTOTYPE and marks the method
+    // already-traced, so the first application to instantiate a shared class wraps it for
+    // every application. A tracer captured here would bind one app's provider to another's.
+    const tracer = appTracer();
 
     return await tracer.startActiveSpan(spanName, async (activeSpan) => {
       // Apply @SpanAttribute metadata if present
