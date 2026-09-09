@@ -188,19 +188,18 @@ x-span-id: span123
 
 ### Accessing Current Context
 
+`getCurrentTraceContext()` answers with the trace the calling code is running in, or `null` when
+it is not running in one:
+
 ```typescript
+import { BaseService, getCurrentTraceContext, Service } from '@onebun/core';
+
 @Service()
 export class MyService extends BaseService {
   async doSomething(): Promise<void> {
-    // Access trace service
-    const traceService = (globalThis as any).__onebunTraceService;
+    const context = getCurrentTraceContext();
 
-    if (traceService) {
-      // Get current trace context
-      const context = await Effect.runPromise(
-        traceService.getCurrentTraceContext()
-      );
-
+    if (context) {
       this.logger.info('Current trace', {
         traceId: context.traceId,
         spanId: context.spanId,
@@ -209,6 +208,21 @@ export class MyService extends BaseService {
   }
 }
 ```
+
+It resolves from the OpenTelemetry active span first and from the request scope second, so it
+answers the same way inside an HTTP request, inside a `@Traced` or `@Span` method, and inside a
+queue handler, a scheduled job or a WebSocket callback — which have no request scope at all. It
+is also what the framework's own logger and its outgoing `traceparent` header use, so the three
+can never name different spans.
+
+::: warning It used to read a process global
+This section showed `(globalThis as any).__onebunTraceService` and called
+`traceService.getCurrentTraceContext()` — a method that does not exist; the trace service spells
+it `getCurrentContext()`, and that one reads a fiber-local value which a fresh
+`Effect.runPromise` cannot see anyway. Anything copied from the old snippet returned `undefined`
+or `null` every time. The global is also written once per application and never cleared, so in a
+process running several the last one constructed wins it.
+:::
 
 ### Context Propagation
 
@@ -252,10 +266,13 @@ await client.get('/api/data', { tracing: false });                   // just thi
 The receiving side honours it: the callee starts its HTTP span as a child of the span named in the
 header, so the two services share one trace in the backend as well as one trace id in the logs.
 
-::: warning The log `spanId` is the caller's, not the callee's
-`getCurrentTraceContext()` on the receiving side reports the **inbound** span id, so log lines from
-the callee are stamped with a span that lives in the calling service. The `traceId` is right and the
-span graph is right; joining a log line to the span that emitted it is not. Tracked separately.
+::: tip What the callee's log lines say
+`getCurrentTraceContext()` on the receiving side reports the **callee's own** span: the caller's
+`traceId` continued, a fresh `spanId`, and the caller's span as `parentSpanId`. So a log line joins
+to the span that emitted it, and one hop up is readable without opening the trace.
+
+It used to report the inbound span id verbatim, which stamped every line from the callee with a
+span living in the calling service — click it in a backend and you land in the caller.
 :::
 
 Outside an application — a standalone `createHttpClient()` with no `OneBunApplication` in the
@@ -276,6 +293,17 @@ A provider that throws, or that answers with ids the W3C format cannot express, 
 rather than sending something malformed.
 
 ## Manual Span Creation
+
+::: warning `__onebunTraceService` is one slot for the whole process
+The snippets below reach the trace service through `globalThis.__onebunTraceService`. It is
+written once per application and never cleared, so in a process running several applications —
+multi-service mode — the **last one constructed** wins it, and a service belonging to any other
+application would be recording spans through a sibling's trace service.
+
+Prefer `@Span` / `@Traced`, which record on the right application's provider automatically, and
+`getCurrentTraceContext()` for reading ids. Use the global only in a single-application process,
+and knowing that it is one.
+:::
 
 ```typescript
 @Service()

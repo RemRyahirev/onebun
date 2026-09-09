@@ -160,28 +160,20 @@ class LoggerImpl implements Logger {
         }
       }
 
-      // 2. Fallback to global trace service (for non-HTTP contexts: WebSocket, Queue)
-      if (!currentTraceInfo && typeof globalThis !== 'undefined') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const globalTraceService = (globalThis as any).__onebunTraceService;
-        if (globalTraceService && globalTraceService.getCurrentTraceContext) {
-          try {
-            const currentContext = Effect.runSync(
-              globalTraceService.getCurrentTraceContext(),
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ) as any;
-            if (currentContext && currentContext.traceId) {
-              currentTraceInfo = {
-                traceId: currentContext.traceId,
-                spanId: currentContext.spanId,
-                parentSpanId: currentContext.parentSpanId,
-              };
-            }
-          } catch {
-            // Ignore errors getting trace context
-          }
-        }
-      }
+      // There is deliberately no second source here.
+      //
+      // A `globalThis.__onebunTraceService` branch used to sit at this point, described as the
+      // fallback "for non-HTTP contexts: WebSocket, Queue". It never once fired, for two
+      // independent reasons: it guarded on `getCurrentTraceContext`, a method the trace service
+      // does not have — it is spelled `getCurrentContext` — and even spelled correctly it would
+      // have read a FiberRef from a freshly-started fiber, which answers with that ref's
+      // default rather than with the value the running request set.
+      //
+      // Those contexts are covered where the covering can actually work: `traceContextGetter`
+      // resolves from the OpenTelemetry active span before the request store, so a queue
+      // handler, a scheduled job or a WebSocket callback logs with the trace it is running in.
+      // A process-global was the wrong shape for it besides — it is written per application and
+      // never cleared, so in a process running several the last one constructed wins.
 
       // Parse additional arguments
       const { error, context: argsContext, additionalData } = parseLogArgs(args);

@@ -368,33 +368,16 @@ describe('LoggerImpl methods and makeLogger env selection', () => {
   });
 });
 
-describe('LoggerImpl trace context fallback to __onebunTraceService', () => {
-  it('uses global trace service when current trace context is absent', () => {
-    // очистить direct context
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__onebunCurrentTraceContext = undefined;
-    const outputs: LogEntry[] = [];
-    const transport = new (class extends ConsoleTransport {
-      override log(_f: string, e: LogEntry) {
-        return Effect.sync(() => {
-          outputs.push(e);
-        });
-      }
-    })();
-    // подготовить псевдо trace service
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__onebunTraceService = {
-      getCurrentTraceContext: () => Effect.succeed({ traceId: 'svc-trace', spanId: 'svc-span' }),
-    };
-
-    const layer = makeDevLogger({ transport });
-    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
-    const sync = createSyncLogger(logger);
-    sync.info('ping');
-
-    expect(outputs[0].trace?.traceId).toBe('svc-trace');
-  });
-});
+// The `__onebunTraceService` fallback that used to live in `LoggerImpl` is gone, and so is the
+// test that covered it. That test built its own global — `{ getCurrentTraceContext: () =>
+// Effect.succeed(...) }` — a shape no real trace service has: the service spells the method
+// `getCurrentContext`, so the branch's guard was false for every genuine service and the branch
+// never ran outside this test. It was green while covering nothing.
+//
+// The contexts it claimed to serve — WebSocket, queue, scheduled jobs — are covered by
+// `getCurrentTraceContext()` in `@onebun/core`, which resolves from the OpenTelemetry active
+// span, and pinned end to end by
+// `packages/core/src/application/log-trace-correlation.test.ts`.
 
 
 // Added tests to raise function coverage for formatter.ts

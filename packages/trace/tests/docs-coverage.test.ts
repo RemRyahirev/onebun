@@ -256,12 +256,17 @@ describe('docs/api/trace.md — Enabling Tracing', () => {
 
       const body = (await response.json()) as Envelope<{ trace: SeenTraceContext | null }>;
 
-      // The caller's ids are continued, not replaced: this is what makes a trace span services.
+      // The caller's TRACE is continued and its sampling decision inherited — that is what makes
+      // a trace span services — while this request takes an identity of its own and records the
+      // caller's span as its parent. Adopting `spanId` verbatim, which this used to assert, meant
+      // every log line here was stamped with a span living in the CALLING service: click it in a
+      // backend and you land in the caller, never in the code that wrote the line.
       expect(body.result.trace).toMatchObject({
         traceId: W3C_TRACE_ID,
-        spanId: W3C_SPAN_ID,
+        parentSpanId: W3C_SPAN_ID,
         traceFlags: SAMPLED_FLAG,
       });
+      expect(body.result.trace?.spanId).not.toBe(W3C_SPAN_ID);
     } finally {
       await app.stop();
     }
@@ -559,7 +564,9 @@ describe('docs/api/trace.md — Trace Context', () => {
       });
       const body = (await response.json()) as Envelope<{ traceId: string; spanId: string }>;
 
-      expect(body.result).toEqual({ traceId: W3C_TRACE_ID, spanId: W3C_SPAN_ID });
+      // Same rule as above: the trace is the caller's, the span is this request's own.
+      expect(body.result.traceId).toBe(W3C_TRACE_ID);
+      expect(body.result.spanId).not.toBe(W3C_SPAN_ID);
     } finally {
       await app.stop();
     }

@@ -62,10 +62,17 @@ on `BaseService` / `BaseController` — resolves to the innermost open span.
   `isSpanContextValid`, which is why there is no second copy of that check in OneBun.
 - **Still flat with no `exportOptions.endpoint`**: the request takes the lightweight path and no HTTP span
   exists for methods to hang off.
-- **The log `spanId` on a called service is the CALLER's.** `getCurrentTraceContext()` returns the inbound
-  context verbatim, so a log line from the callee is stamped with a span living in the calling service. The
-  `traceId` and the span graph are right; joining a log line to the span that emitted it is not. Tracked
-  separately — do not build correlation tooling on `trace.spanId` yet.
+- **A log line names the span it was written from.** `getCurrentTraceContext()` resolves from the
+  OpenTelemetry active span first and the request scope second — the same order the outgoing `traceparent`
+  uses, so logs, spans and propagated headers can never name different spans. Consequences worth knowing:
+  a line logged inside a `@Traced`/`@Span` method carries THAT method's `spanId`, not the request's; a
+  callee's lines carry the callee's span rather than the caller's; and queue handlers, `@Cron` jobs and
+  WebSocket callbacks — which have no request scope at all — carry a trace id whenever a span is open,
+  which is whenever the handler is traced.
+  Two defects used to sit here. The request scope was filled with a context minted separately from the span,
+  so every HTTP log line named a trace that existed nowhere (measured: span on `4074598c…`, logs on
+  `38b97f3e…`). And the fallback meant to cover the non-HTTP contexts guarded on `getCurrentTraceContext`, a
+  method the trace service does not have — it is `getCurrentContext` — so it never fired.
 - **Sampling reads differently now.** The sampler is `ParentBased`, so the decision is made once at the root
   and inherited: `samplingRate: 0.1` means one request in ten with all of its spans, not one span in ten.
 

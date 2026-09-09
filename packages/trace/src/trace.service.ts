@@ -555,6 +555,11 @@ export class TraceServiceImpl implements TraceService {
       traceContext = {
         traceId: spanCtx.traceId,
         spanId: spanCtx.spanId,
+        // Whoever called us, when anyone did. `SpanContext` does not carry it — it describes a
+        // span, not an edge — so it comes from the inbound context the span was parented to.
+        // Recorded because `TraceInfo.parentSpanId` is what a log line offers a reader who wants
+        // to walk one hop up without opening the trace.
+        parentSpanId: data.parentContext?.spanId,
         traceFlags: spanCtx.traceFlags,
       };
 
@@ -580,8 +585,25 @@ export class TraceServiceImpl implements TraceService {
         httpAttributes['http.request_content_length'] = data.requestSize;
       }
     } else {
-      // Lightweight path — no OTel span creation, just context propagation
-      traceContext = this.generateTraceContextSync();
+      // Lightweight path — no OTel span creation, just context propagation.
+      //
+      // Continues the caller's TRACE while taking an identity of its own. Minting the whole
+      // context unconditionally put this request on a trace of its own while the request scope
+      // carried the caller's, and nothing ever compared the two — which is how a third,
+      // invisible trace id per request came to exist. Adopting the inbound context verbatim
+      // would be the opposite mistake: every log line would then be stamped with a span living
+      // in the calling service, so clicking it lands in the caller rather than here.
+      const minted = this.generateTraceContextSync();
+
+      traceContext = data.parentContext
+        ? {
+          traceId: data.parentContext.traceId,
+          spanId: minted.spanId,
+          parentSpanId: data.parentContext.spanId,
+          // The caller's sampling decision, inherited rather than re-rolled.
+          traceFlags: data.parentContext.traceFlags,
+        }
+        : minted;
     }
 
     return {

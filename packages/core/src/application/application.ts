@@ -1287,10 +1287,20 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   // `requestHandler` below, before the span existed.
                   app.traceService.activateSpanSync?.(traceSpan);
 
-                  // Store trace context in AsyncLocalStorage for per-request isolation
+                  // The SPAN's own context, not the one generated a few lines above. Those two
+                  // are unrelated: `generateTraceContextSync()` mints fresh ids, while
+                  // `startHttpTraceSync` derives its own from the OpenTelemetry span it starts.
+                  // Storing the generated one put a trace id in every log line that belonged to
+                  // no span — measured on one request with one span: the span was on trace
+                  // 4074598c…, the logs said 38b97f3e…. A trace id copied out of the logs found
+                  // nothing in the backend, which is the one thing logging it is for.
+                  //
+                  // `traceContext` stays the fallback for the same reason it is computed: when
+                  // an inbound `traceparent` arrived it is the caller's context, and it is what
+                  // the span was parented to.
                   const store = requestContextStore.getStore();
                   if (store) {
-                    store.traceContext = traceContext;
+                    store.traceContext = traceSpan?.context ?? traceContext;
                   }
                 } catch (error) {
                   app.logger.error(
