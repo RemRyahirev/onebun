@@ -1,6 +1,66 @@
 # Changelog
 
-## [0.6.0]
+## 0.6.0 — 2026-09-09
+
+### Package Versions
+
+Every package moves together, for the same reason as last release. `workspace:^` is rewritten to
+`^<version>` at publish time and a caret on a 0.x version pins the minor, so once one package
+crosses a minor, everything that depends on it must cross with it — otherwise an install resolves
+two copies of the same package. Ten of the eleven have code changes; `@onebun/create` has none and
+moves because of that constraint, not because of its contents. Independent per-package versions
+become viable again at 1.0.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.5.0 | 0.6.0 |
+| `@onebun/drizzle` | 0.5.0 | 0.6.0 |
+| `@onebun/trace` | 0.5.0 | 0.6.0 |
+| `@onebun/requests` | 0.5.0 | 0.6.0 |
+| `@onebun/nats` | 0.5.0 | 0.6.0 |
+| `@onebun/logger` | 0.5.0 | 0.6.0 |
+| `@onebun/cache` | 0.5.0 | 0.6.0 |
+| `@onebun/docs` | 0.5.0 | 0.6.0 |
+| `@onebun/metrics` | 0.5.0 | 0.6.0 |
+| `@onebun/envs` | 0.5.0 | 0.6.0 |
+| `@onebun/create` | 0.5.0 | 0.6.0 |
+
+### Read This First
+
+Ten entries below are breaking, three of them security-relevant. Two stop an application from
+booting, and that is the fix in both cases — each was previously a silence. Each entry carries its
+own **Migration** note where it appears; this is the index.
+
+- **`auth: { type: 'onebun' }` authenticated nothing** — it verified a payload rebuilt from two
+  headers no client ever sent, so only a literal `GET /` could validate and every request worth
+  protecting failed open. The scheme is rewritten and the wire format changed: **both ends must
+  upgrade together**, and `validateOneBunAuth` is removed rather than deprecated.
+- **`auth: { type: 'apikey', location: 'query' }` never reached the wire** — the URL was built
+  before auth ran, so those calls went out with no key at all. They start carrying one now, which
+  means the key starts appearing in the callee's access logs.
+- **The 500 body no longer carries the error's message or its stack** — for any unhandled throw
+  both were echoed verbatim, disclosing paths, hosts and credentials to whoever could provoke a
+  500. `exposeErrorDetails: true` returns the old body; the stack was always in the logs.
+- **`json`/`jsonb` columns were stored double-encoded on PostgreSQL** — every value written
+  through `DrizzleService` landed as a jsonb *string*, so `jsonb_typeof` answered `string` and no
+  operator or index worked. **The on-disk format changes**: existing rows need migrating.
+- **`RedisCache.clear()` could delete outside its own keyspace** — with an empty key prefix it
+  issued `KEYS *` and a `DEL` per hit, so one "flush the cache" call destroyed every other tenant
+  of that Redis database.
+- **`pool.*` was accepted and then discarded** on PostgreSQL — every pool option an operator
+  configured was read and thrown away. `pool.min` is removed rather than made to work.
+- **`queue.redis` now selects the Redis adapter**, where it used to only enable the queue. An
+  application with a `redis` block and no `adapter` was silently running an in-memory queue whose
+  messages never left the process; it now connects, and **fails to boot if Redis is unreachable**.
+- **A JetStream subscription no declared stream binds is refused at startup** — it used to be
+  bound to whichever stream was declared first, where it received nothing forever, with
+  `isConnected()` reporting true. **Some applications will stop booting**; the migration note has
+  an offline check to find them before you upgrade.
+- **A `keyPrefix` alongside `useSharedClient: true` is rejected** rather than silently discarded.
+  If you passed both, your keys were never under the prefix you asked for.
+- **`Message.params` is a required field** on `Message<T>` — code that constructs a message by
+  hand (test doubles, custom adapters) must add it. `params: {}` is correct where there was no
+  pattern capture.
 
 ### Added
 
