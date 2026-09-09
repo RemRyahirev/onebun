@@ -639,6 +639,7 @@ lightweight path: the question is whether anything will see the span, not how it
 - `installedTracerProvider()` is exported and re-derives ownership from reality: `trace.getTracerProvider()` returns a `ProxyTracerProvider` wrapper, so identity is read through its public `getDelegate()`. Shutdown releases the global only when the remembered owner AND the installed delegate are both this provider
 - Teardown has three cases and only the last disables anything: not the owner -> touch nothing; owner with another live provider -> `trace.disable()` immediately followed by `setGlobalTracerProvider(successor)`, because a duplicate registration would be refused; owner with nothing left -> `trace.disable()`
 - `shutdown()` is idempotent via a `shutdownStarted` flag, and removes the provider from the live set BEFORE flushing so a concurrent shutdown cannot elect a provider that is on its way down. `releaseGlobal` runs in a `finally`, because a failed flush is still a dead provider
+- `enabled: false` builds no provider, and its tracer comes from a detached `new ProxyTracerProvider()` — NOT from `trace.getTracer()`. The global fallback made a switched-off service borrow whichever enabled sibling had installed the slot and record spans under that sibling's `service.name`; measured in one process, the same disabled service answered with a valid trace id after an enabled sibling was constructed and with the all-zero one when alone. A delegate-less `ProxyTracerProvider` resolves to the API's no-op tracer and cannot reach the global
 
 </llm-only>
 

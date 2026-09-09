@@ -18,7 +18,13 @@
  * the claim, and only a real endpoint can answer it.
  */
 
-import { context as otelContext, trace as otelTrace } from '@opentelemetry/api';
+import {
+  context as otelContext,
+  INVALID_TRACEID,
+  isSpanContextValid,
+  trace as otelTrace,
+  type SpanContext,
+} from '@opentelemetry/api';
 import {
   afterEach,
   beforeEach,
@@ -35,6 +41,7 @@ import {
   TraceService,
   type TraceServiceImpl,
 } from '../src/index';
+import { TraceServiceImpl as TraceServiceClass } from '../src/trace.service';
 
 /** One OTLP collector, remembering the service names of everything posted to it. */
 interface Collector {
@@ -210,5 +217,42 @@ describe('two applications in one process', () => {
     expect(ordersCollector.serviceNames()).toEqual([]);
 
     await orders.shutdown();
+  });
+});
+
+/**
+ * A disabled application is inert regardless of what its neighbours do.
+ *
+ * `TraceServiceImpl` fell back to `trace.getTracer()` when it had built no provider of its own,
+ * which is exactly the `enabled: false` case. That reads the PROCESS-GLOBAL provider — whatever
+ * the first enabled application installed — so switching tracing off for one service in a
+ * multi-service process did not produce silence. It produced that service's spans, recorded by
+ * the neighbour's provider and exported under the neighbour's `service.name`.
+ *
+ * Measured before the fix, in one process: a disabled service's tracer yielded
+ * `valid=true traceId=9f7a70bc…` after an enabled sibling had been constructed, and
+ * `valid=false traceId=000…0` when it was alone. The outcome depended on construction order.
+ */
+describe('a disabled trace service records nothing, whoever else is in the process', () => {
+  it('yields an invalid span context even after an enabled sibling installed the global', () => {
+    // The sibling first, so the process-global provider slot is taken by a real provider.
+    const sibling = new TraceServiceClass({ enabled: true, serviceName: 'sibling' });
+
+    expect(sibling.getTracer()).toBeDefined();
+
+    const disabled = new TraceServiceClass({ enabled: false, serviceName: 'switched-off' });
+
+    let observed: SpanContext | undefined;
+
+    disabled.getTracer().startActiveSpan('should-not-record', (span) => {
+      observed = span.spanContext();
+      span.end();
+    });
+
+    // An all-zero context is what `getCurrentTraceContext()` skips, so nothing this service logs
+    // carries a trace id — which is what `enabled: false` is asking for.
+    expect(observed).toBeDefined();
+    expect(isSpanContextValid(observed as SpanContext)).toBe(false);
+    expect(observed?.traceId).toBe(INVALID_TRACEID);
   });
 });

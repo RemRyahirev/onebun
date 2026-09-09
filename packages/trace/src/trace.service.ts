@@ -3,6 +3,7 @@ import {
   type Context as OtelContext,
   type Span as OtelSpan,
   SpanStatusCode as OtelSpanStatusCode,
+  ProxyTracerProvider,
   ROOT_CONTEXT,
   SpanKind,
   trace,
@@ -234,8 +235,17 @@ export class TraceServiceImpl implements TraceService {
     //
     // The global registration in `initTracerProvider` stays, as a best-effort answer for
     // third-party instrumentation that resolves through `trace.getTracer()` on its own.
+    //
+    // `providerResult` is null in exactly one case — `enabled: false` — and the fallback must not
+    // be `trace.getTracer()` there. That reads the process-global provider, so a service with
+    // tracing switched off borrowed whichever ENABLED sibling had installed it, and recorded its
+    // spans under that sibling's `service.name`. Measured in one process: the disabled service
+    // answered with a valid `9f7a70bc…` after an enabled sibling was constructed, and with the
+    // all-zero context when it was alone — so `enabled: false` meant different things depending
+    // on construction order. A `ProxyTracerProvider` with no delegate answers with the API's
+    // no-op tracer and cannot resolve to the global, which is what "switched off" has to mean.
     this.tracer = this.providerResult?.provider.getTracer('@onebun/trace')
-      ?? trace.getTracer('@onebun/trace');
+      ?? new ProxyTracerProvider().getTracer('@onebun/trace');
   }
 
   /**
