@@ -757,7 +757,10 @@ describe('@ApiResponse() (docs/api/decorators.md)', () => {
       expect(broken.status).toBe(serverErrorStatus);
       const body = await broken.json() as { success: boolean; error: string };
       expect(body.success).toBe(false);
-      expect(body.error).toContain('Response validation failed');
+      // "never reaches the client" is the point, and so is the body: the violation detail
+      // quotes the offending response value, so it goes to the log and the client is told
+      // only that the request failed.
+      expect(body.error).toBe('Internal Server Error');
     } finally {
       await app.stop();
     }

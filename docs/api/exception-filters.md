@@ -36,8 +36,9 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 **The default filter** handles:
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
 - `OneBunBaseError` subclasses → `{ success: false, error: message, code: errorCode }` (HTTP status = error's code)
-- Any other `Error` → `{ success: false, error: message, code: 500 }` (HTTP 500)
+- Any other `Error` **or thrown value** → `{ success: false, error: 'Internal Server Error', code: 500 }` (HTTP 500). The exported constant is `UNHANDLED_ERROR_MESSAGE`. The thrown value's own message is NOT in the body: it is written by whatever threw it — a driver, a socket, the file system — and routinely names an absolute path, an internal host and port, a service hostname, a failing statement with its bound parameters, or the password inside a connection string. The two branches above keep their messages, because they are author-written and client-facing; this branch has no way to tell a safe message from a leaking one, so it is withheld wholesale rather than filtered. A denylist of shapes would always miss the shape it had not met
 - `createErrorResponse` always emits a `details` key, defaulting to `{}`. Only the unhandled branch ever populated it, and it no longer does unless `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
+- `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
 - The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
 - The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
 - The stack still reaches the operator: the application logs `'Unhandled error in ...'` with the error object before the filter runs, so withholding it from the response costs no debuggability
@@ -222,26 +223,52 @@ The `defaultExceptionFilter` is always active. It handles:
 |------------|---------------|--------|
 | `HttpException` | `{ success: false, error: message, code: statusCode, details: {} }` | exception's statusCode |
 | `OneBunBaseError` subclass | `{ success: false, error: message, code: errorCode }` | error's code |
-| Any other `Error` or value | `{ success: false, error: message, code: 500, details: {} }` | 500 |
+| Any other `Error` or value | `{ success: false, error: 'Internal Server Error', code: 500, details: {} }` | 500 |
 
-Every body carries a `details` object, and on the default filter it is **empty**. It used to
-carry the error's stack trace, class name and non-HTTP `code` for any unhandled throw — the
-default path, taken by every error that is not an `HttpException` or a `OneBunBaseError`. A stack
+**An unhandled error does not put its own message in the response.** The first two rows do —
+those messages are written by the author and meant for the client. The third is the branch where
+the text came from a library or the kernel, and such a message routinely carries exactly what an
+API response must not:
+
+```
+ENOENT: no such file or directory, open '/srv/app/config/private.pem'
+connect ECONNREFUSED 10.0.3.17:5432
+getaddrinfo ENOTFOUND internal-billing.svc.cluster.local
+Invalid URL: postgres://app:hunter2@db.internal:5432/app
+```
+
+An absolute path, an internal host and port, the service topology, a password. Nothing in the
+filter can tell one of those from a harmless message, so the whole branch answers with the fixed
+string `'Internal Server Error'` — exported as `UNHANDLED_ERROR_MESSAGE`. Filtering by pattern
+instead was rejected: a denylist always misses the shape it has not met, and reads as safe.
+
+Every body also carries a `details` object, and on the default filter it is **empty**. It used to
+carry the error's stack trace, class name and non-HTTP `code` for any unhandled throw. A stack
 trace in an API response discloses absolute filesystem paths, dependency versions and internal
-module layout to whoever can provoke a 500, so it is withheld.
+module layout to whoever can provoke a 500, so it is withheld too.
 
-Nothing is lost operationally: the application logs the whole error, stack included, before the
-filter runs.
+Nothing is lost operationally: the application logs the whole error, message and stack included,
+before the filter runs — look for `Unhandled error in <Controller>.<handler>`.
+
+::: tip Returning a message to the client deliberately
+Throw an `HttpException` — that is what it is for. `throw new HttpException(422, 'orderId must
+be a positive integer')` answers with that text verbatim. Catching a driver error and rethrowing
+it as an `HttpException` you worded yourself is the supported way to say something specific
+about a failure.
+:::
 
 ::: warning exposeErrorDetails puts it back
 ```typescript
 const app = new OneBunApplication(AppModule, { exposeErrorDetails: true });
 ```
 
-`details` then carries `originalErrorName`, `originalCode` and the full `stack` for unhandled
-errors. Off by default, and deliberately **not** tied to `NODE_ENV` — a deployment with an unset
-or mistyped `NODE_ENV` would start disclosing stack traces silently, which is the failure this
-guards against. Turn it on knowingly, in a development configuration you can read.
+The unhandled branch then answers with the error's **real message**, and `details` carries
+`originalErrorName`, `originalCode` and the full `stack`. One flag governs both: a message naming
+an internal host is not meaningfully safer than the stack naming the file.
+
+Off by default, and deliberately **not** tied to `NODE_ENV` — a deployment with an unset or
+mistyped `NODE_ENV` would start disclosing all of it silently, which is the failure this guards
+against. Turn it on knowingly, in a development configuration you can read.
 
 `HttpException` and `OneBunBaseError` bodies are unaffected by the flag: they never carried
 details.

@@ -449,7 +449,14 @@ module exports only `OneBunFile`, `MimeType`, `matchMimeType`, `validateFile`.
 |---|---|---|
 | `HttpException` | exception's statusCode | `{ success: false, error: message, code: statusCode }` |
 | `OneBunBaseError` | error's code | `{ success: false, error: message, code: errorCode }` |
-| Any other `Error` | 500 | `{ success: false, error: message, code: 500 }` |
+| Any other `Error` or thrown value | 500 | `{ success: false, error: 'Internal Server Error', code: 500 }` |
+
+The third row does **not** carry the error's own message. That text is written by whatever threw — a
+driver, a socket, the file system — and routinely names an absolute path, an internal host and port, or
+the password inside a connection string. The first two rows keep their messages because those are
+author-written and client-facing. The real message goes to the log (`Unhandled error in <Controller>.<handler>`),
+and comes back in the response only under `exposeErrorDetails`, which governs the message and the stack
+together. To say something specific to a client, throw an `HttpException` with your own wording.
 
 ## Guards, Exception Filters, Security
 

@@ -23,17 +23,21 @@ import {
   Body,
   Controller,
   createExceptionFilter,
+  Effect,
   Get,
   HttpException,
   HttpStatusCode,
+  Layer,
   Module,
   NotFoundError,
   OneBunApplication,
   OneBunBaseError,
   Post,
   type,
+  UNHANDLED_ERROR_MESSAGE,
   UseFilters,
 } from '@onebun/core';
+import { LoggerService, type Logger } from '@onebun/logger';
 import { ValidationError } from '@onebun/requests';
 
 // `@onebun/core/testing` is a package subpath with no tsconfig path mapping, so in-repo
@@ -407,7 +411,9 @@ describe('docs/api/exception-filters.md', () => {
 
     expect(plain.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
     expect(plainBody.success).toBe(false);
-    expect(plainBody.error).toBe('kaboom');
+    // The table's third row: an unhandled error answers with the fixed string, not with its
+    // own message. The first two rows keep theirs, asserted above.
+    expect(plainBody.error).toBe(UNHANDLED_ERROR_MESSAGE);
     expect(plainBody.code).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
   });
 
@@ -474,7 +480,9 @@ describe('docs/api/exception-filters.md', () => {
     const rethrownBody = await rethrown.json() as ErrorBody;
 
     expect(rethrown.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
-    expect(rethrownBody.error).toBe('unmapped');
+    // Re-thrown to the default filter, so it is an unhandled error by the time it is
+    // serialized — and the default filter withholds the message.
+    expect(rethrownBody.error).toBe(UNHANDLED_ERROR_MESSAGE);
     expect(rethrownBody.code).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
   });
 
@@ -687,6 +695,48 @@ describe('docs/api/exception-filters.md — global filters', () => {
   });
 });
 
+/** A record of one logger call, including the arguments after the message. */
+interface LogRecord {
+  level: string;
+  message: string;
+  extra: unknown[];
+}
+
+/**
+ * A logger layer that keeps every write, arguments included.
+ *
+ * `makeMockLoggerLayer` is silent by design, so it cannot answer the question this section
+ * needs answered: the response no longer carries the error's message, and the promise is that
+ * the LOG still does. The error arrives as the second argument to `error()`, so a recorder
+ * that keeps only the message string would miss exactly the thing under test.
+ */
+function recordingLoggerLayer(sink: LogRecord[]): Layer.Layer<Logger> {
+  const make = (): Logger => {
+    const record = (level: string) => (message: string, ...extra: unknown[]) =>
+      Effect.sync(() => {
+        sink.push({
+          level,
+          message,
+          // Errors do not survive JSON.stringify, so they are flattened here where the shape
+          // is still known.
+          extra: extra.map(value => (value instanceof Error ? `${value.name}: ${value.message}` : value)),
+        });
+      });
+
+    return {
+      trace: record('trace'),
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
+      fatal: record('fatal'),
+      child: () => make(),
+    };
+  };
+
+  return Layer.succeed(LoggerService, make());
+}
+
 /**
  * The "Default Filter Behaviour" table, and the `exposeErrorDetails` warning beneath it,
  * exercised against a live application rather than against the filter object — the disclosure
@@ -705,6 +755,17 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
     @Get('/http-exception')
     httpException(): never {
       throw new HttpException(HTTP_GONE, 'Gone for good');
+    }
+
+    /** The four shapes the docs quote, thrown from an ordinary handler. */
+    @Get('/leaky')
+    leaky(): never {
+      throw new Error(
+        "ENOENT: no such file or directory, open '/srv/app/config/private.pem'; "
+        + 'connect ECONNREFUSED 10.0.3.17:5432; '
+        + 'getaddrinfo ENOTFOUND internal-billing.svc.cluster.local; '
+        + 'Invalid URL: postgres://app:hunter2@db.internal:5432/app',
+      );
     }
   }
 
@@ -738,7 +799,7 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
 
       expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
       expect(body.success).toBe(false);
-      expect(body.error).toBe('internal failure');
+      expect(body.error).toBe(UNHANDLED_ERROR_MESSAGE);
       expect(body.code).toBe(HTTP_INTERNAL_SERVER_ERROR);
       expect(body.details).toEqual({});
     });
@@ -762,6 +823,46 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
       expect(typeof body.details?.stack).toBe('string');
       expect(body.details?.originalErrorName).toBe('Error');
     });
+  });
+
+  it('discloses no path, host:port, service name or credential from an unhandled error', async () => {
+    // The four examples printed under the table, asserted on the raw response text of a real
+    // request — the disclosure was in the body the application itself builds, so it has to be
+    // checked there rather than on the filter object.
+    await withApp({}, async (base) => {
+      const raw = await (await fetch(`${base}/default-filter/leaky`)).text();
+
+      expect(raw).not.toContain('/srv/app/config/private.pem');
+      expect(raw).not.toContain('10.0.3.17:5432');
+      expect(raw).not.toContain('internal-billing.svc.cluster.local');
+      expect(raw).not.toContain('hunter2');
+      expect(raw).toContain(UNHANDLED_ERROR_MESSAGE);
+    });
+  });
+
+  it('still hands the real message to the log, which is where it belongs', async () => {
+    // Withholding it from the response must not remove it from the operator's view. The
+    // application logs the whole error before the filter runs; this asserts that, so that a
+    // future change cannot quietly make the message disappear from both places at once.
+    const records: Array<{ level: string; message: string; extra: unknown[] }> = [];
+    const app = new OneBunApplication(DefaultFilterModule, {
+      port: 0,
+      loggerLayer: recordingLoggerLayer(records) as never,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    await app.start();
+
+    try {
+      await fetch(`${app.getHttpUrl()}/default-filter/leaky`);
+    } finally {
+      await app.stop();
+    }
+
+    const logged = JSON.stringify(records);
+    expect(logged).toContain('Unhandled error in UnhandledController.leaky');
+    expect(logged).toContain('/srv/app/config/private.pem');
   });
 
   it('leaves the HttpException row unaffected by the flag', async () => {

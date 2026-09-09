@@ -236,9 +236,12 @@ describe('Validation docs examples (docs/api/validation.md)', () => {
         // rejected instead of being handed to the client as a 200.
         const broken = await fetch(`${base}/broken`);
         expect(broken.status).toBe(500);
+        // The violation is a server-side contract bug and its detail quotes the offending
+        // response value, so it goes to the log rather than to the client — the default
+        // filter answers an unhandled error with a fixed string.
         expect(await broken.json()).toMatchObject({
           success: false,
-          error: expect.stringContaining('Response validation failed'),
+          error: 'Internal Server Error',
         });
 
         const missing = await fetch(`${base}/nobody`);

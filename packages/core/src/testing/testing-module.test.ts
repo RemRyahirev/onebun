@@ -631,7 +631,9 @@ describe('fast path — exception filters', () => {
     expect(res.status).toBe(500);
     expect(res.contentType).toContain('application/json');
     expect(res.body.success).toBe(false);
-    expect(res.body.error).toBe('boom');
+    // The filter ran — and an unhandled error answers with the fixed string rather than
+    // with whatever the thrower wrote.
+    expect(res.body.error).toBe('Internal Server Error');
   });
 
   it('does not let a non-numeric error code crash the filter', async () => {
@@ -642,7 +644,7 @@ describe('fast path — exception filters', () => {
 
     expect(res.status).toBe(500);
     expect(res.contentType).toContain('application/json');
-    expect(res.body.error).toBe('control plane unreachable');
+    expect(res.body.error).toBe('Internal Server Error');
   });
 
   // The anti-drift guard. Five separate call sites apply filters; a cross product is

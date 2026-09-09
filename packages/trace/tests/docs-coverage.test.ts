@@ -1005,9 +1005,13 @@ describe('docs/api/trace.md — Complete Example', () => {
       });
 
       expect(response.status).toBe(HTTP_SERVER_ERROR);
+      // The default filter withholds an unhandled error's own message — it is written by
+      // whatever threw, and cannot be told apart from one naming a path or a credential. The
+      // diagnostic detail is on the SPAN, asserted below, and in the log. A message meant for
+      // the client is thrown as an `HttpException`.
       expect(await response.json()).toMatchObject({
         success: false,
-        error: 'Insufficient stock for product sku-2',
+        error: 'Internal Server Error',
       });
 
       const validation = recordedSpan('order-validate-items');

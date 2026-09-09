@@ -261,19 +261,28 @@ file/form parameter decorators.
 |---|---|---|
 | `HttpException` | exception's `statusCode` | `{ success: false, error: message, code: statusCode, details: {} }` |
 | `OneBunBaseError` | `toHttpStatus(error.code)` | `error.toErrorResponse()` → `{ success: false, error, code, details, originalError }` |
-| Any other `Error` | `toHttpStatus(error.code)`, else 500 | `{ success: false, error: message, code, details: { originalErrorName, originalCode, stack } }` |
+| Any other `Error` or thrown value | `toHttpStatus(error.code)`, else 500 | `{ success: false, error: 'Internal Server Error', code, details: {} }` |
 
-Two things about the last row that a reader will otherwise get wrong:
+Three things about the last row that a reader will otherwise get wrong:
 
 - **It is not a flat 500.** The status is `toHttpStatus(error.code)` — an `Error` carrying an
   integer `code` in 100–599 answers with THAT status, so
   `Object.assign(new Error('x'), { code: 404 })` produces HTTP 404. 500 is only the fallback for a
   missing or out-of-range code, e.g. the string `'ECONNREFUSED'`. (Coercion exists because passing
   `NaN` to `new Response` throws `RangeError` from inside the filter itself.)
-- **The stack trace is serialized to the client.** `details.stack` carries `error.stack` verbatim
-  for this branch, and there is no option to turn it off. If unhandled errors must not leak
-  internals, register a global exception filter that catches everything and rewrites the body —
-  the default filter will not do it for you.
+- **The error's own message is NOT in the body.** It answers with the fixed string
+  `UNHANDLED_ERROR_MESSAGE` (`'Internal Server Error'`), because a message written by a driver, a
+  socket or the file system routinely names an absolute path, an internal host and port, or the
+  password in a connection string, and nothing in the filter can tell those from a harmless
+  message. The first two rows keep their messages: those are author-written and client-facing.
+  To return specific wording to a client, throw an `HttpException` — that is what it is for.
+- **No stack trace and no `details` either.** `details` is present and empty. Both the message and
+  the details come back under `exposeErrorDetails: true` in `ApplicationOptions` — one flag for
+  both, deliberately not derived from `NODE_ENV`, since an unset or mistyped `NODE_ENV` would flip
+  a security-relevant default the wrong way with no signal.
+
+Nothing is lost operationally: the application logs the whole error, message and stack included,
+before the filter runs — grep the logs for `Unhandled error in <Controller>.<handler>`.
 
 `httpEnvelope: true` overrides the status column: every row answers HTTP 200 and the real status
 lives in `code`.

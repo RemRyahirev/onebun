@@ -14,6 +14,7 @@ import {
   createDefaultExceptionFilter,
   createExceptionFilter,
   defaultExceptionFilter,
+  UNHANDLED_ERROR_MESSAGE,
 } from './exception-filters';
 import { HttpException } from './http-exception';
 
@@ -114,23 +115,26 @@ describe('defaultExceptionFilter', () => {
     expect(body.success).toBe(false);
   });
 
-  it('returns HTTP 500 for plain Error', async () => {
+  it('returns HTTP 500 for plain Error, without the error message', async () => {
     const error = new Error('Something went wrong');
     const response = await defaultExceptionFilter.catch(error, makeContext());
 
     expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
-    expect(body.error).toBe('Something went wrong');
+    // The message of an unhandled error is written by whatever threw it, not by the author.
+    expect(body.error).toBe(UNHANDLED_ERROR_MESSAGE);
   });
 
-  it('returns HTTP 500 for non-Error values', async () => {
+  it('returns HTTP 500 for non-Error values, without stringifying them into the body', async () => {
     const response = await defaultExceptionFilter.catch('string error', makeContext());
 
     expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
-    expect(body.error).toBe('string error');
+    // `throw someObject` is no safer than `throw new Error(...)`: `String(value)` of a thrown
+    // config object is exactly the kind of thing that carries a connection string.
+    expect(body.error).toBe(UNHANDLED_ERROR_MESSAGE);
   });
 
   it('sets Content-Type to application/json', async () => {
@@ -186,8 +190,51 @@ describe('defaultExceptionFilter', () => {
 
     expect(raw).not.toContain('PostgresConnectionError');
     expect(raw).not.toContain('ECONNREFUSED');
-    // The documented contract is unchanged: the message still goes out.
-    expect(raw).toContain('connect failed');
+    // And the message with it: `connect failed` is the benign half of a family whose other
+    // members name hosts, ports and credentials, and nothing here can tell them apart.
+    expect(raw).not.toContain('connect failed');
+  });
+
+  it('discloses no path, host:port or connection string from an unhandled error', async () => {
+    // The three shapes a runtime error routinely carries, on the raw response text rather than
+    // on a parsed field: the point is that none of it is shipped AT ALL, under any key.
+    const leaks = [
+      "ENOENT: no such file or directory, open '/srv/app/config/private.pem'",
+      'connect ECONNREFUSED 10.0.3.17:5432',
+      'getaddrinfo ENOTFOUND internal-billing.svc.cluster.local',
+      'Invalid URL: postgres://app:hunter2@db.internal:5432/app',
+    ];
+
+    for (const leak of leaks) {
+      const response = await defaultExceptionFilter.catch(new Error(leak), makeContext());
+      const raw = await response.text();
+
+      expect(raw).not.toContain('/srv/app/config');
+      expect(raw).not.toContain('10.0.3.17');
+      expect(raw).not.toContain('internal-billing.svc.cluster.local');
+      expect(raw).not.toContain('hunter2');
+      expect(raw).toContain(UNHANDLED_ERROR_MESSAGE);
+    }
+  });
+
+  it('leaves an author-written HttpException message alone', async () => {
+    // The leak is confined to the branch where the text came from a library or the kernel.
+    // A message the author chose is client-facing on purpose and still goes out verbatim.
+    const response = await defaultExceptionFilter.catch(
+      new HttpException(422, 'orderId must be a positive integer'),
+      makeContext(),
+    );
+
+    expect(await response.text()).toContain('orderId must be a positive integer');
+  });
+
+  it('leaves an author-written OneBunBaseError message alone', async () => {
+    const response = await defaultExceptionFilter.catch(
+      new NotFoundError('No order with that id'),
+      makeContext(),
+    );
+
+    expect(await response.text()).toContain('No order with that id');
   });
 
   it('still answers 500 when a non-HTTP code cannot become a status', async () => {
@@ -210,6 +257,18 @@ describe('createDefaultExceptionFilter({ exposeErrorDetails })', () => {
     const body = await response.json() as Record<string, unknown>;
 
     expect(body.details).toEqual({});
+  });
+
+  it('returns the real message when explicitly enabled', async () => {
+    // One knob, not two: a message naming an internal host is not meaningfully safer than the
+    // stack naming the file, so the same flag governs both.
+    const filter = createDefaultExceptionFilter({ exposeErrorDetails: true });
+    const response = await filter.catch(
+      new Error("ENOENT: no such file or directory, open '/srv/app/config/private.pem'"),
+      makeContext(),
+    );
+
+    expect(await response.text()).toContain('/srv/app/config/private.pem');
   });
 
   it('adds the stack and the original error identity when explicitly enabled', async () => {
@@ -278,7 +337,8 @@ describe('createDefaultExceptionFilter with httpEnvelope: true', () => {
     expect(response.status).toBe(HttpStatusCode.OK);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
-    expect(body.error).toBe('Something went wrong');
+    // The envelope changes the STATUS, not what may be disclosed in the body.
+    expect(body.error).toBe(UNHANDLED_ERROR_MESSAGE);
   });
 
   it('returns HTTP 200 for non-Error values', async () => {
@@ -287,7 +347,7 @@ describe('createDefaultExceptionFilter with httpEnvelope: true', () => {
     expect(response.status).toBe(HttpStatusCode.OK);
     const body = await response.json() as { success: boolean; error: string };
     expect(body.success).toBe(false);
-    expect(body.error).toBe('string error');
+    expect(body.error).toBe(UNHANDLED_ERROR_MESSAGE);
   });
 });
 

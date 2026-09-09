@@ -1040,6 +1040,12 @@ export class UserController extends BaseController {
 }
 ```
 
+The schema is **enforced**, not merely documented: a body that violates it never reaches the
+client. The request answers HTTP 500 with the default filter's fixed
+`{ success: false, error: 'Internal Server Error', code: 500 }` — a response that does not match
+its own declared schema is a server-side contract bug, and the violation detail quotes the
+offending value, so it goes to the application log rather than to the caller.
+
 ## Documentation Decorators
 
 Package: `@onebun/docs`

@@ -2451,7 +2451,8 @@ describe('OneBunApplication', () => {
       const body = await response.json() as { success: boolean; error: string; code: number };
 
       expect(body.success).toBe(false);
-      expect(body.error).toBe('Test error');
+      // An unhandled error answers with the fixed string, not with its own message.
+      expect(body.error).toBe('Internal Server Error');
       expect(body.code).toBe(500);
     });
 
@@ -5436,8 +5437,10 @@ describe('OneBunApplication', () => {
         expect(raw).not.toContain(import.meta.dir);
         expect(raw).not.toContain('/packages/core');
 
-        // The documented contract is intact.
-        expect(JSON.parse(raw)).toMatchObject({ success: false, error: 'internal failure', code: 500 });
+        // Nor the message: it has the same author as the stack, and the same risk of naming a
+        // path, an internal host or a credential.
+        expect(raw).not.toContain('internal failure');
+        expect(JSON.parse(raw)).toMatchObject({ success: false, error: 'Internal Server Error', code: 500 });
       } finally {
         await app.stop();
       }

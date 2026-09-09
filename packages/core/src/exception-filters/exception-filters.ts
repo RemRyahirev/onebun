@@ -102,14 +102,28 @@ function toHttpStatus(code: unknown): number {
 }
 
 /**
+ * What the default filter answers for an error it did not recognise.
+ *
+ * A fixed string rather than `error.message`: the message of an unhandled error is written by
+ * whatever threw it — a driver, a socket, the file system — and routinely names absolute
+ * paths, internal hosts and ports, or the credentials inside a connection string. The real
+ * message goes to the log, and comes back in the response only under `exposeErrorDetails`.
+ *
+ * @see docs:api/exception-filters.md
+ */
+export const UNHANDLED_ERROR_MESSAGE = 'Internal Server Error';
+
+/**
  * Build the framework's fallback exception filter.
  *
  * @param options.httpEnvelope - Always answer HTTP 200 and carry the real code in the body.
- * @param options.exposeErrorDetails - Add `details` — the error's class name, its non-HTTP
- *   `code`, and its **stack trace** — to the response for an unhandled error. Off by default,
- *   and deliberately not tied to `NODE_ENV`: a deployment with an unset or mistyped `NODE_ENV`
- *   would then disclose stack traces publicly, which is the failure mode this guards against.
- *   Turn it on knowingly, in a development configuration you can read.
+ * @param options.exposeErrorDetails - Disclose an unhandled error to the caller: its real
+ *   `message` in place of {@link UNHANDLED_ERROR_MESSAGE}, plus `details` — the error's class
+ *   name, its non-HTTP `code`, and its **stack trace**. Off by default, and deliberately not
+ *   tied to `NODE_ENV`: a deployment with an unset or mistyped `NODE_ENV` would then disclose
+ *   all of it publicly, which is the failure mode this guards against. Turn it on knowingly,
+ *   in a development configuration you can read. One knob, not two — a message that names an
+ *   internal host is not meaningfully safer than the stack that names the file.
  *
  * @see docs:api/exception-filters.md
  */
@@ -145,7 +159,26 @@ export function createDefaultExceptionFilter(
         });
       }
 
-      const message = error instanceof Error ? error.message : String(error);
+      // NOT `error.message`. A runtime message routinely carries exactly what an unhandled
+      // error must not disclose to an unauthenticated caller, and none of it is chosen by the
+      // author: `ENOENT: no such file or directory, open '/srv/app/config/private.pem'` names
+      // an absolute path, `connect ECONNREFUSED 10.0.3.17:5432` an internal host and port,
+      // `getaddrinfo ENOTFOUND internal-billing.svc.cluster.local` the service topology, and a
+      // connection string echoed back by a URL parser carries the password. Driver errors
+      // quote the failing statement and sometimes its bound parameters.
+      //
+      // The two branches above keep their messages, because `HttpException` and
+      // `OneBunBaseError` are author-written and client-facing. This branch is the one where
+      // the text came from a library or the kernel, and there is no way to tell a safe one
+      // from a leaking one — which is why it is withheld wholesale rather than filtered. A
+      // denylist of shapes would always miss the shape it had not met.
+      //
+      // Nothing is lost to the operator: the application logs the whole error, stack included,
+      // before this filter runs. `exposeErrorDetails` returns the real message here alongside
+      // the stack.
+      const message = exposeErrorDetails
+        ? (error instanceof Error ? error.message : String(error))
+        : UNHANDLED_ERROR_MESSAGE;
       const originalCode = error instanceof Error && 'code' in error
         ? (error as { code: unknown }).code
         : undefined;
