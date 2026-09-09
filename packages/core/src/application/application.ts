@@ -37,6 +37,7 @@ import {
   setTraceContextProvider,
 } from '@onebun/requests';
 
+import { awaitBounded } from '../await-bounded';
 import {
   getControllerFilters,
   getControllerGuards,
@@ -125,6 +126,7 @@ import {
   DRAIN_BUDGET_RATIO,
   describeRemaining,
   drainInFlight,
+  SERVER_STOP_TIMEOUT_MS,
   type DrainReport,
   type InFlightSource,
 } from './shutdown';
@@ -2916,6 +2918,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // was still accepting new work — a hook that deregisters from discovery or flushes a
     // buffer ran under live traffic, and the request that was mid-response was severed by
     // the process.exit that followed.
+    // Sockets first, and before the HTTP drain rather than with the rest of the WebSocket
+    // teardown. `drainHttpServer` ends in `server.stop(true)`, which severs every established
+    // upgrade: the client saw no close frame at all — measured, `readyState` still 1 and no close
+    // event — and learned the service was gone only when the process died, as an abnormal 1006 at
+    // an arbitrary moment. Closing here gives it a clean going-away at a controlled one, and gives
+    // `@OnDisconnect` a chance to run while the gateway, its storage and the DI scope are alive.
+    if (this.wsHandler) {
+      await this.runShutdownStep(outcome, 'closing WebSocket connections', async () => {
+        await this.wsHandler!.closeAll();
+      });
+    }
+
     const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
     await this.runShutdownStep(outcome, 'draining in-flight HTTP requests', async () => {
       outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
@@ -3088,8 +3102,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       );
     }
 
-    // Open WebSockets are cut here, not drained — they have no bounded wait of their own
-    // yet, and a graceful `stop()` never resolves while one is connected (measured).
+    // Anything still connected here was not closed by the WebSocket step above — a socket whose
+    // close callback never arrived, or one opened during the shutdown itself. Those are cut, not
+    // drained: a graceful `stop()` never resolves while one is connected (measured).
     const openSockets = typeof server.pendingWebSockets === 'number' ? server.pendingWebSockets : 0;
     if (openSockets > 0) {
       this.logger.warn(
@@ -3100,7 +3115,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Always the forcing form. The bounded wait above is what makes the shutdown graceful;
     // `stop(false)` would hand the deadline back to whatever is still connected — a single
     // idle WebSocket keeps it pending forever.
-    await server.stop(true);
+    //
+    // And bounded, because `stop(true)` does not always resolve: closing sockets before the drain
+    // — which is what gives clients a close frame at all — leaves Bun's `pendingWebSockets` stale,
+    // and it then waits for a connection that is already gone. See `SERVER_STOP_TIMEOUT_MS`.
+    // `Promise.resolve` because the value is only contractually a promise: a test double, or a
+    // future synchronous implementation, may hand back `undefined`, and calling `.then` on that
+    // would abandon the rest of the teardown — including clearing `this.server`.
+    await awaitBounded(Promise.resolve(server.stop(true)), SERVER_STOP_TIMEOUT_MS);
     this.server = null;
     this.logger.debug('HTTP server stopped');
 

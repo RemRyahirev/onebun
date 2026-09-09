@@ -20,6 +20,7 @@ import type {
   MessageMetadata,
 } from './types';
 
+import { awaitBounded } from '../await-bounded';
 import { inEntrySpan } from '../trace-scope';
 
 import {
@@ -42,28 +43,6 @@ import { withTraceMetadata } from './trace-metadata';
  * of the same shutdown disagree about how long "in flight" is allowed to last.
  */
 const JOB_DRAIN_TIMEOUT_MS = 30_000;
-
-/**
- * Wait for `promise`, but no longer than `timeoutMs`.
- *
- * The timer is cleared once the race settles, so a drain that finishes early does not hold the
- * event loop open for the rest of the bound — which would turn a graceful shutdown into a
- * 30-second pause.
- */
-async function awaitBounded(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-
-  await Promise.race([
-    promise.then(() => undefined, () => undefined),
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
-    }),
-  ]);
-
-  if (timer !== undefined) {
-    clearTimeout(timer);
-  }
-}
 
 /** One scheduled run that has started and not yet finished. */
 interface InFlightRun {

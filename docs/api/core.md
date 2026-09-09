@@ -469,22 +469,41 @@ OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on
 
 1. **Refuses new requests**: every route answers `503 Service Unavailable`
    (`{"success": false, "error": "Service Unavailable", ...}`). The listener stays open on
-   purpose, so a load balancer sees a refusal instead of a dropped connection.
-2. **Drains in-flight requests**: waits for the requests already being served to finish.
+   purpose, so a load balancer sees a refusal instead of a dropped connection. A WebSocket
+   upgrade attempted from here on is refused with `503` too, which matters because step 2 is
+   itself an invitation to reconnect.
+2. **Closes WebSocket connections**: each open socket is closed with RFC 6455 code **1001**
+   ("going away") and the reason `Server shutting down`, and every `@OnDisconnect` handler is
+   awaited — while the gateway, its client storage and the DI scope are all still alive.
+   Bounded at 5 seconds; anything still open after that is cut by step 4.
+3. **Drains in-flight requests**: waits for the requests already being served to finish.
    Anything still open when the drain deadline expires is force-closed, and a `warn` names
    how many connections were cut.
-3. **Closes the HTTP listener** — before any destroy hook runs.
-4. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
-5. Closes all WebSocket connections
-6. Stops the queue service and disconnects the queue adapter
-7. Flushes traces
-8. Calls `onModuleDestroy()` hooks on all services and controllers
-9. Releases the shared Redis connection (disconnected when the last consumer lets go)
-10. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
-11. Flushes the logger transport
+4. **Closes the HTTP listener** — before any destroy hook runs.
+5. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
+6. Releases the remaining WebSocket resources: ping timers and client storage
+7. Stops the queue service and disconnects the queue adapter, after waiting for a scheduled job
+   that is mid-run (bounded at 30 seconds)
+8. Flushes traces
+9. Calls `onModuleDestroy()` hooks on all services and controllers
+10. Releases the shared Redis connection (disconnected when the last consumer lets go)
+11. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+12. Flushes the logger transport
 
-Steps 1–3 are what keeps a rolling deploy from cutting responses that were mid-flight: the
+Steps 1–4 are what keeps a rolling deploy from cutting responses that were mid-flight: the
 destroy hooks no longer run while the socket is still accepting work.
+
+::: warning Bun reports the close code as 1000 to its own client
+The server sends 1001 — that is what a `close` callback on the server side reports, and what the
+reason accompanies. Bun's `WebSocket` client currently surfaces the code as **1000** regardless.
+Measured against a bare `Bun.serve` with no framework involved. If your client branches on the
+code, branch on the reason instead until that changes.
+
+WebSocket connections used to be closed by nothing at all: the shutdown severed them at the very
+end with `server.stop(true)`, so a client saw no close frame, stayed `readyState === 1`, and
+learned the service was gone only when the process died — an abnormal 1006 at an arbitrary
+moment. `@OnDisconnect` ran, but after the client storage had already been wiped.
+:::
 
 **Bounded, always**. `shutdownTimeout` (default **15000 ms**) caps the whole sequence.
 The first half of that budget bounds the drain; the rest bounds the destroy hooks. `stop()`

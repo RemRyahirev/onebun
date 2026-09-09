@@ -588,3 +588,109 @@ describe('WebSocket Integration', () => {
     });
   });
 });
+
+/**
+ * `app.stop()` closes the sockets it is serving.
+ *
+ * It used to close none. No close frame was sent, and `drainHttpServer` severed every established
+ * upgrade at the end with `server.stop(true)` — so a client saw nothing at all (measured:
+ * `readyState` still 1, no close event) and learned the service was gone only when the process
+ * died, as an abnormal 1006 at an arbitrary moment.
+ *
+ * The close now happens BEFORE the HTTP drain, which is what lets `@OnDisconnect` run while the
+ * gateway, its storage and the DI scope are still alive.
+ */
+describe('shutdown closes WebSocket connections', () => {
+  const disconnected: string[] = [];
+  const echoed: number[] = [];
+  /** Long enough that "started" and "finished" are distinguishable in the assertions below. */
+  const DISCONNECT_WORK_MS = 300;
+
+  @WebSocketGateway({ path: '/shutdown-ws' })
+  class ShutdownGateway extends BaseWebSocketGateway {
+    @OnDisconnect()
+    async onDisconnect(@Client() client: WsClientData): Promise<void> {
+      // Slow on purpose. `stop()` has to WAIT for this, not merely start it: without the wait the
+      // handler would still be running when the storage is wiped and the DI scope is disposed.
+      // A mutation that drops the wait leaves a fast handler passing by luck.
+      await Bun.sleep(DISCONNECT_WORK_MS);
+
+      // Reads the client back out of storage, the way the chat example does. It must still be
+      // there: the storage wipe belongs after the disconnect path, not before it.
+      const stored = await this.getClient(client.id);
+
+      disconnected.push(stored ? `present:${client.id}` : `missing:${client.id}`);
+    }
+
+    @OnMessage('echo')
+    onEcho(@MessageData() data: { n: number }): void {
+      echoed.push(data.n);
+    }
+  }
+
+  @Module({ controllers: [ShutdownGateway] })
+  class ShutdownModule {}
+
+  afterEach(() => {
+    disconnected.length = 0;
+    echoed.length = 0;
+  });
+
+  it('sends a close, runs @OnDisconnect with storage intact, and handles nothing afterwards', async () => {
+    const shutdownApp = new OneBunApplication(ShutdownModule, {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await shutdownApp.start();
+
+    const socket = new WebSocket(`${shutdownApp.getHttpUrl().replace('http', 'ws')}/shutdown-ws`);
+    let closeReason: string | undefined;
+    let closeSeen = false;
+
+    socket.addEventListener('close', (event) => {
+      closeSeen = true;
+      closeReason = (event as CloseEvent).reason;
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener('open', () => resolve());
+      socket.addEventListener('error', () => reject(new Error('the socket never opened')));
+    });
+
+    socket.send(JSON.stringify({ event: 'echo', data: { n: 1 } }));
+
+    const deadline = Bun.nanoseconds() + 3_000 * 1_000_000;
+    while (echoed.length === 0) {
+      if (Bun.nanoseconds() > deadline) {
+        throw new Error('the gateway never handled the first frame');
+      }
+      await Bun.sleep(20);
+    }
+
+    await shutdownApp.stop();
+
+    // (a) The client was told, rather than being cut when the process died. Asserted on the
+    // reason and on the state: Bun's own client reports the CODE as 1000 whatever the server
+    // sends — measured against a bare `Bun.serve`, `close(1001, 'bye')` reaches the server's own
+    // callback as 1001 and the client as 1000 — so the code is not something to pin here.
+    expect(closeSeen).toBe(true);
+    expect(closeReason).toBe('Server shutting down');
+    expect(socket.readyState).toBe(WebSocket.CLOSED);
+
+    // (b) `@OnDisconnect` ran to COMPLETION before `stop()` resolved — asserted right here, with
+    // no further waiting, so a shutdown that merely kicked the handler off fails.
+    expect(disconnected).toHaveLength(1);
+    expect(disconnected[0]).toStartWith('present:');
+
+    // (c) Nothing sent afterwards is handled.
+    socket.send(JSON.stringify({ event: 'echo', data: { n: 2 } }));
+    await Bun.sleep(200);
+
+    expect(echoed).toEqual([1]);
+    // Booting and stopping a whole application, twice over a real socket, does not fit bun's
+    // 5 s default.
+  }, 20_000);
+});
