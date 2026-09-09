@@ -510,7 +510,12 @@ export class QueueService {
         interval.milliseconds,
         interval.options.pattern,
         method,
-        { metadata: interval.options.metadata, declarative: true },
+        {
+          metadata: interval.options.metadata,
+          overlapStrategy: interval.options.overlapStrategy,
+          runOnStart: interval.options.runOnStart,
+          declarative: true,
+        },
       );
     }
 

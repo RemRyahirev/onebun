@@ -100,6 +100,9 @@ interface ScheduledJob {
   // Runtime state
   timer?: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
   isRunning?: boolean;
+
+  /** Interval jobs only: run once when the job starts, before the first period elapses. */
+  runOnStart?: boolean;
   lastRun?: Date;
   nextRun?: Date;
 
@@ -261,6 +264,8 @@ export class QueueScheduler {
     getDataFn?: () => unknown | Promise<unknown>,
     options?: {
       metadata?: Partial<MessageMetadata>;
+      overlapStrategy?: OverlapStrategy;
+      runOnStart?: boolean;
       declarative?: boolean;
     },
   ): void {
@@ -271,6 +276,9 @@ export class QueueScheduler {
       intervalMs,
       getDataFn,
       metadata: options?.metadata,
+      // Same default as cron, which is also what the documentation already claimed for both.
+      overlapStrategy: options?.overlapStrategy ?? 'skip',
+      runOnStart: options?.runOnStart,
       declarative: options?.declarative,
     };
 
@@ -327,6 +335,8 @@ export class QueueScheduler {
       case 'interval':
         this.addIntervalJob(options.name, options.intervalMs, options.pattern, options.getDataFn, {
           metadata: options.metadata,
+          overlapStrategy: options.overlapStrategy,
+          runOnStart: options.runOnStart,
         });
         break;
       case 'timeout':
@@ -370,7 +380,9 @@ export class QueueScheduler {
 
     if (this.running) {
       if (job.type === 'interval' && job.intervalMs) {
-        this.startIntervalJob(job);
+        // No leading run: the job already started once. Resuming and reconfiguring continue a
+        // schedule, they do not begin one.
+        this.startIntervalJob(job, false);
       } else if (job.type === 'timeout' && job.timeoutMs) {
         this.startTimeoutJob(job);
       } else if (job.type === 'cron' && job.cronSchedule) {
@@ -405,7 +417,9 @@ export class QueueScheduler {
         }
         job.intervalMs = options.intervalMs;
         if (this.running && !job.paused) {
-          this.startIntervalJob(job);
+          // No leading run: the job already started once. Resuming and reconfiguring continue a
+          // schedule, they do not begin one.
+          this.startIntervalJob(job, false);
         }
         break;
       }
@@ -527,7 +541,7 @@ export class QueueScheduler {
       // Check if it's time to run
       if (job.nextRun && now >= job.nextRun) {
         // Handle overlap strategy
-        if (job.isRunning && job.overlapStrategy === 'skip') {
+        if (this.hasRunInFlight(job.name) && job.overlapStrategy === 'skip') {
           // Skip this run, but update next run time
           job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
           continue;
@@ -545,17 +559,30 @@ export class QueueScheduler {
   /**
    * Start an interval job
    */
-  private startIntervalJob(job: ScheduledJob): void {
+  private startIntervalJob(job: ScheduledJob, leading = true): void {
     if (job.timer || !job.intervalMs) {
       return;
     }
 
     job.timer = setInterval(() => {
+      // The same rule cron has always had, and the one the docs already claimed for both. A
+      // `setInterval` does not care whether the last tick finished, so a body slower than its
+      // period ran concurrently with itself: measured at a 50 ms period with a 120 ms body,
+      // 8 invocations and 3 at once inside 400 ms, publishing a duplicate every tick.
+      if (job.overlapStrategy === 'skip' && this.hasRunInFlight(job.name)) {
+        return;
+      }
+
       this.launch(job);
     }, job.intervalMs);
 
-    // Also execute immediately
-    this.launch(job);
+    // The leading run belongs to STARTING the job, not to arming its timer. `resumeJob` and
+    // `updateJob` re-arm a job that already started, and firing it again there gave a
+    // pause/resume cycle a run the schedule never asked for — measured start=1, resume=2,
+    // update=3 for the same job.
+    if (leading && job.runOnStart !== false) {
+      this.launch(job);
+    }
   }
 
   /**
@@ -576,6 +603,27 @@ export class QueueScheduler {
   /**
    * Execute a scheduled job
    */
+  /**
+   * Is a run of this job still going?
+   *
+   * Answered from the per-execution registry, the same one `drain` waits on, rather than from
+   * `job.isRunning`. The two agree on every path reachable today — a mutation swapping this for
+   * `job.isRunning` leaves the suite green, and that is stated here rather than dressed up as a
+   * defect. The registry is preferred because it is a count rather than a flag: it stays correct
+   * if a second run is ever allowed to start while the first is going, which is exactly what
+   * `overlapStrategy: 'queue'` asks for, and it keeps "is this job busy" answered in one place
+   * instead of two that must be kept in step.
+   */
+  private hasRunInFlight(name: string): boolean {
+    for (const run of this.inFlight) {
+      if (run.name === name) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /**
    * Start a tick and remember it until it finishes.
    *

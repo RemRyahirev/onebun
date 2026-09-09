@@ -379,6 +379,10 @@ export interface AddIntervalJob {
   pattern: string;
   getDataFn?: () => unknown | Promise<unknown>;
   metadata?: Partial<MessageMetadata>;
+  /** @defaultValue 'skip' — a tick arriving while the previous run is going is dropped */
+  overlapStrategy?: OverlapStrategy;
+  /** @defaultValue true — run once when the job starts, before the first period elapses */
+  runOnStart?: boolean;
 }
 
 /**
@@ -624,6 +628,26 @@ export interface IntervalDecoratorOptions {
 
   /** Job name (defaults to method name) */
   name?: string;
+
+  /**
+   * What to do when a tick arrives while the previous run is still going.
+   *
+   * `'skip'` drops the tick — the choice for anything that can outlast its own period, such as a
+   * collector that usually takes 5 s on a 5 s schedule. `'queue'` runs it anyway, concurrently.
+   *
+   * @defaultValue 'skip'
+   */
+  overlapStrategy?: OverlapStrategy;
+
+  /**
+   * Run once as soon as the job starts, rather than waiting out the first period.
+   *
+   * `false` gives "every hour, starting next hour", which used to be impossible: the first run
+   * always happened at boot.
+   *
+   * @defaultValue true
+   */
+  runOnStart?: boolean;
 }
 
 /**

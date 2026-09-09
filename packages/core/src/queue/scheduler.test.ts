@@ -17,6 +17,20 @@ import { useFakeTimers } from '../testing/test-utils';
 import { InMemoryQueueAdapter } from './adapters/memory.adapter';
 import { QueueScheduler, createQueueScheduler } from './scheduler';
 
+/**
+ * Let the microtask queue drain.
+ *
+ * A delivery is a chain of awaits — the tick, the data provider, the publish, the subscriber — so
+ * a single `await Promise.resolve()` only gets as far as the first link. That matters more since
+ * ticks began consulting the in-flight registry: a run that has not settled yet is indistinguishable
+ * from one that is genuinely slow, and the next tick is skipped as an overlap.
+ */
+async function flush(): Promise<void> {
+  for (let turn = 0; turn < 10; turn += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe('QueueScheduler', () => {
   let adapter: InMemoryQueueAdapter;
   let scheduler: QueueScheduler;
@@ -159,6 +173,128 @@ describe('QueueScheduler', () => {
    * message never reached a subscriber, and on the real deploy path — `process.exit(0)` right
    * after `stop()` resolves — nothing was logged either.
    */
+  /**
+   * An interval job does not run concurrently with itself, and its leading run is a choice.
+   *
+   * `setInterval` does not care whether the last tick finished. `startIntervalJob` never read
+   * `job.overlapStrategy` — declared, defaulted, and consulted only on the cron path — and fired
+   * the leading run from all four entry points, so `pause()`/`resume()` and `updateJob()` each
+   * injected an execution the schedule never asked for.
+   *
+   * Measured on the old code, 50 ms period and a 120 ms body over 400 ms: 8 invocations, 3 bodies
+   * at once, a duplicate published every tick; leading runs start=1, resume=2, update=3.
+   */
+  describe('interval overlap and the leading run', () => {
+    it('does not enter a body that outlives its period a second time', async () => {
+      let entered = 0;
+      let concurrent = 0;
+      let maxConcurrent = 0;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      scheduler.addIntervalJob('slow', 50, 'overlap.slow', async () => {
+        entered += 1;
+        concurrent += 1;
+        maxConcurrent = Math.max(maxConcurrent, concurrent);
+        await blocked;
+        concurrent -= 1;
+
+        return { built: true };
+      });
+
+      scheduler.start();
+      await Promise.resolve();
+
+      // Four periods pass while the first run is still blocked.
+      for (let tick = 0; tick < 4; tick += 1) {
+        advanceTime(50);
+        await Promise.resolve();
+      }
+
+      expect(entered).toBe(1);
+      expect(maxConcurrent).toBe(1);
+
+      release();
+      await scheduler.drain();
+    });
+
+    it('runs concurrently when the caller asks for it', async () => {
+      let entered = 0;
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      scheduler.addIntervalJob('parallel', 50, 'overlap.parallel', async () => {
+        entered += 1;
+        await blocked;
+
+        return { built: true };
+      }, { overlapStrategy: 'queue' });
+
+      scheduler.start();
+      await Promise.resolve();
+
+      advanceTime(50);
+      await Promise.resolve();
+
+      expect(entered).toBe(2);
+
+      release();
+      await scheduler.drain();
+    });
+
+    it('waits out the first period when the leading run is turned off', async () => {
+      const entries: number[] = [];
+
+      scheduler.addIntervalJob('deferred', 50, 'overlap.deferred', () => {
+        entries.push(entries.length);
+
+        return { built: true };
+      }, { runOnStart: false });
+
+      scheduler.start();
+      await Promise.resolve();
+
+      // "Every hour, starting next hour" — previously impossible, the first run was at boot.
+      expect(entries).toHaveLength(0);
+
+      advanceTime(50);
+      await Promise.resolve();
+
+      expect(entries).toHaveLength(1);
+    });
+
+    it('adds no execution on pause/resume or updateJob', async () => {
+      let entered = 0;
+
+      scheduler.addIntervalJob('counted', 1_000, 'overlap.counted', () => {
+        entered += 1;
+
+        return { built: true };
+      });
+
+      scheduler.start();
+      await Promise.resolve();
+
+      expect(entered).toBe(1);
+
+      scheduler.pauseJob('counted');
+      scheduler.resumeJob('counted');
+      await Promise.resolve();
+
+      // Resuming continues a schedule; it does not begin one.
+      expect(entered).toBe(1);
+
+      scheduler.updateJob({ name: 'counted', type: 'interval', intervalMs: 2_000 });
+      await Promise.resolve();
+
+      expect(entered).toBe(1);
+    });
+  });
+
   describe('shutdown drains runs already under way', () => {
     it('resolves only after the running job returned, and its message still arrives', async () => {
       const delivered: Message[] = [];
@@ -601,7 +737,7 @@ describe('QueueScheduler', () => {
 
       // Should fire immediately on start
       advanceTime(10);
-      await Promise.resolve();
+      await flush();
       expect(received.length).toBe(1);
 
       // Pause the job
@@ -612,11 +748,22 @@ describe('QueueScheduler', () => {
       await Promise.resolve();
       expect(received.length).toBe(1);
 
-      // Resume — should restart interval and fire immediately
+      // Resume restarts the interval, and deliberately does NOT fire immediately. This used to
+      // assert a second message here: the leading run was emitted from all four entry points, so
+      // every pause/resume cycle injected an execution the schedule never asked for, and a job
+      // paused and resumed on a health check ran extra times for no stated reason. The leading
+      // run belongs to STARTING a job; resuming continues one.
       scheduler.resumeJob('int-paused');
 
       advanceTime(10);
-      await Promise.resolve();
+      await flush();
+      expect(received.length).toBe(1);
+
+      // The schedule itself is alive again: the next period delivers. Several microtask turns
+      // because delivery is a chain of awaits — the tick, the data provider, the publish and the
+      // subscriber — and one turn only gets as far as the tick.
+      advanceTime(100);
+      await flush();
       expect(received.length).toBe(2);
     });
   });

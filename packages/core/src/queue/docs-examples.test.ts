@@ -1335,3 +1335,47 @@ describe('Redis dead-letter cap precedence', () => {
     expect(dead.options?.deadLetter).toBeUndefined();
   });
 });
+
+/**
+ * @source docs:api/queue.md#interval-overlap-and-the-first-run
+ */
+describe('Interval overlap and the first run', () => {
+  it('registers the documented @Interval options as written', () => {
+    // The snippet's whole point is that these two options exist and reach the scheduler.
+    // `overlapStrategy` was declared for every job type and read only on the cron path, and
+    // there was no way to ask for an interval that does not run at boot.
+    class ReportsController {
+      @Interval(3_600_000, {
+        pattern: 'reports.hourly',
+        overlapStrategy: 'skip',
+        runOnStart: false,
+      })
+      buildHourly(): { at: number } {
+        return { at: 1 };
+      }
+    }
+
+    const jobs = getIntervalMetadata(ReportsController) ?? [];
+
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]?.options.overlapStrategy).toBe('skip');
+    expect(jobs[0]?.options.runOnStart).toBe(false);
+    expect(jobs[0]?.milliseconds).toBe(3_600_000);
+  });
+
+  it('leaves both unset when the decorator does not mention them', () => {
+    // Absent, not defaulted at the decorator: the scheduler applies 'skip' and a leading run,
+    // so a job that says nothing behaves the way the section describes as the default.
+    class PlainController {
+      @Interval(1_000, { pattern: 'plain.tick' })
+      tick(): { at: number } {
+        return { at: 1 };
+      }
+    }
+
+    const jobs = getIntervalMetadata(PlainController) ?? [];
+
+    expect(jobs[0]?.options.overlapStrategy).toBeUndefined();
+    expect(jobs[0]?.options.runOnStart).toBeUndefined();
+  });
+});

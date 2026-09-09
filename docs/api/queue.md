@@ -125,6 +125,47 @@ If your controllers use **only** scheduling decorators (`@Cron`, `@Interval`, `@
 Errors thrown inside `@Cron`, `@Interval`, and `@Timeout` handlers are caught and logged as warnings. The scheduler continues running — one failed job does not affect other scheduled jobs.
 :::
 
+### Interval overlap and the first run
+
+A tick that arrives while the previous run is still going is **dropped**. That is the default and
+usually what you want: a collector on a 5-second interval that occasionally takes 7 seconds skips a
+beat rather than piling up on itself. Pass `overlapStrategy: 'queue'` to run it anyway,
+concurrently.
+
+An interval job also runs **once immediately** when it starts, before the first period elapses.
+Pass `runOnStart: false` for "every hour, starting next hour".
+
+```typescript
+import { BaseController, Controller, Interval } from '@onebun/core';
+
+@Controller('/reports')
+export class ReportsController extends BaseController {
+  // Skips a beat rather than overlapping, and does not run at boot.
+  @Interval(3_600_000, {
+    pattern: 'reports.hourly',
+    overlapStrategy: 'skip',
+    runOnStart: false,
+  })
+  buildHourly(): { at: number } {
+    return { at: Date.now() };
+  }
+}
+```
+
+Both apply to `@Interval` only. `@Cron` has always skipped an overlapping tick and has no leading
+run; `@Timeout` fires once by definition.
+
+::: warning Interval jobs used to overlap, whatever you configured
+`overlapStrategy` was declared and defaulted for every job type but read only on the cron path, so
+an interval body slower than its period ran concurrently with itself and published a duplicate
+every tick — measured at a 50 ms period with a 120 ms body, 8 invocations and 3 at once in 400 ms.
+It is now 3 invocations and never more than one at a time.
+
+The leading run also fired from all four entry points, so a `pause()`/`resume()` cycle or an
+`updateJob()` each injected an execution the schedule never asked for. Resuming and reconfiguring
+now continue a schedule rather than beginning one; only starting a job runs it immediately.
+:::
+
 ::: tip Producer-only apps
 An application with **zero** queue decorators still gets a live queue as soon as `queue.adapter`, `queue.options` or `queue.redis` is set. Such a producer-only service can inject `QueueService` and call `publish()` without declaring a single `@Subscribe` handler — the message reaches the broker instead of the call throwing. The trade-off: the adapter is now constructed and connected during `app.start()`, so the application **fails to boot** when the broker is unreachable, where previously it started fine and silently discarded every published message. Set `queue.enabled: false` if you want the queue to stay off despite a configured backend.
 :::
@@ -143,7 +184,7 @@ An application with **zero** queue decorators still gets a live queue as soon as
 - `@Interval` handlers fire immediately on scheduler start, then repeat at the configured interval
 - Scheduler error handler logs warnings for failed jobs via `QueueScheduler.setErrorHandler()`
 - Message guards (`@UseMessageGuards`) are applied as wrappers around the actual handler
-- The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `'skip'` (default — skip execution if previous is still running), `'queue'` (publish as regular message even if previous is running)
+- The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `'skip'` (default — skip execution if previous is still running), `'queue'` (run it anyway, concurrently). Both cron and interval consult it; timeout fires once so it does not apply. The decision reads `hasRunInFlight(name)` — the same per-execution registry `drain()` waits on — rather than the `job.isRunning` flag, so "is this job busy" is answered in one place. Interval jobs additionally take `runOnStart` (default `true`); the leading run is emitted only by `start()` and by `addIntervalJob()` on a running scheduler, never by `resumeJob()` or `updateJob()`
 - Queue shutdown sequence: `queueService.stop()` → `scheduler.stop()` → `scheduler.drain()` → unsubscribe → `queueAdapter.disconnect()`. The drain is what waits for scheduled runs already under way, and it has to sit before the disconnect: a job publishes its result at the end, so draining afterwards would only change where the message is lost
 - `QueueScheduler.stop()` stays synchronous — it clears timers, which is instant — and `drain(timeoutMs = 30_000)` is the separate awaitable step. The bound matches the consumer side's `HANDLER_DRAIN_TIMEOUT_MS`, so both halves of one shutdown agree on how long "in flight" may last. A run that outlives the bound is reported by name through `setErrorHandler` BEFORE `drain()` resolves and is then abandoned: the application tears the logger down immediately after `stop()`, and on the deploy path calls `process.exit(0)`, so a report made any later is written to nothing. Anything that run publishes afterwards is rejected by a disconnected adapter
 - Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
