@@ -462,8 +462,11 @@ setInterval(() => {
 }, 60_000);
 ```
 
-To link a background job back to what caused it, carry the trace ids in the message yourself — a
-span link is a deliberate reference, not an accident of scheduling.
+A queue message is the exception, and it does not need doing by hand: `publish()` stamps the
+publisher's trace onto `metadata`, and the delivery starts its span as a child of it. So a message
+and the work that sent it are one trace across the re-root. For any other background work you
+schedule yourself, carry the ids and pass them as `inEntrySpan`'s `parent` — a deliberate
+reference, not an accident of scheduling.
 :::
 
 An inbound `traceparent` continues the caller's trace: the request's HTTP span is started as a child

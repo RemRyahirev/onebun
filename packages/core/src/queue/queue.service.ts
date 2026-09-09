@@ -39,6 +39,7 @@ import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
 import { inEntrySpan, runWithAppTracer } from '../trace-scope';
 
+
 import {
   getSubscribeMetadata,
   getCronMetadata,
@@ -50,6 +51,7 @@ import {
 } from './decorators';
 import { executeMessageGuards, MessageExecutionContextImpl } from './guards';
 import { QueueScheduler } from './scheduler';
+import { publisherTraceContext, withTraceMetadata } from './trace-metadata';
 
 // ============================================================================
 // Queue Service Class
@@ -220,7 +222,7 @@ export class QueueService {
    * Publish a message to a pattern
    */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    return await this.getAdapter().publish(pattern, data, options);
+    return await this.getAdapter().publish(pattern, data, withTraceMetadata(options));
   }
 
   /**
@@ -229,7 +231,11 @@ export class QueueService {
   async publishBatch<T>(
     messages: Array<{ pattern: string; data: T; options?: PublishOptions }>,
   ): Promise<string[]> {
-    return await this.getAdapter().publishBatch(messages);
+    // Stamped per message, not once for the batch: `publishBatch` takes independent options per
+    // entry, and a caller who set an explicit trace id on one of them must keep it.
+    return await this.getAdapter().publishBatch(
+      messages.map(message => ({ ...message, options: withTraceMetadata(message.options) })),
+    );
   }
 
   // ============================================================================
@@ -261,7 +267,14 @@ export class QueueService {
       spanName,
       async () => await handler(message),
       this.ownerTracer,
-      { attributes, openSpan: this.traceQueueMessages },
+      {
+        attributes,
+        openSpan: this.traceQueueMessages,
+        // The delivery hangs off the publish that caused it. Without this every message was an
+        // independently sampled root that announced itself as a consumption entry point and
+        // pointed at nothing — a trace per message, none of them joined to the work that sent it.
+        parent: publisherTraceContext(message.metadata),
+      },
     );
 
     const subscription = await this.getAdapter().subscribe(pattern, traced, options);

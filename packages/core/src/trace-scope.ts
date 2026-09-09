@@ -5,7 +5,10 @@ import {
   ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
+  trace,
+  TraceFlags,
   type Attributes,
+  type Context,
   type Tracer,
 } from '@opentelemetry/api';
 
@@ -77,6 +80,17 @@ export interface EntrySpanOptions {
   kind?: SpanKind;
   attributes?: Attributes;
   /**
+   * The work's causal parent, carried to it across a transport — the trace ids a queue message
+   * was stamped with when it was published.
+   *
+   * Distinct from the ambient parent this helper drops. Re-rooting exists because the async call
+   * graph is not causality; an id that travelled inside the message IS causality, and is the one
+   * parent worth keeping. Ids that are not well-formed are discarded by `Tracer.startSpan`, which
+   * roots the span instead — so a hand-written placeholder cannot attach work to a fictional trace.
+   */
+  parent?: TraceInfo;
+
+  /**
    * Open a span at all. `false` re-roots and establishes ownership exactly as
    * {@link inRootTraceScope} does, and nothing more — the shape `tracing.traceQueueMessages`,
    * `traceScheduledJobs` and `traceWebSocketEvents` select when set to `false`.
@@ -101,6 +115,26 @@ export interface EntrySpanSwitches {
   queueMessages?: boolean;
   /** `tracing.traceScheduledJobs` */
   scheduledJobs?: boolean;
+}
+
+/**
+ * The context an entry span starts from: rooted, owned, and parented only by what the work carried.
+ */
+function entryContext(owner: Tracer, parent: TraceInfo | undefined): Context {
+  const rooted = ROOT_CONTEXT.setValue(APP_TRACER_KEY, owner);
+
+  if (!parent) {
+    return rooted;
+  }
+
+  return trace.setSpanContext(rooted, {
+    traceId: parent.traceId,
+    spanId: parent.spanId,
+    // `isRemote` so `ParentBasedSampler` knows the decision was made in another process, and so a
+    // backend can tell where this trace crossed a service boundary.
+    traceFlags: parent.traceFlags ?? TraceFlags.SAMPLED,
+    isRemote: true,
+  });
 }
 
 /** Whether a handler returned a promise, without assuming it returned one. */
@@ -151,7 +185,7 @@ export function inEntrySpan<T>(
     return inRootTraceScope(fn, owner);
   }
 
-  return context.with(ROOT_CONTEXT.setValue(APP_TRACER_KEY, owner), () => owner.startActiveSpan(
+  return context.with(entryContext(owner, options?.parent), () => owner.startActiveSpan(
     name,
     { kind: options?.kind ?? SpanKind.CONSUMER, attributes: options?.attributes },
     (span): T => {

@@ -27,6 +27,8 @@ import {
   getNextRun,
   type CronSchedule,
 } from './cron-parser';
+import { withTraceMetadata } from './trace-metadata';
+
 
 // ============================================================================
 // Types
@@ -557,10 +559,14 @@ export class QueueScheduler {
         data = { timestamp: Date.now() };
       }
 
-      // Publish the message
-      await this.adapter.publish(job.pattern, data, {
-        metadata: job.metadata,
-      });
+      // Publish the message. Stamped here rather than in `QueueService.publish`, which this
+      // path does not go through — the scheduler holds the adapter directly. Inside
+      // `executeJob`'s entry span, so the message carries the tick that produced it.
+      await this.adapter.publish(
+        job.pattern,
+        data,
+        withTraceMetadata({ metadata: job.metadata }),
+      );
     } catch (error) {
       // Report error via handler if set, otherwise silently continue
       if (this.onJobError) {

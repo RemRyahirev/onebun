@@ -57,6 +57,15 @@ export interface MessageMetadata {
   /** Parent span ID for distributed tracing */
   parentSpanId?: string;
 
+  /**
+   * W3C trace flags; bit 0 is "sampled".
+   *
+   * Carried so a consumer inherits the producer's sampling decision instead of re-deciding.
+   * A `traceId` set by hand with no flags is treated as sampled, which is the same reading
+   * `extractFromHeadersSync` gives the `x-trace-id`/`x-span-id` header pair.
+   */
+  traceFlags?: number;
+
   /** Additional data (for guards and custom logic) */
   [key: string]: unknown;
 }

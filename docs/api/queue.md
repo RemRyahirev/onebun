@@ -227,6 +227,8 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - Because the check sits inside the `try`, a throw skips it entirely: nack-then-throw carries the THROWN error. The synthesised error carries no `cause`, because the handler never raised one
 - On JetStream the auto-ack is additionally gated: `if (acknowledgesAutomatically(entry.options) && !wasNacked(message))`. That `msg.ack()` is on the raw `JsMsg`, not the wrapper, so it bypasses the wrapper's first-call-wins guard — ungated, it settled a message the handler had just `nak()`ed and cancelled the redelivery
 - One delivery emits NO event at all on `NatsQueueAdapter`: one whose pattern does not match the subscription's matcher — it returns before `onMessageReceived`, and no message object is constructed. A payload that fails `JSON.parse` now emits `onError` naming the subject, with the parse failure as `cause`. Core NATS cannot `term()` it, so reporting is the only disposition available; JetStream both reports and `term()`s
+- Trace propagation is two functions in `packages/core/src/queue/trace-metadata.ts`, neither exported from `@onebun/core`. `withTraceMetadata(options)` runs on the publish side at three funnels — `QueueService.publish`, `QueueService.publishBatch`, and `QueueScheduler.runJob`'s own `adapter.publish`, which does not go through the service. It reads `getCurrentTraceContext()` and returns the options unchanged when the caller already set `metadata.traceId` or when there is no ambient trace. The adapters' internal republishes (dead-letter, delayed promotion) are deliberately NOT stamped: they preserve the original message's provenance
+- `publisherTraceContext(metadata)` runs on the delivery side and becomes `inEntrySpan`'s `parent`, so the `queue <pattern>` span is a child of the publisher's rather than a root. It READS the metadata and never writes back: the in-memory adapter hands one metadata object to every subscription on a pattern and again on every retry. Both ids are required — a trace id with no span id names no point to hang from — and malformed ids are discarded by `Tracer.startSpan`, which roots the span instead
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 **Technical details for AI agents — the retry policy under `'auto'`:**
@@ -539,8 +541,22 @@ interface MessageMetadata {
   traceId?: string;        // Distributed tracing
   spanId?: string;
   parentSpanId?: string;
+  traceFlags?: number;     // W3C sampling decision; bit 0 is "sampled"
 }
 ```
+
+The four trace fields are filled by `publish()` and `publishBatch()` from the trace the publisher
+was running in — an HTTP request, a `@Traced` method, a queue handler, a scheduler tick or a
+WebSocket handler. The delivery then starts its own span as a child of that one, so a message and
+the work that sent it are one trace.
+
+Two cases where they are absent, both deliberate:
+
+- **You set `traceId` yourself.** Then nothing is overwritten. A service relaying on behalf of
+  someone else is stating the causal trace, and the ambient one is not it.
+- **There is no trace to join** — a publish from `onModuleInit`, from a lifecycle hook, or with
+  tracing disabled. The fields stay empty rather than being invented: an id that names no span is
+  worse than no id, because it looks joinable and resolves to nothing in the backend.
 
 `params` carries what the **subscriber's** pattern captured from the delivered topic:
 `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
@@ -678,6 +694,18 @@ async handleApi(message: Message) {}
 @Subscribe('traced.events')
 async handleTraced(message: Message) {}
 ```
+
+`MessageTraceGuard` passes a message that carries `metadata.traceId`, which `publish()` fills in
+whenever the publisher was inside a trace. It therefore refuses exactly the messages sent from
+outside one — a lifecycle hook, or an application with tracing off — and a refusal is nacked and
+logged, not silently consumed.
+
+::: warning It used to refuse everything
+Nothing populated `metadata.traceId` before, so this guard rejected 100% of traffic, and following
+this section stopped the entire message stream. Anything written against the old behaviour — a
+producer setting `traceId` by hand at every call site to get past the guard — still works, and is
+now unnecessary.
+:::
 
 ### Composite Guards
 
