@@ -499,27 +499,60 @@ describe('JetStreamQueueAdapter Integration', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const probeJsm = (probe as any).jsm as AnyRecord;
-    const names: string[] = [];
-    for await (const info of await probeJsm.consumers.list('ITEST_RELEASE')) {
-      names.push(info.name);
+
+    async function consumerNames(): Promise<string[]> {
+      const names: string[] = [];
+      for await (const info of await probeJsm.consumers.list('ITEST_RELEASE')) {
+        names.push(info.name);
+      }
+
+      return names.sort();
     }
 
+    // Wait for the ephemeral to be gone, then assert the exact list. Splitting it this way is
+    // deliberate: the poll waits only for the condition that legitimately settles late, so a
+    // DELETED DURABLE — the regression this test exists for — fails immediately with a
+    // readable `[] !== [durable]` instead of timing out after POLL_DEADLINE_MS.
+    //
+    // The wait is needed because two things make the ephemeral's disappearance asynchronous
+    // relative to this line, and both widen under the load of a full suite run:
+    //   - `disconnect()` bounds the release step at RELEASE_TIMEOUT_MS and resolves on that
+    //     timer whether or not the server-side deletes have completed;
+    //   - the delete was issued on the connection that is now closed, and this list runs on a
+    //     NEW one — JetStream orders API calls per connection, not across them.
+    // Asserting immediately made this the suite's intermittent failure: green in isolation,
+    // red in roughly one full run in three.
+    //
+    // What the ephemeral half does NOT prove: that the ADAPTER deleted it. Measured — with
+    // `releaseSubscription` stubbed out entirely, this test still passes, because the server
+    // reaps an ephemeral once the connection that created it goes away. The adapter-side
+    // guarantee is pinned by 'leaves no ephemeral consumer behind after unsubscribe', where
+    // the connection stays open and the server has no reason to reap anything.
+    await pollUntil(async () => (await consumerNames()).length <= 1);
+
     // The durable survives; the ephemeral does not.
-    expect(names).toEqual([durable]);
+    expect(await consumerNames()).toEqual([durable]);
     expect((await probeJsm.consumers.info('ITEST_RELEASE', durable)).ack_floor.stream_seq)
       .toBe(ackFloorBefore);
 
     // And the preserved floor is observable: re-subscribing must not replay what the
     // previous instance already acknowledged.
-    const replayed: unknown[] = [];
-    await probe.subscribe('release.durable', async (message) => {
+    const replayed: Array<{ n: number }> = [];
+    await probe.subscribe<{ n: number }>('release.durable', async (message) => {
       replayed.push(message.data);
       await message.ack();
     }, { group, ackMode: 'manual' });
 
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    // A marker rather than a fixed sleep. The assertion is a NEGATIVE — "the old message was
+    // not redelivered" — and a negative cannot be polled directly, so it is turned into a
+    // positive: publish a new message and wait for it. JetStream delivers a consumer's
+    // backlog in stream order, so anything replayed would have arrived BEFORE the marker.
+    // That also makes the test stronger than the sleep it replaces, which passed equally well
+    // when the subscription was delivering nothing at all.
+    await probe.publish('release.durable', { n: 2 });
+    await pollUntil(() => replayed.length > 0);
 
-    expect(replayed).toHaveLength(0);
+    expect(replayed).toEqual([{ n: 2 }]);
   }, CASE_TIMEOUT_MS);
 
   it('recovers when the consumer is deleted out of band', async () => {
