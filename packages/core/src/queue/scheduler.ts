@@ -35,6 +35,43 @@ import { withTraceMetadata } from './trace-metadata';
 // ============================================================================
 
 /**
+ * How long shutdown waits for scheduled runs already under way.
+ *
+ * Matches the consumer side's `HANDLER_DRAIN_TIMEOUT_MS`, which is what the queue already
+ * promises for a message being handled; a producer that gave up sooner would make the two halves
+ * of the same shutdown disagree about how long "in flight" is allowed to last.
+ */
+const JOB_DRAIN_TIMEOUT_MS = 30_000;
+
+/**
+ * Wait for `promise`, but no longer than `timeoutMs`.
+ *
+ * The timer is cleared once the race settles, so a drain that finishes early does not hold the
+ * event loop open for the rest of the bound — which would turn a graceful shutdown into a
+ * 30-second pause.
+ */
+async function awaitBounded(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  await Promise.race([
+    promise.then(() => undefined, () => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+
+  if (timer !== undefined) {
+    clearTimeout(timer);
+  }
+}
+
+/** One scheduled run that has started and not yet finished. */
+interface InFlightRun {
+  name: string;
+  promise: Promise<void>;
+}
+
+/**
  * Job configuration
  */
 interface ScheduledJob {
@@ -83,6 +120,19 @@ export class QueueScheduler {
   private cronCheckInterval?: ReturnType<typeof setInterval>;
   private readonly cronCheckIntervalMs = 1000; // Check cron jobs every second
   private onJobError?: (jobName: string, error: unknown) => void;
+
+  /**
+   * Runs that have started and not yet finished.
+   *
+   * Every tick was fire-and-forget: `executeJob`'s promise was stored nowhere, so shutdown had
+   * nothing to wait for. A job mid-execution when the application stopped finished into a void,
+   * and its `publish()` was rejected by an adapter that had already disconnected — measured, a
+   * 400 ms job with `stop()` called 120 ms in returned in 3 ms and the message never arrived.
+   *
+   * An entry is removed when its run settles, so whatever remains after {@link drain} is exactly
+   * the set that outlived the bound.
+   */
+  private readonly inFlight = new Set<InFlightRun>();
 
   /**
    * The tracer of the application these jobs belong to, or `undefined` when it is not tracing.
@@ -484,7 +534,7 @@ export class QueueScheduler {
         }
 
         // Execute the job
-        this.executeJob(job);
+        this.launch(job);
 
         // Update next run time
         job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
@@ -501,11 +551,11 @@ export class QueueScheduler {
     }
 
     job.timer = setInterval(() => {
-      this.executeJob(job);
+      this.launch(job);
     }, job.intervalMs);
 
     // Also execute immediately
-    this.executeJob(job);
+    this.launch(job);
   }
 
   /**
@@ -517,7 +567,7 @@ export class QueueScheduler {
     }
 
     job.timer = setTimeout(() => {
-      this.executeJob(job);
+      this.launch(job);
       // Remove the job after execution (it's one-time)
       this.jobs.delete(job.name);
     }, job.timeoutMs);
@@ -526,6 +576,61 @@ export class QueueScheduler {
   /**
    * Execute a scheduled job
    */
+  /**
+   * Start a tick and remember it until it finishes.
+   *
+   * The four timers that reach a job all come through here. `catch` because these promises are
+   * not awaited by their caller: a rejection with nobody attached is an unhandled rejection, and
+   * `runJob` already reports failures through the error handler.
+   */
+  private launch(job: ScheduledJob): void {
+    const run: InFlightRun = {
+      name: job.name,
+      promise: Promise.resolve(),
+    };
+
+    run.promise = this.executeJob(job)
+      .catch(() => undefined)
+      .finally(() => {
+        this.inFlight.delete(run);
+      });
+
+    this.inFlight.add(run);
+  }
+
+  /**
+   * Wait for the runs already under way, for at most `timeoutMs`.
+   *
+   * Separate from {@link stop}, which stays synchronous: stopping is "accept no more work" and
+   * happens instantly, draining is "let what started finish" and cannot. Splitting them also
+   * keeps the documented `stop(): void` signature, and lets a caller stop the timers long before
+   * it is ready to wait.
+   *
+   * A run still going when the bound expires is reported through the error handler BEFORE this
+   * resolves — the application's shutdown tears the logger down immediately afterwards, so a
+   * report made any later is written to nothing.
+   */
+  async drain(timeoutMs: number = JOB_DRAIN_TIMEOUT_MS): Promise<void> {
+    if (this.inFlight.size === 0) {
+      return;
+    }
+
+    const runs = [...this.inFlight].map(run => run.promise);
+
+    await awaitBounded(Promise.allSettled(runs), timeoutMs);
+
+    for (const run of this.inFlight) {
+      this.onJobError?.(
+        run.name,
+        new Error(
+          `Scheduled job "${run.name}" was still running after ${timeoutMs}ms of shutdown drain `
+          + 'and has been abandoned. Anything it publishes from here will be rejected by a '
+          + 'disconnected adapter.',
+        ),
+      );
+    }
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
     // A tick belongs to the schedule, not to whatever was in flight when the timer was armed.
     // Context follows the async graph into `setInterval`, so without this a cron job started

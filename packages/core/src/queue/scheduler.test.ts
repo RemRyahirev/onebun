@@ -150,6 +150,108 @@ describe('QueueScheduler', () => {
     });
   });
 
+  /**
+   * A run under way when the application stops is finished, not abandoned.
+   *
+   * `executeJob`'s promise used to be stored nowhere, so `stop()` had nothing to wait for. A
+   * 400 ms job with `stop()` called 120 ms in returned in 3 ms; the job body then finished into
+   * a void and its `publish()` was rejected by an adapter that had already disconnected. The
+   * message never reached a subscriber, and on the real deploy path — `process.exit(0)` right
+   * after `stop()` resolves — nothing was logged either.
+   */
+  describe('shutdown drains runs already under way', () => {
+    it('resolves only after the running job returned, and its message still arrives', async () => {
+      const delivered: Message[] = [];
+      await adapter.subscribe('drain.job', async (message) => {
+        delivered.push(message);
+      });
+
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      let started = false;
+
+      scheduler.addIntervalJob('blocking', 60_000, 'drain.job', async () => {
+        started = true;
+        await blocked;
+
+        return { built: true };
+      });
+
+      scheduler.start();
+      advanceTime(1);
+      await Promise.resolve();
+
+      expect(started).toBe(true);
+
+      scheduler.stop();
+
+      const drained = scheduler.drain();
+      let settled = false;
+
+      void drained.then(() => {
+        settled = true;
+      });
+
+      // Give the drain every chance to resolve early. It must not: the job has not returned.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      release();
+      await drained;
+
+      expect(settled).toBe(true);
+      // And the run got far enough to publish, because the adapter was still connected.
+      expect(delivered).toHaveLength(1);
+    });
+
+    it('reports a job that outlives the bound, before the drain resolves', async () => {
+      const reported: string[] = [];
+      scheduler.setErrorHandler((name) => {
+        reported.push(name);
+      });
+
+      let release!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      scheduler.addIntervalJob('overrunning', 60_000, 'drain.slow', async () => {
+        await blocked;
+
+        return { built: true };
+      });
+
+      scheduler.start();
+      advanceTime(1);
+      await Promise.resolve();
+
+      scheduler.stop();
+
+      const drained = scheduler.drain(1_000);
+
+      advanceTime(1_001);
+      await drained;
+
+      // Named, and named while the logger the handler writes through is still alive — the
+      // application tears it down immediately after `stop()` resolves.
+      expect(reported).toEqual(['overrunning']);
+
+      release();
+    });
+
+    it('returns immediately when nothing is running', async () => {
+      scheduler.start();
+
+      await scheduler.drain();
+
+      expect(scheduler.getJobs()).toHaveLength(0);
+    });
+  });
+
   describe('job management', () => {
     it('should add and remove jobs', () => {
       scheduler.addIntervalJob('job1', 1000, 'test');

@@ -144,9 +144,10 @@ An application with **zero** queue decorators still gets a live queue as soon as
 - Scheduler error handler logs warnings for failed jobs via `QueueScheduler.setErrorHandler()`
 - Message guards (`@UseMessageGuards`) are applied as wrappers around the actual handler
 - The scheduler (`QueueScheduler`) manages cron/interval/timeout jobs with configurable overlap strategies: `'skip'` (default — skip execution if previous is still running), `'queue'` (publish as regular message even if previous is running)
-- Queue shutdown sequence: `queueService.stop()` → `queueAdapter.disconnect()`
+- Queue shutdown sequence: `queueService.stop()` → `scheduler.stop()` → `scheduler.drain()` → unsubscribe → `queueAdapter.disconnect()`. The drain is what waits for scheduled runs already under way, and it has to sit before the disconnect: a job publishes its result at the end, so draining afterwards would only change where the message is lost
+- `QueueScheduler.stop()` stays synchronous — it clears timers, which is instant — and `drain(timeoutMs = 30_000)` is the separate awaitable step. The bound matches the consumer side's `HANDLER_DRAIN_TIMEOUT_MS`, so both halves of one shutdown agree on how long "in flight" may last. A run that outlives the bound is reported by name through `setErrorHandler` BEFORE `drain()` resolves and is then abandoned: the application tears the logger down immediately after `stop()`, and on the deploy path calls `process.exit(0)`, so a report made any later is written to nothing. Anything that run publishes afterwards is rejected by a disconnected adapter
 - Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
-- Dynamic job management: `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` on `QueueService` — all synchronous, delegate to `QueueScheduler`
+- Dynamic job management: `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` on `QueueService` — all synchronous, delegate to `QueueScheduler`. `QueueScheduler.drain()` is the one exception and is not surfaced on `QueueService`: the application already awaits it inside `stop()`
 - Jobs created via decorators are also accessible through the dynamic API by their name (method name by default, overridable via `name` option)
 
 **QueueApplicationOptions interface:**

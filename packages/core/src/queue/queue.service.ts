@@ -173,9 +173,12 @@ export class QueueService {
       return;
     }
 
-    // Stop scheduler
+    // Stop the scheduler, then let the runs already under way finish. Both, in this order, and
+    // both BEFORE the adapter is disconnected below: a job publishes its result at the end, and
+    // draining after the disconnect would only change where the message is lost.
     if (this.scheduler) {
       this.scheduler.stop();
+      await this.scheduler.drain();
     }
 
     // Unsubscribe all subscriptions
