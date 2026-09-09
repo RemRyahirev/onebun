@@ -7,6 +7,12 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 /* eslint-disable @typescript-eslint/no-magic-numbers */
 
+import {
+  SpanKind,
+  type Attributes,
+  type Tracer,
+} from '@opentelemetry/api';
+
 import type { WsStorageAdapter } from './ws-storage';
 import type {
   WsClientData,
@@ -16,7 +22,6 @@ import type {
 } from './ws.types';
 import type { WsAuthResult, WsHandlerResponse } from './ws.types';
 import type { OneBunRequest } from '../types';
-import type { Tracer } from '@opentelemetry/api';
 import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -24,7 +29,7 @@ import type { SyncLogger } from '@onebun/logger';
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
-import { inRootTraceScope } from '../trace-scope';
+import { inEntrySpan, inRootTraceScope } from '../trace-scope';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import { getGatewayMetadata, isWebSocketGateway } from './ws-decorators';
@@ -120,6 +125,12 @@ export class WsHandler {
      * one behaves exactly as before.
      */
     private ownerTracer?: Tracer,
+    /**
+     * `tracing.traceBackgroundWork`. Turns off the per-connection and per-frame span; ownership
+     * above is deliberately unaffected, or a `@Traced` method inside a handler would resolve its
+     * tracer to whichever application won the process-wide provider slot.
+     */
+    private openEntrySpans: boolean = true,
   ) {
     this.storage = new InMemoryWsStorage();
     const socketio = options.socketio;
@@ -268,9 +279,25 @@ export class WsHandler {
       // Bun invokes these from the event loop, not from a continuation of anything this
       // application ran, so neither the parent span nor the owning application is inherited —
       // both have to be stated here.
-      open: (ws) => inRootTraceScope(() => this.handleOpen(ws), this.ownerTracer),
+      //
+      // `open` and `close` get a span each — once per connection, so the cost is irrelevant and
+      // an `@OnConnect`/`@OnDisconnect` handler's log lines finally land in a trace. `message`
+      // and `drain` do NOT: every Engine.IO heartbeat arrives as a message and `handleDrain`
+      // only writes a debug line, so a span here would be one exported span per PING. The frames
+      // that actually dispatch to user code get theirs in `routeMessage`.
+      open: (ws) => inEntrySpan(
+        'ws open',
+        () => this.handleOpen(ws),
+        this.ownerTracer,
+        { kind: SpanKind.SERVER, openSpan: this.openEntrySpans },
+      ),
       message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message), this.ownerTracer),
-      close: (ws, code, reason) => inRootTraceScope(() => this.handleClose(ws, code, reason), this.ownerTracer),
+      close: (ws, code, reason) => inEntrySpan(
+        'ws close',
+        () => this.handleClose(ws, code, reason),
+        this.ownerTracer,
+        { kind: SpanKind.SERVER, openSpan: this.openEntrySpans },
+      ),
       drain: (ws) => inRootTraceScope(() => this.handleDrain(ws), this.ownerTracer),
     };
   }
@@ -512,6 +539,30 @@ export class WsHandler {
    * Route message to appropriate handler
    */
   private async routeMessage(
+    ws: ServerWebSocket<WsClientData>,
+    event: string,
+    data: unknown,
+    ackId?: number,
+  ): Promise<void> {
+    // The one dispatch point both protocols reach, and the first place a frame is known to be
+    // going to user code rather than to a heartbeat. The event rides as an attribute instead of
+    // in the span name: event strings carry ids (`room:123:msg`), and a span name is a
+    // cardinality dimension in every backend.
+    const attributes: Attributes = {};
+    attributes['onebun.ws.event'] = event;
+
+    return await inEntrySpan(
+      'ws message',
+      async () => await this.dispatchMessage(ws, event, data, ackId),
+      this.ownerTracer,
+      { kind: SpanKind.SERVER, attributes, openSpan: this.openEntrySpans },
+    );
+  }
+
+  /**
+   * Dispatch a routed message to the handler that claims it.
+   */
+  private async dispatchMessage(
     ws: ServerWebSocket<WsClientData>,
     event: string,
     data: unknown,

@@ -30,13 +30,13 @@ import type {
 } from './types';
 import type { Guard } from '../http-guards/http-guards';
 import type { ResolvedInterceptor } from '../types';
-import type { Tracer } from '@opentelemetry/api';
+import type { Attributes, Tracer } from '@opentelemetry/api';
 
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getMetadata } from '../decorators/metadata';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
-import { runWithAppTracer } from '../trace-scope';
+import { inEntrySpan, runWithAppTracer } from '../trace-scope';
 
 import {
   getSubscribeMetadata,
@@ -75,6 +75,9 @@ export class QueueService {
    * one place covers all four adapters without changing any adapter signature.
    */
   private ownerTracer: Tracer | undefined = undefined;
+
+  /** `tracing.traceBackgroundWork`; turns off the per-delivery span, never the ownership. */
+  private openEntrySpans = true;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: Subscription[] = [];
   private started = false;
@@ -89,8 +92,10 @@ export class QueueService {
    *
    * @see docs:api/trace.md
    */
-  setOwnerTracer(tracer: Tracer | undefined): void {
+  setOwnerTracer(tracer: Tracer | undefined, openEntrySpans = true): void {
     this.ownerTracer = tracer;
+    this.openEntrySpans = openEntrySpans;
+    this.scheduler?.setOwnerTracer(tracer, openEntrySpans);
   }
 
   constructor(config: QueueConfig) {
@@ -103,6 +108,8 @@ export class QueueService {
   async initialize(adapter: QueueAdapter): Promise<void> {
     this.adapter = adapter;
     this.scheduler = new QueueScheduler(adapter);
+    // Ordering-proof: the owner may have been named before this scheduler existed, or after.
+    this.scheduler.setOwnerTracer(this.ownerTracer, this.openEntrySpans);
 
     // Guarded exactly as in start(): the application already connects the adapter in
     // initializeQueue(), so an unconditional connect here opens the backend twice per boot.
@@ -232,7 +239,27 @@ export class QueueService {
     handler: MessageHandler<T>,
     options?: SubscribeOptions,
   ): Promise<Subscription> {
-    const subscription = await this.getAdapter().subscribe(pattern, handler, options);
+    // Every delivery gets a span, and this is the one place that can give it to every delivery:
+    // all four adapters reach a handler through here, and so does an imperative `subscribe()`
+    // call that never went through `registerService`. Without a span the handler's log lines
+    // carry no trace id at all — `requestContextStore` is entered only for HTTP.
+    //
+    // `this.ownerTracer` is read per message rather than captured, so naming the owner after a
+    // subscription is registered still traces it.
+    // Built once per subscription, not once per message: the values are fixed by the pattern.
+    const attributes: Attributes = {};
+    attributes['messaging.destination.name'] = pattern;
+    attributes['messaging.operation'] = 'process';
+
+    const spanName = `queue ${pattern}`;
+    const traced: MessageHandler<T> = async (message) => await inEntrySpan(
+      spanName,
+      async () => await handler(message),
+      this.ownerTracer,
+      { attributes, openSpan: this.openEntrySpans },
+    );
+
+    const subscription = await this.getAdapter().subscribe(pattern, traced, options);
     this.subscriptions.push(subscription);
 
     return subscription;

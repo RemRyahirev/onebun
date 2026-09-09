@@ -5,6 +5,12 @@
  * Creates messages to be published via the queue adapter.
  */
 
+import {
+  SpanKind,
+  type Attributes,
+  type Tracer,
+} from '@opentelemetry/api';
+
 import type {
   AddJobOptions,
   UpdateJobOptions,
@@ -14,7 +20,7 @@ import type {
   MessageMetadata,
 } from './types';
 
-import { inRootTraceScope } from '../trace-scope';
+import { inEntrySpan } from '../trace-scope';
 
 import {
   parseCronExpression,
@@ -76,7 +82,27 @@ export class QueueScheduler {
   private readonly cronCheckIntervalMs = 1000; // Check cron jobs every second
   private onJobError?: (jobName: string, error: unknown) => void;
 
+  /**
+   * The tracer of the application these jobs belong to, or `undefined` when it is not tracing.
+   *
+   * Held here rather than resolved from the ambient context: a tick arrives from a timer, and the
+   * context a timer fires in is whatever armed it. Read at execution time, never captured, so a
+   * scheduler built before the trace service still traces.
+   */
+  private ownerTracer: Tracer | undefined = undefined;
+
+  /** `tracing.traceBackgroundWork`; turns off the per-tick span, never the ownership. */
+  private openEntrySpans = true;
+
   constructor(private readonly adapter: QueueAdapter) {}
+
+  /**
+   * Name the application whose tracer every tick runs under.
+   */
+  setOwnerTracer(tracer: Tracer | undefined, openEntrySpans = true): void {
+    this.ownerTracer = tracer;
+    this.openEntrySpans = openEntrySpans;
+  }
 
   /**
    * Set error handler for scheduled job failures
@@ -502,7 +528,20 @@ export class QueueScheduler {
     // A tick belongs to the schedule, not to whatever was in flight when the timer was armed.
     // Context follows the async graph into `setInterval`, so without this a cron job started
     // during a request would file every future tick under that one finished request.
-    return await inRootTraceScope(async () => await this.runJob(job));
+    //
+    // The span covers the WHOLE tick, publish included: `runJob` calls the data provider and then
+    // publishes its result, and a trace that stopped at the provider would leave the publish —
+    // the part that reaches another service — outside the trace it caused.
+    const attributes: Attributes = {};
+    attributes['onebun.job.name'] = job.name;
+    attributes['onebun.job.type'] = job.type;
+
+    return await inEntrySpan(
+      `${job.type} ${job.name}`,
+      async () => await this.runJob(job),
+      this.ownerTracer,
+      { kind: SpanKind.INTERNAL, attributes, openSpan: this.openEntrySpans },
+    );
   }
 
   private async runJob(job: ScheduledJob): Promise<void> {

@@ -251,8 +251,10 @@ The parent id is the innermost open span — a call made inside a `@Traced` meth
 method, not off the request. `traceFlags` carries this request's sampling decision, so a downstream
 service inherits it instead of being told everything is sampled.
 
-Nothing is sent when there is no trace to join — startup code, a cron tick, a queue handler — and
-nothing is sent when the ids are not well-formed. A malformed `traceparent` can get a request
+Nothing is sent when there is no trace to join — startup code, or any handler running with
+tracing disabled — and nothing is sent when the ids are not well-formed. A cron tick, a queue
+handler and a WebSocket frame each open a span of their own, so a call made from one of them does
+carry a header, naming that unit of work as the parent. A malformed `traceparent` can get a request
 rejected outright, so no header is the safer failure.
 
 Suppress it with `tracing: false`, on the client or on one call:
@@ -433,8 +435,21 @@ So three boundaries start a fresh trace on purpose: **scheduled jobs** (`@Cron`,
 `message`, `close`, `drain`). Each request is re-rooted too, because Bun reuses a keep-alive
 connection's async context and the second request would otherwise be filed under the first.
 
-`inRootTraceScope(fn)` from `@onebun/core` is what those boundaries call, and it is exported so your
-own background work can do the same:
+Fresh trace, not *no* trace. Each of those boundaries opens a span of its own — `queue <pattern>`,
+`cron <name>`, `interval <name>`, `timeout <name>`, `ws open`, `ws message`, `ws close` — for the
+same reason an HTTP request gets one: a log line can only name a span that exists. Re-rooting alone
+left background handlers with none, so every line they wrote carried no trace id at all and there
+was no way to follow a request into the work it queued.
+
+Two frames deliberately get no span: the raw `message` callback, because every Engine.IO heartbeat
+arrives through it, and `drain`. The frames that reach your handlers get theirs one level in.
+
+Turn the spans off with `tracing: { traceBackgroundWork: false }` — the `traceHttpRequests`
+counterpart for everything else. Those handlers then go back to logging without a trace id;
+`@Traced` methods inside them still get their own spans.
+
+`inRootTraceScope(fn)` from `@onebun/core` is what re-roots, and `inEntrySpan(name, fn, tracer)`
+is re-rooting plus the span. Both are exported so your own background work can do the same:
 
 <!-- typecheck: skip -->
 ```typescript

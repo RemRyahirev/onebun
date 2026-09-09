@@ -409,6 +409,19 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
     traceDatabaseQueries?: boolean;
 
     /**
+     * Open a span around work that does not arrive over HTTP: a queue message, a scheduler tick
+     * (`@Cron`, `@Interval`, `@Timeout`), a WebSocket connection or frame.
+     *
+     * The `traceHttpRequests` counterpart for everything else. Turning it off returns those
+     * handlers to logging with no trace id at all, since a log line can only name a span that
+     * exists — it does not disable tracing inside them, so a `@Traced` method still gets its own
+     * span and its own trace.
+     *
+     * @defaultValue true
+     */
+    traceBackgroundWork?: boolean;
+
+    /**
      * Auto-trace all async methods on services and controllers.
      * When enabled, all async methods are wrapped in spans without
      * requiring @Traced() on each method.

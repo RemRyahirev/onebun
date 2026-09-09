@@ -433,7 +433,7 @@ Tracing is enabled by default when `tracing.enabled` is set in app options or wh
 
 ### Combined JSON + Trace Output
 
-With both JSON logging and tracing enabled, every log entry during an HTTP request automatically includes the trace context:
+With both JSON logging and tracing enabled, a log entry automatically includes the trace context:
 
 ```json
 {
@@ -453,14 +453,19 @@ With both JSON logging and tracing enabled, every log entry during an HTTP reque
 }
 ```
 
-The `trace` field is automatically injected by the logger when a span is active. No code changes needed in your controllers or services — just use `this.logger` as usual.
+The `trace` field is automatically injected by the logger whenever a span is active. No code changes needed in your controllers or services — just use `this.logger` as usual.
+
+That covers an HTTP request, a `@Traced` or `@Span` method, and — because each of those boundaries opens a span of its own — a queue handler, a `@Cron`/`@Interval`/`@Timeout` job, and a WebSocket connection or message handler.
+
+The `trace` key is **absent**, not empty, where no span is open: bootstrap and shutdown code, and any handler running with `tracing.enabled: false` or with `tracing.traceBackgroundWork: false`. A log line never carries a trace id that names nothing.
 
 <llm-only>
 
 **Technical details for AI agents:**
 - `makeLogger()` selects formatter based on: `config.formatter` > `LOG_FORMAT` env > `NODE_ENV` (production=JSON, other=pretty)
 - `JsonFormatter.format()` checks `entry.trace` and adds `{ traceId, spanId, parentSpanId }` to output
-- Trace context is injected into log entries by the trace middleware when a span is active
+- Trace context is injected by `createSyncLogger(effectLogger, getCurrentTraceContext)` — the application wires the getter at construction (`application.ts`, `module.ts`); there is no trace middleware involved
+- `getCurrentTraceContext()` resolves from the OpenTelemetry active span first and the `requestContextStore` AsyncLocalStorage second, and skips an invalid (all-zero) span context so a disabled tracer cannot stamp ids on every line
 - `makeDevLogger()` forces pretty format + debug level
 - `makeProdLogger()` forces JSON format + info level
 - `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext, otlpEndpoint, otlpHeaders, otlpBatchSize, otlpBatchTimeout, otlpResourceAttributes }` and creates the appropriate layer

@@ -1032,7 +1032,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // The tracer is passed so a `@Traced` method reached from a socket callback is recorded
       // by THIS application's provider. `getTracer` is impl-only on the trace service, hence
       // the optional call.
-      this.wsHandler = new WsHandler(this.logger, this.options.websocket, this.traceService?.getTracer?.());
+      this.wsHandler = new WsHandler(
+        this.logger,
+        this.options.websocket,
+        this.traceService?.getTracer?.(),
+        this.options.tracing?.traceBackgroundWork !== false,
+      );
 
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
       for (const controllerClass of controllers) {
@@ -3191,7 +3196,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     this.queueService = new QueueService(queueServiceConfig);
     // Before any handler is registered: every delivery and every scheduled job this service
     // invokes then runs under THIS application's tracer, whichever adapter delivered it.
-    this.queueService.setOwnerTracer(this.traceService?.getTracer?.());
+    this.queueService.setOwnerTracer(
+      this.traceService?.getTracer?.(),
+      this.options.tracing?.traceBackgroundWork !== false,
+    );
 
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);
