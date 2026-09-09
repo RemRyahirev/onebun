@@ -172,7 +172,7 @@ export * from './errors';
 // Request Context (AsyncLocalStorage)
 export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';
 export { inEntrySpan, inRootTraceScope, runWithAppTracer } from './trace-scope';
-export type { EntrySpanOptions } from './trace-scope';
+export type { EntrySpanOptions, EntrySpanSwitches } from './trace-scope';
 
 // Named module registrations — the supported way to configure a dynamic module more than
 // once. See docs:api/decorators.md.

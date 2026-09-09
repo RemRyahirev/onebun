@@ -409,17 +409,36 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
     traceDatabaseQueries?: boolean;
 
     /**
-     * Open a span around work that does not arrive over HTTP: a queue message, a scheduler tick
-     * (`@Cron`, `@Interval`, `@Timeout`), a WebSocket connection or frame.
+     * Open a span around each delivered queue message, named `queue <pattern>`.
      *
-     * The `traceHttpRequests` counterpart for everything else. Turning it off returns those
-     * handlers to logging with no trace id at all, since a log line can only name a span that
-     * exists — it does not disable tracing inside them, so a `@Traced` method still gets its own
-     * span and its own trace.
+     * Turning it off returns `@Subscribe` handlers to logging with no trace id, since a log line
+     * can only name a span that exists. It does not disable tracing inside them: a `@Traced`
+     * method still gets its own span, in a trace of its own.
      *
      * @defaultValue true
      */
-    traceBackgroundWork?: boolean;
+    traceQueueMessages?: boolean;
+
+    /**
+     * Open a span around each scheduler tick — `@Cron`, `@Interval` and `@Timeout` — named
+     * `cron <name>`, `interval <name>` or `timeout <name>`.
+     *
+     * Covers the whole tick, the publish of the job's result included.
+     *
+     * @defaultValue true
+     */
+    traceScheduledJobs?: boolean;
+
+    /**
+     * Open a span around each WebSocket connection (`ws open`, `ws close`) and each frame that
+     * reaches a handler (`ws message`).
+     *
+     * Engine.IO heartbeats get none: they are answered below the dispatch point, so a heartbeat
+     * never produces a span.
+     *
+     * @defaultValue true
+     */
+    traceWebSocketEvents?: boolean;
 
     /**
      * Auto-trace all async methods on services and controllers.

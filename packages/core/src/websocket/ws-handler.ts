@@ -126,11 +126,11 @@ export class WsHandler {
      */
     private ownerTracer?: Tracer,
     /**
-     * `tracing.traceBackgroundWork`. Turns off the per-connection and per-frame span; ownership
+     * `tracing.traceWebSocketEvents`. Turns off the per-connection and per-frame span; ownership
      * above is deliberately unaffected, or a `@Traced` method inside a handler would resolve its
      * tracer to whichever application won the process-wide provider slot.
      */
-    private openEntrySpans: boolean = true,
+    private traceWebSocketEvents: boolean = true,
   ) {
     this.storage = new InMemoryWsStorage();
     const socketio = options.socketio;
@@ -289,14 +289,14 @@ export class WsHandler {
         'ws open',
         () => this.handleOpen(ws),
         this.ownerTracer,
-        { kind: SpanKind.SERVER, openSpan: this.openEntrySpans },
+        { kind: SpanKind.SERVER, openSpan: this.traceWebSocketEvents },
       ),
       message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message), this.ownerTracer),
       close: (ws, code, reason) => inEntrySpan(
         'ws close',
         () => this.handleClose(ws, code, reason),
         this.ownerTracer,
-        { kind: SpanKind.SERVER, openSpan: this.openEntrySpans },
+        { kind: SpanKind.SERVER, openSpan: this.traceWebSocketEvents },
       ),
       drain: (ws) => inRootTraceScope(() => this.handleDrain(ws), this.ownerTracer),
     };
@@ -555,7 +555,7 @@ export class WsHandler {
       'ws message',
       async () => await this.dispatchMessage(ws, event, data, ackId),
       this.ownerTracer,
-      { kind: SpanKind.SERVER, attributes, openSpan: this.openEntrySpans },
+      { kind: SpanKind.SERVER, attributes, openSpan: this.traceWebSocketEvents },
     );
   }
 

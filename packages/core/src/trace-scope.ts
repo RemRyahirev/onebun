@@ -78,14 +78,29 @@ export interface EntrySpanOptions {
   attributes?: Attributes;
   /**
    * Open a span at all. `false` re-roots and establishes ownership exactly as
-   * {@link inRootTraceScope} does, and nothing more — the `tracing.traceBackgroundWork: false`
-   * shape. Ownership is deliberately NOT dropped with the span: `@Traced` inside the handler
-   * resolves its tracer from the ambient key at call time, and without an owner it would resolve
-   * to whichever application won the process-wide provider slot.
+   * {@link inRootTraceScope} does, and nothing more — the shape `tracing.traceQueueMessages`,
+   * `traceScheduledJobs` and `traceWebSocketEvents` select when set to `false`.
+   *
+   * Ownership is deliberately NOT dropped with the span: `@Traced` inside the handler resolves
+   * its tracer from the ambient key at call time, and without an owner it would resolve to
+   * whichever application won the process-wide provider slot.
    *
    * @defaultValue true
    */
   openSpan?: boolean;
+}
+
+/**
+ * Which kinds of non-HTTP work open a span, as the application configures them.
+ *
+ * One switch per subject rather than one for "background work": the key has to say what it turns
+ * off, and a busy queue is a different decision from a once-a-day cron.
+ */
+export interface EntrySpanSwitches {
+  /** `tracing.traceQueueMessages` */
+  queueMessages?: boolean;
+  /** `tracing.traceScheduledJobs` */
+  scheduledJobs?: boolean;
 }
 
 /** Whether a handler returned a promise, without assuming it returned one. */

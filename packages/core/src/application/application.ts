@@ -1036,7 +1036,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.logger,
         this.options.websocket,
         this.traceService?.getTracer?.(),
-        this.options.tracing?.traceBackgroundWork !== false,
+        this.options.tracing?.traceWebSocketEvents !== false,
       );
 
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
@@ -3196,10 +3196,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     this.queueService = new QueueService(queueServiceConfig);
     // Before any handler is registered: every delivery and every scheduled job this service
     // invokes then runs under THIS application's tracer, whichever adapter delivered it.
-    this.queueService.setOwnerTracer(
-      this.traceService?.getTracer?.(),
-      this.options.tracing?.traceBackgroundWork !== false,
-    );
+    this.queueService.setOwnerTracer(this.traceService?.getTracer?.(), {
+      queueMessages: this.options.tracing?.traceQueueMessages !== false,
+      scheduledJobs: this.options.tracing?.traceScheduledJobs !== false,
+    });
 
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);

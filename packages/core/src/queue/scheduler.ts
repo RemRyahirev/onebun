@@ -91,17 +91,17 @@ export class QueueScheduler {
    */
   private ownerTracer: Tracer | undefined = undefined;
 
-  /** `tracing.traceBackgroundWork`; turns off the per-tick span, never the ownership. */
-  private openEntrySpans = true;
+  /** `tracing.traceScheduledJobs`; turns off the per-tick span, never the ownership. */
+  private traceScheduledJobs = true;
 
   constructor(private readonly adapter: QueueAdapter) {}
 
   /**
    * Name the application whose tracer every tick runs under.
    */
-  setOwnerTracer(tracer: Tracer | undefined, openEntrySpans = true): void {
+  setOwnerTracer(tracer: Tracer | undefined, traceScheduledJobs = true): void {
     this.ownerTracer = tracer;
-    this.openEntrySpans = openEntrySpans;
+    this.traceScheduledJobs = traceScheduledJobs;
   }
 
   /**
@@ -540,7 +540,7 @@ export class QueueScheduler {
       `${job.type} ${job.name}`,
       async () => await this.runJob(job),
       this.ownerTracer,
-      { kind: SpanKind.INTERNAL, attributes, openSpan: this.openEntrySpans },
+      { kind: SpanKind.INTERNAL, attributes, openSpan: this.traceScheduledJobs },
     );
   }
 

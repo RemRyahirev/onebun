@@ -457,7 +457,7 @@ The `trace` field is automatically injected by the logger whenever a span is act
 
 That covers an HTTP request, a `@Traced` or `@Span` method, and — because each of those boundaries opens a span of its own — a queue handler, a `@Cron`/`@Interval`/`@Timeout` job, and a WebSocket connection or message handler.
 
-The `trace` key is **absent**, not empty, where no span is open: bootstrap and shutdown code, and any handler running with `tracing.enabled: false` or with `tracing.traceBackgroundWork: false`. A log line never carries a trace id that names nothing.
+The `trace` key is **absent**, not empty, where no span is open: bootstrap and shutdown code, and any handler running with `tracing.enabled: false` or with its own kind switched off — `tracing.traceQueueMessages`, `tracing.traceScheduledJobs`, `tracing.traceWebSocketEvents`. A log line never carries a trace id that names nothing.
 
 <llm-only>
 

@@ -29,6 +29,7 @@ import type {
   BuiltInAdapterType,
 } from './types';
 import type { Guard } from '../http-guards/http-guards';
+import type { EntrySpanSwitches } from '../trace-scope';
 import type { ResolvedInterceptor } from '../types';
 import type { Attributes, Tracer } from '@opentelemetry/api';
 
@@ -76,8 +77,11 @@ export class QueueService {
    */
   private ownerTracer: Tracer | undefined = undefined;
 
-  /** `tracing.traceBackgroundWork`; turns off the per-delivery span, never the ownership. */
-  private openEntrySpans = true;
+  /** `tracing.traceQueueMessages`; turns off the per-delivery span, never the ownership. */
+  private traceQueueMessages = true;
+
+  /** `tracing.traceScheduledJobs`, kept so a scheduler created later still learns it. */
+  private traceScheduledJobs = true;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: Subscription[] = [];
   private started = false;
@@ -92,10 +96,11 @@ export class QueueService {
    *
    * @see docs:api/trace.md
    */
-  setOwnerTracer(tracer: Tracer | undefined, openEntrySpans = true): void {
+  setOwnerTracer(tracer: Tracer | undefined, spans?: EntrySpanSwitches): void {
     this.ownerTracer = tracer;
-    this.openEntrySpans = openEntrySpans;
-    this.scheduler?.setOwnerTracer(tracer, openEntrySpans);
+    this.traceQueueMessages = spans?.queueMessages ?? true;
+    this.traceScheduledJobs = spans?.scheduledJobs ?? true;
+    this.scheduler?.setOwnerTracer(tracer, this.traceScheduledJobs);
   }
 
   constructor(config: QueueConfig) {
@@ -109,7 +114,7 @@ export class QueueService {
     this.adapter = adapter;
     this.scheduler = new QueueScheduler(adapter);
     // Ordering-proof: the owner may have been named before this scheduler existed, or after.
-    this.scheduler.setOwnerTracer(this.ownerTracer, this.openEntrySpans);
+    this.scheduler.setOwnerTracer(this.ownerTracer, this.traceScheduledJobs);
 
     // Guarded exactly as in start(): the application already connects the adapter in
     // initializeQueue(), so an unconditional connect here opens the backend twice per boot.
@@ -256,7 +261,7 @@ export class QueueService {
       spanName,
       async () => await handler(message),
       this.ownerTracer,
-      { attributes, openSpan: this.openEntrySpans },
+      { attributes, openSpan: this.traceQueueMessages },
     );
 
     const subscription = await this.getAdapter().subscribe(pattern, traced, options);

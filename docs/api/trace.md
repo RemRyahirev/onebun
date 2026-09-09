@@ -444,9 +444,11 @@ was no way to follow a request into the work it queued.
 Two frames deliberately get no span: the raw `message` callback, because every Engine.IO heartbeat
 arrives through it, and `drain`. The frames that reach your handlers get theirs one level in.
 
-Turn the spans off with `tracing: { traceBackgroundWork: false }` — the `traceHttpRequests`
-counterpart for everything else. Those handlers then go back to logging without a trace id;
-`@Traced` methods inside them still get their own spans.
+Each kind has its own switch, alongside `traceHttpRequests`: `tracing.traceQueueMessages`,
+`tracing.traceScheduledJobs` and `tracing.traceWebSocketEvents`, all `true` by default. A busy
+consumer and a once-a-day cron are different decisions, so they are different keys. Setting one to
+`false` returns those handlers to logging without a trace id; `@Traced` methods inside them still
+get their own spans.
 
 `inRootTraceScope(fn)` from `@onebun/core` is what re-roots, and `inEntrySpan(name, fn, tracer)`
 is re-rooting plus the span. Both are exported so your own background work can do the same:

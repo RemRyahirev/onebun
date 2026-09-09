@@ -150,6 +150,31 @@ async function waitForRun(seen: Observed, what: string): Promise<void> {
   }
 }
 
+/** Open a socket, send one frame the gateway handles, and wait for the handler. */
+async function ping(app: OneBunApplication): Promise<void> {
+  const socket = new WebSocket(`${app.getHttpUrl().replace('http', 'ws')}/ws`);
+
+  await new Promise<void>((resolve, reject) => {
+    socket.addEventListener('open', () => {
+      resolve();
+    });
+    socket.addEventListener('error', () => {
+      reject(new Error('the socket never opened'));
+    });
+  });
+
+  socket.send(JSON.stringify({ event: 'ping', data: {} }));
+  await waitForRun(wsSeen, 'the WebSocket handler');
+  socket.close();
+}
+
+/** The handler ran, and deliberately carries no trace — its kind of span is switched off. */
+function expectUntraced(seen: Observed): void {
+  expect(seen.ran).toBeGreaterThan(0);
+  expect(seen.fromSpan).toBe('(no active span)');
+  expect(seen.fromLogger).toBe('(no trace on the entry)');
+}
+
 /** Every assertion this file makes about one context, in one place. */
 function expectCorrelated(seen: Observed): void {
   expect(seen.ran).toBeGreaterThan(0);
@@ -203,7 +228,7 @@ class CorrelateGateway extends BaseWebSocketGateway {
 @Module({ controllers: [CorrelateController, CorrelateGateway] })
 class CorrelateModule {}
 
-async function startApp(): Promise<OneBunApplication> {
+async function startApp(tracing?: Record<string, boolean>): Promise<OneBunApplication> {
   const app = new OneBunApplication(CorrelateModule, {
     port: 0,
     metrics: { enabled: false },
@@ -217,6 +242,7 @@ async function startApp(): Promise<OneBunApplication> {
       enabled: true,
       serviceName: 'correlate',
       exportOptions: { endpoint: 'http://127.0.0.1:9/unused' },
+      ...tracing,
     },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } as any);
@@ -328,24 +354,68 @@ describe('a log line names the span it was written from', () => {
     const app = await startApp();
 
     try {
-      const socket = new WebSocket(`${app.getHttpUrl().replace('http', 'ws')}/ws`);
-
-      await new Promise<void>((resolve, reject) => {
-        socket.addEventListener('open', () => {
-          resolve();
-        });
-        socket.addEventListener('error', () => {
-          reject(new Error('the socket never opened'));
-        });
-      });
-
-      socket.send(JSON.stringify({ event: 'ping', data: {} }));
-      await waitForRun(wsSeen, 'the WebSocket handler');
-      socket.close();
+      await ping(app);
     } finally {
       await app.stop();
     }
 
     expectCorrelated(wsSeen);
+  });
+});
+
+/**
+ * Each kind of background work has its own switch, and the switches are independent.
+ *
+ * One umbrella `traceBackgroundWork` said nothing about what it covered — a busy consumer and a
+ * once-a-day cron are different decisions. These cases are what makes the split real rather than
+ * a rename: turning one off must leave the others tracing.
+ */
+describe('each kind of background work has its own switch', () => {
+  it('traceQueueMessages: false silences the queue and nothing else', async () => {
+    const app = await startApp({ traceQueueMessages: false });
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (app as any).queueService.publish('correlate.queue', { n: 1 });
+      await waitForRun(queueSeen, 'the queue handler');
+      await waitForRun(cronSeen, 'the cron job');
+    } finally {
+      await app.stop();
+    }
+
+    expectUntraced(queueSeen);
+    expectCorrelated(cronSeen);
+  });
+
+  it('traceScheduledJobs: false silences the scheduler and nothing else', async () => {
+    const app = await startApp({ traceScheduledJobs: false });
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (app as any).queueService.publish('correlate.queue', { n: 1 });
+      await waitForRun(cronSeen, 'the cron job');
+      await waitForRun(intervalSeen, 'the interval job');
+      await waitForRun(queueSeen, 'the queue handler');
+    } finally {
+      await app.stop();
+    }
+
+    expectUntraced(cronSeen);
+    expectUntraced(intervalSeen);
+    expectCorrelated(queueSeen);
+  });
+
+  it('traceWebSocketEvents: false silences sockets and nothing else', async () => {
+    const app = await startApp({ traceWebSocketEvents: false });
+
+    try {
+      await ping(app);
+      await waitForRun(cronSeen, 'the cron job');
+    } finally {
+      await app.stop();
+    }
+
+    expectUntraced(wsSeen);
+    expectCorrelated(cronSeen);
   });
 });
