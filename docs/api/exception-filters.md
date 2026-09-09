@@ -28,6 +28,7 @@ import { ExceptionFilter, createExceptionFilter, UseFilters, HttpException } fro
 - Priority: route-level > controller-level > global > default
 
 **Signature:**
+<!-- typecheck: skip -->
 ```typescript
 filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Promise<OneBunResponse>
 ```
@@ -35,7 +36,12 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 **The default filter** handles:
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
 - `OneBunBaseError` subclasses → `{ success: false, error: message, code: errorCode }` (HTTP status = error's code)
-- Any other `Error` → `{ success: false, error: message, code: 500 }` (HTTP 500)
+- Any other `Error` **or thrown value** → `{ success: false, error: 'Internal Server Error', code: 500 }` (HTTP 500). The exported constant is `UNHANDLED_ERROR_MESSAGE`. The thrown value's own message is NOT in the body: it is written by whatever threw it — a driver, a socket, the file system — and routinely names an absolute path, an internal host and port, a service hostname, a failing statement with its bound parameters, or the password inside a connection string. The two branches above keep their messages, because they are author-written and client-facing; this branch has no way to tell a safe message from a leaking one, so it is withheld wholesale rather than filtered. A denylist of shapes would always miss the shape it had not met
+- `createErrorResponse` always emits a `details` key, defaulting to `{}`. Only the unhandled branch ever populated it, and it no longer does unless `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
+- `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
+- The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
+- The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
+- The stack still reaches the operator: the application logs `'Unhandled error in ...'` with the error object before the filter runs, so withholding it from the response costs no debuggability
 
 </llm-only>
 
@@ -67,7 +73,7 @@ import { OneBunBaseError } from '@onebun/requests';
 const myFilter = createExceptionFilter((error, ctx) => {
   if (error instanceof OneBunBaseError) {
     return new Response(
-      JSON.stringify({ success: false, error: error.message, code: error.statusCode }),
+      JSON.stringify({ success: false, error: error.message, code: error.code }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   }
@@ -78,8 +84,13 @@ const myFilter = createExceptionFilter((error, ctx) => {
 
 ### Class-based filter
 
+`ValidationError` is a class from `@onebun/requests`, not from `@onebun/core` — `instanceof` needs the
+runtime value, and the similarly named `ValidationError` in core's validation module is an interface
+with no runtime existence:
+
 ```typescript
 import type { ExceptionFilter, HttpExecutionContext } from '@onebun/core';
+import { ValidationError } from '@onebun/requests';
 
 class ValidationExceptionFilter implements ExceptionFilter {
   catch(error: unknown, ctx: HttpExecutionContext): Response {
@@ -98,6 +109,7 @@ class ValidationExceptionFilter implements ExceptionFilter {
 
 Throw `HttpException` from handlers, guards, or middleware to return a specific HTTP status code:
 
+<!-- typecheck: skip -->
 ```typescript
 import { HttpException } from '@onebun/core';
 
@@ -118,7 +130,7 @@ The default exception filter converts `HttpException` to a JSON response with th
 | `throw new HttpException(404, 'Not found')` | HTTP 404 `{ success: false, error: "Not found", code: 404 }` |
 | `throw new HttpException(409, 'Conflict')` | HTTP 409 `{ success: false, error: "Conflict", code: 409 }` |
 
-> **Note:** Framework validation errors (`@Body(schema)`, `@Param`, `@File`) automatically throw `HttpException(400, ...)`, so validation failures return HTTP 400 with a descriptive error message.
+> **Note:** Framework validation errors (`@Body(schema)`, `@Param`, `@UploadedFile`) automatically throw `HttpException(400, ...)`, so validation failures return HTTP 400 with a descriptive error message. There is no `@File` decorator — the file-parameter decorators are `@UploadedFile`, `@UploadedFiles` and `@FormField`.
 
 ## Applying Filters
 
@@ -155,7 +167,7 @@ class UploadController extends BaseController {
     throw err;
   }))
   @Post('/')
-  async upload(@File() file: OneBunFile) { /* ... */ }
+  async upload(@UploadedFile() file: OneBunFile) { /* ... */ }
 }
 ```
 
@@ -209,9 +221,58 @@ The `defaultExceptionFilter` is always active. It handles:
 
 | Error type | Response body | Status |
 |------------|---------------|--------|
-| `HttpException` | `{ success: false, error: message, code: statusCode }` | exception's statusCode |
+| `HttpException` | `{ success: false, error: message, code: statusCode, details: {} }` | exception's statusCode |
 | `OneBunBaseError` subclass | `{ success: false, error: message, code: errorCode }` | error's code |
-| Any other `Error` or value | `{ success: false, error: message, code: 500 }` | 500 |
+| Any other `Error` or value | `{ success: false, error: 'Internal Server Error', code: 500, details: {} }` | 500 |
+
+**An unhandled error does not put its own message in the response.** The first two rows do —
+those messages are written by the author and meant for the client. The third is the branch where
+the text came from a library or the kernel, and such a message routinely carries exactly what an
+API response must not:
+
+```
+ENOENT: no such file or directory, open '/srv/app/config/private.pem'
+connect ECONNREFUSED 10.0.3.17:5432
+getaddrinfo ENOTFOUND internal-billing.svc.cluster.local
+Invalid URL: postgres://app:hunter2@db.internal:5432/app
+```
+
+An absolute path, an internal host and port, the service topology, a password. Nothing in the
+filter can tell one of those from a harmless message, so the whole branch answers with the fixed
+string `'Internal Server Error'` — exported as `UNHANDLED_ERROR_MESSAGE`. Filtering by pattern
+instead was rejected: a denylist always misses the shape it has not met, and reads as safe.
+
+Every body also carries a `details` object, and on the default filter it is **empty**. It used to
+carry the error's stack trace, class name and non-HTTP `code` for any unhandled throw. A stack
+trace in an API response discloses absolute filesystem paths, dependency versions and internal
+module layout to whoever can provoke a 500, so it is withheld too.
+
+Nothing is lost operationally: the application logs the whole error, message and stack included,
+before the filter runs — look for `Unhandled error in <Controller>.<handler>`.
+
+::: tip Returning a message to the client deliberately
+Throw an `HttpException` — that is what it is for. `throw new HttpException(422, 'orderId must
+be a positive integer')` answers with that text verbatim. Catching a driver error and rethrowing
+it as an `HttpException` you worded yourself is the supported way to say something specific
+about a failure.
+:::
+
+::: warning exposeErrorDetails puts it back
+```typescript
+const app = new OneBunApplication(AppModule, { exposeErrorDetails: true });
+```
+
+The unhandled branch then answers with the error's **real message**, and `details` carries
+`originalErrorName`, `originalCode` and the full `stack`. One flag governs both: a message naming
+an internal host is not meaningfully safer than the stack naming the file.
+
+Off by default, and deliberately **not** tied to `NODE_ENV` — a deployment with an unset or
+mistyped `NODE_ENV` would start disclosing all of it silently, which is the failure this guards
+against. Turn it on knowingly, in a development configuration you can read.
+
+`HttpException` and `OneBunBaseError` bodies are unaffected by the flag: they never carried
+details.
+:::
 
 ## Accessing the Request in a Filter
 

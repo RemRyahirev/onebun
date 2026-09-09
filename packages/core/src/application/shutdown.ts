@@ -28,6 +28,17 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15_000;
  */
 export const DRAIN_BUDGET_RATIO = 0.5;
 
+/**
+ * How long to wait for `server.stop(true)` to settle before continuing the teardown.
+ *
+ * Short on purpose. Measured against a bare `Bun.serve` with no framework involved: after a
+ * SERVER-initiated `ws.close()` the close callback fires and the socket is gone, but
+ * `server.pendingWebSockets` stays at 1 and `stop(true)` never settles — still pending after 8 s.
+ * The listener is genuinely down by then (a fetch to the port is refused), so waiting past this
+ * buys nothing and costs the entire shutdown budget.
+ */
+export const SERVER_STOP_TIMEOUT_MS = 250;
+
 /** Poll interval for the drain loop. Only ever runs while the application is stopping. */
 const DRAIN_POLL_INTERVAL_MS = 5;
 

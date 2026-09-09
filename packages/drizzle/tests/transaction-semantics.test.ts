@@ -17,7 +17,7 @@ import {
 
 import { createTestService } from '@onebun/core/testing';
 
-import { UniversalTransactionClient } from '../src/builders';
+import { createTransactionAwareDatabase, UniversalTransactionClient } from '../src/builders';
 import { DrizzleService, DrizzleTransactionError } from '../src/drizzle.service';
 import { eq, sql } from '../src/index';
 import {
@@ -390,12 +390,25 @@ describe('DrizzleService.transaction() on PostgreSQL', () => {
   const makePostgresService = (): {
     service: DrizzleService;
     calls: Array<(tx: unknown) => Promise<unknown>>;
+    savepoints: Array<(tx: unknown) => Promise<unknown>>;
     rawTx: object;
     rawDb: object;
   } => {
     const { instance } = createTestService(DrizzleService);
     const calls: Array<(tx: unknown) => Promise<unknown>> = [];
-    const rawTx = { marker: 'pg-tx' };
+    const savepoints: Array<(tx: unknown) => Promise<unknown>> = [];
+
+    // A drizzle PostgreSQL transaction handle carries its own `transaction()` — that is how
+    // savepoints are reached — so the stub has to as well, or the nested path cannot be
+    // exercised here at all.
+    const rawTx = {
+      marker: 'pg-tx',
+      async transaction(callback: (tx: unknown) => Promise<unknown>) {
+        savepoints.push(callback);
+
+        return await callback(rawTx);
+      },
+    };
     const rawDb = {
       async transaction(callback: (tx: unknown) => Promise<unknown>) {
         calls.push(callback);
@@ -407,6 +420,9 @@ describe('DrizzleService.transaction() on PostgreSQL', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = instance as any;
     internals.db = rawDb;
+    // What `initialize()` builds on the PostgreSQL branch: the same object with the query
+    // entry points routed to whichever transaction the caller is inside.
+    internals.routedDb = createTransactionAwareDatabase(rawDb, internals.pgAmbient);
     internals.dbType = DatabaseType.POSTGRESQL;
     internals.initialized = true;
     internals.connectionOptions = {
@@ -415,7 +431,7 @@ describe('DrizzleService.transaction() on PostgreSQL', () => {
     };
 
     return {
-      service: instance, calls, rawTx, rawDb,
+      service: instance, calls, savepoints, rawTx, rawDb,
     };
   };
 
@@ -437,19 +453,31 @@ describe('DrizzleService.transaction() on PostgreSQL', () => {
     expect(seen!.getRawTransaction()).toBe(rawTx as never);
   });
 
-  test('hands out the database ungated, since a transaction takes its own connection', () => {
+  test('hands out the database routed, so a repository joins the transaction it is inside', () => {
     const { service, rawDb } = makePostgresService();
 
-    expect(service.getDatabase()).toBe(rawDb as never);
+    // Not the raw instance any more — the raw instance is its PROTOTYPE, so everything not
+    // routed resolves to it untouched and nothing on it is modified.
+    expect(service.getDatabase()).not.toBe(rawDb as never);
+    expect(Object.getPrototypeOf(service.getDatabase())).toBe(rawDb);
   });
 
-  test('does not refuse a nested transaction on PostgreSQL', async () => {
-    const { service, calls } = makePostgresService();
+  test('gives the narrower escape hatch the same routed instance, not an opt-out', () => {
+    const { service } = makePostgresService();
+
+    expect<unknown>(service.getPostgreSQLDatabase()).toBe(service.getDatabase());
+  });
+
+  test('makes a nested transaction a savepoint on the connection already held', async () => {
+    // Not refused, as on SQLite — and not a second pooled connection either, which is what it
+    // used to be: an INDEPENDENT transaction able to block on a row its own caller holds.
+    const { service, calls, savepoints } = makePostgresService();
 
     await service.transaction(async () => {
       await service.transaction(async () => 'inner');
     });
 
-    expect(calls.length).toBe(2);
+    expect(calls.length).toBe(1);
+    expect(savepoints.length).toBe(1);
   });
 });

@@ -1,0 +1,545 @@
+# OneBun Drizzle Integration — Full Reference
+
+## Setup
+
+### Installation
+
+```bash
+bun add @onebun/drizzle
+```
+
+### Module Registration
+
+```typescript
+// src/app.module.ts
+import { Module } from '@onebun/core';
+import { DrizzleModule, DatabaseType } from '@onebun/drizzle';
+
+@Module({
+  imports: [
+    DrizzleModule.forRoot({
+      connection: {
+        type: DatabaseType.SQLITE,       // the only other member is DatabaseType.POSTGRESQL
+        options: { url: process.env.DB_PATH || './data/app.db' },
+      },
+      autoMigrate: true,
+      migrationsFolder: './src/db/migrations',
+    }),
+    // ... domain modules
+  ],
+})
+export class AppModule {}
+```
+
+`DrizzleModule.forRoot()` makes `DrizzleService` globally available — no need to import in domain modules.
+
+`DatabaseType` has exactly two members: `SQLITE = 'sqlite'` and `POSTGRESQL = 'postgresql'`. There is no
+`DatabaseType.POSTGRES` — writing it is a compile error, and casting it away boots into
+`Unsupported database type: undefined`.
+
+### Startup contract — a configured database is a REQUIRED one
+
+`DrizzleService.onModuleInit()` opens the database, probes PostgreSQL with a bounded `SELECT 1`, and runs
+migrations. Any failure rejects `app.start()` **before** `Bun.serve()` binds — there is no warn-and-continue
+default. The snippet above dies at boot when `DB_PATH` is unset and `./data` does not exist, rather than
+starting and returning 500 from every request that touches the database. That is deliberate: an orchestrator
+must see a container that refuses to come up, not one that passes readiness and then fails.
+
+| Aspect | Behaviour |
+|---|---|
+| Error | `DrizzleStartupError`, carrying `stage` (`'open' \| 'connect' \| 'migrate'`), `target` (password redacted), `waitedMs`, `timeoutMs` |
+| Connect probe bound | `connection.options.pool.timeout` (ms) when set, otherwise 5000 ms — the same number the driver gets as its connect timeout |
+| SQLite | no `connect` stage — opening the file *is* the check |
+| Missing migrations folder | "no migrations", not a failure (`migrationsFolder` defaults to `./drizzle`) |
+
+Opt out with `allowDegradedStart: true`. The same switch on the environment path is
+`DB_ALLOW_DEGRADED_START=true` (with the configured `envPrefix`) — and it applies **only** there: an
+application whose `connection` came from `forRoot()` takes the option and ignores the variable, because
+module options are code. It does not skip the check either way: the check still runs, the failure is
+logged at `warn`, and boot continues. Use it only when a degraded or absent database at boot is genuinely acceptable
+(read-mostly service behind a cache, database brought up after the application).
+
+```typescript
+import { DatabaseType, DrizzleModule } from '@onebun/drizzle';
+
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: { url: './data/app.db' },
+  },
+  // "I accept an absent database at boot" — every request touching it fails until it is there.
+  allowDegradedStart: true,
+});
+```
+
+Two things that surprise readers:
+
+- **`instanceof DrizzleStartupError` does not hold on what `await app.start()` rejects with.** Effect wraps
+  it in a `FiberFailure` that carries only the message; match on the message there. The `instanceof` check
+  works only on what `onModuleInit()` itself throws.
+- **A package that ships its own migrations needs its own `migrationsTable`** in `forRoot()` /
+  `runMigrations()`. Both default to drizzle's `__drizzle_migrations`, and the framework refuses the
+  collision rather than living with it: the second `runMigrations()` on one `DrizzleService` throws
+  `Migration folder "X" would share the journal "drizzle.__drizzle_migrations" with "Y"` — under
+  `autoMigrate` that kills the boot. A set that is skipped anyway is logged at `warn` with the filenames.
+  The guard is per service instance, so two services against one database — or drizzle-kit run outside
+  the service — still skip in silence: drizzle compares folder timestamps against the newest journal
+  row, never hashes.
+
+### Multiple databases
+
+Name each configuration with `as`, and let each feature module select the one it needs:
+
+```typescript
+export const MAIN_DB = Symbol('MAIN_DB');
+export const ANALYTICS_DB = Symbol('ANALYTICS_DB');
+
+@Module({
+  imports: [
+    DrizzleModule.forRoot({ connection: mainConnection,      as: MAIN_DB }),
+    DrizzleModule.forRoot({ connection: analyticsConnection, as: ANALYTICS_DB }),
+    ReportsModule,
+  ],
+})
+export class AppModule {}
+
+@Module({
+  imports: [DrizzleModule.forFeature(ANALYTICS_DB)],  // the module decides, once
+  providers: [ReportService],
+})
+export class ReportsModule {}
+
+@Service()
+export class ReportService extends BaseService {
+  constructor(private db: DrizzleService) { super(); }  // no @Inject, no token here
+}
+```
+
+A module that needs BOTH names each one — this is the only place a token appears at an injection site:
+
+```typescript
+@Module({
+  imports: [DrizzleModule.forFeature(MAIN_DB), DrizzleModule.forFeature(ANALYTICS_DB)],
+  providers: [Reconciler],
+})
+export class ReconcileModule {}
+
+@Service()
+export class Reconciler extends BaseService {
+  constructor(
+    @Inject(MAIN_DB) private main: DrizzleService,
+    @Inject(ANALYTICS_DB) private analytics: DrizzleService,
+    private clock: ClockService,          // un-annotated parameters still resolve by type
+  ) { super(); }
+}
+```
+
+Rules: one token per `forRoot()` (registering it twice throws); selecting a token nothing configured fails at
+startup; the bare class in a module holding two registrations throws naming both; `@Inject` with a token the
+module never selected throws naming what it did select. A named registration is never `@Global()` — `as` with
+`isGlobal: true` throws — and it reaches a module only by being imported. An unnamed `forRoot()` keeps the
+global behaviour, and `isGlobal: false` is about VISIBILITY, not about multiple databases.
+
+From outside the tree, `app.getService(Class, TOKEN)` is the **only** call that works once two registrations
+exist. The untokened `app.getService(Class)` and `app.getLayer()` both THROW an `Error` whose `name` is
+`OneBunAmbiguousServiceError`, naming every holder. Untokened `getLayer()` throws rather than quietly
+returning a Context because an Effect `Context` has exactly one slot per service class — the layer it built
+would carry whichever instance merged last, i.e. whatever the import order happened to be.
+
+**Say which one takes the slot:** `app.getLayer([[DrizzleService, ANALYTICS_DB]])`. The layer still holds one
+instance per class, because that is what a `Context` is, but which one is stated rather than inferred from
+import order. Every ambiguous class must be named; one left out still throws, and the message lists only what
+is still unresolved. To reach an instance without building a layer, `getService(Class, TOKEN)` or
+`@Inject(TOKEN)`.
+
+`CacheModule` works the same way: `forRoot({ ..., as: TOKEN })` and `forFeature(TOKEN)`.
+
+### Drizzle Config
+
+Create `drizzle.config.ts` at service root:
+
+```typescript
+import { defineConfig } from '@onebun/drizzle';
+
+export default defineConfig({
+  schema: './src/db/schema.ts',
+  out: './src/db/migrations',
+  dialect: 'sqlite',
+  dbCredentials: { url: process.env.DB_PATH || './data/app.db' },
+});
+```
+
+## SQLite Pragmas and Read-Only Files
+
+Every SQLite connection gets a pragma set right after the file opens. The default is
+`['journal_mode = WAL', 'synchronous = NORMAL']`; `pragmas` replaces it wholesale.
+
+A `readonly: true` connection gets `['synchronous = NORMAL']` instead, so a read-only database boots with
+**no pragma list at all**:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/reference.db',
+      options: { readonly: true },
+    },
+  },
+})
+```
+
+`journal_mode` is a property of the file, not of the connection — setting it rewrites the database header —
+so a read-only handle answers `attempt to write a readonly database`.
+
+**An explicit `pragmas` array is applied exactly as given, read-only or not.** The framework filters its own
+defaults, never your list; a write pragma you asked for still fails the boot, naming it.
+
+Do not "just ignore" a failing pragma: measured under bun:sqlite, `PRAGMA journal_mode = WAL` on a read-only
+handle fails only when the file is **not already in WAL mode** — on a file that is, the same statement
+succeeds as a no-op. Swallowing it makes boot depend on how the database happened to be written.
+
+## Connection Pool (PostgreSQL)
+
+`pool` sits next to either connection shape, and every option in it reaches the driver:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.POSTGRESQL,
+    options: {
+      connectionString: process.env.DB_URL!,
+      pool: {
+        max: 20,            // connections the pool may open (driver default: 10)
+        idleTimeout: 30000, // ms an idle connection is kept (default: kept forever)
+        timeout: 2000,      // ms a connect may take (driver default: 30000)
+      },
+    },
+  },
+})
+```
+
+Both timeouts are **milliseconds**; the driver takes seconds and the framework divides on the way through,
+fractions included, so a 250 ms timeout stays 250 ms. `pool.timeout` has exactly one meaning: it bounds the
+driver's connect **and** the startup reachability probe, one number for both. A zero or negative value is
+not forwarded — to the driver a zero timeout means *no* timeout, so it would turn a misconfiguration into an
+unbounded connect.
+
+**There is no `pool.min`.** It was accepted and discarded on every release that had it, because Bun's `SQL`
+opens connections on demand and has no minimum-pool concept. It is now a compile error.
+
+## Schema Definition
+
+```typescript
+// src/db/schema.ts
+import { sqliteTable, text, integer, real, index, uniqueIndex } from '@onebun/drizzle/sqlite';
+import { sql } from '@onebun/drizzle';
+
+// Basic table
+export const users = sqliteTable('users', {
+  id: text('id').primaryKey(),                                    // ULID as text
+  name: text('name').notNull(),
+  email: text('email').notNull().unique(),
+  role: text('role', { enum: ['admin', 'user'] }).notNull().default('user'),
+  metadata: text('metadata', { mode: 'json' }).$type<Record<string, unknown>>(),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
+// Table with indexes
+export const transactions = sqliteTable('transactions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull().references(() => users.id),
+  amountCents: integer('amount_cents').notNull(),                 // money in cents!
+  type: text('type', { enum: ['income', 'expense'] }).notNull(),
+  description: text('description'),
+  createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+}, (table) => [
+  index('idx_transactions_user').on(table.userId),
+  index('idx_transactions_created').on(table.createdAt),
+]);
+
+// Singleton/state table
+export const appState = sqliteTable('app_state', {
+  id: integer('id').primaryKey(),                                 // always 1
+  balanceCents: integer('balance_cents').notNull().default(0),
+  updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+});
+
+// Type exports
+export type DbUser = typeof users.$inferSelect;
+export type NewUser = typeof users.$inferInsert;
+export type DbTransaction = typeof transactions.$inferSelect;
+export type NewTransaction = typeof transactions.$inferInsert;
+```
+
+### Conventions
+
+| Convention | Pattern |
+|---|---|
+| IDs | ULID as `text('id').primaryKey()` |
+| Timestamps | `integer('col', { mode: 'timestamp_ms' })` — milliseconds |
+| Money | `integer('amount_cents')` — always cents, never float |
+| Enums | `text('col', { enum: ['a', 'b'] })` |
+| JSON | `text('col', { mode: 'json' }).$type<MyType>()` |
+| Booleans | `integer('col', { mode: 'boolean' })` (SQLite has no bool) |
+
+## Repository Pattern
+
+```typescript
+import { Service, BaseService } from '@onebun/core';
+import { DrizzleService, eq, desc, gte, and, sql, count } from '@onebun/drizzle';
+import { users, type DbUser, type NewUser } from '../db/schema';
+
+@Service()
+export class UserRepository extends BaseService {
+  constructor(private db: DrizzleService) {
+    super();
+  }
+
+  async findAll(limit = 10, offset = 0): Promise<DbUser[]> {
+    return this.db.select()
+      .from(users)
+      .orderBy(desc(users.createdAt))
+      .limit(limit)
+      .offset(offset);
+  }
+
+  async findById(id: string): Promise<DbUser | undefined> {
+    const results = await this.db.select()
+      .from(users)
+      .where(eq(users.id, id))
+      .limit(1);
+    return results[0];
+  }
+
+  async findByEmail(email: string): Promise<DbUser | undefined> {
+    const results = await this.db.select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    return results[0];
+  }
+
+  async create(data: NewUser): Promise<DbUser> {
+    const results = await this.db.insert(users)
+      .values(data)
+      .returning();
+    return results[0];
+  }
+
+  async update(id: string, data: Partial<NewUser>): Promise<DbUser | undefined> {
+    const results = await this.db.update(users)
+      .set({ ...data, updatedAt: new Date() })
+      .where(eq(users.id, id))
+      .returning();
+    return results[0];
+  }
+
+  async delete(id: string): Promise<boolean> {
+    const results = await this.db.delete(users)
+      .where(eq(users.id, id))
+      .returning();
+    return results.length > 0;
+  }
+
+  async count(): Promise<number> {
+    const results = await this.db.select({ value: count() }).from(users);
+    return results[0].value;
+  }
+}
+```
+
+## Transactions
+
+Always use transactions for multi-table writes to ensure atomicity. **Everything called from inside the
+callback is in the transaction, on both dialects** — a query through `DrizzleService`, a repository method, a
+call into another service. Nothing has to be rewritten to take `tx`, though passing it is still valid and
+still means the same thing.
+
+<!-- typecheck: skip -->
+```typescript
+async transferFunds(fromId: string, toId: string, amountCents: number) {
+  return this.db.transaction(async (tx) => {
+    // Debit sender
+    const sender = await tx.update(accounts)
+      .set({ balance: sql`${accounts.balance} - ${amountCents}` })
+      .where(eq(accounts.id, fromId))
+      .returning();
+
+    if (sender[0].balance < 0) {
+      throw new Error('Insufficient funds');  // rolls back transaction
+    }
+
+    // Credit receiver
+    await tx.update(accounts)
+      .set({ balance: sql`${accounts.balance} + ${amountCents}` })
+      .where(eq(accounts.id, toId));
+
+    // Log the transfer
+    await tx.insert(transferLog).values({
+      id: generateUlid(),
+      fromId,
+      toId,
+      amountCents,
+      createdAt: new Date(),
+    });
+
+    return sender[0];
+  });
+}
+```
+
+The callback may `await` freely, and a throw rolls the whole thing back with the original error reaching the
+caller. What still differs between the dialects is what happens to work issued from **elsewhere** in the
+application while a transaction is open:
+
+**SQLite** — one connection, so the transaction owns the database for its whole duration:
+
+- A query issued through the service or a repository from **inside** the callback runs ON the open
+  transaction and is rolled back with it. A repository method does not have to be rewritten to take part.
+- A **nested** `db.transaction()` throws `DrizzleTransactionError` with `code === 'SQLITE_TRANSACTION_NESTED'`
+  — it would wait for the connection its own caller is holding.
+- A synchronous `.get()`, `.all()`, `.run()` or `.values()` issued from **elsewhere** while the transaction
+  holds the connection throws `DrizzleTransactionError` with `code === 'SQLITE_TRANSACTION_SYNC_QUERY'`: it
+  returns rows rather than a promise, so it cannot be queued — await the query instead. The same call from
+  inside the callback is fine: it runs on the open transaction and sees its uncommitted rows.
+- Concurrent **async** queries from elsewhere in the application are queued and run after the COMMIT or
+  ROLLBACK — never enrolled in the transaction, never rolled back with it. Two transactions are serialized.
+
+**PostgreSQL** — a pooled connection through drizzle's own `transaction()`; nothing is queued, nothing is
+refused, and the SQLite re-entrancy errors cannot occur.
+
+- A query issued through the service or a repository from **inside** the callback runs ON the transaction and
+  is rolled back with it, exactly as on SQLite. Earlier releases took another pooled connection here, so such
+  a write **survived the rollback** — silently. If you threaded `tx` into repository methods to work around
+  that, it still works.
+- A **nested** `db.transaction()` is a SAVEPOINT on the connection the outer one holds: it sees the outer's
+  uncommitted rows, an inner rollback keeps the outer work, an outer rollback undoes everything.
+  `tx.getRawTransaction().transaction(...)` is the same thing, reached explicitly.
+- `Promise.all` inside the callback is safe and is **not parallel** — one connection runs one statement at a
+  time and the driver queues them.
+- Work that **outlives** the callback goes back to the pool rather than onto the finished transaction.
+- Concurrent transactions are independent: routing is keyed by async context, so two overlapping callbacks
+  see only their own uncommitted rows, one rollback never touches the other's writes, and a query issued
+  outside any transaction goes to the pool even while one is open. Two `DrizzleService` instances never see
+  each other's transactions.
+
+`DrizzleTransactionError` is exported from `@onebun/drizzle`; `name` is stable, so it can be matched without
+importing the class.
+
+## Upsert Pattern
+
+```typescript
+await this.db.insert(dailyStats)
+  .values({ date: today, totalCents: amount, count: 1 })
+  .onConflictDoUpdate({
+    target: dailyStats.date,
+    set: {
+      totalCents: sql`${dailyStats.totalCents} + ${amount}`,
+      count: sql`${dailyStats.count} + 1`,
+    },
+  });
+```
+
+## Raw SQL Expressions
+
+<!-- typecheck: skip -->
+```typescript
+import { sql } from '@onebun/drizzle';
+
+// In select
+const result = await this.db.select({
+  total: sql<number>`SUM(${transactions.amountCents})`,
+}).from(transactions);
+
+// In where — compare a timestamp column against a Date, NEVER against SQL datetime()
+.where(gte(transactions.createdAt, new Date(Date.now() - 7 * 86_400_000)))
+
+// In update
+.set({ balance: sql`${accounts.balance} + ${amount}` })
+```
+
+**Never filter a `{ mode: 'timestamp_ms' }` column against a raw SQL `datetime(...)` expression.** The column has
+INTEGER affinity; `datetime()` returns TEXT (`'2026-08-07 16:19:41'`). SQLite compares across storage classes
+by type order, and every integer sorts before every string — so the predicate is always false and the query
+returns **zero rows with no error**. A silent empty result is worse than a crash: nothing tells you the
+filter did not run. Pass a `Date` (drizzle serializes it to ms) or, if you must stay in SQL,
+`unixepoch('now', '-7 days') * 1000`.
+
+## JSON and JSONB Columns (PostgreSQL)
+
+`json`/`jsonb` values round-trip as values, not as JSON strings — so `@>`, `->`, `jsonb_array_length`
+and `jsonb_typeof` all work on what was written:
+
+```typescript
+import { pgTable, serial, jsonb } from '@onebun/drizzle/pg';
+
+export const events = pgTable('events', {
+  id: serial('id').primaryKey(),
+  payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+});
+```
+
+The same holds for `sql.placeholder()`: a json column
+round-trips through .prepare() on both .values() and .set(),
+and an explicit `null` binds SQL NULL rather than the JSON text `null`.
+
+**Raw SQL bypasses it.** The fix lives in the column encoders, so `db.execute(sql`...`)` and the raw
+`$client` do not get it — there you must cast as $n::text::jsonb yourself, and hand it a
+pre-stringified value:
+
+<!-- typecheck: skip -->
+```typescript
+// WRONG — stores a jsonb string
+await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+
+// RIGHT
+await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+```
+
+On the Bun SQL driver a plain ::jsonb cast is a verified no-op — measured against
+`postgres:16-alpine`, `$1::jsonb` on a pre-stringified value still stores `jsonb_typeof='string'`.
+Only the double cast forces the parameter to be inferred as text and bound verbatim.
+
+**Rows written by OneBun ≤ 0.5.0 are double-encoded** and are not migrated automatically. Repair
+them *before* deploying, because the read path no longer compensates:
+
+```sql
+UPDATE t SET c = (c #>> '{}')::jsonb
+WHERE jsonb_typeof(c) = 'string' AND (c #>> '{}') ~ '^\s*[\[{]';
+```
+
+The `~ '^\s*[\[{]'` guard is not optional: without it the statement tries to parse every string
+scalar and the first non-JSON one fails the whole repair.
+
+## Migration Commands
+
+```bash
+bunx onebun-drizzle generate    # generate migration from schema changes
+bunx onebun-drizzle push        # push schema directly (dev only)
+bunx onebun-drizzle studio      # visual DB browser
+```
+
+## Available Query Helpers
+
+Import from `@onebun/drizzle`:
+
+```typescript
+import {
+  DrizzleService,
+  eq,           // equality: eq(col, value)
+  ne,           // not equal
+  gt, gte,      // greater than (or equal)
+  lt, lte,      // less than (or equal)
+  and, or,      // combine conditions
+  desc, asc,    // ordering
+  sql,          // raw SQL
+  count,        // count aggregation
+  sum,          // sum aggregation
+  like,         // LIKE pattern
+  inArray,      // IN (...)
+  isNull,       // IS NULL
+  isNotNull,    // IS NOT NULL
+} from '@onebun/drizzle';
+```

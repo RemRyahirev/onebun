@@ -386,6 +386,7 @@ const client = createWsClient(definition, {
 
 The token can be validated in a connect handler or guard:
 
+<!-- typecheck: skip -->
 ```typescript
 @OnConnect()
 async handleConnect(@Client() client: WsClientData) {

@@ -54,6 +54,12 @@ export {
   type SseEvent,
   type SseOptions,
   type SseGenerator,
+  // Guard and pipeline context types. The docs tell readers to import these from
+  // '@onebun/core'; until they were listed here that import did not resolve, and the
+  // docs-examples tests reached into './types' instead, so nothing noticed.
+  type ExecutionContext,
+  type HttpExecutionContext,
+  type HttpGuard,
 } from './types';
 
 // Decorators and Metadata (exports Controller decorator, Module decorator, etc.)
@@ -165,6 +171,8 @@ export * from './errors';
 
 // Request Context (AsyncLocalStorage)
 export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';
+export { inEntrySpan, inRootTraceScope, runWithAppTracer } from './trace-scope';
+export type { EntrySpanOptions, EntrySpanSwitches } from './trace-scope';
 
 // Named module registrations — the supported way to configure a dynamic module more than
 // once. See docs:api/decorators.md.

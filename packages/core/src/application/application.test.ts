@@ -64,7 +64,11 @@ import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
 
 
 import { OneBunApplication } from './application';
-import { QUEUE_DISABLED_WITH_ADAPTER_WARNING } from './queue-enablement';
+import {
+  QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  resolveQueueAdapterType,
+  resolveQueueEnablement,
+} from './queue-enablement';
 
 // Helper function to create app with mock logger to suppress logs in tests
 function createTestApp(
@@ -1179,6 +1183,13 @@ describe('OneBunApplication', () => {
       await app.start();
 
       expect(mockMetricsService.startSystemMetricsCollection).toHaveBeenCalled();
+
+      await app.stop();
+
+      // The counterpart, on the application's OWN service instance. The mock has been here since
+      // the test was written and nothing asserted it: nothing called it either, so the sampler
+      // outlived every application and a boot-then-stop script never terminated.
+      expect(mockMetricsService.stopSystemMetricsCollection).toHaveBeenCalled();
     });
 
     test('should handle config service creation', () => {
@@ -1323,6 +1334,100 @@ describe('OneBunApplication', () => {
 
       expect(response.status).toBe(200);
       expect(body.result).toEqual({ id: 123, name: 'User 123' });
+    });
+
+    test('ignores a URL fragment when reading query parameters', async () => {
+      // OneBun parsed the request target with two disagreeing parsers: the router uses
+      // `new URL()`, which drops everything from `#`, while the @Query() extractor searched for
+      // `?` in the raw string and fed the fragment to URLSearchParams. Anyone able to write a
+      // request target could inject parameters the router never saw — and because
+      // URLSearchParams is last-wins, OVERRIDE real ones.
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('page') page?: string, @Query('admin') admin?: string) {
+          return { page, admin };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // A parameter smuggled in entirely: routed as no query at all.
+      const injected = new Request('http://localhost:3000/api/search#?admin=true', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const injectedBody = await (await (mockServer as any).fetchHandler(injected)).json();
+
+      expect(injectedBody.result.admin).toBeUndefined();
+
+      // A real parameter overridden: the router sees page=1, the handler used to see page=99.
+      const overridden = new Request('http://localhost:3000/api/search?page=1#&page=99', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const overriddenBody = await (await (mockServer as any).fetchHandler(overridden)).json();
+
+      expect(overriddenBody.result.page).toBe('1');
+
+      await app.stop();
+    });
+
+    test('treats an encoded %23 as a value, not a fragment delimiter', async () => {
+      // The cut is on a literal `#` only. A parameter whose value legitimately contains a hash
+      // arrives percent-encoded and must survive intact.
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('tag') tag?: string) {
+          return { tag };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const request = new Request('http://localhost:3000/api/search?tag=c%23sharp', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const body = await (await (mockServer as any).fetchHandler(request)).json();
+
+      expect(body.result.tag).toBe('c#sharp');
+
+      await app.stop();
+    });
+
+    test('handles a bare trailing hash and a fragment containing a question mark', async () => {
+      @Controller('/api')
+      class ApiController extends BaseController {
+        @Get('/search')
+        async search(@Query('q') q?: string, @Query('evil') evil?: string) {
+          return { q, evil };
+        }
+      }
+
+      @Module({ controllers: [ApiController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      const trailing = new Request('http://localhost:3000/api/search?q=hello#', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const trailingBody = await (await (mockServer as any).fetchHandler(trailing)).json();
+
+      expect(trailingBody.result.q).toBe('hello');
+
+      // A fragment carrying its own `?`: the cut happens first, so the inner `?` is never found.
+      const nested = new Request('http://localhost:3000/api/search#/other?evil=1', { method: 'GET' });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const nestedBody = await (await (mockServer as any).fetchHandler(nested)).json();
+
+      expect(nestedBody.result.evil).toBeUndefined();
+
+      await app.stop();
     });
 
     test('should handle query parameters', async () => {
@@ -2353,7 +2458,8 @@ describe('OneBunApplication', () => {
       const body = await response.json() as { success: boolean; error: string; code: number };
 
       expect(body.success).toBe(false);
-      expect(body.error).toBe('Test error');
+      // An unhandled error answers with the fixed string, not with its own message.
+      expect(body.error).toBe('Internal Server Error');
       expect(body.code).toBe(500);
     });
 
@@ -4511,14 +4617,27 @@ describe('OneBunApplication', () => {
       await app.stop();
     });
 
-    test('enables queue when only queue.redis is present', async () => {
+    test('queue.redis alone enables the queue AND selects the Redis adapter', async () => {
+      // Two facts, and the second used to be false: `queue.redis` enabled the queue while the
+      // adapter choice ignored it, so this configuration booted an in-memory queue and threw the
+      // Redis settings away without a word.
+      expect(resolveQueueEnablement({ redis: { useSharedProvider: true } }, false).enabled).toBe(true);
+      expect(resolveQueueAdapterType({ redis: { useSharedProvider: true } })).toBe('redis');
+    });
+
+    test('a half-specified redis config fails loudly instead of falling back to memory', async () => {
+      // The behavioural half, asserted at application level with no broker involved: the Redis
+      // branch rejects this configuration before it ever opens a socket. Reaching that error at
+      // all proves the redis branch was selected — before the fix the same options built an
+      // in-memory adapter and started cleanly.
       const app = createTestApp(ProducerOnlyModule, {
         port: 0,
-        queue: { redis: { useSharedProvider: true } },
+        queue: { redis: { useSharedProvider: false } },
       });
-      await app.start();
 
-      expect(app.getQueueService()).not.toBeNull();
+      await expect(app.start()).rejects.toThrow(
+        'Redis queue adapter requires either useSharedProvider: true or a url',
+      );
 
       await app.stop();
     });
@@ -5294,6 +5413,70 @@ describe('OneBunApplication', () => {
         await app.stop();
       }
     });
+
+    test('a 500 body carries no stack trace and no filesystem path', async () => {
+      // Asserted against the body of a REAL request, not against the filter in isolation: the
+      // application builds its own default filter, and the disclosure was on that path.
+      @Controller('/api')
+      class ExplodingController {
+        @Get('/boom')
+        boom() {
+          throw new Error('internal failure');
+        }
+      }
+
+      @Module({ controllers: [ExplodingController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/boom`);
+
+        expect(response.status).toBe(500);
+
+        // Raw text, not the parsed object: a stack nested under an unexpected key would still
+        // be shipped, and shipping it at all is the defect.
+        const raw = await response.text();
+        expect(raw).not.toContain('stack');
+        expect(raw).not.toContain('at ');
+        expect(raw).not.toContain(import.meta.dir);
+        expect(raw).not.toContain('/packages/core');
+
+        // Nor the message: it has the same author as the stack, and the same risk of naming a
+        // path, an internal host or a credential.
+        expect(raw).not.toContain('internal failure');
+        expect(JSON.parse(raw)).toMatchObject({ success: false, error: 'Internal Server Error', code: 500 });
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('exposeErrorDetails: true puts the stack back, deliberately', async () => {
+      @Controller('/api')
+      class ExplodingController {
+        @Get('/boom')
+        boom() {
+          throw new Error('internal failure');
+        }
+      }
+
+      @Module({ controllers: [ExplodingController] })
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { port: 0, exposeErrorDetails: true });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/api/boom`);
+        const body = await response.json() as { details?: { stack?: string } };
+
+        expect(typeof body.details?.stack).toBe('string');
+      } finally {
+        await app.stop();
+      }
+    });
   });
 
   /**
@@ -5511,6 +5694,146 @@ describe('OneBunApplication', () => {
       expect(hasLine('warn', 'force-closing')).toBe(true);
       expect(hasLine('warn', '1 HTTP request(s)')).toBe(true);
       expect(await hanging).toBe('force-closed');
+    });
+
+    test('stops the system-metric sampler so no timer survives shutdown', async () => {
+      // `startSystemMetricsCollection()` is called at startup and nothing ever called its
+      // counterpart, so the interval outlived the application. In a test suite or a
+      // multi-service process every stopped application left a timer sampling memory and CPU
+      // into a registry nobody reads.
+      let started = 0;
+      let stopped = 0;
+
+      @Module({})
+      class EmptyModule {}
+
+      const app = createRealApp(EmptyModule);
+      await app.start();
+
+      (app as unknown as { metricsService: unknown }).metricsService = {
+        startSystemMetricsCollection() {
+          started += 1;
+        },
+        stopSystemMetricsCollection() {
+          stopped += 1;
+        },
+      };
+
+      await app.stop();
+
+      expect(stopped).toBe(1);
+      expect(started).toBe(0);
+    });
+
+    test('a rejecting trace flush does not cancel the rest of the teardown', async () => {
+      // The trace flush pushes the last span batch to a collector that is usually going down
+      // with the pod, so it is the step most likely to reject in practice. It used to abandon
+      // everything after it: destroy hooks never ran, the shared Redis lease was never
+      // released, the logger never flushed — exactly the work graceful shutdown exists to do.
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements BeforeApplicationDestroy, OnModuleDestroy, OnApplicationDestroy {
+        beforeApplicationDestroy(): void {
+          counters.before++;
+        }
+
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      // Substituted on the instance, not through mock.module: the replacement must not be
+      // visible to any other file in the run.
+      (app as unknown as { traceService: { shutdown: () => Promise<void> } }).traceService = {
+        async shutdown() {
+          throw new Error('OTLP collector unreachable');
+        },
+      };
+
+      // Still resolves — that half of today's behaviour is correct and must not regress.
+      await app.stop();
+
+      // Every later step ran anyway.
+      expect(counters).toEqual({ before: 1, module: 1, application: 1 });
+
+      // And the failure is attributed to its phase, not reported as "something failed".
+      expect(hasLine('error', 'Shutdown step "flushing traces" failed')).toBe(true);
+      expect(hasLine('error', 'OTLP collector unreachable')
+        || logLines.some(l => l.message.includes('flushing traces'))).toBe(true);
+    });
+
+    test('a rejecting queue adapter disconnect does not cancel the rest either', async () => {
+      // The same shape one step earlier, so the fix is the sequence rather than a special case
+      // for tracing.
+      const counters: HookCounters = { before: 0, module: 0, application: 0 };
+
+      @Service()
+      class CountingService extends BaseService
+        implements OnModuleDestroy, OnApplicationDestroy {
+        onModuleDestroy(): void {
+          counters.module++;
+        }
+
+        onApplicationDestroy(): void {
+          counters.application++;
+        }
+      }
+
+      @Module({ providers: [CountingService] })
+      class CountingModule {}
+
+      const app = createRealApp(CountingModule);
+      await app.start();
+
+      (app as unknown as { queueAdapter: { disconnect: () => Promise<void> } }).queueAdapter = {
+        async disconnect() {
+          throw new Error('broker went away first');
+        },
+      };
+
+      await app.stop();
+
+      expect(counters).toEqual({ before: 0, module: 1, application: 1 });
+      expect(hasLine('error', 'Shutdown step "disconnecting the queue adapter" failed')).toBe(true);
+    });
+
+    test('names every failed phase in one summary line', async () => {
+      // Two failures in one teardown. Scanning the tail of a log should show the whole picture
+      // rather than whichever failure happened to be last.
+      @Module({})
+      class EmptyModule {}
+
+      const app = createRealApp(EmptyModule);
+      await app.start();
+
+      (app as unknown as { traceService: { shutdown: () => Promise<void> } }).traceService = {
+        async shutdown() {
+          throw new Error('collector unreachable');
+        },
+      };
+      (app as unknown as { queueAdapter: { disconnect: () => Promise<void> } }).queueAdapter = {
+        async disconnect() {
+          throw new Error('broker unreachable');
+        },
+      };
+
+      await app.stop();
+
+      expect(hasLine('error', 'Shutdown completed with 2 failed step(s)')).toBe(true);
+      expect(hasLine('error', 'disconnecting the queue adapter')).toBe(true);
+      expect(hasLine('error', 'flushing traces')).toBe(true);
     });
 
     test('stop() called twice sequentially runs every destroy hook exactly once', async () => {

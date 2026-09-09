@@ -35,14 +35,35 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Via the script, not `bunx tsc` directly: the script also compiles each example
+      # against its own tsconfig. The examples augment the same global OneBunAppConfig,
+      # so they cannot share one program — and for eight months the root `include` said
+      # `example/**/*` against a directory named `examples/`, which typechecked nothing.
       - name: Type check
-        run: bunx tsc --noEmit
+        run: bun run typecheck
 
+      # --max-warnings=0 because the Definition of Done asks for "no errors AND no
+      # warnings"; without the flag eslint exits 0 on warnings and half the gate is void.
       - name: Lint
-        run: bunx eslint packages/
+        run: bunx eslint packages/ --max-warnings=0
+
+      - name: Docs cross-reference
+        run: bun run docs:xref --check
+
+      # Compiles every TypeScript fence in docs/ against the real packages. Nothing else
+      # in the repo type-checks documentation, which is how a page could import a removed
+      # export or name an option that does not exist and stay green for months.
+      - name: Docs snippets
+        run: bun run docs:typecheck --check
+
+      # README.md is generated from docs regions plus package.json. This fails when the
+      # committed file no longer matches, which is what kept its example and its version
+      # column drifting away from everything else.
+      - name: README up to date
+        run: bun run readme:check
 
       - name: Pre-pull testcontainer images
-        run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & wait
+        run: docker pull redis:7-alpine & docker pull nats:2.10-alpine & docker pull postgres:16-alpine & wait
 
       - name: Test with coverage
         timeout-minutes: 25
@@ -114,6 +135,14 @@ jobs:
           label: tests
           message: ${{ env.TEST_COUNT }} passed
           color: ${{ env.BADGE_COLOR }}
+
+      # Publish-specific validation (lockfile, secret scan, change detection,
+      # workspace-dependency rewriting) on the PR that causes a problem, instead of for
+      # the first time after the merge button, mid-release. --skip-suite drops the
+      # test/typecheck/lint gates, which are this job's own steps above.
+      - name: Publish dry run
+        if: github.event_name == 'pull_request'
+        run: bun scripts/publish.ts --dry-run --skip-suite
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5

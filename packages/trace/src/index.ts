@@ -38,8 +38,31 @@ export {
   type TraceFilterOptions,
 } from './auto-trace.js';
 
+// The owning application's tracer, carried in the OpenTelemetry context
+export {
+  APP_TRACER_KEY,
+  appTracer,
+  currentAppTracer,
+  runWithAppTracer,
+  withAppTracer,
+} from './app-tracer.js';
+
+// Context propagation
+export {
+  activateSpanInCurrentScope,
+  installContextManager,
+  OneBunContextManager,
+  releaseContextManager,
+  resetContextManagerStateForTests,
+} from './context-manager.js';
+
 // OTLP exporter
-export { OtlpFetchSpanExporter, type OtlpExporterOptions } from './otlp-exporter.js';
+export {
+  DEFAULT_RETRY_BUDGET,
+  OtlpExportError,
+  OtlpFetchSpanExporter,
+  type OtlpExporterOptions,
+} from './otlp-exporter.js';
 
 // Core service
 export {

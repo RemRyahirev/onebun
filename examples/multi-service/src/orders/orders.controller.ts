@@ -19,7 +19,7 @@ const createOrderSchema = type({
     productId: 'string',
     quantity: 'number > 0',
     price: 'number > 0',
-  }).array().configure({ minLength: 1 }),
+  }).array().atLeastLength(1),
 });
 
 const updateStatusSchema = type({

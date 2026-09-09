@@ -7,6 +7,12 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 /* eslint-disable @typescript-eslint/no-magic-numbers */
 
+import {
+  SpanKind,
+  type Attributes,
+  type Tracer,
+} from '@opentelemetry/api';
+
 import type { WsStorageAdapter } from './ws-storage';
 import type {
   WsClientData,
@@ -20,9 +26,11 @@ import type { Server, ServerWebSocket } from 'bun';
 
 import type { SyncLogger } from '@onebun/logger';
 
+import { awaitBounded } from '../await-bounded';
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
+import { inEntrySpan, inRootTraceScope } from '../trace-scope';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
 import { getGatewayMetadata, isWebSocketGateway } from './ws-decorators';
@@ -51,6 +59,15 @@ import {
 } from './ws.types';
 
 // Alias for clarity
+/** Answered to an upgrade attempt once shutdown has begun. */
+const HTTP_SERVICE_UNAVAILABLE = 503;
+
+/** RFC 6455 "going away": the server is shutting down. What a client should see, not a 1006. */
+const WS_GOING_AWAY = 1001;
+
+/** How long shutdown waits for the disconnect path of the sockets it just closed. */
+const WS_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
+
 const ParamType = WsParamType;
 const HandlerType = WsHandlerType;
 
@@ -108,9 +125,44 @@ export class WsHandler {
   private socketioEnabled: boolean;
   private socketioPath: string;
 
+  /**
+   * The sockets this handler currently serves.
+   *
+   * Per handler, deliberately, and not the module-scope map in `ws-base-gateway.ts`: that one is
+   * shared by every gateway in the process, so shutting one application down through it would
+   * close a sibling application's connections.
+   */
+  private readonly openSockets = new Set<ServerWebSocket<WsClientData>>();
+
+  /**
+   * Set once shutdown has begun, so no new connection is accepted after that point.
+   *
+   * Not defensive tidiness — required. Clients reconnect by default (`reconnect: true`,
+   * `reconnectInterval: 1000`), so the clean close this handler now sends is itself an
+   * invitation to reconnect. Without this the socket comes straight back during shutdown and the
+   * HTTP drain waits for a connection the server just asked to go away.
+   */
+  private shuttingDown = false;
+
+  /** Resolved when a socket's close has been fully handled, so shutdown can wait for it. */
+  private readonly closeWaiters = new Map<ServerWebSocket<WsClientData>, () => void>();
+
   constructor(
     private logger: SyncLogger,
     private options: WebSocketApplicationOptions = {},
+    /**
+     * The owning application's tracer, so a `@Traced` method reached from a socket callback is
+     * recorded by THIS application's provider rather than by whichever application happened to
+     * register its provider with OpenTelemetry first. Optional: a handler constructed without
+     * one behaves exactly as before.
+     */
+    private ownerTracer?: Tracer,
+    /**
+     * `tracing.traceWebSocketEvents`. Turns off the per-connection and per-frame span; ownership
+     * above is deliberately unaffected, or a `@Traced` method inside a handler would resolve its
+     * tracer to whichever application won the process-wide provider slot.
+     */
+    private traceWebSocketEvents: boolean = true,
   ) {
     this.storage = new InMemoryWsStorage();
     const socketio = options.socketio;
@@ -251,11 +303,34 @@ export class WsHandler {
     close: (ws: ServerWebSocket<WsClientData>, code: number, reason: string) => void;
     drain: (ws: ServerWebSocket<WsClientData>) => void;
   } {
+    // Every socket callback starts its own trace. Bun invokes them from the async context of
+    // the upgrade, so without re-rooting a long-lived connection would file every message it
+    // ever receives under the one HTTP request that opened it — a trace that keeps growing for
+    // as long as the socket is open, attributed to a request that finished long ago.
     return {
-      open: (ws) => this.handleOpen(ws),
-      message: (ws, message) => this.handleMessage(ws, message),
-      close: (ws, code, reason) => this.handleClose(ws, code, reason),
-      drain: (ws) => this.handleDrain(ws),
+      // Bun invokes these from the event loop, not from a continuation of anything this
+      // application ran, so neither the parent span nor the owning application is inherited —
+      // both have to be stated here.
+      //
+      // `open` and `close` get a span each — once per connection, so the cost is irrelevant and
+      // an `@OnConnect`/`@OnDisconnect` handler's log lines finally land in a trace. `message`
+      // and `drain` do NOT: every Engine.IO heartbeat arrives as a message and `handleDrain`
+      // only writes a debug line, so a span here would be one exported span per PING. The frames
+      // that actually dispatch to user code get theirs in `routeMessage`.
+      open: (ws) => inEntrySpan(
+        'ws open',
+        () => this.handleOpen(ws),
+        this.ownerTracer,
+        { kind: SpanKind.SERVER, openSpan: this.traceWebSocketEvents },
+      ),
+      message: (ws, message) => inRootTraceScope(() => this.handleMessage(ws, message), this.ownerTracer),
+      close: (ws, code, reason) => inEntrySpan(
+        'ws close',
+        () => this.handleClose(ws, code, reason),
+        this.ownerTracer,
+        { kind: SpanKind.SERVER, openSpan: this.traceWebSocketEvents },
+      ),
+      drain: (ws) => inRootTraceScope(() => this.handleDrain(ws), this.ownerTracer),
     };
   }
 
@@ -266,6 +341,10 @@ export class WsHandler {
     req: OneBunRequest | Request,
     server: Server<WsClientData>,
   ): Promise<Response | undefined> {
+    if (this.shuttingDown) {
+      return new Response('Server shutting down', { status: HTTP_SERVICE_UNAVAILABLE });
+    }
+
     const url = new URL(req.url);
     const path = url.pathname;
 
@@ -362,6 +441,8 @@ export class WsHandler {
 
     // Store client
     await this.storage.addClient(client);
+
+    this.openSockets.add(ws);
 
     // Register socket in gateway
     for (const [_, gateway] of this.gateways) {
@@ -496,6 +577,30 @@ export class WsHandler {
    * Route message to appropriate handler
    */
   private async routeMessage(
+    ws: ServerWebSocket<WsClientData>,
+    event: string,
+    data: unknown,
+    ackId?: number,
+  ): Promise<void> {
+    // The one dispatch point both protocols reach, and the first place a frame is known to be
+    // going to user code rather than to a heartbeat. The event rides as an attribute instead of
+    // in the span name: event strings carry ids (`room:123:msg`), and a span name is a
+    // cardinality dimension in every backend.
+    const attributes: Attributes = {};
+    attributes['onebun.ws.event'] = event;
+
+    return await inEntrySpan(
+      'ws message',
+      async () => await this.dispatchMessage(ws, event, data, ackId),
+      this.ownerTracer,
+      { kind: SpanKind.SERVER, attributes, openSpan: this.traceWebSocketEvents },
+    );
+  }
+
+  /**
+   * Dispatch a routed message to the handler that claims it.
+   */
+  private async dispatchMessage(
     ws: ServerWebSocket<WsClientData>,
     event: string,
     data: unknown,
@@ -772,6 +877,10 @@ export class WsHandler {
 
     // Remove from storage
     await this.storage.removeClient(client.id);
+
+    this.openSockets.delete(ws);
+    this.closeWaiters.get(ws)?.();
+    this.closeWaiters.delete(ws);
   }
 
   /**
@@ -810,6 +919,64 @@ export class WsHandler {
 
   /**
    * Cleanup all resources
+   */
+  /**
+   * Close every open socket and wait for the disconnect path to finish.
+   *
+   * `app.stop()` used to leave connections established and let `server.stop(true)` drop them at
+   * the end, so a client saw no close frame at all — measured, `readyState` still 1 and no close
+   * event — and was cut only when the process died, as an abnormal 1006 at an arbitrary moment
+   * instead of a clean going-away at a controlled one.
+   *
+   * Bounded, because a socket whose close callback never arrives must not turn shutdown into a
+   * hang. A connection still open when the bound expires is dropped by `server.stop(true)` as
+   * before.
+   *
+   * The code reaches the wire but not necessarily the client's report of it: measured against a
+   * bare `Bun.serve`, a server-side `close(1001, 'bye')` arrives at the server's own close
+   * callback as 1001 and at Bun's WebSocket client as **1000**, with the reason intact. So the
+   * reason is the part a client can rely on today.
+   */
+  async closeAll(
+    code: number = WS_GOING_AWAY,
+    reason = 'Server shutting down',
+    timeoutMs: number = WS_CLOSE_DRAIN_TIMEOUT_MS,
+  ): Promise<void> {
+    this.shuttingDown = true;
+
+    const sockets = [...this.openSockets];
+
+    if (sockets.length === 0) {
+      return;
+    }
+
+    // Waiters registered BEFORE the first close: Bun delivers the close callback asynchronously,
+    // so a set snapshotted afterwards can miss a socket that closed in between.
+    const waits = sockets.map(async socket => await new Promise<void>((resolve) => {
+      this.closeWaiters.set(socket, resolve);
+    }));
+
+    for (const socket of sockets) {
+      try {
+        socket.close(code, reason);
+      } catch (error) {
+        // Already gone. Its waiter is released by the bound rather than left hanging.
+        this.logger.debug(`WebSocket close during shutdown failed: ${error}`);
+      }
+    }
+
+    await awaitBounded(Promise.all(waits), timeoutMs);
+
+    this.closeWaiters.clear();
+  }
+
+  /**
+   * Release what is left after {@link closeAll}: the ping timers and the client storage.
+   *
+   * Storage is wiped HERE and not before the sockets are closed, which is why `closeAll` runs in
+   * its own shutdown step ahead of the HTTP drain. A `@OnDisconnect` handler reads the client back
+   * out of storage — the chat example reads `client.rooms` — and wiping first would hand every one
+   * of them an empty record.
    */
   async cleanup(): Promise<void> {
     // Stop all ping intervals

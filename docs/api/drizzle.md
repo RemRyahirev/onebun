@@ -44,6 +44,55 @@ import * as schema from './schema';
 export class UserModule {}
 ```
 
+#### SQLite pragmas and read-only files
+
+`SQLiteConnectionOptions` gives every connection a pragma set, applied immediately after the
+file opens. The default is `['journal_mode = WAL', 'synchronous = NORMAL']`, and `pragmas`
+replaces it wholesale:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/app.db',
+      pragmas: ['journal_mode = WAL', 'synchronous = NORMAL', 'foreign_keys = ON'],
+    },
+  },
+})
+```
+
+A **read-only** connection gets a different default — `['synchronous = NORMAL']`:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.SQLITE,
+    options: {
+      url: './data/reference.db',
+      options: { readonly: true },   // no pragmas needed: the default set adapts
+    },
+  },
+})
+```
+
+`journal_mode` is a property of the file rather than of the connection — setting it rewrites the
+database header — so a read-only handle answers `attempt to write a readonly database` and the
+application used to die at boot. A read-only SQLite file is an ordinary deployment: a shipped
+dataset, a mounted read-only volume. It now boots with no pragma list at all.
+
+An explicit `pragmas` array is always applied **exactly as given**, read-only or not. Ask for a
+write pragma on a read-only connection and the boot still fails, naming the pragma and saying it
+is yours to remove — the framework filters its own defaults, not your list.
+
+::: tip Why not just ignore the failure
+Because whether it fails depends on the file. Measured under bun:sqlite,
+`PRAGMA journal_mode = WAL` on a read-only handle fails only when the file is **not already in
+WAL mode**; on a file that is, the identical statement succeeds as a no-op. Swallowing the error
+would leave a deployment whose boot depends on how the database it was handed happened to be
+written.
+:::
+
 ### PostgreSQL Setup
 
 ```typescript
@@ -74,6 +123,7 @@ mix, and never a subset. The two shapes are mutually exclusive at the type level
 half-filled object is a compile error rather than a connection built from `undefined` that
 surfaces later as an unreachable server:
 
+<!-- typecheck: skip -->
 ```typescript
 // A URL
 options: { connectionString: 'postgresql://user:password@host:5432/database' }
@@ -92,7 +142,43 @@ Options arriving from an untyped source (a JSON config, a cast) are validated at
 accompanied a `connectionString`, or which of the five are missing. Neither case is resolved
 by picking a winner.
 
-`pool` is accepted alongside either shape.
+`pool` is accepted alongside either shape, and every option in it reaches the driver:
+
+```typescript
+DrizzleModule.forRoot({
+  connection: {
+    type: DatabaseType.POSTGRESQL,
+    options: {
+      connectionString: 'postgresql://user:password@host:5432/app',
+      pool: {
+        max: 20,            // connections the pool may open (driver default: 10)
+        idleTimeout: 30000, // ms an idle connection is kept (default: kept forever)
+        timeout: 2000,      // ms a connect may take (driver default: 30000)
+      },
+    },
+  },
+})
+```
+
+The block is typed as `PostgreSQLPoolOptions`. Both timeouts are **milliseconds**, like every
+other duration in this framework. The driver takes seconds, so they are divided on the way
+through — it accepts fractional values, so a 250 ms timeout stays 250 ms rather than rounding to
+nothing.
+
+`timeout` has one meaning in both places it is used: it bounds the driver's own connect *and*
+the [startup reachability probe](#startup-contract). It is one number, so the two cannot drift
+apart.
+
+A zero or negative value is **not** forwarded. To the driver a zero timeout means *no* timeout,
+so passing it on would turn a misconfiguration into an unbounded connect; the driver's default
+applies instead.
+
+::: warning `pool.min` is gone
+Bun's `SQL` opens connections on demand and has no minimum-pool concept, so the option was
+accepted and discarded on every release that had it. Delete it from your configuration —
+TypeScript now rejects it, and nothing about your pool changes, because nothing about it ever
+depended on the value.
+:::
 
 ### Global Module (Default Behavior)
 
@@ -224,7 +310,7 @@ Asking for the bare class in such a module fails at startup naming both candidat
 
 **A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws. An unnamed `forRoot()` keeps the global behaviour it always had.
 
-**Reaching a registration from outside the tree:** `app.getService(DrizzleService, ANALYTICS_DB)`. Without the token there is no correct answer once two registrations exist, so the call throws instead of choosing — an `Error` whose `name` is `OneBunAmbiguousServiceError`, naming both candidates. `app.getLayer()` has no token parameter and cannot represent such an application at all: Effect keys a `Context` by the tag's key, which is the class NAME, so two registrations need two slots where a `Context` has one — it throws the same error rather than silently carrying whichever was merged last. Both checks fire only when the tree holds two or more instances under one key; a single registration, named or not, still answers.
+**Reaching a registration from outside the tree:** `app.getService(DrizzleService, ANALYTICS_DB)`. Without the token there is no correct answer once two registrations exist, so the call throws instead of choosing — an `Error` whose `name` is `OneBunAmbiguousServiceError`, naming both candidates. `app.getLayer()` without arguments throws the same error rather than silently carrying whichever was merged last: Effect keys a `Context` by the tag's key, which is the class NAME, so two registrations need two slots where a `Context` has one. Say which one takes it — `app.getLayer([[DrizzleService, ANALYTICS_DB]])` — and the layer builds. Both checks fire only when the tree holds two or more instances under one key; a single registration, named or not, still answers.
 
 ::: warning Upgrading from 0.4.4 or earlier
 Two `forRoot()` calls used to give you two `DrizzleService` instances **both connected to whichever was evaluated last**, silently — and earlier releases documented exactly that arrangement as the way to run a main and an analytics database. If you followed it, audit both databases: every write is in one of them, and which one depended on module evaluation order rather than on the order you declared them.
@@ -234,6 +320,7 @@ Two `forRoot()` calls used to give you two `DrizzleService` instances **both con
 
 When `DrizzleModule` is not global (`isGlobal: false`), a submodule must import it to reach `DrizzleService`: a non-global service does not travel down the module tree, and `exports` travels up to the importing module rather than down to children. `forFeature()` is that import:
 
+<!-- typecheck: skip -->
 ```typescript
 // Root module with non-global DrizzleModule
 @Module({
@@ -278,7 +365,7 @@ export class DatabaseModule {}
 - `isGlobal: false` - requires an explicit import; the instance count is unchanged (one per application). NOT the multi-database mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own configuration and its own instance
 - `as: symbol | string` on `forRoot()` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws. A named registration is never `@Global()`
 - A module that selects TWO registrations of one service must name each with `@Inject(TOKEN)`; the bare class throws naming both candidates, and `@Inject` with an unselected token throws naming what the module did select. The token lives in a SIDE map, so `getConstructorParamTypes` still returns the full `design:paramtypes` array and partial injection is unaffected; `@Controller` copies the map onto its wrapper subclass
-- `app.getService(Class, TOKEN)` walks the module tree for the registration that token names. `app.getLayer()` refuses outright: a `Context` has one slot per `tag.key`, which is the class NAME, so with two registrations it throws an `Error` whose `name` is `OneBunAmbiguousServiceError` — there is no token parameter and no last-writer fallback. Untokened `app.getService(Class)` throws the same error in the same case. Both fire only when the tree holds 2+ instances under one key; a single registration still answers. `OneBunAmbiguousServiceError` is a `name` on a plain `Error`, not an exported class — match on `err.name`, not `instanceof`
+- `app.getService(Class, TOKEN)` walks the module tree for the registration that token names. Untokened `app.getLayer()` refuses: a `Context` has one slot per `tag.key`, which is the class NAME, so with two registrations it throws an `Error` whose `name` is `OneBunAmbiguousServiceError` — no last-writer fallback. `app.getLayer([[DrizzleService, ANALYTICS_DB]])` names the instance that takes the slot and builds. Untokened `app.getService(Class)` throws the same error in the same case. Both fire only when the tree holds 2+ instances under one key; a single registration still answers. `OneBunAmbiguousServiceError` is a `name` on a plain `Error`, not an exported class — match on `err.name`, not `instanceof`
 - `forFeature()` simply returns the DrizzleModule class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one DrizzleService
 - Global services are stored in the application's scope and automatically injected into all its modules
 - `isGlobal: false` removes the module from the process-wide global registry via `removeFromGlobalModules()`; a later unnamed `forRoot()` that does not opt out puts it back. That symmetry replaced a permanent latch with LAST-WRITER-WINS — it is not isolation. The registry has one entry per module CLASS for the whole process, and `forRoot()` normally runs at import time (it is the argument to `@Module({ imports: [...] })`), so the last unnamed `forRoot()` evaluated anywhere in the process decides globality for EVERY application in it. Measured, two applications, `forRoot` evaluation order varied: `{isGlobal:false}` then default → both see global and the application that asked to opt out gets ambient injection anyway; default then `{isGlobal:false}` → both see non-global and BOTH fail at `app.start()` with `Could not resolve dependency`, including the one that declared nothing. Boot order is irrelevant. Two configurations that must not interfere need `forRoot({ as: TOKEN })`, which never touches the registry
@@ -340,6 +427,108 @@ export const users = pgTable('users', {
   // ... rest of schema
 });
 ```
+
+### JSON and JSONB columns
+
+Declared as usual, and stored as what they are:
+
+```typescript
+import { pgTable, serial, jsonb, json } from '@onebun/drizzle/pg';
+
+export const events = pgTable('events', {
+  id: serial('id').primaryKey(),
+  payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+  raw: json('raw'),
+});
+```
+
+Objects, arrays and scalars all round-trip as **values**, not as JSON strings, so the SQL side works:
+
+```sql
+SELECT * FROM events WHERE payload @> '{"kind":"signup"}';
+SELECT jsonb_array_length(payload -> 'tags') FROM events;
+```
+
+`jsonb[]` columns (`jsonb('tags').array()`) round-trip too, and always did.
+
+::: danger Versions up to 0.5.0 stored double-encoded values
+Every value written to a `json`/`jsonb` column through `DrizzleService` was stored as a jsonb
+**string**: `jsonb_typeof` returned `'string'`, `@>` matched nothing, `jsonb_array_length` failed
+with `cannot get array length of a scalar`.
+
+It was invisible from the application that wrote it, because the read path decoded twice — so a
+round trip through the ORM looked correct while every SQL operator, every other service and every
+report saw a string. Existing rows are **not** migrated automatically; see
+[Repairing double-encoded JSON](#repairing-double-encoded-json), and run it **before** deploying
+this version, because the read path no longer compensates.
+:::
+
+#### Prepared statements and placeholders
+
+`sql.placeholder()` on a json/jsonb column round-trips through `.prepare()`, on both `.values()`
+and `.set()`:
+
+```typescript
+const insert = db.insert(events)
+  .values({ payload: sql.placeholder('payload') })
+  .prepare('insert_event');
+
+await insert.execute({ payload: { kind: 'signup', tags: ['beta'] } });
+await insert.execute({ payload: null });   // SQL NULL, not the JSON text `null`
+```
+
+One prepared statement can be executed any number of times with different payloads; the cast is
+added to its text once.
+
+#### Raw SQL bypasses this
+
+The fix lives in the column encoders, so anything that does not go through a column does not get
+it — ``db.execute(sql`...`)`` and the raw `$client`:
+
+```typescript
+// WRONG — stores a jsonb string
+await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+
+// RIGHT — the double cast is what forces the value to be bound verbatim
+await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+```
+
+A plain `::jsonb` is **not** enough — measured against `postgres:16-alpine`, `$1::jsonb` on a
+pre-stringified value still stores `jsonb_typeof='string'`. Only `::text::jsonb` works.
+
+### Repairing double-encoded JSON
+
+Rows written by an earlier version hold a jsonb string. Repair them **before** deploying, with the
+guard:
+
+```sql
+UPDATE t SET c = (c #>> '{}')::jsonb
+WHERE jsonb_typeof(c) = 'string' AND (c #>> '{}') ~ '^\s*[\[{]';
+```
+
+The guard is not optional. Without `~ '^\s*[\[{]'` the same statement tries to parse every string
+scalar and fails on the first one that is not JSON — `invalid input syntax for type json` — taking
+the whole repair with it. It is a heuristic for the same reason: a legitimately stored jsonb string
+whose content happens to look like JSON is indistinguishable from a double-encoded row, and this
+one deliberately errs toward leaving values alone.
+
+Run it before the upgrade, not after: from this version on `mapFromDriverValue` is identity, so an
+unrepaired row reads back as the **string** it is on disk, while `createSelectSchema` still types a
+`$type<T>()` column as `T`.
+
+<llm-only>
+
+**Technical details for AI agents — json/jsonb encoding:**
+- The fix is `applyBunSqlJsonEncodingFix()` in `packages/drizzle/src/pg-json-encoding.ts`, applied from the `POSTGRESQL` branch of `DrizzleService.initialize()` before `drizzlePostgres(connectionUrl)`. Idempotent
+- It patches TWO drizzle-orm internals, neither covered by that package's semver contract, pinned to **0.44.7**: (1) `PgJsonb`/`PgJson`/`PgArray.prototype.mapToDriverValue`, (2) `BunSQLPreparedQuery.prototype.execute`/`.all`
+- Non-placeholder writes: the encoder returns `` sql`${JSON.stringify(value)}::text::jsonb` ``, which `buildQueryFromSourceParams` inlines because it unwraps an `SQL` result. `mapFromDriverValue` is identity — Bun has already decoded the column, and re-parsing would corrupt a legitimately stored jsonb string scalar
+- Inside `PgArray` the encoder returns a plain string instead, tracked by an `arrayDepth` counter: `makePgArray` string-concatenates the base encoder's result, so an `SQL` chunk there renders `{[object Object]}`
+- Placeholder writes cannot take an `SQL` chunk: `fillPlaceholders` pushes the encoder's result straight into the params array and has NO `is(x, SQL)` unwrap — that exists only in `buildQueryFromSourceParams`. So a process-global `placeholderMode` flag makes the encoder return a plain string, and the `$N` token is rewritten to `$N::text::jsonb` in the prepared statement's text, once per instance
+- `fillPlaceholders` also has no null guard, unlike the value path, so the encoder returns `null` for `null` to keep SQL NULL on both paths
+- The `placeholderMode` window is safe only because it contains no `await`: `execute` awaits nothing before `tracer.startActiveSpan`, that helper invokes its callback synchronously, and `fillPlaceholders` is its first statement. The wrapper therefore captures the delegated promise INSIDE the `try` and lets the caller await it AFTER the `finally` — `return await original.call(...)` inside the try would hold the flag across the whole round trip and silently re-corrupt a concurrent non-placeholder write
+- `packages/drizzle/tests/drizzle-orm-shape.test.ts` pins every one of those structural assumptions and fails naming the fix file; `package.json` declares `^0.44.7`, a caret, so a minor bump can land without a code change
+
+</llm-only>
 
 ### Relations
 
@@ -420,7 +609,7 @@ await app.start();
 
 The error is a `DrizzleStartupError` carrying `stage` (`'open' | 'connect' | 'migrate'`), `target`, `waitedMs` and `timeoutMs`. **The password is never printed** — not in the error, not in the log line that names the connection.
 
-**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied.
+**The connect probe is bounded.** A host that accepts the connection and never answers — a dropped route, a stalled proxy — would otherwise hold `start()` open forever. The bound is `pool.timeout` (milliseconds) when the connection options carry one, and 5000 ms otherwise; the error states which applied. That is the same number the driver gets as its own connect timeout — see [`pool`](#postgresql-connection).
 
 **What does not fail.** An application that configures no database at all is untouched: no connection is opened and nothing is checked. A missing migrations folder is *no migrations*, not a failure — `migrationsFolder` defaults to `./drizzle`, and an application that has never generated a migration starts normally.
 
@@ -447,6 +636,7 @@ On the environment path the same switch is `DB_ALLOW_DEGRADED_START=true` (with 
 - PostgreSQL: `drizzle(url)` from `drizzle-orm/bun-sql` is lazy — no socket is opened until the first query — so the probe is what makes an unreachable server visible at boot
 - SQLite: `SQLITE_CANTOPEN` covers both "the directory does not exist" and "the directory is there and unwritable"; the service asks the file system directly and says which one. A write pragma against a read-only database fails after a successful open and is reported as the pragma it was
 - The bound comes from `connection.options.pool.timeout` (ms) or `DEFAULT_STARTUP_PROBE_TIMEOUT_MS` (5000). On timeout the in-flight query is left settled with a no-op catch, so it cannot surface as an unhandled rejection
+- The same `pool.timeout` also becomes the driver's `connectionTimeout` via `poolDriverOptions()`, so the probe cannot outlive the connect it is probing. The probe default (5000 ms) and the driver default (30000 ms) differ only when neither is configured
 - On the fatal path the service closes whatever it opened before rethrowing, so a refused boot leaves no socket or file handle behind
 - `allowDegradedStart` is read from module options on the `forRoot()` path and from `<PREFIX>_ALLOW_DEGRADED_START` on the environment path. The variable is read straight from `process.env` rather than through the env schema, so it still works when parsing the rest of the configuration is what failed
 </llm-only>
@@ -596,6 +786,7 @@ const [deleted] = await this.db.delete(users)
 
 Execute queries in a transaction. The transaction callback receives a `UniversalTransactionClient` with the same API as `DrizzleService`.
 
+<!-- typecheck: skip -->
 ```typescript
 async transaction<T>(
   fn: (tx: UniversalTransactionClient) => Promise<T>
@@ -632,12 +823,25 @@ try {
 }
 ```
 
-**Prefer `tx` for every statement that belongs to the transaction.** What happens to a query
-issued through the service — or through a repository — from inside the callback depends on
-the dialect: on SQLite it runs ON the open transaction and is rolled back with it (see the
-SQLite rules below); on PostgreSQL it takes another pooled connection, so it does NOT join
-the transaction and survives the rollback. `tx` is the one form that means the same thing on
-both.
+**Anything called from inside the callback is in the transaction, on both dialects.** A query
+issued through the service, a repository method, a call into another service — all of them run
+on the open transaction and are rolled back with it. Nothing has to be rewritten to take `tx`:
+
+```typescript
+await this.db.transaction(async () => {
+  await this.orders.create(order);        // repository — in the transaction
+  await this.orderItems.createMany(items); // another repository — same transaction
+
+  throw new Error('nope');                 // rolls back BOTH
+});
+```
+
+::: warning This used to be dialect-dependent
+On PostgreSQL a repository call inside the callback used to take another pooled connection, so
+its writes survived the ROLLBACK — silently, with no error and no warning, showing up only as
+inconsistent data afterwards. On SQLite the same code was already correct. If you added a `tx`
+argument to work around it, that still works and still means the same thing.
+:::
 
 ##### SQLite
 
@@ -679,15 +883,27 @@ than a promise.
 
 ##### PostgreSQL
 
-Unchanged: the transaction runs on its own pooled connection through drizzle's own
-`transaction()`. Nothing is queued, nothing is refused — concurrent queries use other
-connections, nested `transaction()` calls are drizzle's savepoints, and the re-entrancy
-errors above cannot occur.
+The transaction runs on its own pooled connection through drizzle's own `transaction()`.
+Nothing is queued and nothing is refused — concurrent queries use other connections, and the
+re-entrancy errors above cannot occur.
 
-**A query issued through the service from inside the callback takes another connection.** It
-is therefore NOT part of the transaction and is NOT undone when the transaction rolls back —
-the opposite of the SQLite rule above. A repository method that has to take part must be
-given `tx`.
+- **A query issued through the service or a repository from inside the callback runs ON the
+  transaction**, exactly as on SQLite, and is rolled back with it.
+- **A nested `transaction()` is a SAVEPOINT.** It runs on the connection the outer one already
+  holds, so it sees the outer's uncommitted rows, an inner rollback keeps the outer work, and
+  an outer rollback undoes everything. Before this it took a second connection and began an
+  independent transaction — one that could block on the locks its own caller held.
+- **`Promise.all` inside the callback is safe, and is not parallel.** One connection runs one
+  statement at a time; the driver queues them rather than failing.
+- **Work that OUTLIVES the transaction goes back to the pool.** A statement issued after the
+  callback has returned is not put on the finished transaction — it would land on whatever
+  connection the pool has since handed that transaction's slot to, and be rolled back by
+  somebody else's failure.
+- **Concurrent transactions are independent.** Routing is keyed by async context, so two
+  overlapping callbacks each see only their own uncommitted rows, one rollback never touches
+  the other's writes, and a query issued outside any transaction goes to the pool even while
+  one is open. Two `DrizzleService` instances never see each other's transactions either,
+  including against the same database.
 
 <llm-only>
 **Technical details for AI agents:**
@@ -701,7 +917,20 @@ given `tx`.
   created inside the callback, so "concurrent" means an async context that began outside it.
 - `getSQLiteDatabase()`, `getSQLiteClient()` and `.prepare()` are ungated escape hatches:
   statements issued through them during a transaction join it and are rolled back with it.
-- On PostgreSQL `getDatabase()` returns the drizzle instance itself, with no wrapper.
+- On PostgreSQL `getDatabase()` returns `createTransactionAwareDatabase(db, ambient)` — the
+  drizzle instance as prototype with the query entry points redefined to ask an
+  `AsyncLocalStorage` at CALL time which client the statement belongs on. Call time is what
+  makes a repository work: it captured the object in its constructor, long before any
+  transaction existed
+- The store holds a mutable cell, not a bare handle, and the cell is closed in a `finally`
+  when the transaction ends. Without that, work the callback left running would be issued on
+  a finished handle — measured: with `max: 1` the row it wrote was deleted by the ROLLBACK of
+  an unrelated transaction that had since taken the connection
+- `DrizzleService.transaction()` dispatches on the ambient transaction when there is one, so a
+  nested call is drizzle's own `tx.transaction()` — a SAVEPOINT — rather than a second pooled
+  connection. `tx.getRawTransaction().transaction(...)` remains available and is the same thing
+- The store is keyed by the owning `AmbientTransaction` instance, so two `DrizzleService`s (two
+  databases) never see each other's transactions
 </llm-only>
 
 ## BaseRepository

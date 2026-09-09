@@ -29,10 +29,15 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
-**CORS preflight:** `CorsMiddleware` answers `OPTIONS` only on a path that declares an
-`OPTIONS`-capable route (`@Options()` or `@All()`). On any other path `OPTIONS` falls through to the
-`404` fallback with NO `Access-Control-*` headers. Headers are added to every response of a matched
-route (errors included), never to fallback 404s.
+**CORS preflight:** answered BEFORE routing, so no `@Options()` route is needed on any path a
+browser preflights. The short-circuit lives at the top of the `Bun.serve` `fetch` fallback, ahead of
+the WebSocket/Socket.IO block — `isSocketIoPath` is method-agnostic, so a cross-origin
+`OPTIONS /socket.io/...` would otherwise enter `handleUpgrade()` and answer `400` with no CORS
+headers. Bun's router runs first, so a declared route is unreachable by the short-circuit and needs
+no precedence rule. Both the short-circuit and `CorsMiddleware.use()` gate on
+`Access-Control-Request-Method`: a preflight is answered, a bare `OPTIONS` probe reaches the
+application. `preflightContinue: true` disables the short-circuit entirely. Headers are added to
+every response of a matched route (errors included).
 
 **Rate limit response:** HTTP 429, `{ success: false, error: 'Too Many Requests', code: 429, details: {} }`.
 `Retry-After` is sent only when `legacyHeaders: true`
@@ -78,12 +83,34 @@ Request → CorsMiddleware → RateLimitMiddleware → [your middleware] → Sec
 ## CorsMiddleware
 
 Adds `Access-Control-*` headers to every response that comes from a matched route, including
-error responses. A preflight is answered only where the path carries an `OPTIONS`-capable route:
-declare `@Options()` — or [`@All()`](/api/decorators#all-catch-all-routes) — on any path a browser
-will preflight. Without one the `OPTIONS` request never enters the middleware chain and answers a
-bare `404` with no CORS headers, so a cross-origin `POST` to a path that only declares `@Post()` is
-blocked at preflight. The same bare `404` is what an unmatched path, or an unmatched verb on a
-matched path, returns — no CORS headers there either.
+error responses.
+
+### Preflight {#cors-preflight}
+
+**A browser preflight is answered before routing.** You do not need an `@Options()` route on the
+paths your frontend calls — a path that declares only `@Post()` answers its preflight correctly,
+and so does a path that does not exist.
+
+Five things follow, and they are worth stating exactly:
+
+1. **No `@Options()` route is required.** Previously one was: without it the `OPTIONS` never
+   entered the middleware chain and came back a bare `404` with no CORS headers, so the browser
+   blocked the `POST` it was preflighting.
+2. **A declared `@Options()` route is never shadowed by the short-circuit.** Bun's router runs
+   first, so a matched path never reaches the fallback where the short-circuit lives.
+3. **A non-preflight `OPTIONS` reaches your application.** The split is the
+   `Access-Control-Request-Method` header, which the Fetch spec requires on every real preflight.
+   A `curl -X OPTIONS` is API discovery, not CORS, and it now reaches your `@Options()` handler —
+   or an honest `404` where you declared none.
+4. **A real preflight is answered by CORS even where an `@Options()` route exists.** A preflight
+   response that does not carry the grant is a blocked request whatever its status, so the CORS
+   layer answers it. Use `preflightContinue: true` to take that over.
+5. **`preflightContinue: true` opts out entirely.** The short-circuit does not fire and today's
+   behaviour is preserved, because the option exists so that a downstream handler produces the
+   response.
+
+A disallowed origin still gets a well-formed `204` — without `Access-Control-Allow-Origin`. The
+browser then blocks the request, which is the correct outcome and its decision to make.
 
 ### Via `ApplicationOptions.cors`
 
@@ -115,6 +142,11 @@ const app = new OneBunApplication(AppModule, {
   ],
 });
 ```
+
+Preflight is answered before routing on this spelling too — the short-circuit finds the middleware
+by prototype, and `CorsMiddleware.configure()` returns a subclass. Prefer
+[`ApplicationOptions.cors`](#via-applicationoptions-cors): it places CORS first in the chain for
+you, which is where it has to be.
 
 ### CorsOptions
 
@@ -335,6 +367,7 @@ const app = new OneBunApplication(AppModule, {
 
 Each property accepts a `string` (custom value) or `false` (disable the header entirely).
 
+<!-- typecheck: skip -->
 ```typescript
 security: {
   contentSecurityPolicy: "default-src 'self'; connect-src 'self' https://api.example.com",

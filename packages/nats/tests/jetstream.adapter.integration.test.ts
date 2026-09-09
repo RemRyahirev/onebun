@@ -136,9 +136,52 @@ describe('JetStreamQueueAdapter Integration', () => {
 
     expect(received[0].data.n).toBe(7);
     expect(received[0].pattern).toBe('params.123');
-    // The transport widened to `params.*`; the parameter value survives in the
-    // delivered pattern and the in-process matcher recovers it.
+    // The transport widened to `params.*`, so the broker captured nothing. The value comes
+    // from the in-process match that narrowed it back, and reaches the handler as `params` —
+    // re-running the matcher by hand, which this test used to do, is no longer necessary.
+    expect(received[0].params).toEqual({ id: '123' });
     expect(matchQueuePattern('params.{id}', received[0].pattern).params.id).toBe('123');
+  }, CASE_TIMEOUT_MS);
+
+  it('captures every parameter of a multi-parameter pattern', async () => {
+    // A single capture can be right by coincidence; two at different depths cannot. Both
+    // segments have to survive the widening to `params.*.items.*` and come back apart.
+    // Its own subject prefix: NATS refuses a stream whose subjects overlap another stream's,
+    // and `ITEST_PARAMS` above already binds `params.>`.
+    const js = makeAdapter('ITEST_MULTIPARAMS', ['multiparams.>']);
+    await js.connect();
+
+    const received: Array<Message<{ n: number }>> = [];
+
+    await js.subscribe<{ n: number }>('multiparams.{id}.items.{itemId}', async (message) => {
+      received.push(message);
+      await message.ack();
+    }, { group: 'itest-multiparams', ackMode: 'manual' });
+
+    await js.publish('multiparams.42.items.abc', { n: 1 });
+
+    await pollUntil(() => received.length === 1);
+
+    expect(received[0].params).toEqual({ id: '42', itemId: 'abc' });
+  }, CASE_TIMEOUT_MS);
+
+  it('answers with an empty object for a pattern that captures nothing', async () => {
+    const js = makeAdapter('ITEST_NOPARAMS', ['noparams.>']);
+    await js.connect();
+
+    const received: Array<Message<{ n: number }>> = [];
+
+    await js.subscribe<{ n: number }>('noparams.*', async (message) => {
+      received.push(message);
+      await message.ack();
+    }, { group: 'itest-noparams', ackMode: 'manual' });
+
+    await js.publish('noparams.created', { n: 1 });
+
+    await pollUntil(() => received.length === 1);
+
+    // Never undefined, so a handler reads `message.params.x` without guarding the access.
+    expect(received[0].params).toEqual({});
   }, CASE_TIMEOUT_MS);
 
   it('round-trips a config-hash stamp through stream and consumer metadata', async () => {
@@ -456,27 +499,60 @@ describe('JetStreamQueueAdapter Integration', () => {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const probeJsm = (probe as any).jsm as AnyRecord;
-    const names: string[] = [];
-    for await (const info of await probeJsm.consumers.list('ITEST_RELEASE')) {
-      names.push(info.name);
+
+    async function consumerNames(): Promise<string[]> {
+      const names: string[] = [];
+      for await (const info of await probeJsm.consumers.list('ITEST_RELEASE')) {
+        names.push(info.name);
+      }
+
+      return names.sort();
     }
 
+    // Wait for the ephemeral to be gone, then assert the exact list. Splitting it this way is
+    // deliberate: the poll waits only for the condition that legitimately settles late, so a
+    // DELETED DURABLE — the regression this test exists for — fails immediately with a
+    // readable `[] !== [durable]` instead of timing out after POLL_DEADLINE_MS.
+    //
+    // The wait is needed because two things make the ephemeral's disappearance asynchronous
+    // relative to this line, and both widen under the load of a full suite run:
+    //   - `disconnect()` bounds the release step at RELEASE_TIMEOUT_MS and resolves on that
+    //     timer whether or not the server-side deletes have completed;
+    //   - the delete was issued on the connection that is now closed, and this list runs on a
+    //     NEW one — JetStream orders API calls per connection, not across them.
+    // Asserting immediately made this the suite's intermittent failure: green in isolation,
+    // red in roughly one full run in three.
+    //
+    // What the ephemeral half does NOT prove: that the ADAPTER deleted it. Measured — with
+    // `releaseSubscription` stubbed out entirely, this test still passes, because the server
+    // reaps an ephemeral once the connection that created it goes away. The adapter-side
+    // guarantee is pinned by 'leaves no ephemeral consumer behind after unsubscribe', where
+    // the connection stays open and the server has no reason to reap anything.
+    await pollUntil(async () => (await consumerNames()).length <= 1);
+
     // The durable survives; the ephemeral does not.
-    expect(names).toEqual([durable]);
+    expect(await consumerNames()).toEqual([durable]);
     expect((await probeJsm.consumers.info('ITEST_RELEASE', durable)).ack_floor.stream_seq)
       .toBe(ackFloorBefore);
 
     // And the preserved floor is observable: re-subscribing must not replay what the
     // previous instance already acknowledged.
-    const replayed: unknown[] = [];
-    await probe.subscribe('release.durable', async (message) => {
+    const replayed: Array<{ n: number }> = [];
+    await probe.subscribe<{ n: number }>('release.durable', async (message) => {
       replayed.push(message.data);
       await message.ack();
     }, { group, ackMode: 'manual' });
 
-    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    // A marker rather than a fixed sleep. The assertion is a NEGATIVE — "the old message was
+    // not redelivered" — and a negative cannot be polled directly, so it is turned into a
+    // positive: publish a new message and wait for it. JetStream delivers a consumer's
+    // backlog in stream order, so anything replayed would have arrived BEFORE the marker.
+    // That also makes the test stronger than the sleep it replaces, which passed equally well
+    // when the subscription was delivering nothing at all.
+    await probe.publish('release.durable', { n: 2 });
+    await pollUntil(() => replayed.length > 0);
 
-    expect(replayed).toHaveLength(0);
+    expect(replayed).toEqual([{ n: 2 }]);
   }, CASE_TIMEOUT_MS);
 
   it('recovers when the consumer is deleted out of band', async () => {
@@ -787,5 +863,78 @@ describe('JetStreamQueueAdapter Integration', () => {
         await second.disconnect();
       }
     }
+  }, CASE_TIMEOUT_MS);
+  it('accepts any filter_subject, however unrelated to what the stream binds', async () => {
+    // OQ-B, and the reason strict local resolution is the only defence there is.
+    //
+    // The question asked was whether nats-server requires `filter_subject` to be a SUBSET of the
+    // stream's subjects, or merely to overlap them. The measured answer is neither: it checks
+    // nothing at all. A filter completely disjoint from the stream is accepted, stored verbatim,
+    // and its consumer sits at `num_pending: 0` forever — a subscription that is alive, healthy
+    // and permanently empty, with nothing logged on either side.
+    //
+    // Two things follow. The overlap pass in `resolveStreamForSubject` is legitimate, because
+    // `events.*` really does deliver against a stream declared `['events.created', ...]`. And the
+    // enriched `consumers.add` failure message can never fire for a mis-bound subscription, so
+    // the declared stream set is the whole oracle. This test is the evidence for both.
+    const js = makeAdapter('ITEST_FILTER', ['filter.created', 'filter.updated']);
+    await js.connect();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const jsm = (js as any).jsm as AnyRecord;
+
+    const add = async (durable: string, filterSubject: string): Promise<string | null> => {
+      try {
+        await jsm.consumers.add('ITEST_FILTER', {
+           
+          durable_name: durable,
+           
+          ack_policy: AckPolicy.Explicit,
+           
+          filter_subject: filterSubject,
+        });
+
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    };
+
+    expect({
+      subset: await add('oqb_subset', 'filter.created'),
+      overlapping: await add('oqb_overlap', 'filter.*'),
+      broader: await add('oqb_broad', 'filter.>'),
+      universal: await add('oqb_universal', '>'),
+      // The one that matters: nothing this stream will ever hold matches it.
+      disjoint: await add('oqb_disjoint', 'nothing.to.do.with.this.stream'),
+    }).toEqual({
+      subset: null,
+      overlapping: null,
+      broader: null,
+      universal: null,
+      disjoint: null,
+    });
+
+    // Accepted AND dead: published messages reach the overlapping consumer and never the
+    // disjoint one. Without this half, "accepted" would not distinguish a server that quietly
+    // rewrote the filter from one that honoured it.
+    await js.publish('filter.created', { n: 1 });
+    await js.publish('filter.updated', { n: 2 });
+
+    await pollUntil(async () => {
+      const overlapping = await jsm.consumers.info('ITEST_FILTER', 'oqb_overlap');
+
+      return overlapping.num_pending === 2;
+    });
+
+    const disjoint = await jsm.consumers.info('ITEST_FILTER', 'oqb_disjoint');
+
+    expect({
+      storedFilter: disjoint.config.filter_subject,
+      pending: disjoint.num_pending,
+    }).toEqual({
+      storedFilter: 'nothing.to.do.with.this.stream',
+      pending: 0,
+    });
   }, CASE_TIMEOUT_MS);
 });

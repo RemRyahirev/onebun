@@ -5,6 +5,10 @@
  * the correct database type (SQLite or PostgreSQL) from table schemas.
  */
 
+export {
+  AmbientTransaction,
+  createTransactionAwareDatabase,
+} from './ambient-transaction';
 export { UniversalSelectBuilder, UniversalSelectDistinctBuilder } from './select-builder';
 export { UniversalTransactionClient } from './transaction-client';
 export {

@@ -353,9 +353,25 @@ TRIMMED_KEY=  value with spaces
   });
 
   describe('loadProcessEnv', () => {
-    it('should exclude undefined values', async () => {
+    afterEach(() => {
+      delete process.env.DEFINED_VAR;
+      delete process.env.UNDEFINED_VAR;
+    });
+
+    it('carries the variables that are set, and invents none for those that are not', async () => {
+      // Renamed from "should exclude undefined values", which is not what it can check.
+      // `loadProcessEnv` skips entries whose value is `undefined`, and on this runtime there are
+      // none: `process.env` yields strings for every key it has, so the filter is defensive
+      // against the TypeScript type (`string | undefined`) rather than against anything the
+      // runtime produces. A mutation deleting the filter leaves this whole file green — stated
+      // here rather than papered over with a test that pretends otherwise.
+      //
+      // `delete`, not `= undefined`. Assignment is how this test used to express "absent", and
+      // it stopped meaning that: Bun 1.3 dropped the key, Bun 1.4 coerces to the string
+      // "undefined" the way Node always has. The assertion then read a five-character string and
+      // reported `Received: "undefined"` — the quotes being the whole message.
       process.env.DEFINED_VAR = 'defined';
-      process.env.UNDEFINED_VAR = undefined;
+      delete process.env.UNDEFINED_VAR;
 
       const result = await Effect.runPromise(
         EnvLoader.load({
@@ -365,6 +381,22 @@ TRIMMED_KEY=  value with spaces
 
       expect(result.DEFINED_VAR).toBe('defined');
       expect(result.UNDEFINED_VAR).toBeUndefined();
+    });
+
+    it('keeps a variable assigned `undefined`, because the runtime stored the string', async () => {
+      // Pinned so the trap above is not re-set by someone "simplifying" the delete back into an
+      // assignment. This is the runtime's behaviour, not the loader's: `process.env` holds
+      // strings, and "undefined" is a legal one. Filtering it would discard a real value.
+      process.env.UNDEFINED_VAR = undefined as unknown as string;
+
+      const result = await Effect.runPromise(
+        EnvLoader.load({
+          loadDotEnv: false,
+        }),
+      );
+
+      expect(process.env.UNDEFINED_VAR).toBe('undefined');
+      expect(result.UNDEFINED_VAR).toBe('undefined');
     });
   });
 });

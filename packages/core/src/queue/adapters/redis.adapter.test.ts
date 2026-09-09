@@ -21,6 +21,25 @@ import { createRedisContainer, type TestContainer } from '../../testing/containe
 
 import { RedisQueueAdapter, createRedisQueueAdapter } from './redis.adapter';
 
+const CONTAINER_TEST_TIMEOUT_MS = 30_000;
+
+/** Poll until `predicate` holds, so a test never depends on a fixed sleep being long enough. */
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    if (await predicate()) {
+      return;
+    }
+    await Bun.sleep(20);
+  }
+
+  throw new Error(`condition not met within ${timeoutMs}ms`);
+}
+
 describe('RedisQueueAdapter', () => {
   let redis: TestContainer;
   let adapter: RedisQueueAdapter;
@@ -130,15 +149,6 @@ describe('RedisQueueAdapter', () => {
     });
   });
 
-  // Note: publish/subscribe tests are skipped because the RedisQueueAdapter
-  // relies on RedisClient.raw() method which doesn't work correctly with
-  // Bun's RedisClient API. The raw() method attempts to call Redis commands
-  // as object methods (e.g., client['RPUSH'](...)) but Bun's Redis client
-  // doesn't expose commands this way.
-  //
-  // These tests would need RedisClient.raw() to be fixed to use Bun's
-  // proper command execution API (likely sendCommand or similar).
-  
   describe('publishing', () => {
     beforeEach(async () => {
       await adapter.connect();
@@ -153,10 +163,596 @@ describe('RedisQueueAdapter', () => {
     });
   });
 
-  // Note: Delayed and priority message tests are skipped because they require
-  // raw Redis commands (ZADD, ZRANGEBYSCORE) that aren't available through the
-  // current RedisClient.raw() implementation. These features need a proper
-  // implementation using Bun's Redis client's sendCommand API.
+  describe('end-to-end against a real Redis', () => {
+    beforeEach(async () => {
+      await adapter.connect();
+    });
+
+    // These four rode the same broken call: the raw-command helper indexed the driver by the
+    // command name — `client['RPUSH'](...)` — which Bun does not expose, so every publish path
+    // rejected with "is not a function" and the adapter could not write a single message. The
+    // test that used to stand here was a comment saying so.
+
+    it('delivers a published message to a subscriber', async () => {
+      const received: Array<{ id: string; data: unknown }> = [];
+
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push({ id: message.id, data: message.data });
+      });
+
+      const messageId = await adapter.publish('orders.created', { orderId: 7 });
+
+      await waitFor(() => received.length > 0);
+      // Settle before asserting the COUNT. `waitFor` returns on the first delivery, so asserting
+      // immediately checks the counter mid-flight and passes even when a second copy is on its
+      // way — which is exactly how the duplicate delivery went unnoticed.
+      await Bun.sleep(400);
+
+      expect(received).toHaveLength(1);
+      expect(received[0].data).toEqual({ orderId: 7 });
+      expect(received[0].id).toBe(messageId);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('holds a delayed message until its delay elapses, then delivers it', async () => {
+      const received: number[] = [];
+
+      await adapter.subscribe('reports.due', async () => {
+        received.push(Date.now());
+      });
+
+      const publishedAt = Date.now();
+      await adapter.publish('reports.due', { reportId: 1 }, { delay: 250 });
+
+      // Still held: the message is in the delayed sorted set, not the queue.
+      await Bun.sleep(80);
+      expect(received).toHaveLength(0);
+
+      await waitFor(() => received.length > 0);
+      await Bun.sleep(400);
+
+      expect(received).toHaveLength(1);
+      expect(received[0] - publishedAt).toBeGreaterThanOrEqual(200);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('promotes a priority message out of the priority set', async () => {
+      const received: unknown[] = [];
+
+      await adapter.subscribe('jobs.urgent', async (message) => {
+        received.push(message.data);
+      });
+
+      await adapter.publish('jobs.urgent', { jobId: 'a' }, { priority: 5 });
+
+      await waitFor(() => received.length > 0);
+      await Bun.sleep(400);
+
+      // Promoted out of the priority set, and delivered once: promotion writes to the list and
+      // signals the channel, and only the list hands the message over.
+      expect(received).toEqual([{ jobId: 'a' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('delivers a message published before the subscription existed, exactly once', async () => {
+      // The reason the list leg exists at all: pub/sub reaches only subscribers that are already
+      // listening, so without the list this message would be lost. It must still arrive once, not
+      // once per leg.
+      await adapter.publish('orders.backlog', { orderId: 99 });
+
+      const received: unknown[] = [];
+      await adapter.subscribe('orders.backlog', async (message) => {
+        received.push(message.data);
+      });
+
+      await waitFor(() => received.length > 0);
+      await Bun.sleep(400);
+
+      expect(received).toEqual([{ orderId: 99 }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('delivers to a {param} subscription, carrying the concrete topic', async () => {
+      const seen: string[] = [];
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        seen.push(message.pattern);
+        captured.push(message.params);
+      });
+
+      await adapter.publish('orders.123', { total: 10 });
+
+      await waitFor(() => seen.length > 0);
+      await Bun.sleep(400);
+
+      // The subscription used to listen on the literal channel `queue:ch:orders.{id}` and LPOP the
+      // literal key `queue:q:orders.{id}` — names nothing ever writes to — so it was silently dead.
+      expect(seen).toEqual(['orders.123']);
+
+      // And the captured value reaches the handler. It is derived from the delivered topic on
+      // this side of the wire — the envelope carries the topic, never the captures, so a
+      // requeued message cannot deliver another subscription's values.
+      expect(captured).toEqual([{ id: '123' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('captures every parameter of a multi-parameter pattern', async () => {
+      // One parameter can be right by coincidence — a regex capturing the wrong segment still
+      // produces something. Two at different depths cannot.
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}.items.{itemId}', async (message) => {
+        captured.push(message.params);
+      });
+
+      await adapter.publish('orders.42.items.abc', { qty: 1 });
+
+      await waitFor(() => captured.length > 0);
+
+      expect(captured).toEqual([{ id: '42', itemId: 'abc' }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('answers with an empty object for a pattern that captures nothing', async () => {
+      const captured: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('events.*', async (message) => {
+        captured.push(message.params);
+      });
+
+      await adapter.publish('events.created', { a: 1 });
+
+      await waitFor(() => captured.length > 0);
+
+      // Never undefined, so a handler reads `message.params.x` without guarding the access.
+      expect(captured[0]).toEqual({});
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('matches * for one token only, not for a deeper topic', async () => {
+      const received: string[] = [];
+
+      await adapter.subscribe('events.*', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('events.created', { a: 1 });
+      await adapter.publish('events.a.b', { a: 2 });
+
+      await waitFor(() => received.length > 0);
+      await Bun.sleep(500);
+
+      // The Redis glob for `events.*` also matches `events.a.b` — globs are character-based. The
+      // in-process matcher is what holds the arity, and this pins that it is the authority.
+      expect(received).toEqual(['events.created']);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('matches # across any number of tokens', async () => {
+      const received: string[] = [];
+
+      await adapter.subscribe('logs.#', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('logs.a.b.c', { level: 'warn' });
+
+      await waitFor(() => received.length > 0);
+      await Bun.sleep(400);
+
+      expect(received).toEqual(['logs.a.b.c']);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('drains a pattern backlog of differently-named topics published before subscribing', async () => {
+      // Nothing is listening yet, so the wake signal reaches no one — these two are found only by
+      // the SCAN the poll loop runs for a pattern subscription.
+      await adapter.publish('backlog.first', { n: 1 });
+      await adapter.publish('backlog.second', { n: 2 });
+
+      const received: string[] = [];
+      await adapter.subscribe('backlog.{name}', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await waitFor(() => received.length >= 2);
+      await Bun.sleep(400);
+
+      expect(received.sort()).toEqual(['backlog.first', 'backlog.second']);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('refuses a pattern whose # is not the final token', async () => {
+      await expect(adapter.subscribe('#.created', async () => undefined)).rejects.toThrow(/final token/i);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('delivers exactly once when no retry is configured, and keeps nothing afterwards', async () => {
+      let calls = 0;
+
+      await adapter.subscribe('orders.oneshot', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      });
+
+      await adapter.publish('orders.oneshot', { orderId: 1 });
+      await waitFor(() => calls > 0);
+      await Bun.sleep(500);
+
+      expect(calls).toBe(1);
+
+      // Nothing under this adapter's prefix still holds it. Without `deadLetter` the message is
+      // dropped, and the docs say so — what must not happen is it sitting on a list forever.
+      const client = (adapter as unknown as {
+        client: { raw: (cmd: string, ...args: string[]) => Promise<[string, string[]]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const [, keys] = await client.raw('SCAN', '0', 'MATCH', `${prefix}queue:q:orders.oneshot`, 'COUNT', '100');
+
+      expect(keys).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('honours retry.attempts, numbering the attempts it delivers', async () => {
+      const seen: Array<{ attempt?: number; maxAttempts?: number; redelivered?: boolean }> = [];
+
+      await adapter.subscribe('orders.retried', async (message) => {
+        seen.push({
+          attempt: message.attempt,
+          maxAttempts: message.maxAttempts,
+          redelivered: message.redelivered,
+        });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.retried', { orderId: 1 });
+      await waitFor(() => seen.length >= 3, 10_000);
+      await Bun.sleep(600);
+
+      expect(seen).toEqual([
+        { attempt: 1, maxAttempts: 3, redelivered: false },
+        { attempt: 2, maxAttempts: 3, redelivered: true },
+        { attempt: 3, maxAttempts: 3, redelivered: true },
+      ]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('parks a delayed retry in Redis, carrying the attempt counter, not in this process', async () => {
+      // Two claims in one test, and both matter. The counter has to survive the round trip
+      // through Redis — a retry is a re-push, and the replica that claims it next is not
+      // necessarily the one that failed, so an in-process counter would restart at 1 on every
+      // hop and make `attempts: 2` loop forever. And the WAIT has to be in Redis too: a retry
+      // sleeping in a closure is a message held by one process and written nowhere.
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      // Long enough to look at the delayed set while the retry is still waiting in it.
+      await adapter.subscribe('orders.persisted', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 2, backoff: 'fixed', delay: 900 } });
+
+      await adapter.publish('orders.persisted', { orderId: 1 });
+      await waitFor(() => calls >= 1);
+
+      let parked: string[] = [];
+      await waitFor(async () => {
+        parked = await client.zrangebyscore(delayedKey, '-inf', '+inf');
+
+        return parked.length > 0;
+      });
+
+      const envelope = JSON.parse(parked[0]);
+      expect(envelope.attempt).toBe(2);
+      expect(envelope.pattern).toBe('orders.persisted');
+      expect(envelope.data).toEqual({ orderId: 1 });
+
+      // And it does come back — the parked copy is a real redelivery, not a leak.
+      await waitFor(() => calls >= 2, 10_000);
+      await Bun.sleep(600);
+      expect(calls).toBe(2);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reports a polling failure instead of discarding it', async () => {
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      await adapter.subscribe('orders.polled', async () => undefined);
+
+      // Break the command the poll loop uses. The loop used to swallow this in a bare `catch {}`,
+      // so an unreachable Redis was indistinguishable from an empty queue.
+      const client = (adapter as unknown as { client: { lpop: (key: string) => Promise<unknown> } }).client;
+      const originalLpop = client.lpop.bind(client);
+      client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+
+      try {
+        await waitFor(() => errors.length > 0);
+        expect(errors[0].message).toContain('LPOP exploded');
+      } finally {
+        client.lpop = originalLpop;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('never lets a polling failure become a process-level unhandled rejection', async () => {
+      // The poll loop is invoked without an `await` and re-scheduled by a bare `setTimeout`, so
+      // anything escaping it lands on the process, not on the adapter. An operator got
+      // `[unhandledRejection] ...` instead of the queue error event the adapter defines for it.
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown): void => {
+        unhandled.push(reason);
+      };
+      process.on('unhandledRejection', onUnhandled);
+
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        await adapter.subscribe('orders.unhandled', async () => undefined);
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+
+        await waitFor(() => errors.length > 0);
+        // Let several poll cycles run: one escaping rejection anywhere in the loop is enough.
+        await Bun.sleep(600);
+
+        expect(errors.length).toBeGreaterThan(0);
+        expect(unhandled).toEqual([]);
+      } finally {
+        client.lpop = originalLpop;
+        process.off('unhandledRejection', onUnhandled);
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('backs off a repeatedly failing poll instead of retrying at full rate', async () => {
+      // A 100 ms poll against a dead broker is ten connection attempts and ten error events per
+      // second, per subscription — reporting the failure without slowing down turns an outage
+      // into a flood. The backoff is what makes the report survivable.
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        await adapter.subscribe('orders.backoff', async () => undefined);
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+
+        await waitFor(() => errors.length > 0);
+        await Bun.sleep(1000);
+
+        // At the unthrottled 100 ms interval this second would hold ~10 failures. The backoff
+        // doubles from 100 ms to the 1000 ms ceiling, so it holds far fewer.
+        expect(errors.length).toBeLessThan(8);
+      } finally {
+        client.lpop = originalLpop;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('recovers the full poll rate once a poll succeeds again', async () => {
+      // A backoff that never resets is an outage that outlives itself.
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { lpop: (key: string) => Promise<unknown> };
+      }).client;
+      const originalLpop = client.lpop.bind(client);
+
+      try {
+        const received: unknown[] = [];
+        await adapter.subscribe('orders.recover', async (message) => {
+          received.push(message.data);
+        });
+
+        client.lpop = () => Promise.reject(new Error('LPOP exploded'));
+        await waitFor(() => errors.length > 0);
+        await Bun.sleep(400);
+
+        client.lpop = originalLpop;
+        await adapter.publish('orders.recover', { orderId: 1 });
+
+        // Delivered on the normal cadence, not after a backed-off wait.
+        await waitFor(() => received.length > 0, 3000);
+        expect(received).toEqual([{ orderId: 1 }]);
+      } finally {
+        client.lpop = originalLpop;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('republishes an exhausted message to deadLetter.queue, consumable with subscribe()', async () => {
+      // The whole point of the change. The old implementation RPUSHed to a per-pattern list that
+      // had no reader — no LPOP, no SCAN, no subscription — so a "dead-lettered" message was
+      // indistinguishable from a dropped one unless you went in with redis-cli.
+      let attempts = 0;
+      const dead: Array<{ pattern: string; data: unknown; id: string; timestamp: number }> = [];
+
+      await adapter.subscribe('orders.dlq-src', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dead', maxRetries: 2 } });
+
+      await adapter.subscribe('orders.dead', async (message) => {
+        dead.push({
+          pattern: message.pattern,
+          data: message.data,
+          id: message.id,
+          timestamp: message.timestamp,
+        });
+      });
+
+      const messageId = await adapter.publish('orders.dlq-src', { orderId: 42 });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(600);
+
+      // `maxRetries: 2` capped the attempts, then the terminal delivery was routed.
+      expect(attempts).toBe(2);
+      expect(dead).toHaveLength(1);
+      expect(dead[0].data).toEqual({ orderId: 42 });
+      expect(dead[0].id).toBe(messageId);
+      expect(dead[0].timestamp).toBeGreaterThan(0);
+      // The dead-lettered copy is addressed to the DLQ; its origin lives in metadata.
+      expect(dead[0].pattern).toBe('orders.dead');
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('lets retry.attempts win over deadLetter.maxRetries when both are set', async () => {
+      // The cap chain is `retry.attempts ?? deadLetter.maxRetries ?? 1`, the same precedence
+      // JetStream uses for `max_deliver`. With both present the explicit retry budget decides.
+      let attempts = 0;
+      const dead: unknown[] = [];
+
+      await adapter.subscribe('orders.prec-src', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 }, deadLetter: { queue: 'orders.prec-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.prec-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.prec-src', { orderId: 11 });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(600);
+
+      // 3, not the 1 that `maxRetries` alone would have given.
+      expect(attempts).toBe(3);
+      expect(dead).toEqual([{ orderId: 11 }]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('stamps the dead letter with its origin, delivery count and error', async () => {
+      const dead: Array<Record<string, unknown>> = [];
+
+      await adapter.subscribe('orders.stamped-src', async () => {
+        throw new Error('inventory unavailable');
+      }, { deadLetter: { queue: 'orders.stamped-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.stamped-dead', async (message) => {
+        dead.push(message.metadata as Record<string, unknown>);
+      });
+
+      await adapter.publish('orders.stamped-src', { orderId: 7 }, { metadata: { headers: { tenant: 'acme' } } });
+
+      await waitFor(() => dead.length > 0, 10_000);
+      await Bun.sleep(400);
+
+      expect(dead[0]['dlq.originalPattern']).toBe('orders.stamped-src');
+      expect(dead[0]['dlq.deliveryCount']).toBe(1);
+      expect(dead[0]['dlq.error']).toBe('inventory unavailable');
+      // The caller's own metadata survives — the `dlq.` prefix is what keeps them apart.
+      expect(dead[0].headers).toEqual({ tenant: 'acme' });
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('does not dead-letter a message whose handler succeeds', async () => {
+      const dead: unknown[] = [];
+      let handled = 0;
+
+      await adapter.subscribe('orders.happy-src', async () => {
+        handled += 1;
+      }, { deadLetter: { queue: 'orders.happy-dead', maxRetries: 3 } });
+
+      await adapter.subscribe('orders.happy-dead', async (message) => {
+        dead.push(message.data);
+      });
+
+      await adapter.publish('orders.happy-src', { orderId: 1 });
+
+      await waitFor(() => handled > 0);
+      await Bun.sleep(600);
+
+      expect(handled).toBe(1);
+      expect(dead).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('dead-letters a message at most once, even when the DLQ handler also throws', async () => {
+      // Without the marker this ping-pongs: the DLQ subscriber fails, routes to its own DLQ,
+      // which is itself, forever.
+      let sourceAttempts = 0;
+      let deadAttempts = 0;
+
+      await adapter.subscribe('orders.loop-src', async () => {
+        sourceAttempts += 1;
+        throw new Error('source exploded');
+      }, { deadLetter: { queue: 'orders.loop-dead', maxRetries: 1 } });
+
+      await adapter.subscribe('orders.loop-dead', async () => {
+        deadAttempts += 1;
+        throw new Error('dead-letter handler exploded too');
+      }, { deadLetter: { queue: 'orders.loop-dead', maxRetries: 1 } });
+
+      await adapter.publish('orders.loop-src', { orderId: 5 });
+
+      await waitFor(() => deadAttempts > 0, 10_000);
+      // Long enough for a loop to be obvious if the guard were missing.
+      await Bun.sleep(1200);
+
+      expect(sourceAttempts).toBe(1);
+      expect(deadAttempts).toBe(1);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('retries without dead-lettering when retry is set and deadLetter is not', async () => {
+      // The two options are independent: `retry` alone must not invent a destination.
+      let attempts = 0;
+
+      await adapter.subscribe('orders.no-dlq', async () => {
+        attempts += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, backoff: 'fixed', delay: 10 } });
+
+      await adapter.publish('orders.no-dlq', { orderId: 3 });
+      await waitFor(() => attempts >= 3, 10_000);
+      await Bun.sleep(600);
+
+      expect(attempts).toBe(3);
+
+      // Nothing was written anywhere under this adapter's prefix.
+      const client = (adapter as unknown as {
+        client: { raw: (cmd: string, ...args: string[]) => Promise<[string, string[]]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const [, keys] = await client.raw('SCAN', '0', 'MATCH', `${prefix}queue:q:*`, 'COUNT', '1000');
+
+      expect(keys).toEqual([]);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('reports a dead letter that could not be republished instead of losing it silently', async () => {
+      const errors: Error[] = [];
+      adapter.on('onError', (error) => {
+        errors.push(error as Error);
+      });
+
+      const client = (adapter as unknown as {
+        client: { rpush: (key: string, ...values: string[]) => Promise<number> };
+      }).client;
+      const originalRpush = client.rpush.bind(client);
+
+      // Broken from inside the handler, so the original publish still lands and only the
+      // dead-letter republish that follows this throw fails.
+      await adapter.subscribe('orders.dlq-broken', async () => {
+        client.rpush = () => Promise.reject(new Error('RPUSH exploded'));
+        throw new Error('handler exploded');
+      }, { deadLetter: { queue: 'orders.dlq-broken-dead', maxRetries: 1 } });
+
+      try {
+        await adapter.publish('orders.dlq-broken', { orderId: 9 });
+        await waitFor(() => errors.some((e) => e.message.includes('dead letter')), 10_000);
+
+        const reported = errors.find((e) => e.message.includes('dead letter'))!;
+        expect(reported.message).toContain('orders.dlq-broken');
+        expect(reported.message).toContain('orders.dlq-broken-dead');
+        expect((reported.cause as Error).message).toBe('RPUSH exploded');
+      } finally {
+        client.rpush = originalRpush;
+      }
+    }, CONTAINER_TEST_TIMEOUT_MS);
+  });
+
 
   describe('features', () => {
     it('should support all standard queue features', () => {

@@ -8,7 +8,7 @@ import { Effect } from 'effect';
 
 import type { RequestConfig } from './types.js';
 
-import { applyAuth, validateOneBunAuth } from './auth.js';
+import { applyAuth, isSigningAuth } from './auth.js';
 import { HttpMethod } from './types.js';
 
 const baseConfig: RequestConfig = {
@@ -100,88 +100,28 @@ describe('auth.applyAuth', () => {
     await expect(Effect.runPromise(eff)).rejects.toBeInstanceOf(Error);
   });
 
-  it('applies onebun auth and sets headers', async () => {
+  it('leaves the config untouched — onebun signs later, over the assembled request', async () => {
+    // `applyAuth` shapes the request; it does not sign it. The signature has to cover the final
+    // URL, the Content-Type and the exact body bytes, none of which exist yet at this point.
+    // Signing here is how the old implementation came to cover neither the query nor the body.
     const eff = applyAuth(
       {
-        type: 'onebun', serviceId: 'svc', secretKey: 'secret', algorithm: 'hmac-sha256', 
+        type: 'onebun', serviceId: 'svc', secretKey: 'secret', algorithm: 'hmac-sha256',
       },
       baseConfig,
     );
     const res = await Effect.runPromise(eff);
-    // presence of headers
-    expect(res.headers?.['X-OneBun-Service-Id']).toBe('svc');
-    expect(res.headers?.['X-OneBun-Timestamp']).toBeDefined();
-    expect(res.headers?.['X-OneBun-Nonce']).toBeDefined();
-    expect(res.headers?.['X-OneBun-Algorithm']).toBe('hmac-sha256');
-    expect(res.headers?.['X-OneBun-Signature']).toBeDefined();
-  });
-});
 
-describe('auth.validateOneBunAuth', () => {
-  it('validates correct headers within age', async () => {
-    // First, create headers via applyAuth
-    const applied = await Effect.runPromise(
-      applyAuth(
-        {
-          type: 'onebun', serviceId: 'svc', secretKey: 'secret', algorithm: 'hmac-sha256', 
-        },
-        baseConfig,
-      ),
-    );
-
-    // Convert to lowercase keys as validator expects
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(applied.headers || {})) {
-      headers[k.toLowerCase()] = String(v);
-    }
-    // supply method/url for payload recreation
-    headers['x-onebun-method'] = baseConfig.method;
-    headers['x-onebun-url'] = baseConfig.url;
-
-    const res = await Effect.runPromise(validateOneBunAuth(headers, 'secret'));
-    expect(res.serviceId).toBe('svc');
-    expect(res.valid).toBe(true);
+    expect(res.headers?.['X-OneBun-Signature']).toBeUndefined();
+    expect(res).toEqual(baseConfig);
   });
 
-  it('rejects when signature mismatched', async () => {
-    const applied = await Effect.runPromise(
-      applyAuth(
-        {
-          type: 'onebun', serviceId: 'svc', secretKey: 'secret', algorithm: 'hmac-sha256', 
-        },
-        baseConfig,
-      ),
-    );
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(applied.headers || {})) {
-      headers[k.toLowerCase()] = String(v);
-    }
-    headers['x-onebun-method'] = baseConfig.method;
-    headers['x-onebun-url'] = baseConfig.url;
-    // Tamper signature
-    headers['x-onebun-signature'] = 'deadbeef';
-    const res = await Effect.runPromise(validateOneBunAuth(headers, 'secret'));
-    expect(res.valid).toBe(false);
-  });
-
-  it('rejects when timestamp is too old', async () => {
-    const applied = await Effect.runPromise(
-      applyAuth(
-        {
-          type: 'onebun', serviceId: 'svc', secretKey: 'secret', algorithm: 'hmac-sha256', 
-        },
-        baseConfig,
-      ),
-    );
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(applied.headers || {})) {
-      headers[k.toLowerCase()] = String(v);
-    }
-    headers['x-onebun-method'] = baseConfig.method;
-    headers['x-onebun-url'] = baseConfig.url;
-    // Set timestamp to a very old value
-    headers['x-onebun-timestamp'] = String(Date.now() - 10 * 60 * 1000);
-    const res = await Effect.runPromise(validateOneBunAuth(headers, 'secret', 1000));
-    expect(res.valid).toBe(false);
+  it('reports which schemes shape the request and which sign it', () => {
+    // Shaping runs before the URL is built; signing after, over what is final.
+    expect(isSigningAuth({ type: 'bearer', token: 't' })).toBe(false);
+    expect(isSigningAuth({
+      type: 'apikey', key: 'k', value: 'v', location: 'query',
+    })).toBe(false);
+    expect(isSigningAuth({ type: 'onebun', serviceId: 's', secretKey: 'k' })).toBe(true);
   });
 });

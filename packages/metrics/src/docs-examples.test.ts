@@ -12,8 +12,11 @@ import {
   afterEach,
 } from 'bun:test';
 import { Effect } from 'effect';
+import { Counter } from 'prom-client';
 
 import type { MetricsService as MetricsServiceInterface } from './metrics.service';
+
+import { BaseService, Service } from '@onebun/core';
 
 import {
   Timed,
@@ -119,18 +122,80 @@ describe('Metrics API Documentation Examples', () => {
   });
 
   describe('MetricsService (docs/api/metrics.md)', () => {
+    beforeEach(() => {
+      // The application publishes the service here; `this.metrics` reads it back
+      (globalThis as Record<string, unknown>).__onebunMetricsService = metricsService;
+    });
+
+    afterEach(() => {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    });
+
     /**
-     * @source docs:api/metrics.md#metricsservice
+     * @source docs:api/metrics.md#accessing-metricsservice
      */
-    it('should create metrics service instance', () => {
+    it('should record what a BaseService counts through this.metrics', async () => {
+      // From docs: `this.metrics` is available in any BaseService or Controller
+      @Service()
+      class OrderService extends BaseService {
+        async createOrder(status: string): Promise<{ status: string }> {
+          const counter = this.metrics?.createCounter({
+            name: 'orders_created_total',
+            help: 'Total number of orders created',
+            labelNames: ['status'],
+          });
+
+          counter?.inc({ status });
+
+          return { status };
+        }
+
+        // Exposes the protected getter so the test can assert which instance it resolves to
+        resolveMetrics(): MetricsServiceInterface | undefined {
+          return this.metrics;
+        }
+      }
+
+      const orderService = new OrderService();
+
+      // The getter hands back the very service the application registered, not a fresh one
+      expect(orderService.resolveMetrics()).toBe(metricsService);
+
+      expect(await orderService.createOrder('completed')).toEqual({ status: 'completed' });
+
+      // The counter the service created lives in the shared registry under the configured prefix
+      const registered = metricsService.getMetric<Counter<string>>('orders_created_total');
+      expect(registered).toBeInstanceOf(Counter);
+
+      // ...and writing through the registry keeps feeding the same series
+      registered?.inc({ status: 'completed' });
+
+      const output = await metricsService.getMetrics();
+      expect(output).toContain('# HELP test_orders_created_total Total number of orders created');
+      expect(output).toContain('# TYPE test_orders_created_total counter');
+      expect(output).toContain('test_orders_created_total{status="completed"} 2');
+    });
+
+    /**
+     * @source docs:api/metrics.md#accessing-metricsservice
+     */
+    it('should yield a usable service from createMetricsService', async () => {
       // From docs: MetricsService usage
       // Use createMetricsService() to get an Effect that yields the service
-      const service = Effect.runSync(createMetricsService());
+      const service = Effect.runSync(createMetricsService({ prefix: 'factory_' }));
 
-      expect(service).toBeDefined();
-      expect(typeof service.createCounter).toBe('function');
-      expect(typeof service.createGauge).toBe('function');
-      expect(typeof service.createHistogram).toBe('function');
+      service.createCounter({ name: 'orders_created_total', help: 'Total number of orders created' }).inc(3);
+      service.createGauge({ name: 'orders_pending', help: 'Number of pending orders' }).set(7);
+      service.createHistogram({
+        name: 'order_duration_seconds',
+        help: 'Order duration',
+        buckets: [1],
+      }).observe(0.5);
+
+      const output = await service.getMetrics();
+      expect(output).toContain('factory_orders_created_total 3');
+      expect(output).toContain('factory_orders_pending 7');
+      expect(output).toContain('factory_order_duration_seconds_bucket{le="1"} 1');
     });
   });
 
@@ -351,5 +416,129 @@ describe('Prometheus Format (docs/api/metrics.md)', () => {
     expect(metrics).toContain('# HELP');
     expect(metrics).toContain('# TYPE');
     expect(metrics).toContain('test_counter');
+  });
+});
+
+/**
+ * The documented promise: applying a decorator is enough.
+ *
+ * @source docs:api/metrics.md#decorator-based-metrics
+ */
+describe('decorators create the metric they record into', () => {
+  let metricsService: MetricsServiceInterface;
+
+  beforeEach(() => {
+    metricsService = getMetricsService();
+    metricsService.clear();
+    (globalThis as Record<string, unknown>).__onebunMetricsService = metricsService;
+  });
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    metricsService.clear();
+  });
+
+  it('records a @Timed histogram with no prior registration', async () => {
+    // The decorators used to only LOOK the metric up and do nothing when it was absent. Since
+    // nothing created it, the documented snippet recorded nothing — silently, in the direction
+    // that hides itself: the method ran, the scrape answered, the series never appeared.
+    @Service()
+    class OrderService extends BaseService {
+      @Timed('order_processing_duration_seconds')
+      async process(): Promise<string> {
+        return 'done';
+      }
+    }
+
+    await new OrderService().process();
+
+    // Read from the SCRAPE, not from the registry object: that is what an operator sees, and it
+    // is where the missing series was missing.
+    const scrape = await metricsService.getMetrics();
+
+    expect(scrape).toContain('test_order_processing_duration_seconds');
+    expect(scrape).toContain('test_order_processing_duration_seconds_count 1');
+  });
+
+  it('records a @Counted counter with no prior registration', async () => {
+    @Service()
+    class SignupService extends BaseService {
+      @Counted('signups_total')
+      register(): void {
+        // no body needed — the decorator is the subject
+      }
+    }
+
+    const service = new SignupService();
+    service.register();
+    service.register();
+
+    const scrape = await metricsService.getMetrics();
+
+    expect(scrape).toContain('test_signups_total 2');
+  });
+
+  it('reuses the metric across calls rather than recreating it', async () => {
+    // Creating on every call would throw on the second one, or silently reset the series.
+    @Service()
+    class PingService extends BaseService {
+      @Counted('pings_total')
+      ping(): void {
+        // counted only
+      }
+    }
+
+    const service = new PingService();
+    for (let i = 0; i < 5; i++) {
+      service.ping();
+    }
+
+    const scrape = await metricsService.getMetrics();
+
+    expect(scrape).toContain('test_pings_total 5');
+  });
+
+  it('honours a metric the application registered by hand', async () => {
+    // The pre-registration path still wins: an explicit createHistogram with real buckets and
+    // help text is not overwritten by the decorator's generated one.
+    metricsService.createHistogram({
+      name: 'explicit_duration_seconds',
+      help: 'Written by the application',
+      buckets: [0.5, 1],
+    });
+
+    @Service()
+    class ExplicitService extends BaseService {
+      @Timed('explicit_duration_seconds')
+      async work(): Promise<void> {
+        // timed only
+      }
+    }
+
+    await new ExplicitService().work();
+
+    const scrape = await metricsService.getMetrics();
+
+    expect(scrape).toContain('Written by the application');
+    expect(scrape).toContain('test_explicit_duration_seconds_count 1');
+  });
+
+  it('shows the name prefixed on the scrape though the decorator takes it unprefixed', async () => {
+    // Its own source of "my metric is missing": the decorator is given `cache_hits_total` and
+    // the scrape shows `test_cache_hits_total`.
+    @Service()
+    class CacheStats extends BaseService {
+      @Counted('cache_hits_total')
+      hit(): void {
+        // counted only
+      }
+    }
+
+    new CacheStats().hit();
+
+    const scrape = await metricsService.getMetrics();
+
+    expect(scrape).toContain('test_cache_hits_total');
+    expect(scrape).not.toContain('\ncache_hits_total');
   });
 });

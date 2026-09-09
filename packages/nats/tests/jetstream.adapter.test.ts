@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 399
+// NATS-SUITE-FLOOR: 441
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -1005,7 +1005,10 @@ describe('JetStreamQueueAdapter', () => {
       })).toThrow('JetStreamQueueAdapter requires at least one stream definition');
     });
 
-    it('should fallback to first stream for unknown subjects', () => {
+    it('refuses to guess a stream for an unbound subject', () => {
+      // This used to answer 'DEFAULT' — the first declaration, chosen because nothing matched.
+      // nats-server then accepted a consumer whose filter matches nothing that stream holds, and
+      // the subscription ran forever, healthy and empty, with nothing logged on either side.
       const multiAdapter = new JetStreamQueueAdapter({
         servers: 'nats://localhost:4222',
         streams: [
@@ -1014,7 +1017,17 @@ describe('JetStreamQueueAdapter', () => {
         ],
       });
 
-      expect(multiAdapter.resolveStreamForSubject('unknown.topic')).toBe('DEFAULT');
+      let message = '';
+      try {
+        multiAdapter.resolveStreamForSubject('unknown.topic');
+      } catch (error) {
+        message = (error as Error).message;
+      }
+
+      // Both halves matter: the refusal, and enough of the configuration to see why.
+      expect(message).toMatch(/No declared stream binds "unknown\.topic"/);
+      expect(message).toContain('DEFAULT');
+      expect(message).toContain('EVENTS');
     });
   });
 
@@ -1219,18 +1232,18 @@ describe('baseline: pre-change wire format', () => {
 });
 
 // ============================================================================
-// natsSubjectMatches (via resolveStreamForSubject — private method)
+// natsSubjectCovers (via resolveStreamForSubject — private method)
 // ============================================================================
 
-describe('natsSubjectMatches (private method via asAny)', () => {
-  // Access the private natsSubjectMatches method directly
+describe('natsSubjectCovers (private method via asAny)', () => {
+  // Access the private natsSubjectCovers method directly
   const baseAdapter = new JetStreamQueueAdapter({
     servers: 'nats://localhost:4222',
     streams: [{ name: 'S', subjects: ['s.>'] }],
   });
 
   function matches(pattern: string, subject: string): boolean {
-    return asAny(baseAdapter).natsSubjectMatches(pattern, subject);
+    return asAny(baseAdapter).natsSubjectCovers(pattern, subject);
   }
 
   it('exact match returns true', () => {
@@ -1277,6 +1290,260 @@ describe('natsSubjectMatches (private method via asAny)', () => {
     });
     expect(a.resolveStreamForSubject('events.created')).toBe('EVENTS');
     expect(a.resolveStreamForSubject('events.user.updated')).toBe('EVENTS');
+  });
+});
+
+// ============================================================================
+// natsSubjectsOverlap (private method)
+//
+// Mirrors the covers block above, and exists to keep the pair apart. Coverage is
+// what `droppedSubjects` needs — "is a subject the server already holds still
+// bound by what I declare" — and overlap is what stream resolution wants. One
+// predicate served both once; that mismatch is the defect this item closes, and
+// merging them again would re-open it inside the reconciler, silently.
+// ============================================================================
+
+describe('natsSubjectsOverlap (private method via asAny)', () => {
+  const baseAdapter = new JetStreamQueueAdapter({
+    servers: 'nats://localhost:4222',
+    streams: [{ name: 'S', subjects: ['s.>'] }],
+  });
+
+  function overlaps(a: string, b: string): boolean {
+    return asAny(baseAdapter).natsSubjectsOverlap(a, b);
+  }
+
+  it('is symmetric where coverage is not', () => {
+    // Neither covers the other; both name `events.created`.
+    expect(overlaps('events.created', 'events.*')).toBe(true);
+    expect(overlaps('events.*', 'events.created')).toBe(true);
+  });
+
+  it('finds an overlap that neither side covers', () => {
+    // `a.b.c` matches both, and neither pattern contains the other.
+    expect(overlaps('a.*.c', 'a.b.>')).toBe(true);
+    expect(overlaps('a.b.>', 'a.*.c')).toBe(true);
+  });
+
+  it('does not let * reach across a token boundary', () => {
+    expect(overlaps('foo.*', 'foo.bar.baz')).toBe(false);
+    expect(overlaps('foo.bar.baz', 'foo.*')).toBe(false);
+  });
+
+  it('treats > as absorbing everything from its position', () => {
+    expect(overlaps('events.>', 'events.a.b.c')).toBe(true);
+    expect(overlaps('events.>', 'events.*')).toBe(true);
+    expect(overlaps('>', 'anything.at.all')).toBe(true);
+  });
+
+  it('does not let > match zero trailing tokens', () => {
+    // `events.>` needs at least one token after `events`, so it never names `events` itself.
+    expect(overlaps('events.>', 'events')).toBe(false);
+  });
+
+  it('rejects disjoint subjects', () => {
+    expect(overlaps('events.created', 'orders.created')).toBe(false);
+    expect(overlaps('events.*', 'orders.*')).toBe(false);
+  });
+
+  it('is reflexive, which keeps reconciliation idempotent', () => {
+    expect(overlaps('orders.*', 'orders.*')).toBe(true);
+    expect(overlaps('orders.>', 'orders.>')).toBe(true);
+  });
+
+  it('is implied by coverage', () => {
+    // Coverage is strictly stronger, which is what makes consulting it first well-founded.
+    const pairs: Array<[string, string]> = [
+      ['events.>', 'events.created'],
+      ['events.*', 'events.created'],
+      ['*', 'events'],
+      ['foo.bar', 'foo.bar'],
+    ];
+
+    for (const [declared, subject] of pairs) {
+      expect(asAny(baseAdapter).natsSubjectCovers(declared, subject)).toBe(true);
+      expect(overlaps(declared, subject)).toBe(true);
+    }
+  });
+
+  it('pins the asymmetry the covers predicate was getting wrong', () => {
+    // `orders.a.b` matches `orders.>` and not `orders.*`, so `orders.*` does not cover
+    // `orders.>` — but they do overlap on `orders.x`. The old single predicate answered
+    // "covers" here, which is what let a narrowing declaration through.
+    expect(asAny(baseAdapter).natsSubjectCovers('orders.*', 'orders.>')).toBe(false);
+    expect(overlaps('orders.*', 'orders.>')).toBe(true);
+  });
+});
+
+// ============================================================================
+// Stream resolution: wildcard patterns against literal declarations
+// ============================================================================
+
+describe('stream resolution: a wildcard pattern over literal declarations', () => {
+  it('resolves through the overlap pass and sends the wildcard as the filter', async () => {
+    // Measured against nats-server 2.10: a `filter_subject` of `events.*` on a stream declared
+    // `['events.created','events.updated']` is accepted AND delivers. This is not a configuration
+    // the coverage pass can reach — no declared subject covers `events.*` — so the overlap pass
+    // is what keeps it working. See the OQ-B case in jetstream.adapter.integration.test.ts.
+    // `OTHER` is declared FIRST and binds nothing here, deliberately: the deleted fallback
+    // returned `resolvedStreams[0]`, so a single-stream fixture would answer 'EVENTS' on the old
+    // code too and prove nothing.
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [
+        { name: 'OTHER', subjects: ['other.>'] },
+        { name: 'EVENTS', subjects: ['events.created', 'events.updated'] },
+      ],
+    });
+
+    expect(adapter.resolveStreamForSubject('events.*')).toBe('EVENTS');
+
+    await adapter.subscribe('events.*', async () => undefined, { group: 'w' });
+
+    expect(callArg(mockJsm.consumers.add, 0, 0) as unknown as string).toBe('EVENTS');
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('events.*');
+  });
+
+  it('resolves a broader pattern over a narrower declaration, through overlap and not coverage', async () => {
+    // The other direction: declared `events.*`, subscribed `events.>`. `events.*` does NOT cover
+    // `events.>` — `events.a.b` matches the second and not the first — which is exactly what the
+    // old matcher got wrong. Overlap still holds on `events.x`.
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [
+        { name: 'OTHER', subjects: ['other.>'] },
+        { name: 'EVENTS', subjects: ['events.*'] },
+      ],
+    });
+
+    expect(asAny(adapter).natsSubjectCovers('events.*', 'events.>')).toBe(false);
+    expect(asAny(adapter).natsSubjectsOverlap('events.*', 'events.>')).toBe(true);
+    expect(adapter.resolveStreamForSubject('events.>')).toBe('EVENTS');
+
+    await adapter.subscribe('events.#', async () => undefined, { group: 'w' });
+
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('events.>');
+  });
+
+  it('prefers the stream that binds the whole pattern over one holding a slice of it', () => {
+    // Coverage before overlap. Without that ordering, widening the matcher would re-route
+    // configurations that resolve correctly today.
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'BROAD', subjects: ['events.>'] },
+        { name: 'NARROW', subjects: ['events.created'] },
+      ],
+    });
+
+    expect(adapter.resolveStreamForSubject('events.*')).toBe('BROAD');
+  });
+});
+
+// ============================================================================
+// Stream resolution: ambiguity is refused, on both passes
+//
+// A silent tiebreak is not behaviourally neutral. `durableConsumerName` omits the
+// stream, so resolving the same pattern to a different stream on a later boot
+// creates the same durable elsewhere and orphans the first with its delivery
+// position — and streams carry their own retention, limits and storage.
+// ============================================================================
+
+describe('stream resolution: ambiguity', () => {
+  function resolveError(adapter: JetStreamQueueAdapter, subject: string): string {
+    try {
+      adapter.resolveStreamForSubject(subject);
+    } catch (error) {
+      return (error as Error).message;
+    }
+
+    return '';
+  }
+
+  it('refuses when two declarations each hold a slice of the pattern', () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'EVENTS_CREATED', subjects: ['events.created'] },
+        { name: 'EVENTS_UPDATED', subjects: ['events.updated'] },
+      ],
+    });
+
+    const message = resolveError(adapter, 'events.*');
+
+    expect(message).toContain('EVENTS_CREATED');
+    expect(message).toContain('EVENTS_UPDATED');
+    expect(message).toContain('holds part of');
+  });
+
+  it('refuses when two declarations both bind the whole pattern', () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'PRIMARY', subjects: ['events.>'] },
+        { name: 'ARCHIVE', subjects: ['events.>'] },
+      ],
+    });
+
+    const message = resolveError(adapter, 'events.created');
+
+    expect(message).toContain('PRIMARY');
+    expect(message).toContain('ARCHIVE');
+    expect(message).toContain('binds all of');
+  });
+
+  it('refuses a catch-all subscription across a multi-stream application', () => {
+    // `@Subscribe('#')` translates to `>`, which overlaps every declaration. It used to take
+    // `resolvedStreams[0]` and consume one stream's worth of a pattern that claims all of them.
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'EVENTS', subjects: ['events.>'] },
+        { name: 'COMMANDS', subjects: ['commands.>'] },
+      ],
+    });
+
+    const message = resolveError(adapter, '#');
+
+    expect(message).toContain('EVENTS');
+    expect(message).toContain('COMMANDS');
+  });
+
+  it('counts one stream declaring several matching subjects as one candidate', () => {
+    // The dedup that keeps a well-formed stream from looking like an ambiguity.
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [{ name: 'ORDERS', subjects: ['orders.>', 'orders.created'] }],
+    });
+
+    expect(adapter.resolveStreamForSubject('orders.created')).toBe('ORDERS');
+  });
+
+  it('refuses when one name is declared twice with different subjects', () => {
+    // Not deduplicated by name, deliberately: one name with two definitions is a configuration
+    // error, and reconciliation would apply whichever came last. Refusing beats picking.
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'ORDERS', subjects: ['orders.created'] },
+        { name: 'ORDERS', subjects: ['orders.updated'] },
+      ],
+    });
+
+    expect(resolveError(adapter, 'orders.*')).toContain('claimed by more than one declared stream');
+  });
+
+  it('refuses on the destructive path too, instead of taking the first candidate', async () => {
+    // The private strict twin this replaces returned the first match on ambiguity, so
+    // deleteDurableConsumer was MORE lenient than subscribe.
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [
+        { name: 'EVENTS_CREATED', subjects: ['events.created'] },
+        { name: 'EVENTS_UPDATED', subjects: ['events.updated'] },
+      ],
+    });
+
+    await expect(adapter.deleteDurableConsumer('events.*', 'workers'))
+      .rejects.toThrow(/is claimed by more than one declared stream/);
+    expect(mockJsm.consumers.delete).not.toHaveBeenCalled();
   });
 });
 
@@ -1843,7 +2110,7 @@ describe('ensureConsumer: migration and error classification', () => {
 
     let thrown: Error | undefined;
     try {
-      await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+      await adapter.subscribe('test.{id}', async () => undefined, { group: 'test-group' });
     } catch (error) {
       thrown = error as Error;
     }
@@ -1851,6 +2118,14 @@ describe('ensureConsumer: migration and error classification', () => {
     expect(thrown!.message).toContain('test-group');
     expect(thrown!.message).toContain('TEST_STREAM');
     expect(thrown!.cause).toBe(cause);
+
+    // What was actually attempted. The server names a consumer and a stream and nothing else,
+    // which leaves the reader to work out which subscription that was — so the OneBun pattern,
+    // the subject it translated to and the declarations are all part of the message. The pattern
+    // and the filter differ here (`test.{id}` vs `test.*`) so neither can stand in for the other.
+    expect(thrown!.message).toContain('test.{id}');
+    expect(thrown!.message).toContain('test.*');
+    expect(thrown!.message).toContain('test.>');
   });
 
   it('wraps an update failure and tells the operator how to recover', async () => {
@@ -1861,7 +2136,7 @@ describe('ensureConsumer: migration and error classification', () => {
 
     let thrown: Error | undefined;
     try {
-      await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+      await adapter.subscribe('test.{id}', async () => undefined, { group: 'test-group' });
     } catch (error) {
       thrown = error as Error;
     }
@@ -1870,6 +2145,11 @@ describe('ensureConsumer: migration and error classification', () => {
     expect(thrown!.message).toContain('TEST_STREAM');
     expect(thrown!.message).toContain('Delete it');
     expect(thrown!.cause).toBe(cause);
+
+    // Same attempt context as the add path — the two messages differ only in the recovery advice.
+    expect(thrown!.message).toContain('test.{id}');
+    expect(thrown!.message).toContain('test.*');
+    expect(thrown!.message).toContain('test.>');
   });
 
   it('refuses to hijack an existing consumer for an ephemeral subscription', async () => {
@@ -2128,6 +2408,47 @@ describe('ensureStream: guards', () => {
     mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['a.x', 'a.y'] })));
 
     await expect(adapter.connect()).rejects.toThrow(/a\.y/);
+    expect(mockJsm.streams.update).not.toHaveBeenCalled();
+    expect(mockJsm.streams.add).not.toHaveBeenCalled();
+  });
+
+  it('allows a declaration that covers an existing subject only as a union', async () => {
+    // `orders.*` and `orders.*.>` partition `orders.>` exactly: neither half covers it, together
+    // they cover it with nothing left over. Asking the coverage question per declared subject
+    // answered "narrowing" and refused to boot, naming a subject that would still be stored.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['orders.*', 'orders.*.#'] }],
+    });
+    mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['orders.>'] })));
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('still refuses when the union leaves a hole', async () => {
+    // One token deeper than the declarations reach: `orders.a.b.c` is stored under `orders.>` and
+    // named by neither `orders.*` nor `orders.*.*`.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['orders.*', 'orders.*.*'] }],
+    });
+    mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['orders.>'] })));
+
+    await expect(adapter.connect()).rejects.toThrow(/orders\.>/);
+    expect(mockJsm.streams.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a wildcard declaration that narrows a broader wildcard on the server', async () => {
+    // The hole the generalised predicate closes. `natsSubjectMatches('orders.*', 'orders.>')`
+    // answered TRUE — the `*` branch skipped past the literal `>` and the token counts tied — so
+    // declaring `orders.*` against a server holding `orders.>` read as a widening and was applied.
+    // It is a narrowing: `orders.a.b` is stored today and would stop being stored.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['orders.*'] }],
+    });
+    mockJsm.streams.info = mock(() => Promise.resolve(streamInfoPresent({ subjects: ['orders.>'] })));
+
+    await expect(adapter.connect()).rejects.toThrow(/orders\.>/);
     expect(mockJsm.streams.update).not.toHaveBeenCalled();
     expect(mockJsm.streams.add).not.toHaveBeenCalled();
   });
@@ -2439,7 +2760,11 @@ describe('consumer identity', () => {
     options: AnyRecord = { group: 'test-group' },
   ): Promise<AnyRecord> {
     const { adapter, mockJsm } = makeConnectedAdapter({
-      streams: [{ name: 'TEST_STREAM', subjects: ['test.>', 'orders.>'] }],
+      // `x`, `b--x` and `orders_new` are declared because strict resolution requires every
+      // subscribed subject to be bound. They are NOT renamed to `test.x` and friends: the forging
+      // probe below works only because `group: 'a--b'` + pattern `x` and `group: 'a'` + pattern
+      // `b--x` both sanitise to the stem `a--b--x`, and renaming either destroys it.
+      streams: [{ name: 'TEST_STREAM', subjects: ['test.>', 'orders.>', 'x', 'b--x', 'orders_new'] }],
     });
     await adapter.subscribe(pattern, async () => undefined, options);
 
@@ -2691,6 +3016,116 @@ describe('subscription lifecycle: the pull loop', () => {
     expect(asAny(consumer.consume).mock.calls.length).toBe(before);
   });
 
+  it('closes the handle when a release lands while consume() is still in flight', async () => {
+    // The race. `releaseSubscription` sets `running = false`, drains, then looks at
+    // `entry.messages` — still null, because the assignment happens after the await. It closes
+    // nothing. If the resolved handle were then installed, nobody would ever close it: the
+    // `for await` only reaches its `break` once the iterator has yielded, and a subscription
+    // released before its first message never yields. It parks forever holding the inbox
+    // subscription and the monitor timer, with the consumer keeping its pull state on the server.
+    const { adapter, consumer } = makeConnectedAdapter();
+    await adapter.subscribe('test.topic', async () => undefined, {});
+    const entry = asAny(adapter).subscriptions[0];
+
+    // A handle that would park forever if it were iterated: no messages, and an iterator that
+    // never completes. Only an explicit close() can end it.
+    const parked = makeDeferred();
+    parkedReleases.push(parked.resolve);
+    const handle: AnyRecord = {
+      async *[Symbol.asyncIterator]() {
+        await parked.promise;
+      },
+      close: mock(() => {
+        parked.resolve();
+
+        return Promise.resolve();
+      }),
+      closed: mock(() => Promise.resolve(true)),
+      status: mock(() => ({
+        async *[Symbol.asyncIterator]() {
+          await parked.promise;
+        },
+      })),
+    };
+
+    // consume() that resolves only when the test says so, so the release can be made to land
+    // strictly inside the await rather than hoped to.
+    const consuming = makeDeferred();
+    consumer.consume = mock(async () => {
+      await consuming.promise;
+
+      return handle;
+    });
+
+    entry.messages = null;
+    const loop = asAny(adapter).consumeMessages(entry);
+
+    // The release happens now, while consume() is unresolved — exactly the window.
+    entry.running = false;
+    consuming.resolve();
+    await loop;
+
+    expect(handle.close).toHaveBeenCalled();
+    // And never installed: an entry nobody will release again must not be holding a handle.
+    expect(entry.messages).toBeNull();
+  });
+
+  it('keeps the handle when the entry is merely paused during the consume', async () => {
+    // The guard above must key on `running`, not on "not usable right now". A pause that lands
+    // inside the same window is a different state: the subscription is still subscribed, the
+    // handle is still ours to hold, and the loop must schedule its restart so `resume()` has
+    // something to resume. Closing here instead would turn pause into a permanent stop.
+    const timers = useFakeTimers();
+
+    try {
+      const { adapter, consumer } = makeConnectedAdapter();
+      await adapter.subscribe('test.topic', async () => undefined, {});
+      const entry = asAny(adapter).subscriptions[0];
+
+      const parked = makeDeferred();
+      parkedReleases.push(parked.resolve);
+      const handle: AnyRecord = {
+        async *[Symbol.asyncIterator]() {
+          yield makeMockJsMsg();
+          await parked.promise;
+        },
+        close: mock(() => {
+          parked.resolve();
+
+          return Promise.resolve();
+        }),
+        closed: mock(() => Promise.resolve(true)),
+        status: mock(() => ({
+          async *[Symbol.asyncIterator]() {
+            await parked.promise;
+          },
+        })),
+      };
+
+      const consuming = makeDeferred();
+      consumer.consume = mock(async () => {
+        await consuming.promise;
+
+        return handle;
+      });
+
+      entry.messages = null;
+      const loop = asAny(adapter).consumeMessages(entry);
+
+      // Paused, not released — `running` stays true.
+      entry.paused = true;
+      consuming.resolve();
+      await loop;
+
+      // Not closed by the guard: the loop took the handle, handed the message back and ended
+      // through its own break, which is the path that leaves a restart pending.
+      expect(handle.close).not.toHaveBeenCalled();
+      expect(entry.restartTimer).not.toBeNull();
+    } finally {
+      timers.restore();
+    }
+  });
+
   it('nacks a message it pulled but will not process', async () => {
     // A message dropped by pause or unsubscribe used to be abandoned, holding an ack
     // slot until ack_wait expired.
@@ -2899,6 +3334,40 @@ describe('vanished consumer recovery', () => {
       adapter, mockJsm, errors, first, second,
     };
   }
+
+  it('names the original subscription pattern when the re-creation itself fails', async () => {
+    // The recreate path builds the same diagnostic as the first `subscribe()`, from the entry's
+    // own inputs. Passing anything but `entry.pattern` here would report the translated subject
+    // as if it were the OneBun pattern — the two differ exactly when a pattern is parameterised,
+    // which is why this subscribes `test.{id}`.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    const first = makeMockConsumer([], [
+      { type: 'consumer_deleted', code: 404, description: 'consumer deleted' },
+    ]);
+
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(first));
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => {
+      errors.push(error);
+    });
+
+    await adapter.subscribe('test.{id}', async () => undefined, { group: 'test-group' });
+
+    // The consumer vanished; the re-creation is what fails now.
+    mockJsm.consumers.info = mock(() =>
+      Promise.reject(makeApiError(CONSUMER_NOT_FOUND_CODE, 'consumer not found')));
+    mockJsm.consumers.add = mock(() => Promise.reject(new Error('maximum consumers exceeded')));
+
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+
+    const reported = errors.map(error => error.message).join('\n');
+
+    expect(reported).toContain('test.{id}');
+    expect(reported).toContain('test.*');
+  });
 
   it('re-creates the consumer when it is deleted and rebinds the entry', async () => {
     const { adapter, mockJsm, second } = await subscribedWith([
@@ -4027,5 +4496,114 @@ describe('deleteDurableConsumer', () => {
 
     await expect(adapter.deleteDurableConsumer('orders.created', 'workers'))
       .rejects.toThrow('JetStreamQueueAdapter not connected');
+  });
+});
+
+/**
+ * The teardown form.
+ *
+ * The strict `deleteDurableConsumer` is right for a call an operator makes on purpose and wrong
+ * for one an `afterEach` makes unconditionally: it throws when the adapter never connected, when
+ * the pattern is unbound, and when the server refuses — and a throw in teardown REPLACES the
+ * assertion failure in the output, so the real breakage disappears behind a cleanup error.
+ */
+describe('tryDeleteDurableConsumer', () => {
+  it('lets the original failure through instead of replacing it with a teardown error', async () => {
+    // The whole point, written the way it is actually used: `runCase` is a test that failed, the
+    // `finally` is its teardown, and the broker refuses the delete. With the strict form the
+    // permissions error wins — `finally` replaces the in-flight exception — and the output names
+    // JetStream instead of the assertion that broke.
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() => Promise.reject(makeApiError(503, 'permissions violation')));
+    adapter.on('onError', () => undefined);
+
+    const runCase = async (): Promise<void> => {
+      try {
+        throw new Error('the assertion that actually failed');
+      } finally {
+        await adapter.tryDeleteDurableConsumer('orders.created', 'workers');
+      }
+    };
+
+    await expect(runCase()).rejects.toThrow('the assertion that actually failed');
+
+    // And the strict form is unchanged — it is still the one that refuses to be quiet.
+    await expect(adapter.deleteDurableConsumer('orders.created', 'workers'))
+      .rejects.toThrow(/permissions violation/);
+  });
+
+  it('returns false without attempting anything when never connected', async () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    // And quietly: an adapter that never connected has no consumer to remove, so reporting it
+    // would make every clean teardown noisy.
+    expect(errors).toHaveLength(0);
+  });
+
+  it('reports an unbound pattern through onError rather than throwing', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('typo.created', 'workers')).toBe(false);
+    expect(mockJsm.consumers.delete).not.toHaveBeenCalled();
+    // Swallowed for the caller, not for the listener: a mistyped pattern in teardown is still
+    // worth knowing about, and this is the channel that says so without killing the run.
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/No declared stream binds "typo\.created"/);
+  });
+
+  it('reports a permissions denial rather than reporting it as nothing to do', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() => Promise.reject(makeApiError(503, 'permissions violation')));
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toMatch(/permissions violation/);
+  });
+
+  it('deletes and reports true on the happy path, exactly like the strict form', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+
+    await adapter.subscribe('orders.created', async () => undefined, { group: 'workers' });
+    const expectedName = callArg(mockJsm.consumers.add, 0, 1).durable_name as string;
+
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(true);
+    expect(callArg(mockJsm.consumers.delete, 0, 0) as unknown as string).toBe('ORDERS');
+    expect(callArg(mockJsm.consumers.delete, 0, 1) as unknown as string).toBe(expectedName);
+  });
+
+  it('returns false, quietly, when there was no such consumer', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'ORDERS', subjects: ['orders.>'] }],
+    });
+    mockJsm.consumers.delete = mock(() =>
+      Promise.reject(makeApiError(CONSUMER_NOT_FOUND_CODE, 'consumer not found')));
+
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => errors.push(error));
+
+    // Idempotent: calling it twice, or on a case that never subscribed, is not an error.
+    expect(await adapter.tryDeleteDurableConsumer('orders.created', 'workers')).toBe(false);
+    expect(errors).toHaveLength(0);
   });
 });

@@ -92,6 +92,25 @@ export class RedisCache implements CacheService {
         ...optionsOrClient,
       } as Required<RedisCacheOptions>;
       this.useShared = optionsOrClient.useSharedClient ?? false;
+
+      // Rejected rather than composed or ignored. The client is the sole owner of the prefix —
+      // it applies one on every command, prefixes the patterns `clear()` and `getStats()` scope
+      // themselves with, and strips it back off results. A cache prefix on top would give the
+      // keyspace two owners that do not know about each other, which is what produced
+      // `myapp:cache:myapp:cache:user:1` before.
+      //
+      // In shared mode the prefix belongs to the provider, so a cache-level one has nowhere to
+      // go. It used to be dropped in silence: keys landed under the shared prefix alone, and the
+      // dashboards, `KEYS` scans and migration scripts written against the configured name found
+      // nothing.
+      if (this.useShared && (optionsOrClient.keyPrefix ?? '').length > 0) {
+        throw new Error(
+          'RedisCache: keyPrefix cannot be set alongside useSharedClient. The shared client owns '
+          + 'the keyspace prefix, so a cache-level one would be silently ignored. Configure it on '
+          + "the provider instead — SharedRedisProvider.configure({ keyPrefix: '…' }) — or drop "
+          + 'useSharedClient to give this cache its own client and its own prefix.',
+        );
+      }
     }
   }
 
@@ -242,9 +261,9 @@ export class RedisCache implements CacheService {
     value: T,
     options: CacheSetOptions = {},
   ): Promise<void> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    // Through ensureClient(), like get/delete/has: a shared client can be disconnected out from
+    // under this cache, and a write is exactly when "reconnect or say so" matters most.
+    const client = await this.ensureClient();
 
     try {
       const fullKey = this.getFullKey(key);
@@ -252,7 +271,7 @@ export class RedisCache implements CacheService {
       const ttl = options.ttl ?? this.options.defaultTtl;
 
       // Set value with TTL
-      await this.client.set(fullKey, serialized, ttl);
+      await client.set(fullKey, serialized, ttl);
     } catch (error) {
       throw new Error(`Redis cache set error for key ${key}: ${error}`);
     }
@@ -296,17 +315,21 @@ export class RedisCache implements CacheService {
    * WARNING: This will clear all keys with the configured prefix
    */
   async clear(): Promise<void> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
+
+    // Refuse before touching Redis, not after: the damage this guards against is done by the
+    // first DEL, and an unscoped clear() has no undo.
+    this.requireNamespace(client, 'clear');
 
     try {
-      const pattern = `${this.options.keyPrefix}*`;
-      const keys = await this.client.keys(pattern);
+      // `*`, not `${prefix}*` — the client prefixes the pattern itself. Spelling the prefix here
+      // too is what produced `prefix + prefix + *`, and what made this match nothing at all in
+      // shared mode, where the prefix that applies belongs to the shared client.
+      const keys = await client.keys('*');
 
       if (keys && Array.isArray(keys) && keys.length > 0) {
         for (const key of keys) {
-          await this.client.del(key);
+          await client.del(key);
         }
       }
 
@@ -320,13 +343,11 @@ export class RedisCache implements CacheService {
    * Get multiple values from cache
    */
   async mget<T = unknown>(keys: string[]): Promise<(T | undefined)[]> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
 
     try {
       const fullKeys = keys.map((key) => this.getFullKey(key));
-      const values = await this.client.mget(fullKeys);
+      const values = await client.mget(fullKeys);
 
       return values.map((value) => {
         if (value === null || value === undefined) {
@@ -335,20 +356,24 @@ export class RedisCache implements CacheService {
           return undefined;
         }
 
-        this.hits++;
         try {
-          return JSON.parse(value) as T;
+          const parsed = JSON.parse(value) as T;
+          this.hits++;
+
+          return parsed;
         } catch {
+          // Counted once, as a miss. It used to be counted as a hit AND a miss, so an unparsable
+          // entry inflated the hit rate it was evidence against.
           this.misses++;
 
           return undefined;
         }
       });
-    } catch {
-      // Return array of undefined with same length
-      this.misses += keys.length;
-
-      return new Array(keys.length).fill(undefined);
+    } catch (error) {
+      // This used to report every key missing and add them to the miss counter, so a connection
+      // blip read as a total cache miss for data that exists — the exact failure single-key get()
+      // was fixed to stop — and skewed hitRate permanently afterwards.
+      throw new Error(`Redis cache mget failed for ${keys.length} key(s): ${error}`);
     }
   }
 
@@ -358,9 +383,7 @@ export class RedisCache implements CacheService {
   async mset<T = unknown>(
     entries: Array<{ key: string; value: T; options?: CacheSetOptions }>,
   ): Promise<void> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
 
     try {
       const msetEntries = entries.map(({ key, value, options }) => ({
@@ -369,7 +392,7 @@ export class RedisCache implements CacheService {
         ttlMs: options?.ttl ?? this.options.defaultTtl,
       }));
 
-      await this.client.mset(msetEntries);
+      await client.mset(msetEntries);
     } catch (error) {
       throw new Error(`Redis cache mset error: ${error}`);
     }
@@ -379,13 +402,16 @@ export class RedisCache implements CacheService {
    * Get cache statistics
    */
   async getStats(): Promise<CacheStats> {
-    if (!this.client) {
-      throw new Error('Redis client not connected. Call connect() first.');
-    }
+    const client = await this.ensureClient();
+
+    // Same scope rule as clear(): if this cache cannot name its own keyspace, `entries` would be
+    // a count of the whole database, which reads as a plausible number and is not this cache's.
+    this.requireNamespace(client, 'getStats');
 
     try {
-      const pattern = `${this.options.keyPrefix}*`;
-      const keys = await this.client.keys(pattern);
+      // `*` — the client prefixes it, exactly as in clear(). The two must not be able to disagree
+      // about what belongs to this cache.
+      const keys = await client.keys('*');
       const totalRequests = this.hits + this.misses;
       const hitRate = totalRequests > 0 ? this.hits / totalRequests : 0;
 
@@ -395,13 +421,10 @@ export class RedisCache implements CacheService {
         entries: Array.isArray(keys) ? keys.length : 0,
         hitRate,
       };
-    } catch {
-      return {
-        hits: this.hits,
-        misses: this.misses,
-        entries: 0,
-        hitRate: 0,
-      };
+    } catch (error) {
+      // Previously this returned zeros, so a dashboard read "cache empty" when the truth was
+      // "cache unreachable" — two states that call for opposite responses.
+      throw new Error(`Redis cache getStats error: ${error}`);
     }
   }
 
@@ -427,16 +450,54 @@ export class RedisCache implements CacheService {
   }
 
   /**
-   * Get full key with prefix
-   * Note: When using shared client, prefix is already applied
+   * The key as the client should be given it — which is unchanged, in every mode.
+   *
+   * `RedisClient` IS the namespace: it applies `keyPrefix` on every read and write, and strips it
+   * back off the results of `keys()`. This used to add the cache's own prefix on top in standalone
+   * mode, which stored keys under `prefix + prefix + key` while `clear()` built its pattern from
+   * one prefix and the client doubled that too — so the two agreed only by both being wrong. Any
+   * other reader (a runbook, `SCAN`, an ACL rule, another service) saw the doubled name.
    */
   private getFullKey(key: string): string {
-    // If client is shared or passed in, don't add prefix (client has its own)
-    if (!this.ownsClient || this.useShared) {
-      return key;
+    return key;
+  }
+
+  /**
+   * The namespace this cache's entries actually live under, or `null` when there is none.
+   *
+   * `null` is not "no prefix configured" — it is "this cache cannot tell its own keys from anyone
+   * else's", which is the state in which a bulk operation must refuse rather than proceed.
+   */
+  private resolveNamespace(client: RedisClient): string | null {
+    const prefix = client.keyPrefix;
+
+    return prefix.length > 0 ? prefix : null;
+  }
+
+  /**
+   * Refuse a keyspace-wide operation the cache cannot scope, naming what to configure.
+   *
+   * Without this, `clear()` on an unprefixed client issues `KEYS *` followed by `DEL` per hit:
+   * sessions, queues, rate-limit counters and every other tenant of that database, gone, with a
+   * resolved promise and no log line.
+   */
+  private requireNamespace(client: RedisClient, operation: string): string {
+    const namespace = this.resolveNamespace(client);
+
+    if (namespace === null) {
+      const mode = this.useShared
+        ? 'shared client'
+        : (this.ownsClient ? 'standalone client' : 'injected client');
+
+      throw new Error(
+        `Redis cache ${operation}() refused: the ${mode} has no key prefix, so this cache cannot `
+        + 'tell its own keys from every other key in the database. Configure a non-empty keyPrefix '
+        + '(cache options for a standalone client, SharedRedisProvider.configure() for a shared one, '
+        + 'or the RedisClient you pass in) before using an operation that spans the keyspace.',
+      );
     }
 
-    return `${this.options.keyPrefix}${key}`;
+    return namespace;
   }
 
   /**

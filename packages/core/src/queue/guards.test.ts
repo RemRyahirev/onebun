@@ -32,6 +32,7 @@ function createMockMessage(metadata: MessageMetadata = {}): Message {
   return {
     id: 'test-id',
     pattern: 'test.pattern',
+    params: {},
     data: { test: true },
     timestamp: Date.now(),
     metadata,

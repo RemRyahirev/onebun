@@ -101,6 +101,24 @@ OneBun is a complete, batteries-included backend framework for Bun.js.
 It provides everything needed to build production-grade TypeScript services
 — from HTTP routing to database integration, from message queues to observability.
 
+## At a Glance
+
+<!-- readme:begin features -->
+- **NestJS-style architecture** — modules, controllers and services with full dependency injection via Effect.ts
+- **ArkType validation** — one schema is the TypeScript type, the runtime check and the OpenAPI spec, wired end to end
+- **Built-in Prometheus metrics and OpenTelemetry tracing** — no community packages needed
+- **Redis / in-memory caching** with decorator-driven TTL
+- **Typed environment variables** with validation and defaults
+- **WebSocket support** — Socket.IO protocol, rooms, guards, typed clients
+- **Queue system** — `@Cron`, `@Interval`, `@Timeout` and `@Subscribe` decorators
+- **Drizzle ORM integration** — database access with migrations
+- **NATS / JetStream** — message bus for microservices
+- **OpenAPI / Swagger** — generated from ArkType schemas and route decorators
+<!-- readme:end -->
+
+Each of these is broken down below, and compared against other frameworks in
+[Framework Comparison](#framework-comparison).
+
 ## Core Framework (@onebun/core)
 
 ### Dependency Injection & Modules

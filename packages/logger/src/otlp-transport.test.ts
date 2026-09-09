@@ -515,3 +515,151 @@ describe('OtlpLogTransport', () => {
     });
   });
 });
+
+/**
+ * Delivery failures.
+ *
+ * `flush()` never inspected the response, so a 503, a 404 and a success were indistinguishable —
+ * a misconfigured endpoint swallowed every log line without a word. And the buffer was cleared
+ * BEFORE the fetch, so by the time the collector rejected a batch the records were already gone:
+ * nothing to retry, nothing to name in a report.
+ */
+describe('OtlpLogTransport delivery failures', () => {
+  const HTTP_UNAVAILABLE = 503;
+  const HTTP_BAD_REQUEST = 400;
+
+  /** A transport whose collector answers with `status`, and the failures it reported. */
+  function failingTransport(status: number, overrides: Record<string, unknown> = {}) {
+    const failures: Array<{ message: string; recordCount: number }> = [];
+    let calls = 0;
+    const mockFetch = mock(async () => {
+      calls += 1;
+
+      return new Response('collector said no', { status, statusText: 'Rejected' });
+    });
+
+    const transport = new OtlpLogTransport({
+      endpoint: 'http://localhost:4318',
+      batchTimeout: NO_AUTO_FLUSH_TIMEOUT,
+      fetchFn: mockFetch as any,
+      onExportFailure(error: Error, recordCount: number) {
+        failures.push({ message: error.message, recordCount });
+      },
+      ...overrides,
+    } as any);
+
+    return { transport, failures, callCount: () => calls };
+  }
+
+  test('should report a non-2xx instead of treating it as delivered', async () => {
+    const { transport, failures } = failingTransport(HTTP_UNAVAILABLE);
+
+    await Effect.runPromise(transport.log('x', makeEntry()));
+    await transport.flush();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0].recordCount).toBe(1);
+    // The status, and what the collector said. "503" alone does not separate a restarting
+    // collector from a rejected payload, and that is the distinction a reader needs.
+    expect(failures[0].message).toContain('503');
+    expect(failures[0].message).toContain('collector said no');
+  });
+
+  test('should keep a batch a retryable failure could still deliver', async () => {
+    const { transport, failures, callCount } = failingTransport(HTTP_UNAVAILABLE);
+
+    await Effect.runPromise(transport.log('x', makeEntry({ message: 'first' })));
+    await transport.flush();
+
+    expect(failures).toHaveLength(1);
+
+    // Still in hand: the next flush sends it again rather than sending nothing.
+    await transport.flush();
+
+    expect(callCount()).toBe(2);
+    expect(failures).toHaveLength(2);
+  });
+
+  test('should discard a batch the collector will reject identically', async () => {
+    const { transport, failures, callCount } = failingTransport(HTTP_BAD_REQUEST);
+
+    await Effect.runPromise(transport.log('x', makeEntry()));
+    await transport.flush();
+    await transport.flush();
+
+    // A 400 means the payload itself was refused; holding it would fill the buffer with records
+    // that can never leave and push out the ones that could.
+    expect(callCount()).toBe(1);
+    expect(failures).toHaveLength(1);
+  });
+
+  test('should hold a batch through a transport failure with no response at all', async () => {
+    const failures: Array<{ recordCount: number }> = [];
+    let calls = 0;
+    const mockFetch = mock(async () => {
+      calls += 1;
+      throw new Error('connect ECONNREFUSED');
+    });
+
+    const transport = new OtlpLogTransport({
+      endpoint: 'http://localhost:4318',
+      batchTimeout: NO_AUTO_FLUSH_TIMEOUT,
+      fetchFn: mockFetch as any,
+      onExportFailure(_error: Error, recordCount: number) {
+        failures.push({ recordCount });
+      },
+    } as any);
+
+    await Effect.runPromise(transport.log('x', makeEntry()));
+    await transport.flush();
+    await transport.flush();
+
+    // A collector being restarted looks exactly like this.
+    expect(calls).toBe(2);
+    expect(failures).toHaveLength(2);
+  });
+
+  test('should bound the buffer when the collector stays down', async () => {
+    const MAX_BUFFERED = 3;
+    const WRITTEN = 5;
+    const { transport, failures } = failingTransport(HTTP_UNAVAILABLE, {
+      maxBufferedRecords: MAX_BUFFERED,
+      batchSize: WRITTEN + 1,
+    });
+
+    for (let i = 0; i < WRITTEN; i++) {
+      await Effect.runPromise(transport.log('x', makeEntry({ message: `entry-${i}` })));
+    }
+    await transport.flush();
+
+    // A logger that kills the application to preserve its own backlog has its priorities
+    // backwards — and the drop is announced rather than silent, which is the whole point.
+    expect(failures).toHaveLength(1);
+    expect(failures[0].message).toContain('dropped 2 buffered record(s)');
+  });
+
+  test('should not re-queue during shutdown', async () => {
+    const { transport, failures, callCount } = failingTransport(HTTP_UNAVAILABLE);
+
+    await Effect.runPromise(transport.log('x', makeEntry()));
+    await transport.shutdown();
+
+    // Nothing will flush again after this, so holding the batch would only hide the loss.
+    expect(callCount()).toBe(1);
+    expect(failures).toHaveLength(1);
+  });
+
+  test('should stay quiet when delivery succeeds', async () => {
+    const failures: unknown[] = [];
+    const { transport } = createTestTransport({
+      onExportFailure: () => failures.push(1),
+    });
+
+    await Effect.runPromise(transport.log('x', makeEntry()));
+    await transport.flush();
+    await transport.flush();
+
+    // The second flush finds an empty buffer: a delivered batch is not held.
+    expect(failures).toHaveLength(0);
+  });
+});

@@ -26,6 +26,7 @@ import type {
 
 import { RedisClient } from '../../redis/redis-client';
 import { SharedRedisProvider } from '../../redis/shared-redis';
+import { inRootTraceScope } from '../../trace-scope';
 import {
   acknowledgesAutomatically,
   nackedError,
@@ -33,8 +34,24 @@ import {
   wasNacked,
   type NackAwareMessage,
 } from '../ack-mode';
-import { createQueuePatternMatcher, type QueuePatternMatch } from '../pattern-matcher';
+import {
+  createQueuePatternMatcher,
+  isQueuePattern,
+  type QueuePatternMatch,
+} from '../pattern-matcher';
+import { toRedisQueueGlob } from '../redis-glob';
+import { resolveMaxAttempts, retryDelayMs } from '../retry';
 import { QueueScheduler } from '../scheduler';
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+/** Ceiling for the poll backoff, so an outage never stretches recovery past a second. */
+const MAX_POLL_INTERVAL_MS = 1000;
+
+/** Doublings applied before the ceiling takes over; bounds the exponent, not the delay. */
+const MAX_POLL_BACKOFF_DOUBLINGS = 6;
 
 // ============================================================================
 // Types
@@ -57,6 +74,22 @@ export interface RedisQueueOptions {
   pollInterval?: number;
 }
 
+/**
+ * What a queued message looks like on the list.
+ *
+ * `attempt` is the one field the wire format carries beyond the message itself: a retry is a
+ * re-push, so the counter has to travel with the message or it restarts at 1 in whichever
+ * process claims it next. Absent on a first publish, which reads as attempt 1.
+ */
+interface RedisQueueEnvelope {
+  id: string;
+  pattern: string;
+  data: unknown;
+  timestamp: number;
+  metadata?: MessageMetadata;
+  attempt?: number;
+}
+
 interface RedisSubscriptionEntry {
   pattern: string;
   handler: MessageHandler;
@@ -64,6 +97,14 @@ interface RedisSubscriptionEntry {
   matcher: (topic: string) => QueuePatternMatch;
   paused: boolean;
   consumerGroup?: string;
+  /**
+   * Set by `drainTopic` when a command against Redis fails, read and cleared by the poll loop.
+   *
+   * `drainTopic` reports and returns rather than throwing, because one unreachable topic must
+   * not abort the others in a pattern subscription. That leaves the poll loop unable to
+   * distinguish a failed drain from an empty queue, which is what the backoff needs to know.
+   */
+  drainFailed?: boolean;
 }
 
 // ============================================================================
@@ -76,6 +117,7 @@ interface RedisSubscriptionEntry {
 class RedisMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -91,6 +133,7 @@ class RedisMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
@@ -104,6 +147,7 @@ class RedisMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -212,15 +256,15 @@ export class RedisQueueAdapter implements QueueAdapter {
   private messageIdCounter = 0;
   private running = false;
   private delayedInterval?: ReturnType<typeof setInterval>;
+  private wakeSubscribed = false;
 
   // Key prefixes
   private keys = {
     delayed: 'queue:delayed',
     priority: 'queue:priority',
     queue: (pattern: string) => `queue:q:${pattern}`,
-    channel: (pattern: string) => `queue:ch:${pattern}`,
+    wake: 'queue:wake',
     processing: (group: string) => `queue:processing:${group}`,
-    deadLetter: (pattern: string) => `queue:dlq:${pattern}`,
   };
 
   // Event handlers
@@ -242,9 +286,8 @@ export class RedisQueueAdapter implements QueueAdapter {
       delayed: `${prefix}queue:delayed`,
       priority: `${prefix}queue:priority`,
       queue: (pattern: string) => `${prefix}queue:q:${pattern}`,
-      channel: (pattern: string) => `${prefix}queue:ch:${pattern}`,
+      wake: `${prefix}queue:wake`,
       processing: (group: string) => `${prefix}queue:processing:${group}`,
-      deadLetter: (pattern: string) => `${prefix}queue:dlq:${pattern}`,
     };
   }
 
@@ -312,6 +355,11 @@ export class RedisQueueAdapter implements QueueAdapter {
     // Clear subscriptions
     this.subscriptions = [];
 
+    // The wake subscription belongs to the connection, so a reconnect has to establish it again.
+    // Leaving the flag set would leave the adapter believing it is listening when it is not, and
+    // delivery would silently fall back to the poll interval.
+    this.wakeSubscribed = false;
+
     // Disconnect client only if we own it
     if (this.ownsClient && this.client) {
       await this.client.disconnect();
@@ -348,14 +396,14 @@ export class RedisQueueAdapter implements QueueAdapter {
     if (options?.delay && options.delay > 0) {
       // Delayed message - use sorted set
       const score = timestamp + options.delay;
-      await this.client!.raw('ZADD', this.keys.delayed, String(score), serialized);
+      await this.client!.zadd(this.keys.delayed, score, serialized);
     } else if (options?.priority && options.priority > 0) {
       // Priority message - use sorted set with negative priority (higher = more important)
-      await this.client!.raw('ZADD', this.keys.priority, String(-options.priority), serialized);
+      await this.client!.zadd(this.keys.priority, -options.priority, serialized);
     } else {
       // Normal message - push to list and publish to channel
-      await this.client!.raw('RPUSH', this.keys.queue(pattern), serialized);
-      await this.client!.publish(this.keys.channel(pattern), serialized);
+      await this.client!.rpush(this.keys.queue(pattern), serialized);
+      await this.client!.publish(this.keys.wake, pattern);
     }
 
     return messageId;
@@ -394,23 +442,15 @@ export class RedisQueueAdapter implements QueueAdapter {
       consumerGroup: options?.group,
     };
 
+    // Fails here, at the call that named the pattern, rather than producing a glob that quietly
+    // matches the wrong keys.
+    toRedisQueueGlob(pattern);
+
     this.subscriptions.push(entry);
+    await this.ensureWakeSubscription();
 
-    // Subscribe to Redis pub/sub channel
-    await this.client!.subscribe(this.keys.channel(pattern), (message) => {
-      if (entry.paused) {
-        return;
-      }
-
-      try {
-        const parsed = JSON.parse(message);
-        this.processMessage(entry, parsed);
-      } catch {
-        // Silently ignore message parsing errors
-      }
-    });
-
-    // Also start polling the queue for messages that were published before subscription
+    // The poll loop covers what pub/sub cannot: messages published before this subscription
+    // existed, and any notification missed while disconnected.
     this.startQueuePolling(entry);
 
     const subscription = new RedisSubscription(entry, async () => {
@@ -418,19 +458,74 @@ export class RedisQueueAdapter implements QueueAdapter {
       if (index !== -1) {
         this.subscriptions.splice(index, 1);
       }
-      await this.client!.unsubscribe(this.keys.channel(pattern));
+
+      // The wake channel is shared by every subscription on this adapter, so it is released only
+      // when the last one goes. Unsubscribing per entry would silence the others.
+      if (this.subscriptions.length === 0 && this.wakeSubscribed) {
+        this.wakeSubscribed = false;
+        await this.client!.unsubscribe(this.keys.wake);
+      }
     });
 
     return subscription;
+  }
+
+  /**
+   * Subscribe the one wake channel, once per adapter.
+   *
+   * There is a single channel rather than one per topic because a pattern subscription does not
+   * know the topics it will match: `orders.{id}` cannot subscribe to a per-topic channel for
+   * `orders.123` before anyone publishes it. The frame carries the TOPIC, every subscription
+   * tests it with its own
+   * in-process matcher, and a match claims the message from that topic's list with an atomic LPOP.
+   *
+   * Bun's client has no usable `psubscribe` — it offers no listener form and drops pattern
+   * messages — so a channel-glob design is not available.
+   */
+  private async ensureWakeSubscription(): Promise<void> {
+    if (this.wakeSubscribed) {
+      return;
+    }
+
+    this.wakeSubscribed = true;
+
+    await this.client!.subscribe(this.keys.wake, (topic: string) => {
+      for (const entry of [...this.subscriptions]) {
+        if (!entry.matcher(topic).matched) {
+          continue;
+        }
+
+        void this.drainTopic(entry, topic).catch((error: unknown) => {
+          this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+        });
+      }
+    });
   }
 
   // ============================================================================
   // Features
   // ============================================================================
 
-  supports(_feature: QueueFeature): boolean {
-    // Redis supports all features
-    return true;
+  /**
+   * One `case` per member of `QueueFeature`, never a blanket `return true`.
+   *
+   * The blanket form advertised every feature the union would ever gain, which is how this
+   * adapter came to report `dead-letter-queue` and `retry` as available while reading neither
+   * option. An explicit switch means the next feature added to the union arrives as a
+   * compile-time gap here rather than as a claim nobody made.
+   */
+  supports(feature: QueueFeature): boolean {
+    switch (feature) {
+      case 'delayed-messages':
+      case 'priority':
+      case 'pattern-subscriptions':
+      case 'consumer-groups':
+      case 'retry':
+      case 'dead-letter-queue':
+        return true;
+      default:
+        return false;
+    }
   }
 
   // ============================================================================
@@ -466,14 +561,28 @@ export class RedisQueueAdapter implements QueueAdapter {
     return `msg-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /**
+   * Invoke every listener for an event, isolating each from the others.
+   *
+   * The swallow is deliberate and is the one bare catch that stays. A listener is application
+   * code: one that throws must not abort the listeners after it, and must not propagate into
+   * the delivery path that emitted the event — a broken `@OnMessageFailed` handler would
+   * otherwise turn a reported failure into a second, different failure.
+   *
+   * Re-emitting the listener's own error as `onError` would be worse than silence: an `onError`
+   * handler that throws would re-enter this loop with its own throw, forever. So the failure is
+   * reported to `console.error` — the one place in this adapter that does not route through the
+   * framework, precisely because the framework's own reporting channel is what just failed.
+   */
   private emit<E extends keyof QueueEvents>(event: E, ...args: unknown[]): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
           handler(...args);
-        } catch {
-          // Silently ignore event handler errors
+        } catch (error) {
+          // eslint-disable-next-line no-console -- see above: the logger path is the one that failed
+          console.error(`[RedisQueueAdapter] a "${event}" listener threw`, error);
         }
       }
     }
@@ -481,13 +590,7 @@ export class RedisQueueAdapter implements QueueAdapter {
 
   private async processMessage(
     entry: RedisSubscriptionEntry,
-    messageData: {
-      id: string;
-      pattern: string;
-      data: unknown;
-      timestamp: number;
-      metadata?: MessageMetadata;
-    },
+    messageData: RedisQueueEnvelope,
   ): Promise<void> {
     // Check if pattern matches
     const match = entry.matcher(messageData.pattern);
@@ -495,13 +598,28 @@ export class RedisQueueAdapter implements QueueAdapter {
       return;
     }
 
+    const tracked = tracksDelivery(entry.options);
+    const maxAttempts = resolveMaxAttempts(entry.options?.retry, entry.options?.deadLetter);
+    // The counter rides in the envelope, not in this process: a retry goes back onto the list,
+    // and the replica that claims it next may not be the one that failed. An in-memory counter
+    // would restart at 1 on every hop and turn `attempts: 3` into an unbounded loop.
+    const attempt = messageData.attempt ?? 1;
+
     const message = new RedisMessage(
       messageData.id,
       messageData.pattern,
+      // What THIS subscription's pattern captured from the delivered topic. The envelope
+      // carries the topic; the values are a function of the subscriber's pattern, so they are
+      // derived here rather than transported.
+      match.params,
       messageData.data,
       messageData.timestamp,
       messageData.metadata ?? {},
       {
+        // Inert under 'none', where nothing tracks delivery and there is no attempt to number.
+        redelivered: tracked ? attempt > 1 : false,
+        attempt: tracked ? attempt : undefined,
+        maxAttempts: tracked ? maxAttempts : undefined,
         onAck: async () => {
           // Remove from processing set if using consumer groups
           if (entry.consumerGroup) {
@@ -514,24 +632,25 @@ export class RedisQueueAdapter implements QueueAdapter {
         onNack: async (requeue) => {
           // Under 'none' the broker tracks nothing, so neither requeue nor dead-letter
           // routing can be honoured without inventing delivery state that does not exist.
-          if (!tracksDelivery(entry.options)) {
+          if (!tracked) {
             return;
           }
 
           if (requeue) {
-            // Re-queue the message
-            await this.client!.raw(
-              'LPUSH',
-              this.keys.queue(messageData.pattern),
-              JSON.stringify(messageData),
-            );
-          } else if (entry.options?.deadLetter) {
-            // Move to dead letter queue
-            await this.client!.raw(
-              'RPUSH',
-              this.keys.deadLetter(messageData.pattern),
-              JSON.stringify(messageData),
-            );
+            // Back to the head of the list, carrying an incremented counter so the next
+            // consumer knows which attempt it is running. Uncapped by design: `nack(true)` is
+            // the handler's instruction, and `Message.attempt` is how a handler stops itself.
+            await this.requeue(messageData, attempt + 1);
+          } else if (!acknowledgesAutomatically(entry.options)) {
+            // `nack(false)` under 'manual' is the handler saying "never redeliver this one" —
+            // the same terminal disposition as an exhausted retry budget, so it takes the same
+            // route. Without a `deadLetter` the message is simply dropped.
+            //
+            // Gated on the mode because under 'auto' the framework owns the disposition: the
+            // consume loop calls `nack(false)` as bookkeeping on EVERY failed attempt and then
+            // decides separately whether the budget is spent. Routing from both places
+            // dead-lettered a message once per attempt plus once more at the end.
+            await this.routeToDeadLetter(entry, messageData, attempt);
           }
         },
       },
@@ -541,7 +660,10 @@ export class RedisQueueAdapter implements QueueAdapter {
     this.emit('onMessageReceived', message);
 
     try {
-      await entry.handler(message);
+      // A delivered message begins its own trace. Context follows the async graph, so a
+      // message published from inside a request would otherwise make its handler — and every
+      // later retry of it — a child of that finished request.
+      await inRootTraceScope(async () => await entry.handler(message));
 
       // Auto-ack only in 'auto': 'manual' is the handler's job and 'none' acknowledges nothing.
       if (acknowledgesAutomatically(entry.options)) {
@@ -560,41 +682,301 @@ export class RedisQueueAdapter implements QueueAdapter {
       this.emit('onMessageFailed', message, error as Error);
 
       // Same rule on the failure side. Under 'none' the message is simply gone.
-      if (acknowledgesAutomatically(entry.options)) {
-        await message.nack(false);
+      if (!acknowledgesAutomatically(entry.options)) {
+        return;
       }
+
+      await message.nack(false);
+
+      if (attempt >= maxAttempts) {
+        // Exhausted: the terminal delivery. Route it, or drop it when nothing is configured.
+        await this.routeToDeadLetter(entry, messageData, attempt, error as Error);
+
+        return;
+      }
+
+      await this.scheduleRetry(messageData, attempt + 1, retryDelayMs(entry.options?.retry, attempt));
     }
   }
 
-  private startQueuePolling(entry: RedisSubscriptionEntry): void {
-    // Poll the queue for existing messages
-    const poll = async () => {
-      if (!this.running || entry.paused) {
+  /**
+   * Republish a terminally-failed message to its configured dead-letter queue.
+   *
+   * `deadLetter.queue` is a QUEUE PATTERN, not a Redis key, and the republish goes through this
+   * adapter's own `publish()` — so a plain `@Subscribe('orders.dead')` consumes it. The previous
+   * implementation RPUSHed to a hardcoded per-pattern DLQ list that nothing ever read:
+   * no LPOP, no SCAN, no subscription. A message sent there was unreachable by any subscriber,
+   * which made the feature indistinguishable from dropping the message.
+   *
+   * With no `deadLetter` configured the message is dropped, exactly as before.
+   *
+   * A message is dead-lettered AT MOST ONCE. The republished envelope carries
+   * `dlq.originalPattern` in its metadata, and a message arriving with that key already set is
+   * dropped rather than routed again — otherwise a dead-letter queue whose own subscriber throws
+   * would republish to itself forever. The marker shape matches the JetStream adapter's, so the
+   * two read the same on the consuming side.
+   */
+  private async routeToDeadLetter(
+    entry: RedisSubscriptionEntry,
+    messageData: RedisQueueEnvelope,
+    attempt: number,
+    error?: Error,
+  ): Promise<void> {
+    const queue = entry.options?.deadLetter?.queue;
+
+    if (queue === undefined) {
+      return;
+    }
+
+    const metadata = messageData.metadata ?? {};
+
+    if (metadata['dlq.originalPattern'] !== undefined) {
+      // Already dead-lettered once. Dropping here is the loop guard.
+      return;
+    }
+
+    try {
+      await this.publish(queue, messageData.data, {
+        messageId: messageData.id,
+        /* eslint-disable @typescript-eslint/naming-convention -- namespaced provenance keys;
+           the `dlq.` prefix keeps them from colliding with the caller's own metadata. */
+        metadata: {
+          ...metadata,
+          'dlq.originalPattern': messageData.pattern,
+          'dlq.deliveryCount': attempt,
+          'dlq.error': error?.message ?? 'negative acknowledgement',
+        },
+        /* eslint-enable @typescript-eslint/naming-convention */
+      });
+    } catch (cause) {
+      // Reported, not swallowed: a dead letter that could not be republished is a message lost
+      // in the one path that exists to not lose it.
+      this.emit(
+        'onError',
+        new Error(
+          `Failed to republish a dead letter from "${messageData.pattern}" to "${queue}"`,
+          { cause },
+        ),
+      );
+    }
+  }
+
+  /**
+   * Hand a failed message back for another attempt.
+   *
+   * The wait goes into Redis, not into a `sleep` here. A retry that waits in a closure is a
+   * message held by one process and written nowhere: kill that process and it is gone, exactly
+   * when the point of retrying was to not lose it. The delayed sorted set already exists for
+   * `publish({ delay })` and promotes to the same list, so the wait survives a restart and any
+   * replica can serve the redelivery.
+   *
+   * A zero delay skips the set: a score of `now` would still wait out a poll tick, which would
+   * quietly make `delay: 0` mean `pollInterval`.
+   */
+  private async scheduleRetry(
+    messageData: RedisQueueEnvelope,
+    attempt: number,
+    delayMs: number,
+  ): Promise<void> {
+    const serialized = JSON.stringify({ ...messageData, attempt });
+
+    if (delayMs > 0) {
+      await this.client!.zadd(this.keys.delayed, Date.now() + delayMs, serialized);
+
+      return;
+    }
+
+    await this.requeue(messageData, attempt);
+    // Wake a consumer for it rather than leaving it to the next poll tick.
+    await this.client!.publish(this.keys.wake, messageData.pattern);
+  }
+
+  /** Put a message back at the head of its topic list, stamped with the attempt it will be. */
+  private async requeue(messageData: RedisQueueEnvelope, attempt: number): Promise<void> {
+    await this.client!.lpush(
+      this.keys.queue(messageData.pattern),
+      JSON.stringify({ ...messageData, attempt }),
+    );
+  }
+
+  /**
+   * Take messages off ONE topic's list and run the handler for each.
+   *
+   * `LPOP` is the claim: it is atomic, so a message goes to exactly one consumer even when several
+   * replicas drain the same list. That is what makes the list the single source of truth and the
+   * wake channel a signal rather than a second delivery path.
+   *
+   * The topic is concrete, never the subscription's pattern — `queue:q:orders.{id}` is a key
+   * nobody writes to, which is what made pattern subscriptions silently dead.
+   *
+   * Bounded per call so one busy topic cannot starve the others sharing this event loop.
+   */
+  private async drainTopic(
+    entry: RedisSubscriptionEntry,
+    topic: string,
+    maxMessages = 50,
+  ): Promise<void> {
+    if (!this.running || entry.paused || !this.client) {
+      return;
+    }
+
+    for (let drained = 0; drained < maxMessages; drained++) {
+      let result: string | null;
+
+      try {
+        result = await this.client.lpop(this.keys.queue(topic));
+      } catch (error) {
+        // Reported, not discarded. This was a bare `catch {}`, so a poll that could not reach
+        // Redis looked exactly like an empty queue: messages sat in the list, no consumer ran,
+        // and nothing was logged. The flag lets the poll loop back off — reporting alone turns a
+        // 100 ms poll against a dead broker into ten error events a second.
+        entry.drainFailed = true;
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+
+        return;
+      }
+
+      if (!result) {
         return;
       }
 
       try {
-        // Get message from queue (LPOP for FIFO)
-        const result = await this.client!.raw<string | null>(
-          'LPOP',
-          this.keys.queue(entry.pattern),
-        );
+        // `topic` — the key this LPOP claimed from — is deliberately not passed on. The
+        // envelope's own `pattern` is the authoritative delivered topic: it is what the
+        // publisher wrote, it is what a requeue copies verbatim, and it is what
+        // `processMessage` captures `Message.params` from. Threading `topic` in as well would
+        // create two candidate topics and a way for the captures to come from the wrong one.
+        await this.processMessage(entry, JSON.parse(result));
+      } catch (error) {
+        // The message is already claimed at this point, so a handler failure must not stop the
+        // drain — the next message is a different message.
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+      }
 
-        if (result) {
-          const messageData = JSON.parse(result);
-          await this.processMessage(entry, messageData);
+      if (entry.paused || !this.running) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * Every queue key this subscription could own, resolved from the server.
+   *
+   * `SCAN`, never `KEYS`: this runs once per poll interval per pattern subscription (100 ms by
+   * default), and `KEYS` walks the whole keyspace with the server blocked for the duration.
+   *
+   * The glob is a superset — Redis globs are character-based, so `orders.*` also matches
+   * `orders.a.b` — and the in-process matcher is what decides. Widening here and narrowing there
+   * is the only safe order; a narrower glob would drop messages the pattern does say it wants.
+   */
+  private async scanTopics(entry: RedisSubscriptionEntry): Promise<string[]> {
+    if (!this.client) {
+      return [];
+    }
+
+    const keyPrefix = this.keys.queue('');
+    const match = `${keyPrefix}${toRedisQueueGlob(entry.pattern)}`;
+    const topics: string[] = [];
+    let cursor = '0';
+
+    do {
+      const reply = await this.client.raw<[string, string[]]>(
+        'SCAN', cursor, 'MATCH', match, 'COUNT', '100',
+      );
+
+      if (!Array.isArray(reply) || reply.length < 2) {
+        return topics;
+      }
+
+      cursor = String(reply[0]);
+      const keys = Array.isArray(reply[1]) ? reply[1] : [];
+
+      for (const key of keys) {
+        const topic = String(key).slice(keyPrefix.length);
+        if (topic.length > 0 && entry.matcher(topic).matched) {
+          topics.push(topic);
         }
-      } catch {
-        // Silently ignore polling errors
+      }
+    } while (cursor !== '0');
+
+    return topics;
+  }
+
+  private startQueuePolling(entry: RedisSubscriptionEntry): void {
+    // Consecutive failures for THIS subscription. Reset by the first poll that gets through.
+    let consecutiveFailures = 0;
+
+    // Poll the queue for messages published before this subscription existed, and as the
+    // fallback path when a pub/sub notification is missed.
+    const poll = async () => {
+      let failed = false;
+
+      try {
+        // An exact pattern owns exactly one key, so ask for it directly. A pattern subscription
+        // has to discover the topics that exist — SCAN, because this runs every pollInterval.
+        if (isQueuePattern(entry.pattern)) {
+          for (const topic of await this.scanTopics(entry)) {
+            await this.drainTopic(entry, topic);
+          }
+        } else {
+          await this.drainTopic(entry, entry.pattern);
+        }
+
+        failed = this.consumeDrainFailure(entry);
+      } catch (error) {
+        // The whole body is guarded, not just the SCAN. `poll` is invoked without an `await`
+        // below and re-scheduled by a bare `setTimeout`, so anything escaping here becomes a
+        // process-level unhandled rejection rather than a queue error the adapter can report.
+        failed = true;
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
+      }
+
+      if (failed) {
+        consecutiveFailures += 1;
+      } else {
+        consecutiveFailures = 0;
       }
 
       // Continue polling
       if (this.running && this.subscriptions.includes(entry)) {
-        setTimeout(poll, this.options.pollInterval);
+        setTimeout(poll, this.pollDelay(consecutiveFailures));
       }
     };
 
-    poll();
+    void poll();
+  }
+
+  /**
+   * Whether the drain just attempted for `entry` reported a failure, clearing the flag.
+   *
+   * `drainTopic` reports its own errors and returns normally, so the poll loop cannot tell a
+   * failed drain from an empty queue by control flow alone — which is exactly how an unreachable
+   * Redis used to look identical to "nothing to do". The flag is how the two are told apart.
+   */
+  private consumeDrainFailure(entry: RedisSubscriptionEntry): boolean {
+    const failed = entry.drainFailed === true;
+    entry.drainFailed = false;
+
+    return failed;
+  }
+
+  /**
+   * How long to wait before the next poll, given consecutive failures.
+   *
+   * A failing poll used to be retried at the full rate — with a 100 ms interval and an
+   * unreachable Redis that is ten connection attempts and ten error events per second, per
+   * subscription. Backing off exponentially to a one-second ceiling keeps the loop alive for the
+   * reconnect without turning an outage into a flood; the ceiling is low enough that recovery is
+   * still prompt, and a single success resets it.
+   */
+  private pollDelay(consecutiveFailures: number): number {
+    if (consecutiveFailures === 0) {
+      return this.options.pollInterval;
+    }
+
+    const backoff = this.options.pollInterval * 2 ** Math.min(consecutiveFailures, MAX_POLL_BACKOFF_DOUBLINGS);
+
+    return Math.min(backoff, MAX_POLL_INTERVAL_MS);
   }
 
   private startDelayedProcessor(): void {
@@ -607,46 +989,33 @@ export class RedisQueueAdapter implements QueueAdapter {
         const now = Date.now();
 
         // Get delayed messages that are ready
-        const messages = await this.client.raw<string[]>(
-          'ZRANGEBYSCORE',
-          this.keys.delayed,
-          '0',
-          String(now),
-          'LIMIT',
-          '0',
-          '100',
-        );
+        const messages = await this.client.zrangebyscore(this.keys.delayed, '0', String(now), 100);
 
         if (messages && messages.length > 0) {
           for (const msg of messages) {
             // Remove from delayed set
-            await this.client.raw('ZREM', this.keys.delayed, msg);
+            await this.client.zrem(this.keys.delayed, msg);
 
             // Parse and publish
             const messageData = JSON.parse(msg);
-            await this.client.raw('RPUSH', this.keys.queue(messageData.pattern), msg);
-            await this.client.publish(this.keys.channel(messageData.pattern), msg);
+            await this.client.rpush(this.keys.queue(messageData.pattern), msg);
+            await this.client.publish(this.keys.wake, String(messageData.pattern));
           }
         }
 
         // Also process priority queue
-        const priorityMessages = await this.client.raw<string[]>(
-          'ZPOPMIN',
-          this.keys.priority,
-          '10',
-        );
+        const priorityMessages = await this.client.zpopmin(this.keys.priority, 10);
 
-        if (priorityMessages && priorityMessages.length > 0) {
-          // ZPOPMIN returns [member, score, member, score, ...]
-          for (let i = 0; i < priorityMessages.length; i += 2) {
-            const msg = priorityMessages[i];
-            const messageData = JSON.parse(msg);
-            await this.client.raw('RPUSH', this.keys.queue(messageData.pattern), msg);
-            await this.client.publish(this.keys.channel(messageData.pattern), msg);
-          }
+        for (const { member } of priorityMessages) {
+          const messageData = JSON.parse(member);
+          await this.client.rpush(this.keys.queue(messageData.pattern), member);
+          await this.client.publish(this.keys.wake, String(messageData.pattern));
         }
-      } catch {
-        // Silently ignore delayed message processing errors
+      } catch (error) {
+        // Reported rather than discarded: a delayed or priority message that cannot be promoted
+        // to its queue never fires, and the bare catch this replaces made that indistinguishable
+        // from "nothing was due".
+        this.emit('onError', error instanceof Error ? error : new Error(String(error)));
       }
     }, this.options.pollInterval);
   }

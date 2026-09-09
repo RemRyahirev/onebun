@@ -7,6 +7,7 @@
  * different answers from the same options object.
  */
 
+import type { QueueAdapterConstructor, BuiltInAdapterType } from '../queue/types';
 import type { QueueApplicationOptions } from '../types';
 
 /**
@@ -83,4 +84,32 @@ export function resolveQueueEnablement(
   const enabled = queueOptions?.enabled === true || hasQueueHandlers || hasAdapterConfig;
 
   return { enabled, hasAdapterConfig, contradiction: false };
+}
+
+/**
+ * Which adapter the application's queue options select.
+ *
+ * `queue.redis` used to enable the queue without selecting the Redis adapter — the choice was
+ * `queue.adapter ?? 'memory'` and never consulted `redis`. So `queue: { redis: { url } }` booted
+ * an in-memory queue, logged "in-memory adapter", and discarded every Redis setting silently.
+ * Messages stayed in-process; nothing reached the broker and nothing said so. Enablement and
+ * selection were two decisions where the configuration reads like one.
+ *
+ * An explicit `adapter` always wins, including `adapter: 'memory'` alongside a `redis` block —
+ * that is a legible choice (Redis settings staged for later, or a local override) and inference
+ * must not overrule what the caller wrote.
+ *
+ * Pure, and exported, so the selection is provable without constructing an adapter or reaching a
+ * broker: the reason this stayed broken is that the only way to observe it was to boot Redis.
+ *
+ * @see docs:api/queue.md
+ */
+export function resolveQueueAdapterType(
+  queueOptions: QueueApplicationOptions | undefined,
+): BuiltInAdapterType | QueueAdapterConstructor {
+  if (queueOptions?.adapter !== undefined) {
+    return queueOptions.adapter as BuiltInAdapterType | QueueAdapterConstructor;
+  }
+
+  return queueOptions?.redis !== undefined ? 'redis' : 'memory';
 }

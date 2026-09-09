@@ -25,6 +25,7 @@ import type {
 import {
   createQueuePatternMatcher,
   createQueueScheduler,
+  inRootTraceScope,
   nackedError,
   resolveAckMode,
   wasNacked,
@@ -46,6 +47,7 @@ import { toNatsSubject } from './subject';
 class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -59,12 +61,14 @@ class NatsQueueMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -413,14 +417,24 @@ export class NatsQueueAdapter implements QueueAdapter {
     return `nats-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /**
+   * Invoke every listener for an event, isolating each from the others.
+   *
+   * The swallow is deliberate: a listener is application code, and one that throws must not abort
+   * the listeners after it nor propagate into the delivery path that emitted the event. Reporting
+   * it as `onError` would let a throwing `onError` handler recurse forever, so it goes to
+   * `console.error` — the one path here that does not route through the framework, because the
+   * framework's reporting channel is what just failed.
+   */
   private emit<E extends keyof QueueEvents>(event: E, ...args: unknown[]): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
           handler(...args);
-        } catch {
-          // Silently ignore event handler errors
+        } catch (error) {
+          // eslint-disable-next-line no-console -- the framework's own reporting channel is what failed
+          console.error(`[NatsQueueAdapter] a "${event}" listener threw`, error);
         }
       }
     }
@@ -439,6 +453,9 @@ export class NatsQueueAdapter implements QueueAdapter {
       const message = new NatsQueueMessage(
         messageData.id || this.generateMessageId(),
         messageData.pattern || natsMsg.subject,
+        // `{id}` widened to `*` on the wire, so the broker cannot capture anything — the
+        // values come from the in-process match that just narrowed the subject back.
+        match.params,
         messageData.data,
         messageData.timestamp || Date.now(),
         messageData.metadata || {},
@@ -448,7 +465,10 @@ export class NatsQueueAdapter implements QueueAdapter {
       this.emit('onMessageReceived', message);
 
       try {
-        await entry.handler(message);
+        // A delivered message begins its own trace. Context follows the async graph, so a
+        // message published from inside a request would otherwise make its handler — and every
+        // later retry of it — a child of that finished request.
+        await inRootTraceScope(async () => await entry.handler(message));
 
         // A handler that catches its own exception and nacks returns normally, so control
         // flow alone cannot tell the drop apart from a success.
@@ -461,8 +481,18 @@ export class NatsQueueAdapter implements QueueAdapter {
         // A throw is the failure, whether or not the handler also nacked — one event either way.
         this.emit('onMessageFailed', message, error as Error);
       }
-    } catch {
-      // Silently ignore message parsing errors
+    } catch (error) {
+      // A payload this adapter cannot parse is a poison message, and dropping it without a word
+      // is how an undeliverable message becomes indistinguishable from one that was never sent.
+      // Core NATS cannot `term()` it — there is no acknowledgement protocol — so reporting is the
+      // only disposition available, and it is the one `JetStreamQueueAdapter` already takes.
+      this.emit(
+        'onError',
+        new Error(
+          `NatsQueueAdapter could not parse a message on subject "${natsMsg.subject}"`,
+          { cause: error },
+        ),
+      );
     }
   }
 }

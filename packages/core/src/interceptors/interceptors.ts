@@ -296,6 +296,23 @@ export class TimeoutInterceptor extends BaseInterceptor {
 
   constructor(timeoutMs: number) {
     super();
+
+    // Rejected at CONSTRUCTION, because the alternative failure is silent and misleading.
+    // `@UseInterceptors(TimeoutInterceptor)` — the class rather than an instance — is a natural
+    // mistake: every other shipped interceptor is used that way. The framework then builds this
+    // one with no arguments, `timeoutMs` is `undefined`, `setTimeout(fn, undefined)` fires on the
+    // next tick, and EVERY request answers 408 with "Request timed out after undefinedms".
+    //
+    // A number cannot come from dependency injection, so unlike a service dependency this can
+    // never be resolved for the caller — the only useful thing to do is say so immediately.
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError(
+        'TimeoutInterceptor requires a positive timeout in milliseconds. '
+        + 'Pass an INSTANCE, not the class: `@UseInterceptors(new TimeoutInterceptor(5000))`. '
+        + `Received: ${String(timeoutMs)}`,
+      );
+    }
+
     this.timeoutMs = timeoutMs;
   }
 

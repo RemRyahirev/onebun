@@ -26,7 +26,9 @@ import {
   OnQueueReady,
   Subscribe,
   createQueuePatternMatcher,
+  getLifecycleHandlers,
   getSubscribeMetadata,
+  resolveAckMode,
 } from '@onebun/core';
 
 
@@ -69,35 +71,95 @@ describe('Pattern Syntax translation table (docs/api/queue.md)', () => {
   });
 });
 
+/** `JetStreamApiCodes.StreamNotFound` — the only rejection the adapter reads as absence. */
+const STREAM_NOT_FOUND_CODE = 10059;
+
+/**
+ * A `NatsQueueAdapter` whose transport is a recorder, so the pub/sub the docs describe can be
+ * observed in process. Core NATS needs a live broker for anything else, and `connect()` is the
+ * only seam — it is substituted on the instance, never through `mock.module`.
+ */
+function connectedNatsAdapter(options: NatsAdapterOptions = { servers: 'nats://localhost:4222' }) {
+  const adapter = new NatsQueueAdapter(options);
+  const handle: AnyRecord = {
+    unsubscribe: mock(() => undefined),
+    drain: mock(() => Promise.resolve()),
+  };
+  const client: AnyRecord = {
+    connect: mock(() => Promise.resolve()),
+    disconnect: mock(() => Promise.resolve()),
+    isConnected: mock(() => true),
+    publish: mock(() => Promise.resolve()),
+    subscribe: mock(() => Promise.resolve(handle)),
+  };
+  (adapter as unknown as AnyRecord).client = client;
+
+  return { adapter, client, handle };
+}
+
 /**
  * @source docs:api/queue.md#natsqueueadapter
  */
-describe('Basic NATS (Pub/Sub) Example (README.md)', () => {
-  it('should create NatsQueueAdapter with options', () => {
-    // From README.md: Basic NATS (Pub/Sub) section
+describe('Basic NATS (Pub/Sub) Example (docs/api/queue.md)', () => {
+  it('should create NatsQueueAdapter with options', async () => {
+    // From docs/api/queue.md: the framework instantiates the adapter with
+    // `new Adapter(queue.options)` and uses it as the queue backend — so `type` is what
+    // selects it, and everything after connect() has to reach the NATS transport.
     const options: NatsAdapterOptions = {
       servers: 'nats://localhost:4222',
     };
 
-    const adapter = new NatsQueueAdapter(options);
+    const { adapter, client } = connectedNatsAdapter(options);
 
     expect(adapter.name).toBe('nats');
     expect(adapter.type).toBe('nats');
+    expect(adapter.isConnected()).toBe(false);
+
+    let ready = 0;
+    adapter.on('onReady', () => {
+      ready += 1;
+    });
+
+    await adapter.connect();
+
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    expect(ready).toBe(1);
+    expect(adapter.isConnected()).toBe(true);
+
+    // Fire-and-forget pub/sub: the published envelope goes straight out on the subject.
+    const id = await adapter.publish('orders.created', { orderId: 7 });
+    const [subject, payload] = client.publish.mock.calls[0] as [string, string];
+
+    expect(subject).toBe('orders.created');
+    expect(JSON.parse(payload)).toMatchObject({ id, pattern: 'orders.created', data: { orderId: 7 } });
+
+    await adapter.disconnect();
+
+    expect(client.disconnect).toHaveBeenCalledTimes(1);
+    expect(adapter.isConnected()).toBe(false);
   });
 });
 
 /**
  * @source docs:api/queue.md#jetstreamqueueadapter
  */
-describe('JetStream (Persistent) Example (README.md)', () => {
-  it('should create JetStreamQueueAdapter with multi-stream configuration', () => {
-    // From README.md: JetStream (Persistent) section
+describe('JetStream (Persistent) Example (docs/api/queue.md)', () => {
+  it('should create JetStreamQueueAdapter with multi-stream configuration', async () => {
+    // From docs/api/queue.md: "`streamDefaults` is merged into each stream definition
+    // (per-stream values take priority)", and every declared stream is reconciled during
+    // startup — created when the server does not have it yet.
+    // `maxAge` is in the defaults on purpose: `retention`, `storage` and `replicas` have
+    // create-path fallbacks of exactly 'limits'/'file'/1, so declaring those alone could not
+    // tell a merged default apart from the fallback. Nothing supplies a `max_age`.
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
-      streamDefaults: { retention: 'limits', storage: 'file' },
+      streamDefaults: {
+        retention: 'limits', storage: 'file', replicas: 1, maxAge: 24 * 60 * 60 * 1e9,
+      },
       streams: [
         { name: 'EVENTS', subjects: ['events.>'] },
-        { name: 'agent_events', subjects: ['agent.events.>'] },
+        { name: 'agent_events', subjects: ['agent.events.>'], maxAge: 7 * 24 * 60 * 60 * 1e9 },
+        { name: 'agent_dlq', subjects: ['agent.dlq.>'], storage: 'memory' },
       ],
     };
 
@@ -105,16 +167,51 @@ describe('JetStream (Persistent) Example (README.md)', () => {
 
     expect(adapter.name).toBe('jetstream');
     expect(adapter.type).toBe('jetstream');
+
+    const jsm: AnyRecord = {
+      streams: {
+        // Nothing exists on the server yet, so every declared stream takes the create path.
+        info: mock(() => Promise.reject(
+          Object.assign(new Error('stream not found'), { code: STREAM_NOT_FOUND_CODE }),
+        )),
+        add: mock(() => Promise.resolve()),
+        update: mock(() => Promise.resolve()),
+      },
+    };
+    (adapter as unknown as AnyRecord).jsm = jsm;
+
+    await (adapter as unknown as AnyRecord).ensureAllStreams();
+
+    const created = jsm.streams.add.mock.calls.map((call: AnyRecord[]) => call[0]);
+
+    expect(created.map((config: AnyRecord) => config.name)).toEqual(['EVENTS', 'agent_events', 'agent_dlq']);
+    // streamDefaults reaches every declared stream...
+    expect(created[0]).toMatchObject({
+      subjects: ['events.>'],
+      retention: 'limits',
+      storage: 'file',
+      num_replicas: 1,
+      max_age: 24 * 60 * 60 * 1e9,
+    });
+    // ...and a per-stream value takes priority over it, field by field.
+    expect(created[1]).toMatchObject({
+      subjects: ['agent.events.>'], storage: 'file', max_age: 7 * 24 * 60 * 60 * 1e9,
+    });
+    expect(created[2]).toMatchObject({
+      subjects: ['agent.dlq.>'], storage: 'memory', max_age: 24 * 60 * 60 * 1e9,
+    });
+    // Reconciled, not blind-written: the server had none of them, so the update path is unused.
+    expect(jsm.streams.update).not.toHaveBeenCalled();
   });
 });
 
 /**
  * @source docs:api/queue.md#feature-support-matrix
  */
-describe('Feature Comparison (README.md)', () => {
-  it('should report correct NatsQueueAdapter features', () => {
-    // From README.md: Feature Comparison table
-    const adapter = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
+describe('Feature Comparison (docs/api/queue.md)', () => {
+  it('should report correct NatsQueueAdapter features', async () => {
+    // From docs/api/queue.md: the NATS column of the Feature Support Matrix.
+    const { adapter, client } = connectedNatsAdapter();
 
     // Supported
     expect(adapter.supports('pattern-subscriptions')).toBe(true);
@@ -124,10 +221,38 @@ describe('Feature Comparison (README.md)', () => {
     expect(adapter.supports('priority')).toBe(false);
     expect(adapter.supports('dead-letter-queue')).toBe(false);
     expect(adapter.supports('retry')).toBe(false);
+
+    // Three rows of that table are not `QueueFeature`s, so `supports()` cannot express them.
+    await adapter.connect();
+
+    // "Acknowledgments ❌ ²": every ackMode is accepted and rejects nothing, and none of them
+    // changes a byte on the wire — the subscription is identical in all three.
+    for (const ackMode of ['auto', 'manual', 'none'] as const) {
+      await adapter.subscribe('orders.*', async () => undefined, { ackMode });
+    }
+
+    expect(client.subscribe.mock.calls.length).toBe(3);
+    expect(client.subscribe.mock.calls.map((call: AnyRecord[]) => call[0])).toEqual([
+      'orders.*', 'orders.*', 'orders.*',
+    ]);
+    expect(client.subscribe.mock.calls.map((call: AnyRecord[]) => (call[2] as AnyRecord).queue)).toEqual([
+      undefined, undefined, undefined,
+    ]);
+
+    // "Publish deduplication ❌": messageId is echoed back as Message.id and nothing more —
+    // no `Nats-Msg-Id` header reaches the broker, so a replay is stored twice.
+    const id = await adapter.publish('orders.created', { total: 10 }, { messageId: 'custom-id' });
+    const [, payload, headers] = client.publish.mock.calls[0] as [string, string, Record<string, string>];
+
+    expect(id).toBe('custom-id');
+    expect(JSON.parse(payload).id).toBe('custom-id');
+    expect(Object.keys(headers)).toEqual([]);
+
+    await adapter.disconnect();
   });
 
   it('should report correct JetStreamQueueAdapter features', () => {
-    // From README.md: Feature Comparison table
+    // From docs/api/queue.md: the JetStream column of the Feature Support Matrix.
     const adapter = new JetStreamQueueAdapter({
       servers: 'nats://localhost:4222',
       streams: [{ name: 'TEST', subjects: ['test.>'] }],
@@ -195,11 +320,18 @@ async function consumerConfigSentFor(
 }
 
 /**
- * @source docs:api/queue.md#jetstreamqueueadapter
+ * Retagged: this test is about the connection options of the CORE-NATS adapter, which
+ * `docs:api/queue.md#natsqueueadapter` documents — it has nothing to do with JetStream,
+ * where the tag used to point.
+ *
+ * @source docs:api/queue.md#natsqueueadapter
  */
-describe('Configuration Options (README.md)', () => {
-  it('should accept NatsConnectionOptions', () => {
-    // From README.md: NatsConnectionOptions interface
+describe('Connection options (docs/api/queue.md)', () => {
+  it('should accept NatsConnectionOptions', async () => {
+    // From docs/api/queue.md: the adapter is constructed from `queue.options` and connects
+    // itself during `app.start()`. A real handshake needs a broker, so what is asserted here
+    // is the whole in-process chain: every declared option lands on the NATS client, and that
+    // client is the one `connect()` drives.
     const options: NatsAdapterOptions = {
       servers: ['nats://host1:4222', 'nats://host2:4222'], // Multiple servers
       name: 'my-client',
@@ -213,11 +345,36 @@ describe('Configuration Options (README.md)', () => {
     };
 
     const adapter = createNatsQueueAdapter(options);
-    expect(adapter).toBeInstanceOf(NatsQueueAdapter);
-  });
 
+    expect(adapter).toBeInstanceOf(NatsQueueAdapter);
+
+    const client = (adapter as unknown as AnyRecord).client as AnyRecord;
+
+    expect(client).toBeInstanceOf(NatsClient);
+    // Not one field is dropped or reshaped on the way to the client.
+    expect(client.options).toEqual(options);
+
+    // And that same client is what the adapter connects: substituted on the instance, since
+    // `mock.module` would replace the transport for every file in the run.
+    client.connect = mock(() => Promise.resolve());
+    client.isConnected = mock(() => true);
+    client.disconnect = mock(() => Promise.resolve());
+
+    await adapter.connect();
+
+    expect(client.connect).toHaveBeenCalledTimes(1);
+    expect(adapter.isConnected()).toBe(true);
+
+    await adapter.disconnect();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#jetstreamqueueadapter
+ */
+describe('Configuration Options (docs/api/queue.md)', () => {
   it('should accept JetStreamAdapterOptions', async () => {
-    // From README.md: JetStreamAdapterOptions interface
+    // From docs/api/queue.md: JetStreamAdapterOptions interface
     const options: JetStreamAdapterOptions = {
       servers: 'nats://localhost:4222',
       streamDefaults: {
@@ -776,7 +933,7 @@ describe('Consumer lifecycle: deleteDurableConsumer (docs/api/queue.md)', () => 
 });
 
 /**
- * @source docs:api/queue.md#natsclient
+ * @source docs:api/queue.md
  */
 describe('NatsClient', () => {
   it('should create client instance', () => {
@@ -822,43 +979,84 @@ describe('Feature Support Matrix - NATS (docs/api/queue.md)', () => {
   });
 });
 
+/** A `Message` stand-in that records which disposition the documented handler chose. */
+function documentedMessage<T>(data: T) {
+  const ack = mock(() => Promise.resolve());
+  const nack = mock((_requeue?: boolean) => Promise.resolve());
+  const message = {
+    id: 'order-1',
+    pattern: 'orders.created',
+    params: {},
+    data,
+    timestamp: Date.now(),
+    redelivered: false,
+    metadata: {},
+    ack,
+    nack,
+  } as unknown as Message<T>;
+
+  return { message, ack, nack };
+}
+
 /**
- * @source docs:api/queue.md#natsqueueadapter
+ * The service the "Subscribe Options" snippet declares, with `this.logger` calls replaced by
+ * a recorder — the framework's own lint bans console output — and `processOrder` stubbed so
+ * the documented try/catch has both branches to take. The decorators and their options are
+ * the page's verbatim.
+ *
+ * Retagged: the body pins the `@Subscribe` options table, not the core-NATS adapter section
+ * the tag used to name. The nack test below stays here because
+ * `docs:api/queue.md#subscribe-options` is where the page states what this recipe does on
+ * `NatsQueueAdapter`.
  */
-describe('Service with Queue Handlers (packages/nats/README.md)', () => {
-  it('registers both handlers the README declares', () => {
-    // From packages/nats/README.md: "### Service with Queue Handlers". `console.log` is
-    // replaced by a recorder — the framework's own lint bans it — and `processOrder` is
-    // stubbed, but the decorators and their options are the README's verbatim.
-    const ready: string[] = [];
+class OrderService {
+  readonly processed: unknown[] = [];
+  readyCount = 0;
 
-    class OrderService {
-      @OnQueueReady()
-      handleReady() {
-        ready.push('Connected to NATS');
-      }
+  @OnQueueReady()
+  handleReady() {
+    this.readyCount += 1;
+  }
 
-      @Subscribe('orders.created')
-      async handleOrderCreated(_message: Message<unknown>) {
-        ready.push('created');
-      }
+  @Subscribe('orders.created')
+  async handleOrderCreated(message: Message<unknown>) {
+    this.processed.push(message.data);
+  }
 
-      // `group` provisions a PERMANENT durable consumer on JetStream — name the role, not the deploy
-      @Subscribe('orders.*', { ackMode: 'manual', group: 'order-processors' })
-      async handleOrder(message: Message<unknown>) {
-        try {
-          await this.processOrder(message.data);
-          await message.ack();
-        } catch {
-          await message.nack(true); // requeue
-        }
-      }
+  @Subscribe('orders.*', {
+    ackMode: 'manual',         // 'auto' (default), 'manual' or 'none'
+    group: 'order-processors', // One durable consumer per (group, pattern)
+    prefetch: 10,              // Messages to process in parallel
+    ackTimeout: 30_000,        // ms — max time a handler may hold a message
+    retry: {
+      attempts: 3,
+      backoff: 'exponential',
+      delay: 1000,
+    },
+  })
+  async handleOrder(message: Message<{ fail?: boolean }>) {
+    try {
+      await this.processOrder(message.data);
+      await message.ack();
+    } catch {
+      await message.nack(true); // requeue
+    }
+  }
 
-      private async processOrder(_data: unknown): Promise<void> {
-        ready.push('processed');
-      }
+  private async processOrder(data: { fail?: boolean }): Promise<void> {
+    if (data.fail) {
+      throw new Error('processing failed');
     }
 
+    this.processed.push(data);
+  }
+}
+
+/**
+ * @source docs:api/queue.md#subscribe-options
+ */
+describe('Subscribe Options (docs/api/queue.md)', () => {
+  it('registers every option the documented @Subscribe declares', () => {
     const subscriptions = getSubscribeMetadata(OrderService);
 
     expect(subscriptions.length).toBe(2);
@@ -866,13 +1064,66 @@ describe('Service with Queue Handlers (packages/nats/README.md)', () => {
 
     const manual = subscriptions.find(s => s.pattern === 'orders.*');
 
-    expect(manual?.options?.ackMode).toBe('manual');
-    expect(manual?.options?.group).toBe('order-processors');
+    expect(manual?.propertyKey).toBe('handleOrder');
+    // Every field of the snippet is stored as declared — none is dropped or renamed.
+    expect(manual?.options).toEqual({
+      ackMode: 'manual',
+      group: 'order-processors',
+      prefetch: 10,
+      ackTimeout: 30_000,
+      retry: { attempts: 3, backoff: 'exponential', delay: 1000 },
+    });
+
+    // "'auto' (default)": a @Subscribe that declares no options resolves to auto.
+    const plain = subscriptions.find(s => s.pattern === 'orders.created');
+
+    expect(plain?.propertyKey).toBe('handleOrderCreated');
+    expect(plain?.options).toBeUndefined();
+    expect(resolveAckMode(plain?.options)).toBe('auto');
   });
 
-  it("reports a nacked message as failed, which is the sample's only effect on core NATS", async () => {
-    // The README states this explicitly: under NatsQueueAdapter neither ack() nor nack()
-    // reaches the wire, and the event is the only trace the nack leaves.
+  it('acks on success and requeues on failure, exactly as the snippet does', async () => {
+    // The registered propertyKey is what the framework will invoke, so the recipe is driven
+    // through it rather than through a direct method call.
+    const manual = getSubscribeMetadata(OrderService).find(s => s.pattern === 'orders.*')!;
+    const service = new OrderService();
+    const handler = (service as unknown as AnyRecord)[String(manual.propertyKey)] as
+      (message: Message<{ fail?: boolean }>) => Promise<void>;
+
+    const ok = documentedMessage({ fail: false });
+    await handler.call(service, ok.message);
+
+    expect(ok.ack).toHaveBeenCalledTimes(1);
+    expect(ok.nack).not.toHaveBeenCalled();
+    expect(service.processed).toEqual([{ fail: false }]);
+
+    const failed = documentedMessage({ fail: true });
+    await handler.call(service, failed.message);
+
+    expect(failed.nack).toHaveBeenCalledWith(true);
+    expect(failed.ack).not.toHaveBeenCalled();
+    expect(service.processed).toEqual([{ fail: false }]);
+  });
+
+  /**
+   * @source docs:api/queue.md#lifecycle-decorators
+   */
+  it('registers the @OnQueueReady handler beside the subscriptions', () => {
+    const handlers = getLifecycleHandlers(OrderService, 'ON_READY');
+
+    expect(handlers.length).toBe(1);
+    expect(handlers[0].propertyKey).toBe('handleReady');
+
+    const service = new OrderService();
+    (service as unknown as AnyRecord)[String(handlers[0].propertyKey)]();
+
+    expect(service.readyCount).toBe(1);
+  });
+
+  it("reports a nacked message as failed, which is the recipe's only effect on core NATS", async () => {
+    // From docs/api/queue.md#subscribe-options: on NatsQueueAdapter the recipe "does not
+    // fail — it does nothing"; neither ack() nor nack() reaches the wire, and the failure
+    // event is the only trace the nack leaves.
     const adapter = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
 
     let processed = 0;
@@ -903,5 +1154,8 @@ describe('Service with Queue Handlers (packages/nats/README.md)', () => {
 
     expect(processed).toBe(0);
     expect(failures.length).toBe(1);
+    // `requeue` is not honoured, so the drop is visible only through this error.
+    expect(failures[0].message).toContain('nacked by its handler');
+    expect(failures[0].message).toContain('readme-1');
   });
 });

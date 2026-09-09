@@ -8,7 +8,9 @@ import {
   describe,
   expect,
   it,
+  mock,
 } from 'bun:test';
+import { Effect } from 'effect';
 
 import type { CompiledTestingModule } from './testing-module';
 
@@ -70,6 +72,25 @@ class UserController extends BaseController {
   }
 }
 
+/**
+ * Controller that touches everything `createTestController` is documented to wire up:
+ * an injected dependency, `this.logger` and `this.config`.
+ */
+@Controller('/audit')
+class AuditController extends BaseController {
+  constructor(private readonly userService: UserService) {
+    super();
+  }
+
+  @Get('/:id')
+  audit(@Param('id') id: string): string {
+    const user = this.userService.findById(id);
+    this.logger.info('audited user', { id });
+
+    return `${String(this.config.get('audit.prefix'))}:${user.name}`;
+  }
+}
+
 // ============================================================================
 // createTestService — docs/testing.md
 // ============================================================================
@@ -123,15 +144,46 @@ describe('docs/testing.md — createTestController', () => {
   /**
    * @source docs:testing.md#createtestcontroller
    */
-  it('basic usage — creates controller with mock logger and config', () => {
-    const mockUserService = { findById: (id: string) => ({ id, name: 'Mock' }) };
-    const { instance, logger, config } = createTestController(UserController, {
+  it('basic usage — deps become constructor arguments, so the handler runs against the mock', () => {
+    const findById = mock((id: string) => ({ id, name: 'Mock' }));
+    const mockUserService = { findById };
+    const { instance } = createTestController(UserController, {
       deps: [mockUserService],
     });
 
     expect(instance).toBeInstanceOf(UserController);
-    expect(logger).toBeDefined();
-    expect(config).toBeDefined();
+    // The real UserService would answer `User 42`; the injected dependency answers `Mock`.
+    expect(instance.getUser('42')).toEqual({ id: '42', name: 'Mock' });
+    expect(findById.mock.calls).toEqual([['42']]);
+  });
+
+  /**
+   * `createTestController` has the same API as `createTestService` but calls
+   * `initializeController()`, so `this.logger` / `this.config` work inside the controller
+   * and the returned `logger` is the very one the controller writes to.
+   *
+   * @source docs:testing.md#createtestcontroller
+   */
+  it('basic usage — initializeController wires the returned mock logger and config into the controller', () => {
+    const mockUserService = { findById: (id: string) => ({ id, name: `Mock ${id}` }) };
+    const { instance, logger, config } = createTestController(AuditController, {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      config: { 'audit.prefix': 'AUDIT' },
+      /* eslint-enable @typescript-eslint/naming-convention */
+      deps: [mockUserService],
+    });
+
+    // `this.config` inside the controller is the mock config built from `options.config`.
+    expect(instance.audit('7')).toBe('AUDIT:Mock 7');
+    expect(config.get('audit.prefix')).toBe('AUDIT');
+    expect(config.isInitialized).toBe(true);
+
+    // `this.logger` inside the controller is the returned logger — a bun mock, per the docs.
+    expect((logger.info as ReturnType<typeof mock>).mock.calls).toEqual([
+      ['audited user', { id: '7' }],
+    ]);
+    expect((logger.error as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
+    expect(logger.child({ context: 'x' })).toBe(logger);
   });
 });
 
@@ -141,7 +193,7 @@ describe('docs/testing.md — createTestController', () => {
 
 describe('docs/testing.md — TestingModule', () => {
   /**
-   * @source docs:testing.md#basic-usage-1
+   * @source docs:testing.md#basic-usage
    */
   it('basic compile / inject / close flow', async () => {
     let module: CompiledTestingModule | undefined;
@@ -317,12 +369,16 @@ describe('docs/testing.md — createMockLogger', () => {
   /**
    * @source docs:testing.md#createmocklogger
    */
-  it('basic usage — creates silent async logger', () => {
+  it('basic usage — every method is a silent Effect succeeding with undefined, child() returns itself', () => {
     const logger = createMockLogger();
 
-    expect(logger).toBeDefined();
-    expect(typeof logger.info).toBe('function');
-    expect(typeof logger.child).toBe('function');
+    // From docs: "All methods return Effect.succeed(undefined), child() returns itself".
+    expect(Effect.runSync(logger.trace('t'))).toBeUndefined();
+    expect(Effect.runSync(logger.debug('d'))).toBeUndefined();
+    expect(Effect.runSync(logger.info('hello', { a: 1 }))).toBeUndefined();
+    expect(Effect.runSync(logger.warn('w'))).toBeUndefined();
+    expect(Effect.runSync(logger.error('boom'))).toBeUndefined();
+    expect(Effect.runSync(logger.fatal('f'))).toBeUndefined();
     expect(logger.child({ context: 'test' })).toBe(logger);
   });
 });

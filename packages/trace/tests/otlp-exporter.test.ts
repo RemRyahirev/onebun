@@ -12,7 +12,11 @@ import {
 import type { ExportResult } from '@opentelemetry/core';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
-import { OtlpFetchSpanExporter, msToNanos } from '../src/otlp-exporter';
+import {
+  OtlpExportError,
+  OtlpFetchSpanExporter,
+  msToNanos,
+} from '../src/otlp-exporter';
 
 const TRACE_ID = '0af7651916cd43dd8448eb211c80319c';
 const SPAN_ID = 'b7ad6b7169203331';
@@ -209,8 +213,11 @@ describe('OtlpFetchSpanExporter', () => {
     });
 
     test('should return FAILED on HTTP error', () => {
+      // retryAttempts: 0 — this test is about the verdict for a single failed send, not about
+      // the retry policy. Left at the default it would quietly make four requests.
       const exporter = new OtlpFetchSpanExporter({
         endpoint: 'http://localhost:4318',
+        retryAttempts: 0,
       });
 
       const mockFetch = mock(() =>
@@ -223,6 +230,7 @@ describe('OtlpFetchSpanExporter', () => {
       return new Promise<void>((resolve) => {
         exporter.export([span], (result: ExportResult) => {
           expect(result.code).toBe(ExportResultCode.FAILED);
+          expect(mockFetch).toHaveBeenCalledTimes(1);
           resolve();
         });
       });
@@ -231,6 +239,7 @@ describe('OtlpFetchSpanExporter', () => {
     test('should return FAILED on fetch error', () => {
       const exporter = new OtlpFetchSpanExporter({
         endpoint: 'http://localhost:4318',
+        retryAttempts: 0,
       });
 
       const mockFetch = mock(() => Promise.reject(new Error('Network error')));
@@ -241,6 +250,7 @@ describe('OtlpFetchSpanExporter', () => {
       return new Promise<void>((resolve) => {
         exporter.export([span], (result: ExportResult) => {
           expect(result.code).toBe(ExportResultCode.FAILED);
+          expect(mockFetch).toHaveBeenCalledTimes(1);
           resolve();
         });
       });
@@ -280,6 +290,200 @@ describe('OtlpFetchSpanExporter', () => {
           resolve();
         });
       });
+    });
+  });
+
+  /**
+   * `BatchSpanProcessor` splices a batch out of its buffer before handing it here, so whatever
+   * this exporter gives up on is gone. Every test below is about that batch surviving — or
+   * about not spending four requests on a failure that will never succeed.
+   */
+  describe('export retry', () => {
+    const RETRY_DELAY = 1;
+    const HTTP_BAD_REQUEST = 400;
+    const HTTP_UNAVAILABLE = 503;
+
+    function exportOnce(exporter: OtlpFetchSpanExporter, spans: ReadableSpan[]): Promise<ExportResult> {
+      return new Promise<ExportResult>((resolve) => {
+        exporter.export(spans, resolve);
+      });
+    }
+
+    test('should deliver a batch that the collector rejects on its first attempts', async () => {
+      const bodies: string[] = [];
+      let call = 0;
+      const mockFetch = mock((_url: string, init: RequestInit) => {
+        bodies.push(init.body as string);
+        call++;
+
+        return Promise.resolve(
+          call < 3
+            ? new Response('collector restarting', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' })
+            : new Response('', { status: HTTP_OK }),
+        );
+      });
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryDelay: RETRY_DELAY,
+      });
+
+      const result = await exportOnce(exporter, [createMockSpan()]);
+
+      expect(result.code).toBe(ExportResultCode.SUCCESS);
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      // The retry must re-send the SAME spans. A retry that posts a different payload is not a
+      // retry — it is a second, emptier export dressed as one.
+      expect(bodies[2]).toBe(bodies[0]);
+      expect(JSON.parse(bodies[2]).resourceSpans[0].scopeSpans[0].spans[0].name).toBe('test-span');
+    });
+
+    test('should retry a transport failure, not only an HTTP status', async () => {
+      let call = 0;
+      const mockFetch = mock(() => {
+        call++;
+
+        return call === 1
+          ? Promise.reject(new Error('connect ECONNREFUSED'))
+          : Promise.resolve(new Response('', { status: HTTP_OK }));
+      });
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryDelay: RETRY_DELAY,
+      });
+
+      const result = await exportOnce(exporter, [createMockSpan()]);
+
+      expect(result.code).toBe(ExportResultCode.SUCCESS);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    test('should not retry a status the collector will reject identically', async () => {
+      const mockFetch = mock(() =>
+        Promise.resolve(new Response('bad payload', { status: HTTP_BAD_REQUEST, statusText: 'Bad Request' })),
+      );
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryDelay: RETRY_DELAY,
+      });
+
+      const result = await exportOnce(exporter, [createMockSpan()]);
+
+      expect(result.code).toBe(ExportResultCode.FAILED);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('should stop after retryAttempts and report how much was lost', async () => {
+      const mockFetch = mock(() =>
+        Promise.resolve(new Response('', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' })),
+      );
+      globalThis.fetch = mockFetch as any;
+
+      const failures: Array<{ message: string; spanCount: number; attempts: number }> = [];
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryAttempts: 2,
+        retryDelay: RETRY_DELAY,
+        onExportFailure(error, spanCount, attempts) {
+          failures.push({ message: error.message, spanCount, attempts });
+        },
+      });
+
+      const result = await exportOnce(exporter, [createMockSpan(), createMockSpan()]);
+
+      expect(result.code).toBe(ExportResultCode.FAILED);
+      // 2 retries after the first attempt — the first attempt is not a retry.
+      expect(mockFetch).toHaveBeenCalledTimes(3);
+      expect(failures).toHaveLength(1);
+      expect(failures[0].spanCount).toBe(2);
+      expect(failures[0].attempts).toBe(3);
+      expect(result.error).toBeInstanceOf(OtlpExportError);
+      expect((result.error as OtlpExportError).attempts).toBe(3);
+      // The status the collector actually returned has to reach the caller: "503" and
+      // "connection refused" call for entirely different action.
+      expect(failures[0].message).toContain('503');
+    });
+
+    test('should give up rather than exceed the retry budget', async () => {
+      const mockFetch = mock(() =>
+        Promise.resolve(new Response('', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' })),
+      );
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryAttempts: 50,
+        retryDelay: 40,
+        retryBudget: 60,
+      });
+
+      const startedAt = Date.now();
+      const result = await exportOnce(exporter, [createMockSpan()]);
+      const elapsed = Date.now() - startedAt;
+
+      expect(result.code).toBe(ExportResultCode.FAILED);
+      // The budget, not `retryAttempts`, is what ends it — otherwise this would be 51 requests.
+      expect(mockFetch.mock.calls.length).toBeLessThan(5);
+      expect(elapsed).toBeLessThan(1000);
+    });
+
+    test('should wait as long as Retry-After asks instead of its own backoff', async () => {
+      const RETRY_AFTER_SECONDS = 0.15;
+      const RETRY_AFTER_MS = 150;
+      let call = 0;
+      const mockFetch = mock(() => {
+        call++;
+
+        return call === 1
+          ? Promise.resolve(
+            new Response('', {
+              status: HTTP_UNAVAILABLE,
+              statusText: 'Service Unavailable',
+              headers: { 'retry-after': String(RETRY_AFTER_SECONDS) },
+            }),
+          )
+          : Promise.resolve(new Response('', { status: HTTP_OK }));
+      });
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        // 1ms of its own — so anything close to the header's 150ms can only have come from
+        // the header.
+        retryDelay: RETRY_DELAY,
+      });
+
+      const startedAt = Date.now();
+      const result = await exportOnce(exporter, [createMockSpan()]);
+      const elapsed = Date.now() - startedAt;
+
+      expect(result.code).toBe(ExportResultCode.SUCCESS);
+      expect(elapsed).toBeGreaterThanOrEqual(RETRY_AFTER_MS - 1);
+    });
+
+    test('should not retry after shutdown', async () => {
+      const mockFetch = mock(() =>
+        Promise.resolve(new Response('', { status: HTTP_UNAVAILABLE, statusText: 'Service Unavailable' })),
+      );
+      globalThis.fetch = mockFetch as any;
+
+      const exporter = new OtlpFetchSpanExporter({
+        endpoint: 'http://localhost:4318',
+        retryDelay: RETRY_DELAY,
+      });
+
+      const pending = exportOnce(exporter, [createMockSpan()]);
+      await exporter.shutdown();
+
+      const result = await pending;
+
+      expect(result.code).toBe(ExportResultCode.FAILED);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
     });
   });
 

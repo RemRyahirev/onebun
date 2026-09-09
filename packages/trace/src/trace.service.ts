@@ -1,8 +1,13 @@
 import {
   context,
+  type Context as OtelContext,
+  type Span as OtelSpan,
   SpanStatusCode as OtelSpanStatusCode,
+  ProxyTracerProvider,
+  ROOT_CONTEXT,
   SpanKind,
   trace,
+  type Tracer,
 } from '@opentelemetry/api';
 import {
   Context,
@@ -13,9 +18,15 @@ import {
 
 import { HttpStatusCode } from '@onebun/requests';
 
-import { initTracerProvider, type TracerProviderResult } from './provider.js';
+import { activateSpanInCurrentScope } from './context-manager.js';
+import {
+  initTracerProvider,
+  installedTracerProvider,
+  type TracerProviderResult,
+} from './provider.js';
 import {
   type HttpTraceData,
+  OTEL_SPAN,
   type SpanStatus,
   SpanStatusCode,
   type TraceContext,
@@ -33,6 +44,33 @@ const TRACE_FLAGS_MATCH_INDEX = 3;
  * Pre-compiled W3C traceparent header regex (avoids re-compilation per request)
  */
 const TRACEPARENT_REGEX = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/;
+
+/**
+ * Turn a caller's trace context into an OpenTelemetry context a span can be started from.
+ *
+ * `isRemote: true` so the SDK knows the parent lives in another process — `ParentBasedSampler`
+ * reads it, and so do backends deciding where a trace begins.
+ *
+ * The ids are deliberately NOT re-validated here. Only the `traceparent` branch of
+ * `extractFromHeadersSync` is regex-checked; the `x-trace-id` / `x-span-id` pair is taken verbatim
+ * from headers anyone can set, and the all-zero ids are the spec's "invalid" sentinels that
+ * OpenTelemetry hands out routinely for non-recording spans. All of them arrive here — and
+ * `Tracer.startSpan` already discards a parent that fails `isSpanContextValid`, producing a root
+ * span, which is exactly the wanted outcome. A check here would be a second copy of that rule with
+ * no test able to tell the two apart. The behaviour is pinned instead, in `context-nesting.test.ts`.
+ */
+function remoteParentContext(parent: TraceContext | undefined): OtelContext | undefined {
+  if (!parent) {
+    return undefined;
+  }
+
+  return trace.setSpanContext(ROOT_CONTEXT, {
+    traceId: parent.traceId,
+    spanId: parent.spanId,
+    traceFlags: parent.traceFlags,
+    isRemote: true,
+  });
+}
 
 /**
  * Trace service interface
@@ -162,10 +200,22 @@ export class TraceServiceImpl implements TraceService {
       traceDatabaseQueries: true,
       defaultAttributes: {},
       exportOptions: {},
+      spanProcessors: [],
       ...options,
     };
 
-    this.hasExporter = !!this.options.exportOptions?.endpoint;
+    // "Does this application record spans anywhere", which is the question the OTel path
+    // actually depends on — not "is an OTLP endpoint configured".
+    //
+    // `enabled` and not the endpoint alone: derived from the endpoint by itself, a service built
+    // with `{ enabled: false, exportOptions: { endpoint } }` starts spans that
+    // `endHttpTraceSync` — which returns early when disabled — never ends.
+    //
+    // And `spanProcessors` counts: a caller that attached its own processor wants real spans
+    // even with no OTLP endpoint, and gating on the endpoint would hand it the lightweight
+    // path and nothing to observe.
+    this.hasExporter = this.options.enabled
+      && (!!this.options.exportOptions?.endpoint || this.options.spanProcessors.length > 0);
     this.hasDefaultAttributes = Object.keys(this.options.defaultAttributes).length > 0;
 
     // Initialize TracerProvider BEFORE creating the tracer
@@ -174,7 +224,55 @@ export class TraceServiceImpl implements TraceService {
       this.providerResult = initTracerProvider(this.options);
     }
 
-    this.tracer = trace.getTracer('@onebun/trace');
+    // THIS application's provider, not the process-global one. OpenTelemetry keeps a single
+    // tracer provider per process and refuses a duplicate registration, so in a process running
+    // several applications only the first installs its own. Reading the global here is what
+    // made every later application's provider dead weight: it was built with that
+    // application's `service.name` resource and its own OTLP exporter, and then never used —
+    // its spans went to the FIRST application's collector, labelled as the first
+    // application's service. Measured with `serviceName: 'users'` and `'orders'`: each own
+    // provider reports its own name, the global reports 'users' for both.
+    //
+    // The global registration in `initTracerProvider` stays, as a best-effort answer for
+    // third-party instrumentation that resolves through `trace.getTracer()` on its own.
+    //
+    // `providerResult` is null in exactly one case — `enabled: false` — and the fallback must not
+    // be `trace.getTracer()` there. That reads the process-global provider, so a service with
+    // tracing switched off borrowed whichever ENABLED sibling had installed it, and recorded its
+    // spans under that sibling's `service.name`. Measured in one process: the disabled service
+    // answered with a valid `9f7a70bc…` after an enabled sibling was constructed, and with the
+    // all-zero context when it was alone — so `enabled: false` meant different things depending
+    // on construction order. A `ProxyTracerProvider` with no delegate answers with the API's
+    // no-op tracer and cannot resolve to the global, which is what "switched off" has to mean.
+    this.tracer = this.providerResult?.provider.getTracer('@onebun/trace')
+      ?? new ProxyTracerProvider().getTracer('@onebun/trace');
+  }
+
+  /**
+   * The tracer this application's spans are created from.
+   *
+   * Exposed so the framework can establish it as the ambient owner at each boundary where work
+   * enters the application — see `appTracer()` in `app-tracer.ts`, which is what the
+   * decoration-time wrappers (`@Traced`, `@Span`, auto-trace) resolve through. Those are
+   * installed on a prototype before any application exists and cannot capture one.
+   *
+   * @see docs:api/trace.md
+   */
+  getTracer(): Tracer {
+    return this.tracer;
+  }
+
+  /**
+   * Is this application's provider the one installed in the process-global slot?
+   *
+   * `false` for every application but the first, which is exactly when resolving through the
+   * global gives the wrong answer and the ambient owner has to be established instead.
+   *
+   * @see docs:api/trace.md
+   */
+  ownsInstalledProvider(): boolean {
+    return this.providerResult !== null
+      && installedTracerProvider() === this.providerResult.provider;
   }
 
   async shutdown(): Promise<void> {
@@ -443,10 +541,17 @@ export class TraceServiceImpl implements TraceService {
     const spanName = `HTTP ${data.method || 'REQUEST'} ${data.route || data.url || '/'}`;
 
     let traceContext: TraceContext;
+    let startedOtelSpan: OtelSpan | undefined;
+    let httpAttributes: Record<string, string | number | boolean> = {};
 
     if (this.hasExporter) {
-      // Full OTel span path — only when spans will be exported
-      const currentOtelContext = context.active();
+      // Full OTel span path — only when spans will be exported.
+      //
+      // The caller's context when the inbound headers carried one, so the span continues that
+      // trace instead of starting its own. `context.active()` cannot supply it: the request
+      // boundary re-roots to ROOT_CONTEXT deliberately (a keep-alive connection would otherwise
+      // chain request N+1 under request N), so a remote parent has to be handed in.
+      const currentOtelContext = remoteParentContext(data.parentContext) ?? context.active();
       const otelSpan = this.tracer.startSpan(
         spanName,
         {
@@ -460,11 +565,21 @@ export class TraceServiceImpl implements TraceService {
       traceContext = {
         traceId: spanCtx.traceId,
         spanId: spanCtx.spanId,
+        // Whoever called us, when anyone did. `SpanContext` does not carry it — it describes a
+        // span, not an edge — so it comes from the inbound context the span was parented to.
+        // Recorded because `TraceInfo.parentSpanId` is what a log line offers a reader who wants
+        // to walk one hop up without opening the trace.
+        parentSpanId: data.parentContext?.spanId,
         traceFlags: spanCtx.traceFlags,
       };
 
-      // Set HTTP attributes on OTel span
-      const attributes: Record<string, string | number | boolean> = {
+      startedOtelSpan = otelSpan;
+
+      // Recorded on the OneBun span, not written to OTel here. `finishOtelSpan` is the single
+      // place attributes reach OpenTelemetry, so the two records cannot disagree and nothing can
+      // be written twice. Writing here as well used to leave `TraceSpan.attributes` holding only
+      // the defaults — a record that claimed less than the span it described.
+      httpAttributes = {
         // eslint-disable-next-line @typescript-eslint/naming-convention
         'http.method': data.method || 'UNKNOWN',
         // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -477,22 +592,61 @@ export class TraceServiceImpl implements TraceService {
         'http.remote_addr': data.remoteAddr || '',
       };
       if (data.requestSize !== undefined) {
-        attributes['http.request_content_length'] = data.requestSize;
+        httpAttributes['http.request_content_length'] = data.requestSize;
       }
-      otelSpan.setAttributes(attributes);
     } else {
-      // Lightweight path — no OTel span creation, just context propagation
-      traceContext = this.generateTraceContextSync();
+      // Lightweight path — no OTel span creation, just context propagation.
+      //
+      // Continues the caller's TRACE while taking an identity of its own. Minting the whole
+      // context unconditionally put this request on a trace of its own while the request scope
+      // carried the caller's, and nothing ever compared the two — which is how a third,
+      // invisible trace id per request came to exist. Adopting the inbound context verbatim
+      // would be the opposite mistake: every log line would then be stamped with a span living
+      // in the calling service, so clicking it lands in the caller rather than here.
+      const minted = this.generateTraceContextSync();
+
+      traceContext = data.parentContext
+        ? {
+          traceId: data.parentContext.traceId,
+          spanId: minted.spanId,
+          parentSpanId: data.parentContext.spanId,
+          // The caller's sampling decision, inherited rather than re-rolled.
+          traceFlags: data.parentContext.traceFlags,
+        }
+        : minted;
     }
 
     return {
       context: traceContext,
       name: spanName,
       startTime: Date.now(),
-      attributes: this.hasDefaultAttributes ? { ...this.options.defaultAttributes } : {},
+      attributes: {
+        ...(this.hasDefaultAttributes ? this.options.defaultAttributes : {}),
+        ...httpAttributes,
+      },
       events: [],
       status: { code: SpanStatusCode.OK },
+      // Carried, not dropped. Undefined on the lightweight path, which is what makes the end a
+      // no-op there without consulting instance configuration.
+      [OTEL_SPAN]: startedOtelSpan,
     };
+  }
+
+  /**
+   * Make an HTTP span the parent of everything the request goes on to do.
+   *
+   * Separate from `startHttpTraceSync` because the caller enters the request's context scope
+   * before the span exists — see `ContextScope` in `context-manager.ts` for why that order is
+   * the cheap one. Returns whether the span became active; `false` means spans from this request
+   * will arrive as separate roots, which is what happens when the context-manager slot belongs to
+   * someone else's SDK.
+   *
+   * @see docs:api/trace.md
+   */
+  activateSpanSync(span: TraceSpan): boolean {
+    const otelSpan = span[OTEL_SPAN];
+
+    return otelSpan === undefined ? false : activateSpanInCurrentScope(otelSpan);
   }
 
   endHttpTraceSync(span: TraceSpan, data: Partial<HttpTraceData>): void {
@@ -507,33 +661,59 @@ export class TraceServiceImpl implements TraceService {
       span.status = { code: SpanStatusCode.ERROR, message: `HTTP ${data.statusCode}` };
     }
 
-    // Only interact with OTel when spans are being exported
-    if (this.hasExporter) {
-      const attributes: Record<string, string | number | boolean> = {};
+    const attributes: Record<string, string | number | boolean> = {};
 
-      if (data.statusCode !== undefined) {
-        attributes['http.status_code'] = data.statusCode;
-      }
-
-      if (data.responseSize !== undefined) {
-        attributes['http.response_content_length'] = data.responseSize;
-      }
-
-      if (data.duration !== undefined) {
-        attributes['http.duration'] = data.duration;
-      }
-
-      Object.assign(span.attributes, attributes);
-
-      const activeSpan = trace.getActiveSpan();
-      if (activeSpan && activeSpan.spanContext().spanId === span.context.spanId) {
-        activeSpan.setAttributes(attributes);
-        if (span.status.code === SpanStatusCode.ERROR) {
-          activeSpan.setStatus({ code: OtelSpanStatusCode.ERROR, message: span.status.message });
-        }
-        activeSpan.end();
-      }
+    if (data.statusCode !== undefined) {
+      attributes['http.status_code'] = data.statusCode;
     }
+
+    if (data.responseSize !== undefined) {
+      attributes['http.response_content_length'] = data.responseSize;
+    }
+
+    if (data.duration !== undefined) {
+      attributes['http.duration'] = data.duration;
+    }
+
+    Object.assign(span.attributes, attributes);
+
+    // Gated on the SPAN's own provenance, not on `this.hasExporter`. A span is finished the way
+    // it was started, so a service whose configuration is read at a different time from the start
+    // cannot orphan it — and that asymmetry is where this bug lived.
+    this.finishOtelSpan(span);
+  }
+
+  /**
+   * Flush a OneBun span onto the OpenTelemetry span it was started from, and end it.
+   *
+   * The ONLY place `.end()` is called. Everything the request accumulated — attributes set at
+   * start and at end, events pushed by the framework or by user code, the error status — reaches
+   * OpenTelemetry here and nowhere else, so the exported span cannot disagree with the record and
+   * nothing can be written twice.
+   *
+   * Idempotent by clearing the carried span: a second end is a no-op rather than a second,
+   * contradictory export of the same span.
+   */
+  private finishOtelSpan(span: TraceSpan): void {
+    const otelSpan = span[OTEL_SPAN];
+
+    if (!otelSpan) {
+      return;
+    }
+
+    span[OTEL_SPAN] = undefined;
+
+    otelSpan.setAttributes(span.attributes);
+
+    for (const event of span.events) {
+      otelSpan.addEvent(event.name, event.attributes, event.timestamp);
+    }
+
+    if (span.status.code === SpanStatusCode.ERROR) {
+      otelSpan.setStatus({ code: OtelSpanStatusCode.ERROR, message: span.status.message });
+    }
+
+    otelSpan.end();
   }
 
   private generateId(length: number): string {
@@ -550,12 +730,31 @@ export class TraceServiceImpl implements TraceService {
  * @see docs:api/trace.md
  */
 export const makeTraceService = (options?: TraceOptions): Layer.Layer<TraceService> =>
-  Layer.succeed(traceService, new TraceServiceImpl(options));
+  // `Layer.sync`, not `Layer.succeed`. `succeed` evaluates its argument at CALL time, so merely
+  // writing `makeTraceService({…})` — never mind building the layer — constructed a service, which
+  // registers a TracerProvider as the OpenTelemetry global. At module scope that made it an IMPORT
+  // side effect: importing the package claimed the global with a provider carrying no span
+  // processors, and the application's own exporter-carrying provider was then refused as a
+  // duplicate. OTel reports that refusal only on its `diag` channel, which nothing here listens
+  // to, so the application logged "Trace service initialized successfully" and exported nothing.
+  Layer.sync(traceService, () => new TraceServiceImpl(options));
+
+/**
+ * The one service the default layer yields.
+ *
+ * Memoized because `Layer.sync` runs its thunk on every build, and each run would register another
+ * provider. One default layer, one service, one registration, however many times it is provided.
+ */
+let defaultTraceService: TraceServiceImpl | undefined;
 
 /**
  * Default trace service layer
  */
-export const traceServiceLive = makeTraceService();
+export const traceServiceLive: Layer.Layer<TraceService> = Layer.sync(traceService, () => {
+  defaultTraceService ??= new TraceServiceImpl();
+
+  return defaultTraceService;
+});
 
 // Backward compatibility aliases
 // eslint-disable-next-line @typescript-eslint/naming-convention

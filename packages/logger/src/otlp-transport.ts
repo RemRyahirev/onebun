@@ -42,11 +42,50 @@ export interface OtlpLogTransportOptions {
    * @internal
    */
   fetchFn?: typeof fetch;
+
+  /**
+   * Called once for a batch that was not delivered, with the failure and how many records were
+   * lost.
+   *
+   * A non-2xx from the collector used to be indistinguishable from a success — the response was
+   * never inspected — so a misconfigured endpoint swallowed every log line in silence. Supply
+   * this to find out; it must not log through the same logger, which would loop.
+   */
+  onExportFailure?: (error: Error, recordCount: number) => void;
+
+  /**
+   * Ceiling on how many records may sit in the buffer waiting for a collector that is refusing
+   * them. Beyond it the oldest are dropped and the drop is reported.
+   *
+   * @defaultValue 1000
+   */
+  maxBufferedRecords?: number;
 }
 
 const DEFAULT_BATCH_SIZE = 100;
 const DEFAULT_BATCH_TIMEOUT = 5000;
 const DEFAULT_TIMEOUT = 10000;
+const ERROR_BODY_EXCERPT = 200;
+const DEFAULT_MAX_BUFFERED_RECORDS = 1000;
+
+const HTTP_REQUEST_TIMEOUT = 408;
+const HTTP_TOO_MANY_REQUESTS = 429;
+const HTTP_INTERNAL_SERVER_ERROR = 500;
+const HTTP_BAD_GATEWAY = 502;
+const HTTP_SERVICE_UNAVAILABLE = 503;
+const HTTP_GATEWAY_TIMEOUT = 504;
+
+/**
+ * Statuses worth holding the batch for. Everything else is rejected identically next time.
+ */
+const RETRYABLE_STATUSES = new Set([
+  HTTP_REQUEST_TIMEOUT,
+  HTTP_TOO_MANY_REQUESTS,
+  HTTP_INTERNAL_SERVER_ERROR,
+  HTTP_BAD_GATEWAY,
+  HTTP_SERVICE_UNAVAILABLE,
+  HTTP_GATEWAY_TIMEOUT,
+]);
 const NANOSECONDS_PER_MILLISECOND = 1000000;
 
 // OTLP severity numbers per OpenTelemetry Logs specification
@@ -163,6 +202,8 @@ export class OtlpLogTransport implements LogTransport {
   private readonly batchTimeout: number;
   private readonly resourceAttributes: Array<{ key: string; value: Record<string, unknown> }>;
   private readonly fetchFn: typeof fetch;
+  private readonly onExportFailure: ((error: Error, recordCount: number) => void) | undefined;
+  private readonly maxBufferedRecords: number;
 
   constructor(options: OtlpLogTransportOptions) {
     this.endpoint = options.endpoint.replace(/\/$/, '');
@@ -175,6 +216,8 @@ export class OtlpLogTransport implements LogTransport {
     this.batchTimeout = options.batchTimeout ?? DEFAULT_BATCH_TIMEOUT;
     this.resourceAttributes = toOtlpAttributes(options.resourceAttributes ?? {});
     this.fetchFn = options.fetchFn ?? globalThis.fetch;
+    this.onExportFailure = options.onExportFailure;
+    this.maxBufferedRecords = Math.max(1, options.maxBufferedRecords ?? DEFAULT_MAX_BUFFERED_RECORDS);
 
     this.scheduleFlush();
   }
@@ -207,6 +250,10 @@ export class OtlpLogTransport implements LogTransport {
       return;
     }
 
+    // Held, not discarded: the records go back on the buffer if delivery fails and the failure
+    // is one that waiting could fix. Clearing before the fetch meant a batch was already gone by
+    // the time the collector rejected it, so there was nothing left to retry and nothing to name
+    // in a report.
     const entries = this.buffer;
     this.buffer = [];
 
@@ -230,16 +277,94 @@ export class OtlpLogTransport implements LogTransport {
     const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
 
     try {
-      await this.fetchFn(`${this.endpoint}/v1/logs`, {
+      const response = await this.fetchFn(`${this.endpoint}/v1/logs`, {
         method: 'POST',
         headers: this.headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
-    } catch {
-      // Silently discard on failure — logging should not crash the application
+
+      if (!response.ok) {
+        // A 503, a 404 and a success used to be indistinguishable: the response was never
+        // inspected. Drain the body so the connection is reusable, and put an excerpt in the
+        // report — "503" alone does not separate a restarting collector from a rejected payload.
+        const detail = (await response.text().catch(() => '')).slice(0, ERROR_BODY_EXCERPT);
+
+        this.handleFailure(
+          new Error(
+            `OTLP log export failed: ${response.status} ${response.statusText}${detail ? ` — ${detail}` : ''}`,
+          ),
+          entries,
+          RETRYABLE_STATUSES.has(response.status),
+        );
+      }
+    } catch (error) {
+      // No HTTP response at all — connection refused, DNS, TLS, or our own timeout. A collector
+      // being restarted looks exactly like this, so it is worth holding the batch for.
+      this.handleFailure(
+        error instanceof Error ? error : new Error(String(error)),
+        entries,
+        true,
+      );
     } finally {
       clearTimeout(timeoutId);
+    }
+  }
+
+  /**
+   * Decide what happens to a batch that was not delivered: keep it, or give up on it.
+   *
+   * Kept only when waiting could plausibly help. A 400 means the collector rejected the payload
+   * and will reject it identically; a 401 will not become authorized by the next flush. Holding
+   * those would fill the buffer with records that can never leave it and push out the ones that
+   * could.
+   */
+  private handleFailure(error: Error, entries: LogEntry[], retryable: boolean): void {
+    if (!retryable || this.isShutdown) {
+      this.reportFailure(error, entries.length);
+
+      return;
+    }
+
+    // Back at the head: order is preserved, so a retried batch does not arrive after the records
+    // that were written while it was in flight.
+    this.buffer = [...entries, ...this.buffer];
+
+    const overflow = this.buffer.length - this.maxBufferedRecords;
+
+    if (overflow > 0) {
+      // Bounded on purpose. A collector that stays down would otherwise grow this buffer until
+      // the process dies — and a logger that kills the application to preserve its own backlog
+      // has its priorities backwards. Oldest go first, and the drop is reported rather than
+      // silent, because a gap nobody knows about is the failure this whole change is about.
+      this.buffer = this.buffer.slice(overflow);
+      this.reportFailure(
+        new Error(`${error.message} (dropped ${overflow} buffered record(s) to stay within maxBufferedRecords)`),
+        overflow,
+      );
+
+      return;
+    }
+
+    this.reportFailure(error, entries.length);
+  }
+
+  /**
+   * Report a batch that was not delivered.
+   *
+   * Never throws, and must never log through the logger this transport belongs to — that would
+   * be a loop, and a failing log backend is exactly when it would run hottest. The default
+   * reporter writes to stderr for that reason.
+   */
+  private reportFailure(error: Error, recordCount: number): void {
+    if (!this.onExportFailure) {
+      return;
+    }
+
+    try {
+      this.onExportFailure(error, recordCount);
+    } catch {
+      // A reporter that throws must not take the flush down with it.
     }
   }
 

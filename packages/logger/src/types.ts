@@ -62,9 +62,15 @@ export interface LoggerConfig {
   transport: LogTransport;
   defaultContext?: Record<string, unknown>;
   /**
-   * Optional getter for per-request trace context from AsyncLocalStorage.
-   * When provided, replaces globalThis fallback for trace context resolution.
-   * Set by the framework at logger creation time.
+   * Optional getter for the trace context the calling code is running in.
+   *
+   * Honoured by every factory that takes a `LoggerConfig` — `makeLogger`, `makeDevLogger`,
+   * `makeProdLogger`. Deliberately absent from `LoggerOptions`, which is the declarative shape
+   * an application passes as data: a function belongs to the programmatic API.
+   *
+   * The framework itself does not use this field. It wraps the logger with
+   * `createSyncLogger(effectLogger, getCurrentTraceContext)`, and the `SyncLogger` sets a
+   * FiberRef that `LoggerImpl` reads before consulting this getter.
    */
   traceContextGetter?: () => TraceInfo | null;
 }
@@ -123,4 +129,21 @@ export interface LoggerOptions {
    * Automatically populated from tracing config when available.
    */
   otlpResourceAttributes?: Record<string, string>;
+
+  /**
+   * Called when a batch of log records could not be delivered to the OTLP collector.
+   *
+   * Defaults to a line on stderr. It cannot go through the logger itself — a failing log backend
+   * is exactly when that loop would run hottest — which is why the default reaches for the one
+   * channel that does not depend on the thing that broke.
+   */
+  otlpOnExportFailure?: (error: Error, recordCount: number) => void;
+
+  /**
+   * Ceiling on how many log records may wait in the buffer for a collector that is refusing
+   * them. Beyond it the oldest are dropped, and the drop is reported.
+   *
+   * @defaultValue 1000
+   */
+  otlpMaxBufferedRecords?: number;
 }

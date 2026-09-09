@@ -45,6 +45,74 @@ OneBun brings NestJS-style architecture — modules, dependency injection, decor
 
 One framework. One runtime. Everything you need for production backend services.
 
+## Quickstart
+
+<!-- readme:begin install -->
+```bash
+bun create @onebun my-app
+cd my-app
+bun run dev
+```
+
+Or add OneBun to an existing project:
+
+```bash
+bun add @onebun/core
+```
+<!-- readme:end -->
+
+<!-- readme:begin quickstart-example -->
+```typescript
+import {
+  BaseController, Controller, Get, Module, OneBunApplication, Service, BaseService, Post, Body, type,
+} from '@onebun/core';
+
+const CreateUser = type({ name: 'string', email: 'string.email' });
+type CreateUserBody = typeof CreateUser.infer;
+
+@Service()
+class UserService extends BaseService {
+  getAll() {
+    return [{ id: 1, name: 'Alice' }];
+  }
+}
+
+@Controller('/users')
+class UserController extends BaseController {
+  constructor(private users: UserService) {
+    super();
+  }
+
+  @Get('/')
+  async list() {
+    return this.users.getAll();
+  }
+
+  @Post('/')
+  async create(@Body(CreateUser) body: CreateUserBody) {
+    return this.success(body, 201); // this.success() only when a custom status is needed
+  }
+}
+
+@Module({ controllers: [UserController], providers: [UserService] })
+class AppModule {}
+
+const app = new OneBunApplication(AppModule, {
+  port: 3000,
+  metrics: { enabled: true }, // Prometheus at /metrics
+  tracing: { enabled: true }, // OpenTelemetry spans
+});
+
+await app.start();
+```
+
+One schema (`CreateUser`) gives you the TypeScript type, runtime validation and the OpenAPI spec — no
+extra packages, no duplication.
+<!-- readme:end -->
+
+The [Minimal Working Example](#minimal-working-example) below is the same application written out in
+full, with the environment schema and the typed configuration the scaffold generates.
+
 ## Quick Reference
 
 | Aspect | Details |
@@ -252,6 +320,7 @@ export const createUserSchema = type({
 export type CreateUserDto = typeof createUserSchema.infer;
 ```
 
+<!-- typecheck: skip -->
 ```typescript
 // In controller — import named type, don't use typeof inline
 import { createUserSchema, type CreateUserDto } from './user.schema';

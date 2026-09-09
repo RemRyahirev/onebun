@@ -290,15 +290,24 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-When `otlpEndpoint` is set, logs are sent to **both** console and OTLP collector. The `service.name` and `service.version` resource attributes are automatically populated from `tracing` config.
+When `otlpEndpoint` is set, logs are sent to **both** console and OTLP collector. The `service.name` and `service.version` resource attributes are populated from `tracing` config.
 
 ### Environment Variable
 
-OTLP export is also enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set:
+OTLP export is also enabled when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` is set —
+**with no `loggerOptions` at all**, which is the point: the same image goes to dev, staging and prod
+and observability is switched on by injection rather than by a code change.
 
 ```bash
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 bun run start
 ```
+
+Priority is `otlpEndpoint` > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+Records exported this way carry the same resource attributes as the explicit path: `service.name`
+from `tracing.serviceName`, then `OTEL_SERVICE_NAME`, then `onebun-service`; `service.version` from
+`tracing.serviceVersion`, then `1.0.0`. A record that arrives with an empty resource cannot be
+attributed to a service, which is most of what a log backend is for.
 
 ### OTLP Format
 
@@ -308,6 +317,35 @@ Log entries are sent as OTLP JSON to `{endpoint}/v1/logs`:
 - Error info: `exception.type`, `exception.message`, `exception.stacktrace` attributes
 - Context fields become OTLP attributes
 - Pending logs are flushed on application shutdown
+
+### When the Collector Rejects a Batch
+
+The response is inspected. A 503, a 404 and a success used to be indistinguishable — nothing looked
+at the status — so a misconfigured endpoint swallowed every log line in silence.
+
+- **Held and retried** on a transport failure (connection refused, DNS, TLS, timeout) and on
+  408/429/500/502/503/504. The records go back to the head of the buffer, in order, and the next
+  scheduled flush sends them again.
+- **Discarded** on any other status. A 400 means the collector refused the payload and will refuse
+  it identically; holding it would fill the buffer with records that can never leave.
+- **Bounded** by `otlpMaxBufferedRecords` (default 1000). A collector that stays down would
+  otherwise grow the buffer until the process dies, and a logger that kills the application to
+  preserve its own backlog has its priorities backwards. Oldest go first, and the drop is reported.
+- **Reported** through `otlpOnExportFailure`, which defaults to a line on stderr. It cannot go
+  through the logger — that feeds the transport which just failed, and the loop is tightest exactly
+  when the collector is down.
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  loggerOptions: {
+    otlpEndpoint: 'http://localhost:4318',
+    otlpMaxBufferedRecords: 5000,
+    otlpOnExportFailure: (error, recordCount) => {
+      process.stderr.write(`lost ${recordCount} log records: ${error.message}\n`);
+    },
+  },
+});
+```
 
 ## Getting Logger from Application
 
@@ -395,7 +433,7 @@ Tracing is enabled by default when `tracing.enabled` is set in app options or wh
 
 ### Combined JSON + Trace Output
 
-With both JSON logging and tracing enabled, every log entry during an HTTP request automatically includes the trace context:
+With both JSON logging and tracing enabled, a log entry automatically includes the trace context:
 
 ```json
 {
@@ -415,20 +453,27 @@ With both JSON logging and tracing enabled, every log entry during an HTTP reque
 }
 ```
 
-The `trace` field is automatically injected by the logger when a span is active. No code changes needed in your controllers or services — just use `this.logger` as usual.
+The `trace` field is automatically injected by the logger whenever a span is active. No code changes needed in your controllers or services — just use `this.logger` as usual.
+
+That covers an HTTP request, a `@Traced` or `@Span` method, and — because each of those boundaries opens a span of its own — a queue handler, a `@Cron`/`@Interval`/`@Timeout` job, and a WebSocket connection or message handler.
+
+The `trace` key is **absent**, not empty, where no span is open: bootstrap and shutdown code, and any handler running with `tracing.enabled: false` or with its own kind switched off — `tracing.traceQueueMessages`, `tracing.traceScheduledJobs`, `tracing.traceWebSocketEvents`. A log line never carries a trace id that names nothing.
 
 <llm-only>
 
 **Technical details for AI agents:**
 - `makeLogger()` selects formatter based on: `config.formatter` > `LOG_FORMAT` env > `NODE_ENV` (production=JSON, other=pretty)
 - `JsonFormatter.format()` checks `entry.trace` and adds `{ traceId, spanId, parentSpanId }` to output
-- Trace context is injected into log entries by the trace middleware when a span is active
+- Trace context is injected by `createSyncLogger(effectLogger, getCurrentTraceContext)` — the application wires the getter at construction (`application.ts`, `module.ts`); there is no trace middleware involved
+- `getCurrentTraceContext()` resolves from the OpenTelemetry active span first and the `requestContextStore` AsyncLocalStorage second, and skips an invalid (all-zero) span context so a disabled tracer cannot stamp ids on every line
 - `makeDevLogger()` forces pretty format + debug level
 - `makeProdLogger()` forces JSON format + info level
 - `makeLoggerFromOptions()` accepts `{ minLevel, format, defaultContext, otlpEndpoint, otlpHeaders, otlpBatchSize, otlpBatchTimeout, otlpResourceAttributes }` and creates the appropriate layer
 - When `otlpEndpoint` is set, `makeLoggerFromOptions()` creates a `CompositeTransport` with both `ConsoleTransport` and `OtlpLogTransport`
 - OTLP log transport auto-enables from env: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
-- `shutdownLogger()` flushes pending OTLP batches — called automatically in `app.stop()`
+- `resolveOtlpLogEndpoint(options?)` is that resolution as a function — the application calls it to decide whether to attach resource attributes BEFORE building the logger
+- `OneBunApplication` always builds through `makeLoggerFromOptions()`, including when no `loggerOptions` are given; routing that case to `makeLogger()` is what used to make the env variables inert
+- `shutdownLogger()` flushes every transport built in the process, not only the most recent one — a multi-service application builds one logger per child, and a single active-transport slot dropped all but the last
 - Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
 
 </llm-only>
@@ -476,31 +521,55 @@ Effect.runPromise(
 
 ### Mock Logger
 
+`makeMockLoggerLayer()` takes **no arguments** and returns a silent layer — use it to keep test output
+clean when you do not care what was logged:
+
 ```typescript
 import { makeMockLoggerLayer } from '@onebun/core/testing';
 
-describe('UserService', () => {
-  it('should log user creation', async () => {
-    const logs: Array<{ level: string; message: string }> = [];
-
-    const mockLogger = makeMockLoggerLayer((entry) => {
-      logs.push({ level: entry.level, message: entry.message });
-    });
-
-    // Use mock logger in tests
-    const app = new OneBunApplication(AppModule, {
-      loggerLayer: mockLogger,
-    });
-
-    // ... test code ...
-
-    expect(logs).toContainEqual({
-      level: 'info',
-      message: expect.stringContaining('User created'),
-    });
-  });
+const app = new OneBunApplication(AppModule, {
+  loggerLayer: makeMockLoggerLayer(),
 });
 ```
+
+To assert on what was logged, provide a layer that records. `Logger` is a plain object of methods
+returning `Effect`, so a capturing implementation is a few lines:
+
+```typescript
+import { Effect, Layer } from 'effect';
+import { LoggerService, type Logger } from '@onebun/logger';
+
+const logs: Array<{ level: string; message: string }> = [];
+
+const record = (level: string) => (message: string) =>
+  Effect.sync(() => {
+    logs.push({ level, message });
+  });
+
+const capturingLogger: Logger = {
+  trace: record('trace'),
+  debug: record('debug'),
+  info: record('info'),
+  warn: record('warn'),
+  error: record('error'),
+  fatal: record('fatal'),
+  child: () => capturingLogger,
+};
+
+const app = new OneBunApplication(AppModule, {
+  loggerLayer: Layer.succeed(LoggerService, capturingLogger),
+});
+
+// ... exercise the application ...
+
+expect(logs).toContainEqual({ level: 'info', message: 'User created' });
+```
+
+::: warning
+`makeMockLoggerLayer()` accepts no callback. Passing one is a compile error, and the mock it builds
+discards every entry — a test that expected to collect entries through it would assert against an
+empty array forever.
+:::
 
 ## Best Practices
 
@@ -543,6 +612,7 @@ this.logger.info('Order placed');
 
 ### 3. Use Child Loggers for Operations
 
+<!-- typecheck: skip -->
 ```typescript
 async processRequest(requestId: string, userId: string) {
   const logger = this.logger.child({ requestId, userId });
@@ -576,6 +646,7 @@ this.logger.info('User login', { email, password: '***' });
 
 ### 5. Log at Entry/Exit Points
 
+<!-- typecheck: skip -->
 ```typescript
 async processOrder(orderId: string): Promise<Order> {
   this.logger.info('Processing order started', { orderId });

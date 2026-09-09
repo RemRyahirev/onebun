@@ -8,6 +8,8 @@ import {
   describe,
   it,
   expect,
+  beforeEach,
+  afterEach,
 } from 'bun:test';
 import {
   Cause,
@@ -16,16 +18,21 @@ import {
 } from 'effect';
 
 import {
+  calculateRetryDelay,
   createHttpClient,
+  getTransportFailureKind,
   isErrorResponse,
+  resolveRetryConfig,
   DEFAULT_RETRY_CONFIG,
   DEFAULT_RETRY_DELAY,
   HttpStatusCode,
+  setTraceContextProvider,
+  TRANSPORT_FAILURE_CODE,
 } from './';
 
 /** Counts the requests a client really sent, so retry claims can be checked end to end. */
 function startCountingServer(
-  respond: (attempt: number) => Response,
+  respond: (attempt: number) => Response | Promise<Response>,
 ): { baseUrl: string; methods: string[]; stop(): void } {
   const methods: string[] = [];
   const server = Bun.serve({
@@ -613,27 +620,120 @@ describe('Requests API Documentation Examples', () => {
     /**
      * @source docs:api/requests.md#retry-configuration
      */
-    it('should accept retry configuration', () => {
-      // From docs: Retry Configuration
-      // Note: actual API uses 'backoff' not 'strategy'
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-        retries: {
-          // Number of retry attempts
-          max: 3,
+    it('should apply max, retryOn and onRetry from the documented config shape', async () => {
+      // From docs: "max — retries after the first attempt", "retryOn — status codes a server
+      // returned", "onRetry — callback on retry" receiving (error, attempt)
+      const server = startCountingServer(() => jsonStatus(503));
+      const observed: { attempt: number; code: number; error: string }[] = [];
 
-          // Backoff strategy: 'fixed', 'linear', 'exponential'
-          backoff: 'exponential',
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: {
+            max: 2,
+            backoff: 'fixed',
+            delay: 1,
+            retryOn: [503],
+            onRetry(error, attempt) {
+              observed.push({ attempt, code: error.code, error: error.error });
+            },
+          },
+        });
 
-          // Base delay in milliseconds
-          delay: 1000,
+        await client.get('/reports').catch(() => undefined);
 
-          // HTTP status codes to retry
-          retryOn: [408, 429, 500, 502, 503, 504],
-        },
+        // max: 2 means two retries *after* the first attempt — three requests in total
+        expect(server.methods).toEqual(['GET', 'GET', 'GET']);
+        expect(observed).toEqual([
+          { attempt: 1, code: 503, error: 'HTTP_ERROR' },
+          { attempt: 2, code: 503, error: 'HTTP_ERROR' },
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should not replay a status that is absent from retryOn', async () => {
+      // From docs: retryOn is the list of status codes that are retried — 404 is not on it
+      const server = startCountingServer(() => jsonStatus(404));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 3, delay: 1 },
+        });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/missing')));
+
+        expect(server.methods).toEqual(['GET']);
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.code).toBe(HttpStatusCode.NOT_FOUND);
+          expect(outcome.left.retryCount).toBe(0);
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should not replay a client-side timeout, nor report it as a server 500', async () => {
+      // From docs: "A client-side timeout is not retried either, for any method" and
+      // "A transport failure carries code: 0 with the error name TIMEOUT_ERROR"
+      const server = startCountingServer(async () => {
+        await Bun.sleep(300);
+
+        return jsonStatus(200);
       });
 
-      expect(client).toBeDefined();
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 3, delay: 1 } });
+
+        const outcome = await Effect.runPromise(
+          Effect.either(client.getEffect('/reports', { timeout: 60 })),
+        );
+
+        expect(server.methods).toEqual(['GET']);
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.code).toBe(TRANSPORT_FAILURE_CODE);
+          expect(outcome.left.error).toBe('TIMEOUT_ERROR');
+          expect(getTransportFailureKind(outcome.left)).toBe('timeout');
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should retry a request that never reached the server, keeping code 0', async () => {
+      // From docs: "retryOnNetworkError: true — connection refused / DNS / TLS" is a default,
+      // and the failure "is never reported as a server 500"
+      const dead = startCountingServer(() => jsonStatus(200));
+      const { baseUrl } = dead;
+      dead.stop();
+
+      const client = createHttpClient({ baseUrl, retries: { max: 2, delay: 1 } });
+
+      const outcome = await Effect.runPromise(Effect.either(client.getEffect('/reports')));
+
+      expect(outcome._tag).toBe('Left');
+
+      if (outcome._tag === 'Left') {
+        expect(outcome.left.retryCount).toBe(2);
+        expect(outcome.left.code).toBe(TRANSPORT_FAILURE_CODE);
+        expect(outcome.left.error).toBe('FETCH_ERROR');
+        expect(getTransportFailureKind(outcome.left)).toBe('network');
+      }
     });
 
     /**
@@ -756,42 +856,114 @@ describe('Requests API Documentation Examples', () => {
     /**
      * @source docs:api/requests.md#retry-strategies
      */
-    it('should accept fixed delay strategy', () => {
-      // From docs: Retry Strategies - Fixed delay
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-        retries: { max: 3, backoff: 'fixed', delay: 1000 },
-      });
+    it('should keep the delay constant under the fixed strategy', async () => {
+      // From docs: `{ max: 3, backoff: 'fixed', delay: 1000 }` retries after 1000ms, 1000ms, 1000ms
+      const schedule = resolveRetryConfig({ max: 3, backoff: 'fixed', delay: 1000 });
 
-      expect(client).toBeDefined();
+      expect([1, 2, 3].map((attempt) => calculateRetryDelay(attempt, schedule)))
+        .toEqual([1000, 1000, 1000]);
+
+      // ...and the client really sleeps that schedule: 20 + 20 + 20 = 60ms of waiting
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 3, backoff: 'fixed', delay: 20 },
+        });
+        const started = Date.now();
+
+        await client.get('/reports').catch(() => undefined);
+        const elapsed = Date.now() - started;
+
+        expect(server.methods).toEqual(['GET', 'GET', 'GET', 'GET']);
+        // Bounded on both sides: the lower bound proves it slept, the upper bound proves it slept
+        // the CONFIGURED schedule. Falling back to the 300ms default would take >=900ms and is the
+        // failure a lower bound alone cannot see. Which strategy was used is settled exactly by the
+        // calculateRetryDelay assertion above, not by wall-clock, which is too noisy to discriminate.
+        expect(elapsed).toBeGreaterThanOrEqual(55);
+        expect(elapsed).toBeLessThan(600);
+      } finally {
+        server.stop();
+      }
     });
 
     /**
      * @source docs:api/requests.md#retry-strategies
      */
-    it('should accept linear backoff strategy', () => {
-      // From docs: Retry Strategies - Linear backoff
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-        retries: { max: 3, backoff: 'linear', delay: 1000 },
-      });
+    it('should grow the delay by one base step under the linear strategy', async () => {
+      // From docs: `{ max: 3, backoff: 'linear', delay: 1000 }` retries after 1000ms, 2000ms, 3000ms
+      const schedule = resolveRetryConfig({ max: 3, backoff: 'linear', delay: 1000 });
 
-      expect(client).toBeDefined();
+      expect([1, 2, 3].map((attempt) => calculateRetryDelay(attempt, schedule)))
+        .toEqual([1000, 2000, 3000]);
+
+      // ...and the client really sleeps that schedule: 20 + 40 + 60 = 120ms of waiting
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 3, backoff: 'linear', delay: 20 },
+        });
+        const started = Date.now();
+
+        await client.get('/reports').catch(() => undefined);
+        const elapsed = Date.now() - started;
+
+        expect(server.methods).toEqual(['GET', 'GET', 'GET', 'GET']);
+        // See the fixed-strategy test: bounded both ways, and the strategy itself is pinned by the
+        // calculateRetryDelay assertion rather than by elapsed time.
+        expect(elapsed).toBeGreaterThanOrEqual(115);
+        expect(elapsed).toBeLessThan(600);
+      } finally {
+        server.stop();
+      }
     });
 
     /**
      * @source docs:api/requests.md#retry-strategies
      */
-    it('should accept exponential backoff strategy', () => {
-      // From docs: Retry Strategies - Exponential backoff
-      const client = createHttpClient({
-        baseUrl: 'https://api.example.com',
-        retries: {
-          max: 3, backoff: 'exponential', delay: 1000, factor: 2, 
-        },
+    it('should multiply the delay by the factor under the exponential strategy', async () => {
+      // From docs: `{ max: 3, backoff: 'exponential', delay: 1000, factor: 2 }` retries after
+      // 1000ms, 2000ms, 4000ms, 8000ms...
+      const schedule = resolveRetryConfig({
+        max: 3,
+        backoff: 'exponential',
+        delay: 1000,
+        factor: 2,
       });
 
-      expect(client).toBeDefined();
+      expect([1, 2, 3, 4].map((attempt) => calculateRetryDelay(attempt, schedule)))
+        .toEqual([1000, 2000, 4000, 8000]);
+
+      // ...and the client really sleeps that schedule: 20 + 40 + 80 = 140ms of waiting
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: {
+            max: 3,
+            backoff: 'exponential',
+            delay: 20,
+            factor: 2,
+          },
+        });
+        const started = Date.now();
+
+        await client.get('/reports').catch(() => undefined);
+        const elapsed = Date.now() - started;
+
+        expect(server.methods).toEqual(['GET', 'GET', 'GET', 'GET']);
+        // 130, not 135: the tighter bound sat ~3ms above the linear schedule's measured wall-clock
+        // (126-132ms), so it flaked under load while pretending to discriminate linear from
+        // exponential. That discrimination belongs to the calculateRetryDelay assertion above.
+        expect(elapsed).toBeGreaterThanOrEqual(130);
+        expect(elapsed).toBeLessThan(600);
+      } finally {
+        server.stop();
+      }
     });
   });
 });
@@ -850,5 +1022,106 @@ describe('Request Client API Methods', () => {
     it('should have deleteEffect method', () => {
       expect(typeof client.deleteEffect).toBe('function');
     });
+  });
+});
+
+/**
+ * docs/api/trace.md, "Context Propagation": three headers go out, the parent id is the innermost
+ * open span, `tracing: false` suppresses them, and nothing is sent when there is no trace to join.
+ *
+ * Driven through a registered provider rather than a whole application — that is the seam the
+ * page documents for anyone using `createHttpClient()` outside OneBun, and it keeps the assertion
+ * on what reaches the wire.
+ */
+describe('Outgoing trace context (docs/api/trace.md)', () => {
+  const TRACE_ID = '4bf92f3577b34da6a3ce929d0e0e4736';
+  const SPAN_ID = '00f067aa0ba902b7';
+  const NOT_SAMPLED = 0;
+
+  let received: Headers[];
+  let upstream: ReturnType<typeof Bun.serve>;
+  let upstreamUrl: string;
+
+  beforeEach(() => {
+    received = [];
+    upstream = Bun.serve({
+      port: 0,
+      fetch(request) {
+        received.push(request.headers);
+
+        return Response.json({ ok: true });
+      },
+    });
+    upstreamUrl = `http://localhost:${upstream.port}/echo`;
+  });
+
+  afterEach(() => {
+    setTraceContextProvider(null);
+    upstream.stop(true);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send traceparent plus the X-Trace-Id / X-Span-Id pair', async () => {
+    setTraceContextProvider(() => ({ traceId: TRACE_ID, spanId: SPAN_ID, traceFlags: 1 }));
+
+    await createHttpClient().get(upstreamUrl);
+
+    const [headers] = received;
+    expect(headers.get('traceparent')).toBe(`00-${TRACE_ID}-${SPAN_ID}-01`);
+    expect(headers.get('x-trace-id')).toBe(TRACE_ID);
+    // Sent WITH the trace id, never without: the receiver needs both, so a lone id joins nothing.
+    expect(headers.get('x-span-id')).toBe(SPAN_ID);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should carry the sampling decision rather than claiming everything is sampled', async () => {
+    setTraceContextProvider(() => ({
+      traceId: TRACE_ID,
+      spanId: SPAN_ID,
+      traceFlags: NOT_SAMPLED,
+    }));
+
+    await createHttpClient().get(upstreamUrl);
+
+    expect(received[0].get('traceparent')).toBe(`00-${TRACE_ID}-${SPAN_ID}-00`);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send nothing when tracing is off, per client and per call', async () => {
+    setTraceContextProvider(() => ({ traceId: TRACE_ID, spanId: SPAN_ID }));
+
+    await createHttpClient({ tracing: false }).get(upstreamUrl);
+    await createHttpClient().get(upstreamUrl, { tracing: false });
+
+    expect(received.map((headers) => headers.get('traceparent'))).toEqual([null, null]);
+  });
+
+  /**
+   * @source docs:api/trace.md#context-propagation
+   */
+  it('should send nothing when there is no trace to join, or when the ids are unusable', async () => {
+    await createHttpClient().get(upstreamUrl);
+
+    // The all-zero ids are OpenTelemetry's "invalid" sentinels, handed out for non-recording
+    // spans — so they arrive routinely, and a peer honouring them would join a trace that does
+    // not exist. A malformed `traceparent` can also get the request rejected outright.
+    setTraceContextProvider(() => ({ traceId: '0'.repeat(32), spanId: '0'.repeat(16) }));
+    await createHttpClient().get(upstreamUrl);
+
+    setTraceContextProvider(() => ({ traceId: 'not-hex', spanId: SPAN_ID }));
+    await createHttpClient().get(upstreamUrl);
+
+    setTraceContextProvider(() => {
+      throw new Error('provider exploded');
+    });
+    await createHttpClient().get(upstreamUrl);
+
+    expect(received.map((headers) => headers.get('traceparent'))).toEqual([null, null, null, null]);
   });
 });

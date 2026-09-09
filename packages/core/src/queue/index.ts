@@ -68,6 +68,17 @@ export {
   type QueuePatternMatch,
 } from './pattern-matcher';
 
+// Redis key glob translation — the Redis-side sibling of `toNatsSubject`
+export { toRedisQueueGlob } from './redis-glob';
+
+// Retry policy shared by the memory and Redis adapters
+export {
+  resolveMaxAttempts,
+  retryDelayMs,
+  DEFAULT_RETRY_ATTEMPTS,
+  DEFAULT_RETRY_DELAY_MS,
+} from './retry';
+
 // Acknowledgment semantics
 export {
   resolveAckMode,

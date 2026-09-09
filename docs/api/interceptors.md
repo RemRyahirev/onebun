@@ -34,8 +34,8 @@ import { CacheInterceptor } from '@onebun/cache';
 
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
-- `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only
-- Global via `ApplicationOptions.interceptors` — applies to all handlers in the application
+- `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only, on HTTP routes and WS handlers; on a `@Subscribe` handler the method form is silently dropped, put queue interceptors on the class
+- Global via `ApplicationOptions.interceptors` — HTTP routes ONLY; the list is merged at route registration and never reaches WS gateways or queue subscribers
 - All three can be combined; onion wrapping order: global (outermost) → controller/gateway → handler (innermost)
 
 **Interceptors work across all transports:**
@@ -46,7 +46,7 @@ import { CacheInterceptor } from '@onebun/cache';
 **Built-in interceptors:**
 - `LoggingInterceptor` — logs with transport-aware labels: `Incoming METHOD /path` for HTTP, `Incoming WS pattern` for WebSocket, `Incoming Queue pattern` for Queue
 - `TimeoutInterceptor` — pass as **instance**: `new TimeoutInterceptor(5000)` (takes `timeoutMs` constructor arg); throws `HttpException(408)` for HTTP, generic `Error` for other transports
-- `CacheInterceptor` — from `@onebun/cache`, caches GET 2xx HTTP responses via `CacheService`; non-HTTP transports pass through; requires `CacheModule` import in the module tree
+- `CacheInterceptor` — from `@onebun/cache`, caches GET 2xx HTTP responses via `CacheService`; non-HTTP transports pass through. Use it directly: `@UseInterceptors(CacheInterceptor)` with `CacheModule` imported. It carries `@Service()`, which is what makes TypeScript emit `design:paramtypes` and lets the resolver inject `CacheService` — an undecorated class with constructor dependencies is built with zero arguments and fails at request time
 
 **ExecutionContext — discriminated union:**
 ```typescript
@@ -197,9 +197,13 @@ class AuditInterceptor extends BaseInterceptor {
 ```
 
 ::: danger The interceptor class must carry a CLASS decorator
-DI is what `@Service()` buys here, not `BaseInterceptor`: TypeScript emits the `design:paramtypes`
-metadata the injector reads only for a class that carries a class decorator. A decorator on the
-`intercept` method does not count.
+DI is what `@Service()` buys here, not `BaseInterceptor`: the injector reads `design:paramtypes`, and
+TypeScript emits that metadata only when the class itself is decorated — a class decorator, or a
+decorator on a **constructor parameter** such as `@Inject(TOKEN)`. A decorator on the `intercept`
+method does not count, because the metadata is emitted for the member it sits on.
+
+Use `@Service()`. The constructor-parameter form works, but it makes DI depend on a token you might
+later remove, and the failure it leaves behind is the silent one described below.
 
 - **Undecorated class with constructor parameters** — every parameter is `undefined` at run time and
   nothing fails at startup. This is true whether or not the class extends `BaseInterceptor`;
@@ -248,12 +252,19 @@ class UserController extends BaseController {
 Applies to every message handler in the gateway:
 
 ```typescript
-import { WebSocketGateway, SubscribeMessage, UseInterceptors, LoggingInterceptor } from '@onebun/core';
+import {
+  WebSocketGateway,
+  BaseWebSocketGateway,
+  OnMessage,
+  UseInterceptors,
+  LoggingInterceptor,
+  type WsClientData,
+} from '@onebun/core';
 
 @UseInterceptors(LoggingInterceptor)
 @WebSocketGateway({ path: '/ws' })
 class ChatGateway extends BaseWebSocketGateway {
-  @SubscribeMessage('chat:send')
+  @OnMessage('chat:send')
   handleMessage(client: WsClientData, data: unknown) {
     return { event: 'chat:received', data };
   }
@@ -263,8 +274,13 @@ class ChatGateway extends BaseWebSocketGateway {
 ### Queue handler
 
 A class-level `@UseInterceptors` wraps the queue subscribers (`@Subscribe`) declared on that class.
-Scheduled handlers — `@Cron`, `@Interval`, `@Timeout` — are **not** wrapped: the scheduler calls the
-bound method directly. If such a job publishes to a `pattern`, the interceptors of the class holding
+Put queue interceptors on the class: the METHOD form does nothing on a `@Subscribe` handler, because
+the method decorator writes its metadata to the prototype while queue registration looks it up on the
+class — nothing errors, the interceptor simply never runs. If one subscriber needs different
+wrapping, give it its own consumer class.
+
+Scheduled handlers — `@Cron`, `@Interval`, `@Timeout` — are **not** wrapped either: the scheduler calls
+the bound method directly. If such a job publishes to a `pattern`, the interceptors of the class holding
 a `@Subscribe` on that pattern still run, once per delivered message.
 
 ```typescript
@@ -282,7 +298,10 @@ class OrderController extends BaseController {
 
 ### Global
 
-Pass interceptors in `ApplicationOptions.interceptors`. They wrap every handler in the application:
+Pass interceptors in `ApplicationOptions.interceptors`. They wrap every **HTTP route** in the
+application — and only those: the global list is merged into the chain at route registration, so
+WebSocket gateways and queue subscribers never see it. To wrap those, put `@UseInterceptors` on the
+gateway or consumer class.
 
 ```typescript
 import { OneBunApplication, LoggingInterceptor } from '@onebun/core';
@@ -390,6 +409,7 @@ class ApiController extends BaseController { /* ... */ }
 
 Aborts handler execution after the specified number of milliseconds. For HTTP, throws `HttpException(408)`. For WebSocket and Queue transports, throws a generic `Error`. Pass as an **instance** because it takes a constructor argument:
 
+<!-- typecheck: skip -->
 ```typescript
 import { TimeoutInterceptor, UseInterceptors } from '@onebun/core';
 
@@ -404,17 +424,12 @@ The route-level `timeout` option (in `@Get('/path', { timeout: 10 })`) sets Bun'
 
 ### CacheInterceptor
 
-From `@onebun/cache` — caches successful (2xx) HTTP GET responses via `CacheService`. Non-GET requests and non-HTTP transports pass through without caching. Requires `CacheModule` to be imported so that `CacheService` is available for DI:
+From `@onebun/cache` — caches successful (2xx) HTTP GET responses via `CacheService`. Non-GET requests and non-HTTP transports pass through without caching. Requires `CacheModule` to be imported so that `CacheService` is available for DI.
+
+Use it directly — `CacheInterceptor` carries `@Service()`, so the resolver injects `CacheService`:
 
 ```typescript
-import { CacheInterceptor } from '@onebun/cache';
-import { CacheModule } from '@onebun/cache';
-
-@Module({
-  imports: [CacheModule],
-  controllers: [DataController],
-})
-class DataModule {}
+import { CacheInterceptor, CacheModule } from '@onebun/cache';
 
 @UseInterceptors(CacheInterceptor)
 @Controller('/api/data')
@@ -422,7 +437,35 @@ class DataController extends BaseController {
   @Get('/')
   getData() { return { items: [1, 2, 3] }; }
 }
+
+@Module({
+  imports: [CacheModule],
+  controllers: [DataController],
+})
+class DataModule {}
 ```
+
+The interceptor does not belong in `providers` — the resolver instantiates it; only its
+dependency has to be resolvable, which is what `CacheModule` provides.
+
+::: warning Writing your own interceptor with constructor dependencies
+Decorate it. TypeScript emits `design:paramtypes` only for a **decorated** class, and that is the
+metadata the resolver reads to find constructor dependencies. Without a decorator the class is
+built with zero arguments, the dependency lands `undefined`, and the failure arrives at request
+time as a 500 rather than at startup.
+
+```typescript
+@Service()                       // ← load-bearing, not decoration
+class AuditInterceptor extends BaseInterceptor {
+  constructor(private readonly audit: AuditService) {
+    super();
+  }
+}
+```
+
+This applies to guards, filters and middleware alike. `CacheInterceptor` shipped without it and
+answered 500 on every GET it wrapped.
+:::
 
 ## Execution Order
 
@@ -441,14 +484,18 @@ Request → [Global Middleware] → [Module Middleware] → [Controller Middlewa
 **WebSocket:**
 
 ```
-Message → [Guards] → [Global Interceptors → [Gateway Interceptors → [Handler Interceptors → Handler]]]
+Message → [Guards] → [Gateway Interceptors → [Handler Interceptors → Handler]]
 ```
 
 **Queue:**
 
 ```
-Message → [Guards] → [Global Interceptors → [Controller Interceptors → [Handler Interceptors → Handler]]]
+Message → [Guards] → [Controller Interceptors → Handler]
 ```
+
+The last two rows have no global level on purpose: `ApplicationOptions.interceptors` is read at HTTP
+route registration only. Queue has no handler level either, because a method-level `@UseInterceptors`
+never reaches a `@Subscribe` handler.
 
 Interceptors use **onion wrapping**: the first interceptor in the list (global) wraps outermost and sees the result last. The innermost interceptor (handler-level) runs closest to the handler.
 

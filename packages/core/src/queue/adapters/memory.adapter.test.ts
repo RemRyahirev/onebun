@@ -130,6 +130,148 @@ describe('InMemoryQueueAdapter', () => {
     });
   });
 
+  describe('captured pattern parameters', () => {
+    it('hands the handler the value its {name} captured', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.123', { total: 10 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].params).toEqual({ id: '123' });
+      // The pattern stays the DELIVERED topic; the captured values are the new information.
+      expect(received[0].pattern).toBe('orders.123');
+    });
+
+    it('captures every parameter of a multi-parameter pattern, in the right order', async () => {
+      // A single-parameter case passes on a coincidence — one captured group cannot be
+      // mismatched with another, and a regex that captured the wrong segment would still
+      // produce something. Two parameters at different depths cannot.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}.items.{itemId}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.42.items.abc', { qty: 1 });
+
+      expect(received).toHaveLength(1);
+      expect(received[0].params).toEqual({ id: '42', itemId: 'abc' });
+    });
+
+    it('gives each subscription its own values for one published topic', async () => {
+      // Params are a function of the SUBSCRIBER's pattern, not of the publish. One topic
+      // reaching two patterns must not give both the same object, or the second handler
+      // reads the first one's capture.
+      await adapter.connect();
+
+      const byName: Record<string, Record<string, string>> = {};
+      await adapter.subscribe('orders.{id}', async (message) => {
+        byName.single = message.params;
+      });
+      await adapter.subscribe('orders.{orderId}', async (message) => {
+        byName.renamed = message.params;
+      });
+      await adapter.subscribe('orders.*', async (message) => {
+        byName.wildcard = message.params;
+      });
+
+      await adapter.publish('orders.777', { total: 1 });
+
+      expect(byName.single).toEqual({ id: '777' });
+      expect(byName.renamed).toEqual({ orderId: '777' });
+      // A `*` captures nothing, and answers with an object rather than undefined.
+      expect(byName.wildcard).toEqual({});
+    });
+
+    it('answers with an empty object for a pattern that captures nothing', async () => {
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.created', async (message) => {
+        received.push(message);
+      });
+      await adapter.subscribe('events.#', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.created', { a: 1 });
+      await adapter.publish('events.user.signed.up', { b: 2 });
+
+      expect(received).toHaveLength(2);
+      // Never undefined: a handler reads `message.params.x` without guarding the access.
+      expect(received[0].params).toEqual({});
+      expect(received[1].params).toEqual({});
+    });
+
+    it('carries the same values into every retry of a failed delivery', async () => {
+      await adapter.connect();
+
+      const seen: Array<Record<string, string>> = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        seen.push(message.params);
+
+        if (seen.length < 3) {
+          throw new Error('not yet');
+        }
+      }, { retry: { attempts: 3, delay: 0 } });
+
+      await adapter.publish('orders.555', { total: 1 });
+
+      expect(seen).toEqual([{ id: '555' }, { id: '555' }, { id: '555' }]);
+    });
+
+    it('gives two subscriptions distinct objects, and one delivery one object across retries', async () => {
+      // The documented ownership rule, as identity rather than as equal values: a handler that
+      // mutates `params` can only affect its own next attempt, never another subscription.
+      await adapter.connect();
+
+      const first: Array<Record<string, string>> = [];
+      const second: Array<Record<string, string>> = [];
+
+      await adapter.subscribe('orders.{id}', async (message) => {
+        first.push(message.params);
+
+        if (first.length < 2) {
+          throw new Error('retry me');
+        }
+      }, { retry: { attempts: 2, delay: 0 } });
+
+      await adapter.subscribe('orders.{orderId}', async (message) => {
+        second.push(message.params);
+      });
+
+      await adapter.publish('orders.5', { total: 1 });
+
+      // Same delivery, two attempts: one object.
+      expect(first).toHaveLength(2);
+      expect(first[0]).toBe(first[1]);
+      // Different subscription: a different object, and different names.
+      expect(second[0]).not.toBe(first[0]);
+      expect(second[0]).toEqual({ orderId: '5' });
+    });
+
+    it('does not put the captured values on the wire as metadata', async () => {
+      // They are derived per subscription, so a publisher never sends them and a
+      // metadata key of the same name is the publisher's own.
+      await adapter.connect();
+
+      const received: Message[] = [];
+      await adapter.subscribe('orders.{id}', async (message) => {
+        received.push(message);
+      });
+
+      await adapter.publish('orders.9', { total: 1 });
+
+      expect(Object.keys(received[0].metadata)).not.toContain('params');
+    });
+  });
+
   describe('delayed messages', () => {
     let advanceTime: (ms: number) => void;
     let restore: () => void;
@@ -490,8 +632,183 @@ describe('InMemoryQueueAdapter', () => {
       expect(adapter.supports('dead-letter-queue')).toBe(false);
     });
 
-    it('should not support retry', () => {
-      expect(adapter.supports('retry')).toBe(false);
+    it('should support retry', () => {
+      // In-process and non-persistent — a restart loses the attempt counter with the message.
+      // It still honours `retry.attempts`, and `false` here would be a `supports()` that lies.
+      expect(adapter.supports('retry')).toBe(true);
+    });
+  });
+
+  describe('retry under ackMode auto', () => {
+    it('delivers exactly once when no retry is configured', async () => {
+      // The behaviour-preservation pin. Adding retries must not upgrade existing subscriptions:
+      // a handler with a non-idempotent side effect would perform it three times instead of one.
+      await adapter.connect();
+
+      let calls = 0;
+      const failures: Error[] = [];
+      adapter.on('onMessageFailed', (_message, error) => {
+        failures.push(error);
+      });
+
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(50);
+
+      expect(calls).toBe(1);
+      expect(failures).toHaveLength(1);
+    });
+
+    it('honours retry.attempts, reporting every failed attempt', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      const failures: Error[] = [];
+      adapter.on('onMessageFailed', (_message, error) => {
+        failures.push(error);
+      });
+
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 5, backoff: 'fixed', delay: 1 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(200);
+
+      // Five attempts requested, five delivered — this used to be one, with `retry` read by
+      // nothing in the adapter at all.
+      expect(calls).toBe(5);
+      expect(failures).toHaveLength(5);
+    });
+
+    it('stops retrying as soon as the handler succeeds', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      let processed = 0;
+      adapter.on('onMessageProcessed', () => {
+        processed += 1;
+      });
+
+      await adapter.subscribe('orders.created', async () => {
+        calls += 1;
+        if (calls < 3) {
+          throw new Error('transient');
+        }
+      }, { retry: { attempts: 5, delay: 1 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(200);
+
+      expect(calls).toBe(3);
+      expect(processed).toBe(1);
+    });
+
+    it('numbers the attempts and marks every delivery after the first as redelivered', async () => {
+      await adapter.connect();
+
+      const seen: Array<{ attempt?: number; maxAttempts?: number; redelivered?: boolean }> = [];
+
+      await adapter.subscribe('orders.created', async (message) => {
+        seen.push({
+          attempt: message.attempt,
+          maxAttempts: message.maxAttempts,
+          redelivered: message.redelivered,
+        });
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, delay: 1 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(200);
+
+      // All three fields were permanently absent before: declared on the message class, assigned
+      // from constructor options no call site passed.
+      expect(seen).toEqual([
+        { attempt: 1, maxAttempts: 3, redelivered: false },
+        { attempt: 2, maxAttempts: 3, redelivered: true },
+        { attempt: 3, maxAttempts: 3, redelivered: true },
+      ]);
+    });
+
+    it('leaves the delivery fields inert under ackMode none', async () => {
+      // 'none' promises exactly one delivery and no tracking. A counter there would advertise
+      // state the mode does not keep.
+      await adapter.connect();
+
+      const seen: Array<{ attempt?: number; maxAttempts?: number; redelivered?: boolean }> = [];
+      let calls = 0;
+
+      await adapter.subscribe('orders.created', async (message) => {
+        calls += 1;
+        seen.push({
+          attempt: message.attempt,
+          maxAttempts: message.maxAttempts,
+          redelivered: message.redelivered,
+        });
+        throw new Error('handler exploded');
+      }, { ackMode: 'none', retry: { attempts: 4, delay: 1 } });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(100);
+
+      expect(calls).toBe(1);
+      expect(seen).toEqual([{ attempt: undefined, maxAttempts: undefined, redelivered: false }]);
+    });
+
+    it('retries only the subscription that failed, not its healthy neighbours', async () => {
+      // The requeue used to re-enter `dispatch()`, which walks every matching subscription — so
+      // one broken consumer re-invoked the working ones on the same topic.
+      await adapter.connect();
+
+      let failing = 0;
+      let healthy = 0;
+
+      await adapter.subscribe('orders.created', async () => {
+        failing += 1;
+        throw new Error('handler exploded');
+      }, { retry: { attempts: 3, delay: 1 } });
+
+      await adapter.subscribe('orders.created', async () => {
+        healthy += 1;
+      });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(200);
+
+      expect(failing).toBe(3);
+      expect(healthy).toBe(1);
+    });
+
+    it('does not fan a manual nack(true) out to other subscriptions', async () => {
+      await adapter.connect();
+
+      let requeueing = 0;
+      let healthy = 0;
+
+      await adapter.subscribe('orders.created', async (message) => {
+        requeueing += 1;
+        if (requeueing === 1) {
+          await message.nack(true);
+        } else {
+          await message.ack();
+        }
+      }, { ackMode: 'manual' });
+
+      await adapter.subscribe('orders.created', async () => {
+        healthy += 1;
+      });
+
+      await adapter.publish('orders.created', { orderId: 1 });
+      await Bun.sleep(100);
+
+      expect(requeueing).toBe(2);
+      // Measured as 2 before the fix: a neighbour re-ran because someone else asked for a requeue.
+      expect(healthy).toBe(1);
     });
   });
 

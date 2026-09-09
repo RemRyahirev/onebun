@@ -1,9 +1,10 @@
 import path from 'node:path';
 
+import { trace as otelTrace } from '@opentelemetry/api';
 import {
   type Context,
   Effect,
-  type Layer,
+  Layer,
 } from 'effect';
 
 import type { Controller } from '../module/controller';
@@ -11,6 +12,7 @@ import type { ResolvedInterceptor } from '../types';
 import type { MultiServiceOrchestrator } from './multi-service-orchestrator';
 import type { MultiServiceApplicationOptions, ServicesMap } from './multi-service.types';
 import type { WsClientData } from '../websocket/ws.types';
+import type { Tracer } from '@opentelemetry/api';
 
 import {
   type DeepPaths,
@@ -20,9 +22,10 @@ import {
 import {
   createSyncLogger,
   type Logger,
+  type LoggerOptions,
   LoggerService,
-  makeLogger,
   makeLoggerFromOptions,
+  resolveOtlpLogEndpoint,
   shutdownLogger,
   type SyncLogger,
 } from '@onebun/logger';
@@ -31,8 +34,10 @@ import {
   createSuccessResponse,
   HttpStatusCode,
   OneBunBaseError,
+  setTraceContextProvider,
 } from '@onebun/requests';
 
+import { awaitBounded } from '../await-bounded';
 import {
   getControllerFilters,
   getControllerGuards,
@@ -66,6 +71,7 @@ import {
   OneBunModule,
 } from '../module/module';
 import { assertRegistrationsConfigured } from '../module/registration';
+import { getServiceTag } from '../module/service';
 import {
   type ProfileMark,
   PROFILING_ENABLED,
@@ -96,24 +102,31 @@ import {
 import { CorsMiddleware } from '../security/cors-middleware';
 import { RateLimitMiddleware } from '../security/rate-limit-middleware';
 import { SecurityHeadersMiddleware } from '../security/security-headers-middleware';
+import { inRootTraceScope } from '../trace-scope';
 import {
   type ApplicationOptions,
   HttpMethod,
   type ModuleInstance,
   type OneBunRequest,
+  type ResolvedMiddleware,
   ParamType,
   type RouteMetadata,
 } from '../types';
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
-import { QUEUE_DISABLED_WITH_ADAPTER_WARNING, resolveQueueEnablement } from './queue-enablement';
+import {
+  QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  resolveQueueAdapterType,
+  resolveQueueEnablement,
+} from './queue-enablement';
 import {
   createDeadline,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
   DRAIN_BUDGET_RATIO,
   describeRemaining,
   drainInFlight,
+  SERVER_STOP_TIMEOUT_MS,
   type DrainReport,
   type InFlightSource,
 } from './shutdown';
@@ -175,6 +188,27 @@ function normalizePath(pathStr: string): string {
   }
 
   return pathStr.endsWith('/') ? pathStr.slice(0, -1) : pathStr;
+}
+
+/**
+ * Compose a route path from a prefix, a controller path and a route path.
+ *
+ * Concatenating them naively is what made `@Controller('/')` unusable: with `@Get('/health')`
+ * it produced `//health`, which matches NOTHING — neither `/health` nor `//health`. A whole
+ * controller silently disappeared, and the startup log printed the broken path, confirming the
+ * wrong route to whoever wrote it.
+ *
+ * `normalizePath` alone does not save this: it strips a TRAILING slash, and the duplicate is in
+ * the middle. Runs of separators are collapsed first, then the trailing one is dropped.
+ *
+ * This is also the real cause of the reported "a root wildcard does not match nested paths"
+ * gotcha. Raw `Bun.serve({ routes: { '/*': { OPTIONS } } })` matches them fine;
+ * `@Controller('/') + @Options('/*')` composed to `//*`.
+ *
+ * @see docs:api/controllers.md
+ */
+export function joinRoutePath(...segments: string[]): string {
+  return normalizePath(segments.join('').replace(/\/{2,}/g, '/'));
 }
 
 /**
@@ -275,15 +309,26 @@ const EMPTY_QUERY_PARAMS: Record<string, string | string[]> = Object.freeze({});
  * extractQueryParams('http://x.com/?tag=a&tag=b')  // { tag: ['a', 'b'] }
  * extractQueryParams('http://x.com/?tag[]=a')       // { tag: ['a'] }
  * extractQueryParams('http://x.com/users')          // {} (frozen empty object, zero alloc)
+ * extractQueryParams('http://x.com/?a=1#&a=9')      // { a: '1' } (fragment ignored, as the router does)
  */
 function extractQueryParams(rawUrl: string): Record<string, string | string[]> {
-  const qIdx = rawUrl.indexOf('?');
+  // The fragment is cut FIRST, before looking for the query. Skipping this made OneBun parse the
+  // request target with two disagreeing parsers: the router uses `new URL()`, which drops
+  // everything from `#`, while this one fed the fragment straight to URLSearchParams. Anyone able
+  // to write a request target — an in-path attacker, or any client that is not a browser — could
+  // therefore inject parameters the router never saw, and because URLSearchParams is last-wins,
+  // OVERRIDE real ones: `/x?page=1#&page=99` routed as `page=1` and reached the handler as
+  // `page=99`. Bun passes the fragment through verbatim, so nothing upstream removes it.
+  const hashIdx = rawUrl.indexOf('#');
+  const requestTarget = hashIdx === -1 ? rawUrl : rawUrl.slice(0, hashIdx);
+
+  const qIdx = requestTarget.indexOf('?');
   if (qIdx === -1) {
     return EMPTY_QUERY_PARAMS;
   }
 
   const queryParams: Record<string, string | string[]> = {};
-  const searchParams = new URLSearchParams(rawUrl.slice(qIdx + 1));
+  const searchParams = new URLSearchParams(requestTarget.slice(qIdx + 1));
 
   for (const [rawKey, value] of searchParams.entries()) {
     // Handle array notation: tag[] -> tag (as array)
@@ -350,6 +395,29 @@ const DEFAULT_STATIC_FILE_EXISTENCE_CACHE_TTL_MS = 60_000;
 const STATIC_EXISTS_CACHE_PREFIX = 'onebun:static:exists:';
 
 /**
+ * One `[ServiceClass, token]` pair for {@link OneBunApplication.getLayer}.
+ *
+ * A `Context` has one slot per service class, so an application holding two instances of one
+ * class cannot be represented without saying which one takes the slot. This is how it is said —
+ * the layer counterpart of `getService(Class, token)`.
+ *
+ * @see docs:api/core.md
+ */
+export type ServiceSelection = readonly [
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  serviceClass: new (...args: any[]) => unknown,
+  token: symbol | string,
+];
+
+/**
+ * Fallbacks for the OTLP `service.*` resource attributes. Deliberately the same strings
+ * `initTracerProvider` uses, so logs and spans from an unconfigured service land under one name
+ * in the backend instead of two.
+ */
+const DEFAULT_OTLP_SERVICE_NAME = 'onebun-service';
+const DEFAULT_OTLP_SERVICE_VERSION = '1.0.0';
+
+/**
  * Resolve a relative path under a root directory and ensure the result stays inside the root (path traversal protection).
  * @param rootDir - Absolute path to the static root directory
  * @param relativePath - URL path segment (e.g. from request path after prefix); must not contain '..' that escapes root
@@ -386,6 +454,13 @@ interface ShutdownOutcome {
   phase: string | null;
   /** Connections force-closed because the drain window expired. */
   forceClosed: number;
+  /**
+   * Phases that rejected. Every one of them was logged and the sequence carried on.
+   *
+   * Named rather than counted, because "the trace flush failed" and "the destroy hooks
+   * failed" send an operator to entirely different places.
+   */
+  failures: string[];
 }
 
 /**
@@ -464,8 +539,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       } as ApplicationOptions;
       this.config = new NotInitializedConfig();
 
-      // Initialize logger (simplified — no config/metrics/tracing at parent level)
-      this.loggerLayer = makeLogger();
+      // Initialize logger (simplified — no config/metrics/tracing at parent level, but the
+      // OTLP environment variables still apply: an orchestrator whose own logs stop at stdout
+      // while its children ship theirs is the half that breaks when something goes wrong)
+      this.loggerLayer = makeLoggerFromOptions(this.resolveLoggerOptions());
       const effectLogger = Effect.runSync(
         Effect.provide(
           Effect.map(LoggerService, (logger: Logger) =>
@@ -511,27 +588,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Use provided logger layer, or create from options, or use default
     // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
-    // Auto-populate OTLP resource attributes from tracing config if available
-    const loggerOptions = this.options.loggerOptions
-      ? {
-        ...this.options.loggerOptions,
-        otlpResourceAttributes: this.options.loggerOptions.otlpResourceAttributes ?? (
-          this.options.loggerOptions.otlpEndpoint && this.options.tracing
-            ? {
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'service.name': this.options.tracing.serviceName ?? 'onebun-service',
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'service.version': this.options.tracing.serviceVersion ?? '1.0.0',
-            }
-            : undefined
-        ),
-      }
-      : undefined;
-
     this.loggerLayer = this.options.loggerLayer
-      ?? (loggerOptions
-        ? makeLoggerFromOptions(loggerOptions)
-        : makeLogger());
+      ?? makeLoggerFromOptions(this.resolveLoggerOptions());
 
     // Initialize logger with application class name as context
     const effectLogger = Effect.runSync(
@@ -587,7 +645,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.logger.debug('Tracing options:', this.options.tracing);
 
         const trace = require('@onebun/trace') as typeof import('@onebun/trace');
-        const traceLayer = trace.makeTraceService(this.options.tracing || {});
+        const traceLayer = trace.makeTraceService(this.resolveTracingOptions());
         this.traceService = Effect.runSync(Effect.provide(trace.TraceService, traceLayer));
 
         this.logger.debug('Trace service Effect run successfully');
@@ -596,6 +654,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         if (typeof globalThis !== 'undefined') {
           (globalThis as Record<string, unknown>).__onebunTraceService = this.traceService;
         }
+
+        // Outgoing calls join the trace from here on. Wired next to the trace service because it
+        // is the same capability seen from the other side, and because a failure above must not
+        // leave the client emitting headers for a trace nothing is recording.
+        this.wireOutgoingTraceContext();
 
         this.logger.info('Trace service initialized successfully');
       } catch (error) {
@@ -619,6 +682,106 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     // Note: root module creation is deferred to start() to ensure
     // config is fully initialized before services are created.
+  }
+
+  /**
+   * Point `@onebun/requests` at this process's per-request trace context.
+   *
+   * `@onebun/requests` cannot import core — core depends on requests, not the reverse — so the
+   * seam is a registered function. It used to be a process-global cell that nothing ever wrote,
+   * which made every outgoing call leave untraced and silent; a single cell would have been the
+   * wrong shape anyway, since concurrent requests share it and the last writer would win.
+   *
+   * The OpenTelemetry active span comes first when there is one: it is the innermost open span,
+   * so a call made from inside a `@Traced` method hangs off that method rather than off the
+   * request. `getCurrentTraceContext()` is the fallback, and covers the path where no exporter is
+   * configured and therefore no OpenTelemetry span exists at all.
+   */
+  private wireOutgoingTraceContext(): void {
+    setTraceContextProvider(() => {
+      const activeSpan = otelTrace.getActiveSpan();
+
+      if (activeSpan) {
+        const spanContext = activeSpan.spanContext();
+
+        return {
+          traceId: spanContext.traceId,
+          spanId: spanContext.spanId,
+          traceFlags: spanContext.traceFlags,
+        };
+      }
+
+      const traceContext = getCurrentTraceContext();
+
+      return traceContext
+        ? {
+          traceId: traceContext.traceId,
+          spanId: traceContext.spanId,
+          traceFlags: traceContext.traceFlags,
+        }
+        : null;
+    });
+  }
+
+  /**
+   * The tracing options actually used, with a default reporter for abandoned span exports.
+   *
+   * An export that fails without a word is how tracing came to deliver nothing for so long, and
+   * the exporter has no logger of its own. Anything the user supplied wins — this only fills the
+   * gap where the alternative is silence.
+   */
+  private resolveTracingOptions(): NonNullable<ApplicationOptions['tracing']> {
+    const tracing = this.options.tracing ?? {};
+
+    if (!tracing.exportOptions?.endpoint || tracing.exportOptions.onExportFailure) {
+      return tracing;
+    }
+
+    return {
+      ...tracing,
+      exportOptions: {
+        ...tracing.exportOptions,
+        onExportFailure: (error: Error, spanCount: number, attempts: number) => {
+          this.logger.warn(
+            `Dropped ${spanCount} span(s) after ${attempts} export attempt(s): ${error.message}`,
+          );
+        },
+      },
+    };
+  }
+
+  /**
+   * The logger options actually used, with the OTLP resource attributes filled in.
+   *
+   * Every path goes through `makeLoggerFromOptions`, including the one where nothing was
+   * configured, because it — and not `makeLogger` — is what reads
+   * `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`. Sending the
+   * no-options case to `makeLogger` meant setting either variable did nothing whatsoever,
+   * which defeats the reason the variables exist: one image promoted from dev to prod with
+   * observability turned on by injection rather than by a code change.
+   */
+  private resolveLoggerOptions(): LoggerOptions | undefined {
+    const configured = this.options.loggerOptions;
+    const otlpEndpoint = resolveOtlpLogEndpoint(configured);
+
+    if (!otlpEndpoint) {
+      return configured;
+    }
+
+    return {
+      ...configured,
+      // Attached on whichever path enabled OTLP, not only the explicit-endpoint one. Records
+      // that arrive with an empty resource cannot be attributed to a service, and telling the
+      // services apart is most of what a log backend is for.
+      otlpResourceAttributes: configured?.otlpResourceAttributes ?? {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'service.name': this.options.tracing?.serviceName
+          ?? process.env.OTEL_SERVICE_NAME
+          ?? DEFAULT_OTLP_SERVICE_NAME,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'service.version': this.options.tracing?.serviceVersion ?? DEFAULT_OTLP_SERVICE_VERSION,
+      },
+    };
   }
 
   /**
@@ -682,13 +845,48 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Get root module layer
+   * The application's services as one Effect `Layer`, for composing them into a program from
+   * outside the module tree — an Effect-native test, a script, an embedding host.
+   *
+   * A `Context` has exactly one slot per service class, so an application holding two instances
+   * of one class does not fit in one and the untokened form refuses rather than handing back
+   * whichever was merged last. `selections` is how you say which instance takes the slot — the
+   * layer counterpart of `getService(Class, token)`, and the reason the refusal is not a dead
+   * end. Every ambiguous class must be named; one left out still refuses, and names itself.
+   *
+   * Only ambiguous classes need naming. Selecting an unambiguous one is allowed and simply pins
+   * what was already going to be there.
+   *
+   * @param selections - `[ServiceClass, token]` pairs choosing an instance per class.
+   * @returns A layer providing every service the application built.
+   * @throws If the application holds two instances of a class that `selections` does not name.
+   *
+   * @example
+   * ```typescript
+   * const layer = app.getLayer([[MailerService, PRIMARY_MAILER]]);
+   * await Effect.runPromise(Effect.provide(program, layer));
+   * ```
+   *
+   * @see docs:api/core.md
    */
-  getLayer(): Layer.Layer<never, never, unknown> {
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown> {
     this.ensureSingleServiceMode('getLayer');
-    this.assertLayerUnambiguous();
 
-    return this.ensureModule().getLayer();
+    const selected = selections ?? [];
+    this.assertLayerUnambiguous(selected.map(([serviceClass]) => serviceClass.name));
+
+    // Merged last, because that is what wins for a shared tag — the same rule that makes the
+    // untokened form ambiguous in the first place is what lets a selection resolve it.
+    return selected.reduce<Layer.Layer<never, never, unknown>>(
+      (layer, [serviceClass, token]) => Layer.merge(
+        layer,
+        Layer.succeed(
+          getServiceTag(serviceClass) as unknown as Context.Tag<unknown, unknown>,
+          this.getService(serviceClass, token),
+        ) as unknown as Layer.Layer<never, never, unknown>,
+      ),
+      this.ensureModule().getLayer(),
+    );
   }
 
   /**
@@ -748,6 +946,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Default exception filter respects httpEnvelope option
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
       httpEnvelope: this.options.httpEnvelope,
+      exposeErrorDetails: this.options.exposeErrorDetails,
     });
     // `applyExceptionFilters` is a function declaration at method-body scope, so it
     // cannot see `const app = this` — that one is block-scoped inside the try below.
@@ -832,7 +1031,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.logger.debug(`Loaded ${controllers.length} controllers`);
 
       // Initialize WebSocket handler and detect gateways
-      this.wsHandler = new WsHandler(this.logger, this.options.websocket);
+      // The tracer is passed so a `@Traced` method reached from a socket callback is recorded
+      // by THIS application's provider. `getTracer` is impl-only on the trace service, hence
+      // the optional call.
+      this.wsHandler = new WsHandler(
+        this.logger,
+        this.options.websocket,
+        this.traceService?.getTracer?.(),
+        this.options.tracing?.traceWebSocketEvents !== false,
+      );
 
       // Register WebSocket gateways (they are in controllers array but decorated with @WebSocketGateway)
       for (const controllerClass of controllers) {
@@ -981,6 +1188,31 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // collapse every verb into one Prometheus series. Concrete routes keep the
         // registered verb, which Bun guarantees equals req.method for a method-map route.
         const isCatchAllRoute = method === HttpMethod.ALL;
+        // Whether this application will create an OpenTelemetry span for the request itself, and
+        // therefore whether entering a context scope per request buys anything. Resolved once at
+        // registration rather than per request — none of these can change while serving.
+        const tracesHttpSpans = Boolean(
+          app.traceService
+          && app.options.tracing?.exportOptions?.endpoint
+          && app.options.tracing?.traceHttpRequests !== false,
+        );
+
+        // The tracer whose provider this application's spans belong to, and whether stating it
+        // buys anything. OpenTelemetry keeps one provider per process and refuses a duplicate,
+        // so an application that did NOT win that slot must name itself or its `@Traced` spans
+        // are recorded by the winner's provider, under the winner's `service.name`.
+        //
+        // Gated on not owning the slot rather than applied unconditionally: a trace service is
+        // created for every application by default, so an unconditional scope would add an
+        // AsyncLocalStorage frame to every request of every OneBun application in existence to
+        // fix a multi-application problem. The single-application hot path is unchanged.
+        //
+        // Resolved once at registration: a first application owns the slot for as long as it
+        // runs, and a later sibling knows at its own registration time that it does not.
+        const ownerTracer = app.traceService?.getTracer?.() as Tracer | undefined;
+        const needsOwnerScope = ownerTracer !== undefined
+          && app.traceService?.ownsInstalledProvider?.() === false;
+        const entersTraceScope = tracesHttpSpans || needsOwnerScope;
 
         return async (req, server) => {
           // Outermost point of a routed request: bind before the middleware chain, the
@@ -1021,13 +1253,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                   const xSpanId = req.headers.get('x-span-id') ?? undefined;
 
                   // Sync hot path: no Effect.runPromise overhead
-                  traceContext = app.traceService.extractFromHeadersSync({
+                  // Kept apart from the generated fallback: only an ACTUALLY inbound context can
+                  // parent this request's span, and `||` had already erased the difference by the
+                  // time the span was created.
+                  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                  const inboundContext: any = app.traceService.extractFromHeadersSync({
                     traceparent,
                     // eslint-disable-next-line @typescript-eslint/naming-convention
                     'x-trace-id': xTraceId,
                     // eslint-disable-next-line @typescript-eslint/naming-convention
                     'x-span-id': xSpanId,
-                  }) || app.traceService.generateTraceContextSync();
+                  });
+
+                  traceContext = inboundContext || app.traceService.generateTraceContextSync();
 
                   const contentLengthHeader = req.headers.get('content-length');
                   traceSpan = app.traceService.startHttpTraceSync({
@@ -1042,12 +1280,34 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     requestSize: contentLengthHeader
                       ? parseInt(contentLengthHeader, 10)
                       : undefined,
+                    // Continues the caller's trace instead of starting a new one. Without it the
+                    // inbound `traceparent` reached the logs and nothing else: the exported spans
+                    // of two services sat in two unrelated traces, and following a trace id out of
+                    // the logs showed half a picture that looked whole.
+                    parentContext: inboundContext ?? undefined,
                   });
 
-                  // Store trace context in AsyncLocalStorage for per-request isolation
+                  // Make the HTTP span the parent of everything the request goes on to do.
+                  // Without this the span is exported but adopts nobody: each `@Traced` method
+                  // arrives as its own root with its own trace id, and one request reads as N
+                  // unrelated traces. The scope it is promoted into was opened around
+                  // `requestHandler` below, before the span existed.
+                  app.traceService.activateSpanSync?.(traceSpan);
+
+                  // The SPAN's own context, not the one generated a few lines above. Those two
+                  // are unrelated: `generateTraceContextSync()` mints fresh ids, while
+                  // `startHttpTraceSync` derives its own from the OpenTelemetry span it starts.
+                  // Storing the generated one put a trace id in every log line that belonged to
+                  // no span — measured on one request with one span: the span was on trace
+                  // 4074598c…, the logs said 38b97f3e…. A trace id copied out of the logs found
+                  // nothing in the backend, which is the one thing logging it is for.
+                  //
+                  // `traceContext` stays the fallback for the same reason it is computed: when
+                  // an inbound `traceparent` arrived it is the caller's context, and it is what
+                  // the span was parented to.
                   const store = requestContextStore.getStore();
                   if (store) {
-                    store.traceContext = traceContext;
+                    store.traceContext = traceSpan?.context ?? traceContext;
                   }
                 } catch (error) {
                   app.logger.error(
@@ -1057,20 +1317,25 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 }
               }
 
-              if (pMark) {
-                profiler!.end(pMark);
-              }
-
-              // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
-              if (profiler && needsQueryParams) {
-                pMark = profiler.start('framework', 'url:parse');
-              }
-              const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
-              if (pMark) {
-                profiler!.end(pMark);
-              }
-
               try {
+                // Inside the try, deliberately. The trace span is created above; everything
+                // between its creation and a `catch` that ends it is a window where a throw
+                // loses the span outright — and `profiler` is a user-supplied object whose
+                // `end()` can throw. It used to sit outside every try that reaches
+                // `endHttpTraceSync`.
+                if (pMark) {
+                  profiler!.end(pMark);
+                }
+
+                // Extract query parameters only when route uses @Query (avoids overhead for simple routes)
+                if (profiler && needsQueryParams) {
+                  pMark = profiler.start('framework', 'url:parse');
+                }
+                const queryParams = needsQueryParams ? extractQueryParams(req.url) : EMPTY_QUERY_PARAMS;
+                if (pMark) {
+                  profiler!.end(pMark);
+                }
+
                 let response: Response;
 
                 // Fast path: no params, no response schemas — inline handler call, skip executeHandler entirely
@@ -1367,13 +1632,29 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
               }
             };
 
+            // Each request begins its own trace. `ROOT_CONTEXT` and not `context.active()`:
+            // Bun reuses the connection's async context across keep-alive requests, and
+            // inheriting it would file the second request as a child of the first.
+            //
+            // This is also the scope `activateSpanSync` promotes the HTTP span into — entering it
+            // here rather than around the span keeps the entire request body out of another
+            // closure on a hot path that has been measured.
+            //
+            // Skipped entirely when no exporter is configured: `startHttpTraceSync` then takes
+            // the lightweight path and creates no OpenTelemetry span, so there would be nothing
+            // to promote and the extra AsyncLocalStorage frame would buy nothing. `@Traced`
+            // methods still nest among themselves — `startActiveSpan` opens its own scope.
+            const scopedRequestHandler = entersTraceScope
+              ? (): Promise<Response> => inRootTraceScope(requestHandler, ownerTracer)
+              : requestHandler;
+
             // Wrap in profiling scope for per-request mark isolation
             let response: Response;
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             let innerReport: any = null;
             if (profiler) {
               response = await runProfileScope(async () => {
-                const res = await requestHandler();
+                const res = await scopedRequestHandler();
                 // Flush inside ALS scope to capture request-scoped marks
                 innerReport = profiler.flush({ route: fullPath, method });
 
@@ -1394,7 +1675,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 app.handleProfileReport(innerReport);
               }
             } else {
-              response = await requestHandler();
+              response = await scopedRequestHandler();
             }
 
             return response;
@@ -1428,6 +1709,30 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       const globalMiddleware: Function[] = allGlobalClasses.length > 0
         ? (this.ensureModule().resolveMiddleware?.(allGlobalClasses) ?? [])
         : [];
+
+      // The resolved CORS middleware, if one is in the chain — used to answer a browser
+      // preflight BEFORE routing. Global middleware is concatenated into registered route
+      // handlers only, so an OPTIONS to a path whose controller declares just GET reached the
+      // 404 fallback with no Access-Control-* headers, and the browser blocked every
+      // cross-origin request carrying Authorization or a JSON content type.
+      //
+      // `resolveMiddleware` preserves input order 1:1, so the class index is the instance index.
+      // Subclass detection is required because `CorsMiddleware.configure()` returns an anonymous
+      // subclass, which is also how a user writing `middleware: [CorsMiddleware.configure(...)]`
+      // by hand keeps working.
+      const corsIndex = allGlobalClasses.findIndex((cls) =>
+        cls === CorsMiddleware
+        || (cls as { prototype?: unknown }).prototype instanceof CorsMiddleware);
+      const corsPreflight = corsIndex === -1
+        ? undefined
+        : (globalMiddleware[corsIndex] as ResolvedMiddleware | undefined);
+      // `preflightContinue: true` means the caller wants a downstream handler to produce the
+      // preflight response, so the short-circuit must not fire. Read off the resolved instance
+      // rather than `this.options.cors`, because a manually supplied
+      // `middleware: [CorsMiddleware.configure({ preflightContinue: true })]` never goes
+      // through `options.cors` at all.
+      const corsContinues = (corsPreflight as { _middlewareInstance?: CorsMiddleware } | undefined)
+        ?._middlewareInstance?.continuesPreflight === true;
 
       // Add routes from controllers
       for (const controllerClass of controllers) {
@@ -1476,7 +1781,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         for (const route of controllerMetadata.routes) {
           // Combine: appPrefix + controllerPath + routePath
           // Normalize to ensure consistent matching (e.g., '/api/users/' -> '/api/users')
-          const fullPath = normalizePath(`${appPrefix}${controllerPath}${route.path}`);
+          const fullPath = joinRoutePath(appPrefix, controllerPath, route.path);
           const method = this.mapHttpMethod(route.method);
           const handler = (controller as unknown as Record<string, Function>)[route.handler].bind(
             controller,
@@ -1637,7 +1942,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
 
         for (const route of metadata.routes) {
-          const fullPath = normalizePath(`${appPrefix}${metadata.path}${route.path}`);
+          const fullPath = joinRoutePath(appPrefix, metadata.path, route.path);
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }
@@ -1763,6 +2068,45 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // the unmatched path from falling back to one shared identity the moment
           // anything downstream starts asking who called.
           bindRequestClientAddress(req, server);
+
+          // Answer a browser preflight before anything else looks at the request.
+          //
+          // Bun's `routes` table has already run, so an explicitly declared `@Options` route
+          // never reaches here and cannot be shadowed — precedence is free. Reaching this point
+          // means no route matched the method and path, which for a preflight is the normal
+          // case: a controller declaring only `@Get` has no OPTIONS route, and the browser's
+          // preflight was answered with a bare 404 carrying no `Access-Control-*` headers, so
+          // every cross-origin request with `Authorization` or a JSON content type was blocked.
+          //
+          // BEFORE the WebSocket block on purpose. `isSocketIoPath` below is method-agnostic, so
+          // with Socket.IO enabled a cross-origin `OPTIONS /socket.io/...` would enter
+          // `handleUpgrade()`, fail to upgrade, and return 400 with no CORS headers. Placing the
+          // short-circuit after that block would leave the bug alive for every Socket.IO app.
+          //
+          // Gated on `Access-Control-Request-Method`, which the Fetch spec requires on every real
+          // preflight: a bare `curl -X OPTIONS` is API probing, not CORS, and keeps its honest
+          // 404. Only the CORS middleware runs — rate limiting and auth must never see a
+          // credential-less preflight, and they already never do on the routed path, because
+          // CORS sits first in the chain and returns without calling `next()`.
+          if (
+            corsPreflight !== undefined
+            && !corsContinues
+            && req.method === 'OPTIONS'
+            && req.headers.has('access-control-request-method')
+          ) {
+            // `OneBunRequest` is Bun's `BunRequest`, which carries `params` and `cookies`; the
+            // fallback `req` is a plain `Request`. A subclass overriding `use()` and reading
+            // either would throw on `undefined`, so both are supplied rather than cast away.
+            const preflightRequest = Object.assign(req, {
+              params: {},
+              cookies: new Map<string, string>(),
+            }) as unknown as OneBunRequest;
+
+            return await corsPreflight(
+              preflightRequest,
+              async () => new Response('Not Found', { status: HttpStatusCode.NOT_FOUND }),
+            );
+          }
 
           // Handle WebSocket upgrade if gateways exist
           if (hasWebSocketGateways && app.wsHandler) {
@@ -2461,14 +2805,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     options?: { closeSharedRedis?: boolean; signal?: string },
   ): Promise<ShutdownOutcome> {
     const budgetMs = this.resolveShutdownTimeout();
-    const outcome: ShutdownOutcome = { timedOut: false, phase: null, forceClosed: 0 };
+    const outcome: ShutdownOutcome = {
+      timedOut: false, phase: null, forceClosed: 0, failures: [], 
+    };
     const deadline = createDeadline(budgetMs);
 
+    // A backstop, not the error path. Every step inside `performShutdown` is individually
+    // guarded, so a rejection reaching here means the guard itself is broken — which is worth
+    // saying differently from a step that failed and was handled.
     const sequence = this.performShutdown(options, outcome).then(
       () => 'done' as const,
       (error: unknown) => {
         this.logger.error(
-          'Shutdown sequence failed:',
+          'Shutdown sequence failed outside any guarded step — this is a framework bug:',
           error instanceof Error ? error : new Error(String(error)),
         );
 
@@ -2487,6 +2836,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       );
     }
 
+    if (outcome.failures.length > 0) {
+      // One summary line naming every phase that failed. The per-step lines carry the errors;
+      // this one exists so an operator scanning the tail of the log sees the whole picture
+      // rather than whichever failure happened to be last.
+      this.logger.error(
+        `Shutdown completed with ${outcome.failures.length} failed step(s): `
+        + outcome.failures.join(', '),
+      );
+    }
+
     return outcome;
   }
 
@@ -2501,6 +2860,38 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
+   * Run one shutdown step, and keep going if it rejects.
+   *
+   * The sequence used to be a chain of bare awaits, so the FIRST step that rejected abandoned
+   * every later one — and the only trace was a single line the process was about to stop being
+   * able to emit. In practice the likely rejecter is the trace flush, which pushes the last span
+   * batch to a collector that is usually going down with the pod. When it rejected, user
+   * `onModuleDestroy` hooks never ran, the shared Redis lease was never released, and the logger
+   * never flushed: precisely the work graceful shutdown exists to do.
+   *
+   * `outcome.phase` is set before the step so a timeout can still name what was running, and the
+   * failure is recorded by phase so an operator is told WHICH part failed rather than that
+   * something did.
+   */
+  private async runShutdownStep(
+    outcome: ShutdownOutcome,
+    phase: string,
+    step: () => Promise<void>,
+  ): Promise<void> {
+    outcome.phase = phase;
+
+    try {
+      await step();
+    } catch (error) {
+      outcome.failures.push(phase);
+      this.logger.error(
+        `Shutdown step "${phase}" failed; continuing with the rest of the teardown:`,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  }
+
+  /**
    * The shutdown sequence itself. `outcome.phase` is updated as it advances so a timeout
    * can name what was still running.
    */
@@ -2509,9 +2900,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     outcome: ShutdownOutcome,
   ): Promise<void> {
     if (this.multiServiceMode) {
-      outcome.phase = 'stopping services';
       if (this.orchestrator) {
-        await this.orchestrator.stopAll();
+        await this.runShutdownStep(outcome, 'stopping services', async () => {
+          await this.orchestrator!.stopAll();
+        });
       }
 
       return;
@@ -2526,54 +2918,89 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // was still accepting new work — a hook that deregisters from discovery or flushes a
     // buffer ran under live traffic, and the request that was mid-response was severed by
     // the process.exit that followed.
-    outcome.phase = 'draining in-flight HTTP requests';
+    // Sockets first, and before the HTTP drain rather than with the rest of the WebSocket
+    // teardown. `drainHttpServer` ends in `server.stop(true)`, which severs every established
+    // upgrade: the client saw no close frame at all — measured, `readyState` still 1 and no close
+    // event — and learned the service was gone only when the process died, as an abnormal 1006 at
+    // an arbitrary moment. Closing here gives it a clean going-away at a controlled one, and gives
+    // `@OnDisconnect` a chance to run while the gateway, its storage and the DI scope are alive.
+    if (this.wsHandler) {
+      await this.runShutdownStep(outcome, 'closing WebSocket connections', async () => {
+        await this.wsHandler!.closeAll();
+      });
+    }
+
     const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
-    outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+    await this.runShutdownStep(outcome, 'draining in-flight HTTP requests', async () => {
+      outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
+    });
 
     // Call beforeApplicationDestroy lifecycle hook
     if (this.rootModule?.callBeforeApplicationDestroy) {
-      outcome.phase = 'running beforeApplicationDestroy hooks';
-      this.logger.debug('Calling beforeApplicationDestroy hooks');
-      await this.rootModule.callBeforeApplicationDestroy(signal);
+      await this.runShutdownStep(outcome, 'running beforeApplicationDestroy hooks', async () => {
+        this.logger.debug('Calling beforeApplicationDestroy hooks');
+        await this.rootModule!.callBeforeApplicationDestroy!(signal);
+      });
     }
 
     // Cleanup WebSocket resources
     if (this.wsHandler) {
-      outcome.phase = 'closing WebSocket connections';
-      this.logger.debug('Cleaning up WebSocket handler');
-      await this.wsHandler.cleanup();
+      await this.runShutdownStep(outcome, 'closing WebSocket connections', async () => {
+        this.logger.debug('Cleaning up WebSocket handler');
+        await this.wsHandler!.cleanup();
+      });
+      // Dropped whether or not cleanup succeeded: the handle is dead either way, and keeping
+      // it would let a later teardown path re-run a cleanup that has already failed once.
       this.wsHandler = null;
     }
 
     // Stop queue service
     if (this.queueService) {
-      outcome.phase = 'stopping the queue service';
-      this.logger.debug('Stopping queue service');
-      await this.queueService.stop();
+      await this.runShutdownStep(outcome, 'stopping the queue service', async () => {
+        this.logger.debug('Stopping queue service');
+        await this.queueService!.stop();
+      });
       this.queueService = null;
     }
     this.queueServiceProxy?.setDelegate(null);
 
     // Disconnect queue adapter
     if (this.queueAdapter) {
-      outcome.phase = 'disconnecting the queue adapter';
-      this.logger.debug('Disconnecting queue adapter');
-      await this.queueAdapter.disconnect();
+      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
+        this.logger.debug('Disconnecting queue adapter');
+        await this.queueAdapter!.disconnect();
+      });
       this.queueAdapter = null;
+    }
+
+    // Stop the system-metric sampler. `startSystemMetricsCollection()` is called at startup and
+    // nothing ever called its counterpart, so the interval outlived the application: in a test
+    // suite or a multi-service process, every stopped application left a timer sampling memory
+    // and CPU into a registry nobody reads.
+    if (this.metricsService?.stopSystemMetricsCollection) {
+      await this.runShutdownStep(outcome, 'stopping system metrics collection', async () => {
+        // `info`, matching the `System metrics collection started` line at startup. A
+        // counterpart logged a level below its opening is invisible exactly when someone is
+        // looking for it: in the default configuration the start is in the log and the stop is not.
+        this.logger.info('System metrics collection stopped');
+        this.metricsService!.stopSystemMetricsCollection!();
+      });
     }
 
     // Shutdown trace service — flush pending spans before module destroy
     if (this.traceService?.shutdown) {
-      outcome.phase = 'flushing traces';
-      this.logger.debug('Shutting down trace service');
-      await this.traceService.shutdown();
+      await this.runShutdownStep(outcome, 'flushing traces', async () => {
+        this.logger.debug('Shutting down trace service');
+        await this.traceService!.shutdown!();
+      });
     }
 
     // Call onModuleDestroy lifecycle hook
     if (this.rootModule?.callOnModuleDestroy) {
-      outcome.phase = 'running onModuleDestroy hooks';
-      this.logger.debug('Calling onModuleDestroy hooks');
-      await this.rootModule.callOnModuleDestroy();
+      await this.runShutdownStep(outcome, 'running onModuleDestroy hooks', async () => {
+        this.logger.debug('Calling onModuleDestroy hooks');
+        await this.rootModule!.callOnModuleDestroy!();
+      });
     }
 
     // Release this application's hold on the shared Redis client. It is disconnected only
@@ -2581,15 +3008,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // outright, so in multi-service mode the FIRST one to stop tore the client out from
     // under its still-running siblings.
     if (closeRedis && SharedRedisProvider.isConnected()) {
-      this.logger.debug('Releasing shared Redis');
-      await SharedRedisProvider.release();
+      await this.runShutdownStep(outcome, 'releasing the shared Redis client', async () => {
+        this.logger.debug('Releasing shared Redis');
+        await SharedRedisProvider.release();
+      });
     }
 
     // Call onApplicationDestroy lifecycle hook
     if (this.rootModule?.callOnApplicationDestroy) {
-      outcome.phase = 'running onApplicationDestroy hooks';
-      this.logger.debug('Calling onApplicationDestroy hooks');
-      await this.rootModule.callOnApplicationDestroy(signal);
+      await this.runShutdownStep(outcome, 'running onApplicationDestroy hooks', async () => {
+        this.logger.debug('Calling onApplicationDestroy hooks');
+        await this.rootModule!.callOnApplicationDestroy!(signal);
+      });
     }
 
     // Dispose this application's DI scope AFTER every destroy hook has run — the hooks read
@@ -2608,9 +3038,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         : 'OneBun application stopped',
     );
 
-    // Shutdown logger transport LAST — flush OTLP log batches after final log message
-    outcome.phase = 'flushing logs';
-    await shutdownLogger();
+    // Shutdown logger transport LAST — flush OTLP log batches after final log message.
+    // Guarded like the rest, with one caveat: if this is what failed, the line reporting it is
+    // written through the transport that is going down, so it may not land. Continuing is still
+    // right — the alternative is an unhandled rejection at the very end of the process.
+    await this.runShutdownStep(outcome, 'flushing logs', async () => {
+      await shutdownLogger();
+    });
   }
 
   /**
@@ -2671,8 +3105,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       );
     }
 
-    // Open WebSockets are cut here, not drained — they have no bounded wait of their own
-    // yet, and a graceful `stop()` never resolves while one is connected (measured).
+    // Anything still connected here was not closed by the WebSocket step above — a socket whose
+    // close callback never arrived, or one opened during the shutdown itself. Those are cut, not
+    // drained: a graceful `stop()` never resolves while one is connected (measured).
     const openSockets = typeof server.pendingWebSockets === 'number' ? server.pendingWebSockets : 0;
     if (openSockets > 0) {
       this.logger.warn(
@@ -2683,7 +3118,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Always the forcing form. The bounded wait above is what makes the shutdown graceful;
     // `stop(false)` would hand the deadline back to whatever is still connected — a single
     // idle WebSocket keeps it pending forever.
-    await server.stop(true);
+    //
+    // And bounded, because `stop(true)` does not always resolve: closing sockets before the drain
+    // — which is what gives clients a close frame at all — leaves Bun's `pendingWebSockets` stale,
+    // and it then waits for a connection that is already gone. See `SERVER_STOP_TIMEOUT_MS`.
+    // `Promise.resolve` because the value is only contractually a promise: a test double, or a
+    // future synchronous implementation, may hand back `undefined`, and calling `.then` on that
+    // would abandon the rest of the teardown — including clearing `this.server`.
+    await awaitBounded(Promise.resolve(server.stop(true)), SERVER_STOP_TIMEOUT_MS);
     this.server = null;
     this.logger.debug('HTTP server stopped');
 
@@ -2723,8 +3165,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return;
     }
 
-    // Create the appropriate adapter
-    const adapterOpt = queueOptions?.adapter ?? 'memory';
+    // Create the appropriate adapter. `queue.redis` selects the Redis adapter when no explicit
+    // `adapter` is given — it used to only ENABLE the queue, so a redis-only config quietly ran
+    // in memory with every Redis setting discarded.
+    const adapterOpt = resolveQueueAdapterType(queueOptions);
 
     if (typeof adapterOpt === 'function') {
       // Custom adapter constructor (e.g. NATS JetStream)
@@ -2775,6 +3219,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           : queueOptions?.redis,
     };
     this.queueService = new QueueService(queueServiceConfig);
+    // Before any handler is registered: every delivery and every scheduled job this service
+    // invokes then runs under THIS application's tracer, whichever adapter delivered it.
+    this.queueService.setOwnerTracer(this.traceService?.getTracer?.(), {
+      queueMessages: this.options.tracing?.traceQueueMessages !== false,
+      scheduledJobs: this.options.tracing?.traceScheduledJobs !== false,
+    });
 
     // Initialize with the adapter
     await this.queueService.initialize(this.queueAdapter);
@@ -2782,6 +3232,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Wire scheduler error handler so failed jobs are logged
     this.queueService.getScheduler().setErrorHandler((jobName, error) => {
       this.logger.warn(`Scheduled job "${jobName}" failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+
+    // An adapter-level failure — an unreachable broker, a rejected command — reaches the
+    // application only through `onError`, and until this was wired the only listeners were the
+    // application's own `@OnQueueError` handlers. An application without one saw nothing at all:
+    // no consumer running, no log line, no clue. Additive — user handlers still fire.
+    this.queueAdapter.on('onError', (error: unknown) => {
+      this.logger.error(
+        `Queue adapter "${this.queueAdapter?.name}" reported an error: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
     });
 
     // Register handlers from controllers using registerService
@@ -3172,22 +3633,33 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Refuse to hand out a layer that silently drops one of two instances.
    *
    * An Effect `Context` has exactly one slot per key, so an application with two instances of
-   * one service class does not fit in one. There is no supported way to build a layer that
-   * holds both — reach a specific instance with `getService(Class, token)`.
+   * one service class does not fit in one. A layer built without saying which instance takes the
+   * slot would carry whichever was merged last — a function of module import order.
+   *
+   * `resolved` are the classes a `getLayer(selections)` call named. Those are no longer
+   * ambiguous: the caller stated the answer. Everything else still refuses, and the message
+   * names only what is actually still unresolved, so a partial selection does not report the
+   * classes it already fixed.
    */
-  private assertLayerUnambiguous(): void {
+  private assertLayerUnambiguous(resolved: string[] = []): void {
     const ambiguous = this.ensureModule().findAmbiguousServiceKeys?.();
     if (!ambiguous || ambiguous.size === 0) {
       return;
     }
 
-    const details = [...ambiguous.entries()]
+    const unresolved = [...ambiguous.entries()].filter(([key]) => !resolved.includes(key));
+    if (unresolved.length === 0) {
+      return;
+    }
+
+    const details = unresolved
       .map(([key, holders]) => `${key} (${holders.join(', ')})`)
       .join('; ');
     const error = new Error(
       'getLayer() cannot represent this application: an Effect Context has one slot per ' +
       `service class and this one holds two instances of ${details}. The layer would carry ` +
-      'whichever was merged last. Reach a specific instance with getService(Class, token) ' +
+      'whichever was merged last. Name the instance you mean — ' +
+      'getLayer([[Class, token]]) — or reach it directly with getService(Class, token) ' +
       'or @Inject(token).',
     );
     error.name = 'OneBunAmbiguousServiceError';

@@ -206,6 +206,25 @@ describe('Docs README Examples', () => {
 
 describe('OpenAPI Generation', () => {
   describe('generateOpenApiSpec', () => {
+    it('documents a root controller at the path it actually serves', () => {
+      // `@Controller('/') + @Get('/health')` composed to `//health` in the generator and in the
+      // server alike — consistently broken. The server is fixed; documenting the route as
+      // `//health` while it serves at `/health` would be a worse failure, because it reads as
+      // the documentation merely being wrong rather than both having been.
+      @Controller('/')
+      class RootController extends BaseController {
+        @Get('/health')
+        async health(): Promise<Response> {
+          return this.success({ ok: true });
+        }
+      }
+
+      const spec = generateOpenApiSpec([RootController], { title: 'T', version: '1.0.0' });
+
+      expect(Object.keys(spec.paths)).toContain('/health');
+      expect(Object.keys(spec.paths)).not.toContain('//health');
+    });
+
     it('should generate spec from controllers', () => {
       @ApiTags('Users')
       @Controller('/users')
@@ -235,7 +254,7 @@ describe('OpenAPI Generation', () => {
       expect(spec.info.description).toBe('Test API description');
       expect(spec.paths).toBeDefined();
       // Controller path + route path = /users + / = /users/
-      expect(spec.paths['/users/']).toBeDefined();
+      expect(spec.paths['/users']).toBeDefined();
       expect(spec.paths['/users/{id}']).toBeDefined();
     });
 
@@ -256,7 +275,7 @@ describe('OpenAPI Generation', () => {
       });
 
       // Path is /orders/ (controller path + route path)
-      const getOperation = spec.paths['/orders/']?.get;
+      const getOperation = spec.paths['/orders']?.get;
       expect(getOperation).toBeDefined();
       expect(getOperation?.tags).toBeDefined();
       expect(getOperation?.tags).toContain('Orders');
@@ -281,7 +300,7 @@ describe('OpenAPI Generation', () => {
         version: '1.0.0',
       });
 
-      const getOperation = spec.paths['/products/']?.get;
+      const getOperation = spec.paths['/products']?.get;
       expect(getOperation).toBeDefined();
       expect(getOperation?.summary).toBe('List products');
       expect(getOperation?.description).toBe(
@@ -457,11 +476,11 @@ describe('docs/api/docs.md Examples', () => {
       expect(spec.info.description).toBe('API for managing users');
 
       // Verify paths exist
-      expect(spec.paths['/api/users/']).toBeDefined();
+      expect(spec.paths['/api/users']).toBeDefined();
       expect(spec.paths['/api/users/{id}']).toBeDefined();
 
       // Verify tags on list endpoint
-      const listOp = spec.paths['/api/users/']?.get;
+      const listOp = spec.paths['/api/users']?.get;
       expect(listOp).toBeDefined();
       expect(listOp?.tags).toContain('Users');
       expect(listOp?.summary).toBe('List all users');
@@ -473,7 +492,7 @@ describe('docs/api/docs.md Examples', () => {
       expect(getOp?.responses?.['404']?.description).toBe('User not found');
 
       // Verify request body on POST
-      const postOp = spec.paths['/api/users/']?.post;
+      const postOp = spec.paths['/api/users']?.post;
       expect(postOp).toBeDefined();
       expect(postOp?.requestBody).toBeDefined();
     });
@@ -711,7 +730,7 @@ describe('Decorator order independence', () => {
       }
 
       const spec = generateOpenApiSpec([SpecTest]);
-      const operation = spec.paths['/spec-test/']?.get;
+      const operation = spec.paths['/spec-test']?.get;
       expect(operation?.responses?.['201']).toMatchObject({ description: 'Created' });
     });
   });

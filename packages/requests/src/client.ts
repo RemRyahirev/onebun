@@ -1,6 +1,12 @@
 import { Effect, pipe } from 'effect';
 
-import { applyAuth } from './auth.js';
+import { applyAuth, isSigningAuth } from './auth.js';
+import { signOneBunRequest } from './onebun-auth.js';
+import {
+  currentOutgoingTraceContext,
+  formatTraceparent,
+  type OutgoingTraceContext,
+} from './trace-context.js';
 import {
   type ApiResponse,
   createErrorResponse,
@@ -26,6 +32,31 @@ import {
   type TransportFailureKind,
   wrapToErrorResponse,
 } from './types.js';
+
+/** Methods whose body is sent, and therefore signed. */
+const BODY_CARRYING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH'];
+
+/**
+ * Fields that mark the second argument of `get`/`delete` as a config rather than query data.
+ *
+ * The overload is ambiguous by construction — both arms take a plain object — so this list is the
+ * whole of the decision. It used to name four fields, which left `tracing` on the wrong side:
+ * `client.get(url, { tracing: false })` was read as query data and went out as `?tracing=false`,
+ * with the header it was meant to suppress still attached.
+ *
+ * `retries` and `query` are deliberately NOT here. `query` is documented as producing a literal
+ * `?query=[object Object]` — the page warns against wrapping the query in a key and a test pins
+ * it — and a `?retries=3` is a plausible query param in a way that `?tracing=` is not. Both still
+ * need the three-argument form, as does any caller whose query really contains one of these names.
+ */
+const REQUEST_CONFIG_MARKERS: readonly string[] = [
+  'method',
+  'headers',
+  'timeout',
+  'auth',
+  'tracing',
+  'metrics',
+];
 
 /**
  * Build full URL from base URL and request URL
@@ -234,22 +265,38 @@ const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, nev
 };
 
 /**
- * Get trace ID if available
+ * The trace this call belongs to, or `undefined` when it belongs to none.
+ *
+ * Read through the registered provider (`setTraceContextProvider`), which `OneBunApplication`
+ * points at its per-request `AsyncLocalStorage`. It used to read
+ * `globalThis.__onebunCurrentTraceContext` — a global nothing in the framework ever assigned, so
+ * the answer was permanently `undefined` and every outgoing call left untraced without a word.
+ * One global cell would have been wrong anyway: concurrent requests share it, so a call would be
+ * attributed to whichever request wrote to it last.
  */
-const getTraceId = (config: RequestConfig, mergedOptions: RequestsOptions): string | undefined => {
-  if (config.tracing !== false && mergedOptions.tracing) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const g = globalThis as unknown as { __onebunCurrentTraceContext?: { traceId: string } };
-      if (typeof globalThis !== 'undefined' && g.__onebunCurrentTraceContext) {
-        return g.__onebunCurrentTraceContext.traceId;
-      }
-    } catch {
-      // Tracing not available, continue without it
-    }
+const getTraceContext = (
+  config: RequestConfig,
+  mergedOptions: RequestsOptions,
+): OutgoingTraceContext | undefined => {
+  if (config.tracing === false || !mergedOptions.tracing) {
+    return undefined;
   }
 
-  return undefined;
+  return currentOutgoingTraceContext();
+};
+
+/**
+ * The exact bytes this request will send, or `undefined` when it sends none.
+ *
+ * Extracted so the signer and `fetch` cannot disagree: a signature over a re-serialization of the
+ * same object is a signature over bytes nobody sent.
+ */
+const serializeBody = (config: RequestConfig): string | undefined => {
+  if (!config.data || !BODY_CARRYING_METHODS.includes(config.method)) {
+    return undefined;
+  }
+
+  return typeof config.data === 'string' ? config.data : JSON.stringify(config.data);
 };
 
 /**
@@ -287,7 +334,7 @@ const applyAuthIfNeeded = (
 const buildHeaders = (
   config: RequestConfig,
   mergedOptions: RequestsOptions,
-  traceId?: string,
+  traceContext?: OutgoingTraceContext,
 ): Record<string, string> => {
   const headers: Record<string, string> = {
     // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -300,9 +347,18 @@ const buildHeaders = (
     ...config.headers,
   };
 
-  // Add trace headers if tracing is enabled
-  if (traceId && config.tracing !== false && mergedOptions.tracing) {
-    headers['X-Trace-Id'] = traceId;
+  if (traceContext && config.tracing !== false && mergedOptions.tracing) {
+    // W3C `traceparent` first, because it is the only one a collector, a service mesh or a
+    // non-OneBun peer understands.
+     
+    headers.traceparent = formatTraceparent(traceContext);
+    // The pair, not `X-Trace-Id` alone. On its own it joined nothing — even the receiving OneBun
+    // service requires trace and span id together, so a lone id fell through and the callee
+    // started a fresh trace. Kept alongside `traceparent` for anything already reading them.
+     
+    headers['X-Trace-Id'] = traceContext.traceId;
+     
+    headers['X-Span-Id'] = traceContext.spanId;
   }
 
   return headers;
@@ -381,6 +437,56 @@ const parseResponseData = <T>(
 };
 
 /**
+ * Add the `X-OneBun-Signature` header when `onebun` auth is configured, otherwise pass through.
+ *
+ * Returns the headers rather than mutating them, so a retry signs the request afresh instead of
+ * inheriting the previous attempt's timestamp and nonce.
+ */
+const signOneBunIfNeeded = (
+  config: RequestConfig,
+  mergedOptions: RequestsOptions,
+  headers: Record<string, string>,
+  fullUrl: string,
+  body: string | undefined,
+  traceId?: string,
+): Effect.Effect<Record<string, string>, ErrorResponse> => {
+  const authConfig = config.auth ?? mergedOptions.auth;
+
+  // Two statements rather than one disjunction: a type predicate negated inside `||` does not
+  // narrow reliably, and the narrowing is what gives `authConfig.audience` a type here.
+  if (authConfig === undefined) {
+    return Effect.succeed(headers);
+  }
+
+  if (!isSigningAuth(authConfig)) {
+    return Effect.succeed(headers);
+  }
+
+  const contentType = Object.entries(headers)
+    .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
+
+  return pipe(
+    signOneBunRequest(authConfig, {
+      method: config.method,
+      url: fullUrl,
+      contentType,
+      body,
+      audience: authConfig.audience,
+    }),
+    Effect.map((signature) => ({
+      ...headers,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'X-OneBun-Signature': signature,
+    })),
+    Effect.catchAll((error) =>
+      Effect.fail(
+        createErrorResponse('AUTH_ERROR', HttpStatusCode.UNAUTHORIZED, traceId, { details: error }),
+      ),
+    ),
+  );
+};
+
+/**
  * Execute single HTTP request attempt
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
@@ -399,20 +505,24 @@ const executeSingleRequest = <T, E extends string, R extends string>(
     signal: AbortSignal.timeout(config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS),
   };
 
-  // Add body for methods that support it
-  if (config.data && ['POST', 'PUT', 'PATCH'].includes(config.method)) {
-    if (typeof config.data === 'string') {
-      requestInit.body = config.data;
-    } else {
-      requestInit.body = JSON.stringify(config.data);
-    }
+  // One serialization, used both for the body that is sent and for the body that is signed.
+  // Serializing twice would let the two diverge, and a signature over different bytes than the
+  // ones on the wire is worse than no signature — it reads as protection.
+  const body = serializeBody(config);
+  if (body !== undefined) {
+    requestInit.body = body;
   }
 
   return pipe(
-    Effect.tryPromise({
-      try: () => fetch(fullUrl, requestInit),
+    // Signed HERE, inside the attempt, over the assembled request. Two reasons it cannot move
+    // out: the signature has to cover the final URL and the exact body bytes, and each retry
+    // needs its own timestamp and nonce — reusing one would make attempt 2 a replay of attempt 1
+    // and the callee would reject it as such.
+    signOneBunIfNeeded(config, mergedOptions, headers, fullUrl, body, traceId),
+    Effect.flatMap((signedHeaders) => Effect.tryPromise({
+      try: () => fetch(fullUrl, { ...requestInit, headers: signedHeaders }),
       catch: (error) => classifyTransportFailure(error, traceId),
-    }),
+    })),
     Effect.flatMap((response) => {
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => {
@@ -428,7 +538,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
             response.status < HttpStatusCode.MOVED_PERMANENTLY;
 
           if (success) {
-            return createSuccessResponse(responseData, traceId);
+            return createSuccessResponse(responseData, traceId, response.status);
           }
 
           return createErrorResponse(
@@ -476,7 +586,11 @@ const executeWithRetry = <T, E extends string, R extends string>(
           ? recordRequestMetrics({
             method: config.method,
             url: fullUrl,
-            statusCode: result.success ? HttpStatusCode.OK : result.code,
+            // The status the upstream actually returned. It used to be `HttpStatusCode.OK` for
+            // every success, so a 201, 202 or 204 was recorded as 200 — a dashboard could not
+            // tell them apart and an alert on non-200 responses never fired. `?? OK` covers the
+            // one path that has no upstream status: a success synthesized without a response.
+            statusCode: result.success ? result.statusCode ?? HttpStatusCode.OK : result.code,
             duration,
             success: result.success,
             retryCount: result.retryCount || 0,
@@ -550,17 +664,24 @@ export const executeRequest = <
   requestOptions: RequestsOptions = {},
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const mergedOptions = mergeRequestsOptions(requestOptions);
-  const fullUrl = buildUrl(mergedOptions.baseUrl, config.url, config.query);
-  const traceId = getTraceId(config, mergedOptions);
+  // Resolved once, before the first attempt: a retry belongs to the same trace as the attempt it
+  // replaces, and re-reading the ambient context per attempt would let a slow retry pick up
+  // whatever scope the process happened to be in by then.
+  const traceContext = getTraceContext(config, mergedOptions);
+  const traceId = traceContext?.traceId;
 
   return pipe(
     applyAuthIfNeeded(config, mergedOptions, traceId),
     Effect.map((finalConfig) => {
-      const headers = buildHeaders(finalConfig, mergedOptions, traceId);
+      // The URL is built AFTER auth, from the config auth produced. It used to be built one line
+      // before, so `apikey` with `location: 'query'` added its key to a `config.query` the URL had
+      // already been assembled from — the key never reached the wire and nothing said so.
+      const fullUrl = buildUrl(mergedOptions.baseUrl, finalConfig.url, finalConfig.query);
+      const headers = buildHeaders(finalConfig, mergedOptions, traceContext);
 
-      return { finalConfig, headers };
+      return { finalConfig, headers, fullUrl };
     }),
-    Effect.flatMap(({ finalConfig, headers }) =>
+    Effect.flatMap(({ finalConfig, headers, fullUrl }) =>
       executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, traceId),
     ),
   );
@@ -629,11 +750,7 @@ export class HttpClient {
       !Array.isArray(queryOrConfig)
     ) {
       // Check if it's a RequestConfig (has method, url, etc.) or query data
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
+      const hasConfigFields = REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig);
       if (hasConfigFields) {
         // It's config
         finalConfig = {

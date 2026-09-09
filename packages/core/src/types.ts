@@ -409,6 +409,38 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
     traceDatabaseQueries?: boolean;
 
     /**
+     * Open a span around each delivered queue message, named `queue <pattern>`.
+     *
+     * Turning it off returns `@Subscribe` handlers to logging with no trace id, since a log line
+     * can only name a span that exists. It does not disable tracing inside them: a `@Traced`
+     * method still gets its own span, in a trace of its own.
+     *
+     * @defaultValue true
+     */
+    traceQueueMessages?: boolean;
+
+    /**
+     * Open a span around each scheduler tick — `@Cron`, `@Interval` and `@Timeout` — named
+     * `cron <name>`, `interval <name>` or `timeout <name>`.
+     *
+     * Covers the whole tick, the publish of the job's result included.
+     *
+     * @defaultValue true
+     */
+    traceScheduledJobs?: boolean;
+
+    /**
+     * Open a span around each WebSocket connection (`ws open`, `ws close`) and each frame that
+     * reaches a handler (`ws message`).
+     *
+     * Engine.IO heartbeats get none: they are answered below the dispatch point, so a heartbeat
+     * never produces a span.
+     *
+     * @defaultValue true
+     */
+    traceWebSocketEvents?: boolean;
+
+    /**
      * Auto-trace all async methods on services and controllers.
      * When enabled, all async methods are wrapped in spans without
      * requiring @Traced() on each method.
@@ -485,7 +517,52 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
        * @defaultValue 5000
        */
       batchTimeout?: number;
+
+      /**
+       * Retries after the first attempt when an export fails.
+       *
+       * The batch processor removes a batch from its buffer before handing it over, so a batch
+       * the exporter gives up on is gone. Set to `0` for at-most-once delivery.
+       *
+       * @defaultValue 3
+       */
+      retryAttempts?: number;
+
+      /**
+       * Delay in milliseconds before the first retry; doubles each retry, capped at 5000ms.
+       * A `Retry-After` header from the collector overrides it.
+       *
+       * @defaultValue 200
+       */
+      retryDelay?: number;
+
+      /**
+       * Ceiling on the total wall time one batch may spend being exported, retries included.
+       * This is what keeps a dead collector from holding shutdown open.
+       *
+       * @defaultValue 10000
+       */
+      retryBudget?: number;
+
+      /**
+       * Called once for a batch that was given up on. Defaults to a warning through the
+       * application logger — an export that fails without a word is the defect this exists
+       * to prevent.
+       */
+      onExportFailure?: (error: Error, spanCount: number, attempts: number) => void;
     };
+
+    /**
+     * Extra span processors for THIS application's provider, appended to whatever
+     * `exportOptions` produces.
+     *
+     * Every application's spans are created from its own provider, so a processor registered
+     * on the process-global one does not see them. This is how to observe or fan out the spans
+     * of a specific application. Values must be `SpanProcessor`s from
+     * `@opentelemetry/sdk-trace-base`; typed as `unknown[]` so this file does not depend on the
+     * OpenTelemetry SDK.
+     */
+    spanProcessors?: unknown[];
   };
 
   /**
@@ -585,6 +662,23 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
    * @defaultValue false
    */
   httpEnvelope?: boolean;
+
+  /**
+   * Add `details` — the error's class name, its non-HTTP `code`, and its **stack trace** — to
+   * the response body for an unhandled error.
+   *
+   * Off by default, and deliberately not tied to `NODE_ENV`. A stack trace in a public API
+   * response discloses absolute filesystem paths, dependency versions and internal module
+   * layout, and a deployment with an unset or mistyped `NODE_ENV` would then leak it silently
+   * — which is the failure this guards against. Turn it on knowingly, in a development
+   * configuration you can read.
+   *
+   * The stack reaches the application log either way, so leaving this off costs no
+   * debuggability on the operator's side.
+   *
+   * @defaultValue false
+   */
+  exposeErrorDetails?: boolean;
 
   /**
    * CORS configuration. When provided, `CorsMiddleware` is automatically prepended

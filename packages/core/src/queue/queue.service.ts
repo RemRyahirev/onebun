@@ -29,12 +29,16 @@ import type {
   BuiltInAdapterType,
 } from './types';
 import type { Guard } from '../http-guards/http-guards';
+import type { EntrySpanSwitches } from '../trace-scope';
 import type { ResolvedInterceptor } from '../types';
+import type { Attributes, Tracer } from '@opentelemetry/api';
 
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getMetadata } from '../decorators/metadata';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
+import { inEntrySpan, runWithAppTracer } from '../trace-scope';
+
 
 import {
   getSubscribeMetadata,
@@ -47,6 +51,7 @@ import {
 } from './decorators';
 import { executeMessageGuards, MessageExecutionContextImpl } from './guards';
 import { QueueScheduler } from './scheduler';
+import { publisherTraceContext, withTraceMetadata } from './trace-metadata';
 
 // ============================================================================
 // Queue Service Class
@@ -62,12 +67,43 @@ import { QueueScheduler } from './scheduler';
  */
 export class QueueService {
   private adapter: QueueAdapter | null = null;
+
+  /**
+   * The owning application's tracer, established around every handler this service invokes.
+   *
+   * The queue adapters cannot supply it: they are constructed from plain option objects and
+   * hold no reference to an application, and the in-memory one has no constructor at all. This
+   * service is per-application by construction, and every delivery — a `@Subscribe` handler, a
+   * `@Cron`/`@Interval`/`@Timeout` data provider — goes through a closure it builds here, so
+   * one place covers all four adapters without changing any adapter signature.
+   */
+  private ownerTracer: Tracer | undefined = undefined;
+
+  /** `tracing.traceQueueMessages`; turns off the per-delivery span, never the ownership. */
+  private traceQueueMessages = true;
+
+  /** `tracing.traceScheduledJobs`, kept so a scheduler created later still learns it. */
+  private traceScheduledJobs = true;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: Subscription[] = [];
   private started = false;
   private config: QueueConfig;
   private onReadyHandlers: Array<() => void> = [];
   private adapterOnReadyRegistered = false;
+
+  /**
+   * Name the application whose tracer every handler of this service runs under.
+   *
+   * Set by `OneBunApplication` right after construction, before any handler is registered.
+   *
+   * @see docs:api/trace.md
+   */
+  setOwnerTracer(tracer: Tracer | undefined, spans?: EntrySpanSwitches): void {
+    this.ownerTracer = tracer;
+    this.traceQueueMessages = spans?.queueMessages ?? true;
+    this.traceScheduledJobs = spans?.scheduledJobs ?? true;
+    this.scheduler?.setOwnerTracer(tracer, this.traceScheduledJobs);
+  }
 
   constructor(config: QueueConfig) {
     this.config = config;
@@ -79,6 +115,8 @@ export class QueueService {
   async initialize(adapter: QueueAdapter): Promise<void> {
     this.adapter = adapter;
     this.scheduler = new QueueScheduler(adapter);
+    // Ordering-proof: the owner may have been named before this scheduler existed, or after.
+    this.scheduler.setOwnerTracer(this.ownerTracer, this.traceScheduledJobs);
 
     // Guarded exactly as in start(): the application already connects the adapter in
     // initializeQueue(), so an unconditional connect here opens the backend twice per boot.
@@ -135,9 +173,12 @@ export class QueueService {
       return;
     }
 
-    // Stop scheduler
+    // Stop the scheduler, then let the runs already under way finish. Both, in this order, and
+    // both BEFORE the adapter is disconnected below: a job publishes its result at the end, and
+    // draining after the disconnect would only change where the message is lost.
     if (this.scheduler) {
       this.scheduler.stop();
+      await this.scheduler.drain();
     }
 
     // Unsubscribe all subscriptions
@@ -184,7 +225,7 @@ export class QueueService {
    * Publish a message to a pattern
    */
   async publish<T>(pattern: string, data: T, options?: PublishOptions): Promise<string> {
-    return await this.getAdapter().publish(pattern, data, options);
+    return await this.getAdapter().publish(pattern, data, withTraceMetadata(options));
   }
 
   /**
@@ -193,7 +234,11 @@ export class QueueService {
   async publishBatch<T>(
     messages: Array<{ pattern: string; data: T; options?: PublishOptions }>,
   ): Promise<string[]> {
-    return await this.getAdapter().publishBatch(messages);
+    // Stamped per message, not once for the batch: `publishBatch` takes independent options per
+    // entry, and a caller who set an explicit trace id on one of them must keep it.
+    return await this.getAdapter().publishBatch(
+      messages.map(message => ({ ...message, options: withTraceMetadata(message.options) })),
+    );
   }
 
   // ============================================================================
@@ -208,7 +253,34 @@ export class QueueService {
     handler: MessageHandler<T>,
     options?: SubscribeOptions,
   ): Promise<Subscription> {
-    const subscription = await this.getAdapter().subscribe(pattern, handler, options);
+    // Every delivery gets a span, and this is the one place that can give it to every delivery:
+    // all four adapters reach a handler through here, and so does an imperative `subscribe()`
+    // call that never went through `registerService`. Without a span the handler's log lines
+    // carry no trace id at all — `requestContextStore` is entered only for HTTP.
+    //
+    // `this.ownerTracer` is read per message rather than captured, so naming the owner after a
+    // subscription is registered still traces it.
+    // Built once per subscription, not once per message: the values are fixed by the pattern.
+    const attributes: Attributes = {};
+    attributes['messaging.destination.name'] = pattern;
+    attributes['messaging.operation'] = 'process';
+
+    const spanName = `queue ${pattern}`;
+    const traced: MessageHandler<T> = async (message) => await inEntrySpan(
+      spanName,
+      async () => await handler(message),
+      this.ownerTracer,
+      {
+        attributes,
+        openSpan: this.traceQueueMessages,
+        // The delivery hangs off the publish that caused it. Without this every message was an
+        // independently sampled root that announced itself as a consumption entry point and
+        // pointed at nothing — a trace per message, none of them joined to the work that sent it.
+        parent: publisherTraceContext(message.metadata),
+      },
+    );
+
+    const subscription = await this.getAdapter().subscribe(pattern, traced, options);
     this.subscriptions.push(subscription);
 
     return subscription;
@@ -355,7 +427,7 @@ export class QueueService {
         : [];
 
       // Wrap handler with guards and interceptors
-      const wrappedHandler = async (message: Message) => {
+      const wrappedHandler = async (message: Message) => await runWithAppTracer(this.ownerTracer, async () => {
         if (guards.length > 0) {
           const context = new MessageExecutionContextImpl(
             message,
@@ -399,7 +471,7 @@ export class QueueService {
         }
 
         await method(message);
-      };
+      });
 
       await this.subscribe(sub.pattern, wrappedHandler, sub.options);
     }
@@ -407,7 +479,11 @@ export class QueueService {
     // Register cron jobs
     const cronJobs = getCronMetadata(serviceClass);
     for (const cron of cronJobs) {
-      const method = serviceInstance[cron.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[cron.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addCronJob(
         cron.options.name ?? String(cron.propertyKey),
         cron.expression,
@@ -424,20 +500,33 @@ export class QueueService {
     // Register interval jobs
     const intervalJobs = getIntervalMetadata(serviceClass);
     for (const interval of intervalJobs) {
-      const method = serviceInstance[interval.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[interval.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addIntervalJob(
         interval.options.name ?? String(interval.propertyKey),
         interval.milliseconds,
         interval.options.pattern,
         method,
-        { metadata: interval.options.metadata, declarative: true },
+        {
+          metadata: interval.options.metadata,
+          overlapStrategy: interval.options.overlapStrategy,
+          runOnStart: interval.options.runOnStart,
+          declarative: true,
+        },
       );
     }
 
     // Register timeout jobs
     const timeoutJobs = getTimeoutMetadata(serviceClass);
     for (const timeout of timeoutJobs) {
-      const method = serviceInstance[timeout.propertyKey].bind(serviceInstance);
+      // The scheduler invokes this as an opaque data provider from a timer, so the owner
+      // is established here rather than in `QueueScheduler`, which holds only the adapter.
+      const bound = serviceInstance[timeout.propertyKey].bind(serviceInstance);
+      const method = async (...args: unknown[]): Promise<unknown> =>
+        await runWithAppTracer(this.ownerTracer, async () => await bound(...args));
       this.getScheduler().addTimeoutJob(
         timeout.options.name ?? String(timeout.propertyKey),
         timeout.milliseconds,

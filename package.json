@@ -21,10 +21,12 @@
     "ex1": "bun run examples/crud-api/src/index.ts",
     "ex2": "bun run examples/multi-service/src/index.ts",
     "ex3": "bun run examples/websocket-chat/src/index.ts",
+    "prepare": "git config core.hooksPath .githooks 2>/dev/null || true",
     "test": "bun test && bun test examples/",
     "test:coverage": "bun test --coverage --coverage-reporter=lcov --coverage-reporter=text",
-    "lint": "eslint --fix",
-    "typecheck": "bunx tsc --noEmit",
+    "lint": "eslint --fix --max-warnings=0",
+    "typecheck": "bunx tsc --noEmit && bun run typecheck:examples",
+    "typecheck:examples": "bunx tsc --noEmit -p examples/crud-api && bunx tsc --noEmit -p examples/multi-service && bunx tsc --noEmit -p examples/websocket-chat",
     "publish:check": "bun scripts/publish.ts --dry-run",
     "publish:packages": "bun scripts/publish.ts",
     "version:bump": "bun scripts/version-bump.ts",
@@ -33,7 +35,12 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
-    "docs:xref": "bun scripts/docs-xref.ts"
+    "docs:xref": "bun scripts/docs-xref.ts",
+    "docs:typecheck": "bun scripts/docs-typecheck.ts",
+    "skill:install": "bun scripts/install-skill.ts",
+    "skill:check": "bun scripts/install-skill.ts --check",
+    "readme:generate": "bun scripts/generate-readme.ts",
+    "readme:check": "bun scripts/generate-readme.ts --check"
   },
   "workspaces": [
     "packages/*",

@@ -112,6 +112,7 @@ Main application class that bootstraps and runs the HTTP server.
 
 ### Constructor
 
+<!-- typecheck: skip -->
 ```typescript
 // Single-service mode
 new OneBunApplication(
@@ -336,7 +337,7 @@ class OneBunApplication {
   getHttpUrl(): string;
 
   /** Get root module layer */
-  getLayer(): Layer.Layer<never, never, unknown>;
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown>;
 
   /** Get a service instance by class from the module container, optionally naming a registration */
   getService<T>(serviceClass: new (...args: unknown[]) => T, token?: symbol | string): T;
@@ -424,7 +425,18 @@ const main = app.getService(DrizzleService, MAIN_DB);
 
 Ask without naming one and there is no correct answer, so `app.getService(DrizzleService)` throws rather than choosing. The instance it would otherwise return depends on the order the modules were imported in, which is not something your code should depend on.
 
-**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last. There is no supported way to build a single layer holding two instances of one service class; reach a specific instance with `getService(Class, token)` or `@Inject(token)`.
+**`getLayer()` carries one instance per service class.** The value it returns is an Effect `Context`, and a `Context` has exactly one slot per key. An application with two registrations of one service — or with two service classes that share a name — has more instances than the layer has slots, so `getLayer()` reports that instead of silently returning whichever instance was merged last.
+
+**Say which instance takes the slot.** `getLayer()` accepts `[ServiceClass, token]` pairs, the layer counterpart of `getService(Class, token)`:
+
+<!-- typecheck: skip -->
+```typescript
+const layer = app.getLayer([[MailerService, PRIMARY_MAILER]]);
+
+await Effect.runPromise(Effect.provide(program, layer));
+```
+
+`ServiceSelection` is the `[ServiceClass, token]` pair type. The layer still holds one instance per class — that is a property of `Context`, not a choice — but which one is yours to state rather than a function of module import order. Every ambiguous class must be named; leaving one out still refuses, and the message names only what is still unresolved. Naming an unambiguous class is allowed and simply pins what was already going to be there. To reach a single instance without building a layer at all, `getService(Class, token)` or `@Inject(token)`.
 
 **Two service classes with the same name.** Two classes called `CacheService` from different packages are separate services to the framework, and injection resolves each of them correctly. They mint the same tag key, so they cannot both appear in a layer. If your application needs both in one layer, give one an explicit tag:
 
@@ -444,7 +456,8 @@ The convention the framework packages follow is `@scope/package/ClassName`.
 <llm-only>
 **Technical details for AI agents:**
 - `@Service()` mints `Context.GenericTag(target.name)` — one tag OBJECT per class, and `tag.key` is the bare class name. Effect keys `Context`/`Layer` by `tag.key`; OneBun's own maps (`serviceInstances`, `GlobalScope.services`, overrides) are keyed by the tag OBJECT, which is why injection is unaffected by a name collision
-- `getService(Class)` and `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- `getService(Class)` and untokened `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration — and so is `getLayer(selections)` for every class the selections name; a class left unnamed still throws, and the message lists only the unresolved ones. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
+- `getLayer(selections)` builds the module layer and merges `Layer.succeed(tag, instance)` per selection ON TOP. Last-merged wins for a shared tag in Effect — the same rule that makes the untokened form ambiguous is what lets a selection resolve it
 - The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT. Keyed by name, two same-named provider classes made boot depend on the order of the `providers` array
 - The framework's own tag keys `LoggerService`, `ConfigService`, `QueueService` and `SharedRedisService` are NOT namespaced, so a user service with one of those names shares their key. It reaches nothing at runtime — the framework reads its logger from its own layer, never from `rootLayer` — but it does make `getLayer()` ambiguous
 </llm-only>
@@ -456,22 +469,44 @@ OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on
 
 1. **Refuses new requests**: every route answers `503 Service Unavailable`
    (`{"success": false, "error": "Service Unavailable", ...}`). The listener stays open on
-   purpose, so a load balancer sees a refusal instead of a dropped connection.
-2. **Drains in-flight requests**: waits for the requests already being served to finish.
+   purpose, so a load balancer sees a refusal instead of a dropped connection. A WebSocket
+   upgrade attempted from here on is refused with `503` too, which matters because step 2 is
+   itself an invitation to reconnect.
+2. **Closes WebSocket connections**: each open socket is closed with RFC 6455 code **1001**
+   ("going away") and the reason `Server shutting down`, and every `@OnDisconnect` handler is
+   awaited — while the gateway, its client storage and the DI scope are all still alive.
+   Bounded at 5 seconds; anything still open after that is cut by step 4.
+3. **Drains in-flight requests**: waits for the requests already being served to finish.
    Anything still open when the drain deadline expires is force-closed, and a `warn` names
    how many connections were cut.
-3. **Closes the HTTP listener** — before any destroy hook runs.
-4. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
-5. Closes all WebSocket connections
-6. Stops the queue service and disconnects the queue adapter
-7. Flushes traces
-8. Calls `onModuleDestroy()` hooks on all services and controllers
-9. Releases the shared Redis connection (disconnected when the last consumer lets go)
-10. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
-11. Flushes the logger transport
+4. **Closes the HTTP listener** — before any destroy hook runs.
+5. Calls `beforeApplicationDestroy(signal)` hooks on all services and controllers
+6. Releases the remaining WebSocket resources: ping timers and client storage
+7. Stops the queue service and disconnects the queue adapter, after waiting for a scheduled job
+   that is mid-run (bounded at 30 seconds)
+8. Stops system-metrics collection — the 5-second sampler started at boot. Nothing used to stop
+   it, so its `setInterval` kept the event loop alive and a script that booted and stopped an
+   application never terminated
+9. Flushes traces
+10. Calls `onModuleDestroy()` hooks on all services and controllers
+11. Releases the shared Redis connection (disconnected when the last consumer lets go)
+12. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+13. Flushes the logger transport
 
-Steps 1–3 are what keeps a rolling deploy from cutting responses that were mid-flight: the
+Steps 1–4 are what keeps a rolling deploy from cutting responses that were mid-flight: the
 destroy hooks no longer run while the socket is still accepting work.
+
+::: warning Bun reports the close code as 1000 to its own client
+The server sends 1001 — that is what a `close` callback on the server side reports, and what the
+reason accompanies. Bun's `WebSocket` client currently surfaces the code as **1000** regardless.
+Measured against a bare `Bun.serve` with no framework involved. If your client branches on the
+code, branch on the reason instead until that changes.
+
+WebSocket connections used to be closed by nothing at all: the shutdown severed them at the very
+end with `server.stop(true)`, so a client saw no close frame, stayed `readyState === 1`, and
+learned the service was gone only when the process died — an abnormal 1006 at an arbitrary
+moment. `@OnDisconnect` ran, but after the client storage had already been wiped.
+:::
 
 **Bounded, always**. `shutdownTimeout` (default **15000 ms**) caps the whole sequence.
 The first half of that budget bounds the drain; the rest bounds the destroy hooks. `stop()`
@@ -546,6 +581,7 @@ Run multiple services in a single process using the unified `OneBunApplication` 
 
 ### Constructor
 
+<!-- typecheck: skip -->
 ```typescript
 new OneBunApplication(options: MultiServiceApplicationOptions)
 ```
@@ -666,7 +702,7 @@ class OneBunModule implements Module {
   getControllers(): Function[];
   getControllerInstance(controllerClass: Function): Controller | undefined;
   getServiceInstance<T>(tag: Context.Tag<T, T>): T | undefined;
-  getLayer(): Layer.Layer<never, never, unknown>;
+  getLayer(selections?: ServiceSelection[]): Layer.Layer<never, never, unknown>;
   getExportedServices(): Map<Context.Tag<unknown, unknown>, unknown>;
 }
 ```

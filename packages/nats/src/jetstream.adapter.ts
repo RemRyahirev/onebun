@@ -40,6 +40,7 @@ import {
   acknowledgesAutomatically,
   createQueuePatternMatcher,
   createQueueScheduler,
+  inRootTraceScope,
   nackedError,
   resolveAckMode,
   tracksDelivery,
@@ -58,6 +59,11 @@ import {
 } from './config-stamp';
 import { NatsClient } from './nats-client';
 import { toNatsSubject } from './subject';
+import {
+  natsSubjectCovers,
+  natsSubjectsOverlap,
+  unionCoversSubject,
+} from './subject-match';
 
 const DEFAULT_ACK_WAIT_NANOSECONDS = 30_000_000_000; // 30 seconds in nanoseconds
 /**
@@ -325,12 +331,48 @@ function cycleMessage(
   return `JetStream consumer "${consumerName}" on stream "${streamName}" is in a reconcile cycle: OneBun wants config hash ${desiredHash}, which was already applied within the last ${CONFIG_CYCLE_WINDOW_MS}ms and has since been replaced by ${currentHash}. Diverging fields: ${diverging}. Two processes are writing different consumer configurations — align consumerConfig, prefetch and retry.attempts across them, or delete the consumer: nats consumer rm ${streamName} ${consumerName}`;
 }
 
-function addFailureMessage(consumerName: string, streamName: string, cause: unknown): string {
-  return `Failed to create JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}`;
+/**
+ * What the consumer write was actually trying to do, for the two messages below.
+ *
+ * The server's rejection names a consumer and a stream and nothing else, which leaves the reader
+ * to work out which subscription that was. This states the OneBun pattern, the subject it
+ * translated to, the stream it resolved to and every declaration — the shape
+ * `publishFailureMessage` already established.
+ *
+ * Note what this can NOT catch: nats-server accepts a `filter_subject` unrelated to the stream's
+ * subjects, so a mis-bound subscription never reaches here at all. This message covers the
+ * rejections the server does issue — overlapping `filter_subjects` entries, create-only field
+ * changes, permissions — not stream binding, which is decided locally before the call.
+ */
+function consumerAttemptContext(
+  pattern: string,
+  filterSubject: string,
+  streamName: string,
+  streams: ResolvedStream[],
+): string {
+  return `OneBun pattern "${pattern}" translated to filter_subject "${filterSubject}" and resolved to stream "${streamName}". This application declares ${describeDeclarations(streams)}.`;
 }
 
-function updateFailureMessage(consumerName: string, streamName: string, cause: unknown): string {
-  return `Failed to update JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}`;
+function addFailureMessage(
+  consumerName: string,
+  streamName: string,
+  pattern: string,
+  filterSubject: string,
+  streams: ResolvedStream[],
+  cause: unknown,
+): string {
+  return `Failed to create JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} The underlying rejection is attached as the cause of this error.`;
+}
+
+function updateFailureMessage(
+  consumerName: string,
+  streamName: string,
+  pattern: string,
+  filterSubject: string,
+  streams: ResolvedStream[],
+  cause: unknown,
+): string {
+  return `Failed to update JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}. The underlying rejection is attached as the cause of this error.`;
 }
 
 /**
@@ -340,9 +382,40 @@ function updateFailureMessage(consumerName: string, streamName: string, cause: u
  * The original rejection is preserved as `cause` rather than interpolated, so the misleading
  * text never reappears inside the replacement message.
  */
+/** `"NAME" (subject, subject)` for each stream, in declaration order. */
+function describeDeclarations(streams: ResolvedStream[]): string {
+  return streams.map(stream => `"${stream.name}" (${stream.natsSubjects.join(', ')})`).join(', ');
+}
+
+/**
+ * No declared stream binds the pattern.
+ *
+ * Says what a fallback would cost rather than only that it was refused: nats-server accepts a
+ * consumer whose filter matches nothing the stream holds, so a guessed binding is not caught
+ * downstream — it produces a live, empty subscription and no diagnostic anywhere.
+ */
+function unboundStreamMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
+  return `No declared stream binds "${pattern}" (as NATS subject "${natsSubject}"). This application declares ${describeDeclarations(streams)}. Refusing to guess: nats-server accepts a consumer whose filter matches nothing the stream holds, so a guessed binding would produce a subscription that is alive, healthy and permanently empty — and on deleteDurableConsumer it would remove a same-named consumer from an unrelated stream. Declare a stream that binds this subject, using the identical definition its owner uses.`;
+}
+
+/**
+ * More than one declared stream qualifies, on the same pass.
+ *
+ * `relation` is how the candidates relate to the subject — "binds all of" on the coverage pass,
+ * "holds part of" on the overlap pass — so the message says which kind of tie this is.
+ */
+function ambiguousStreamMessage(
+  pattern: string,
+  natsSubject: string,
+  candidates: ResolvedStream[],
+  relation: string,
+): string {
+  return `"${pattern}" (as NATS subject "${natsSubject}") is claimed by more than one declared stream: ${describeDeclarations(candidates)} — each ${relation} it. Refusing to guess which: the durable consumer name is derived from the group and the pattern and does not include the stream, so resolving differently on a later boot would create the same durable on another stream and orphan the first along with its delivery position. Streams also differ in retention, limits and storage, so the choice is not neutral. Narrow the declarations until exactly one binds this subject.`;
+}
+
 function publishFailureMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
   const declared = streams.length > 0
-    ? streams.map(stream => `"${stream.name}" (${stream.natsSubjects.join(', ')})`).join(', ')
+    ? describeDeclarations(streams)
     : 'no streams at all';
 
   return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${declared}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
@@ -414,6 +487,7 @@ interface ResolvedStream extends StreamDefinition {
 class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   id: string;
   pattern: string;
+  params: Record<string, string>;
   data: T;
   timestamp: number;
   redelivered: boolean;
@@ -440,6 +514,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   constructor(
     id: string,
     pattern: string,
+    params: Record<string, string>,
     data: T,
     timestamp: number,
     metadata: MessageMetadata,
@@ -450,6 +525,7 @@ class JetStreamMessage<T> implements Message<T>, NackAwareMessage {
   ) {
     this.id = id;
     this.pattern = pattern;
+    this.params = params;
     this.data = data;
     this.timestamp = timestamp;
     this.metadata = metadata;
@@ -861,6 +937,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       Boolean(options?.group),
       filterSubject,
       resolved,
+      pattern,
     );
 
     const consumer = await this.js!.consumers.get(streamName, consumerName);
@@ -953,23 +1030,29 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     return `js-${++this.messageIdCounter}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  /**
+   * Invoke every listener for an event, isolating each from the others.
+   *
+   * The swallow is deliberate: a listener is application code, and one that throws must not abort
+   * the listeners after it nor propagate into the delivery path that emitted the event. Reporting
+   * it as `onError` would let a throwing `onError` handler recurse forever, so it goes to
+   * `console.error` — the one path here that does not route through the framework, because the
+   * framework's reporting channel is what just failed.
+   */
   private emit<E extends keyof QueueEvents>(event: E, ...args: unknown[]): void {
     const handlers = this.eventHandlers.get(event);
     if (handlers) {
       for (const handler of handlers) {
         try {
           handler(...args);
-        } catch {
-          // Silently ignore event handler errors
+        } catch (error) {
+          // eslint-disable-next-line no-console -- the framework's own reporting channel is what failed
+          console.error(`[JetStreamQueueAdapter] a "${event}" listener threw`, error);
         }
       }
     }
   }
 
-  /**
-   * Resolve which stream a subject belongs to by matching against configured subject patterns.
-   * Falls back to the first stream if no match is found.
-   */
   /**
    * Reconciles one JetStream consumer: probe, classify, then create or stamp.
    *
@@ -988,6 +1071,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     isDurable: boolean,
     filterSubject: string,
     resolved: ResolvedConsumerConfig,
+    pattern: string,
   ): Promise<void> {
     const desiredHash = hashReconcileConfig({
       ack_wait: resolved.tracksDelivery ? resolved.ackWait : undefined,
@@ -1005,7 +1089,15 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         throw error;
       }
 
-      await this.addConsumer(streamName, consumerName, isDurable, filterSubject, resolved, desiredHash);
+      await this.addConsumer(
+        streamName,
+        consumerName,
+        isDurable,
+        filterSubject,
+        resolved,
+        desiredHash,
+        pattern,
+      );
 
       return;
     }
@@ -1062,7 +1154,17 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         ...redeliveryConfig(resolved),
       });
     } catch (cause) {
-      throw this.failConsumer(updateFailureMessage(consumerName, streamName, cause), cause);
+      throw this.failConsumer(
+        updateFailureMessage(
+          consumerName,
+          streamName,
+          pattern,
+          filterSubject,
+          this.resolvedStreams,
+          cause,
+        ),
+        cause,
+      );
     }
   }
 
@@ -1074,6 +1176,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     filterSubject: string,
     resolved: ResolvedConsumerConfig,
     desiredHash: string,
+    pattern: string,
   ): Promise<void> {
     try {
       await this.jsm!.consumers.add(streamName, {
@@ -1086,7 +1189,17 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         ...redeliveryConfig(resolved),
       });
     } catch (cause) {
-      throw this.failConsumer(addFailureMessage(consumerName, streamName, cause), cause);
+      throw this.failConsumer(
+        addFailureMessage(
+          consumerName,
+          streamName,
+          pattern,
+          filterSubject,
+          this.resolvedStreams,
+          cause,
+        ),
+        cause,
+      );
     }
   }
 
@@ -1145,9 +1258,15 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * needs it: a `group` that was templated per run or per deploy and has left a trail of
    * consumers behind on the server.
    *
-   * Stream resolution here is STRICT. `resolveStreamForSubject` falls back to the first
-   * declared stream when nothing matches, which is harmless when publishing and dangerous
-   * here: a mistyped pattern would delete a same-named consumer on an unrelated stream.
+   * Stream resolution goes through the same `resolveStreamForSubject` that `subscribe()` uses,
+   * and must: a delete has to name exactly the stream the subscription bound to, or it cannot
+   * decommission what `subscribe()` created.
+   *
+   * It used to have a private strict twin, `requireStreamForSubject`, byte-identical except for
+   * the no-match branch — the twin threw, the public one fell back to the first declaration. Two
+   * copies of one predicate, and neither handled ambiguity: both returned whichever candidate
+   * came first. Now that the public resolver refuses instead of guessing, the twin had no reason
+   * to exist, and one implementation cannot drift from itself.
    *
    * @param pattern - The subscription pattern the consumer was created for.
    * @param group - The `group` the subscription declared.
@@ -1158,11 +1277,48 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    *
    * @see docs:api/queue.md
    */
+  /**
+   * `deleteDurableConsumer` for teardown: best effort, and never throws.
+   *
+   * The strict form is right for the call an operator makes on purpose and wrong for the one an
+   * `afterEach` makes unconditionally. It opens with `ensureConnected()` and resolves the stream
+   * strictly, so on an adapter that never connected — or after a case failed before `connect()`,
+   * or after `disconnect()` — it throws, and that throw REPLACES the assertion failure in the
+   * test output. The real breakage disappears behind a JetStream error from the cleanup.
+   *
+   * So this one swallows, and reports through `onError` rather than silently: a teardown wants no
+   * exception, but a permissions denial or a mistyped pattern is still worth knowing about, and a
+   * listener can see it without the process dying. Nothing about the strict path changes — this
+   * calls it, so the two cannot drift.
+   *
+   * @param pattern - The subscription pattern the consumer was created for.
+   * @param group - The `group` the subscription declared.
+   * @returns `true` when a consumer was removed; `false` when there was nothing to remove, the
+   *   adapter is not connected, or the attempt failed.
+   *
+   * @see docs:api/queue.md
+   */
+  async tryDeleteDurableConsumer(pattern: string, group: string): Promise<boolean> {
+    // Not an error: an adapter that never connected has no consumer to remove, and saying so
+    // through `onError` would make every clean teardown noisy.
+    if (!this.isConnected()) {
+      return false;
+    }
+
+    try {
+      return await this.deleteDurableConsumer(pattern, group);
+    } catch (error) {
+      this.emit('onError', error as Error);
+
+      return false;
+    }
+  }
+
   async deleteDurableConsumer(pattern: string, group: string): Promise<boolean> {
     this.ensureConnected();
 
     const jsModule = await getJetStreamModule();
-    const streamName = this.requireStreamForSubject(pattern);
+    const streamName = this.resolveStreamForSubject(pattern);
     const consumerName = durableConsumerName(group, toNatsSubject(pattern));
 
     try {
@@ -1177,77 +1333,100 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   }
 
   /**
-   * Stream resolution for destructive operations: no fallback, ever.
+   * The declared stream a subscription to `subject` must bind to.
+   *
+   * Resolved locally, against the streams this application declares. There is no broker lookup
+   * and none would help: `$JS.API.STREAM.NAMES` answers "which streams on this broker bind this
+   * subject", while `consumers.add` needs "which stream *this application declared* for it", and
+   * on a shared broker those differ.
+   *
+   * There is no fallback, and no fallback is safe. Measured against nats-server 2.10: a
+   * `filter_subject` completely unrelated to what the stream holds is ACCEPTED, stored verbatim,
+   * and its consumer sits at zero pending forever — a subscription that is alive, healthy and
+   * permanently empty, with nothing logged on either side. The broker validates nothing here, so
+   * this rule is the only thing standing between a typo and a dead handler.
+   *
+   * Coverage is consulted first, so a stream binding the whole pattern wins outright over one
+   * holding a slice of it. A tie in either pass is an error rather than a pick: `durableConsumerName`
+   * omits the stream, so resolving the same pattern differently on a later boot would create the
+   * same durable on another stream and orphan the first along with its delivery position — and
+   * streams differ in retention, limits and storage, so the choice is not neutral either.
+   *
+   * @param subject - A OneBun pattern; translated here, so `orders.{id}` resolves as `orders.*`.
+   * @returns The name of the one declared stream that binds it.
+   * @throws If no declared stream binds the subject, or if more than one does.
    *
    * @see docs:api/queue.md
    */
-  private requireStreamForSubject(pattern: string): string {
-    const natsSubject = toNatsSubject(pattern);
-
-    for (const stream of this.resolvedStreams) {
-      for (const declared of stream.natsSubjects) {
-        if (this.natsSubjectMatches(declared, natsSubject)) {
-          return stream.name;
-        }
-      }
-    }
-
-    throw new Error(
-      `No declared stream binds "${pattern}" (as NATS subject "${natsSubject}"). This application declares `
-      + `${this.resolvedStreams.map(s => `"${s.name}" (${s.natsSubjects.join(', ')})`).join(', ')}. `
-      + 'Refusing to guess: on a destructive call a mistyped pattern would delete a consumer on an unrelated stream.',
-    );
-  }
-
   resolveStreamForSubject(subject: string): string {
     const natsSubject = toNatsSubject(subject);
 
-    for (const stream of this.resolvedStreams) {
-      for (const pattern of stream.natsSubjects) {
-        if (this.natsSubjectMatches(pattern, natsSubject)) {
-          return stream.name;
-        }
-      }
+    const covering = this.matchingStreams(natsSubject, this.natsSubjectCovers);
+
+    if (covering.length === 1) {
+      return covering[0].name;
     }
 
-    // Fallback to first stream
-    return this.resolvedStreams[0].name;
+    if (covering.length > 1) {
+      throw new Error(ambiguousStreamMessage(subject, natsSubject, covering, 'binds all of'));
+    }
+
+    const overlapping = this.matchingStreams(natsSubject, this.natsSubjectsOverlap);
+
+    if (overlapping.length === 1) {
+      return overlapping[0].name;
+    }
+
+    if (overlapping.length > 1) {
+      throw new Error(ambiguousStreamMessage(subject, natsSubject, overlapping, 'holds part of'));
+    }
+
+    throw new Error(unboundStreamMessage(subject, natsSubject, this.resolvedStreams));
   }
 
   /**
-   * Check if a NATS subject matches a pattern.
-   * Supports `.` as separator, `*` as single-level wildcard, `>` as multi-level wildcard.
+   * The declared streams satisfying `predicate` for `natsSubject`, each counted once.
+   *
+   * `some` rather than a second loop, so a stream declaring `['orders.>', 'orders.created']` is
+   * ONE candidate: counting its matching subjects instead would make a single well-formed stream
+   * look like an ambiguity and refuse to resolve.
+   *
+   * Two declarations that share a `name` stay two candidates, and therefore resolve to an
+   * ambiguity refusal. That is the right outcome — one name with two definitions is a
+   * configuration error, and reconciliation would apply whichever came last.
    */
-  private natsSubjectMatches(pattern: string, subject: string): boolean {
-    const patternTokens = pattern.split('.');
-    const subjectTokens = subject.split('.');
+  private matchingStreams(
+    natsSubject: string,
+    predicate: (declared: string, subject: string) => boolean,
+  ): ResolvedStream[] {
+    return this.resolvedStreams.filter(
+      stream => stream.natsSubjects.some(declared => predicate(declared, natsSubject)),
+    );
+  }
 
-    for (let i = 0; i < patternTokens.length; i++) {
-      const pt = patternTokens[i];
+  /**
+   * Does `declared` bind every concrete subject `subject` can name?
+   *
+   * Coverage, asymmetric, correct on both sides. Lives in `subject-match.ts` with the rest of the
+   * subject algebra and its reasoning; kept as a method because it reads as one at the call sites
+   * and because the tests reach it here.
+   *
+   * @see docs:api/queue.md
+   */
+  private natsSubjectCovers(declared: string, subject: string): boolean {
+    return natsSubjectCovers(declared, subject);
+  }
 
-      // Multi-level wildcard matches the rest
-      if (pt === '>') {
-        return i < subjectTokens.length;
-      }
-
-      // No more subject tokens but pattern continues
-      if (i >= subjectTokens.length) {
-        return false;
-      }
-
-      // Single-level wildcard matches any single token
-      if (pt === '*') {
-        continue;
-      }
-
-      // Exact match required
-      if (pt !== subjectTokens[i]) {
-        return false;
-      }
-    }
-
-    // Both must be fully consumed
-    return patternTokens.length === subjectTokens.length;
+  /**
+   * Is there any concrete subject that both `a` and `b` name?
+   *
+   * Overlap, symmetric, strictly weaker than coverage — deliberately a separate predicate, never
+   * a relaxation of the coverage one. See `subject-match.ts`.
+   *
+   * @see docs:api/queue.md
+   */
+  private natsSubjectsOverlap(a: string, b: string): boolean {
+    return natsSubjectsOverlap(a, b);
   }
 
   private async ensureAllStreams(): Promise<void> {
@@ -1406,11 +1585,17 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     return error;
   }
 
-  /** Existing subjects that no configured subject would still cover. */
+  /**
+   * Existing subjects that the declaration would no longer cover.
+   *
+   * Asks whether the declared SET covers each one, not whether any single declared subject does.
+   * The two differ: `['orders.*', 'orders.*.>']` covers a server-held `orders.>` only jointly —
+   * neither half covers it, together they cover it exactly — and the per-subject question
+   * reported that as a narrowing, refusing to boot while naming a subject that would in fact
+   * still be stored.
+   */
   private droppedSubjects(existingSubjects: string[], configured: string[]): string[] {
-    return existingSubjects.filter(
-      existing => !configured.some(pattern => this.natsSubjectMatches(pattern, existing)),
-    );
+    return existingSubjects.filter(existing => !unionCoversSubject(configured, existing));
   }
 
   /** Declared create-only fields whose value differs from the server's. */
@@ -1498,8 +1683,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * dead-letter queue exists to prevent.
    *
    * The republish goes through the adapter's own `publish()` rather than a second raw
-   * `js.publish`, so subject translation, stream resolution and the publish diagnostics all
-   * apply to dead letters without a second convention to keep in step.
+   * `js.publish`, so subject translation and the publish diagnostics apply to dead letters
+   * without a second convention to keep in step.
+   *
+   * Stream resolution does NOT apply: `publish()` never calls `resolveStreamForSubject`. It hands
+   * the subject to the server and lets it route, which is why a dead-letter subject no stream
+   * binds is not caught at startup — it surfaces as a republish failure the first time a message
+   * is actually dead-lettered. `validateDeadLetterQueue` catches only a wildcard queue and a queue
+   * equal to the subscription's own pattern.
    *
    * @see docs:api/queue.md
    */
@@ -1618,6 +1809,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         entry.durable,
         entry.filterSubject,
         entry.resolved,
+        entry.pattern,
       );
 
       entry.consumer = await this.js!.consumers.get(entry.streamName, entry.consumerName);
@@ -1651,6 +1843,23 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       const messages = await entry.consumer.consume({
         max_messages: entry.consumeBatch,
       });
+
+      // Checked AFTER consume(), which is a different question from the `paused` check above.
+      // A release that lands while this await is in flight sets `running = false` and looks at
+      // `entry.messages`, which is still null — so it closes nothing and moves on. Assigning
+      // the resolved handle here would install it on an entry nobody will release again.
+      //
+      // Nothing else would close it either. Breaking out of the `for await` below does run the
+      // iterator's `finally` and unsubscribes the inbox — but only once the loop has yielded at
+      // least once, and a subscription released before its first message never will. The loop
+      // parks on the internal signal forever, holding the inbox subscription and the monitor
+      // timer, with the consumer keeping its pull state on the server.
+      if (!entry.running) {
+        await messages.close().catch(() => undefined);
+
+        return;
+      }
+
       entry.messages = messages;
 
       // Watched alongside the loop, not instead of it. When the consumer is deleted the
@@ -1722,6 +1931,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         const message = new JetStreamMessage(
           id,
           messagePattern,
+          // The consumer's `filter_subject` is the WIDENED subject — `{id}` binds `*` — so
+          // the values come from the in-process match that just narrowed it back, at line
+          // `entry.matcher(...)` above.
+          match.params,
           messageData.data,
           messageData.timestamp || Date.now(),
           metadata,
@@ -1739,7 +1952,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           // handler to finish and acknowledge. `nc.drain()` flushes subscriptions but
           // never the application's loop body, and an ack published after close() is
           // buffered and then silently dropped.
-          entry.inFlight = entry.handler(message);
+          // A delivered message begins its own trace. Context follows the async graph, so a
+          // message published from inside a request would otherwise make its handler — and
+          // every later redelivery of it — a child of that finished request.
+          entry.inFlight = inRootTraceScope(() => entry.handler(message));
           await entry.inFlight;
         } catch (error) {
           // Emit failed event

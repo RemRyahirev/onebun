@@ -5,6 +5,12 @@
  * Creates messages to be published via the queue adapter.
  */
 
+import {
+  SpanKind,
+  type Attributes,
+  type Tracer,
+} from '@opentelemetry/api';
+
 import type {
   AddJobOptions,
   UpdateJobOptions,
@@ -14,15 +20,35 @@ import type {
   MessageMetadata,
 } from './types';
 
+import { awaitBounded } from '../await-bounded';
+import { inEntrySpan } from '../trace-scope';
+
 import {
   parseCronExpression,
   getNextRun,
   type CronSchedule,
 } from './cron-parser';
+import { withTraceMetadata } from './trace-metadata';
+
 
 // ============================================================================
 // Types
 // ============================================================================
+
+/**
+ * How long shutdown waits for scheduled runs already under way.
+ *
+ * Matches the consumer side's `HANDLER_DRAIN_TIMEOUT_MS`, which is what the queue already
+ * promises for a message being handled; a producer that gave up sooner would make the two halves
+ * of the same shutdown disagree about how long "in flight" is allowed to last.
+ */
+const JOB_DRAIN_TIMEOUT_MS = 30_000;
+
+/** One scheduled run that has started and not yet finished. */
+interface InFlightRun {
+  name: string;
+  promise: Promise<void>;
+}
 
 /**
  * Job configuration
@@ -53,6 +79,9 @@ interface ScheduledJob {
   // Runtime state
   timer?: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
   isRunning?: boolean;
+
+  /** Interval jobs only: run once when the job starts, before the first period elapses. */
+  runOnStart?: boolean;
   lastRun?: Date;
   nextRun?: Date;
 
@@ -74,7 +103,40 @@ export class QueueScheduler {
   private readonly cronCheckIntervalMs = 1000; // Check cron jobs every second
   private onJobError?: (jobName: string, error: unknown) => void;
 
+  /**
+   * Runs that have started and not yet finished.
+   *
+   * Every tick was fire-and-forget: `executeJob`'s promise was stored nowhere, so shutdown had
+   * nothing to wait for. A job mid-execution when the application stopped finished into a void,
+   * and its `publish()` was rejected by an adapter that had already disconnected — measured, a
+   * 400 ms job with `stop()` called 120 ms in returned in 3 ms and the message never arrived.
+   *
+   * An entry is removed when its run settles, so whatever remains after {@link drain} is exactly
+   * the set that outlived the bound.
+   */
+  private readonly inFlight = new Set<InFlightRun>();
+
+  /**
+   * The tracer of the application these jobs belong to, or `undefined` when it is not tracing.
+   *
+   * Held here rather than resolved from the ambient context: a tick arrives from a timer, and the
+   * context a timer fires in is whatever armed it. Read at execution time, never captured, so a
+   * scheduler built before the trace service still traces.
+   */
+  private ownerTracer: Tracer | undefined = undefined;
+
+  /** `tracing.traceScheduledJobs`; turns off the per-tick span, never the ownership. */
+  private traceScheduledJobs = true;
+
   constructor(private readonly adapter: QueueAdapter) {}
+
+  /**
+   * Name the application whose tracer every tick runs under.
+   */
+  setOwnerTracer(tracer: Tracer | undefined, traceScheduledJobs = true): void {
+    this.ownerTracer = tracer;
+    this.traceScheduledJobs = traceScheduledJobs;
+  }
 
   /**
    * Set error handler for scheduled job failures
@@ -181,6 +243,8 @@ export class QueueScheduler {
     getDataFn?: () => unknown | Promise<unknown>,
     options?: {
       metadata?: Partial<MessageMetadata>;
+      overlapStrategy?: OverlapStrategy;
+      runOnStart?: boolean;
       declarative?: boolean;
     },
   ): void {
@@ -191,6 +255,9 @@ export class QueueScheduler {
       intervalMs,
       getDataFn,
       metadata: options?.metadata,
+      // Same default as cron, which is also what the documentation already claimed for both.
+      overlapStrategy: options?.overlapStrategy ?? 'skip',
+      runOnStart: options?.runOnStart,
       declarative: options?.declarative,
     };
 
@@ -247,6 +314,8 @@ export class QueueScheduler {
       case 'interval':
         this.addIntervalJob(options.name, options.intervalMs, options.pattern, options.getDataFn, {
           metadata: options.metadata,
+          overlapStrategy: options.overlapStrategy,
+          runOnStart: options.runOnStart,
         });
         break;
       case 'timeout':
@@ -290,7 +359,9 @@ export class QueueScheduler {
 
     if (this.running) {
       if (job.type === 'interval' && job.intervalMs) {
-        this.startIntervalJob(job);
+        // No leading run: the job already started once. Resuming and reconfiguring continue a
+        // schedule, they do not begin one.
+        this.startIntervalJob(job, false);
       } else if (job.type === 'timeout' && job.timeoutMs) {
         this.startTimeoutJob(job);
       } else if (job.type === 'cron' && job.cronSchedule) {
@@ -325,7 +396,9 @@ export class QueueScheduler {
         }
         job.intervalMs = options.intervalMs;
         if (this.running && !job.paused) {
-          this.startIntervalJob(job);
+          // No leading run: the job already started once. Resuming and reconfiguring continue a
+          // schedule, they do not begin one.
+          this.startIntervalJob(job, false);
         }
         break;
       }
@@ -447,14 +520,14 @@ export class QueueScheduler {
       // Check if it's time to run
       if (job.nextRun && now >= job.nextRun) {
         // Handle overlap strategy
-        if (job.isRunning && job.overlapStrategy === 'skip') {
+        if (this.hasRunInFlight(job.name) && job.overlapStrategy === 'skip') {
           // Skip this run, but update next run time
           job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
           continue;
         }
 
         // Execute the job
-        this.executeJob(job);
+        this.launch(job);
 
         // Update next run time
         job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
@@ -465,17 +538,30 @@ export class QueueScheduler {
   /**
    * Start an interval job
    */
-  private startIntervalJob(job: ScheduledJob): void {
+  private startIntervalJob(job: ScheduledJob, leading = true): void {
     if (job.timer || !job.intervalMs) {
       return;
     }
 
     job.timer = setInterval(() => {
-      this.executeJob(job);
+      // The same rule cron has always had, and the one the docs already claimed for both. A
+      // `setInterval` does not care whether the last tick finished, so a body slower than its
+      // period ran concurrently with itself: measured at a 50 ms period with a 120 ms body,
+      // 8 invocations and 3 at once inside 400 ms, publishing a duplicate every tick.
+      if (job.overlapStrategy === 'skip' && this.hasRunInFlight(job.name)) {
+        return;
+      }
+
+      this.launch(job);
     }, job.intervalMs);
 
-    // Also execute immediately
-    this.executeJob(job);
+    // The leading run belongs to STARTING the job, not to arming its timer. `resumeJob` and
+    // `updateJob` re-arm a job that already started, and firing it again there gave a
+    // pause/resume cycle a run the schedule never asked for — measured start=1, resume=2,
+    // update=3 for the same job.
+    if (leading && job.runOnStart !== false) {
+      this.launch(job);
+    }
   }
 
   /**
@@ -487,7 +573,7 @@ export class QueueScheduler {
     }
 
     job.timer = setTimeout(() => {
-      this.executeJob(job);
+      this.launch(job);
       // Remove the job after execution (it's one-time)
       this.jobs.delete(job.name);
     }, job.timeoutMs);
@@ -496,7 +582,103 @@ export class QueueScheduler {
   /**
    * Execute a scheduled job
    */
+  /**
+   * Is a run of this job still going?
+   *
+   * Answered from the per-execution registry, the same one `drain` waits on, rather than from
+   * `job.isRunning`. The two agree on every path reachable today — a mutation swapping this for
+   * `job.isRunning` leaves the suite green, and that is stated here rather than dressed up as a
+   * defect. The registry is preferred because it is a count rather than a flag: it stays correct
+   * if a second run is ever allowed to start while the first is going, which is exactly what
+   * `overlapStrategy: 'queue'` asks for, and it keeps "is this job busy" answered in one place
+   * instead of two that must be kept in step.
+   */
+  private hasRunInFlight(name: string): boolean {
+    for (const run of this.inFlight) {
+      if (run.name === name) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Start a tick and remember it until it finishes.
+   *
+   * The four timers that reach a job all come through here. `catch` because these promises are
+   * not awaited by their caller: a rejection with nobody attached is an unhandled rejection, and
+   * `runJob` already reports failures through the error handler.
+   */
+  private launch(job: ScheduledJob): void {
+    const run: InFlightRun = {
+      name: job.name,
+      promise: Promise.resolve(),
+    };
+
+    run.promise = this.executeJob(job)
+      .catch(() => undefined)
+      .finally(() => {
+        this.inFlight.delete(run);
+      });
+
+    this.inFlight.add(run);
+  }
+
+  /**
+   * Wait for the runs already under way, for at most `timeoutMs`.
+   *
+   * Separate from {@link stop}, which stays synchronous: stopping is "accept no more work" and
+   * happens instantly, draining is "let what started finish" and cannot. Splitting them also
+   * keeps the documented `stop(): void` signature, and lets a caller stop the timers long before
+   * it is ready to wait.
+   *
+   * A run still going when the bound expires is reported through the error handler BEFORE this
+   * resolves — the application's shutdown tears the logger down immediately afterwards, so a
+   * report made any later is written to nothing.
+   */
+  async drain(timeoutMs: number = JOB_DRAIN_TIMEOUT_MS): Promise<void> {
+    if (this.inFlight.size === 0) {
+      return;
+    }
+
+    const runs = [...this.inFlight].map(run => run.promise);
+
+    await awaitBounded(Promise.allSettled(runs), timeoutMs);
+
+    for (const run of this.inFlight) {
+      this.onJobError?.(
+        run.name,
+        new Error(
+          `Scheduled job "${run.name}" was still running after ${timeoutMs}ms of shutdown drain `
+          + 'and has been abandoned. Anything it publishes from here will be rejected by a '
+          + 'disconnected adapter.',
+        ),
+      );
+    }
+  }
+
   private async executeJob(job: ScheduledJob): Promise<void> {
+    // A tick belongs to the schedule, not to whatever was in flight when the timer was armed.
+    // Context follows the async graph into `setInterval`, so without this a cron job started
+    // during a request would file every future tick under that one finished request.
+    //
+    // The span covers the WHOLE tick, publish included: `runJob` calls the data provider and then
+    // publishes its result, and a trace that stopped at the provider would leave the publish —
+    // the part that reaches another service — outside the trace it caused.
+    const attributes: Attributes = {};
+    attributes['onebun.job.name'] = job.name;
+    attributes['onebun.job.type'] = job.type;
+
+    return await inEntrySpan(
+      `${job.type} ${job.name}`,
+      async () => await this.runJob(job),
+      this.ownerTracer,
+      { kind: SpanKind.INTERNAL, attributes, openSpan: this.traceScheduledJobs },
+    );
+  }
+
+  private async runJob(job: ScheduledJob): Promise<void> {
     try {
       job.isRunning = true;
       job.lastRun = new Date();
@@ -509,10 +691,14 @@ export class QueueScheduler {
         data = { timestamp: Date.now() };
       }
 
-      // Publish the message
-      await this.adapter.publish(job.pattern, data, {
-        metadata: job.metadata,
-      });
+      // Publish the message. Stamped here rather than in `QueueService.publish`, which this
+      // path does not go through — the scheduler holds the adapter directly. Inside
+      // `executeJob`'s entry span, so the message carries the tick that produced it.
+      await this.adapter.publish(
+        job.pattern,
+        data,
+        withTraceMetadata({ metadata: job.metadata }),
+      );
     } catch (error) {
       // Report error via handler if set, otherwise silently continue
       if (this.onJobError) {

@@ -61,6 +61,6 @@
       "@onebun/trace": ["./packages/trace/src"]
     }
   },
-  "include": ["example/**/*", "packages/**/*", "scripts/**/*"],
+  "include": ["packages/**/*", "scripts/**/*"],
   "exclude": ["node_modules", "dist"]
 }

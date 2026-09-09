@@ -134,6 +134,22 @@ export class CorsMiddleware extends BaseMiddleware {
    * });
    * ```
    */
+  /**
+   * Whether this instance defers the preflight response to the rest of the chain.
+   *
+   * Read by the application's pre-routing preflight short-circuit, which must not fire when the
+   * caller asked for `preflightContinue: true` — that option exists so a downstream handler
+   * produces the response, and a short-circuit would take that away.
+   *
+   * `@internal`: the option is already public on `CorsOptions`; this only exposes what a
+   * configured instance resolved it to, and only because `options` is private.
+   *
+   * @internal
+   */
+  get continuesPreflight(): boolean {
+    return this.options.preflightContinue;
+  }
+
   static configure(options: CorsOptions = {}): typeof CorsMiddleware {
     class ConfiguredCorsMiddleware extends CorsMiddleware {
       constructor() {
@@ -186,8 +202,15 @@ export class CorsMiddleware extends BaseMiddleware {
       headers.set('Access-Control-Expose-Headers', this.options.exposedHeaders.join(', '));
     }
 
-    // Handle preflight OPTIONS request
-    if (req.method === 'OPTIONS') {
+    // Handle preflight OPTIONS request.
+    //
+    // Gated on `Access-Control-Request-Method`, which the Fetch spec requires on every real
+    // preflight. Without the gate this answered EVERY OPTIONS with 204 and never called
+    // `next()`, so a declared `@Options` route was unreachable whenever CORS was configured,
+    // and a plain API-discovery probe got a CORS response instead of the application's.
+    // The same gate gates the pre-routing short-circuit, so a routed and an unrouted preflight
+    // are decided by one rule rather than two that can drift.
+    if (req.method === 'OPTIONS' && req.headers.has('access-control-request-method')) {
       headers.set('Access-Control-Allow-Methods', this.options.methods.join(', '));
       headers.set('Access-Control-Allow-Headers', this.options.allowedHeaders.join(', '));
       headers.set('Access-Control-Max-Age', String(this.options.maxAge));

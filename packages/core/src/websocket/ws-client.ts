@@ -172,12 +172,18 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
     this.stopPing();
     this.clearReconnectTimer();
 
+    // BEFORE the close, not after. `close()` invokes `onclose` — synchronously in some
+    // runtimes — and `handleClose` decides whether to reconnect from this very field:
+    // `wasConnected && this.options.reconnect`. Set afterwards, a deliberate disconnect read
+    // as CONNECTED there and re-armed the timer that was just cleared, so a client with the
+    // default `reconnect: true` came back a second after being told to stop.
+    this.state = WsConnectionState.DISCONNECTED;
+
     if (this.ws) {
       this.ws.close(1000, 'Client disconnect');
       this.ws = null;
     }
 
-    this.state = WsConnectionState.DISCONNECTED;
     this.pendingRequests.clear();
     this.sid = null;
   }

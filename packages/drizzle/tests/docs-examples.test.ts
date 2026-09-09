@@ -4,7 +4,16 @@
  * @source docs:api/drizzle.md
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'path';
 
@@ -12,9 +21,11 @@ import {
   describe,
   it,
   expect,
+  beforeAll,
   beforeEach,
   afterEach,
 } from 'bun:test';
+import { drizzle as drizzleBunSql } from 'drizzle-orm/bun-sql';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
 import type { PostgreSQLConnectionOptions } from '../src/types';
@@ -43,13 +54,20 @@ import {
   BaseRepository,
   getPrimaryKeyColumn,
   generateMigrations,
+  relations,
+  sql,
 } from '../src';
 import {
+  json,
+  jsonb,
   pgTable,
   text as pgText,
   integer as pgInteger,
+  serial,
   timestamp,
+  uuid as pgUuid,
 } from '../src/pg';
+import { applyBunSqlJsonEncodingFix } from '../src/pg-json-encoding';
 import {
   sqliteTable,
   text,
@@ -215,22 +233,162 @@ describe('Drizzle API Documentation Examples', () => {
    * @source docs:api/drizzle.md#schema-definition
    */
   describe('Schema Definition (docs/api/drizzle.md)', () => {
-    it('should define SQLite schema with timestamps', () => {
-      // From docs: SQLite Schema example
+    const { createTestService } = require('@onebun/core/testing');
+
+    /** The literal SQL a `.default(sql`...`)` / `.defaultNow()` / `.defaultRandom()` column carries. */
+    const defaultSql = (column: { default?: unknown }): string => {
+      const chunks = (column.default as { queryChunks?: { value?: string[] }[] } | undefined)?.queryChunks ?? [];
+
+      return chunks.map(chunk => (chunk.value ?? []).join('')).join('');
+    };
+
+    it('should define SQLite schema with timestamps', async () => {
+      // From docs, "SQLite Schema" — the snippet verbatim: builders from @onebun/drizzle/sqlite,
+      // `sql` from @onebun/drizzle, and both timestamps defaulting to CURRENT_TIMESTAMP.
       const users = sqliteTable('users', {
         id: text('id').primaryKey(),
         name: text('name').notNull(),
         email: text('email').notNull().unique(),
         age: integer('age'),
-        // Note: Using simpler timestamp representation for SQLite
-        createdAt: text('created_at').notNull(),
-        updatedAt: text('updated_at').notNull(),
+        createdAt: text('created_at').notNull().default(sql`CURRENT_TIMESTAMP`),
+        updatedAt: text('updated_at').notNull().default(sql`CURRENT_TIMESTAMP`),
       });
 
-      expect(users).toBeDefined();
+      type User = typeof users.$inferSelect;
+      type InsertUser = typeof users.$inferInsert;
+
+      // The builder chain registers exactly the constraints the snippet spells out.
+      expect(users.id.primary).toBe(true);
+      expect(users.id.columnType).toBe('SQLiteText');
+      expect(users.name.notNull).toBe(true);
+      expect(users.email.isUnique).toBe(true);
+      expect(users.age.notNull).toBe(false);
+      expect(users.age.columnType).toBe('SQLiteInteger');
+      // camelCase property -> snake_case column, and both timestamps get a DB-side default.
+      expect(users.createdAt.name).toBe('created_at');
+      expect(users.updatedAt.name).toBe('updated_at');
+      expect(defaultSql(users.createdAt)).toBe('CURRENT_TIMESTAMP');
+      expect(defaultSql(users.updatedAt)).toBe('CURRENT_TIMESTAMP');
+
+      // And the schema drives real statements: the same table against in-memory SQLite.
+      const { instance } = createTestService(DrizzleServiceCtor);
+      await instance.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+      instance.getDatabase().run(`CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        age INTEGER,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )`);
+
+      try {
+        // $inferInsert leaves the defaulted timestamps out, so the DB fills them in.
+        const newUser: InsertUser = { id: 'u-1', name: 'John', email: 'john@example.com' };
+        await instance.insert(users).values(newUser);
+
+        const rows: User[] = await instance.select().from(users);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0].id).toBe('u-1');
+        expect(rows[0].name).toBe('John');
+        // age is the only nullable column; the timestamps came from CURRENT_TIMESTAMP,
+        // read back under their camelCase property names.
+        expect(rows[0].age).toBeNull();
+        expect(rows[0].createdAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+        expect(rows[0].updatedAt).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+        // .unique() on email is a real constraint, not decoration.
+        const duplicate = await instance.insert(users)
+          .values({ id: 'u-2', name: 'Jane', email: 'john@example.com' })
+          .then(() => null, (error: unknown) => error as Error);
+
+        expect(duplicate?.message).toContain('UNIQUE constraint failed: users.email');
+      } finally {
+        await instance.close();
+      }
     });
 
-    // PostgreSQL test skipped - see note at top of file
+    it('should define PostgreSQL schema with an identity id and defaultNow() timestamps', () => {
+      // From docs, "PostgreSQL Schema": generatedAlwaysAsIdentity() for the auto-increment
+      // primary key, timestamps in `date` mode defaulting to now().
+      const users = pgTable('users', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        name: pgText('name').notNull(),
+        email: pgText('email').notNull().unique(),
+        age: pgInteger('age'),
+        createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
+        updatedAt: timestamp('updated_at', { mode: 'date' }).notNull().defaultNow(),
+      });
+
+      expect(users.id.primary).toBe(true);
+      expect(users.id.columnType).toBe('PgInteger');
+      // generatedAlwaysAsIdentity() is what supplies the value, so no value is required on insert.
+      expect((users.id as unknown as { generatedIdentity?: { type: string } }).generatedIdentity)
+        .toEqual({ type: 'always' });
+      expect(users.id.hasDefault).toBe(true);
+      expect(users.email.isUnique).toBe(true);
+      expect(users.age.notNull).toBe(false);
+      expect(users.createdAt.name).toBe('created_at');
+      expect(users.createdAt.columnType).toBe('PgTimestamp');
+      // mode: 'date' — the driver hands back a Date, not a string.
+      expect(users.createdAt.dataType).toBe('date');
+      expect(defaultSql(users.createdAt)).toBe('now()');
+      expect(defaultSql(users.updatedAt)).toBe('now()');
+
+      // From docs, "Alternative with UUID".
+      const uuidUsers = pgTable('uuid_users', {
+        id: pgUuid('id').primaryKey().defaultRandom(),
+      });
+
+      expect(uuidUsers.id.columnType).toBe('PgUUID');
+      expect(defaultSql(uuidUsers.id)).toBe('gen_random_uuid()');
+    });
+
+    it('should bind relations() to its table and register the referenced foreign key', () => {
+      // From docs, "Relations".
+      const users = pgTable('users', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        name: pgText('name').notNull(),
+      });
+
+      const posts = pgTable('posts', {
+        id: pgInteger('id').primaryKey().generatedAlwaysAsIdentity(),
+        title: pgText('title').notNull(),
+        content: pgText('content'),
+        authorId: pgInteger('author_id').notNull().references(() => users.id),
+        createdAt: timestamp('created_at', { mode: 'date' }).notNull().defaultNow(),
+      });
+
+      const postsRelations = relations(posts, ({ one }) => ({
+        author: one(users, {
+          fields: [posts.authorId],
+          references: [users.id],
+        }),
+      }));
+
+      const usersRelations = relations(users, ({ many }) => ({
+        posts: many(posts),
+      }));
+
+      // Each relations() set is bound to the table it was declared on.
+      expect((postsRelations as unknown as { table: unknown }).table).toBe(posts);
+      expect((usersRelations as unknown as { table: unknown }).table).toBe(users);
+
+      // .references(() => users.id) registers a real foreign key: posts.author_id -> users.id.
+      type InlineForeignKey = {
+        reference: () => { columns: { name: string }[]; foreignColumns: { name: string }[] };
+      };
+      const inlineForeignKeys = (posts as unknown as Record<symbol, InlineForeignKey[]>)[
+        Symbol.for('drizzle:PgInlineForeignKeys')
+      ];
+
+      expect(inlineForeignKeys).toHaveLength(1);
+      const reference = inlineForeignKeys[0].reference();
+      expect(reference.columns.map(column => column.name)).toEqual(['author_id']);
+      expect(reference.foreignColumns.map(column => column.name)).toEqual(['id']);
+      expect(posts.authorId.notNull).toBe(true);
+    });
   });
 
   describe('Schema Utilities (docs/api/drizzle.md)', () => {
@@ -276,10 +434,72 @@ describe('Drizzle API Documentation Examples', () => {
    * @source docs:api/drizzle.md#migrations
    */
   describe('Migration Functions (docs/api/drizzle.md)', () => {
-    it('should have generateMigrations function', () => {
-      // From docs: Migration Management - generateMigrations
-      expect(generateMigrations).toBeDefined();
-      expect(typeof generateMigrations).toBe('function');
+    it('generateMigrations writes migration files for the schema, folder and dialect it is given', async () => {
+      // From docs, "Programmatic Generation": generateMigrations({ schemaPath,
+      // migrationsFolder, dialect }) produces migration files. Run it in a throwaway cwd so
+      // nothing lands in the repository, with node_modules linked in so `bunx drizzle-kit`
+      // resolves to the drizzle-kit this package depends on instead of hitting the registry.
+      //
+      // THIS package's node_modules, not the workspace root's. Bun 1.3 hoisted a workspace
+      // dependency to the root as an absolute symlink, so linking the root exposed drizzle-kit
+      // and drizzle-orm; 1.4 does not, and the root no longer contains them at all. `bunx` then
+      // went to the registry, installed a drizzle-kit of its own, and that one refused the
+      // drizzle-orm it found: `Please install latest version of drizzle-orm`. A package's own
+      // node_modules holds its dependencies under either layout, which is what makes this the
+      // stable answer rather than a fix aimed at one version.
+      const workDir = mkdtempSync(join(tmpdir(), 'onebun-docs-generate-'));
+      const linkedModules = join(workDir, 'node_modules');
+      const originalCwd = process.cwd();
+
+      try {
+        symlinkSync(join(__dirname, '..', 'node_modules'), linkedModules);
+        mkdirSync(join(workDir, 'schema'), { recursive: true });
+        writeFileSync(join(workDir, 'schema', 'index.ts'), [
+          "import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core';",
+          '',
+          "export const docsUsers = sqliteTable('docs_users', {",
+          "  id: integer('id').primaryKey(),",
+          "  name: text('name').notNull(),",
+          '});',
+          '',
+        ].join('\n'));
+
+        process.chdir(workDir);
+
+        await generateMigrations({
+          schemaPath: './schema',
+          migrationsFolder: './migrations',
+          dialect: 'sqlite',
+        });
+
+        // migrationsFolder is where the SQL lands, and the SQL is the schema, not a stub.
+        const generated = readdirSync(join(workDir, 'migrations')).filter((name) => name.endsWith('.sql'));
+
+        expect(generated).toHaveLength(1);
+
+        const statements = readFileSync(join(workDir, 'migrations', generated[0]!), 'utf8');
+
+        expect(statements).toContain('CREATE TABLE `docs_users`');
+        expect(statements).toContain('`name` text NOT NULL');
+
+        // The dialect argument reaches drizzle-kit: the journal records it, and the SQL is
+        // SQLite's backtick-quoted form rather than PostgreSQL's.
+        const journal = JSON.parse(
+          readFileSync(join(workDir, 'migrations', 'meta', '_journal.json'), 'utf8'),
+        ) as { dialect: string; entries: { tag: string }[] };
+
+        expect(journal.dialect).toBe('sqlite');
+        expect(journal.entries).toHaveLength(1);
+        expect(generated[0]).toBe(`${journal.entries[0]!.tag}.sql`);
+
+        // The drizzle.config it writes to drive drizzle-kit is an implementation detail and
+        // must not outlive the call.
+        expect(existsSync(join(workDir, 'drizzle.config.temp.ts'))).toBe(false);
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(linkedModules, { force: true });
+        rmSync(workDir, { recursive: true, force: true });
+      }
     });
 
     it('should have pushSchema function', () => {
@@ -317,6 +537,154 @@ describe('Drizzle API Documentation Examples', () => {
         options: { connectionString: 'postgresql://u:p@h:5432/d', host: 'other' },
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)).rejects.toThrow(/both connectionString and discrete field/);
+    });
+
+    /**
+     * @source docs:api/drizzle.md#transaction
+     */
+    it('rolls back a repository call made from inside the callback', async () => {
+      // From docs: "Anything called from inside the callback is in the transaction, on both
+      // dialects." Asserted here on SQLite, which needs no container; the PostgreSQL half —
+      // the one that used to be wrong — is `ambient-transaction.test.ts`, against a server.
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-tx-'));
+      const file = join(dir, 'orders.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      const seed = new Database(file);
+      seed.run('CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT NOT NULL)');
+      seed.close();
+
+      const orders = sqliteTable('orders', {
+        id: integer('id').primaryKey({ autoIncrement: true }),
+        label: text('label').notNull(),
+      });
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await service.initialize({ type: DatabaseType.SQLITE, options: { url: file } });
+
+        class OrdersRepository extends BaseRepository<typeof orders> {
+          constructor(drizzle: InstanceType<typeof DrizzleServiceCtor>) {
+            super(drizzle, orders);
+          }
+        }
+        const repository = new OrdersRepository(service);
+
+        await expect(service.transaction(async () => {
+          await repository.create({ label: 'through the repository' });
+
+          throw new Error('nope');
+        })).rejects.toThrow('nope');
+
+        expect(await repository.findAll()).toEqual([]);
+      } finally {
+        await service.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * @source docs:api/drizzle.md#sqlite-pragmas-and-read-only-files
+     */
+    it('gives a read-only connection a default pragma set it can actually apply', async () => {
+      // From docs: "A read-only connection gets a different default — ['synchronous = NORMAL']"
+      // and "It now boots with no pragma list at all."
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-readonly-'));
+      const file = join(dir, 'reference.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      const seed = new Database(file);
+      seed.run('CREATE TABLE reference (id INTEGER PRIMARY KEY, label TEXT)');
+      seed.run("INSERT INTO reference (id, label) VALUES (1, 'shipped')");
+      seed.close();
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await service.initialize({
+          type: DatabaseType.SQLITE,
+          options: { url: file, options: { readonly: true } },
+        });
+
+        const client = service.getSQLiteClient();
+        expect(client?.query('SELECT label FROM reference WHERE id = 1').all())
+          .toEqual([{ label: 'shipped' }]);
+      } finally {
+        await service.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * @source docs:api/drizzle.md#sqlite-pragmas-and-read-only-files
+     */
+    it('applies an explicit pragma list exactly as given, read-only or not', async () => {
+      // From docs: "An explicit `pragmas` array is always applied exactly as given, read-only
+      // or not... naming the pragma and saying it is yours to remove"
+      const dir = mkdtempSync(join(tmpdir(), 'onebun-docs-pragma-'));
+      const file = join(dir, 'explicit.db');
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { Database } = require('bun:sqlite');
+      new Database(file).close();
+
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      try {
+        await expect(service.initialize({
+          type: DatabaseType.SQLITE,
+          options: {
+            url: file,
+            options: { readonly: true },
+            pragmas: ['journal_mode = WAL'],
+          },
+        })).rejects.toThrow(/PRAGMA journal_mode = WAL failed/);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * @source docs:api/drizzle.md#postgresql-connection
+     */
+    it('passes every documented pool option to the driver, in milliseconds', async () => {
+      // From docs: "`pool` is accepted alongside either shape, and every option in it reaches
+      // the driver" — max as given, both timeouts in ms, and `timeout` also bounding the probe.
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      const { DrizzleService: Service } = require('../src/drizzle.service');
+      const service = new Service() as InstanceType<typeof DrizzleServiceCtor>;
+
+      await service.initialize({
+        type: DatabaseType.POSTGRESQL,
+        options: {
+          connectionString: 'postgresql://user:password@host:5432/app',
+          pool: {
+            max: 20,
+            idleTimeout: 30000,
+            timeout: 2000,
+          },
+        },
+      });
+
+      const client = service.getPostgreSQLClient();
+      const options = (client as unknown as {
+        options: { max?: number; idleTimeout?: number; connectionTimeout?: number };
+      }).options;
+
+      expect(options.max).toBe(20);
+      expect(options.idleTimeout).toBe(30000);
+      expect(options.connectionTimeout).toBe(2000);
+
+      await service.close();
     });
 
     /**
@@ -2182,5 +2550,119 @@ describe('Reaching a registration from outside the tree (docs/api/drizzle.md)', 
     expect(app.getLayer()).toBeDefined();
 
     await app.stop();
+  });
+});
+
+
+describe('JSON and JSONB columns (docs)', () => {
+  const events = pgTable('events', {
+    id: serial('id').primaryKey(),
+    payload: jsonb('payload').$type<{ kind: string; tags: string[] }>(),
+    raw: json('raw'),
+  });
+
+  /** A stub Bun SQL client: records what it was asked to run, answers no rows. */
+  function stubClient(): { client: unknown; calls: Array<{ query: string; params: unknown[] }> } {
+    const calls: Array<{ query: string; params: unknown[] }> = [];
+
+    const client = {
+      unsafe(query: string, params: unknown[]) {
+        calls.push({ query, params });
+
+        const thenable = Promise.resolve([] as unknown[]) as Promise<unknown[]> & {
+          values(): Promise<unknown[]>;
+        };
+        thenable.values = () => Promise.resolve([]);
+
+        return thenable;
+      },
+    };
+
+    return { client, calls };
+  }
+
+  beforeAll(() => {
+    // What `DrizzleService.initialize()` does on the PostgreSQL branch before building the driver.
+    applyBunSqlJsonEncodingFix();
+  });
+
+  /**
+   * @source docs:api/drizzle.md#json-and-jsonb-columns
+   */
+  it('should round-trip objects, arrays and scalars as values, not as JSON strings', async () => {
+    // From docs: "Objects, arrays and scalars all round-trip as values, not as JSON strings"
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+
+    await db.insert(events).values({ payload: { kind: 'signup', tags: ['beta'] } });
+
+    expect(calls[0].query).toContain('$1::text::jsonb');
+    expect(calls[0].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#prepared-statements-and-placeholders
+   */
+  it('should round-trip sql.placeholder() through prepare(), including an explicit null', async () => {
+    // From docs: one prepared statement, executed any number of times with different payloads
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+
+    const insert = db.insert(events)
+      .values({ payload: sql.placeholder('payload') })
+      .prepare('insert_event');
+
+    await insert.execute({ payload: { kind: 'signup', tags: ['beta'] } });
+    await insert.execute({ payload: null });
+
+    expect(calls[0].query).toContain('$1::text::jsonb');
+    expect(calls[0].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+
+    // The cast is added to the statement text once, however many times it runs...
+    expect(calls[1].query).toBe(calls[0].query);
+    // ...and an explicit null binds SQL NULL, not the JSON text `null`.
+    expect(calls[1].params).toEqual([null]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#raw-sql-bypasses-this
+   */
+  it('should require an explicit double cast on raw SQL, which bypasses the column encoder', async () => {
+    // From docs: "The fix lives in the column encoders, so anything that does not go through a
+    // column does not get it"
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+    const payload = { kind: 'signup', tags: ['beta'] };
+
+    // WRONG — stores a jsonb string: no cast, and Bun JSON-encodes the object it is handed.
+    await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+    expect(calls[0].query).not.toContain('::text::jsonb');
+    expect(calls[0].params).toEqual([payload]);
+
+    // RIGHT — the double cast is what forces the value to be bound verbatim.
+    await db.execute(
+      sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`,
+    );
+    expect(calls[1].query).toContain('$1::text::jsonb');
+    expect(calls[1].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#repairing-double-encoded-json
+   */
+  it('should document the repair with its guard, and read an unrepaired row back as a string', () => {
+    // The guard is load-bearing: without it the same statement tries to parse every string scalar
+    // and the first non-JSON one fails the whole repair. Asserted against the page itself so the
+    // published snippet cannot drift away from that form.
+    const page = readFileSync(join(__dirname, '../../../docs/api/drizzle.md'), 'utf-8');
+
+    expect(page).toMatch(
+      /UPDATE t SET c = \(c #>> '\{\}'\)::jsonb\s*\n\s*WHERE jsonb_typeof\(c\) = 'string' AND \(c #>> '\{\}'\) ~ '\^\\s\*\[\\\[\{\]';/,
+    );
+
+    // From docs: "After it, mapFromDriverValue is identity: an unrepaired row reads back as the
+    // string it is on disk" — which is why the repair runs before the upgrade, not after.
+    expect(events.payload.mapFromDriverValue('{"kind":"signup"}')).toBe('{"kind":"signup"}');
+    expect(events.payload.mapFromDriverValue({ kind: 'signup' })).toEqual({ kind: 'signup' });
   });
 });

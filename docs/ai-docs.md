@@ -59,6 +59,44 @@ OneBun documentation is indexed by Context7. Use library ID `onebun` with Contex
 }
 ```
 
+## Agent Skill
+
+The repository ships an agent skill — `skills/onebun-framework` — that teaches an assistant the
+idiomatic way to write OneBun code: which decorator to reach for, what the DI container will and will
+not resolve, which patterns are anti-patterns and why. It is more opinionated than the reference
+documentation, and it is versioned alongside the code, so a change to a public API and the guidance
+that describes it land in the same commit.
+
+### Installing it
+
+```bash
+bun run skill:install     # copy into the agent's skill directory
+bun run skill:check       # report drift between the repo and the installed copy
+```
+
+By default the skill is installed into `~/.claude/skills/onebun-framework`. Override the destination
+with `CLAUDE_SKILLS_DIR`, or with an explicit path:
+
+```bash
+bun scripts/install-skill.ts --target /path/to/skills
+bun scripts/install-skill.ts --print-target   # show where it would go
+```
+
+The install replaces the destination wholesale rather than merging into it: a file deleted from the
+repository must not survive in the installed copy, because a removed instruction that stays on disk
+keeps being followed.
+
+### For agents working in another project
+
+The skill is plain Markdown with no build step, so it can also be read directly from a checkout, or
+vendored into another repository's own skill directory. `SKILL.md` is the entry point; the files under
+`references/` are loaded on demand for a specific area (controllers, drizzle, guards, interceptors,
+observability, queues, testing).
+
+If you have no checkout, the same material is reachable over HTTP — but note the difference between the
+two endpoints: [llms.txt](/llms.txt) is a link index of a few kilobytes, while
+[llms-full.txt](/llms-full.txt) is the complete documentation in one file.
+
 ## What's Included
 
 - API reference for all packages (@onebun/core, @onebun/cache, @onebun/drizzle, etc.)

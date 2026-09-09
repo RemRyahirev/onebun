@@ -1,10 +1,15 @@
+import { SQL } from 'bun';
 import {
   describe,
   expect,
   test,
 } from 'bun:test';
 
-import { createNatsContainer, createRedisContainer } from './containers';
+import {
+  createNatsContainer,
+  createPostgresContainer,
+  createRedisContainer,
+} from './containers';
 
 describe('createRedisContainer', () => {
   test('starts redis and returns connection details', async () => {
@@ -30,6 +35,40 @@ describe('createNatsContainer', () => {
       expect(nats.container).toBeDefined();
     } finally {
       await nats.stop();
+    }
+  }, 60000);
+});
+
+describe('createPostgresContainer', () => {
+  test('starts postgres and returns connection details', async () => {
+    const postgres = await createPostgresContainer();
+    try {
+      expect(postgres.url).toMatch(/^postgresql:\/\/.+:\d+\/.+$/);
+      expect(postgres.host).toBeDefined();
+      expect(postgres.port).toBeGreaterThan(0);
+      expect(postgres.container).toBeDefined();
+    } finally {
+      await postgres.stop();
+    }
+  }, 60000);
+
+  test('hands back a server that is actually accepting connections', async () => {
+    // The reason the wait strategy counts TWO "ready to accept connections" lines: the image
+    // starts a temporary server for its init scripts, logs the line for that one, stops it, and
+    // only then starts the real server. Waiting for the first line returns a URL that is about
+    // to stop working, and the failure lands in whichever test connects first.
+    const postgres = await createPostgresContainer();
+    try {
+      const sql = new SQL(postgres.url);
+      try {
+        const rows = await sql`SELECT 1 AS ok` as Array<{ ok: number }>;
+
+        expect(rows).toEqual([{ ok: 1 }]);
+      } finally {
+        await sql.close();
+      }
+    } finally {
+      await postgres.stop();
     }
   }, 60000);
 });

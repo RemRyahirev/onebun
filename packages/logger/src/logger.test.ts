@@ -17,11 +17,16 @@ import {
   makeDevLogger,
   makeLoggerFromOptions,
   parseLogLevel,
+  resolveOtlpLogEndpoint,
   shutdownLogger,
 } from './logger';
 import { makeLogger } from './logger';
 import { ConsoleTransport } from './transport';
-import { LogLevel, type LogEntry } from './types';
+import {
+  LogLevel,
+  type LogEntry,
+  type LogTransport,
+} from './types';
 
 
 describe('PrettyFormatter', () => {
@@ -367,34 +372,52 @@ describe('LoggerImpl methods and makeLogger env selection', () => {
   });
 });
 
-describe('LoggerImpl trace context fallback to __onebunTraceService', () => {
-  it('uses global trace service when current trace context is absent', () => {
-    // очистить direct context
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__onebunCurrentTraceContext = undefined;
-    const outputs: LogEntry[] = [];
-    const transport = new (class extends ConsoleTransport {
-      override log(_f: string, e: LogEntry) {
-        return Effect.sync(() => {
-          outputs.push(e);
-        });
-      }
-    })();
-    // подготовить псевдо trace service
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (globalThis as any).__onebunTraceService = {
-      getCurrentTraceContext: () => Effect.succeed({ traceId: 'svc-trace', spanId: 'svc-span' }),
+// The `__onebunTraceService` fallback that used to live in `LoggerImpl` is gone, and so is the
+// test that covered it. That test built its own global — `{ getCurrentTraceContext: () =>
+// Effect.succeed(...) }` — a shape no real trace service has: the service spells the method
+// `getCurrentContext`, so the branch's guard was false for every genuine service and the branch
+// never ran outside this test. It was green while covering nothing.
+//
+// The contexts it claimed to serve — WebSocket, queue, scheduled jobs — are covered by
+// `getCurrentTraceContext()` in `@onebun/core`, which resolves from the OpenTelemetry active
+// span, and pinned end to end by
+// `packages/core/src/application/log-trace-correlation.test.ts`.
+
+
+/**
+ * `traceContextGetter` is honoured by every factory that takes a `LoggerConfig`.
+ *
+ * It was not. `makeDevLogger` and `makeProdLogger` spread the whole config and so passed it on;
+ * `makeLogger` enumerated four of the five fields and dropped this one. Same type, same
+ * documentation, opposite behaviour depending on which factory a caller reached for — and
+ * nothing in the signatures said which.
+ */
+describe('makeLogger honours traceContextGetter', () => {
+  it('stamps the context the getter returns onto the entry', async () => {
+    const entries: LogEntry[] = [];
+    const transport: LogTransport = {
+      log: (_formatted: string, entry: LogEntry) => Effect.sync(() => {
+        entries.push(entry);
+      }),
     };
 
-    const layer = makeDevLogger({ transport });
-    const logger = Effect.runSync(Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer));
-    const sync = createSyncLogger(logger);
-    sync.info('ping');
+    const layer = makeLogger({
+      minLevel: LogLevel.Debug,
+      transport,
+      traceContextGetter: () => ({ traceId: 'from-the-getter', spanId: 'span-1' }),
+    });
 
-    expect(outputs[0].trace?.traceId).toBe('svc-trace');
+    await Effect.runPromise(
+      Effect.provide(
+        Effect.flatMap(LoggerService, logger => logger.info('hello')),
+        layer,
+      ),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.trace?.traceId).toBe('from-the-getter');
   });
 });
-
 
 // Added tests to raise function coverage for formatter.ts
 
@@ -956,5 +979,110 @@ describe('shutdownLogger', () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+/**
+ * `OTEL_EXPORTER_OTLP_ENDPOINT` exists so that one image can be promoted from dev to prod with
+ * observability turned on by injection. Reading it only on the path that already had explicit
+ * options meant setting it did nothing at all.
+ */
+describe('OTLP log export from the environment alone', () => {
+  const originalFetch = globalThis.fetch;
+  const originalOtelLogs = process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+  const originalOtelEndpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const LONG_BATCH_TIMEOUT = 600000;
+
+  let posted: Array<{ url: string; body: string }>;
+
+  beforeEach(() => {
+    posted = [];
+    globalThis.fetch = mock(async (url: string, init: RequestInit) => {
+      posted.push({ url: String(url), body: init.body as string });
+
+      return new Response('{}', { status: 200 });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    }) as any;
+    delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  });
+
+  afterEach(async () => {
+    await shutdownLogger();
+    globalThis.fetch = originalFetch;
+    if (originalOtelLogs === undefined) {
+      delete process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT;
+    } else {
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = originalOtelLogs;
+    }
+    if (originalOtelEndpoint === undefined) {
+      delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+    } else {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = originalOtelEndpoint;
+    }
+  });
+
+  describe('resolveOtlpLogEndpoint', () => {
+    it('prefers the explicit option over both variables', () => {
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://logs:4318';
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://all:4318';
+
+      expect(resolveOtlpLogEndpoint({ otlpEndpoint: 'http://explicit:4318' })).toBe('http://explicit:4318');
+    });
+
+    it('prefers the logs-specific variable over the general one', () => {
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://logs:4318';
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://all:4318';
+
+      expect(resolveOtlpLogEndpoint()).toBe('http://logs:4318');
+    });
+
+    it('falls back to the general variable', () => {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://all:4318';
+
+      expect(resolveOtlpLogEndpoint()).toBe('http://all:4318');
+    });
+
+    it('reports no endpoint when nothing is configured', () => {
+      expect(resolveOtlpLogEndpoint()).toBeUndefined();
+      expect(resolveOtlpLogEndpoint({ minLevel: 'info' })).toBeUndefined();
+    });
+  });
+
+  it('exports logs when only the environment variable is set', async () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+
+    const layer = makeLoggerFromOptions();
+    const logger = Effect.runSync(
+      Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+    );
+
+    await Effect.runPromise(logger.info('env-configured record'));
+    await shutdownLogger();
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].url).toBe('http://collector:4318/v1/logs');
+    expect(posted[0].body).toContain('env-configured record');
+  });
+
+  it('flushes every logger built in the process, not only the last one', async () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+
+    for (const marker of ['first-service', 'second-service']) {
+      const layer = makeLoggerFromOptions({ otlpBatchTimeout: LONG_BATCH_TIMEOUT });
+      const logger = Effect.runSync(
+        Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+      );
+      await Effect.runPromise(logger.info(marker));
+    }
+
+    await shutdownLogger();
+
+    // A single active-transport slot silently dropped the first logger: its records were never
+    // sent and its flush timer went on rescheduling itself with nothing left holding it.
+    const bodies = posted.map((p) => p.body).join('');
+    expect(posted).toHaveLength(2);
+    expect(bodies).toContain('first-service');
+    expect(bodies).toContain('second-service');
   });
 });

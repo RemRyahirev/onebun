@@ -601,6 +601,7 @@ This provides a consistent API response envelope across all endpoints.
 
 For custom HTTP status codes on success, use `this.success(data, statusCode)`:
 
+<!-- typecheck: skip -->
 ```typescript
 @Post('/')
 async create(@Body(createUserSchema) body: CreateUserBody) {
@@ -613,6 +614,7 @@ async create(@Body(createUserSchema) body: CreateUserBody) {
 
 OneBun supports both path styles out of the box. `@Get(':id')` and `@Get('/:id')` are equivalent — the framework normalizes paths automatically. No migration step needed:
 
+<!-- typecheck: skip -->
 ```typescript
 // NestJS
 @Get(':id')

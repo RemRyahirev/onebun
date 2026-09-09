@@ -262,10 +262,20 @@ if (result.success) {
 **Return Type:**
 
 ```typescript
-type ValidationResult<T> =
-  | { success: true; data: T }
-  | { success: false; errors: string[] };
+interface ValidationResult<T = unknown> {
+  success: boolean;
+  data?: T;
+  errors?: string[];
+}
 ```
+
+::: warning It does not narrow
+`ValidationResult` is an interface with optional fields, not a discriminated union, so checking
+`result.success` does **not** narrow `data` to `T` — it stays `T | undefined` and needs a non-null
+assertion or a guard of your own. At run time the two fields are mutually exclusive (`validate()`
+returns either `{ success: true, data }` or `{ success: false, errors: [...] }`), but the type does not
+say so. Tracked for a future release.
+:::
 
 ### validateOrThrow()
 
@@ -408,6 +418,7 @@ export type UpdateUserDto = typeof updateUserSchema.infer;
 
 ### Pagination
 
+<!-- typecheck: skip -->
 ```typescript
 const paginationSchema = type({
   'page?': 'number.integer > 0',
@@ -436,6 +447,7 @@ async findAll(
 
 ### API Request Body
 
+<!-- typecheck: skip -->
 ```typescript
 const createOrderSchema = type({
   customerId: 'string.uuid',
@@ -706,6 +718,7 @@ function processUser(user: User) {
 
 ### 4. Validate Early
 
+<!-- typecheck: skip -->
 ```typescript
 // Schema validation happens at parameter extraction — use named types from schema files
 @Post('/')

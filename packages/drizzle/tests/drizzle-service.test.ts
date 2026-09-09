@@ -763,3 +763,87 @@ describe('PostgreSQL connection options', () => {
     await expect(initPg({})).rejects.toThrow(/incomplete/);
   });
 });
+
+describe('waitForInit', () => {
+  /** Slow enough that ordering is observable, short enough not to pad the suite. */
+  const INIT_DELAY_MS = 60;
+
+  test('actually waits for an in-flight onModuleInit', async () => {
+    // `initPromise` was declared and read but never assigned, so this method resolved
+    // immediately and every caller that awaited it got no synchronisation at all.
+    const { instance } = createTestService(DrizzleService);
+
+    const order: string[] = [];
+    // Substituted on the INSTANCE, not through mock.module: the replacement must not be
+    // visible to any other file in the run.
+    (instance as unknown as { autoInitialize: () => Promise<void> }).autoInitialize = async () => {
+      await Bun.sleep(INIT_DELAY_MS);
+      order.push('init-finished');
+    };
+
+    const starting = instance.onModuleInit();
+    const waiting = instance.waitForInit().then(() => {
+      order.push('waiter-resumed');
+    });
+
+    await Promise.all([starting, waiting]);
+
+    expect(order).toEqual(['init-finished', 'waiter-resumed']);
+  });
+
+  test('resolves immediately once initialization has finished', async () => {
+    // The normal case for client code: the framework awaits onModuleInit() before anything
+    // else runs, so the latch has nothing left to hold.
+    const { instance } = createTestService(DrizzleService);
+
+    (instance as unknown as { autoInitialize: () => Promise<void> }).autoInitialize =
+      async () => undefined;
+
+    await instance.onModuleInit();
+
+    const startedAt = Date.now();
+    await instance.waitForInit();
+
+    expect(Date.now() - startedAt).toBeLessThan(INIT_DELAY_MS);
+  });
+
+  test('does not re-throw a start failure the application has already reported', async () => {
+    // The latch is cleared in a `finally`. Leaving a rejected promise behind would make every
+    // later waitForInit() throw a failure `app.start()` already surfaced once.
+    const { instance } = createTestService(DrizzleService);
+
+    (instance as unknown as { autoInitialize: () => Promise<void> }).autoInitialize = async () => {
+      throw new Error('startup exploded');
+    };
+
+    await expect(instance.onModuleInit()).rejects.toThrow('startup exploded');
+
+    await expect(instance.waitForInit()).resolves.toBeUndefined();
+  });
+
+  test('close() called from inside the initialization does not deadlock on it', async () => {
+    // The degraded-start cleanup path closes a client the FAILING initialization opened, from
+    // inside that initialization. Awaiting the latch there is waiting on yourself.
+    const { instance } = createTestService(DrizzleService);
+
+    (instance as unknown as { autoInitialize: () => Promise<void> }).autoInitialize = async () => {
+      // Yield first. `initPromise` is assigned from the RESULT of this call, so it is still
+      // null throughout the synchronous prefix — a close() before the first await consults an
+      // empty latch and cannot deadlock no matter how it is written. Reaching the real
+      // condition requires being past an await point.
+      await Bun.sleep(0);
+
+      // Stand in for a half-open connection: `close()` only consults the latch when a client
+      // exists, so the deadlock needs one present.
+      (instance as unknown as { sqliteClient: unknown }).sqliteClient = { close: () => undefined };
+      await instance.close(true);
+    };
+
+    const finished = await Promise.race([
+      instance.onModuleInit().then(() => 'finished'),
+      Bun.sleep(1000).then(() => 'deadlocked'),
+    ]);
+
+    expect(finished).toBe('finished');
+  });
+});

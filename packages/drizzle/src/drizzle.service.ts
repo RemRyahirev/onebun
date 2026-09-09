@@ -43,7 +43,9 @@ import {
   UniversalSelectDistinctBuilder,
   UniversalTransactionClient,
 } from './builders';
+import { AmbientTransaction, createTransactionAwareDatabase } from './builders/ambient-transaction';
 import { createGatedDatabase, SQLiteTransactionGate } from './builders/transaction-gate';
+import { applyBunSqlJsonEncodingFix } from './pg-json-encoding';
 import {
   type DatabaseConnectionOptions,
   type DatabaseInstance,
@@ -52,6 +54,7 @@ import {
   type DrizzleModuleOptions,
   type MigrationOptions,
   type PostgreSQLConnectionOptions,
+  type PostgreSQLPoolOptions,
   type SQLiteConnectionOptions,
 } from './types';
 
@@ -132,6 +135,50 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
  * `app.start()` open forever with nothing logged.
  */
 const DEFAULT_STARTUP_PROBE_TIMEOUT_MS = 5000;
+
+/** The pragmas applied to a writable SQLite connection when the caller names none. */
+const DEFAULT_SQLITE_PRAGMAS = ['journal_mode = WAL', 'synchronous = NORMAL'];
+
+/**
+ * The same set minus the one a read-only connection cannot apply.
+ *
+ * `journal_mode` is a property of the *file*, not of the connection: setting it rewrites the
+ * database header, so on a read-only handle SQLite answers `attempt to write a readonly
+ * database`. `synchronous` is per-connection and read-only accepts it.
+ *
+ * Measured under bun:sqlite, and the measurement is why this is a separate constant rather
+ * than a `try`/ignore: the WAL pragma fails on a read-only handle **only when the file is not
+ * already in WAL mode**. On a file that is, the identical statement succeeds as a no-op. A
+ * read-only deployment would therefore work or fail depending on how the file it was handed
+ * happened to be written — the kind of difference that survives staging and appears in
+ * production.
+ */
+const READONLY_SQLITE_PRAGMAS = ['synchronous = NORMAL'];
+
+/**
+ * What to do about a pragma the database refused, in the words of whoever chose it.
+ *
+ * Three different situations reach one `catch`, and the same sentence cannot serve all
+ * three: a pragma the caller wrote is theirs to remove, a default that failed on a writable
+ * database says nothing about read-only, and a default that failed on a read-only one means
+ * this function's own filtering missed a case.
+ */
+function sqlitePragmaHint(pragma: string, readonly: boolean, explicit: boolean): string {
+  if (explicit) {
+    return readonly
+      ? `The connection is read-only and PRAGMA ${pragma} writes. Drop it from \`pragmas\`, or `
+        + 'open the database without `readonly: true`.'
+      : `Remove PRAGMA ${pragma} from \`pragmas\`, or correct it — the list is applied exactly `
+        + 'as given, immediately after the file opens.';
+  }
+
+  return readonly
+    ? `PRAGMA ${pragma} is one of the defaults a read-only connection is given, so this is a `
+      + 'framework bug rather than a configuration one. Set `pragmas: []` to boot, and report it.'
+    : 'The default pragmas write to the database. A connection that may not write needs '
+      + '`readonly: true` — which selects a default set that does not — or an explicit '
+      + '`pragmas` list.';
+}
 
 /** The one option that turns a fatal startup into a degraded one. Quoted in every message. */
 const DEGRADED_START_OPTION = 'allowDegradedStart';
@@ -217,8 +264,46 @@ function describeTarget(connection: DatabaseConnectionOptions): string {
 }
 
 /**
+ * A configured pool value the driver can use, or `undefined`.
+ *
+ * Zero and negative numbers are not passed on: to Bun a zero timeout means *no* timeout, so
+ * forwarding `timeout: 0` would turn a misconfiguration into an unbounded connect rather than
+ * the default one.
+ */
+function positiveOrUndefined(value: number | undefined): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Translate a `pool` block into the options Bun's `SQL` actually takes.
+ *
+ * Bun's timeouts are **seconds** and it accepts fractional values, so the conversion from the
+ * milliseconds this API uses is a plain division with nothing to round away — measured against
+ * a black-holed host, `connectionTimeout: 0.25` failed the connect after 251 ms. Bun normalises
+ * them back to milliseconds on `client.options`, which is what `pool-options.test.ts` asserts.
+ *
+ * `min` has no counterpart and never had one; see {@link PostgreSQLPoolOptions}.
+ */
+function poolDriverOptions(pool: PostgreSQLPoolOptions | undefined): {
+  max?: number;
+  idleTimeout?: number;
+  connectionTimeout?: number;
+} {
+  const max = positiveOrUndefined(pool?.max);
+  const idleTimeoutMs = positiveOrUndefined(pool?.idleTimeout);
+  const connectTimeoutMs = positiveOrUndefined(pool?.timeout);
+
+  return {
+    ...(max === undefined ? {} : { max }),
+    ...(idleTimeoutMs === undefined ? {} : { idleTimeout: idleTimeoutMs / 1000 }),
+    ...(connectTimeoutMs === undefined ? {} : { connectionTimeout: connectTimeoutMs / 1000 }),
+  };
+}
+
+/**
  * The bound for the reachability probe: the timeout the options already carry, or the
- * default. `pool.timeout` is documented as the connection timeout in milliseconds.
+ * default. `pool.timeout` is the connection timeout in milliseconds — the same number the
+ * driver gets as its own `connectionTimeout`, so one setting cannot mean two things.
  */
 function startupProbeTimeoutOf(connection: DatabaseConnectionOptions): number {
   if (connection.type === DatabaseType.POSTGRESQL) {
@@ -512,6 +597,13 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * a transaction takes a pooled connection and nothing has to wait.
    */
   private gatedDb: DatabaseInstance | null = null;
+
+  /**
+   * What `getDatabase()` hands out on PostgreSQL: the same database with every query routed
+   * to the open transaction, when the caller is inside one. `null` on SQLite, where
+   * {@link gatedDb} already does it.
+   */
+  private routedDb: DatabaseInstance | null = null;
   private dbType: DatabaseTypeLiteral | null = null;
   private connectionOptions: DatabaseConnectionOptions | null = null;
   private initialized = false;
@@ -520,6 +612,9 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   private postgresClient: SQL | null = null;
   /** Serializes SQLite transactions and queues ordinary queries behind them. */
   private readonly sqliteGate = new SQLiteTransactionGate();
+
+  /** Carries the open PostgreSQL transaction to everything called inside its callback. */
+  private readonly pgAmbient = new AmbientTransaction();
   /**
    * Which folder claimed each journal, keyed by `schema.table`.
    *
@@ -753,8 +848,20 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     // Flush any buffered logs now that logger is available
     this.flushLogBuffer();
 
-    // Run auto-initialization
-    await this.autoInitialize();
+    // Publish the in-flight initialization so `waitForInit()` has something to wait ON.
+    // The field was declared and read but never assigned, so the latch resolved instantly and
+    // every caller that awaited it — `initialize()`, `runMigrations()`, `transaction()`,
+    // `close()` — got no synchronisation at all.
+    this.initPromise = this.autoInitialize();
+
+    try {
+      await this.initPromise;
+    } finally {
+      // Cleared either way. A failed start is not an initialization still in flight, and
+      // leaving a rejected promise here would make every later `waitForInit()` re-throw a
+      // failure `app.start()` has already reported.
+      this.initPromise = null;
+    }
   }
 
   /**
@@ -874,7 +981,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     const startedAt = Date.now();
 
     try {
-      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      // skipWait: we ARE the initialization, so the latch would be waiting on itself.
       await this.initialize(plan.connection, true);
       await this.verifyReachable(plan, target, timeoutMs, startedAt);
 
@@ -893,7 +1000,8 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       if (!plan.allowDegradedStart) {
         // Nothing may keep a socket or a file handle for a database this process has just
         // refused to start with: the container has to exit, not linger holding a connection.
-        await this.close().catch(() => undefined);
+        // Inside the initialization: `close()` must not wait on the promise it is part of.
+        await this.close(true).catch(() => undefined);
         this.initialized = false;
 
         throw failure;
@@ -1048,7 +1156,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     this.safeLog('debug', 'Running auto-migrations', { migrationsFolder });
 
     try {
-      // Pass skipWait=true to avoid deadlock (we're already inside initPromise)
+      // skipWait: we ARE the initialization, so the latch would be waiting on itself.
       await this.runMigrations({
         migrationsFolder,
         migrationsTable: plan.migrationsTable,
@@ -1095,7 +1203,18 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
   }
 
   /**
-   * Wait for initialization to complete
+   * Wait for an in-flight `onModuleInit()` to finish.
+   *
+   * Resolves immediately when nothing is initializing — which is the normal case for client
+   * code, because the framework awaits `onModuleInit()` before anything else runs. It matters
+   * for the entry points a caller can reach WHILE startup is still going: `initialize()`,
+   * `runMigrations()`, `transaction()` and `close()` all pass through here so a manual call
+   * cannot race the automatic one into a double-open.
+   *
+   * Callers that are themselves running inside the initialization pass `skipWait`, because
+   * waiting on the promise you are part of is a deadlock, not a synchronisation.
+   *
+   * @see docs:api/drizzle.md
    */
   async waitForInit(): Promise<void> {
     if (this.initPromise) {
@@ -1111,6 +1230,12 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * unwritable one identically (`SQLITE_CANTOPEN`), and a write pragma against a read-only
    * database fails AFTER a perfectly successful open — three different fixes behind two
    * driver messages.
+   *
+   * A `readonly: true` connection takes {@link READONLY_SQLITE_PRAGMAS} instead of
+   * {@link DEFAULT_SQLITE_PRAGMAS}: a read-only SQLite file is an ordinary deployment — a
+   * shipped dataset, a mounted read-only volume — and the framework knowing that a read-only
+   * connection cannot set `journal_mode` is better than telling the operator to hand-write
+   * the pragma list. An explicit `pragmas` array is always applied exactly as given.
    */
   private openSQLite(options: SQLiteConnectionOptions): Database {
     let client: Database;
@@ -1124,8 +1249,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       );
     }
 
-    // Apply SQLite pragmas before creating drizzle instance
-    const pragmas = options.pragmas ?? ['journal_mode = WAL', 'synchronous = NORMAL'];
+    const readonly = options.options?.readonly === true;
+    const explicit = options.pragmas !== undefined;
+    const pragmas = options.pragmas ?? (readonly ? READONLY_SQLITE_PRAGMAS : DEFAULT_SQLITE_PRAGMAS);
+
     for (const pragma of pragmas) {
       try {
         client.run(`PRAGMA ${pragma}`);
@@ -1135,8 +1262,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
         throw new Error(
           `SQLite database "${options.url}" opened, but PRAGMA ${pragma} failed: `
           + `${error instanceof Error ? error.message : String(error)}. `
-          + 'The default pragmas write to the database; a read-only one needs `pragmas: []` '
-          + 'or a list that does not write.',
+          + sqlitePragmaHint(pragma, readonly, explicit),
           { cause: error },
         );
       }
@@ -1151,15 +1277,16 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * @param skipWait - Internal flag to skip waitForInit (used by autoInitialize to avoid deadlock)
    */
   async initialize(options: DatabaseConnectionOptions, skipWait = false): Promise<void> {
-    // Skip waitForInit when called from autoInitialize to avoid deadlock
-    // (autoInitialize is the function that creates initPromise)
+    // Skipped when called from autoInitialize: that call is what `initPromise` resolves.
     if (!skipWait) {
       await this.waitForInit();
     }
 
     if (this.initialized && this.connectionOptions) {
       this.safeLog('warn', 'Database already initialized, closing existing connection');
-      await this.close();
+      // Carries the caller's context through: a re-initialize from inside `autoInitialize()`
+      // would otherwise deadlock here on the promise that IS `autoInitialize()`.
+      await this.close(skipWait);
     }
 
     this.connectionOptions = options;
@@ -1179,9 +1306,18 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       // Either shape: a connectionString is used as given, discrete fields are assembled.
       const connectionUrl = resolvePostgreSQLUrl(pgOptions);
 
-      // Use Bun.SQL - recommended way according to Drizzle docs
-      // Pass connection string directly to drizzle()
-      this.db = drizzlePostgres(connectionUrl);
+      // Before the driver exists, because it patches prototypes the driver will use. Without
+      // it every json/jsonb value written through this service is stored as a jsonb STRING —
+      // invisible to the application that wrote it, and broken for every SQL operator, every
+      // other service and every report. See the file for the measurements.
+      applyBunSqlJsonEncodingFix();
+
+      // Bun.SQL, through the config form rather than the bare URL: the URL alone is what made
+      // every `pool.*` option a value the framework accepted and then dropped on the floor.
+      this.db = drizzlePostgres({
+        connection: { url: connectionUrl, ...poolDriverOptions(pgOptions.pool) },
+      });
+      this.routedDb = createTransactionAwareDatabase(this.db, this.pgAmbient);
 
       // Store client reference for closing if needed
       // Drizzle returns database with $client property
@@ -1216,6 +1352,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * rolls back, instead of joining it. `getSQLiteDatabase()` and `getSQLiteClient()` are the
    * ungated escape hatches.
    *
+   * On PostgreSQL it is routed instead of gated: a query built from it while the caller is
+   * inside a `transaction()` callback is issued ON that transaction, so a repository holding
+   * this object is atomic with it. `db.$client` is the escape hatch.
+   *
    * @see docs:api/drizzle.md
    */
   getDatabase(): DatabaseInstance {
@@ -1223,7 +1363,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database not initialized. Call initialize() first.');
     }
 
-    return this.gatedDb ?? this.db;
+    return this.gatedDb ?? this.routedDb ?? this.db;
   }
 
   /**
@@ -1256,7 +1396,10 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       throw new Error('Database is not PostgreSQL');
     }
 
-    return this.db as BunSQLDatabase<Record<string, PgTable>>;
+    // The same instance `getDatabase()` hands out, transaction routing included: this is a
+    // narrower TYPE, not an opt-out of the transaction the caller is inside. `db.$client` is
+    // the escape hatch for that, and is documented as one.
+    return this.getDatabase() as BunSQLDatabase<Record<string, PgTable>>;
   }
 
   /**
@@ -1449,7 +1592,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * @throws Error if database is not initialized
    */
   async runMigrations(options?: MigrationOptions, skipWait = false): Promise<void> {
-    // Skip waitForInit when called from autoInitialize to avoid deadlock
+    // Skipped when called from autoInitialize: that call is what `initPromise` resolves.
     if (!skipWait) {
       await this.waitForInit();
     }
@@ -1562,12 +1705,19 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     await this.close();
   }
 
-  async close(): Promise<void> {
-    // Only wait for init if there are actual database clients to close
-    // This prevents hanging when close() is called on an uninitialized service
-    // Note: we check clients directly, not `initialized` flag, because autoInitialize()
-    // may still be running and `initialized` could be false while initPromise is pending
-    if (this.postgresClient || this.sqliteClient) {
+  /**
+   * Close the database connections.
+   *
+   * @param skipWait - Internal. Set by callers that are already running inside
+   *   `onModuleInit()`; awaiting the initialization promise from within it would deadlock.
+   *   The degraded-start cleanup path is exactly that case: it closes a client the failing
+   *   initialization had already opened.
+   */
+  async close(skipWait = false): Promise<void> {
+    // Only wait for init if there are actual database clients to close.
+    // Checked on the clients rather than the `initialized` flag, because `autoInitialize()`
+    // may still be running and `initialized` is false while `initPromise` is pending.
+    if (!skipWait && (this.postgresClient || this.sqliteClient)) {
       await this.waitForInit();
     }
 
@@ -1584,6 +1734,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
 
     this.db = null;
     this.gatedDb = null;
+    this.routedDb = null;
     this.dbType = null;
     this.connectionOptions = null;
     this.initialized = false;
@@ -1637,11 +1788,21 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       return await this.runSQLiteTransaction(callback);
     }
 
+    // A transaction opened from inside a transaction is a SAVEPOINT on the connection
+    // already held, not a second one from the pool — the latter can block on a row its own
+    // outer transaction holds, which is a deadlock with itself.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return await (this.db as any).transaction(async (rawTx: DatabaseInstance) => {
+    const root = (this.pgAmbient.activeDatabase() ?? this.db) as any;
+
+    return await root.transaction(async (rawTx: DatabaseInstance) => {
       const wrappedTx = new UniversalTransactionClient(rawTx);
 
-      return await callback(wrappedTx);
+      // Everything called from inside the callback — a repository, a service query, another
+      // service — is issued on this transaction rather than on a second pooled connection.
+      return await this.pgAmbient.runInContext(
+        rawTx as object,
+        async () => await callback(wrappedTx),
+      );
     });
   }
 

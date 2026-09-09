@@ -10,8 +10,15 @@
 
 /**
  * Message acknowledgment mode
- * - 'auto': Message is automatically acknowledged after successful handler execution
- * - 'manual': Handler must call message.ack() or message.nack() explicitly
+ * - 'auto': Message is automatically acknowledged after successful handler execution. A handler
+ *   that throws is retried up to `retry.attempts` times (default 1 — one delivery, as before),
+ *   with `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
+ *   fires on every failed attempt. Once the attempts are exhausted the message is dropped on the
+ *   memory adapter, and dropped on the Redis adapter too until `deadLetter.queue` is honoured
+ *   there; JetStream dead-letters it.
+ * - 'manual': Handler must call message.ack() or message.nack() explicitly. `nack(true)` is
+ *   uncapped — it is the handler's instruction, not the framework's policy, and `Message.attempt`
+ *   is what lets a handler stop itself.
  * - 'none': Fire-and-forget. The message is delivered exactly once and nothing is
  *   acknowledged, so there is **no redelivery** and **no dead-letter routing** on any
  *   adapter. Everything that depends on the broker tracking delivery state goes inert
@@ -50,12 +57,23 @@ export interface MessageMetadata {
   /** Parent span ID for distributed tracing */
   parentSpanId?: string;
 
+  /**
+   * W3C trace flags; bit 0 is "sampled".
+   *
+   * Carried so a consumer inherits the producer's sampling decision instead of re-deciding.
+   * A `traceId` set by hand with no flags is treated as sampled, which is the same reading
+   * `extractFromHeadersSync` gives the `x-trace-id`/`x-span-id` header pair.
+   */
+  traceFlags?: number;
+
   /** Additional data (for guards and custom logic) */
   [key: string]: unknown;
 }
 
 /**
  * Queue message interface
+ *
+ * @see docs:api/queue.md
  */
 export interface Message<T = unknown> {
   /** Unique message ID */
@@ -63,6 +81,24 @@ export interface Message<T = unknown> {
 
   /** Message pattern/topic */
   pattern: string;
+
+  /**
+   * Values captured by the `{name}` parameters of the pattern this handler subscribed with.
+   *
+   * `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
+   * Always an object — `{}` for a pattern with no named parameters, and for a `*` or `#`
+   * wildcard — so a handler never has to guard the access itself.
+   *
+   * Captured **per subscription**, not per publish: one topic delivered to two subscriptions
+   * with different patterns gives each handler its own values, in its own object. It is
+   * therefore not part of the published envelope and does not travel over the wire — a value
+   * in `metadata` would.
+   *
+   * **Treat it as read-only.** One object is captured per delivery and reused across every
+   * retry of that delivery, so a handler that mutates it changes what its own next attempt
+   * sees. Nothing else can observe the mutation: a second subscription has its own object.
+   */
+  params: Record<string, string>;
 
   /** Message payload */
   data: T;
@@ -156,23 +192,42 @@ export interface PublishOptions {
 
 /**
  * Retry configuration
+ *
+ * @see docs:api/queue.md
  */
 export interface RetryOptions {
-  /** Maximum number of attempts */
+  /**
+   * Total deliveries, not extra ones: `attempts: 3` runs the handler at most three times.
+   * Defaults to 1 — one delivery, which is what an unconfigured subscription has always done.
+   * Honoured by the memory, Redis and JetStream adapters; core NATS tracks no delivery state
+   * and ignores it.
+   */
   attempts?: number;
-  /** Backoff strategy */
+  /** Backoff strategy. Same three formulas as `@onebun/requests`: fixed, `delay * n`, `delay * 2^(n-1)`. */
   backoff?: 'fixed' | 'linear' | 'exponential';
-  /** Base delay in milliseconds */
+  /** Base delay in milliseconds (default 100). */
   delay?: number;
 }
 
 /**
  * Dead Letter Queue configuration
+ *
+ * Honoured by the Redis and JetStream adapters. The memory and core-NATS adapters report
+ * `supports('dead-letter-queue') === false` and ignore it.
+ *
+ * @see docs:api/queue.md
  */
 export interface DeadLetterOptions {
-  /** Queue name for dead letters */
+  /**
+   * Where a terminally-failed message goes. A QUEUE PATTERN, not a broker-specific key: the
+   * message is republished through the normal publish path, so `@Subscribe(queue)` consumes it.
+   */
   queue: string;
-  /** Maximum retries before sending to DLQ */
+  /**
+   * Deliveries before the message is dead-lettered, used only when `retry.attempts` is absent —
+   * the cap resolves as `retry.attempts ?? deadLetter.maxRetries ?? 1` on Redis, and
+   * `retry.attempts ?? deadLetter.maxRetries ?? consumerConfig.maxDeliver ?? 3` on JetStream.
+   */
   maxRetries?: number;
 }
 
@@ -324,6 +379,10 @@ export interface AddIntervalJob {
   pattern: string;
   getDataFn?: () => unknown | Promise<unknown>;
   metadata?: Partial<MessageMetadata>;
+  /** @defaultValue 'skip' — a tick arriving while the previous run is going is dropped */
+  overlapStrategy?: OverlapStrategy;
+  /** @defaultValue true — run once when the job starts, before the first period elapses */
+  runOnStart?: boolean;
 }
 
 /**
@@ -569,6 +628,26 @@ export interface IntervalDecoratorOptions {
 
   /** Job name (defaults to method name) */
   name?: string;
+
+  /**
+   * What to do when a tick arrives while the previous run is still going.
+   *
+   * `'skip'` drops the tick — the choice for anything that can outlast its own period, such as a
+   * collector that usually takes 5 s on a 5 s schedule. `'queue'` runs it anyway, concurrently.
+   *
+   * @defaultValue 'skip'
+   */
+  overlapStrategy?: OverlapStrategy;
+
+  /**
+   * Run once as soon as the job starts, rather than waiting out the first period.
+   *
+   * `false` gives "every hour, starting next hour", which used to be impossible: the first run
+   * always happened at boot.
+   *
+   * @defaultValue true
+   */
+  runOnStart?: boolean;
 }
 
 /**

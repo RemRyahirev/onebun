@@ -160,28 +160,20 @@ class LoggerImpl implements Logger {
         }
       }
 
-      // 2. Fallback to global trace service (for non-HTTP contexts: WebSocket, Queue)
-      if (!currentTraceInfo && typeof globalThis !== 'undefined') {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const globalTraceService = (globalThis as any).__onebunTraceService;
-        if (globalTraceService && globalTraceService.getCurrentTraceContext) {
-          try {
-            const currentContext = Effect.runSync(
-              globalTraceService.getCurrentTraceContext(),
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ) as any;
-            if (currentContext && currentContext.traceId) {
-              currentTraceInfo = {
-                traceId: currentContext.traceId,
-                spanId: currentContext.spanId,
-                parentSpanId: currentContext.parentSpanId,
-              };
-            }
-          } catch {
-            // Ignore errors getting trace context
-          }
-        }
-      }
+      // There is deliberately no second source here.
+      //
+      // A `globalThis.__onebunTraceService` branch used to sit at this point, described as the
+      // fallback "for non-HTTP contexts: WebSocket, Queue". It never once fired, for two
+      // independent reasons: it guarded on `getCurrentTraceContext`, a method the trace service
+      // does not have — it is spelled `getCurrentContext` — and even spelled correctly it would
+      // have read a FiberRef from a freshly-started fiber, which answers with that ref's
+      // default rather than with the value the running request set.
+      //
+      // Those contexts are covered where the covering can actually work: `traceContextGetter`
+      // resolves from the OpenTelemetry active span before the request store, so a queue
+      // handler, a scheduled job or a WebSocket callback logs with the trace it is running in.
+      // A process-global was the wrong shape for it besides — it is written per application and
+      // never cleared, so in a process running several the last one constructed wins.
 
       // Parse additional arguments
       const { error, context: argsContext, additionalData } = parseLogArgs(args);
@@ -343,20 +335,65 @@ export const createSyncLogger = (
 };
 
 /**
- * Active transport reference for shutdown support
+ * Every transport built here that still has buffered records to flush.
+ *
+ * A set rather than a single reference because one process can hold several loggers — a
+ * multi-service application builds one per child, and a test file builds several. With a single
+ * slot the last one built silently replaced the others: their buffered records were never sent
+ * and their flush timers went on rescheduling themselves forever, because nothing held a
+ * reference that `shutdownLogger()` could reach.
+ *
+ * Only transports that have something to shut down are tracked, so a console-only logger does
+ * not accumulate entries here.
  */
-let activeTransport: LogTransport | null = null;
+const activeTransports = new Set<LogTransport>();
 
 /**
- * Shutdown the active logger transport (flush OTLP batches, etc.)
+ * Shutdown every logger transport built by this module (flush OTLP batches, etc.)
  * Should be called as the very last step in application shutdown.
  */
 export const shutdownLogger = async (): Promise<void> => {
-  if (activeTransport?.shutdown) {
-    await activeTransport.shutdown();
-  }
-  activeTransport = null;
+  const transports = [...activeTransports];
+  activeTransports.clear();
+
+  // One failing flush must not strand the others: a collector that is down is exactly when the
+  // remaining transports most need their chance to drain.
+  await Promise.all(transports.map(async (transport) => {
+    try {
+      await transport.shutdown?.();
+    } catch {
+      // Shutdown is best-effort — there is nowhere left to report a logging failure to.
+    }
+  }));
 };
+
+/**
+ * Resolve the endpoint OTLP log export should use, if any.
+ *
+ * Priority: explicit option > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT`.
+ *
+ * Exported because the caller has to answer "will this logger export?" BEFORE building it — the
+ * resource attributes that identify the service are only worth attaching when it will.
+ *
+ * @see docs:api/logger.md
+ */
+/**
+ * Where an undelivered batch of log records is announced by default.
+ *
+ * `console.error` and not the logger: routing a log-transport failure back through the logger
+ * feeds the transport that just failed, and the loop is tightest exactly when the collector is
+ * down. Silence was the previous behaviour and is what this replaces — a misconfigured endpoint
+ * swallowed every line without a word.
+ */
+const reportOtlpExportFailure = (error: Error, recordCount: number): void => {
+  // eslint-disable-next-line no-console
+  console.error(`[onebun/logger] dropped ${recordCount} log record(s): ${error.message}`);
+};
+
+export const resolveOtlpLogEndpoint = (options?: LoggerOptions): string | undefined =>
+  options?.otlpEndpoint
+  || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+  || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
 
 /**
  * Create a logger layer from LoggerOptions.
@@ -402,9 +439,7 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
   }
 
   // Build transport: Console + optional OTLP
-  const otlpEndpoint = options?.otlpEndpoint
-    || process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
-    || process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const otlpEndpoint = resolveOtlpLogEndpoint(options);
 
   let transport: LogTransport;
 
@@ -415,13 +450,14 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
       batchSize: options?.otlpBatchSize,
       batchTimeout: options?.otlpBatchTimeout,
       resourceAttributes: options?.otlpResourceAttributes,
+      maxBufferedRecords: options?.otlpMaxBufferedRecords,
+      onExportFailure: options?.otlpOnExportFailure ?? reportOtlpExportFailure,
     });
     transport = new CompositeTransport([new ConsoleTransport(), otlpTransport]);
+    activeTransports.add(transport);
   } else {
     transport = new ConsoleTransport();
   }
-
-  activeTransport = transport;
 
   return Layer.succeed(
     LoggerService,
@@ -470,6 +506,11 @@ export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> 
       formatter,
       transport: config?.transport ?? new ConsoleTransport(),
       defaultContext: config?.defaultContext ?? {},
+      // Forwarded, and it used to be dropped. `makeDevLogger` and `makeProdLogger` spread the
+      // whole config and so honoured this field, while the two factories that enumerate their
+      // fields — this one and `makeLoggerFromOptions` — silently discarded it. Same type, same
+      // documentation, opposite behaviour depending on which factory you reached for.
+      traceContextGetter: config?.traceContextGetter,
     }),
   );
 };

@@ -107,12 +107,40 @@ describe('CorsMiddleware', () => {
   it('responds with 204 to OPTIONS preflight', async () => {
     const mw = makeCors();
     const res = await mw.use(
-      makeReq('OPTIONS', 'http://localhost/', [['origin', 'https://example.com']]),
+      makeReq('OPTIONS', 'http://localhost/', [
+        ['origin', 'https://example.com'],
+        // The Fetch spec requires this on every real preflight, and the middleware requires it
+        // too — without it, an OPTIONS is not a preflight and is none of CORS's business.
+        ['access-control-request-method', 'GET'],
+      ]),
       makeNext(),
     );
     expect(res.status).toBe(204);
     expect(res.headers.get('Access-Control-Allow-Methods')).toContain('GET');
     expect(res.headers.get('Access-Control-Max-Age')).toBeDefined();
+  });
+
+  it('passes a non-preflight OPTIONS through to the handler', async () => {
+    // Without `Access-Control-Request-Method` this is API discovery, not CORS. It used to be
+    // swallowed with a 204 all the same, which made a declared `@Options` route unreachable
+    // whenever CORS was configured.
+    const mw = makeCors();
+    let reachedHandler = false;
+
+    const res = await mw.use(
+      makeReq('OPTIONS', 'http://localhost/', [['origin', 'https://example.com']]),
+      async () => {
+        reachedHandler = true;
+
+        return new Response('from the route', { status: 200 });
+      },
+    );
+
+    expect(reachedHandler).toBe(true);
+    expect(res.status).toBe(200);
+    // Still a cross-origin response, so it still carries the grant. The default config
+    // allows any origin, so the grant is the wildcard rather than a reflection.
+    expect(res.headers.get('Access-Control-Allow-Origin')).toBe('*');
   });
 
   it('reflects allowed origin when exact string is configured', async () => {
