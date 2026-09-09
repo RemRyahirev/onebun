@@ -506,6 +506,11 @@ export const makeLogger = (config?: Partial<LoggerConfig>): Layer.Layer<Logger> 
       formatter,
       transport: config?.transport ?? new ConsoleTransport(),
       defaultContext: config?.defaultContext ?? {},
+      // Forwarded, and it used to be dropped. `makeDevLogger` and `makeProdLogger` spread the
+      // whole config and so honoured this field, while the two factories that enumerate their
+      // fields — this one and `makeLoggerFromOptions` — silently discarded it. Same type, same
+      // documentation, opposite behaviour depending on which factory you reached for.
+      traceContextGetter: config?.traceContextGetter,
     }),
   );
 };

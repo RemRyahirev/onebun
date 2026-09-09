@@ -22,7 +22,11 @@ import {
 } from './logger';
 import { makeLogger } from './logger';
 import { ConsoleTransport } from './transport';
-import { LogLevel, type LogEntry } from './types';
+import {
+  LogLevel,
+  type LogEntry,
+  type LogTransport,
+} from './types';
 
 
 describe('PrettyFormatter', () => {
@@ -379,6 +383,41 @@ describe('LoggerImpl methods and makeLogger env selection', () => {
 // span, and pinned end to end by
 // `packages/core/src/application/log-trace-correlation.test.ts`.
 
+
+/**
+ * `traceContextGetter` is honoured by every factory that takes a `LoggerConfig`.
+ *
+ * It was not. `makeDevLogger` and `makeProdLogger` spread the whole config and so passed it on;
+ * `makeLogger` enumerated four of the five fields and dropped this one. Same type, same
+ * documentation, opposite behaviour depending on which factory a caller reached for — and
+ * nothing in the signatures said which.
+ */
+describe('makeLogger honours traceContextGetter', () => {
+  it('stamps the context the getter returns onto the entry', async () => {
+    const entries: LogEntry[] = [];
+    const transport: LogTransport = {
+      log: (_formatted: string, entry: LogEntry) => Effect.sync(() => {
+        entries.push(entry);
+      }),
+    };
+
+    const layer = makeLogger({
+      minLevel: LogLevel.Debug,
+      transport,
+      traceContextGetter: () => ({ traceId: 'from-the-getter', spanId: 'span-1' }),
+    });
+
+    await Effect.runPromise(
+      Effect.provide(
+        Effect.flatMap(LoggerService, logger => logger.info('hello')),
+        layer,
+      ),
+    );
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.trace?.traceId).toBe('from-the-getter');
+  });
+});
 
 // Added tests to raise function coverage for formatter.ts
 
