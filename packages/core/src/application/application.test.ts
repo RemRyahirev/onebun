@@ -1183,6 +1183,13 @@ describe('OneBunApplication', () => {
       await app.start();
 
       expect(mockMetricsService.startSystemMetricsCollection).toHaveBeenCalled();
+
+      await app.stop();
+
+      // The counterpart, on the application's OWN service instance. The mock has been here since
+      // the test was written and nothing asserted it: nothing called it either, so the sampler
+      // outlived every application and a boot-then-stop script never terminated.
+      expect(mockMetricsService.stopSystemMetricsCollection).toHaveBeenCalled();
     });
 
     test('should handle config service creation', () => {

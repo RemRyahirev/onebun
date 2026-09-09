@@ -484,11 +484,14 @@ OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on
 6. Releases the remaining WebSocket resources: ping timers and client storage
 7. Stops the queue service and disconnects the queue adapter, after waiting for a scheduled job
    that is mid-run (bounded at 30 seconds)
-8. Flushes traces
-9. Calls `onModuleDestroy()` hooks on all services and controllers
-10. Releases the shared Redis connection (disconnected when the last consumer lets go)
-11. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
-12. Flushes the logger transport
+8. Stops system-metrics collection — the 5-second sampler started at boot. Nothing used to stop
+   it, so its `setInterval` kept the event loop alive and a script that booted and stopped an
+   application never terminated
+9. Flushes traces
+10. Calls `onModuleDestroy()` hooks on all services and controllers
+11. Releases the shared Redis connection (disconnected when the last consumer lets go)
+12. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
+13. Flushes the logger transport
 
 Steps 1–4 are what keeps a rolling deploy from cutting responses that were mid-flight: the
 destroy hooks no longer run while the socket is still accepting work.

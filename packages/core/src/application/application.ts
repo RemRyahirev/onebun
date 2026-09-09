@@ -2979,7 +2979,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // and CPU into a registry nobody reads.
     if (this.metricsService?.stopSystemMetricsCollection) {
       await this.runShutdownStep(outcome, 'stopping system metrics collection', async () => {
-        this.logger.debug('Stopping system metrics collection');
+        // `info`, matching the `System metrics collection started` line at startup. A
+        // counterpart logged a level below its opening is invisible exactly when someone is
+        // looking for it: in the default configuration the start is in the log and the stop is not.
+        this.logger.info('System metrics collection stopped');
         this.metricsService!.stopSystemMetricsCollection!();
       });
     }
