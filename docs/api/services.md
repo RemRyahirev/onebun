@@ -205,6 +205,8 @@ This makes it safe to use "standalone" services whose main work happens inside `
 :::
 
 ::: info Initialization Order
+Pipeline elements get the module hooks too, on the instance that actually serves requests. A **middleware** or **interceptor** class receives `onModuleInit`, `onApplicationInit`, `onModuleDestroy` and `onApplicationDestroy` — the init hook runs in a pass of its own, after routes are registered and before the server accepts anything, because that is when those instances exist. **Guards do not**: a guard class is constructed per request by design, so there is no single instance for a hook to belong to, and a guard implementing `onModuleInit` is reported at startup rather than silently skipped. Put the setup in a `@Service()` the guard injects.
+
 `onModuleInit` hooks are called **sequentially in dependency order**: if service A depends on service B, then B's `onModuleInit` will complete **before** A's `onModuleInit` starts. This guarantees that when your `onModuleInit` runs, all injected dependencies are already fully initialized.
 :::
 

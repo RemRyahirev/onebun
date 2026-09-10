@@ -34,6 +34,14 @@ isWsContext(ctx)     // → ctx is WsExecutionContext
 isQueueContext(ctx)  // → ctx is MessageExecutionContext
 ```
 
+## Lifecycle hooks
+
+An interceptor class receives the module lifecycle hooks on the instance that serves requests:
+`onModuleInit` runs in its own pass after routes are registered and before the server accepts
+anything, and `onModuleDestroy` on the way down. The same holds for middleware. Guards do not get
+them — a guard is constructed per request, so there is no instance to initialize, and the framework
+warns at startup if a guard class implements `onModuleInit`.
+
 ## Lifetime: one instance per class, shared by every request
 
 An interceptor class is instantiated when handlers are **registered** (application startup), once

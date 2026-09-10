@@ -1984,6 +1984,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
+      // Middleware and interceptor instances exist only now — they are built while routes are
+      // registered — so their onModuleInit is a pass of its own, here: after the pipeline is
+      // assembled, before onApplicationInit and before the server accepts anything.
+      if (this.ensureModule().callPipelineOnModuleInit) {
+        await this.ensureModule().callPipelineOnModuleInit!();
+      }
+
       // Call onApplicationInit lifecycle hook for all services and controllers
       if (this.ensureModule().callOnApplicationInit) {
         await this.ensureModule().callOnApplicationInit!();

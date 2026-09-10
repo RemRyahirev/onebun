@@ -5066,6 +5066,70 @@ describe('OneBunApplication', () => {
     });
   });
 
+  describe('pipeline lifecycle hooks', () => {
+    // Middleware and interceptors live in neither serviceInstances nor controllerInstances, so
+    // every lifecycle pass walked past them: the hook ran on a second instance built from
+    // `providers` and every request was served by the pipeline's own, with the flag still false.
+    test('should run onModuleInit on the middleware and interceptor that serve requests', async () => {
+      class WarmingMiddleware extends BaseMiddleware {
+        warm = false;
+
+        async onModuleInit(): Promise<void> {
+          this.warm = true;
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          const response = await next();
+
+          response.headers.set('x-middleware-warm', String(this.warm));
+
+          return response;
+        }
+      }
+
+      class WarmingInterceptor implements Interceptor {
+        warm = false;
+
+        async onModuleInit(): Promise<void> {
+          this.warm = true;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          const response = await next() as Response;
+
+          response.headers.set('x-interceptor-warm', String(this.warm));
+
+          return response;
+        }
+      }
+
+      @UseMiddleware(WarmingMiddleware)
+      @UseInterceptors(WarmingInterceptor)
+      @Controller('/warm')
+      class WarmController extends BaseController {
+        @Get('/')
+        index() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [WarmController] })
+      class WarmModule {}
+
+      const app = createTestApp(WarmModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/warm`);
+
+        expect(response.headers.get('x-middleware-warm')).toBe('true');
+        expect(response.headers.get('x-interceptor-warm')).toBe('true');
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
   describe('HTTP Interceptors', () => {
     // The BaseInterceptor JSDoc promises one instance per application, reused for every matching
     // request. `resolveInterceptors` was called inside the per-route loop and constructed

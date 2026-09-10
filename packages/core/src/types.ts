@@ -150,6 +150,13 @@ export interface ModuleInstance {
   getControllerInstance?(controllerClass: Function): unknown;
 
   /**
+   * Run `onModuleInit` on the middleware and interceptor instances the module built for the
+   * pipeline. Optional: those instances do not exist until routes are registered, so this is a
+   * pass of its own rather than part of `setup()`.
+   */
+  callPipelineOnModuleInit?(): Promise<void>;
+
+  /**
    * Call onApplicationInit lifecycle hook for all services and controllers
    */
   callOnApplicationInit?(): Promise<void>;

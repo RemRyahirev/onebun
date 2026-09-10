@@ -300,6 +300,22 @@ export class OneBunModule implements ModuleInstance {
   private readonly interceptorInstances = new Map<Function, ResolvedInterceptor>();
 
   /**
+   * Middleware and interceptor instances this module built for the pipeline.
+   *
+   * They are constructed by `resolveMiddleware` / `resolveInterceptors` and live in neither
+   * `serviceInstances` nor `controllerInstances`, so every lifecycle pass walked straight past
+   * them: a middleware that opened a pool in `onModuleInit` never had the hook run on the object
+   * that serves requests. Registering the class in `providers` did not help — that produced a
+   * SECOND instance which got the hook and never saw a request.
+   *
+   * A Set keyed by identity, so a class registered at several sites is initialized once.
+   */
+  private readonly pipelineInstances = new Set<object>();
+
+  /** Guard classes already reported as carrying a lifecycle hook that cannot run. */
+  private readonly guardHookReported = new Set<Function>();
+
+  /**
    * Global modules this module constructed in the pre-pass, so the import loop can merge
    * their layers when it reaches the corresponding `imports` entry.
    */
@@ -1019,6 +1035,8 @@ export class OneBunModule implements ModuleInstance {
       // the constructor (e.g., not extending BaseMiddleware, or for backwards compatibility).
       instance.initializeMiddleware(this.logger, this.config);
 
+      this.pipelineInstances.add(instance);
+
       const bound = instance.use.bind(instance);
       // Preserve class name for profiling and debugging
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1102,6 +1120,7 @@ export class OneBunModule implements ModuleInstance {
 
       const bound = instance.intercept.bind(instance);
 
+      this.pipelineInstances.add(instance);
       this.interceptorInstances.set(cls, bound);
 
       return bound;
@@ -1128,6 +1147,23 @@ export class OneBunModule implements ModuleInstance {
    */
   resolveGuards(guards: (Function | Guard)[]): Guard[] {
     return guards.map((guard) => {
+      // A guard is constructed per request on purpose, so there is no one instance for a
+      // lifecycle hook to belong to. Running it per request would not be a hook, and running it
+      // on a throwaway instance would be a lie — so the hook is refused out loud instead of
+      // being silently skipped, which is what a guard author would otherwise discover from a
+      // field that is undefined on the hot path.
+      if (typeof guard === 'function' && !this.guardHookReported.has(guard)) {
+        this.guardHookReported.add(guard);
+
+        if (hasOnModuleInit(guard.prototype)) {
+          this.logger.warn(
+            `Guard ${guard.name} implements onModuleInit, and it will not run: guards are `
+            + 'constructed per request by design, so there is no single instance to initialize. '
+            + 'Move the setup into a @Service() the guard injects, which does get the hook.',
+          );
+        }
+      }
+
       if (typeof guard !== 'function') {
         // Already an instance — the caller owns its lifetime, as before. Initialize it if
         // it can be, then use it as-is.
@@ -1662,6 +1698,39 @@ export class OneBunModule implements ModuleInstance {
    *   module that can see it, so without this its hook fired once per module — five times in
    *   a five-module tree. Test overrides seeded into every module amplify the same effect.
    */
+  /**
+   * Run `onModuleInit` on the middleware and interceptor instances this module built.
+   *
+   * A separate pass, and a later one, because these instances do not exist when `setup()` runs:
+   * they are constructed while routes are registered, which is after every service and controller
+   * hook has already fired. The application awaits this between route registration and
+   * `onApplicationInit`, so a middleware that opens a pool has done it before the first request
+   * and before anything that might use it.
+   *
+   * Guards are absent on purpose — they are constructed per request, so there is no instance for
+   * the hook to belong to; `resolveGuards` reports a guard that implements it.
+   */
+  async callPipelineOnModuleInit(invoked: Set<unknown> = new Set()): Promise<void> {
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnModuleInit(instance)) {
+        try {
+          await instance.onModuleInit();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onModuleInit completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onModuleInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    for (const childModule of this.childModules) {
+      await childModule.callPipelineOnModuleInit(invoked);
+    }
+  }
+
   async callOnApplicationInit(invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for services
     for (const [, instance] of this.serviceInstances) {
@@ -1687,6 +1756,22 @@ export class OneBunModule implements ModuleInstance {
           this.logger.debug(`Controller ${controller.constructor.name} onApplicationInit completed`);
         } catch (error) {
           this.logger.error(`Controller ${controller.constructor.name} onApplicationInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    // Call for pipeline elements (middleware, interceptors)
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnApplicationInit(instance)) {
+        try {
+          await instance.onApplicationInit();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onApplicationInit completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onApplicationInit failed: ${error}`);
           throw error;
         }
       }
@@ -1759,6 +1844,22 @@ export class OneBunModule implements ModuleInstance {
    *   Without it a `@Global()` service's `close()` runs once per module that can see it.
    */
   async callOnModuleDestroy(invoked: Set<unknown> = new Set()): Promise<void> {
+    // Pipeline elements first: they were constructed last, during route registration, and a
+    // middleware holding a pool has to release it before the services it borrowed from go.
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnModuleDestroy(instance)) {
+        try {
+          await instance.onModuleDestroy();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onModuleDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onModuleDestroy failed: ${error}`);
+        }
+      }
+    }
+
     // Call for controllers first (reverse order of creation)
     const controllers = Array.from(this.controllerInstances.values()).reverse();
     for (const controller of controllers) {

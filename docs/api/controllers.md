@@ -437,6 +437,8 @@ OneBun provides a class-based middleware system that operates at four levels: **
 
 Every middleware class extends `BaseMiddleware` and implements the `use()` method. Use the `@Middleware()` decorator on the class so that constructor dependencies (if any) are resolved automatically:
 
+A middleware class is a lifecycle citizen: implement `OnModuleInit` and the hook runs on the instance that serves requests, after routes are registered and before the server starts, with `onModuleDestroy` on the way down. The same holds for interceptors. Guards are the exception — they are constructed per request, so they get no hooks and the framework says so at startup if one implements them.
+
 ```typescript
 import { BaseMiddleware, Middleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';
 

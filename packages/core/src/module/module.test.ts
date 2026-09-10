@@ -2859,4 +2859,56 @@ describe('OneBunModule', () => {
       expect(boundFirst).not.toBe(boundSecond);
     });
   });
+  // Guards are constructed per request on purpose, so a lifecycle hook on a guard class has no
+  // instance to belong to. It used to be skipped in silence; now it is reported once.
+  describe('resolveGuards reports a lifecycle hook it cannot run', () => {
+    test('warns once for a guard class implementing onModuleInit', () => {
+      const warnings: string[] = [];
+
+      class WarmingGuard {
+        async onModuleInit(): Promise<void> {
+          /* would prewarm something */
+        }
+
+        canActivate(): boolean {
+          return true;
+        }
+      }
+
+      @Module({})
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, mockLoggerLayer);
+      const logger = (module as any).logger;
+      (module as any).logger = { ...logger, warn: (message: string) => warnings.push(message) };
+
+      (module as any).resolveGuards([WarmingGuard]);
+      (module as any).resolveGuards([WarmingGuard]);
+
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain('WarmingGuard');
+      expect(warnings[0]).toContain('onModuleInit');
+    });
+
+    test('says nothing about a guard without the hook', () => {
+      const warnings: string[] = [];
+
+      class PlainGuard {
+        canActivate(): boolean {
+          return true;
+        }
+      }
+
+      @Module({})
+      class PlainGuardModule {}
+
+      const module = new OneBunModule(PlainGuardModule, mockLoggerLayer);
+      const logger = (module as any).logger;
+      (module as any).logger = { ...logger, warn: (message: string) => warnings.push(message) };
+
+      (module as any).resolveGuards([PlainGuard]);
+
+      expect(warnings).toEqual([]);
+    });
+  });
 });
