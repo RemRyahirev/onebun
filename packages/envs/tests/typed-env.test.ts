@@ -377,6 +377,68 @@ TESTARRAY=a,b,c
 
       expect(newConfig1).toBe(newConfig2); // Same instance after clear
     });
+
+    it('should give two different schemas two different instances without an explicit key', async () => {
+      process.env.TEST_APP_PORT = '3000';
+      process.env.TEST_LIB_TOKEN = 'secret-token';
+
+      const appSchema = { port: Env.number({ env: 'TEST_APP_PORT', default: 0 }) };
+      const libSchema = { token: Env.string({ env: 'TEST_LIB_TOKEN', default: 'none' }) };
+
+      const appConfig = await TypedEnv.createAsync(appSchema, { loadDotEnv: false });
+      const libConfig = await TypedEnv.createAsync(libSchema, { loadDotEnv: false });
+
+      expect(appConfig).not.toBe(libConfig);
+      expect(appConfig.get('port')).toBe(3000);
+      expect(libConfig.get('token')).toBe('secret-token');
+
+      delete process.env.TEST_APP_PORT;
+      delete process.env.TEST_LIB_TOKEN;
+    });
+
+    it('should return the same instance for the same schema and options', () => {
+      const schema = { test: Env.string() };
+
+      const config1 = TypedEnv.create(schema, { loadDotEnv: false });
+      const config2 = TypedEnv.create(schema, { loadDotEnv: false });
+
+      expect(config1).toBe(config2);
+    });
+
+    it('should not share an instance between two different valueOverrides', async () => {
+      const schema: EnvSchema<{ db: { name: string } }> = {
+        db: { name: Env.string({ env: 'TEST_DB_NAME', default: 'shared_db' }) },
+      };
+
+      const usersConfig = await TypedEnv.createAsync(schema, {
+        loadDotEnv: false,
+        valueOverrides: { TEST_DB_NAME: 'users_db' },
+      });
+      const ordersConfig = await TypedEnv.createAsync(schema, {
+        loadDotEnv: false,
+        valueOverrides: { TEST_DB_NAME: 'orders_db' },
+      });
+
+      expect(usersConfig).not.toBe(ordersConfig);
+      expect(usersConfig.get('db.name')).toBe('users_db');
+      expect(ordersConfig.get('db.name')).toBe('orders_db');
+    });
+
+    it('should reject an explicit key already bound to a different schema', () => {
+      const appSchema = { port: Env.number({ env: 'TEST_APP_PORT', default: 0 }) };
+      const libSchema = { token: Env.string({ env: 'TEST_LIB_TOKEN', default: 'none' }) };
+
+      TypedEnv.create(appSchema, {}, 'shared_key');
+
+      expect(() => TypedEnv.create(libSchema, {}, 'shared_key')).toThrow("TypedEnv key 'shared_key'");
+    });
+
+    it('should accept an explicit key rebound to a structurally identical schema', () => {
+      const config1 = TypedEnv.create({ test: Env.string({ env: 'TEST_STRING' }) }, {}, 'literal_key');
+      const config2 = TypedEnv.create({ test: Env.string({ env: 'TEST_STRING' }) }, {}, 'literal_key');
+
+      expect(config1).toBe(config2);
+    });
   });
 
   describe('Manual initialization', () => {

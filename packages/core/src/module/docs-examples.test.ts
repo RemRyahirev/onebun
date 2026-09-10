@@ -1501,11 +1501,11 @@ describe('Architecture (docs/architecture.md)', () => {
       // The shared `envSchema` reaches every child.
       expect(multiApp.getApplication('users')!.getConfig().get('db.name')).toBe('shared_db');
 
-      // KNOWN DEFECT, pinned deliberately: the page's `envOverrides: { DB_NAME: ... }` does NOT
-      // reach the second service. Every application calls `TypedEnv.create(schema, options)`
-      // with the DEFAULT cache key, so the first child's ConfigProxy is handed to every later
-      // one and its `valueOverrides` are dropped. Expect 'orders_db' here once that is fixed.
-      expect(multiApp.getApplication('orders')!.getConfig().get('db.name')).toBe('shared_db');
+      // The page's `envOverrides: { DB_NAME: ... }` reaches the second service. It used not to:
+      // every application called `TypedEnv.create(schema, options)` on one process-wide cache key,
+      // so the first child's ConfigProxy was handed to every later one and its `valueOverrides`
+      // were dropped. The cache now keys on the schema and the options that shape the load.
+      expect(multiApp.getApplication('orders')!.getConfig().get('db.name')).toBe('orders_db');
 
       const usersUrl = multiApp.getServiceUrl('users');
       const ordersUrl = multiApp.getServiceUrl('orders');

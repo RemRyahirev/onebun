@@ -231,28 +231,125 @@ class ConfigProxy<T> {
 }
 
 /**
+ * Deterministic fingerprint of a plain value: same content, same string, regardless of key order.
+ *
+ * `EnvLoadOptions` and `EnvSchema` are data, so JSON is enough. Anything JSON drops (a function,
+ * a symbol) fingerprints as `undefined` — two schemas that differ only there compare equal, which
+ * costs a shared proxy in a case the schema types do not allow anyway.
+ */
+function fingerprint(value: unknown): string {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) ?? 'undefined';
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map(fingerprint).join(',')}]`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, entryValue]) => entryValue !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b));
+
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${fingerprint(v)}`).join(',')}}`;
+}
+
+/**
+ * Start loading a freshly created proxy without leaving the rejection to float.
+ *
+ * The caller of `create()` gets no handle on this promise, so a schema that fails validation would
+ * otherwise surface as an unhandled rejection in whatever code happens to be running. Nothing is
+ * lost by swallowing it here: `initialize()` retries after a failure, and everyone who needs the
+ * error awaits it — `createAsync()` and `OneBunApplication.start()` — while everyone else meets
+ * "Configuration not initialized" on first access.
+ */
+function autoInitialize<T>(proxy: ConfigProxy<T>): void {
+  void proxy.initialize().catch(() => undefined);
+}
+
+/**
  * Static factory for creating typed environment configurations
+ *
+ * @see docs:api/envs.md
  */
 export class TypedEnv {
-  private static instances = new Map<string, ConfigProxy<unknown>>();
+  /**
+   * Default path: the schema object identifies the configuration, and the options that shape the
+   * load (`valueOverrides` above all) split it further. Two different schemas are two different
+   * configurations, so they get two proxies — the process is not a single global slot.
+   *
+   * A `WeakMap` so a schema that goes out of scope takes its proxy with it.
+   */
+  private static schemaInstances = new WeakMap<object, Map<string, ConfigProxy<unknown>>>();
 
   /**
-   * Create or get existing typed environment configuration
+   * Explicit-key path: the caller named the slot, so the name is the identity. The schema is kept
+   * alongside to catch a name reused for a different configuration.
+   */
+  private static namedInstances = new Map<string, { schemaFingerprint: string; proxy: ConfigProxy<unknown> }>();
+
+  /**
+   * Create or get existing typed environment configuration.
+   *
+   * Without `key`, instances are cached per (schema, options) pair. With `key`, the key alone
+   * identifies the instance — reusing one key for a structurally different schema throws instead
+   * of handing back the other schema's configuration.
    */
   static create<T>(
     schema: EnvSchema<T>,
     options: EnvLoadOptions = {},
-    key = 'default',
+    key?: string,
   ): ConfigProxy<T> {
-    if (!TypedEnv.instances.has(key)) {
-      const proxy = new ConfigProxy(schema, options);
-      TypedEnv.instances.set(key, proxy);
-
-      // Auto-initialize
-      proxy.initialize();
+    if (key !== undefined) {
+      return TypedEnv.createNamed(schema, options, key);
     }
 
-    return TypedEnv.instances.get(key) as ConfigProxy<T>;
+    const optionsFingerprint = fingerprint(options);
+    let byOptions = TypedEnv.schemaInstances.get(schema as object);
+
+    if (!byOptions) {
+      byOptions = new Map<string, ConfigProxy<unknown>>();
+      TypedEnv.schemaInstances.set(schema as object, byOptions);
+    }
+
+    const cached = byOptions.get(optionsFingerprint);
+    if (cached) {
+      return cached as ConfigProxy<T>;
+    }
+
+    const proxy = new ConfigProxy(schema, options);
+    byOptions.set(optionsFingerprint, proxy as ConfigProxy<unknown>);
+
+    autoInitialize(proxy);
+
+    return proxy;
+  }
+
+  private static createNamed<T>(
+    schema: EnvSchema<T>,
+    options: EnvLoadOptions,
+    key: string,
+  ): ConfigProxy<T> {
+    const schemaFingerprint = fingerprint(schema);
+    const cached = TypedEnv.namedInstances.get(key);
+
+    if (cached) {
+      if (cached.schemaFingerprint !== schemaFingerprint) {
+        throw new Error(
+          `TypedEnv key '${key}' is already bound to a different schema. `
+          + 'One key is one configuration: pass a distinct key, or omit it and let the schema identify '
+          + 'the instance.',
+        );
+      }
+
+      return cached.proxy as ConfigProxy<T>;
+    }
+
+    const proxy = new ConfigProxy(schema, options);
+    TypedEnv.namedInstances.set(key, { schemaFingerprint, proxy: proxy as ConfigProxy<unknown> });
+
+    autoInitialize(proxy);
+
+    return proxy;
   }
 
   /**
@@ -262,7 +359,7 @@ export class TypedEnv {
     schema: EnvSchema<T>,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     options: any = {},
-    key = 'default',
+    key?: string,
   ): Promise<ConfigProxy<T>> {
     const proxy = TypedEnv.create(schema, options, key);
     await proxy.initialize();
@@ -274,7 +371,8 @@ export class TypedEnv {
    * Clear all instances (useful for testing)
    */
   static clear(): void {
-    TypedEnv.instances.clear();
+    TypedEnv.namedInstances.clear();
+    TypedEnv.schemaInstances = new WeakMap<object, Map<string, ConfigProxy<unknown>>>();
   }
 }
 

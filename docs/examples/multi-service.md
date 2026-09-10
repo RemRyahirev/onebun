@@ -120,7 +120,7 @@ app.start().then(() => {
 Two things the type system accepts but the runtime overrides, so do not configure them per service:
 
 - **`tracing.serviceName`** is always replaced with the services-map key. `tracing: { serviceName: 'users-service' }` reaches nothing — the tracer reports `users`. An application-level `serviceName` is overwritten the same way. Name the map key what you want to see in traces. `metrics.prefix` is *not* affected and is honoured as written; only `metrics.defaultLabels.service` is forced to the key.
-- **`envOverrides`** keys are environment variable **names** (`ORDERS_DATABASE_URL`), never `config.get()` paths — a `'database.url'` key is silently ignored. And with two or more services the scoping does not hold today: every service reads the ENV resolved for the first service to start, so the other services' overrides are dropped. Here nothing is needed anyway — `orders.database.url` is already bound to `ORDERS_DATABASE_URL` by the schema.
+- **`envOverrides`** keys are environment variable **names** (`ORDERS_DATABASE_URL`), never `config.get()` paths — a `'database.url'` key is silently ignored. Scoping to one service does hold: each service gets its own configuration instance. Here nothing is needed anyway — `orders.database.url` is already bound to `ORDERS_DATABASE_URL` by the schema.
 
 ## Inter-Service Communication
 
@@ -316,7 +316,7 @@ await app.stop();
 
 1. **OneBunApplication multi-service mode**: Run multiple services in one process
 2. **Service Isolation**: Each service has its own module, port, and route prefix
-3. **Environment Overrides**: `envOverrides` replaces ENV values by variable name (per-service scoping is not effective yet — see above)
+3. **Environment Overrides**: `envOverrides` replaces ENV values by variable name, scoped to the service that declares them
 4. **Inter-service Communication**: Use `createHttpClient` with typed config URLs
 5. **Shared Configuration**: Common settings via `envSchema`
 6. **Trace Propagation**: Traces automatically flow between services

@@ -642,11 +642,13 @@ on the `users` service reaches nothing — the tracer reports `users`. Rename th
 `static` is the one option that does **not** cascade: it is honoured per service only, an
 application-level `static` is not passed to the children.
 
-::: warning envOverrides are not per-service yet
+::: warning envOverrides keys are variable names
 Keys are **environment variable names** (`DB_NAME`), never `config.get()` paths — a wrong key is
-ignored silently. And with two or more services the scoping does not hold: every service reads the
-ENV resolved for the first service to start, so the other services' `envOverrides` are dropped.
-With a single service, or with overrides declared at application level, they apply as written.
+ignored silently.
+
+Per-service scoping itself holds: each service gets its own configuration instance, so its
+`envOverrides` and `envSchemaExtend` apply to it alone. Through 0.6.0 they did not — every service
+after the first read the ENV resolved for the first one to start.
 :::
 
 ### Usage Example
