@@ -31,6 +31,22 @@ export interface CronSchedule {
   daysOfMonth: number[];
   months: number[];
   daysOfWeek: number[];
+  /**
+   * Was the day-of-month field written as something other than `*`?
+   *
+   * The parsed arrays cannot answer this: `parseField` expands `*` into the same `1..31` a literal
+   * `1-31` produces. crontab(5) needs the difference, because the OR rule below applies only when
+   * BOTH day fields are restricted.
+   *
+   * Optional so a hand-built `CronSchedule` still compiles; when absent, {@link getNextRun} infers
+   * it from whether the array covers every day.
+   */
+  daysOfMonthRestricted?: boolean;
+  /**
+   * Was the day-of-week field written as something other than `*`? See
+   * {@link CronSchedule.daysOfMonthRestricted}.
+   */
+  daysOfWeekRestricted?: boolean;
 }
 
 /**
@@ -132,6 +148,17 @@ function parseField(field: string, min: number, max: number): number[] {
 }
 
 /**
+ * Is a day field restricted, in the crontab(5) sense?
+ *
+ * Restricted means "written as something other than a wildcard". A leading `*` is not restricted
+ * even with a step (`*\/2`), which is how Vixie cron reads it: the star flag is set from the first
+ * character, before the step is applied.
+ */
+function isRestrictedField(field: string): boolean {
+  return !field.trim().startsWith('*');
+}
+
+/**
  * Parse a cron expression into a schedule
  *
  * @param expression - Cron expression (5 or 6 fields)
@@ -177,6 +204,8 @@ export function parseCronExpression(expression: string): CronSchedule {
     daysOfMonth: parseField(parts[3], 1, 31),
     months: parseField(parts[4], 1, 12),
     daysOfWeek: parseField(parts[5], 0, 6),
+    daysOfMonthRestricted: isRestrictedField(parts[3]),
+    daysOfWeekRestricted: isRestrictedField(parts[5]),
     /* eslint-enable @typescript-eslint/no-magic-numbers */
   };
 }
@@ -200,6 +229,43 @@ function findNextInSorted(values: number[], target: number): number | null {
  */
 function daysInMonth(year: number, month: number): number {
   return new Date(year, month, 0).getDate();
+}
+
+/** Every day of the month a cron field can name. */
+const DAYS_OF_MONTH_COUNT = 31;
+
+/** Every day of the week a cron field can name. */
+const DAYS_OF_WEEK_COUNT = 7;
+
+/**
+ * Does this date satisfy the schedule's two day fields, under crontab(5)?
+ *
+ * Both restricted → EITHER matches. Exactly one restricted → only that one applies. Neither
+ * restricted → every day. A schedule built by hand carries no restricted flags, so they are
+ * inferred from whether the array names every value.
+ */
+function matchesDayFields(schedule: CronSchedule, dayOfMonth: number, dayOfWeek: number): boolean {
+  const dayOfMonthRestricted = schedule.daysOfMonthRestricted
+    ?? schedule.daysOfMonth.length < DAYS_OF_MONTH_COUNT;
+  const dayOfWeekRestricted = schedule.daysOfWeekRestricted
+    ?? schedule.daysOfWeek.length < DAYS_OF_WEEK_COUNT;
+
+  const dayOfMonthMatches = schedule.daysOfMonth.includes(dayOfMonth);
+  const dayOfWeekMatches = schedule.daysOfWeek.includes(dayOfWeek);
+
+  if (dayOfMonthRestricted && dayOfWeekRestricted) {
+    return dayOfMonthMatches || dayOfWeekMatches;
+  }
+
+  if (dayOfMonthRestricted) {
+    return dayOfMonthMatches;
+  }
+
+  if (dayOfWeekRestricted) {
+    return dayOfWeekMatches;
+  }
+
+  return true;
 }
  
 
@@ -249,13 +315,8 @@ export function getNextRun(
     let dayFound = false;
 
     for (let d = current.getDate(); d <= maxDays; d++) {
-      if (!schedule.daysOfMonth.includes(d)) {
-        continue;
-      }
-
-      // Check day of week for this specific date
       const testDate = new Date(current.getFullYear(), month - 1, d);
-      if (!schedule.daysOfWeek.includes(testDate.getDay())) {
+      if (!matchesDayFields(schedule, d, testDate.getDay())) {
         continue;
       }
 

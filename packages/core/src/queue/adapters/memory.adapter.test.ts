@@ -305,6 +305,57 @@ describe('InMemoryQueueAdapter', () => {
       expect(received.length).toBe(1);
       expect(received[0].data).toEqual({ data: 'delayed' });
     });
+
+    // The buffer used to be sorted priority-first and read head-first, so a far-future message
+    // with a high priority sat at index 0 and held every earlier-due message behind it.
+    it('should not let a later, higher-priority message hold back a due one', async () => {
+      await adapter.connect();
+
+      const received: string[] = [];
+      await adapter.subscribe('due.*', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('due.slow', {}, { delay: 3000, priority: 10 });
+      await adapter.publish('due.soon', {}, { delay: 100, priority: 1 });
+
+      advanceTime(300);
+
+      expect(received).toEqual(['due.soon']);
+    });
+
+    it('should still deliver equal-priority delayed messages on time', async () => {
+      await adapter.connect();
+
+      const received: string[] = [];
+      await adapter.subscribe('equal.*', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('equal.slow', {}, { delay: 3000 });
+      await adapter.publish('equal.soon', {}, { delay: 100 });
+
+      advanceTime(300);
+
+      expect(received).toEqual(['equal.soon']);
+    });
+
+    it('should order by priority among messages that come due together', async () => {
+      await adapter.connect();
+
+      const received: string[] = [];
+      await adapter.subscribe('batch.*', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('batch.low', {}, { delay: 100, priority: 1 });
+      await adapter.publish('batch.high', {}, { delay: 100, priority: 10 });
+      await adapter.publish('batch.mid', {}, { delay: 100, priority: 5 });
+
+      advanceTime(300);
+
+      expect(received).toEqual(['batch.high', 'batch.mid', 'batch.low']);
+    });
   });
 
   describe('subscription management', () => {

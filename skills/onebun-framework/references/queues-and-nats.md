@@ -3,9 +3,11 @@
 ## Queue System Overview
 
 The queue system in `@onebun/core` provides a unified API across multiple backends.
-Queue handlers are discovered only in classes listed in a module's `controllers` array —
-placing them in `providers` will silently skip them. The queue system is enabled when **any**
-of these holds:
+Queue handlers are discovered only in classes listed in a module's `controllers` array. Placing
+them in `providers` skips them — no longer silently: startup emits one warning per offending
+class, naming it and every decorated method, and an application whose only handlers are on
+providers gets a debug line saying exactly that instead of "no handlers detected". The queue
+system is enabled when **any** of these holds:
 
 1. a controller carries a `@Subscribe`, `@Cron`, `@Interval`, or `@Timeout` decorator, or
 2. `queue.enabled: true` is set in `ApplicationOptions`, or

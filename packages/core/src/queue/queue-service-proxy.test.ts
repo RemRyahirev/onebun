@@ -10,7 +10,12 @@ import {
 
 
 import { InMemoryQueueAdapter } from './adapters/memory.adapter';
-import { QueueServiceProxy, QUEUE_NOT_ENABLED_ERROR_MESSAGE } from './queue-service-proxy';
+import {
+  QueueServiceProxy,
+  QUEUE_NOT_ENABLED_ERROR_MESSAGE,
+  QUEUE_NOT_READY_ERROR_MESSAGE,
+  QUEUE_STOPPED_ERROR_MESSAGE,
+} from './queue-service-proxy';
 import { QueueService } from './queue.service';
 
 describe('QueueServiceProxy', () => {
@@ -86,6 +91,51 @@ describe('QueueServiceProxy', () => {
 
     await real.stop();
     proxy.setDelegate(null);
+    // Not "not enabled": this queue WAS enabled and has shut down, and telling its user to
+    // configure a backend they already configured is the report this replaced.
+    expect(() => proxy.getAdapter()).toThrow(QUEUE_STOPPED_ERROR_MESSAGE);
+  });
+
+  test('holds a publish issued while the queue is still starting, and flushes it', async () => {
+    const adapter = new InMemoryQueueAdapter();
+    const real = new QueueService({ adapter: 'memory' });
+    await real.initialize(adapter);
+    await real.start();
+
+    const proxy = new QueueServiceProxy();
+    proxy.markStarting();
+
+    const received: unknown[] = [];
+    await real.subscribe('held.event', async (message) => {
+      received.push(message.data);
+    });
+
+    // Answered with the id it will ship under, so the caller is not handed a placeholder.
+    const messageId = await proxy.publish('held.event', { held: true });
+    expect(typeof messageId).toBe('string');
+    expect(received.length).toBe(0);
+
+    proxy.setDelegate(real);
+    expect(await proxy.flushPendingPublishes()).toEqual([]);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(received).toEqual([{ held: true }]);
+
+    await real.stop();
+  });
+
+  test('refuses everything that cannot be held while the queue is starting', () => {
+    const proxy = new QueueServiceProxy();
+    proxy.markStarting();
+
+    expect(() => proxy.getScheduler()).toThrow(QUEUE_NOT_READY_ERROR_MESSAGE);
+    expect(() => proxy.getJobs()).toThrow(QUEUE_NOT_READY_ERROR_MESSAGE);
+  });
+
+  test('keeps the not-enabled message for a proxy that was never told a queue is coming', () => {
+    const proxy = new QueueServiceProxy();
+
     expect(() => proxy.getAdapter()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    expect(proxy.publish('nowhere', {})).rejects.toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
   });
 });

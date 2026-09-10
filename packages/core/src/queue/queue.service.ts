@@ -168,7 +168,14 @@ export class QueueService {
   /**
    * Stop the queue service (disconnect and stop scheduler)
    */
-  async stop(): Promise<void> {
+  /**
+   * Stop consuming and scheduling.
+   *
+   * `disconnectAdapter: false` leaves the transport open, which is what lets `onModuleDestroy`
+   * publish a goodbye message: the application stops the consumers before the modules tear down
+   * and disconnects afterwards. Defaults to true, so every other caller is unchanged.
+   */
+  async stop(options?: { disconnectAdapter?: boolean }): Promise<void> {
     if (!this.started) {
       return;
     }
@@ -188,7 +195,7 @@ export class QueueService {
     this.subscriptions = [];
 
     // Disconnect adapter
-    if (this.adapter) {
+    if (this.adapter && options?.disconnectAdapter !== false) {
       await this.adapter.disconnect();
     }
 

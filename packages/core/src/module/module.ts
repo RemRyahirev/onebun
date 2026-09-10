@@ -1820,6 +1820,23 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
+   * Provider CLASSES declared by this module and its children (recursive), deduplicated.
+   *
+   * Classes rather than instances, because the only caller reads decorator metadata off the
+   * constructor: a `{ provide, useValue }` entry has no class to read and is skipped. One module
+   * imported from two places appears once.
+   */
+  getProviderClasses(): Function[] {
+    const metadata = getModuleMetadata(this.moduleClass);
+    const own = (metadata?.providers ?? []).filter(
+      (provider): provider is Function => typeof provider === 'function',
+    );
+    const fromChildren = this.childModules.flatMap((child) => child.getProviderClasses());
+
+    return Array.from(new Set([...own, ...fromChildren]));
+  }
+
+  /**
    * Find controller instance (searches this module then child modules recursively, no logging).
    */
   private findControllerInstance(controllerClass: Function): Controller | undefined {

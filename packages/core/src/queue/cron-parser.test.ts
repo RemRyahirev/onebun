@@ -122,6 +122,54 @@ describe('cron-parser', () => {
       expect(next!.getDay()).toBe(1); // Monday
     });
 
+    // crontab(5): when BOTH day fields are restricted the command runs when EITHER matches.
+    // `0 0 1 * 1` is "the 1st of the month OR any Monday", not "a Monday that is the 1st".
+    it('should OR day-of-month with day-of-week when both are restricted', () => {
+      const schedule = parseCronExpression('0 0 1 * 1');
+      const runs = getNextRuns(schedule, 5, new Date(2026, 0, 1, 12, 0, 0));
+
+      expect(runs.map((run) => [run.getFullYear(), run.getMonth() + 1, run.getDate()])).toEqual([
+        [2026, 1, 5], // Monday
+        [2026, 1, 12], // Monday
+        [2026, 1, 19], // Monday
+        [2026, 1, 26], // Monday
+        [2026, 2, 1], // the 1st, a Sunday
+      ]);
+    });
+
+    it('should apply only day-of-month when day-of-week is a wildcard', () => {
+      const schedule = parseCronExpression('0 0 1 * *');
+      const runs = getNextRuns(schedule, 3, new Date(2026, 0, 1, 12, 0, 0));
+
+      expect(runs.map((run) => [run.getMonth() + 1, run.getDate()])).toEqual([
+        [2, 1],
+        [3, 1],
+        [4, 1],
+      ]);
+    });
+
+    it('should apply only day-of-week when day-of-month is a wildcard', () => {
+      const schedule = parseCronExpression('0 0 * * 1');
+      const runs = getNextRuns(schedule, 3, new Date(2026, 0, 1, 12, 0, 0));
+
+      expect(runs.map((run) => [run.getMonth() + 1, run.getDate()])).toEqual([
+        [1, 5],
+        [1, 12],
+        [1, 19],
+      ]);
+    });
+
+    it('should run every day when neither day field is restricted', () => {
+      const schedule = parseCronExpression('0 0 * * *');
+      const runs = getNextRuns(schedule, 3, new Date(2026, 0, 1, 12, 0, 0));
+
+      expect(runs.map((run) => [run.getMonth() + 1, run.getDate()])).toEqual([
+        [1, 2],
+        [1, 3],
+        [1, 4],
+      ]);
+    });
+
     it('should find next run for every 5 seconds', () => {
       const schedule = parseCronExpression('*/5 * * * * *');
       const from = new Date('2024-01-15T10:30:42');

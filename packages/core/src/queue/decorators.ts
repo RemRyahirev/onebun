@@ -523,6 +523,24 @@ export function getLifecycleHandlers(
 }
 
 /**
+ * Names of the methods carrying queue decorators on a class, in declaration order.
+ *
+ * For diagnostics: a class whose handlers will never run has to be reported by NAME, method
+ * included — "this class has queue decorators somewhere" is not something a reader can act on.
+ * Duplicates are collapsed, since one method can carry several decorators.
+ */
+export function getQueueHandlerNames(target: object): string[] {
+  const entries: Array<{ propertyKey: string | symbol }> = [
+    ...getSubscribeMetadata(target),
+    ...getCronMetadata(target),
+    ...getIntervalMetadata(target),
+    ...getTimeoutMetadata(target),
+  ];
+
+  return Array.from(new Set(entries.map((entry) => String(entry.propertyKey))));
+}
+
+/**
  * Check if a class has any queue decorators
  */
 export function hasQueueDecorators(target: object): boolean {

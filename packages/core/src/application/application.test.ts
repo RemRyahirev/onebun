@@ -26,6 +26,7 @@ import type {
 } from '../types';
 import type { OnModuleConfigure } from '../types';
 
+import { Env, TypedEnv } from '@onebun/envs';
 import { LoggerService, type Logger } from '@onebun/logger';
 import { register } from '@onebun/metrics';
 
@@ -299,6 +300,50 @@ describe('OneBunApplication', () => {
       // Config service is created eagerly in the constructor
       const config = app.getConfig();
       expect(config).toBeDefined();
+    });
+
+    test('should give each application its own config when two apps declare different envSchema', async () => {
+      @Module({})
+      class ConfigAppAModule {}
+
+      @Module({})
+      class ConfigAppBModule {}
+
+      process.env.TEST_APP_A_TOKEN = 'token-a';
+      process.env.TEST_APP_B_TOKEN = 'token-b';
+      TypedEnv.clear();
+
+      const appA = createTestApp(ConfigAppAModule, {
+        port: 0,
+        host: '127.0.0.1',
+        envSchema: { a: { token: Env.string({ env: 'TEST_APP_A_TOKEN', default: 'none' }) } },
+        metrics: { enabled: false },
+        tracing: { enabled: false },
+        gracefulShutdown: false,
+      });
+      const appB = createTestApp(ConfigAppBModule, {
+        port: 0,
+        host: '127.0.0.1',
+        envSchema: { b: { token: Env.string({ env: 'TEST_APP_B_TOKEN', default: 'none' }) } },
+        metrics: { enabled: false },
+        tracing: { enabled: false },
+        gracefulShutdown: false,
+      });
+
+      try {
+        await appA.start();
+        await appB.start();
+
+        expect(appA.getConfigValue<string>('a.token')).toBe('token-a');
+        // Before the per-schema cache this was `undefined`: appB was handed appA's ConfigProxy.
+        expect(appB.getConfigValue<string>('b.token')).toBe('token-b');
+      } finally {
+        await appA.stop();
+        await appB.stop();
+        delete process.env.TEST_APP_A_TOKEN;
+        delete process.env.TEST_APP_B_TOKEN;
+        TypedEnv.clear();
+      }
     });
 
     test('should provide typed access to config values via getConfig()', () => {
@@ -4361,7 +4406,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(PlainModule, { port: 0 });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4381,7 +4426,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(LifecycleOnlyModule, { port: 0 });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4402,7 +4447,7 @@ describe('OneBunApplication', () => {
       });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4452,7 +4497,7 @@ describe('OneBunApplication', () => {
       await app.stop();
     });
 
-    test('getQueueService() returns null when queue not enabled', async () => {
+    test('getQueueService() explains itself when the queue is not enabled', async () => {
       @Controller('/no-queue')
       class NoQueueController extends BaseController {
         @Get('/')
@@ -4467,8 +4512,9 @@ describe('OneBunApplication', () => {
       const app = createTestApp(NoQueueModule, { port: 0 });
       await app.start();
 
-      const queueService = app.getQueueService();
-      expect(queueService).toBeNull();
+      // The explanation the DI path has always given, on the accessor that used to answer null
+      // and leave the caller with a TypeError on the next line.
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4652,7 +4698,7 @@ describe('OneBunApplication', () => {
 
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
       expect(SpyQueueAdapter.constructCount).toBe(0);
       expect(SpyQueueAdapter.connectCount).toBe(0);
       // Filter by exact equality: other subsystems warn during start() too.
@@ -4680,7 +4726,7 @@ describe('OneBunApplication', () => {
 
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
       expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(0);
 
       await app.stop();

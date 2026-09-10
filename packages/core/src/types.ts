@@ -137,6 +137,14 @@ export interface ModuleInstance {
   getControllers(): Function[];
 
   /**
+   * Get provider classes declared by this module and its children.
+   *
+   * Optional: a substituted module double in a test need not implement it, and the one caller
+   * — the queue's report about handlers that will never run — treats its absence as "none".
+   */
+  getProviderClasses?(): Function[];
+
+  /**
    * Get controller instance
    */
   getControllerInstance?(controllerClass: Function): unknown;

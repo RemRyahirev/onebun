@@ -317,6 +317,10 @@ Key rules:
   Cost: such a service cannot be built by `createTestService` — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
+- `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
+  is held until the handlers are registered and then delivered, and the shutdown message goes out
+  before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the
+  adapter) is only usable from `onApplicationInit` onwards
 
 ## Controllers
 
@@ -615,7 +619,10 @@ bunx onebun-drizzle studio      # visual browser
 See `references/queues-and-nats.md` for the full queue system reference including all adapters,
 NATS/JetStream configuration, message guards, and scheduled jobs.
 
-Queue handlers are discovered only in `controllers` (not `providers`). The queue system is
+Queue handlers are discovered only in `controllers` (not `providers`). A class in `providers`
+carrying queue decorators is reported at startup — one warning naming the class and every
+decorated method — instead of being skipped in silence, and when those are the only handlers the
+disabled-queue debug line says so rather than claiming none were found. The queue system is
 enabled when **any** of these holds:
 
 1. a controller carries a queue decorator (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`), or

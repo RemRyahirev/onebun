@@ -84,12 +84,13 @@ import {
   QueueService,
   QueueServiceProxy,
   QueueServiceTag,
+  QUEUE_NOT_ENABLED_ERROR_MESSAGE,
   type QueueAdapter,
   type QueueConfig,
 } from '../queue';
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
-import { hasQueueDecorators } from '../queue/decorators';
+import { getQueueHandlerNames, hasQueueDecorators } from '../queue/decorators';
 import { SharedRedisProvider } from '../redis/shared-redis';
 import { getCurrentTraceContext, requestContextStore } from '../request-context';
 import {
@@ -116,7 +117,10 @@ import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
 import {
+  type QueueEnablementDecision,
   QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG,
+  queueHandlerOnProviderWarning,
   resolveQueueAdapterType,
   resolveQueueEnablement,
 } from './queue-enablement';
@@ -489,6 +493,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
+
+  /**
+   * Whether a queue will run, decided before `setup()` from classes and options alone.
+   *
+   * Kept so `initializeQueue` reuses this answer instead of reaching a second one: two
+   * computations of one decision is how the queue came to be enabled for the adapter and
+   * disabled for the proxy at the same time.
+   */
+  private queueEnablement: QueueEnablementDecision | null = null;
   /**
    * DI state owned by THIS application: `@Global()` service instances, the modules already
    * processed, test overrides and dynamic-module option snapshots. Not on `ApplicationOptions`
@@ -1017,6 +1030,20 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.logger.info('System metrics collection started');
       }
 
+      // Whether a queue will run is decided HERE, before setup() runs a single onModuleInit,
+      // from the controller classes and the options alone — no instance exists yet. The proxy
+      // needs the answer this early: a service publishing from onModuleInit was told the queue
+      // was not enabled, quoting three remedies it had already applied, when the truth was "not
+      // yet". `initializeQueue` reuses this decision rather than reaching a second one.
+      this.queueEnablement = resolveQueueEnablement(
+        this.options.queue,
+        this.ensureModule().getControllers().some((controller) => hasQueueDecorators(controller)),
+      );
+
+      if (this.queueEnablement.enabled) {
+        this.queueServiceProxy?.markStarting();
+      }
+
       // Setup the module and create controller instances
       if (PROFILING_ENABLED) {
         profileMark = getProfiler()!.start('bootstrap', 'module:setup');
@@ -1064,6 +1091,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       await this.initializeQueue(controllers);
       if (profileMark) {
         getProfiler()!.end(profileMark);
+      }
+
+      // Anything published from onModuleInit was held until the handlers existed — with an
+      // in-memory adapter, sending it earlier would have delivered it to nobody.
+      const heldPublishFailures = await (this.queueServiceProxy?.flushPendingPublishes() ?? []);
+      for (const failure of heldPublishFailures) {
+        this.logger.error(
+          `A message published before the queue was ready could not be sent: ${failure.message}`,
+        );
       }
 
       // Initialize Docs (OpenAPI/Swagger) if enabled and available
@@ -2954,23 +2990,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.wsHandler = null;
     }
 
-    // Stop queue service
+    // Stop consuming and scheduling, but keep the transport open: `onModuleDestroy` runs below,
+    // and announcing a shutdown from it is the ordinary reason to publish there. Tearing the
+    // adapter down first is what made that message vanish — the throw was caught and logged as a
+    // failed hook, while stop() went on to report a clean shutdown.
     if (this.queueService) {
       await this.runShutdownStep(outcome, 'stopping the queue service', async () => {
         this.logger.debug('Stopping queue service');
-        await this.queueService!.stop();
+        await this.queueService!.stop({ disconnectAdapter: false });
       });
-      this.queueService = null;
-    }
-    this.queueServiceProxy?.setDelegate(null);
-
-    // Disconnect queue adapter
-    if (this.queueAdapter) {
-      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
-        this.logger.debug('Disconnecting queue adapter');
-        await this.queueAdapter!.disconnect();
-      });
-      this.queueAdapter = null;
     }
 
     // Stop the system-metric sampler. `startSystemMetricsCollection()` is called at startup and
@@ -3001,6 +3029,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.logger.debug('Calling onModuleDestroy hooks');
         await this.rootModule!.callOnModuleDestroy!();
       });
+    }
+
+    // Now nothing can publish any more: drop the delegate and close the transport the destroy
+    // hooks were still using.
+    this.queueService = null;
+    this.queueServiceProxy?.setDelegate(null);
+
+    if (this.queueAdapter) {
+      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
+        this.logger.debug('Disconnecting queue adapter');
+        await this.queueAdapter!.disconnect();
+      });
+      this.queueAdapter = null;
     }
 
     // Release this application's hold on the shared Redis client. It is disconnected only
@@ -3148,17 +3189,37 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return hasQueueDecorators(controller) || hasQueueDecorators(instance.constructor);
     });
 
+    // Discovery walks controllers only, so a queue decorator on a provider is metadata nothing
+    // reads and the handler never runs. Reported before the enablement decision, so it is said
+    // whether or not the queue ends up running: the application that needs to hear it most is the
+    // one where these are the ONLY handlers, which is exactly the one that never starts a queue.
+    const providersWithHandlers = (this.ensureModule().getProviderClasses?.() ?? [])
+      .filter((providerClass: Function) => hasQueueDecorators(providerClass));
+
+    for (const providerClass of providersWithHandlers) {
+      this.logger.warn(
+        queueHandlerOnProviderWarning(providerClass.name, getQueueHandlerNames(providerClass)),
+      );
+    }
+
     // Determine if queue should be enabled: a queue decorator on a controller, OR
     // queue.enabled === true, OR an explicit queue.adapter/options/redis backend config.
     // An explicit queue.enabled === false overrides all three, and warns once when it
     // contradicts a configured backend.
-    const enablement = resolveQueueEnablement(queueOptions, hasQueueHandlers);
+    // The pre-setup decision wins when it said yes — it is the one the proxy already acted on.
+    // Recomputed only when it said no, which keeps the instance-level check that covers a
+    // `@Controller` wrapper whose queue metadata does not sit on the class in `controllers`.
+    const enablement = this.queueEnablement?.enabled
+      ? this.queueEnablement
+      : resolveQueueEnablement(queueOptions, hasQueueHandlers);
     if (!enablement.enabled) {
       if (enablement.contradiction) {
         this.logger.warn(QUEUE_DISABLED_WITH_ADAPTER_WARNING);
       } else {
         this.logger.debug(
-          'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
+          providersWithHandlers.length > 0
+            ? QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG
+            : 'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
         );
       }
 
@@ -3285,11 +3346,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Get the queue service instance
-   * @returns The queue service or null if not enabled
+   * Get the queue service instance.
+   *
+   * Throws when there is no queue to hand back, with the same explanation an injected
+   * `QueueService` gives — which one depends on why: never enabled, still starting, already
+   * stopped. It used to return `null` here, so the natural next line was a `TypeError` on
+   * `queue.publish` and the diagnosis the framework already had never reached the caller.
+   *
+   * @returns The queue service
+   * @throws Error when the queue is not available, naming the reason and the remedy
+   * @see docs:api/queue.md
    */
-  getQueueService(): QueueService | null {
+  getQueueService(): QueueService {
     this.ensureSingleServiceMode('getQueueService');
+
+    if (this.queueService === null) {
+      throw new Error(this.queueServiceProxy?.unavailableReason() ?? QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    }
 
     return this.queueService;
   }

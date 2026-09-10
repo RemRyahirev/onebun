@@ -270,15 +270,16 @@ export class InMemoryQueueAdapter implements QueueAdapter {
         options: { ...options, messageId },
         executeAt: Date.now() + options.delay,
       });
-      // Sort by priority (higher first) and then by time
+      // Due time first, priority only as a tie-break. Sorting by priority put a far-future
+      // message at the head of the buffer, and the drain reads the head — so a high-priority
+      // message scheduled for an hour from now withheld every message due in a minute.
+      // Priority decides the order among messages that are due, never when one becomes due.
       this.delayedMessages.sort((a, b) => {
-        const priorityA = a.options?.priority ?? 0;
-        const priorityB = b.options?.priority ?? 0;
-        if (priorityA !== priorityB) {
-          return priorityB - priorityA; // Higher priority first
+        if (a.executeAt !== b.executeAt) {
+          return a.executeAt - b.executeAt;
         }
 
-        return a.executeAt - b.executeAt;
+        return (b.options?.priority ?? 0) - (a.options?.priority ?? 0);
       });
 
       return messageId;
@@ -521,8 +522,34 @@ export class InMemoryQueueAdapter implements QueueAdapter {
   private processDelayedMessages(): void {
     const now = Date.now();
 
-    while (this.delayedMessages.length > 0 && this.delayedMessages[0].executeAt <= now) {
-      const delayed = this.delayedMessages.shift()!;
+    if (this.delayedMessages.length === 0) {
+      return;
+    }
+
+    // Every due message, not just the ones ahead of the first that is not: a message's own delay
+    // is the only thing that decides when it is delivered, and nothing scheduled for later can
+    // stand in front of it.
+    const due: DelayedMessage[] = [];
+    const waiting: DelayedMessage[] = [];
+
+    for (const message of this.delayedMessages) {
+      (message.executeAt <= now ? due : waiting).push(message);
+    }
+
+    if (due.length === 0) {
+      return;
+    }
+
+    this.delayedMessages = waiting;
+
+    // Among messages that came due in this pass, priority decides who goes first.
+    due.sort((a, b) => {
+      const byPriority = (b.options?.priority ?? 0) - (a.options?.priority ?? 0);
+
+      return byPriority !== 0 ? byPriority : a.executeAt - b.executeAt;
+    });
+
+    for (const delayed of due) {
       const messageId = delayed.options?.messageId ?? this.generateMessageId();
 
       // Dispatch without delay
