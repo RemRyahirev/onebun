@@ -554,6 +554,16 @@ Inject the raw request object. The type is `OneBunRequest` (alias for `BunReques
 - `.cookies` — a `CookieMap` for reading and setting cookies
 - `.params` — route parameters extracted by Bun's routes API
 
+**A handler parameter without a param decorator is not injected.** What it receives depends on how
+the rest of the handler is written: on a route whose handler has no decorated parameter and no
+response schema the framework calls the handler with the request, so the first parameter happens to
+be it; on any other route the framework fills only the decorated positions and an undecorated one is
+`undefined`. Adding a single `@Query()` therefore flips the meaning of every other parameter on that
+handler. The framework reports each undecorated parameter at startup, by controller, handler and
+0-based index — `Function.length` stops counting at the first defaulted or rest parameter, so a gap
+after one of those is not reported. Decorate the parameter with `@Req()` and the question does not
+arise.
+
 <!-- typecheck: skip -->
 ```typescript
 @Req()

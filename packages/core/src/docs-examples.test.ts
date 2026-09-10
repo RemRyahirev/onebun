@@ -7696,6 +7696,58 @@ describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
   });
 
   /**
+   * The section's claim that an UNDECORATED parameter is not injected, and that the framework
+   * says so at startup rather than leaving the difference to be discovered.
+   *
+   * @source docs:api/decorators.md#req
+   */
+  it('should report a handler parameter that carries no param decorator', async () => {
+    @Controller('/api')
+    class UndecoratedApiController extends BaseController {
+      @Get('/raw')
+      async handleRaw(@Query('q') _q: string, plain: unknown) {
+        return { plain: typeof plain };
+      }
+    }
+
+    @Module({ controllers: [UndecoratedApiController] })
+    class UndecoratedReqModule {}
+
+    const warnings: string[] = [];
+    const { createMockSyncLogger } = await import('./testing/test-utils');
+    const app = new OneBunApplication(UndecoratedReqModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    const capturingLogger = {
+      ...createMockSyncLogger(),
+      warn: (message: string) => warnings.push(message),
+      child: () => capturingLogger,
+    };
+    (app as unknown as { logger: unknown }).logger = capturingLogger;
+
+    await app.start();
+
+    try {
+      const reported = warnings.find((line) => line.includes('UndecoratedApiController.handleRaw'));
+
+      expect(reported).toBeDefined();
+      expect(reported).toContain('parameter(s) 1');
+
+      // And the undecorated parameter really is undefined on this route.
+      const response = await fetch(`${app.getHttpUrl()}/api/raw?q=hi`);
+
+      expect(await response.json()).toEqual({ success: true, result: { plain: 'undefined' } });
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
    * @source docs:api/decorators.md#req
    */
   it('should define handler accessing cookies via req.cookies', async () => {

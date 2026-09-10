@@ -449,6 +449,63 @@ function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Respons
   );
 }
 
+/**
+ * Report handler parameters that carry no param decorator.
+ *
+ * What such a parameter receives depends on which dispatch arm the route lands in, and nothing
+ * told the user which one that is: on a route with no decorated parameters and no response schema
+ * the framework calls `boundHandler(req)`, so parameter 0 IS the request; on every other route it
+ * builds an argument array and writes only the decorated indices, so the same parameter is
+ * `undefined`. Adding one `@Query()` — or a response schema — flips the meaning of every other
+ * parameter on that handler, silently, in both directions.
+ *
+ * The two arms are a measured optimisation and are deliberately left alone; what this removes is
+ * the silence. Reported once per route at registration.
+ *
+ * `Function.length` stops counting at the first defaulted or rest parameter, so a gap after one of
+ * those is invisible here. That is the honest limit of the check: it never false-positives, and it
+ * says nothing about what it cannot see.
+ */
+function reportUndecoratedHandlerParameters(
+  routeMeta: RouteMetadata,
+  boundHandler: Function,
+  controllerName: string,
+  isFastPath: boolean,
+  logger: SyncLogger,
+): void {
+  const declaredCount = boundHandler.length;
+
+  if (declaredCount === 0) {
+    return;
+  }
+
+  const decorated = new Set((routeMeta.params ?? []).map((param) => param.index));
+  const gaps: number[] = [];
+
+  for (let index = 0; index < declaredCount; index++) {
+    if (!decorated.has(index)) {
+      gaps.push(index);
+    }
+  }
+
+  if (gaps.length === 0) {
+    return;
+  }
+
+  const routeName = `${controllerName}.${routeMeta.handler ?? 'unknown'}`;
+  const receives = isFastPath
+    ? 'parameter 0 receives the raw request and any later one receives undefined — but only '
+      + 'because this route has no decorated parameter and no response schema; adding either '
+      + 'makes parameter 0 undefined too'
+    : 'they receive undefined, because the framework fills only decorated positions';
+
+  logger.warn(
+    `${routeName}: parameter(s) ${gaps.join(', ')} carry no param decorator. On this route `
+    + `${receives}. Decorate them — @Req(), @Param(), @Query(), @Body() — so the handler does not `
+    + 'depend on which dispatch path the route happens to take.',
+  );
+}
+
 const DEFAULT_OTLP_SERVICE_NAME = 'onebun-service';
 const DEFAULT_OTLP_SERVICE_VERSION = '1.0.0';
 
@@ -1258,6 +1315,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // the two arms — they also differ observably, the fast arm calling
         // boundHandler(req) where executeHandler calls boundHandler(...args).
         const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
+
+        reportUndecoratedHandlerParameters(routeMeta, boundHandler, controllerName, isFastPath, appLogger);
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
         // An @All route answers every verb, so 'ALL' is not a method any client sent —
         // emitting it as a metric label or span attribute would be a lie, and it would
