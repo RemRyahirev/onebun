@@ -2362,10 +2362,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * back out through it. A throwing middleware is therefore not filtered by design and
      * falls to the last-resort outer catch.
      *
-     * Only the last filter runs — route-level filters are appended last and win. A filter
-     * that throws, or returns something other than a Response, degrades to the default
-     * filter instead of escaping: applying filters on more paths widens the blast radius
-     * of a buggy user filter, so the fallback is part of the fix rather than a bonus.
+     * Filters are tried from the most specific outwards — route, then controller, then global,
+     * then the framework's default — and the first one to return a Response answers. A filter
+     * DECLINES by returning `undefined`, which is the supported way to say "not mine": the
+     * documentation used to show `throw error` for that, and a throw cannot mean it, because a
+     * bug in a filter throws too.
+     *
+     * A filter that THROWS is treated as the bug it is: reported with the filter's name and
+     * answered by the default filter, without consulting the rest of the chain. A filter that
+     * returns something that is neither a Response nor `undefined` is reported the same way.
+     * Applying filters on more paths widens the blast radius of a buggy user filter, so that
+     * fallback is part of the design rather than a bonus.
      */
     async function applyExceptionFilters(
       error: unknown,
@@ -2388,23 +2395,43 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // registration. A class never survives to here.
       const filters = routeMeta.filters as ExceptionFilter[] | undefined;
 
-      if (filters && filters.length > 0) {
+      // Most specific first: the merged list is global -> controller -> route, so it is walked
+      // backwards. `undefined` declines and moves outwards; anything else ends the walk.
+      for (let index = (filters?.length ?? 0) - 1; index >= 0; index--) {
+        const filter = filters![index];
+        const filterName = filter.constructor?.name ?? 'anonymous filter';
+
         try {
-          const filtered = await filters[filters.length - 1].catch(error, ctx);
+          const filtered = await filter.catch(error, ctx);
+
           if (filtered instanceof Response) {
             return filtered;
           }
 
+          if (filtered === undefined || filtered === null) {
+            // A deliberate decline, not a failure: the next filter out gets the error.
+            appLogger.debug(
+              `Exception filter ${filterName} declined `
+              + `${controllerName}.${routeMeta.handler ?? 'unknown'}`,
+            );
+            continue;
+          }
+
           appLogger.error(
-            'Exception filter returned a non-Response; falling back to the default filter',
+            `Exception filter ${filterName} returned neither a Response nor undefined; `
+            + 'falling back to the default filter',
             new Error(`${controllerName}.${routeMeta.handler ?? 'unknown'}`),
           );
         } catch (filterError) {
           appLogger.error(
-            'Exception filter threw; falling back to the default filter',
+            `Exception filter ${filterName} threw; falling back to the default filter`,
             filterError instanceof Error ? filterError : new Error(String(filterError)),
           );
         }
+
+        // Reached only when the filter misbehaved: stop consulting the chain, since a filter
+        // that cannot be trusted to answer cannot be trusted to have declined either.
+        break;
       }
 
       return await appDefaultExceptionFilter.catch(error, ctx);

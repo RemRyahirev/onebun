@@ -93,17 +93,26 @@ import type { ExceptionFilter, HttpExecutionContext } from '@onebun/core';
 import { ValidationError } from '@onebun/requests';
 
 class ValidationExceptionFilter implements ExceptionFilter {
-  catch(error: unknown, ctx: HttpExecutionContext): Response {
+  catch(error: unknown, ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
       return Response.json(
         { success: false, error: 'Validation failed', details: error.details },
         { status: 200 },
       );
     }
-    throw error; // pass to next filter
+
+    return undefined; // decline: the next filter outwards gets it
   }
 }
 ```
+
+**Which filter answers.** Filters are tried from the most specific outwards — route, then
+controller, then global, then the framework's default filter — and the first one to return a
+Response answers. Returning `undefined` declines, and the error moves one level out; that is the
+supported way to say "not mine". Do **not** rethrow to decline: a throw out of `catch()` is how a
+BUG in a filter looks, so it is reported with the filter's name and answered by the default filter
+without consulting the rest of the chain. Through 0.6.0 only the most specific filter ran at all,
+and this page told you to rethrow — which reached the default filter rather than the next one.
 
 ## HttpException
 
