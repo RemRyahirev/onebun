@@ -234,7 +234,7 @@ function removeFromGlobalModules(target: Function): void;
 **Technical details for AI agents:**
 - Global modules are stored in a Set on `globalThis` and checked during module initialization
 - Global services are registered in a separate registry and automatically injected into all modules
-- The Set is keyed by module CLASS and shared by the entire process. `removeFromGlobalModules()` is how `forRoot({ isGlobal: false })` implements itself; calling it by hand opts out every application at once. For two configurations of one module use `forRoot({ as: TOKEN })` and `forFeature(TOKEN)`
+- The Set is keyed by module CLASS and shared by the entire process. `removeFromGlobalModules()` is how an UNNAMED `forRoot({ isGlobal: false })` implements itself — a named `forRoot({ as: TOKEN, isGlobal: false })` leaves the Set alone, because a named registration is never ambient anyway; calling it by hand opts out every application at once. For two configurations of one module use `forRoot({ as: TOKEN })` and `forFeature(TOKEN)`
 - The conflict is caught at `app.start()`, not at the second `forRoot()`: the defect is an application booting on an answer it did not declare, and a process that imports two module graphs without booting either is not that
 - The check compares what it can see. Options nested inside a class instance (a driver handle, a custom store) collapse to the class name, so two calls differing only there are not distinguished
 - The `@Global()` decorator only runs once at module definition time

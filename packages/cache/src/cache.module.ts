@@ -171,13 +171,21 @@ export class CacheModule {
       options.as === undefined ? options.isGlobal !== false : undefined,
     );
 
-    // If isGlobal is explicitly set to false, remove from global modules registry.
-    // Symmetric on purpose: the registry is process-wide, so without the else branch one
-    // opt-out de-globalized CacheModule for every later forRoot() in the process.
-    if (options.isGlobal === false) {
-      removeFromGlobalModules(CacheModule);
-    } else if (options.as === undefined) {
-      Global()(CacheModule);
+    // Only an UNNAMED call decides the base module's globality. The registry is keyed by the
+    // module class and shared by the whole process, so a named registration touching it would
+    // be answering for the unnamed one — measured, `forRoot({ as, isGlobal: false })` left
+    // isGlobalModule(CacheModule) false and an unrelated module's ambient CacheService
+    // unresolvable. A named registration is never global anyway: its minted class is
+    // deliberately not @Global(), so isGlobal: false alongside `as` asks for what already holds.
+    //
+    // Both arms stay here, symmetric on purpose: without the else, one opt-out de-globalized
+    // CacheModule for every later unnamed forRoot() in the process.
+    if (options.as === undefined) {
+      if (options.isGlobal === false) {
+        removeFromGlobalModules(CacheModule);
+      } else {
+        Global()(CacheModule);
+      }
     }
 
     return registration as typeof CacheModule;

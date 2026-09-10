@@ -174,6 +174,24 @@ describe('conflicting unnamed registrations', () => {
     expect(() => assertRegistrationsConfigured(AppModule)).not.toThrow();
   });
 
+  test('should not count a named registration as a competing unnamed one', () => {
+    @Module({})
+    class ConfigModule {}
+
+    const named = registerModule(ConfigModule, { host: 'b' }, 'replica', []);
+
+    @Module({ imports: [ConfigModule, named] })
+    class AppModule {}
+
+    forRoot(ConfigModule, { host: 'a' });
+
+    // One unnamed call and one named call is the ordinary two-registration shape, not a
+    // disagreement. If a named call ever started landing in the unnamed history, this is where
+    // it would show up — as a boot failure for everyone using `as:`, which is the remedy the
+    // conflict error itself recommends.
+    expect(() => assertRegistrationsConfigured(AppModule)).not.toThrow();
+  });
+
   test('should leave named registrations alone — they already have their own identity', () => {
     @Module({})
     class ConfigModule {}
