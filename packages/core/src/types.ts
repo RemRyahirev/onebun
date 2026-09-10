@@ -215,6 +215,13 @@ export interface ModuleInstance {
   resolveInterceptors?(classes: (Function | Interceptor)[]): ResolvedInterceptor[];
 
   /**
+   * Resolve exception filter classes (or instances) into initialized filters using this module's
+   * DI scope. Optional for the same reason as the others: a module double in a test may omit it.
+   */
+  resolveFilters?(filters: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[]):
+  import('./exception-filters/exception-filters').ExceptionFilter[];
+
+  /**
    * Resolve guard classes into instances with dependency injection, once at route-build time.
    */
   resolveGuards?(guards: (Function | HttpGuard)[]): HttpGuard[];
@@ -655,7 +662,7 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
    * });
    * ```
    */
-  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+  filters?: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[];
 
   /**
    * Global interceptors applied to all routes.
@@ -1198,7 +1205,7 @@ export interface RouteMetadata {
   /** Guards to execute before the route handler. Supports class constructors and instances. */
   guards?: (Function | HttpGuard)[];
   /** Exception filters to apply when the route handler throws. */
-  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+  filters?: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[];
   /** Interceptors to wrap the route handler. Supports class constructors and instances. */
   interceptors?: (Function | Interceptor)[];
   /**

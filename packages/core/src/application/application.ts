@@ -1849,10 +1849,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             : [];
 
           // Merge exception filters: global → controller → route (route has highest priority)
-          const globalFilters = (this.options.filters as ExceptionFilter[] | undefined) ?? [];
+          const globalFilters = this.options.filters ?? [];
           const ctrlFilters = getControllerFilters(controllerClass);
           const routeFilters = route.filters ?? [];
-          const mergedFilters = [...globalFilters, ...ctrlFilters, ...routeFilters];
+          const mergedFilterEntries = [...globalFilters, ...ctrlFilters, ...routeFilters];
+          // Resolved through the owning module, exactly like interceptors: a filter class gets
+          // constructor DI, an instance is passed through and initialized. Filters used to be
+          // merged raw, which is why `this.logger` was undefined in the one place that sees every
+          // unhandled error.
+          const mergedFilters = mergedFilterEntries.length > 0
+            ? (ownerModule.resolveFilters?.(mergedFilterEntries) ?? (mergedFilterEntries as ExceptionFilter[]))
+            : [];
 
           // Merge interceptors: global → controller → route (global wraps outermost)
           const globalInterceptorClasses = this.options.interceptors ?? [];
@@ -2356,7 +2363,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
 
       const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
-      const filters = routeMeta.filters;
+      // The field is declared wide because a decorator may write CLASSES into it; what reaches
+      // the pipeline is the resolved form, built by `ownerModule.resolveFilters` during route
+      // registration. A class never survives to here.
+      const filters = routeMeta.filters as ExceptionFilter[] | undefined;
 
       if (filters && filters.length > 0) {
         try {

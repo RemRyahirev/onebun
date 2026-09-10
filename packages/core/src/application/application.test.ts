@@ -48,6 +48,7 @@ import {
   UseMiddleware,
   UseGuards,
   UseInterceptors,
+  UseFilters,
   Middleware,
 } from '../decorators/decorators';
 import { createHttpGuard } from '../http-guards/http-guards';
@@ -5063,6 +5064,100 @@ describe('OneBunApplication', () => {
       expect(jobs.length).toBe(2);
 
       await app.stop();
+    });
+  });
+
+  describe('exception filter DI', () => {
+    // Filters were the one pipeline element with no DI path: the types accepted instances only,
+    // so a class was a compile error, and an instance was merged into the route metadata
+    // untouched — this.logger, this.config and every injected service were undefined inside
+    // catch(), in the one place that sees every unhandled error.
+    test('should inject a service into a filter class and give it logger and config', async () => {
+      const reported: string[] = [];
+
+      @Service()
+      class ErrorReporter extends BaseService {
+        report(message: string): void {
+          reported.push(message);
+        }
+      }
+
+      // Same rule as interceptors: constructor DI needs a class decorator, because that is what
+      // makes TypeScript emit design:paramtypes.
+      @Service()
+      class ReportingFilter extends BaseService {
+        constructor(private readonly reporter: ErrorReporter) {
+          super();
+        }
+
+        catch(error: unknown): Response {
+          this.reporter.report(error instanceof Error ? error.message : String(error));
+
+          return Response.json(
+            { hasLogger: this.logger !== undefined, hasConfig: this.config !== undefined },
+            { status: 418 },
+          );
+        }
+      }
+
+      @UseFilters(ReportingFilter)
+      @Controller('/filtered')
+      class FilteredController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('kaboom');
+        }
+      }
+
+      @Module({ controllers: [FilteredController], providers: [ErrorReporter] })
+      class FilteredModule {}
+
+      const app = createTestApp(FilteredModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/filtered/boom`);
+        const body = await response.json() as { hasLogger: boolean; hasConfig: boolean };
+
+        expect(response.status).toBe(418);
+        expect(reported).toEqual(['kaboom']);
+        expect(body.hasLogger).toBe(true);
+        expect(body.hasConfig).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('should initialize a filter passed as an instance', async () => {
+      class InstanceFilter extends BaseService {
+        catch(): Response {
+          return Response.json({ hasLogger: this.logger !== undefined }, { status: 418 });
+        }
+      }
+
+      @UseFilters(new InstanceFilter())
+      @Controller('/instance-filtered')
+      class InstanceFilteredController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('kaboom');
+        }
+      }
+
+      @Module({ controllers: [InstanceFilteredController] })
+      class InstanceFilteredModule {}
+
+      const app = createTestApp(InstanceFilteredModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/instance-filtered/boom`);
+        const body = await response.json() as { hasLogger: boolean };
+
+        expect(body.hasLogger).toBe(true);
+      } finally {
+        await app.stop();
+      }
     });
   });
 

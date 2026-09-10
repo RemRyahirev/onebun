@@ -18,7 +18,7 @@ import { ExceptionFilter, createExceptionFilter, UseFilters, HttpException } fro
 
 **Three ways to create a filter:**
 1. `createExceptionFilter(fn)` — inline function-based filter (simplest)
-2. Implement `ExceptionFilter` interface (class-based)
+2. Implement `ExceptionFilter` interface (class-based) — pass the CLASS to get constructor DI, or an instance to own its lifetime yourself
 3. Use the built-in `defaultExceptionFilter` (always active as the final fallback)
 
 **Applying filters:**
@@ -154,6 +154,40 @@ import { Controller, UseFilters } from '@onebun/core';
 @Controller('/users')
 class UserController extends BaseController { /* ... */ }
 ```
+
+### With dependency injection
+
+Pass the class rather than an instance and the framework builds it from the owning module's scope — one instance per class, shared by every route that names it. This is the only place in an application that sees every unhandled error, so it is usually the place that wants a reporter:
+
+```typescript
+import {
+  BaseService,
+  Controller,
+  Service,
+  UseFilters,
+  type HttpExecutionContext,
+} from '@onebun/core';
+
+@Service()
+class ReportingFilter extends BaseService {
+  constructor(private readonly reporter: ErrorReporter) {
+    super();
+  }
+
+  catch(error: unknown, context: HttpExecutionContext): Response {
+    this.reporter.report(error, context.getHandler());
+    this.logger.error('Unhandled error reported');
+
+    return Response.json({ success: false, error: 'Internal error' }, { status: 500 });
+  }
+}
+
+@UseFilters(ReportingFilter)
+@Controller('/users')
+class UserController extends BaseController { /* ... */ }
+```
+
+Constructor injection needs a class decorator — `@Service()` is the conventional one — because that is what makes TypeScript emit the parameter types. A dependency that cannot be resolved fails the application at startup, naming the filter, rather than at the first error it was supposed to handle. Extending `BaseService` additionally gives `this.logger` and `this.config`; a filter passed as an INSTANCE gets those too, but nothing injected through its constructor.
 
 ### On a single route
 

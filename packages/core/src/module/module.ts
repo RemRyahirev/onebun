@@ -4,6 +4,7 @@ import {
   Layer,
 } from 'effect';
 
+import type { ExceptionFilter } from '../exception-filters/exception-filters';
 import type { Guard } from '../http-guards/http-guards';
 import type { ModuleInstance } from '../types';
 import type { Interceptor, ResolvedInterceptor } from '../types';
@@ -311,6 +312,12 @@ export class OneBunModule implements ModuleInstance {
    * A Set keyed by identity, so a class registered at several sites is initialized once.
    */
   private readonly pipelineInstances = new Set<object>();
+
+  /**
+   * One resolved exception filter per class, for this module. Same rule as interceptors: the
+   * filter is shared by every route that names the class.
+   */
+  private readonly filterInstances = new Map<Function, ExceptionFilter>();
 
   /** Guard classes already reported as carrying a lifecycle hook that cannot run. */
   private readonly guardHookReported = new Set<Function>();
@@ -1124,6 +1131,78 @@ export class OneBunModule implements ModuleInstance {
       this.interceptorInstances.set(cls, bound);
 
       return bound;
+    });
+  }
+
+  /**
+   * Resolve exception filter classes into instances with dependency injection, once.
+   *
+   * Filters were the one element of the documented pipeline with no DI path at all: the types
+   * accepted instances only, so a class was a compile error, and an instance was merged into the
+   * route metadata untouched — `this.logger`, `this.config` and every injected service were
+   * `undefined` inside `catch()`. That is the one place in an application that sees every
+   * unhandled error, and it was the one place that could not reach a service to report it to.
+   *
+   * Mirrors `resolveInterceptors`: one instance per class per module, an already-constructed
+   * instance passed through (and initialized if it extends `BaseService`, as `resolveGuards`
+   * does), and an unresolvable dependency failing the application at startup.
+   *
+   * @see docs:api/exception-filters.md
+   */
+  resolveFilters(filters: (Function | ExceptionFilter)[]): ExceptionFilter[] {
+    return filters.map((filter) => {
+      if (typeof filter !== 'function') {
+        // Already an instance — the caller owns its lifetime. Initialize it if it can be, so a
+        // filter written as `new MyFilter()` still gets this.logger and this.config.
+        if (filter instanceof BaseService) {
+          filter.initializeService(this.logger, this.config, this.scope);
+        }
+
+        return filter;
+      }
+
+      const cached = this.filterInstances.get(filter);
+      if (cached) {
+        return cached;
+      }
+
+      const paramTypes = getConstructorParamTypes(filter);
+      const deps: unknown[] = [];
+
+      if (paramTypes && paramTypes.length > 0) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
+          const dep = this.resolveDependencyByType(paramType, filter, i);
+          if (dep) {
+            deps.push(dep);
+          } else if (isOptionalParam(filter, i)) {
+            deps.push(undefined);
+          } else {
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(filter.name, paramType.name, 'filter', suggestions);
+          }
+        }
+      }
+
+      const filterConstructor = filter as new (...args: unknown[]) => ExceptionFilter;
+
+      // Ambient init context, so a filter extending BaseService has logger/config after super()
+      BaseService.setInitContext(this.logger, this.config, this.scope);
+      let instance: ExceptionFilter;
+      try {
+        instance = new filterConstructor(...deps);
+      } finally {
+        BaseService.clearInitContext();
+      }
+
+      if (instance instanceof BaseService) {
+        instance.initializeService(this.logger, this.config, this.scope);
+      }
+
+      this.pipelineInstances.add(instance);
+      this.filterInstances.set(filter, instance);
+
+      return instance;
     });
   }
 

@@ -1221,7 +1221,7 @@ export function UseGuards(...guards: (Function | Guard)[]): any {
  * @param target - Controller class (constructor)
  * @returns Array of exception filter instances
  */
-export function getControllerFilters(target: Function): ExceptionFilter[] {
+export function getControllerFilters(target: Function): (Function | ExceptionFilter)[] {
   return collectInheritedClassMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target);
 }
 
@@ -1253,13 +1253,13 @@ export function getControllerFilters(target: Function): ExceptionFilter[] {
  * ```
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function UseFilters(...filters: ExceptionFilter[]): any {
+export function UseFilters(...filters: (Function | ExceptionFilter)[]): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return function useFiltersDecorator(...args: any[]): any {
     // ---- Class decorator: target is a constructor function ----
     if (args.length === 1 && typeof args[0] === 'function') {
       const target = args[0] as Function;
-      const existing: ExceptionFilter[] =
+      const existing: (Function | ExceptionFilter)[] =
         Reflect.getMetadata(CONTROLLER_EXCEPTION_FILTERS_METADATA, target) || [];
       Reflect.defineMetadata(
         CONTROLLER_EXCEPTION_FILTERS_METADATA,

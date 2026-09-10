@@ -36,6 +36,8 @@ import {
   type,
   UNHANDLED_ERROR_MESSAGE,
   UseFilters,
+  BaseService,
+  Service,
 } from '@onebun/core';
 import { LoggerService, type Logger } from '@onebun/logger';
 import { ValidationError } from '@onebun/requests';
@@ -344,6 +346,41 @@ describe('docs/api/exception-filters.md', () => {
     }
   }
 
+  // From "With dependency injection": the CLASS form, built from the owning module's scope.
+  const reportedErrors: string[] = [];
+
+  @Service()
+  class ErrorReporter extends BaseService {
+    report(error: unknown): void {
+      reportedErrors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  @Service()
+  class ReportingFilter extends BaseService {
+    constructor(private readonly reporter: ErrorReporter) {
+      super();
+    }
+
+    catch(error: unknown): Response {
+      this.reporter.report(error);
+
+      return Response.json(
+        { success: false, error: 'Internal error', hasLogger: this.logger !== undefined },
+        { status: HttpStatusCode.INTERNAL_SERVER_ERROR },
+      );
+    }
+  }
+
+  @UseFilters(ReportingFilter)
+  @Controller('/di-filter')
+  class DiFilterController extends BaseController {
+    @Get('/boom')
+    boom(): never {
+      throw new Error('report me');
+    }
+  }
+
   @Module({
     controllers: [
       DefaultsController,
@@ -354,7 +391,9 @@ describe('docs/api/exception-filters.md', () => {
       RequestInfoController,
       AuditController,
       AuditRethrowController,
+      DiFilterController,
     ],
+    providers: [ErrorReporter],
   })
   class FiltersModule {}
 
@@ -535,6 +574,23 @@ describe('docs/api/exception-filters.md', () => {
 
     expect(elsewhere.status).toBe(HttpStatusCode.UNPROCESSABLE_ENTITY);
     expect(elsewhereBody.error).toBe('bad payload');
+  });
+
+  // --------------------------------------------------------------------------
+  // With dependency injection
+  // --------------------------------------------------------------------------
+
+  /**
+   * @source docs:api/exception-filters.md#with-dependency-injection
+   */
+  it('a filter class registered by class gets its injected service, logger and config', async () => {
+    const before = reportedErrors.length;
+    const response = await fetch(`${base}/di-filter/boom`);
+    const body = await response.json() as { hasLogger: boolean };
+
+    expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+    expect(reportedErrors.slice(before)).toEqual(['report me']);
+    expect(body.hasLogger).toBe(true);
   });
 
   // --------------------------------------------------------------------------
