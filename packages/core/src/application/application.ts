@@ -116,6 +116,7 @@ import {
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
 
+import { runMiddlewareChain } from './middleware-chain';
 import {
   type QueueEnablementDecision,
   QUEUE_DISABLED_WITH_ADAPTER_WARNING,
@@ -1495,29 +1496,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     return await interceptedHandler();
                   };
 
-                  const next = async (index: number): Promise<Response> => {
-                    if (index >= routeMeta.middleware!.length) {
-                      return await guardedHandler();
-                    }
-
-                    const middleware = routeMeta.middleware![index];
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    const mwName = (middleware as any)._middlewareName
-                  || middleware.name
-                  || `middleware[${index}]`;
-
-                    if (profiler) {
-                      const mwMark = profiler.start('middleware', mwName);
-                      const result = await middleware(req, () => next(index + 1));
-                      profiler.end(mwMark);
-
-                      return result;
-                    }
-
-                    return await middleware(req, () => next(index + 1));
-                  };
-
-                  response = await next(0);
+                  response = await runMiddlewareChain(
+                    routeMeta.middleware!,
+                    req,
+                    guardedHandler,
+                    profiler,
+                  );
                 } else {
                 // No middleware — run guards inline (no extra closure)
                   if (routeMeta.guards && routeMeta.guards.length > 0) {
@@ -2191,62 +2175,83 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             }
           }
 
-          // Static file serving (GET/HEAD only)
-          if (staticRootResolved && (req.method === 'GET' || req.method === 'HEAD')) {
-            const requestPath = normalizePath(new URL(req.url).pathname);
-            const prefix = staticPathPrefix ?? '/';
-            const hasPrefix = prefix !== '' && prefix !== '/';
-            if (hasPrefix && !requestPath.startsWith(prefix)) {
-              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-            }
-            const relativePath = hasPrefix ? requestPath.slice(prefix.length) || '/' : requestPath;
-            const resolvedPath = resolvePathUnderRoot(staticRootResolved, relativePath);
-            if (resolvedPath === null) {
-              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-            }
+          // Everything the routes table did not match — a static file, or nothing at all —
+          // now travels the SAME global middleware chain a controller route does. These
+          // responses used to be bare `new Response(...)`: `security: true` put its headers on
+          // controller routes and not on the SPA they serve, and `rateLimit` bounded only the
+          // paths that happened to match a controller, so hammering nonexistent ones was free.
+          //
+          // DECIDED, and it changes what `max` means: an unmatched path and a static asset both
+          // consume rate-limit budget now. One rule for every response the application emits is
+          // worth more than a cheaper 404, and a limit that only counted routed paths did not
+          // bound request volume at all. Size `max` for the assets a page pulls.
+          //
+          // The preflight short-circuit and the WebSocket upgrade above stay OUTSIDE the chain:
+          // the first answers with CORS alone by design, and the second returns `undefined` to
+          // hand the socket to Bun, which is not a Response the chain could carry.
+          const fallbackRequest = Object.assign(req, {
+            params: {},
+            cookies: new Map<string, string>(),
+          }) as unknown as OneBunRequest;
 
-            const cache = staticCacheTtlMs > 0 ? staticExistsCache : null;
-            const cacheKey = resolvedPath;
-            if (cache) {
-              const cached = await cache.get(cacheKey);
-              if (cached === true) {
-                return new Response(Bun.file(resolvedPath));
-              }
-              if (cached === false) {
-                if (staticFallbackFile) {
-                  const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
-                  if (fallbackResolved !== null) {
-                    return new Response(Bun.file(fallbackResolved));
-                  }
-                }
-
+          return await runMiddlewareChain(globalMiddleware, fallbackRequest, async () => {
+            // Static file serving (GET/HEAD only)
+            if (staticRootResolved && (req.method === 'GET' || req.method === 'HEAD')) {
+              const requestPath = normalizePath(new URL(req.url).pathname);
+              const prefix = staticPathPrefix ?? '/';
+              const hasPrefix = prefix !== '' && prefix !== '/';
+              if (hasPrefix && !requestPath.startsWith(prefix)) {
                 return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
               }
-            }
+              const relativePath = hasPrefix ? requestPath.slice(prefix.length) || '/' : requestPath;
+              const resolvedPath = resolvePathUnderRoot(staticRootResolved, relativePath);
+              if (resolvedPath === null) {
+                return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+              }
 
-            const file = Bun.file(resolvedPath);
-            const exists = await file.exists();
-            if (cache && staticCacheTtlMs > 0) {
-              await cache.set(cacheKey, exists, staticCacheTtlMs);
-            }
-            if (exists) {
-              return new Response(file);
-            }
-            if (staticFallbackFile) {
-              const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
-              if (fallbackResolved !== null) {
-                const fallbackFile = Bun.file(fallbackResolved);
-                if (await fallbackFile.exists()) {
-                  return new Response(fallbackFile);
+              const cache = staticCacheTtlMs > 0 ? staticExistsCache : null;
+              const cacheKey = resolvedPath;
+              if (cache) {
+                const cached = await cache.get(cacheKey);
+                if (cached === true) {
+                  return new Response(Bun.file(resolvedPath));
+                }
+                if (cached === false) {
+                  if (staticFallbackFile) {
+                    const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+                    if (fallbackResolved !== null) {
+                      return new Response(Bun.file(fallbackResolved));
+                    }
+                  }
+
+                  return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
                 }
               }
+
+              const file = Bun.file(resolvedPath);
+              const exists = await file.exists();
+              if (cache && staticCacheTtlMs > 0) {
+                await cache.set(cacheKey, exists, staticCacheTtlMs);
+              }
+              if (exists) {
+                return new Response(file);
+              }
+              if (staticFallbackFile) {
+                const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+                if (fallbackResolved !== null) {
+                  const fallbackFile = Bun.file(fallbackResolved);
+                  if (await fallbackFile.exists()) {
+                    return new Response(fallbackFile);
+                  }
+                }
+              }
+
+              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
             }
 
+            // 404 for everything not matched by routes
             return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-          }
-
-          // 404 for everything not matched by routes
-          return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+          });
         },
       });
 

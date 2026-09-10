@@ -291,6 +291,13 @@ await app.start();
 // GET /api/*, /docs, /metrics, /ws handled by framework; GET /, /dashboard, etc. serve dist/ or index.html
 ```
 
+**Static responses go through the global middleware chain.** A served file carries the same
+`security` headers a controller route does — which is the reason to serve a SPA from the API origin
+at all — and it consumes `rateLimit` budget like any other request. Size `max` for the number of
+assets a page pulls, or put the assets behind a CDN. Through 0.6.0 static responses and unmatched
+paths bypassed the chain entirely: no security headers, and rate limiting bounded only the paths
+that happened to match a controller.
+
 **Example: static under a path prefix**
 
 ```typescript

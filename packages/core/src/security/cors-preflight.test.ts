@@ -115,10 +115,13 @@ describe('CORS preflight before routing', () => {
         const response = await module.inject('OPTIONS', '/api/items', { headers: { 'Origin': ORIGIN } });
 
         expect(response.status).toBe(NOT_FOUND);
-        // And a BARE 404. Without the gate the short-circuit would still hand this to the CORS
-        // middleware, which would attach the grant to the 404 on its way out — the same status
-        // with a different meaning, which is why the status alone does not pin this.
-        expect(response.headers.get('access-control-allow-origin')).toBeNull();
+        // A 404, and NOT a preflight answer: the short-circuit did not fire, so none of the
+        // preflight-only headers are here. The grant header alone no longer pins that — since
+        // the fallback runs the global chain, an ordinary cross-origin 404 carries it exactly as
+        // a routed response does. `access-control-allow-methods` is set by the preflight branch
+        // only, so it is what tells the two apart.
+        expect(response.headers.get('access-control-allow-methods')).toBeNull();
+        expect(response.headers.get('access-control-max-age')).toBeNull();
       },
     );
   });
@@ -269,11 +272,13 @@ describe('CORS preflight interactions', () => {
       async (module) => {
         const response = await module.inject('OPTIONS', '/api/items', { headers: preflightHeaders() });
 
+        // `preflightContinue` means a downstream handler produces the preflight response, and
+        // here the downstream handler is the fallback: a 404, decorated by the CORS middleware in
+        // the global chain on its way out. The short-circuit would have answered 204 instead, so
+        // the status is what pins the guard — the decoration no longer distinguishes them, since
+        // every fallback response travels that chain now.
         expect(response.status).toBe(NOT_FOUND);
-        // Untouched, not "handled differently": without the guard the short-circuit would run
-        // CORS, which under `preflightContinue` calls next(), gets this 404 and decorates it.
-        // Same status, different response — so the headers are what pin the guard.
-        expect(response.headers.get('access-control-allow-origin')).toBeNull();
+        expect(response.headers.get('access-control-allow-origin')).toBe(ORIGIN);
       },
     );
   });

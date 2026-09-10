@@ -29,6 +29,14 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
+**What the chain covers:** every response the application produces — controller routes, static
+files, and unmatched paths answered with a 404. A request that matches nothing consumes rate-limit
+budget, so `max` bounds request volume rather than volume on paths that happen to exist. Through
+0.6.0 the chain was merged into per-route handlers only, so a served SPA carried no CSP and an
+attacker hammering nonexistent paths was unmetered. Two things stay outside it on purpose: the CORS
+preflight short-circuit, which answers with CORS headers alone and must not be seen by rate limiting
+or auth, and a WebSocket upgrade, which hands the socket to Bun rather than producing a response.
+
 **CORS preflight:** answered BEFORE routing, so no `@Options()` route is needed on any path a
 browser preflights. The short-circuit lives at the top of the `Bun.serve` `fetch` fallback, ahead of
 the WebSocket/Socket.IO block — `isSocketIoPath` is method-agnostic, so a cross-origin
