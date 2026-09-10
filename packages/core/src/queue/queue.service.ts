@@ -418,10 +418,12 @@ export class QueueService {
       // Resolution happens HERE, at registration, so a guard whose constructor dependency
       // cannot be resolved fails the application at STARTUP with DependencyResolutionError
       // naming it — rather than throwing once per delivered message and dropping each one.
-      const declaredGuards = [
+      // Deduplicated by identity, the same rule the other two transports use: a guard named on
+      // both the class and the method runs once per message, not twice.
+      const declaredGuards = [...new Set([
         ...classGuards,
         ...getMessageGuards(serviceClass, sub.propertyKey),
-      ] as Array<MessageGuard | MessageGuardConstructor>;
+      ])] as Array<MessageGuard | MessageGuardConstructor>;
       const guards = declaredGuards.length > 0 && guardBinding
         ? (guardBinding.resolve(declaredGuards as unknown as (Function | Guard)[]) as
             unknown as Array<MessageGuard | MessageGuardConstructor>)

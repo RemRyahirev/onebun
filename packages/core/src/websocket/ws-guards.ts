@@ -232,6 +232,13 @@ export class WsAllGuards implements WsGuard {
   constructor(private guards: WsGuard[]) {}
 
   async canActivate(context: WsExecutionContext): Promise<boolean> {
+    // Narrowed before the children see it, like every leaf guard in this file — a composite used
+    // to pass another transport's context straight down, where a hand-written child throws
+    // instead of denying.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     for (const guard of this.guards) {
       const result = await guard.canActivate(context);
       if (!result) {
@@ -260,6 +267,11 @@ export class WsAnyGuard implements WsGuard {
   constructor(private guards: WsGuard[]) {}
 
   async canActivate(context: WsExecutionContext): Promise<boolean> {
+    // See WsAllGuards: the composite narrows, so its children never see another transport.
+    if (!isWsContext(context)) {
+      return false;
+    }
+
     for (const guard of this.guards) {
       const result = await guard.canActivate(context);
       if (result) {

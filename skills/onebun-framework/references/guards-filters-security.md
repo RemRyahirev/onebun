@@ -96,10 +96,10 @@ class AdminController extends BaseController {
 
 The same `@UseGuards` works on a `@WebSocketGateway` and on a queue consumer, and merges with the
 transport-specific `@UseWsGuards` / `@UseMessageGuards` on the same handler — shared `@UseGuards`
-first. **WebSocket is the only transport that deduplicates a guard merge.** On HTTP and on queue
-every merge is a plain concat — controller+route, class+handler, `@UseGuards` + `@UseMessageGuards` —
-so a guard named twice anywhere runs twice: harmless for a pure check, doubled cost and doubled side
-effects for anything that logs, counts or calls out.
+first. **Every guard merge deduplicates by identity**, on all three transports: controller+route,
+class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once.
+Through 0.6.0 only WebSocket did this and the other two concatenated, so a guard named at two levels
+ran twice — doubled cost and doubled side effects for anything that logs, counts or calls out.
 
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved

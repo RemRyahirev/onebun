@@ -241,6 +241,15 @@ export class MessageAllGuards implements MessageGuard {
   }
 
   async canActivate(context: MessageExecutionContext): Promise<boolean> {
+    // Narrowed before the children see it, like every leaf guard in this file. A composite used
+    // to hand whatever context it was given straight down: on the wrong transport its built-in
+    // children denied by accident, and a hand-written child threw a TypeError inside
+    // canActivate — which on HTTP reaches the exception filter as a 500, a fail-open shape for
+    // something whose job is to fail closed.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     for (const guard of this.guards) {
       const result = await guard.canActivate(context);
       if (!result) {
@@ -291,6 +300,11 @@ export class MessageAnyGuard implements MessageGuard {
   }
 
   async canActivate(context: MessageExecutionContext): Promise<boolean> {
+    // See MessageAllGuards: the composite narrows, so its children never see another transport.
+    if (!isQueueContext(context)) {
+      return false;
+    }
+
     for (const guard of this.guards) {
       const result = await guard.canActivate(context);
       if (result) {

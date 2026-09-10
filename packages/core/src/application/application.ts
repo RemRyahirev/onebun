@@ -1853,7 +1853,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
           const routeGuards = route.guards ?? [];
-          const mergedGuardClasses = [...ctrlGuards, ...routeGuards];
+          // Deduplicated by identity, as WebSocket already did. A guard named on both the
+          // controller and one of its routes used to run twice per request: doubled database or
+          // cache work, doubled denial lines in the log, and a decision that is only idempotent
+          // if the guard happens to be.
+          const mergedGuardClasses = [...new Set([...ctrlGuards, ...routeGuards])];
           const mergedGuards = mergedGuardClasses.length > 0
             ? (ownerModule.resolveGuards?.(mergedGuardClasses) ?? mergedGuardClasses)
             : [];

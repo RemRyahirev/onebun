@@ -228,9 +228,47 @@ describe('queue-guards', () => {
       const result = await guard.canActivate(context);
       expect(result).toBe(true);
     });
+
+    // Every leaf guard narrows to its transport first; the composites did not, so a child that
+    // was not written defensively threw inside canActivate instead of denying — a fail-open
+    // shape for something whose job is to fail closed.
+    it('should deny a context from another transport instead of handing it to a child', async () => {
+      let childSaw = false;
+      const handWritten = {
+        canActivate(context: MessageExecutionContext): boolean {
+          childSaw = true;
+
+          // A child written against the queue context: on an HTTP context this throws.
+          return context.getMessage().pattern.length > 0;
+        },
+      };
+      const guard = new MessageAllGuards([handWritten as never]);
+
+      const result = await guard.canActivate({ getType: () => 'http' } as never);
+
+      expect(result).toBe(false);
+      expect(childSaw).toBe(false);
+    });
   });
 
   describe('MessageAnyGuard', () => {
+    it('should deny a context from another transport instead of handing it to a child', async () => {
+      let childSaw = false;
+      const handWritten = {
+        canActivate(): boolean {
+          childSaw = true;
+
+          return true;
+        },
+      };
+      const guard = new MessageAnyGuard([handWritten as never]);
+
+      const result = await guard.canActivate({ getType: () => 'http' } as never);
+
+      expect(result).toBe(false);
+      expect(childSaw).toBe(false);
+    });
+
     it('should pass when any guard passes', async () => {
       const guard = new MessageAnyGuard([MessageAuthGuard, MessageTraceGuard]);
       const context = createContext({ authorization: 'Bearer token' }); // Only auth, no trace

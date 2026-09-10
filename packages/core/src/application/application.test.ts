@@ -5067,6 +5067,50 @@ describe('OneBunApplication', () => {
     });
   });
 
+  describe('guard merging', () => {
+    // Controller-level and route-level lists used to be concatenated, so a guard named on both
+    // ran twice per request: doubled database or cache work, doubled denial lines in the log,
+    // and a decision that is only idempotent if the guard happens to be. WebSocket already
+    // deduplicated; now all three transports do.
+    test('should run a guard named at both controller and route level once per request', async () => {
+      let invocations = 0;
+
+      @Service()
+      class CountingGuard extends BaseService {
+        canActivate(): boolean {
+          invocations += 1;
+
+          return true;
+        }
+      }
+
+      @UseGuards(CountingGuard)
+      @Controller('/deduped')
+      class DedupedController extends BaseController {
+        @UseGuards(CountingGuard)
+        @Get('/')
+        index() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [DedupedController] })
+      class DedupedModule {}
+
+      const app = createTestApp(DedupedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/deduped`);
+
+        expect(response.status).toBe(200);
+        expect(invocations).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
   describe('interceptors see handler errors', () => {
     // Filters used to be applied inside the two handler arms, below the interceptor chain, so by
     // the time next() returned the throw was already a Response and `try { await next() } catch`

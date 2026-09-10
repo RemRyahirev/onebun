@@ -495,10 +495,12 @@ export function getMessageGuards(
   const messageGuards: Array<MessageGuard | MessageGuardConstructor> =
     getMetadata(QUEUE_METADATA.GUARDS, target, propertyKey) || [];
 
-  return [
+  // Deduplicated by identity, like every other guard merge: a guard listed under both
+  // `@UseGuards` and `@UseMessageGuards` on one handler runs once per message, not twice.
+  return [...new Set([
     ...(shared as unknown as Array<MessageGuard | MessageGuardConstructor>),
     ...messageGuards,
-  ];
+  ])];
 }
 
 /**

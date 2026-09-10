@@ -372,9 +372,9 @@ chain, and failing open would be a silent authorization bypass).
 
 `@UseMessageGuards` still exists and still works — method-level and queue-only, so the type system checks
 the context for you. `getMessageGuards()` merges it with the shared `@UseGuards` list, shared first.
-**The merge does not deduplicate**: a guard listed under both decorators on the same consumer runs
-**twice per message** (on WebSocket the equivalent merge *is* deduplicated — the queue path is the
-exception). List each guard under one decorator only.
+**The merge deduplicates by identity**: a guard listed under both decorators on the same consumer
+runs once per message. Through 0.6.0 it ran twice — WebSocket was the only transport that dropped
+duplicates.
 
 Built-in message guards: `MessageAuthGuard`, `MessageServiceGuard`, `MessageHeaderGuard`,
 `MessageTraceGuard`, `MessageAllGuards`, `MessageAnyGuard`. The four leaf guards — and anything from
