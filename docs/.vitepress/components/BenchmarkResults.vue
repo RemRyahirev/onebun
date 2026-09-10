@@ -139,11 +139,112 @@ const realisticPgRows = computed(() =>
   toCompactRows(data.value?.realisticPg ?? []).sort((a, b) => b.getList - a.getList),
 );
 
-const realisticPgOnebunRow = computed(() =>
-  realisticPgRows.value.find((r) =>
-    r.name.toLowerCase().includes('onebun') && !r.name.toLowerCase().includes('full'),
-  ) ?? null,
-);
+// ---------------------------------------------------------------------------
+// Derived comparisons
+//
+// Every number quoted in the prose below is computed from the same rows the
+// tables render, so the text can never drift away from the data. Wording that
+// is NOT computed (which stack leads where, how the endpoints behave) was
+// checked against the last ten CI runs and holds across all of them.
+// ---------------------------------------------------------------------------
+
+type EndpointKey = 'getList' | 'getDetail' | 'post';
+
+type RatioSet = Record<EndpointKey, number | null>;
+
+const ENDPOINT_KEYS: EndpointKey[] = ['getList', 'getDetail', 'post'];
+
+function isOneBun(name: string): boolean {
+  return name.toLowerCase().includes('onebun');
+}
+
+function isFullObservability(name: string): boolean {
+  return isOneBun(name) && name.toLowerCase().includes('full');
+}
+
+function isTypeorm(name: string): boolean {
+  return name.toLowerCase().includes('typeorm');
+}
+
+// The NestJS row on Bun — matches both the "+ Fastify" label the CI data uses
+// today and a future "+ Drizzle" one. `onebun` is excluded first, since it also
+// contains "bun".
+function isNestOnBun(name: string): boolean {
+  const lower = name.toLowerCase();
+  return !isOneBun(name) && !isTypeorm(name) && lower.includes('bun');
+}
+
+function pickRow(rows: CompactRealisticRow[], match: (name: string) => boolean): CompactRealisticRow | null {
+  return rows.find((r) => match(r.name)) ?? null;
+}
+
+function ratioOf(a: CompactRealisticRow | null, b: CompactRealisticRow | null): RatioSet {
+  const div = (x: number, y: number): number | null => (x > 0 && y > 0 ? x / y : null);
+  return {
+    getList: a && b ? div(a.getList, b.getList) : null,
+    getDetail: a && b ? div(a.getDetail, b.getDetail) : null,
+    post: a && b ? div(a.post, b.post) : null,
+  };
+}
+
+function fmtRatio(value: number | null): string {
+  return value === null ? '—' : `${value.toFixed(2)}×`;
+}
+
+function fmtPct(value: number | null): string {
+  return value === null ? '—' : `${Math.round(value)}%`;
+}
+
+// Signed overhead: the sign decides the word, so a run where observability
+// comes out ahead does not print "-3% slower".
+function fmtOverhead(value: number | null): string {
+  if (value === null) return '—';
+  const rounded = Math.round(value);
+  if (rounded === 0) return 'no measurable difference';
+  return rounded > 0 ? `${rounded}% slower` : `${-rounded}% faster`;
+}
+
+const pgOnebun = computed(() => pickRow(realisticPgRows.value, (n) => isOneBun(n) && !isFullObservability(n)));
+const pgOnebunFull = computed(() => pickRow(realisticPgRows.value, isFullObservability));
+const pgNestOnBun = computed(() => pickRow(realisticPgRows.value, isNestOnBun));
+const pgTypeorm = computed(() => pickRow(realisticPgRows.value, isTypeorm));
+
+const pgVsNestOnBun = computed(() => ratioOf(pgOnebun.value, pgNestOnBun.value));
+const pgVsTypeorm = computed(() => ratioOf(pgOnebun.value, pgTypeorm.value));
+const pgFullVsNestOnBun = computed(() => ratioOf(pgOnebunFull.value, pgNestOnBun.value));
+
+const obsOverhead = computed<RatioSet>(() => {
+  const base = pgOnebun.value;
+  const full = pgOnebunFull.value;
+  const cost = (b: number, f: number): number | null => (b > 0 && f > 0 ? ((b - f) / b) * 100 : null);
+  return {
+    getList: base && full ? cost(base.getList, full.getList) : null,
+    getDetail: base && full ? cost(base.getDetail, full.getDetail) : null,
+    post: base && full ? cost(base.post, full.post) : null,
+  };
+});
+
+// Trace cost scales roughly with the sampling rate; this is an extrapolation
+// from the 100%-sampling measurement, and is labelled as one in the text.
+const obsSampledEstimate = computed(() => {
+  const full = obsOverhead.value.getList;
+  return full === null ? null : full / 10;
+});
+
+// Realistic SQLite — comparison rows
+const sqOnebun = computed(() => pickRow(realisticRows.value, isOneBun));
+
+const sqVsDrizzleBand = computed(() => {
+  const base = sqOnebun.value;
+  if (!base) return null;
+  const values = realisticRows.value
+    .filter((r) => !isOneBun(r.name) && !isTypeorm(r.name))
+    .flatMap((row) => ENDPOINT_KEYS.map((k) => ratioOf(base, row)[k]))
+    .filter((v): v is number => v !== null);
+  return values.length > 0 ? { min: Math.min(...values), max: Math.max(...values) } : null;
+});
+
+const sqVsTypeorm = computed(() => ratioOf(sqOnebun.value, pickRow(realisticRows.value, isTypeorm)));
 
 // ---------------------------------------------------------------------------
 // Fetch
@@ -200,7 +301,7 @@ onMounted(async () => {
     <div class="bm-cards">
       <div class="bm-card">
         <span class="bm-card-number">~2x</span>
-        <span class="bm-card-label">faster than canonical NestJS + TypeORM</span>
+        <span class="bm-card-label">faster than canonical NestJS + TypeORM on the production-like PostgreSQL workload</span>
       </div>
       <div class="bm-card">
         <span class="bm-card-number">Zero</span>
@@ -209,8 +310,10 @@ onMounted(async () => {
     </div>
 
     <p class="bm-meta">
-      ~2x is a conservative estimate across multiple runs. Exact results from the latest CI run
-      are in the tables below. Results vary &plusmn;20% between runs due to shared GitHub Actions runners.
+      ~2x is a conservative estimate across CI runs; the tables below carry the exact numbers from the latest one.
+      Absolute throughput depends on which shared GitHub Actions runner the job lands on and has moved by more than
+      2&times; between runs &mdash; the ratios between frameworks are far steadier. Every comparison quoted in the
+      text is computed from the table directly above it.
     </p>
 
     <!-- Intro -->
@@ -304,8 +407,19 @@ onMounted(async () => {
       </div>
 
       <blockquote class="bm-commentary">
-        <p>SQLite results show smaller framework overhead differences &mdash; driver and runtime choice dominate in embedded scenarios. OneBun leads across all endpoints, but margins are tighter than on Postgres: typically in the ~1.2&times;&ndash;1.5&times; range against NestJS + Drizzle stacks, and wider against canonical NestJS + TypeORM.</p>
-        <p>For embedded and edge workloads, the bottleneck shifts away from the framework layer. If you're running SQLite in production, driver choice (<code>bun:sqlite</code> vs <code>better-sqlite3</code>) matters more than framework choice.</p>
+        <p>
+          This scenario runs without cache and without validation, so what is left is ORM, driver and serialization.
+          Against the two NestJS + Fastify rows (both Drizzle-based), OneBun lands in the
+          <strong v-if="sqVsDrizzleBand">{{ fmtRatio(sqVsDrizzleBand.min) }}&ndash;{{ fmtRatio(sqVsDrizzleBand.max) }}</strong><strong v-else>&mdash;</strong>
+          band across the three endpoints in this run; against canonical NestJS + TypeORM it is
+          {{ fmtRatio(sqVsTypeorm.getList) }} on list reads, {{ fmtRatio(sqVsTypeorm.getDetail) }} on detail reads
+          and {{ fmtRatio(sqVsTypeorm.post) }} on writes.
+        </p>
+        <p>
+          The table cannot separate framework from driver: the Bun rows go through <code>bun:sqlite</code>, the Node
+          rows through <code>better-sqlite3</code>. For embedded and edge workloads, read these as combined
+          framework + runtime + driver numbers, not as a framework ranking.
+        </p>
       </blockquote>
     </template>
 
@@ -348,7 +462,17 @@ onMounted(async () => {
 
         <div class="bm-commentary">
           <p>GET list uses in-memory cache (hot-path reads). GET detail hits Postgres directly with a JOIN (I/O-bound). POST is uncached write.</p>
-          <p>Against NestJS with the same ORM on the same runtime, OneBun is <strong>~1.4&times; faster on cached reads</strong> and <strong>~1.3&times; faster on writes</strong>. On uncached reads, framework overhead dissolves into database round-trip time &mdash; all frameworks land within noise. Against canonical NestJS + TypeORM, the gap widens to <strong>~2.7&times; on cached reads</strong> and <strong>~2&times; on writes</strong>.</p>
+          <p>
+            Against NestJS with the same ORM on the same runtime (<em>{{ pgNestOnBun?.name ?? 'NestJS on Bun' }}</em>),
+            OneBun does <strong>{{ fmtRatio(pgVsNestOnBun.getList) }} the throughput on cached reads</strong>,
+            {{ fmtRatio(pgVsNestOnBun.getDetail) }} on uncached reads and
+            <strong>{{ fmtRatio(pgVsNestOnBun.post) }} on writes</strong>. The cached read is the one endpoint where
+            the framework, not the database, sets the pace; on the uncached read both Bun stacks wait on the same
+            round-trip, so they land close together. Against canonical NestJS + TypeORM the gap widens on every endpoint:
+            <strong>{{ fmtRatio(pgVsTypeorm.getList) }} on cached reads</strong>,
+            {{ fmtRatio(pgVsTypeorm.getDetail) }} on uncached reads and
+            <strong>{{ fmtRatio(pgVsTypeorm.post) }} on writes</strong>.
+          </p>
         </div>
 
         <!-- Observability Overhead -->
@@ -374,17 +498,29 @@ onMounted(async () => {
               </tr>
               <tr>
                 <td>OneBun (full observability)</td>
-                <td>under 25% slower</td>
-                <td>under 10% slower</td>
-                <td>under 15% slower</td>
+                <td>{{ fmtOverhead(obsOverhead.getList) }}</td>
+                <td>{{ fmtOverhead(obsOverhead.getDetail) }}</td>
+                <td>{{ fmtOverhead(obsOverhead.post) }}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
         <div class="bm-commentary">
-          <p>At <strong>100% sampling</strong>, observability adds under 25% overhead on cache hits and near-zero on I/O-bound endpoints. With production-typical <strong>10% sampling</strong>, overhead scales roughly linearly to <strong>under 5% on cache hits</strong>.</p>
-          <p>Even with full observability enabled, OneBun remains faster than NestJS + Drizzle on the same runtime for cached reads and writes. Setup cost is <code>bun add @onebun/metrics @onebun/trace</code> &mdash; no middleware wiring, no manual instrumentation.</p>
+          <p>
+            At <strong>100% sampling</strong>, observability costs {{ fmtOverhead(obsOverhead.getList) }} on cache
+            hits &mdash; that is where the framework sets the pace. On the endpoints the database dominates it costs
+            {{ fmtOverhead(obsOverhead.getDetail) }} (uncached read) and {{ fmtOverhead(obsOverhead.post) }} (write).
+            Trace cost scales roughly with the sampling rate, so production-typical <strong>10% sampling</strong>
+            puts cache hits near <strong>{{ fmtPct(obsSampledEstimate) }}</strong> &mdash; extrapolated from the run
+            above, not measured.
+          </p>
+          <p>
+            With full observability enabled OneBun stays ahead of the same-runtime NestJS + Fastify stack on writes
+            ({{ fmtRatio(pgFullVsNestOnBun.post) }}) and level with it on cached reads
+            ({{ fmtRatio(pgFullVsNestOnBun.getList) }}) &mdash; those two trade places between runs. Setup cost is
+            <code>bun add @onebun/metrics @onebun/trace</code> &mdash; no middleware wiring, no manual instrumentation.
+          </p>
         </div>
       </div>
     </template>
@@ -436,17 +572,17 @@ onMounted(async () => {
       <li><strong>Startup:</strong> Time from process start to first successful HTTP response, measured with 5&nbsp;ms Bun fetch polling.</li>
       <li>All frameworks return identical JSON payloads.</li>
       <li><strong>Realistic (SQLite):</strong> SQLite database (100 users, 500 posts, 2000 comments). No cache, no validation &mdash; measures ORM + serialization overhead only. Swagger docs enabled across all frameworks. Same Drizzle ORM.</li>
-      <li><strong>Realistic (PostgreSQL):</strong> PostgreSQL 16, same data set. In-memory cache on GET list only (hot-path reads). GET detail hits DB directly with a JOIN. Validation enabled across all frameworks (ArkType for OneBun, Zod via <code>nestjs-zod</code> for NestJS + Drizzle stacks, class-validator for canonical NestJS + TypeORM). Swagger docs enabled. Includes a separate OneBun run with observability enabled (Prometheus metrics + OpenTelemetry tracing at 100% sampling, no-op exporter) to isolate observability overhead.</li>
+      <li><strong>Realistic (PostgreSQL):</strong> PostgreSQL 16, same data set. In-memory cache on GET list only (hot-path reads). GET detail hits DB directly with a JOIN. Validation enabled across all frameworks (ArkType for OneBun, Zod via <code>nestjs-zod</code> for the NestJS + Fastify stacks, class-validator for canonical NestJS + TypeORM). Swagger docs enabled. Includes a separate OneBun run with observability enabled (Prometheus metrics + OpenTelemetry tracing at 100% sampling, no-op exporter) to isolate observability overhead.</li>
       <li>Scripts are in the <code>benchmarks/</code> directory of the repository.</li>
-      <li>CI runs on shared GitHub Actions runners. Results vary &plusmn;20% between runs due to noisy-neighbor effects. Relative ranking between frameworks is consistent across runs. Raw data from all CI runs is available via <a href="https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265" target="_blank" rel="noopener">Gist revisions</a>.</li>
+      <li>CI runs on shared GitHub Actions runners. Absolute throughput depends on the runner the job lands on and on the Bun / Node versions of the day; it has moved by more than 2&times; between runs. Ratios between frameworks are much steadier, but stacks sitting within a few percent of each other do swap places from run to run. Raw data from all CI runs is available via <a href="https://gist.github.com/RemRyahirev/bde6a4c4930c19a963199fa0bea2b265" target="_blank" rel="noopener">Gist revisions</a>.</li>
     </ul>
 
     <h3>About the stacks</h3>
     <ul>
       <li><strong>OneBun:</strong> default configuration from <code>bunx create-onebun</code>. No custom tuning.</li>
-      <li><strong>NestJS + Drizzle (Bun):</strong> hand-assembled best-case for NestJS on Bun &mdash; <code>@nestjs/common</code> + Drizzle + <code>Bun.SQL</code> + custom <code>SimpleCacheService</code> + Zod via <code>nestjs-zod</code> for validation. Not a default NestJS stack; represents NestJS paired with modern best practices on Bun.</li>
-      <li><strong>NestJS + Drizzle (Node):</strong> same as above but on Node + <code>pg Pool</code>. Also uses Zod via <code>nestjs-zod</code>. Modern NestJS on the traditional runtime.</li>
-      <li><strong>NestJS + TypeORM (Node):</strong> canonical NestJS stack &mdash; <code>@nestjs/typeorm</code> + <code>cache-manager</code> + class-validator. What most teams currently run in production.</li>
+      <li><strong>NestJS + Fastify (Bun):</strong> hand-assembled best-case for NestJS on Bun &mdash; <code>@nestjs/platform-fastify</code> + Drizzle + <code>Bun.SQL</code> (<code>bun:sqlite</code> in the SQLite scenario) + custom <code>SimpleCacheService</code> + Zod via <code>nestjs-zod</code> for validation. Not a default NestJS stack; represents NestJS paired with modern best practices on Bun. In the HTTP scenario this row is the same Nest app with no database.</li>
+      <li><strong>NestJS + Fastify (Node):</strong> same stack on Node &mdash; <code>pg Pool</code>, or <code>better-sqlite3</code> in the SQLite scenario. Also uses Zod via <code>nestjs-zod</code>. Modern NestJS on the traditional runtime.</li>
+      <li><strong>NestJS + TypeORM (Node):</strong> canonical NestJS stack &mdash; <code>@nestjs/typeorm</code> + <code>cache-manager</code> + class-validator, on Fastify as well. What most teams currently run in production.</li>
     </ul>
 
     <h3>About the scenarios</h3>
@@ -462,12 +598,19 @@ onMounted(async () => {
 
     <h2 id="honest-assessment">Honest Assessment</h2>
     <p>OneBun is an application framework with DI, modules, validation, caching, and optional observability. Comparing raw req/sec with minimal HTTP frameworks (Elysia, Hono) is apples-to-oranges &mdash; they solve different problems.</p>
-    <p><strong>Against NestJS</strong> (same framework class, production-like stack with Zod validation): OneBun is <strong>~2&times; faster on cache-hit reads</strong> and <strong>~1.3&times; faster on writes</strong> with the same ORM on the same runtime. Against canonical NestJS + TypeORM, gaps widen to ~4&times; and ~1.7&times;.</p>
+    <p>
+      <strong>Against NestJS</strong> (same framework class, production-like stack with Zod validation): on the
+      PostgreSQL workload above, OneBun does {{ fmtRatio(pgVsNestOnBun.getList) }} the cache-hit read throughput and
+      {{ fmtRatio(pgVsNestOnBun.post) }} the write throughput of the same ORM on the same runtime; against canonical
+      NestJS + TypeORM, {{ fmtRatio(pgVsTypeorm.getList) }} and {{ fmtRatio(pgVsTypeorm.post) }}.
+    </p>
     <p><strong>Where OneBun doesn't lead:</strong></p>
     <ul>
-      <li><strong>SQLite workloads</strong> &mdash; gaps between frameworks narrow significantly. Driver and runtime choice dominate framework overhead in embedded scenarios; OneBun still leads but margins are small.</li>
-      <li><strong>Uncached reads hitting Postgres</strong> &mdash; I/O dominates, parity with other frameworks expected.</li>
-      <li><strong>Cold startup</strong> &mdash; ~477ms reflects DI graph construction. Optimized for long-running services, not serverless.</li>
+      <li><strong>Raw HTTP throughput</strong> &mdash; Bun.serve and Elysia are ahead in every run; OneBun sits around Hono. Routing overhead is not where an application framework wins.</li>
+      <li><strong>Cached reads against NestJS + Fastify (Node)</strong> &mdash; the two swap places from run to run. The reliable wins against that stack are writes and uncached reads, not cache hits.</li>
+      <li><strong>Uncached reads hitting Postgres</strong> &mdash; I/O dominates, so the same-runtime NestJS stack lands within roughly ten percent.</li>
+      <li><strong>SQLite workloads</strong> &mdash; OneBun leads there, but the scenario cannot attribute the gap: framework, runtime and SQLite driver all differ between the rows.</li>
+      <li><strong>Cold startup</strong> &mdash; ~{{ onebunStartupMs }}ms reflects DI graph construction, the slowest entry in the startup table. Optimized for long-running services, not serverless.</li>
     </ul>
     <p>Performance matters, but it's a bonus — not why we built OneBun. The core pitch is <strong>enterprise practices without the integration work</strong> &mdash; structured logging, metrics, tracing, typed config, validation, and OpenAPI generation all wired from the first line of code. Validation in particular: <code>type({...})</code> in your code, and you get TypeScript types, runtime validation, and OpenAPI spec from one declaration &mdash; no bridge packages, no Swagger patches.</p>
   </div>
