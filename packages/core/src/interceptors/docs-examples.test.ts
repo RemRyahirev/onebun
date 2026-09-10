@@ -501,10 +501,11 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
    * @source docs:api/interceptors.md#class-based
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('builds one interceptor instance per registration site and reuses it for every request', async () => {
-    // Two routes on one controller — the class-level interceptor is a registration site per
-    // route, so exactly two instances exist, both created before any request arrived.
-    expect(lifetimeConstructions).toBe(2);
+  it('builds one interceptor instance per class and reuses it for every request', async () => {
+    // Two routes on one controller and one class-level interceptor: one instance, created before
+    // any request arrived. It used to be one per registration site, so this read 2 and a counter
+    // on `this` counted per route.
+    expect(lifetimeConstructions).toBe(1);
 
     const before = lifetimeCalls.length;
     await fetch(`${base}/lifetime/a`);
@@ -513,10 +514,11 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
     await fetch(`${base}/lifetime/b`);
     const served = lifetimeCalls.slice(before);
 
-    // Still two instances after four requests: per-request construction would show four ids.
-    expect(lifetimeConstructions).toBe(2);
+    // Still one instance after four requests, and both routes were served by it: per-request
+    // construction would show four ids, per-site would show two.
+    expect(lifetimeConstructions).toBe(1);
     expect(served.length).toBe(4);
-    expect(new Set(served).size).toBe(2);
+    expect(new Set(served).size).toBe(1);
   });
 
   /**

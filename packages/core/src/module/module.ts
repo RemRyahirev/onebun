@@ -290,6 +290,16 @@ export class OneBunModule implements ModuleInstance {
   private childModules: OneBunModule[] = [];
 
   /**
+   * One resolved interceptor per class, for this module.
+   *
+   * Keyed by the constructor and holding the BOUND `intercept`, so every registration site that
+   * names the class gets the same instance and the same function. Per module rather than per
+   * process: the DI scope an interceptor resolves its dependencies from is the module's, and two
+   * applications in one process must not share one.
+   */
+  private readonly interceptorInstances = new Map<Function, ResolvedInterceptor>();
+
+  /**
    * Global modules this module constructed in the pre-pass, so the import loop can merge
    * their layers when it reaches the corresponding `imports` entry.
    */
@@ -1032,6 +1042,19 @@ export class OneBunModule implements ModuleInstance {
    */
   resolveInterceptors(classes: (Function | Interceptor)[]): ResolvedInterceptor[] {
     return classes.map((cls) => {
+      // One instance per class per module, which is what `BaseInterceptor`'s own documentation
+      // has always promised. This method is called once per REGISTRATION SITE — per route on
+      // HTTP, per handler on WebSocket, per subscription on the queue — so without the cache a
+      // class covering three routes became three instances, each route bound to its own, and any
+      // state the interceptor kept (a counter, a limiter, a cache) was silently per route.
+      // Guards deliberately do NOT share an instance; see resolveGuards.
+      if (typeof cls === 'function') {
+        const cached = this.interceptorInstances.get(cls);
+        if (cached) {
+          return cached;
+        }
+      }
+
       // If already an instance (not a constructor), bind intercept() directly
       if (typeof cls !== 'function') {
         const instance = cls;
@@ -1078,6 +1101,8 @@ export class OneBunModule implements ModuleInstance {
       }
 
       const bound = instance.intercept.bind(instance);
+
+      this.interceptorInstances.set(cls, bound);
 
       return bound;
     });

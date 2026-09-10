@@ -2815,4 +2815,48 @@ describe('OneBunModule', () => {
       expect(count()).toBe(1);
     });
   });
+  // Interceptors are resolved once per REGISTRATION SITE — per route on HTTP, per handler on
+  // WebSocket, per subscription on the queue — so the shared resolver is where "one instance per
+  // application" has to hold. Every transport reaches it through this method.
+  describe('resolveInterceptors shares one instance per class', () => {
+    test('returns the same bound function for repeated registration sites', () => {
+      let constructed = 0;
+
+      class SharedInterceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: any, next: () => any): Promise<any> {
+          return await next();
+        }
+      }
+
+      @Module({})
+      class InterceptorModule {}
+
+      const module = new OneBunModule(InterceptorModule, mockLoggerLayer);
+
+      const [first] = (module as any).resolveInterceptors([SharedInterceptor]);
+      const [second] = (module as any).resolveInterceptors([SharedInterceptor]);
+
+      expect(constructed).toBe(1);
+      expect(second).toBe(first);
+    });
+
+    test('passes an instance through without caching it', () => {
+      const first = { intercept: async (_ctx: any, next: () => any) => await next() };
+      const second = { intercept: async (_ctx: any, next: () => any) => await next() };
+
+      @Module({})
+      class InstanceInterceptorModule {}
+
+      const module = new OneBunModule(InstanceInterceptorModule, mockLoggerLayer);
+
+      const [boundFirst] = (module as any).resolveInterceptors([first]);
+      const [boundSecond] = (module as any).resolveInterceptors([second]);
+
+      expect(boundFirst).not.toBe(boundSecond);
+    });
+  });
 });

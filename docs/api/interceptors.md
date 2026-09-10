@@ -30,7 +30,7 @@ import { CacheInterceptor } from '@onebun/cache';
 2. Class implementing `Interceptor` — constructor DI works, provided the class carries a **class** decorator (`@Service()` is the conventional one; a method decorator does not count)
 3. Class extending `BaseInterceptor` — same DI, plus `this.logger` and `this.config`
 
-**Interceptor lifetime:** an interceptor class is instantiated when handlers are REGISTERED, once per registration site (a global interceptor gets its own instance per route), and the same instance serves every request. Never keep per-request state on `this` — guards are the opposite (per-invocation) and that habit does not carry over
+**Interceptor lifetime:** an interceptor class is instantiated when handlers are REGISTERED, once per class per application, and that one instance serves every route, gateway handler and subscription that names it. Through 0.6.0 it was once per registration SITE, so a class covering three routes was three instances and any state it kept was silently per route. Never keep per-request state on `this` — guards are the opposite (per-invocation) and that habit does not carry over
 
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
@@ -159,11 +159,17 @@ class AddHeaderInterceptor implements Interceptor {
 }
 ```
 
-An interceptor is instantiated when handlers are registered, never per request: one instance per
-registration site (a global interceptor gets its own instance for each route it wraps), reused by
-every request or message that reaches that handler. Never hold per-request state on `this` — keep
-it in locals inside `intercept()`. Guards are the opposite: passing the guard CLASS constructs the
-guard per invocation, so state on `this` is safe there.
+An interceptor is instantiated when handlers are registered, never per request: **one instance per
+class per application**, shared by every route, WebSocket handler and queue subscription that names
+it — so a counter, a limiter or a cache on `this` counts what you expect it to. Passing an
+*instance* instead of a class opts out: the caller owns it, and two instances of the same class stay
+two. Never hold per-request state on `this` — keep it in locals inside `intercept()`. Guards are the
+opposite: passing the guard CLASS constructs the guard per invocation, so state on `this` is safe
+there.
+
+Through 0.6.0 the instance was per registration site: a class covering three routes was constructed
+three times, each route permanently bound to its own copy, and a global interceptor got one instance
+per route in the application.
 
 ### With DI
 

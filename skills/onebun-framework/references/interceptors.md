@@ -8,7 +8,8 @@ throws at startup, the interceptor just misbehaves or never runs:
 
 1. **A class with constructor parameters MUST carry a class decorator** (`@Service()`).
    `extends BaseInterceptor` does NOT buy DI.
-2. **One instance per registration site, built at startup** — never keep per-request state on `this`.
+2. **One instance per class per application, built at startup** — shared by every route, gateway
+   handler and subscription that names the class; never keep per-request state on `this`.
 3. **On the queue side only `@Subscribe` is intercepted, and only via a CLASS-level
    `@UseInterceptors`** — `@Cron`/`@Interval`/`@Timeout` and method-level `@UseInterceptors` on a
    subscriber are ignored.
@@ -33,19 +34,18 @@ isWsContext(ctx)     // → ctx is WsExecutionContext
 isQueueContext(ctx)  // → ctx is MessageExecutionContext
 ```
 
-## Lifetime: one instance per registration site, shared by every request
+## Lifetime: one instance per class, shared by every request
 
 An interceptor class is instantiated when handlers are **registered** (application startup), once
-per registration site, and that instance serves every request or message that reaches the handler.
-A global interceptor gets a separate instance for each route it wraps. An interceptor passed as an
-**instance** (`new TimeoutInterceptor(5000)`) is not copied at all — the resolver hands it through
-untouched, so that one object serves every site the decorator is attached to. Wider sharing, same
-rule about `this`.
+per class per application, and that instance serves every request or message that reaches any
+handler it wraps — including a global interceptor across every route, and the same class used on
+HTTP, WebSocket and the queue. An interceptor passed as an **instance**
+(`new TimeoutInterceptor(5000)`) is not copied either: the resolver hands it through untouched, so
+the caller owns its lifetime and two instances of one class stay two.
 
-Measured on a two-route controller with the same interceptor registered both globally and at
-controller level: **4 instances constructed at startup, 0 more after any number of requests**; two
-hits on `/c/a` were served by one instance (its own counter read 1, then 2) and `/c/b` by a
-different one.
+Through 0.6.0 the instance was per registration SITE: a class covering three routes was constructed
+three times, each route bound to its own copy, so a counter or a limiter on `this` counted per route
+without saying so.
 
 Consequences, in order of how often they bite:
 
@@ -246,5 +246,5 @@ Interceptors wrap in onion order: global outermost → class-level → method-le
   only class level (NestJS has separate patterns)
 - `BaseInterceptor` with ambient init context (same pattern as `BaseMiddleware`) — it supplies
   `this.logger`/`this.config`, not constructor DI
-- Interceptors are singletons per registration site; NestJS scopes them with `Scope.REQUEST`, which
-  has no equivalent here
+- Interceptors are singletons per class per application; NestJS scopes them with `Scope.REQUEST`,
+  which has no equivalent here

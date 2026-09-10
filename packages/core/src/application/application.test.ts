@@ -18,7 +18,11 @@ import type {
   OnModuleDestroy,
 } from '../module/lifecycle';
 import type { QueueAdapter, Subscription } from '../queue/types';
-import type { ApplicationOptions, ModuleInstance } from '../types';
+import type {
+  ApplicationOptions,
+  Interceptor,
+  ModuleInstance,
+} from '../types';
 import type {
   MiddlewareClass,
   OneBunRequest,
@@ -5063,6 +5067,116 @@ describe('OneBunApplication', () => {
   });
 
   describe('HTTP Interceptors', () => {
+    // The BaseInterceptor JSDoc promises one instance per application, reused for every matching
+    // request. `resolveInterceptors` was called inside the per-route loop and constructed
+    // unconditionally, so a class covering three routes became three instances — each route
+    // permanently bound to its own — and any state the class kept was per route.
+    test('should construct a class interceptor once, however many routes it covers', async () => {
+      let constructed = 0;
+      let intercepted = 0;
+
+      class CountingInterceptor implements Interceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          intercepted += 1;
+
+          return await next();
+        }
+      }
+
+      @UseInterceptors(CountingInterceptor)
+      @Controller('/counted')
+      class CountedController extends BaseController {
+        @Get('/one')
+        one() {
+          return { route: 'one' };
+        }
+
+        @Get('/two')
+        two() {
+          return { route: 'two' };
+        }
+
+        @Get('/three/:id')
+        three(@Param('id') id: string) {
+          return { route: 'three', id };
+        }
+      }
+
+      @Module({ controllers: [CountedController] })
+      class CountedModule {}
+
+      const app = createTestApp(CountedModule, { port: 0 });
+      await app.start();
+
+      try {
+        expect(constructed).toBe(1);
+
+        await fetch(`http://localhost:${app.getPort()}/counted/one`);
+        await fetch(`http://localhost:${app.getPort()}/counted/two`);
+        await fetch(`http://localhost:${app.getPort()}/counted/three/42`);
+
+        // One instance means one counter: three different routes advance the same one.
+        expect(intercepted).toBe(3);
+        expect(constructed).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('should construct a global class interceptor once for the whole application', async () => {
+      let constructed = 0;
+
+      class GlobalCountingInterceptor implements Interceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          return await next();
+        }
+      }
+
+      @Controller('/first')
+      class FirstController extends BaseController {
+        @Get('/a')
+        a() {
+          return { ok: 'a' };
+        }
+
+        @Get('/b')
+        b() {
+          return { ok: 'b' };
+        }
+      }
+
+      @Controller('/second')
+      class SecondController extends BaseController {
+        @Get('/c')
+        c() {
+          return { ok: 'c' };
+        }
+      }
+
+      @Module({ controllers: [FirstController, SecondController] })
+      class GlobalInterceptorModule {}
+
+      const app = createTestApp(GlobalInterceptorModule, {
+        port: 0,
+        interceptors: [GlobalCountingInterceptor],
+      });
+      await app.start();
+
+      try {
+        expect(constructed).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+
     test('route-level interceptor wraps handler', async () => {
       const addHeaderInterceptor = createInterceptor(async (_ctx, next) => {
         const response = await next() as Response;
