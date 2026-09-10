@@ -558,14 +558,15 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
   /**
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('hides handler errors from an interceptor try/catch but filters the interceptor own throw', async () => {
+  it('shows handler errors to an interceptor try/catch and filters the interceptor own throw', async () => {
     observed.length = 0;
     const handlerFailure = await fetch(`${base}/errors/handler-throws`);
 
-    // Filters sit INSIDE the interceptor chain: by the time next() returns, the throw has
-    // already become a 418 Response, so the catch block never runs.
+    // Filters sit ABOVE the interceptor chain, so the throw reaches the catch block and only
+    // then becomes a 418 Response. It used to be the other way round, and this line read
+    // `resolved 418` — the interceptor recorded a success for a request that failed.
     expect(handlerFailure.status).toBe(HTTP_TEAPOT);
-    expect(observed).toEqual([`resolved ${HTTP_TEAPOT}`]);
+    expect(observed).toEqual(['caught handler exploded']);
 
     const interceptorFailure = await fetch(`${base}/errors/interceptor-throws`);
     const body = await interceptorFailure.json() as { success: boolean; error: string };

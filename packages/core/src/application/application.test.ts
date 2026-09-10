@@ -5067,6 +5067,195 @@ describe('OneBunApplication', () => {
     });
   });
 
+  describe('interceptors see handler errors', () => {
+    // Filters used to be applied inside the two handler arms, below the interceptor chain, so by
+    // the time next() returned the throw was already a Response and `try { await next() } catch`
+    // was dead code — on HTTP only. The same interceptor class on the queue and on WebSocket saw
+    // the throw, because those transports have no filter layer.
+    test('should let an interceptor catch a handler error and still return the filtered response', async () => {
+      const seen: string[] = [];
+
+      class ObservingInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            const result = await next();
+            seen.push(`resolved ${(result as Response).status}`);
+
+            return result;
+          } catch (error) {
+            seen.push(`caught ${(error as Error).message}`);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(ObservingInterceptor)
+      @Controller('/observed')
+      class ObservedController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('handler blew up');
+        }
+      }
+
+      @Module({ controllers: [ObservedController] })
+      class ObservedModule {}
+
+      const app = createTestApp(ObservedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/observed/boom`);
+        const body = await response.json() as { success: boolean; error: string; code: number };
+
+        expect(seen).toEqual(['caught handler blew up']);
+        // Rethrowing leaves the answer exactly as it was before the boundary moved, masking
+        // included: the default filter does not disclose a non-HttpException message.
+        expect(response.status).toBe(500);
+        expect(body.success).toBe(false);
+        expect(body.error).toBe('Internal Server Error');
+        expect(body.code).toBe(500);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // The boundary sits below the middleware chain on purpose: CorsMiddleware and its siblings
+    // set headers AFTER `await next()`, and filtering any higher would unwind past those blocks
+    // and strip them from every error response.
+    test('should keep middleware headers on a filtered error response', async () => {
+      class PassThroughInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          return await next();
+        }
+      }
+
+      @UseInterceptors(PassThroughInterceptor)
+      @Controller('/cors-error')
+      class CorsErrorController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('still needs headers');
+        }
+      }
+
+      @Module({ controllers: [CorsErrorController] })
+      class CorsErrorModule {}
+
+      const app = createTestApp(CorsErrorModule, {
+        port: 0,
+        cors: { origin: ['http://localhost:5173'] },
+      });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/cors-error/boom`, {
+          headers: { origin: 'http://localhost:5173' },
+        });
+
+        expect(response.status).toBe(500);
+        expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // Transport parity: the same shape on a queue handler, which never had a filter layer and
+    // therefore always showed the throw. The point of the test is that HTTP now matches it.
+    test('should show a queue handler error to the interceptor, as it always did', async () => {
+      const seen: string[] = [];
+
+      class QueueObservingInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            return await next();
+          } catch (error) {
+            seen.push(`caught ${(error as Error).message}`);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(QueueObservingInterceptor)
+      @Controller('/queue-observed')
+      class QueueObservedController extends BaseController {
+        @Get('/')
+        ping() {
+          return { ok: true };
+        }
+
+        @Subscribe('observed.event')
+        handle(): never {
+          throw new Error('queue handler blew up');
+        }
+      }
+
+      @Module({ controllers: [QueueObservedController] })
+      class QueueObservedModule {}
+
+      const app = createTestApp(QueueObservedModule, {
+        port: 0,
+        queue: { enabled: true, adapter: 'memory' },
+      });
+      await app.start();
+
+      try {
+        await app.getQueueService().publish('observed.event', { id: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(seen).toEqual(['caught queue handler blew up']);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // Decided rather than inherited: the boundary now also covers parameter extraction and
+    // schema validation, so an interceptor counting failures counts a 400 too.
+    test('should show a validation error to the interceptor as well', async () => {
+      const seen: string[] = [];
+
+      class ValidationObserver implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            return await next();
+          } catch (error) {
+            seen.push((error as Error).constructor.name);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(ValidationObserver)
+      @Controller('/validated')
+      class ValidatedController extends BaseController {
+        @Post('/users')
+        create(@Body(arktype({ name: 'string' })) user: { name: string }) {
+          return user;
+        }
+      }
+
+      @Module({ controllers: [ValidatedController] })
+      class ValidatedModule {}
+
+      const app = createTestApp(ValidatedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/validated/users`, {
+          method: 'POST',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 42 }),
+        });
+
+        expect(response.status).toBe(400);
+        expect(seen.length).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
   describe('exception filter DI', () => {
     // Filters were the one pipeline element with no DI path: the types accepted instances only,
     // so a class was a compile error, and an instance was merged into the route metadata

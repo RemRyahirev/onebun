@@ -1378,9 +1378,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 // Full path: delegate to executeHandler for param extraction, validation, response wrapping
                 const callHandler = isFastPath
                   ? async (): Promise<Response> => {
-                    // Filtered here rather than in the outer catch, which sits above the
-                    // middleware chain — see applyExceptionFilters.
-                    try {
+                    // Throws rather than filtering: the filter boundary is the wrapper below,
+                    // above the interceptor chain — see applyExceptionFilters.
+                    {
                       let hMark: ProfileMark | undefined;
                       if (profiler) {
                         hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
@@ -1406,8 +1406,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                           'Content-Type': 'application/json',
                         },
                       });
-                    } catch (error) {
-                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
                   }
                   : (): Promise<Response> => executeHandler(
@@ -1415,7 +1413,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     sseDecoratorOptions, req, queryParams, profiler,
                   );
 
-                // Wrap callHandler with interceptors if any (zero-cost when absent)
+                // The filter boundary. Everything that can throw while producing this route's
+                // response sits inside it: the handler, parameter extraction and validation, and
+                // the interceptors themselves. It is ABOVE the interceptor chain, so an
+                // interceptor's `try { await next() } catch` sees a handler error — on HTTP it
+                // used to see a finished 500 Response, while the same interceptor class on the
+                // queue and on WebSocket saw the throw. It stays BELOW the middleware chain,
+                // because middleware sets headers after `await next()` and filtering higher would
+                // strip them from every error response.
                 const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
                   ? async (): Promise<Response> => {
                     const interceptorCtx = new HttpExecutionContextImpl(
@@ -1424,8 +1429,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       controllerName,
                     );
 
-                    // callHandler already returns a filtered Response, so this only ever
-                    // sees a throw from the interceptors themselves.
                     try {
                       return await (composeInterceptors(
                         resolvedInterceptors, interceptorCtx, callHandler,
@@ -1434,7 +1437,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
                   }
-                  : callHandler;
+                  : async (): Promise<Response> => {
+                    try {
+                      return await callHandler();
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                    }
+                  };
 
                 // Execute middleware chain if any, then guards + handler
                 if (routeMeta.middleware && routeMeta.middleware.length > 0) {
@@ -2327,12 +2336,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * added outside one is silently unfiltered — that was the original defect, where a
      * handler with no decorated parameters took the fast path and its `HttpException`
      * left the framework as a bare 500 `text/plain`. Call sites, `grep` for the name and
-     * expect five:
-     *   1. `executeHandler`'s catch                        — full-path handler
-     *   2. the `isFastPath` arm of the `callHandler` ternary — fast-path handler
-     *   3. the `interceptedHandler` arm                     — throwing interceptors
-     *   4. the guard call inside `guardedHandler`           — throwing guards, with middleware
-     *   5. the inline guard call                            — throwing guards, without
+     * expect four:
+     *   1. the `interceptedHandler` arm WITH interceptors   — handler, params, validation,
+     *                                                         and the interceptors themselves
+     *   2. the `interceptedHandler` arm WITHOUT them        — the same, minus interceptors
+     *   3. the guard call inside `guardedHandler`           — throwing guards, with middleware
+     *   4. the inline guard call                            — throwing guards, without
+     *
+     * Sites 1 and 2 are one boundary in two shapes, and they are ABOVE the interceptor chain.
+     * `executeHandler` and the fast arm used to filter for themselves, below it, which made
+     * `try { await next() } catch` in an interceptor dead code on HTTP while the identical
+     * class saw the throw on the queue and on WebSocket. Guards keep their own sites because
+     * they run outside the chain — an interceptor never wraps a guard.
      *
      * DELIBERATELY NOT applied to the middleware chain. Middleware post-processes the
      * Response that `next()` returns — `CorsMiddleware`, `SecurityHeadersMiddleware` and
@@ -2405,374 +2420,373 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       queryParams: Record<string, string | string[]>,
       profiler: import('../profiler').Profiler | null,
     ): Promise<Response> {
-      try {
-      // Prepare arguments array based on parameter metadata
-        const args: unknown[] = [];
+      // Nothing is caught here any more. A throw from parameter extraction, from schema
+      // validation or from the handler travels up to the filter boundary that wraps the
+      // interceptor chain, so an interceptor's `try { await next() } catch` sees it.
+    // Prepare arguments array based on parameter metadata
+      const args: unknown[] = [];
 
-        // Sort params by index to ensure correct order
-        const sortedParams = [...(routeMeta.params || [])].sort((a, b) => a.index - b.index);
+      // Sort params by index to ensure correct order
+      const sortedParams = [...(routeMeta.params || [])].sort((a, b) => a.index - b.index);
 
-        // Pre-parse body for file upload params (FormData or JSON, cached for all params)
-        const needsFileData = sortedParams.some(
-          (p) =>
-            p.type === ParamType.FILE ||
-          p.type === ParamType.FILES ||
-          p.type === ParamType.FORM_FIELD,
-        );
+      // Pre-parse body for file upload params (FormData or JSON, cached for all params)
+      const needsFileData = sortedParams.some(
+        (p) =>
+          p.type === ParamType.FILE ||
+        p.type === ParamType.FILES ||
+        p.type === ParamType.FORM_FIELD,
+      );
 
-        // Validate that @Body and file decorators are not used on the same method
-        if (needsFileData) {
-          const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
-          if (hasBody) {
+      // Validate that @Body and file decorators are not used on the same method
+      if (needsFileData) {
+        const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
+        if (hasBody) {
+          throw new HttpException(
+            HttpStatusCode.BAD_REQUEST,
+            'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
+          'Both consume the request body. Use file decorators for multipart/base64 uploads.',
+          );
+        }
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let formData: any = null;
+      let jsonBody: Record<string, unknown> | null = null;
+      let isMultipart = false;
+
+      if (needsFileData) {
+        const contentType = req.headers.get('content-type') || '';
+
+        if (contentType.includes('multipart/form-data')) {
+          isMultipart = true;
+          try {
+            formData = await req.formData();
+          } catch {
+            formData = null;
+          }
+        } else if (contentType.includes('application/json')) {
+          try {
+            const parsed = await req.json();
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              jsonBody = parsed as Record<string, unknown>;
+            }
+          } catch {
+            jsonBody = null;
+          }
+        }
+      }
+
+      let paramsMark: ProfileMark | undefined;
+      if (profiler) {
+        paramsMark = profiler.start('handler', 'params:extract');
+      }
+      for (const param of sortedParams) {
+        switch (param.type) {
+          case ParamType.PATH:
+          // Use req.params from BunRequest (natively populated by Bun routes API)
+            args[param.index] = param.name
+              ? (req.params as Record<string, string>)[param.name]
+              : undefined;
+            break;
+
+          case ParamType.QUERY:
+            args[param.index] = param.name ? queryParams[param.name] : undefined;
+            break;
+
+          case ParamType.BODY:
+            try {
+              args[param.index] = await req.json();
+            } catch {
+              args[param.index] = undefined;
+            }
+            break;
+
+          case ParamType.HEADER:
+            args[param.index] = param.name ? req.headers.get(param.name) : undefined;
+            break;
+
+          case ParamType.COOKIE:
+            args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
+            break;
+
+          case ParamType.REQUEST:
+            args[param.index] = req;
+            break;
+
+          case ParamType.RESPONSE:
+          // For now, we don't support direct response manipulation
+            args[param.index] = undefined;
+            break;
+
+          case ParamType.FILE: {
+            let file: OneBunFile | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (entry instanceof File) {
+                file = new OneBunFile(entry);
+              }
+            } else if (jsonBody && param.name) {
+              file = extractFileFromJson(jsonBody, param.name);
+            }
+
+            if (file && param.fileOptions) {
+              validateFile(file, param.fileOptions, param.name);
+            }
+
+            args[param.index] = file;
+            break;
+          }
+
+          case ParamType.FILES: {
+            let files: OneBunFile[] = [];
+
+            if (isMultipart && formData) {
+              if (param.name) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const entries: any[] = formData.getAll(param.name);
+                files = entries
+                  .filter((entry: unknown): entry is File => entry instanceof File)
+                  .map((f: File) => new OneBunFile(f));
+              } else {
+              // Get all files from all fields
+                for (const [, value] of formData.entries()) {
+                  if (value instanceof File) {
+                    files.push(new OneBunFile(value));
+                  }
+                }
+              }
+            } else if (jsonBody) {
+              if (param.name) {
+                const fieldValue = jsonBody[param.name];
+                if (Array.isArray(fieldValue)) {
+                  files = fieldValue
+                    .map((item) => extractFileFromJsonValue(item))
+                    .filter((f): f is OneBunFile => f !== undefined);
+                }
+              } else {
+              // Extract all file-like values from JSON
+                for (const [, value] of Object.entries(jsonBody)) {
+                  const file = extractFileFromJsonValue(value);
+                  if (file) {
+                    files.push(file);
+                  }
+                }
+              }
+            }
+
+            // Validate maxCount
+            if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
+              throw new HttpException(
+                HttpStatusCode.BAD_REQUEST,
+                `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
+              );
+            }
+
+            // Validate each file
+            if (param.fileOptions) {
+              for (const file of files) {
+                validateFile(file, param.fileOptions, param.name);
+              }
+            }
+
+            args[param.index] = files;
+            break;
+          }
+
+          case ParamType.FORM_FIELD: {
+            let value: string | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (typeof entry === 'string') {
+                value = entry;
+              }
+            } else if (jsonBody && param.name) {
+              const jsonValue = jsonBody[param.name];
+              if (jsonValue !== undefined && jsonValue !== null) {
+                value = String(jsonValue);
+              }
+            }
+
+            args[param.index] = value;
+            break;
+          }
+
+          default:
+            args[param.index] = undefined;
+        }
+
+        // Validate parameter if required
+        if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
+          throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+        }
+
+        // For FILES type, also check for empty array when required
+        if (
+          param.isRequired &&
+        param.type === ParamType.FILES &&
+        Array.isArray(args[param.index]) &&
+        (args[param.index] as unknown[]).length === 0
+        ) {
+          throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+        }
+
+        // Apply arktype schema validation if provided
+        if (param.schema && args[param.index] !== undefined) {
+          try {
+            args[param.index] = validateOrThrow(param.schema, args[param.index]);
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
             throw new HttpException(
               HttpStatusCode.BAD_REQUEST,
-              'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
-            'Both consume the request body. Use file decorators for multipart/base64 uploads.',
+              `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
             );
           }
         }
+      }
+      if (paramsMark) {
+        profiler!.end(paramsMark);
+      }
+      // Call handler with injected parameters
+      let handlerMark: ProfileMark | undefined;
+      if (profiler) {
+        handlerMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+      }
+      const result = await boundHandler(...args);
+      if (handlerMark) {
+        profiler!.end(handlerMark);
+      }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let formData: any = null;
-        let jsonBody: Record<string, unknown> | null = null;
-        let isMultipart = false;
+      // Handle SSE response - wrap async generator in SSE Response
+      if (sseOptions !== undefined) {
+        return createSseResponseFromResult(result, sseOptions);
+      }
 
-        if (needsFileData) {
-          const contentType = req.headers.get('content-type') || '';
+      // Initialize variables for response validation
+      let validatedResult = result;
+      let responseStatusCode = HttpStatusCode.OK;
 
-          if (contentType.includes('multipart/form-data')) {
-            isMultipart = true;
-            try {
-              formData = await req.formData();
-            } catch {
-              formData = null;
-            }
-          } else if (contentType.includes('application/json')) {
-            try {
-              const parsed = await req.json();
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                jsonBody = parsed as Record<string, unknown>;
-              }
-            } catch {
-              jsonBody = null;
-            }
-          }
-        }
+      // If the result is already a Response object, extract body and validate it
+      if (result instanceof Response) {
+        responseStatusCode = result.status;
 
-        let paramsMark: ProfileMark | undefined;
-        if (profiler) {
-          paramsMark = profiler.start('handler', 'params:extract');
-        }
-        for (const param of sortedParams) {
-          switch (param.type) {
-            case ParamType.PATH:
-            // Use req.params from BunRequest (natively populated by Bun routes API)
-              args[param.index] = param.name
-                ? (req.params as Record<string, string>)[param.name]
-                : undefined;
-              break;
+        // Extract and parse response body for validation
+        const contentType = result.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          try {
+            // Clone response to avoid consuming the body
+            const clonedResponse = result.clone();
+            const bodyText = await clonedResponse.text();
+            const bodyData = bodyText ? JSON.parse(bodyText) : null;
 
-            case ParamType.QUERY:
-              args[param.index] = param.name ? queryParams[param.name] : undefined;
-              break;
+            // Validate response body if schema is provided
+            if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+              const responseSchema = routeMeta.responseSchemas.find(
+                (rs) => rs.statusCode === responseStatusCode,
+              ) || routeMeta.responseSchemas.find(
+                (rs) => rs.statusCode === HttpStatusCode.OK,
+              ) || routeMeta.responseSchemas[0];
 
-            case ParamType.BODY:
-              try {
-                args[param.index] = await req.json();
-              } catch {
-                args[param.index] = undefined;
-              }
-              break;
-
-            case ParamType.HEADER:
-              args[param.index] = param.name ? req.headers.get(param.name) : undefined;
-              break;
-
-            case ParamType.COOKIE:
-              args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
-              break;
-
-            case ParamType.REQUEST:
-              args[param.index] = req;
-              break;
-
-            case ParamType.RESPONSE:
-            // For now, we don't support direct response manipulation
-              args[param.index] = undefined;
-              break;
-
-            case ParamType.FILE: {
-              let file: OneBunFile | undefined;
-
-              if (isMultipart && formData && param.name) {
-                const entry = formData.get(param.name);
-                if (entry instanceof File) {
-                  file = new OneBunFile(entry);
-                }
-              } else if (jsonBody && param.name) {
-                file = extractFileFromJson(jsonBody, param.name);
-              }
-
-              if (file && param.fileOptions) {
-                validateFile(file, param.fileOptions, param.name);
-              }
-
-              args[param.index] = file;
-              break;
-            }
-
-            case ParamType.FILES: {
-              let files: OneBunFile[] = [];
-
-              if (isMultipart && formData) {
-                if (param.name) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const entries: any[] = formData.getAll(param.name);
-                  files = entries
-                    .filter((entry: unknown): entry is File => entry instanceof File)
-                    .map((f: File) => new OneBunFile(f));
-                } else {
-                // Get all files from all fields
-                  for (const [, value] of formData.entries()) {
-                    if (value instanceof File) {
-                      files.push(new OneBunFile(value));
-                    }
-                  }
-                }
-              } else if (jsonBody) {
-                if (param.name) {
-                  const fieldValue = jsonBody[param.name];
-                  if (Array.isArray(fieldValue)) {
-                    files = fieldValue
-                      .map((item) => extractFileFromJsonValue(item))
-                      .filter((f): f is OneBunFile => f !== undefined);
-                  }
-                } else {
-                // Extract all file-like values from JSON
-                  for (const [, value] of Object.entries(jsonBody)) {
-                    const file = extractFileFromJsonValue(value);
-                    if (file) {
-                      files.push(file);
-                    }
-                  }
-                }
-              }
-
-              // Validate maxCount
-              if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
-                throw new HttpException(
-                  HttpStatusCode.BAD_REQUEST,
-                  `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
-                );
-              }
-
-              // Validate each file
-              if (param.fileOptions) {
-                for (const file of files) {
-                  validateFile(file, param.fileOptions, param.name);
-                }
-              }
-
-              args[param.index] = files;
-              break;
-            }
-
-            case ParamType.FORM_FIELD: {
-              let value: string | undefined;
-
-              if (isMultipart && formData && param.name) {
-                const entry = formData.get(param.name);
-                if (typeof entry === 'string') {
-                  value = entry;
-                }
-              } else if (jsonBody && param.name) {
-                const jsonValue = jsonBody[param.name];
-                if (jsonValue !== undefined && jsonValue !== null) {
-                  value = String(jsonValue);
-                }
-              }
-
-              args[param.index] = value;
-              break;
-            }
-
-            default:
-              args[param.index] = undefined;
-          }
-
-          // Validate parameter if required
-          if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
-            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
-          }
-
-          // For FILES type, also check for empty array when required
-          if (
-            param.isRequired &&
-          param.type === ParamType.FILES &&
-          Array.isArray(args[param.index]) &&
-          (args[param.index] as unknown[]).length === 0
-          ) {
-            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
-          }
-
-          // Apply arktype schema validation if provided
-          if (param.schema && args[param.index] !== undefined) {
-            try {
-              args[param.index] = validateOrThrow(param.schema, args[param.index]);
-            } catch (error) {
-              const errorMessage =
-                error instanceof Error ? error.message : String(error);
-              throw new HttpException(
-                HttpStatusCode.BAD_REQUEST,
-                `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
-              );
-            }
-          }
-        }
-        if (paramsMark) {
-          profiler!.end(paramsMark);
-        }
-        // Call handler with injected parameters
-        let handlerMark: ProfileMark | undefined;
-        if (profiler) {
-          handlerMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
-        }
-        const result = await boundHandler(...args);
-        if (handlerMark) {
-          profiler!.end(handlerMark);
-        }
-
-        // Handle SSE response - wrap async generator in SSE Response
-        if (sseOptions !== undefined) {
-          return createSseResponseFromResult(result, sseOptions);
-        }
-
-        // Initialize variables for response validation
-        let validatedResult = result;
-        let responseStatusCode = HttpStatusCode.OK;
-
-        // If the result is already a Response object, extract body and validate it
-        if (result instanceof Response) {
-          responseStatusCode = result.status;
-
-          // Extract and parse response body for validation
-          const contentType = result.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            try {
-              // Clone response to avoid consuming the body
-              const clonedResponse = result.clone();
-              const bodyText = await clonedResponse.text();
-              const bodyData = bodyText ? JSON.parse(bodyText) : null;
-
-              // Validate response body if schema is provided
-              if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
-                const responseSchema = routeMeta.responseSchemas.find(
-                  (rs) => rs.statusCode === responseStatusCode,
-                ) || routeMeta.responseSchemas.find(
-                  (rs) => rs.statusCode === HttpStatusCode.OK,
-                ) || routeMeta.responseSchemas[0];
-
-                if (responseSchema?.schema) {
-                  try {
-                    validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(bodyData));
-                  } catch (error) {
-                    const errorMessage =
-                      error instanceof Error ? error.message : String(error);
-                    throw new Error(`Response validation failed: ${errorMessage}`);
-                  }
-                } else {
-                  validatedResult = bodyData;
+              if (responseSchema?.schema) {
+                try {
+                  validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(bodyData));
+                } catch (error) {
+                  const errorMessage =
+                    error instanceof Error ? error.message : String(error);
+                  throw new Error(`Response validation failed: ${errorMessage}`);
                 }
               } else {
                 validatedResult = bodyData;
               }
-
-              // Preserve all original headers (including multiple Set-Cookie)
-              // using new Headers() constructor instead of Object.fromEntries()
-              // which would lose duplicate header keys
-              const newHeaders = new Headers(result.headers);
-              newHeaders.set('Content-Type', 'application/json');
-
-              // Create new Response with validated data
-              return new Response(JSON.stringify(validatedResult), {
-                status: responseStatusCode,
-                headers: newHeaders,
-              });
-            } catch {
-              // If parsing fails, return original response
-              return result;
+            } else {
+              validatedResult = bodyData;
             }
-          } else {
-            // For non-JSON responses, return as-is (can't validate)
+
+            // Preserve all original headers (including multiple Set-Cookie)
+            // using new Headers() constructor instead of Object.fromEntries()
+            // which would lose duplicate header keys
+            const newHeaders = new Headers(result.headers);
+            newHeaders.set('Content-Type', 'application/json');
+
+            // Create new Response with validated data
+            return new Response(JSON.stringify(validatedResult), {
+              status: responseStatusCode,
+              headers: newHeaders,
+            });
+          } catch {
+            // If parsing fails, return original response
             return result;
           }
+        } else {
+          // For non-JSON responses, return as-is (can't validate)
+          return result;
         }
+      }
 
-        // Validate response against schema if provided
-        if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
-          // Find matching response schema (default to 200 if not found)
-          const responseSchema = routeMeta.responseSchemas.find(
-            (rs) => rs.statusCode === HttpStatusCode.OK,
-          ) || routeMeta.responseSchemas[0];
+      // Validate response against schema if provided
+      if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+        // Find matching response schema (default to 200 if not found)
+        const responseSchema = routeMeta.responseSchemas.find(
+          (rs) => rs.statusCode === HttpStatusCode.OK,
+        ) || routeMeta.responseSchemas[0];
 
-          if (responseSchema?.schema) {
-            try {
-              validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(validatedResult));
-              responseStatusCode = responseSchema.statusCode;
-            } catch (error) {
-              const errorMessage =
-                error instanceof Error ? error.message : String(error);
-              throw new Error(`Response validation failed: ${errorMessage}`);
-            }
+        if (responseSchema?.schema) {
+          try {
+            validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(validatedResult));
+            responseStatusCode = responseSchema.statusCode;
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            throw new Error(`Response validation failed: ${errorMessage}`);
           }
         }
+      }
 
-        // If the result is already in standardized format, return it as JSON
-        if (
-          typeof validatedResult === 'object' &&
-          validatedResult !== null &&
-          'success' in validatedResult
-        ) {
-          let serMark: ProfileMark | undefined;
-          if (profiler) {
-            serMark = profiler.start('framework', 'response:serialize');
-          }
-          const resp = new Response(JSON.stringify(validatedResult), {
-            status: responseStatusCode,
-            headers: {
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'Content-Type': 'application/json',
-            },
-          });
-          if (serMark) {
-            profiler!.end(serMark);
-          }
-
-          return resp;
-        }
-
-        // Otherwise, wrap in standardized success response
-        let serializeMark: ProfileMark | undefined;
+      // If the result is already in standardized format, return it as JSON
+      if (
+        typeof validatedResult === 'object' &&
+        validatedResult !== null &&
+        'success' in validatedResult
+      ) {
+        let serMark: ProfileMark | undefined;
         if (profiler) {
-          serializeMark = profiler.start('framework', 'response:serialize');
+          serMark = profiler.start('framework', 'response:serialize');
         }
-        const successResponse = createSuccessResponse(validatedResult);
-
-        const resp = new Response(JSON.stringify(successResponse), {
+        const resp = new Response(JSON.stringify(validatedResult), {
           status: responseStatusCode,
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
           },
         });
-        if (serializeMark) {
-          profiler!.end(serializeMark);
+        if (serMark) {
+          profiler!.end(serMark);
         }
 
         return resp;
-      } catch (error) {
-        return await applyExceptionFilters(error, req, routeMeta, controllerName);
       }
+
+      // Otherwise, wrap in standardized success response
+      let serializeMark: ProfileMark | undefined;
+      if (profiler) {
+        serializeMark = profiler.start('framework', 'response:serialize');
+      }
+      const successResponse = createSuccessResponse(validatedResult);
+
+      const resp = new Response(JSON.stringify(successResponse), {
+        status: responseStatusCode,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+      });
+      if (serializeMark) {
+        profiler!.end(serializeMark);
+      }
+
+      return resp;
     }
 
     /**

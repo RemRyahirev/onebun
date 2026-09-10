@@ -57,7 +57,7 @@ Use `isHttpContext(ctx)`, `isWsContext(ctx)`, `isQueueContext(ctx)` for type-saf
 **Key differences from NestJS:** No RxJS — uses `next: () => Promise<unknown>` instead of Observable.
 
 **Execution order:**
-- HTTP: middleware → guards[→filters] → interceptors[→filters] → handler[→filters] → response. Filters sit INSIDE the interceptor chain, not after it: an interceptor wrapping `await next()` in a try/catch will not see handler errors, because the handler is already filtered by the time it returns. An error the interceptor itself throws IS filtered.
+- HTTP: middleware → guards[→filters] → [filters→ interceptors → handler] → response. Filters sit ABOVE the interceptor chain and below the middleware chain: an interceptor wrapping `await next()` in a try/catch sees a handler error, an error from parameter extraction or schema validation, and it can rethrow to let the filters answer. An error the interceptor itself throws is filtered the same way. Guards are outside the chain, so a guard rejection is filtered without reaching an interceptor. Through 0.6.0 the handler was already filtered by the time `next()` returned, so that catch block was dead code on HTTP — and only on HTTP, since queue and WebSocket have no filter layer.
 - WS: guards → interceptors(handler)
 - Queue: guards → interceptors(handler)
 
@@ -481,11 +481,16 @@ Each transport has its own pipeline. Interceptors sit between guards and the han
 
 ```
 Request → [Global Middleware] → [Module Middleware] → [Controller Middleware] → [Route Middleware]
-       → [Controller Guards] → [Route Guards]
-       → [Global Interceptors → [Controller Interceptors → [Route Interceptors → Handler]]]
-       → [Exception Filters on error]
+       → [Controller Guards] → [Route Guards]        (a guard error is filtered here)
+       → [Exception Filters on error
+            → [Global Interceptors → [Controller Interceptors → [Route Interceptors
+                 → params + validation → Handler]]]]
        → Response
 ```
+
+The filter boundary wraps the interceptor chain, so an interceptor sees a handler error and can
+rethrow it for the filters to answer. It sits below the middleware chain because middleware sets
+headers after `await next()` — CORS and security headers are on error responses too.
 
 **WebSocket:**
 

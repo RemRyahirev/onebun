@@ -232,10 +232,12 @@ The same trap applies to guards, filters and middleware. The interceptor itself 
 
 ## Execution order by transport
 
-**HTTP:** middleware → guards[→filters] → interceptors[→filters] → handler[→filters]. Filters sit
-INSIDE the interceptor chain, not after it — an interceptor's try/catch around `await next()` never
-sees a handler error, because the handler is already filtered by then; an error the interceptor
-itself throws is filtered.
+**HTTP:** middleware → guards[→filters] → [filters→ interceptors → params + validation → handler].
+Filters sit ABOVE the interceptor chain and below the middleware chain — an interceptor's try/catch
+around `await next()` sees a handler error, a validation error, and can rethrow for the filters to
+answer; an error the interceptor itself throws is filtered the same way. A guard rejection is
+filtered outside the chain and never reaches an interceptor. Through 0.6.0 the handler was already
+filtered by the time `next()` returned, so that catch block was dead code on HTTP only.
 **WebSocket:** guards → interceptors → handler
 **Queue:** guards → interceptors → handler, for `@Subscribe` subscribers only. `@Cron`, `@Interval`
 and `@Timeout` jobs are handed to the scheduler as bound methods, so neither interceptors nor guards
