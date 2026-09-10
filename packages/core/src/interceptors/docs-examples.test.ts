@@ -857,7 +857,7 @@ describe('docs/api/interceptors.md — global and combined interceptors', () => 
    * @source docs:api/interceptors.md#global
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('never reaches a queue subscriber with the global list, while the class-level one still runs', async () => {
+  it('reaches a queue subscriber with the global list, wrapping outside the class-level one', async () => {
     trace.length = 0;
     const queue = app.getQueueService();
     if (!queue) {
@@ -867,8 +867,15 @@ describe('docs/api/interceptors.md — global and combined interceptors', () => 
     await queue.publish('pipeline.job', { id: 'j-1' });
     await sleep(SETTLE_MS);
 
-    // The global list is merged at HTTP route registration only: no 'global:*' entry here.
-    expect(trace).toEqual(['controller:before', 'queue-handler', 'controller:after']);
+    // The global list reaches every transport now, outermost. It used to be merged at HTTP route
+    // registration only, and this read ['controller:before', 'queue-handler', 'controller:after'].
+    expect(trace).toEqual([
+      'global:before',
+      'controller:before',
+      'queue-handler',
+      'controller:after',
+      'global:after',
+    ]);
   });
 });
 

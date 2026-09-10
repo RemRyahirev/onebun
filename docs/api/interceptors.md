@@ -35,7 +35,7 @@ import { CacheInterceptor } from '@onebun/cache';
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
 - `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only, on HTTP routes and WS handlers; on a `@Subscribe` handler the method form is silently dropped, put queue interceptors on the class
-- Global via `ApplicationOptions.interceptors` — HTTP routes ONLY; the list is merged at route registration and never reaches WS gateways or queue subscribers
+- Global via `ApplicationOptions.interceptors` — every transport: HTTP routes, WebSocket message handlers and `@Subscribe` queue subscribers. Merged outermost, ahead of gateway/class-level and handler-level lists. Through 0.6.0 it was HTTP only, and the other two silently ran without it
 - All three can be combined; onion wrapping order: global (outermost) → controller/gateway → handler (innermost)
 
 **Interceptors work across all transports:**
@@ -304,10 +304,14 @@ class OrderController extends BaseController {
 
 ### Global
 
-Pass interceptors in `ApplicationOptions.interceptors`. They wrap every **HTTP route** in the
-application — and only those: the global list is merged into the chain at route registration, so
-WebSocket gateways and queue subscribers never see it. To wrap those, put `@UseInterceptors` on the
-gateway or consumer class.
+Pass interceptors in `ApplicationOptions.interceptors`. They wrap every **HTTP route**, every
+**WebSocket message handler** and every **`@Subscribe` queue subscriber** in the application, and
+they wrap outermost — ahead of a gateway-level or class-level `@UseInterceptors`, which is the same
+order HTTP routes use. Through 0.6.0 the list was merged at HTTP route registration only, so a
+global logging or metrics interceptor covered HTTP and silently skipped the other two transports.
+
+Scheduled handlers (`@Cron`, `@Interval`, `@Timeout`) are still not wrapped — see the pipeline
+table below.
 
 ```typescript
 import { OneBunApplication, LoggingInterceptor } from '@onebun/core';
@@ -495,18 +499,18 @@ headers after `await next()` — CORS and security headers are on error response
 **WebSocket:**
 
 ```
-Message → [Guards] → [Gateway Interceptors → [Handler Interceptors → Handler]]
+Message → [Guards] → [Global Interceptors → [Gateway Interceptors → [Handler Interceptors → Handler]]]
 ```
 
 **Queue:**
 
 ```
-Message → [Guards] → [Controller Interceptors → Handler]
+Message → [Guards] → [Global Interceptors → [Controller Interceptors → Handler]]
 ```
 
-The last two rows have no global level on purpose: `ApplicationOptions.interceptors` is read at HTTP
-route registration only. Queue has no handler level either, because a method-level `@UseInterceptors`
-never reaches a `@Subscribe` handler.
+All three transports read `ApplicationOptions.interceptors`, and it wraps outermost on each. Queue
+has no handler level, because a method-level `@UseInterceptors` never reaches a `@Subscribe`
+handler.
 
 Interceptors use **onion wrapping**: the first interceptor in the list (global) wraps outermost and sees the result last. The innermost interceptor (handler-level) runs closest to the handler.
 

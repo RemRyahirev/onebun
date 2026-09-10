@@ -174,7 +174,8 @@ class OrderController extends BaseController {
   sweep() { ... }                          // NOT intercepted (pattern is required)
 }
 
-// Global (ApplicationOptions) — HTTP routes only, never WS or queue
+// Global (ApplicationOptions) — every transport: HTTP routes, WS message handlers and
+// @Subscribe subscribers, wrapping outermost. Scheduled handlers are still not wrapped.
 const app = new OneBunApplication(AppModule, {
   interceptors: [LoggingInterceptor],
 });

@@ -1078,6 +1078,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
               controllerClass,
               instance as import('../websocket/ws-base-gateway').BaseWebSocketGateway,
               ownerModule.resolveInterceptors?.bind(ownerModule),
+              this.options.interceptors ?? [],
             );
             this.logger.info(`Registered WebSocket gateway: ${controllerClass.name}`);
           }
@@ -3361,6 +3362,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           instance,
           registrationClass as new (...args: unknown[]) => unknown,
           queueOwnerModule.resolveInterceptors?.bind(queueOwnerModule),
+          this.options.interceptors ?? [],
         );
         this.logger.debug(`Registered queue handlers for controller: ${controllerClass.name}`);
       } else {

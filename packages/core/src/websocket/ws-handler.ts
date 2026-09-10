@@ -187,6 +187,7 @@ export class WsHandler {
     gatewayClass: Function,
     instance: BaseWebSocketGateway,
     resolveInterceptors?: (classes: (Function | import('../types').Interceptor)[]) => import('../types').ResolvedInterceptor[],
+    globalInterceptors: (Function | import('../types').Interceptor)[] = [],
   ): void {
     const metadata = getGatewayMetadata(gatewayClass);
     if (!metadata) {
@@ -226,9 +227,12 @@ export class WsHandler {
         ? (guardBinding.resolve(mergedGuards) as unknown as (Function | WsGuard)[])
         : mergedGuards;
 
-      // Merge interceptors: gateway-level + handler-level
+      // Merge interceptors: application-global + gateway-level + handler-level, outermost
+      // first — the same order HTTP routes use. The global list used to be merged at HTTP route
+      // registration only, so an application-wide logging or metrics interceptor covered HTTP
+      // and silently missed every WebSocket message.
       const handlerInterceptors = handler.interceptors ?? [];
-      const mergedClasses = [...gatewayInterceptors, ...handlerInterceptors];
+      const mergedClasses = [...globalInterceptors, ...gatewayInterceptors, ...handlerInterceptors];
 
       // Resolve interceptor classes via DI
       if (mergedClasses.length > 0 && resolveInterceptors) {
