@@ -755,6 +755,8 @@ export class UserModule {}
 
 **Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
 
+**Globality itself is still per process.** The instances are per application; the answer to "is this module ambient?" is not — it lives in one `Set` keyed by the module class. Two unnamed `forRoot()` calls that disagree about it, or about what they configure, therefore cannot each be honoured, and the framework refuses rather than letting the last one decide: an application importing the contested module fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. Give each configuration a token — `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` — when they must coexist.
+
 The options a dynamic module was imported with are **captured per application** at import time, so a later `forRoot()` in the same process cannot retroactively change what an already-running application is using.
 
 **Global Module Utilities:**

@@ -164,7 +164,12 @@ export class CacheModule {
 
     // A NAMED registration gets its own module identity and its own options; an unnamed one
     // keeps the base module exactly as before.
-    const registration = registerModule(CacheModule, options, options.as, [CacheService]);
+    // The fifth argument is this call's ambient visibility. Only this module knows its own
+    // options shape, and globality is what a second unnamed forRoot() can silently overrule.
+    const registration = registerModule(
+      CacheModule, options, options.as, [CacheService],
+      options.as === undefined ? options.isGlobal !== false : undefined,
+    );
 
     // If isGlobal is explicitly set to false, remove from global modules registry.
     // Symmetric on purpose: the registry is process-wide, so without the else branch one

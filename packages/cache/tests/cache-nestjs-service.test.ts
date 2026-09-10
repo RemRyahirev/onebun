@@ -6,11 +6,20 @@ import {
   afterEach,
 } from 'bun:test';
 
+import { resetRegistrations } from '@onebun/core';
 import { createTestService, useFakeTimers } from '@onebun/core/testing';
 
 import { CacheModule } from '../src/cache.module';
 import { CacheService } from '../src/cache.service';
 import { CacheType } from '../src/types';
+
+// forRoot() writes into a process-wide registry that outlives the file. Two unnamed calls that
+// configure the module differently are refused at app.start(), so a test that boots must not
+// inherit a registration written by an earlier test — or by an earlier FILE in the same run,
+// which is how this suite used to leak across package boundaries.
+beforeEach(() => {
+  resetRegistrations();
+});
 
 describe('CacheService', () => {
   let service: CacheService;

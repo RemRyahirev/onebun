@@ -172,7 +172,12 @@ export class DrizzleModule {
     // A NAMED registration gets its own module identity and its own options, so a second
     // forRoot() no longer overwrites the first for everyone. An unnamed one keeps the base
     // module exactly as before.
-    const registration = registerModule(DrizzleModule, options, options.as, [DrizzleService]);
+    // The fifth argument is this call's ambient visibility. Only this module knows its own
+    // options shape, and globality is what a second unnamed forRoot() can silently overrule.
+    const registration = registerModule(
+      DrizzleModule, options, options.as, [DrizzleService],
+      options.as === undefined ? options.isGlobal !== false : undefined,
+    );
 
     // If isGlobal is explicitly set to false, remove from global modules registry.
     // The registry is process-wide, so the restore has to be symmetric: without the else

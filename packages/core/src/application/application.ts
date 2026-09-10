@@ -1106,8 +1106,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         profileMark = getProfiler()!.start('bootstrap', 'module:create');
       }
       // A registration selected with forFeature(token) but never configured with
-      // forRoot({ as: token }) is caught here, before anything is constructed.
-      assertRegistrationsConfigured();
+      // forRoot({ as: token }) is caught here, before anything is constructed. So is a pair of
+      // unnamed forRoot() calls that disagree about a module THIS application imports — passing
+      // the root module is what lets that check stay silent about the rest of the process.
+      assertRegistrationsConfigured(this.moduleClass ?? undefined);
 
       this.rootModule = OneBunModule.create(
         this.moduleClass!, this.loggerLayer, this.config,
@@ -3247,6 +3249,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.globalScope.moduleOptions.clear();
       this.globalScope = null;
     }
+
+    // The module REGISTRATIONS are deliberately not cleared here. `forRoot()` runs at module
+    // evaluation, not at start(), so it does not run again on a restart — clearing the registry
+    // would leave a restarted application with no configuration at all, and would let a second
+    // conflicting unnamed forRoot() through on the next boot. `resetRegistrations()` is the
+    // reset, and it belongs to tests, which are the only thing that needs a clean process.
 
     this.logger.info(
       outcome.forceClosed > 0

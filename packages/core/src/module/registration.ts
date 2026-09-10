@@ -20,7 +20,7 @@
  * @see docs:api/decorators.md
  */
 
-import { Module } from '../decorators/decorators';
+import { getModuleMetadata, Module } from '../decorators/decorators';
 
 /**
  * What identifies a registration at the call site.
@@ -43,11 +43,34 @@ interface Registration {
   providers: Function[];
 }
 
+/**
+ * One unnamed `forRoot()` call, kept so a later call that disagrees can be reported against it.
+ *
+ * `defaultRegistrations` holds only the winner; this holds the history, which is the only way
+ * to say WHICH two calls disagreed and where they were written.
+ */
+interface UnnamedCall {
+  /** Effective ambient visibility, `isGlobal !== false`. `undefined` when the caller did not say. */
+  ambient: boolean | undefined;
+  /**
+   * What the call configured, compared as a string.
+   *
+   * Taken at call time on purpose: an options object mutated after `forRoot()` would otherwise
+   * make two calls agree — or disagree — retroactively.
+   */
+  fingerprint: string;
+  /** Where the call was written, as far as the stack could say. */
+  callSite: string;
+}
+
 /** Every registration in the process, keyed by base module and then by token. */
 const registrations = new Map<Function, Map<RegistrationToken, Registration>>();
 
 /** The unnamed registration per base module, if `forRoot()` was called without `as`. */
 const defaultRegistrations = new Map<Function, Registration>();
+
+/** Every unnamed `forRoot()` per base module, in call order. Checked at boot, not here. */
+const unnamedCalls = new Map<Function, UnnamedCall[]>();
 
 /** Which registration a minted module class belongs to, for reading options back. */
 const byModuleClass = new Map<Function, Registration>();
@@ -65,6 +88,99 @@ function listTokens(baseModule: Function): string {
 }
 
 /**
+ * The options with the two keys that name the registration rather than describe its target.
+ *
+ * `isGlobal` is compared on its own — it is a different kind of disagreement, with a different
+ * message — and an unnamed call has no `as` by definition.
+ */
+function comparableOptions(options: unknown): unknown {
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    return options;
+  }
+
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(options as Record<string, unknown>)) {
+    if (key !== 'isGlobal' && key !== 'as') {
+      copy[key] = value;
+    }
+  }
+
+  return copy;
+}
+
+/**
+ * A stable, readable description of a configuration, for comparing two calls and for printing
+ * the difference back to whoever wrote them.
+ *
+ * Keys are sorted, so property order cannot make one configuration look like two. Non-plain
+ * objects collapse to their class name: a driver handle or a custom store is not meaningfully
+ * comparable and walking one risks a cycle. Two calls differing ONLY inside such a value are
+ * therefore not distinguished — the check reports what it can see, and says nothing it cannot.
+ */
+function fingerprint(value: unknown, seen: Set<object> = new Set()): string {
+  if (value === undefined) {
+    return 'undefined';
+  }
+  if (typeof value === 'function') {
+    return `[function ${value.name || 'anonymous'}]`;
+  }
+  if (typeof value === 'symbol') {
+    return value.toString();
+  }
+  if (typeof value === 'bigint') {
+    return `${value}n`;
+  }
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value) as string;
+  }
+  if (seen.has(value)) {
+    return '[circular]';
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => fingerprint(item, seen)).join(',')}]`;
+  }
+
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  if (prototype !== Object.prototype && prototype !== null) {
+    return `[${(value as object).constructor?.name ?? 'object'}]`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([left], [right]) => (left < right ? -1 : 1))
+    .map(([key, item]) => `${key}:${fingerprint(item, seen)}`);
+
+  return `{${entries.join(',')}}`;
+}
+
+/**
+ * Where the `forRoot()` that reached us was written.
+ *
+ * Frames from this file are ours, and a frame named `forRoot` is the module's own static method
+ * — `registerModule` exists to be called from one. What is left is the user's call, the only
+ * address they can act on. A runtime that inlines the `forRoot` frame away lands on the same
+ * answer, which is why this skips by NAME rather than by counting.
+ *
+ * Stacks are best-effort. When the shape is not what we expect, say so rather than print a frame
+ * that means something else.
+ */
+function captureCallSite(): string {
+  const stack = new Error().stack;
+  if (stack === undefined) {
+    return 'unknown location';
+  }
+
+  const caller = stack.split('\n')
+    .slice(1)
+    .find((frame) => !frame.includes('registration.ts') && !/^\s*at\s+(?:\S+\.)?forRoot\b/.test(frame));
+  const location = caller?.match(/\(?([^()\s]+:\d+:\d+)\)?\s*$/)?.[1];
+
+  return location ?? 'unknown location';
+}
+
+/**
  * Register a configuration of a dynamic module.
  *
  * Called from the module's own `forRoot()`. Returns the class to put in `imports`.
@@ -73,14 +189,22 @@ function listTokens(baseModule: Function): string {
  * @param options - Whatever `forRoot()` was given; stored verbatim.
  * @param token - Names this registration, so `forFeature(token)` can select it.
  * @param providers - The providers the minted module declares and exports.
+ * @param ambient - Whether this call leaves the module ambiently visible, i.e. `isGlobal !== false`.
+ *   Only the calling module knows its own options shape. Omitting it means the unnamed calls are
+ *   compared on configuration alone.
  */
 export function registerModule(
   baseModule: Function,
   options: unknown,
   token: RegistrationToken | undefined,
   providers: Function[],
+  ambient?: boolean,
 ): Function {
   if (token === undefined) {
+    const calls = unnamedCalls.get(baseModule) ?? [];
+    calls.push({ ambient, fingerprint: fingerprint(comparableOptions(options)), callSite: captureCallSite() });
+    unnamedCalls.set(baseModule, calls);
+
     // The unnamed registration keeps the base module itself as its identity, so an
     // application with one configuration is byte-for-byte what it was before registrations
     // existed: same class in `imports`, same globality, same ambient resolution.
@@ -241,6 +365,121 @@ export function resetRegistrations(): void {
   registrations.clear();
   defaultRegistrations.clear();
   byModuleClass.clear();
+  unnamedCalls.clear();
+}
+
+/**
+ * Every module reachable from a root's import graph, the root included.
+ *
+ * The unnamed registration keeps the base module itself as its identity, so a base module in
+ * this set is one this application actually imports — which is what makes the conflict check
+ * below able to stay silent about a module the application never mentioned.
+ */
+function collectReachableModules(rootModule: Function): Set<Function> {
+  const visited = new Set<Function>();
+
+  const walk = (moduleClass: Function): void => {
+    if (visited.has(moduleClass)) {
+      return;
+    }
+    visited.add(moduleClass);
+
+    for (const imported of getModuleMetadata(moduleClass)?.imports ?? []) {
+      walk(imported);
+    }
+  };
+
+  walk(rootModule);
+
+  return visited;
+}
+
+/** Trim a fingerprint for an error message: enough to see the difference, not a wall of JSON. */
+function abbreviate(text: string): string {
+  const limit = 200;
+
+  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+function conflictingUnnamedCallsError(
+  baseModule: Function,
+  rootModule: Function,
+  first: UnnamedCall,
+  later: UnnamedCall,
+  ambientDiffers: boolean,
+): Error {
+  const detail = ambientDiffers
+    ? [
+      `  first   isGlobal: ${String(first.ambient)}   at ${first.callSite}`,
+      `  second  isGlobal: ${String(later.ambient)}   at ${later.callSite}`,
+    ]
+    : [
+      `  first   at ${first.callSite}`,
+      `          ${abbreviate(first.fingerprint)}`,
+      `  second  at ${later.callSite}`,
+      `          ${abbreviate(later.fingerprint)}`,
+    ];
+
+  const cause = ambientDiffers
+    ? 'Ambient visibility is process-wide state keyed by the module class, so the call evaluated ' +
+      'last decides for every application: one of them boots with a service it never asked for, ' +
+      'or fails to resolve one it did.'
+    : 'An unnamed registration is identified by the module class itself, so the call evaluated ' +
+      'last replaced the first for every application: two services configured differently end up ' +
+      'talking to the same target.';
+
+  const error = new Error(
+    `${baseModule.name}.forRoot() was called more than once in this process, with ` +
+    `${ambientDiffers ? 'different ambient visibility' : 'a different configuration'}, and ` +
+    `${rootModule.name} imports ${baseModule.name}.\n` +
+    `${cause}\n` +
+    `${detail.join('\n')}\n` +
+    'Name the configurations so each keeps its own identity: ' +
+    `${baseModule.name}.forRoot({ ..., as: TOKEN }) where it is configured, and ` +
+    `${baseModule.name}.forFeature(TOKEN) in the modules that need it. A registration token is ` +
+    'the supported way to configure one module twice in a single process.',
+  );
+  error.name = 'OneBunConflictingRegistrationError';
+
+  return error;
+}
+
+/**
+ * Fail when two unnamed `forRoot()` calls disagree about a module this application imports.
+ *
+ * Deliberately at BOOT rather than at the second `forRoot()`: the defect is "an application was
+ * wired on an answer it did not declare", and that is what boot-with-reachability describes. A
+ * throw at registration time is broader than the defect — it fails a process that merely imports
+ * two module graphs and boots neither, which is the ordinary shape of a test suite.
+ *
+ * Reachability is why an options comparison is affordable here at all. Comparing configurations
+ * at registration time would fire on every process that configures the same module twice; here it
+ * only fires when an application actually boots with the contested module in its graph.
+ */
+function assertUnnamedRegistrationsAgree(rootModule: Function): void {
+  if (unnamedCalls.size === 0) {
+    return;
+  }
+
+  const reachable = collectReachableModules(rootModule);
+  for (const [baseModule, calls] of unnamedCalls) {
+    if (calls.length < 2 || !reachable.has(baseModule)) {
+      continue;
+    }
+
+    const [first] = calls;
+    for (const later of calls.slice(1)) {
+      // `undefined` on either side means that caller did not report globality, which is not the
+      // same as reporting agreement — comparing it would invent a disagreement out of silence.
+      const ambientDiffers = first.ambient !== undefined
+        && later.ambient !== undefined
+        && first.ambient !== later.ambient;
+
+      if (ambientDiffers || first.fingerprint !== later.fingerprint) {
+        throw conflictingUnnamedCallsError(baseModule, rootModule, first, later, ambientDiffers);
+      }
+    }
+  }
 }
 
 /**
@@ -250,8 +489,13 @@ export function resetRegistrations(): void {
  * token, or a missing `forRoot()`, produces an empty registration rather than an immediate
  * error. This is where that is caught — at boot, before anything is constructed, with the
  * call that is missing named.
+ *
+ * @param rootModule - The module this application is booting. Given one, two unnamed `forRoot()`
+ *   calls that disagree about a module in its graph are refused here too. Without one there is
+ *   nothing for a module to be reachable FROM, so that check is skipped rather than widened to
+ *   the whole process.
  */
-export function assertRegistrationsConfigured(): void {
+export function assertRegistrationsConfigured(rootModule?: Function): void {
   for (const [baseModule, forBase] of registrations) {
     for (const [token, registration] of forBase) {
       if (registration.configured) {
@@ -266,6 +510,10 @@ export function assertRegistrationsConfigured(): void {
       error.name = 'OneBunUnconfiguredRegistrationError';
       throw error;
     }
+  }
+
+  if (rootModule !== undefined) {
+    assertUnnamedRegistrationsAgree(rootModule);
   }
 }
 

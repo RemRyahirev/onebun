@@ -257,6 +257,14 @@ one per sub-application. Two applications in the same process each build their o
 silently reusing the first one's. The options a dynamic module is imported with are captured
 per application at import time.
 
+**Globality itself is still per process.** The instances are per application; the answer to "is
+this module ambient?" lives in one Set keyed by the module class. So two unnamed `forRoot()`
+calls that disagree — about `isGlobal`, or about what they configure — cannot both be honoured,
+and the framework refuses rather than letting the last one win: an application importing the
+contested module fails at `start()` with `OneBunConflictingRegistrationError` naming both calls.
+Give each configuration a token (`forRoot({ as: TOKEN })` + `forFeature(TOKEN)`) when they must
+coexist; in tests, call `resetRegistrations()` in `beforeEach`.
+
 **Class-based providers only.** An object entry — `{ provide: X, useValue: v }` — throws
 `OneBunInvalidProviderError` naming the module. Substitute implementations with
 `TestingModule.overrideProvider()` instead.
