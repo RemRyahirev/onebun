@@ -27,6 +27,7 @@ import { OnConnect, WebSocketGateway } from '../websocket/ws-decorators';
 
 const NO_CONTENT = 204;
 const NOT_FOUND = 404;
+const METHOD_NOT_ALLOWED = 405;
 const OK = 200;
 
 const ORIGIN = 'https://app.example.com';
@@ -132,7 +133,11 @@ describe('CORS preflight before routing', () => {
       async (module) => {
         const response = await module.inject('OPTIONS', '/api/items', { headers: preflightHeaders() });
 
-        expect(response.status).toBe(NOT_FOUND);
+        // Without `cors` the OPTIONS verb is registered like any other verb the path does not
+        // declare: 405 with `Allow`, and no grant. With `cors` it is left to the short-circuit,
+        // which is what the case above pins.
+        expect(response.status).toBe(METHOD_NOT_ALLOWED);
+        expect(response.headers.get('access-control-allow-origin')).toBeNull();
       },
     );
   });

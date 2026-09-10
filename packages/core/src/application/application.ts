@@ -419,6 +419,36 @@ export type ServiceSelection = readonly [
  * `initTracerProvider` uses, so logs and spans from an unconfigured service land under one name
  * in the backend instead of two.
  */
+/**
+ * The verbs a client may reasonably try on a path that exists.
+ *
+ * A path declaring none of them is unknown and keeps its 404 from the fallback; a path declaring
+ * some answers 405 for the rest and names them in `Allow`, so "wrong verb" and "wrong path" stop
+ * being the same answer.
+ */
+const METHOD_NOT_ALLOWED_VERBS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const;
+
+/**
+ * The 405 a declared path gives a verb it does not declare.
+ *
+ * `Allow` is required on a 405 by the HTTP spec, and it is the whole value of the status: it tells
+ * the client what the path does support instead of leaving it to guess.
+ */
+function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Response {
+  return new Response(
+    JSON.stringify(createErrorResponse('Method Not Allowed', HttpStatusCode.METHOD_NOT_ALLOWED)),
+    {
+      status: httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.METHOD_NOT_ALLOWED,
+      headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Content-Type': 'application/json',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Allow': allow,
+      },
+    },
+  );
+}
+
 const DEFAULT_OTLP_SERVICE_NAME = 'onebun-service';
 const DEFAULT_OTLP_SERVICE_VERSION = '1.0.0';
 
@@ -1911,6 +1941,45 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const { methods, catchAll } = registration;
 
         if (!catchAll) {
+          // HEAD is derived from GET unless the controller declared its own. Bun does not derive
+          // it (measured on 1.3.14) and neither did route registration, so every load-balancer
+          // and uptime probe — which conventionally use HEAD — reported the service down.
+          const getHandler = methods.get('GET');
+          if (getHandler && !methods.has('HEAD')) {
+            methods.set('HEAD', async (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => {
+              const response = await getHandler(req, server);
+
+              // Same status, same headers, no body — the definition of HEAD. Running the GET
+              // handler means the middleware chain, the guards and the interceptors all ran, so
+              // the headers are the ones a GET would really have carried.
+              return new Response(null, { status: response.status, headers: response.headers });
+            });
+          }
+
+          // A verb nobody declared on a path that DOES exist used to reach the fallback and
+          // answer 404, which is the same thing an unknown path says: the developer went looking
+          // for a route that was right there. Registering the remaining verbs here lets Bun do
+          // the matching — including params and wildcards — so `Allow` lists exactly what this
+          // pattern declares.
+          const allowHeader = [...methods.keys()].join(', ');
+          for (const method of METHOD_NOT_ALLOWED_VERBS) {
+            if (methods.has(method)) {
+              continue;
+            }
+
+            // OPTIONS stays unclaimed when `cors` is configured: the preflight short-circuit in
+            // the fallback owns it, and a 405 here would undo that fix.
+            if (method === 'OPTIONS' && corsPreflight !== undefined) {
+              continue;
+            }
+
+            methods.set(method, async (req: OneBunRequest) => await runMiddlewareChain(
+              globalMiddleware,
+              req,
+              async () => methodNotAllowedResponse(allowHeader, app.options.httpEnvelope === true),
+            ));
+          }
+
           bunRoutes[pathKey] = Object.fromEntries(methods);
 
           continue;

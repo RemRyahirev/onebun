@@ -2470,8 +2470,9 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      // Current implementation returns 404 for method not allowed, not 405
-      expect(response.status).toBe(404);
+      // 405 with `Allow`, not the 404 an unknown path gets: the path exists, the verb does not.
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toContain('GET');
     });
 
     test('should handle controller method errors', async () => {

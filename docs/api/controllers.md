@@ -258,6 +258,13 @@ class AdminController extends ProtectedController {
 }
 ```
 
+**A wrong verb answers 405, not 404.** A path that some route declares answers `405 Method Not
+Allowed` with an `Allow` header listing what it does declare, so a client that sent `POST` to a
+`@Get` route is told exactly that instead of being sent hunting for a route that exists. A path no
+route declares still answers 404. `HEAD` is answered from the matching `@Get` handler — same status,
+same headers, no body — unless the controller declares its own `@Head`, which wins. When `cors` is
+configured the `OPTIONS` verb is left to the CORS preflight rather than answering 405.
+
 **Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
 
 ::: warning Upgrading from 0.4.4 or earlier

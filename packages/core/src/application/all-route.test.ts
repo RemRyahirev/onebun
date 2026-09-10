@@ -212,9 +212,11 @@ describe('@All() catch-all routes', () => {
     expect(await ok.json()).toEqual({ success: true, result: { handler: 'ping' } });
 
     // /api/ping carries no @All, so it keeps the method-map form and must NOT
-    // become a catch-all just because a sibling path did.
+    // become a catch-all just because a sibling path did. A declared path answers 405 for a verb
+    // it does not declare — that is the point of the method map — while a verb outside the
+    // standard set still falls through to the fallback's 404.
     expect(typeof (servedOptions.routes as Record<string, unknown>)['/api/ping']).toBe('object');
-    expect((await call('/api/ping', 'POST')).status).toBe(404);
+    expect((await call('/api/ping', 'POST')).status).toBe(405);
     expect((await call('/api/ping', 'PROPFIND')).status).toBe(404);
   });
 
