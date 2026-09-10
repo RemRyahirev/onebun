@@ -996,6 +996,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // cannot see `const app = this` — that one is block-scoped inside the try below.
     const appLogger = this.logger;
 
+    /**
+     * Routes already told that their response schema cannot validate a handler-built Response.
+     *
+     * Once per route, not once per request: it is a property of how the route is written, and a
+     * line per request would bury it.
+     */
+    const unvalidatedResponseRoutes = new Set<string>();
+
     try {
       // Initialize configuration if schema was provided
       let profileMark: ProfileMark | undefined;
@@ -2774,61 +2782,32 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       let validatedResult = result;
       let responseStatusCode = HttpStatusCode.OK;
 
-      // If the result is already a Response object, extract body and validate it
+      // A handler that returns a Response has already produced the exact bytes it wants sent, so
+      // they are sent. This used to clone(), text(), JSON.parse() and JSON.stringify() every JSON
+      // response, which changed them: a 64-bit id sent as a JSON number came back rounded
+      // (12345678901234567890 -> 12345678901234567000, silently, 200 OK), and the whole body was
+      // buffered, so a streaming response reached the client only once its producer finished.
+      // The fast arm always passed it through — one decorated parameter was the entire difference
+      // between the two behaviours.
+      //
+      // A declared response schema is not applied here. Reading the body to validate it is what
+      // caused both defects, and for a stream there is no body to read without ending the stream.
+      // The schema still describes the response in the OpenAPI document; it just does not rewrite
+      // what the handler built. Said once per route, because it is a property of the route.
       if (result instanceof Response) {
-        responseStatusCode = result.status;
-
-        // Extract and parse response body for validation
-        const contentType = result.headers.get('content-type') || '';
-        if (contentType.includes('application/json')) {
-          try {
-            // Clone response to avoid consuming the body
-            const clonedResponse = result.clone();
-            const bodyText = await clonedResponse.text();
-            const bodyData = bodyText ? JSON.parse(bodyText) : null;
-
-            // Validate response body if schema is provided
-            if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
-              const responseSchema = routeMeta.responseSchemas.find(
-                (rs) => rs.statusCode === responseStatusCode,
-              ) || routeMeta.responseSchemas.find(
-                (rs) => rs.statusCode === HttpStatusCode.OK,
-              ) || routeMeta.responseSchemas[0];
-
-              if (responseSchema?.schema) {
-                try {
-                  validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(bodyData));
-                } catch (error) {
-                  const errorMessage =
-                    error instanceof Error ? error.message : String(error);
-                  throw new Error(`Response validation failed: ${errorMessage}`);
-                }
-              } else {
-                validatedResult = bodyData;
-              }
-            } else {
-              validatedResult = bodyData;
-            }
-
-            // Preserve all original headers (including multiple Set-Cookie)
-            // using new Headers() constructor instead of Object.fromEntries()
-            // which would lose duplicate header keys
-            const newHeaders = new Headers(result.headers);
-            newHeaders.set('Content-Type', 'application/json');
-
-            // Create new Response with validated data
-            return new Response(JSON.stringify(validatedResult), {
-              status: responseStatusCode,
-              headers: newHeaders,
-            });
-          } catch {
-            // If parsing fails, return original response
-            return result;
+        if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+          const routeKey = `${controllerName}.${routeMeta.handler ?? 'unknown'}`;
+          if (!unvalidatedResponseRoutes.has(routeKey)) {
+            unvalidatedResponseRoutes.add(routeKey);
+            appLogger.warn(
+              `${routeKey} returns a Response, so its @ApiResponse schema is not validated at `
+              + 'runtime — the handler\'s bytes are sent as they are. The schema still documents '
+              + 'the endpoint. Return a plain object if you want the schema enforced.',
+            );
           }
-        } else {
-          // For non-JSON responses, return as-is (can't validate)
-          return result;
         }
+
+        return result;
       }
 
       // Validate response against schema if provided

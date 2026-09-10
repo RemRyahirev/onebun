@@ -7903,6 +7903,46 @@ describe('Custom Response Headers (docs/api/controllers.md)', () => {
   });
 
   /**
+   * The section says the client receives what the handler built. That used to hold only for a
+   * route with no decorated parameters — one `@Param` sent the response through a JSON round
+   * trip that rewrote the bytes.
+   *
+   * @source docs:api/controllers.md#custom-response-headers
+   */
+  it('should send a hand-built Response verbatim from a route that has a decorated parameter', async () => {
+    const exactBody = '{"big":12345678901234567890}';
+
+    @Controller('/api')
+    class PrecisionController extends BaseController {
+      @Get('/download/:id')
+      async download(@Param('id') _id: string) {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        return new Response(exactBody, { headers: { 'Content-Type': 'application/json' } });
+      }
+    }
+
+    @Module({ controllers: [PrecisionController] })
+    class PrecisionModule {}
+
+    const app = new OneBunApplication(PrecisionModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      loggerLayer: makeMockLoggerLayer(),
+    });
+    await app.start();
+
+    try {
+      const response = await fetch(`${app.getHttpUrl()}/api/download/1`);
+
+      // Round-tripped, the id read back as 12345678901234567000.
+      expect(await response.text()).toBe(exactBody);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
    * @source docs:api/controllers.md#setting-cookies-via-set-cookie-header
    */
   it('should define handler returning Response with Set-Cookie header', async () => {

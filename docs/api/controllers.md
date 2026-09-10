@@ -391,7 +391,17 @@ async logout(@Req() req: OneBunRequest) {
 
 ## Custom Response Headers
 
-To return custom headers, return a `Response` object directly from your handler:
+To return custom headers, return a `Response` object directly from your handler. **What you build is
+what the client receives** — the framework does not read, re-parse or re-serialize it, so the bytes,
+the headers and a streaming body all arrive as written. Through 0.6.0 that was true only for a route
+with no decorated parameters: one `@Param`, `@Body`, `@Query` or `@Req` sent the response through a
+`JSON.parse`/`JSON.stringify` round trip, which rounded 64-bit numbers and buffered streams until
+the producer finished.
+
+The one consequence: an `@ApiResponse` schema on such a route documents the endpoint but does not
+validate or reshape what the handler built — reading the body to check it is what caused both of
+those defects. The framework logs that once per route at startup-time granularity. Return a plain
+object instead if you want the schema enforced.
 
 ```typescript
 @Controller('/api')
