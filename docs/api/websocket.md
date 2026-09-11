@@ -530,7 +530,38 @@ See [Interceptors](/api/interceptors) for full documentation.
 
 ## Storage adapters
 
-Default is in-memory. For Redis, set `websocket.storage: { type: 'redis', redis: { url, prefix } }` and use `createRedisWsStorage(redisClient)` when providing a custom storage to the handler.
+Clients and rooms live in memory by default — one process, state gone when it exits. Point
+`websocket.storage` at Redis and they are shared by every instance, which is also what turns on
+the pub/sub fan-out behind `broadcast()`, `emit()` and `emitToRoom()` across instances.
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  websocket: {
+    storage: {
+      type: 'redis',                       // 'memory' | 'redis'
+      redis: {
+        url: 'redis://localhost:6379',
+        prefix: 'ws:',                     // every key this application writes lives under it
+      },
+    },
+  },
+});
+```
+
+`prefix` is the application's whole WebSocket keyspace, so two applications on one Redis stay out
+of each other's way by giving it different values. `url` may be omitted when
+`SharedRedisProvider` is already configured — its URL is used, and the connection is still this
+application's own so that `prefix` applies.
+
+::: warning
+`type: 'redis'` makes Redis a startup dependency: a connection that cannot be opened fails
+`start()` rather than falling back to memory. Falling back is what the option did for its whole
+life before this — it was read by no code at all, so an application configured for Redis ran in
+memory and said nothing.
+:::
+
+Shutdown removes the clients THIS instance was serving. It does not clear the namespace, so a
+rolling deploy leaves the surviving instances' connections and rooms alone.
 
 ## WebSocket client options
 

@@ -6618,6 +6618,9 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
       // The block survives onto the application; on start() it is what the WebSocket handler
       // is built from (application.ts: `new WsHandler(this.logger, this.options.websocket)`).
+      // `storage` is asserted for its EFFECT in ws-storage-option.test.ts — surviving onto the
+      // options object was all this used to check, and for `storage` that was the whole of what
+      // it did: nothing read it, so an application configured for Redis ran in memory.
       expect((app as unknown as { options: { websocket?: typeof websocket } }).options.websocket)
         .toEqual(websocket);
 

@@ -91,6 +91,7 @@ import {
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { getQueueHandlerNames, hasQueueDecorators } from '../queue/decorators';
+import { type RedisClient } from '../redis/redis-client';
 import { SharedRedisProvider } from '../redis/shared-redis';
 import { getCurrentTraceContext, requestContextStore } from '../request-context';
 import {
@@ -115,6 +116,7 @@ import {
 } from '../types';
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
+import { createRedisWsStorage } from '../websocket/ws-storage-redis';
 
 import { runMiddlewareChain } from './middleware-chain';
 import {
@@ -582,6 +584,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
   private wsHandler: WsHandler | null = null;
+
+  /**
+   * The connection `websocket.storage: { type: 'redis' }` opened, so stop() can close it.
+   *
+   * Held here rather than inside the handler: the handler is handed a `WsStorageAdapter` and has
+   * no business knowing whether one arrived with a socket attached.
+   */
+  private wsStorageClient: RedisClient | null = null;
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
@@ -1192,6 +1202,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           }
         }
       }
+
+      // Before anything is served: a Redis that cannot be reached should stop the boot, not
+      // leave the application listening with its state in a Map the operator did not ask for.
+      await this.initializeWebSocketStorage();
 
       // Initialize Queue system if configured or handlers exist
       if (PROFILING_ENABLED) {
@@ -3213,6 +3227,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.wsHandler = null;
     }
 
+    // After cleanup, which is the last thing that needs the connection.
+    if (this.wsStorageClient) {
+      const client = this.wsStorageClient;
+      this.wsStorageClient = null;
+      await this.runShutdownStep(outcome, 'closing the WebSocket Redis connection', async () => {
+        await client.disconnect();
+      });
+    }
+
     // Stop consuming and scheduling, but keep the transport open: `onModuleDestroy` runs below,
     // and announcing a shutdown from it is the ordinary reason to publish there. Tearing the
     // adapter down first is what made that message vanish — the throw was caught and logged as a
@@ -3426,6 +3449,43 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     this.logger.debug('HTTP server stopped');
 
     return forceClosed;
+  }
+
+  /**
+   * Put WebSocket state where `websocket.storage` says it goes.
+   *
+   * The option was declared, exported and documented, and read by nobody: `WsHandler` built an
+   * in-memory adapter in its constructor before looking at any of it. Measured against a real
+   * application with `storage: { type: 'redis' }` — the client lived in a Map and Redis held
+   * zero keys, so an operator who configured multi-instance ran single-instance and was told
+   * nothing.
+   *
+   * The connection is this application's own rather than the shared provider's, because the
+   * documented `prefix` has to land somewhere: `RedisClient` IS the namespace, and the shared
+   * client already carries whoever configured it first. A prefix that silently did not apply
+   * would be the same class of lie this is fixing.
+   */
+  private async initializeWebSocketStorage(): Promise<void> {
+    const storage = this.options.websocket?.storage;
+    if (storage?.type !== 'redis' || !this.wsHandler) {
+      return;
+    }
+
+    const keyPrefix = storage.redis?.prefix ?? 'ws:';
+    let client: RedisClient;
+    try {
+      client = SharedRedisProvider.createClient({ url: storage.redis?.url, keyPrefix });
+    } catch {
+      throw new Error(
+        'websocket.storage.type is "redis" but no Redis URL is available. Set '
+        + 'websocket.storage.redis.url, or configure SharedRedisProvider before start().',
+      );
+    }
+
+    await client.connect();
+    this.wsStorageClient = client;
+    this.wsHandler.setStorage(createRedisWsStorage(client));
+    this.logger.info(`WebSocket state stored in Redis under "${keyPrefix}"`);
   }
 
   /**
