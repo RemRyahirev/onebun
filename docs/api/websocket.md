@@ -226,7 +226,7 @@ await client.connect();
 
 - Engine.IO v4, Socket.IO v4
 - WebSocket and HTTP long-polling transports
-- Namespaces, acknowledgements
+- Acknowledgements
 - Binary data (base64 encoded)
 
 ## WebSocketGateway decorator
@@ -243,8 +243,39 @@ export class ChatGateway extends BaseWebSocketGateway {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `path` | `string` | `'/'` | WebSocket connection path |
-| `namespace` | `string` | - | Namespace for isolating gateways |
+| `namespace` | `string` | - | Distinguishes gateways that share a path. See [Which gateway a connection belongs to](#which-gateway-a-connection-belongs-to) |
 | `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
+
+### Which gateway a connection belongs to
+
+A connection is bound to exactly ONE gateway, decided at upgrade from the URL it connected to.
+That gateway's `@OnConnect`, `@OnMessage`, `@OnJoinRoom`, `@OnLeaveRoom` and `@OnDisconnect`
+handlers are the only ones that run for it, and it appears only in that gateway's `clients`.
+
+Everything a gateway sends covers the connections IT admitted: `broadcast()`, `emit()`,
+`emitToRoom()`/`emitToRooms()`/`emitToRoomPattern()`, `disconnectClient()`, `disconnectAll()`,
+`clients` and `getClientsByRoom()`. `emit()`, `joinRoom()`, `leaveRoom()` and
+`disconnectClient()` do nothing for a client another gateway owns. The scope is also
+per-application: two applications in one process do not see each other's connections.
+
+`namespace` distinguishes two gateways that would otherwise share a path. A client selects one by
+connecting with `?namespace=<name>`; OneBun's own `WsClient` sends that automatically when its
+`namespace` option is set. A namespace that matches no gateway is ignored and resolution falls
+back to the path — it never refuses the connection. Isolation does not depend on this option:
+the binding above holds either way.
+
+::: warning
+With the Socket.IO protocol enabled, every client arrives on one path, so `?namespace=` is the
+only thing that can tell two gateways apart. Without it, a single registered gateway is
+unambiguous; with more than one the client is bound to the first and a warning is logged. The
+Socket.IO `nsp` field in the CONNECT packet is echoed but does not select a gateway — the client
+receives the `@OnConnect` reply before it sends that packet.
+:::
+
+Because a Socket.IO client is now bound to a gateway at upgrade, that gateway's `authenticate`
+hook runs for it. It did not before: no gateway was resolved on the Socket.IO branch, so the hook
+was skipped. A hook that returns `false` will now refuse a Socket.IO connection that previously
+succeeded.
 
 ### Authentication
 

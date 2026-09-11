@@ -47,6 +47,17 @@ export interface WsClientData {
   metadata: Record<string, unknown>;
   /** Protocol used by the client */
   protocol: WsProtocol;
+  /**
+   * Which gateway admitted this connection — its path, or `path:namespace`.
+   *
+   * Written once at upgrade and read when dispatching, so a connection reaches the handlers of
+   * the gateway it connected to and no other. It is a hint rather than a credential: the
+   * framework confirms ownership against its own socket map, so assigning this field in a
+   * handler cannot redirect that client's frames elsewhere.
+   * @internal
+   * @see docs:api/websocket.md
+   */
+  gatewayKey?: string;
 }
 
 /**

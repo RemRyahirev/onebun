@@ -64,6 +64,8 @@ const HTTP_SERVICE_UNAVAILABLE = 503;
 
 /** RFC 6455 "going away": the server is shutting down. What a client should see, not a 1006. */
 const WS_GOING_AWAY = 1001;
+/** Close code for a connection the framework cannot route: better closed than open and mute. */
+const WS_INTERNAL_ERROR_CODE = 1011;
 
 /** How long shutdown waits for the disconnect path of the sockets it just closed. */
 const WS_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
@@ -110,6 +112,22 @@ interface GatewayInstance {
   instance: BaseWebSocketGateway;
   metadata: ReturnType<typeof getGatewayMetadata>;
   handlers: Map<WsHandlerType, WsHandlerMetadata[]>;
+  /** The registry key this gateway is stored under, recorded on every client it admits. */
+  key: string;
+}
+
+/**
+ * The registry key for a gateway's metadata.
+ *
+ * One function so the key written onto a client at upgrade and the key a gateway is stored
+ * under cannot drift apart.
+ */
+function gatewayKeyFor(metadata: { path: string; namespace?: string } | undefined): string {
+  if (!metadata) {
+    return '';
+  }
+
+  return metadata.namespace ? `${metadata.path}:${metadata.namespace}` : metadata.path;
 }
 
 /**
@@ -118,6 +136,14 @@ interface GatewayInstance {
 export class WsHandler {
   private storage: WsStorageAdapter;
   private gateways: Map<string, GatewayInstance> = new Map();
+  /**
+   * One socket map per gateway key, shared by reference with the gateway instance.
+   *
+   * The handler holds these so `cleanup()` can empty them: a socket whose close callback never
+   * arrives — `server.stop(true)` drops it once the close drain times out — would otherwise
+   * leave its entry behind with nothing able to reach it.
+   */
+  private socketsByGateway: Map<string, Map<string, ServerWebSocket<WsClientData>>> = new Map();
   private pingIntervalMs: number;
   private pingTimeoutMs: number;
   private maxPayload: number;
@@ -249,8 +275,26 @@ export class WsHandler {
       handlers.set(handler.type, typeHandlers);
     }
 
-    const key = metadata.namespace ? `${metadata.path}:${metadata.namespace}` : metadata.path;
-    this.gateways.set(key, { instance, metadata, handlers });
+    const key = gatewayKeyFor(metadata);
+    const existing = this.gateways.get(key);
+    if (existing && existing.instance.constructor !== instance.constructor) {
+      throw new Error(
+        `WebSocket gateway ${gatewayClass.name} and ${existing.instance.constructor.name} both `
+        + `resolve to "${key}". The second registration used to replace the first silently, which `
+        + 'left one gateway unreachable with nothing said. Give them different paths, or different '
+        + 'namespaces on the same path.',
+      );
+    }
+
+    // The gateway is born with its own map; attaching hands it the handler's map for this key
+    // and carries over anything already registered, so gateway and handler share one object.
+    const sockets = this.socketsByGateway.get(key) ?? new Map<string, ServerWebSocket<WsClientData>>();
+    this.socketsByGateway.set(key, sockets);
+    instance._attachSockets(sockets);
+
+    this.gateways.set(key, {
+      instance, metadata, handlers, key,
+    });
 
     this.logger.debug(`Registered WebSocket gateway: ${gatewayClass.name} at ${metadata.path}`);
   }
@@ -281,6 +325,18 @@ export class WsHandler {
       if (this.gateways.has(key)) {
         return this.gateways.get(key);
       }
+
+      // A namespace declared on a gateway whose path this one only prefixes.
+      for (const gateway of this.gateways.values()) {
+        if (gateway.metadata?.namespace === namespace && path.startsWith(gateway.metadata.path)) {
+          return gateway;
+        }
+      }
+
+      this.logger.warn(
+        `WebSocket client asked for namespace "${namespace}" on ${path}, which matches no gateway. `
+        + 'Falling back to path resolution.',
+      );
     }
 
     // Try exact path match
@@ -296,6 +352,98 @@ export class WsHandler {
     }
 
     return undefined;
+  }
+
+  /**
+   * The gateway a Socket.IO client belongs to.
+   *
+   * Socket.IO clients all arrive on one path, so there is nothing in the URL to tell two
+   * gateways apart except an explicit `?namespace=`. With none, a single gateway is unambiguous;
+   * more than one is a coin flip, and it is resolved loudly rather than by delivering the client
+   * to all of them — which is what used to happen, welcome messages included.
+   */
+  private resolveSocketioGateway(namespace?: string): GatewayInstance | undefined {
+    if (namespace) {
+      for (const gateway of this.gateways.values()) {
+        if (gateway.metadata?.namespace === namespace) {
+          return gateway;
+        }
+      }
+    }
+
+    const all = [...this.gateways.values()];
+    if (all.length <= 1) {
+      return all[0];
+    }
+
+    this.logger.warn(
+      `Socket.IO client did not state a namespace and ${all.length} gateways are registered `
+      + `(${all.map((gateway) => gateway.key).join(', ')}). Binding it to the first. `
+      + 'Connect with ?namespace=<name> to choose.',
+    );
+
+    return all[0];
+  }
+
+  /**
+   * The gateway that admitted this socket, or undefined when it cannot be established.
+   *
+   * The key on `ws.data` is a hint, not a credential: it is reachable from user code through
+   * `@Client()`, so the answer is confirmed against the handler's own socket map, which only
+   * this class writes. A forged key resolves to a gateway whose map does not hold this socket,
+   * and dispatch is refused.
+   *
+   * The unkeyed fallback exists for sockets that never went through `handleUpgrade` — test
+   * harnesses call the Bun handlers directly. With one gateway registered the answer is not in
+   * doubt; with several it is, and guessing is what this whole change removes.
+   */
+  private ownerAtOpen(ws: ServerWebSocket<WsClientData>): GatewayInstance | undefined {
+    const key = ws.data?.gatewayKey;
+
+    if (key !== undefined) {
+      return this.gateways.get(key);
+    }
+
+    if (this.gateways.size === 1) {
+      return this.gateways.values().next().value;
+    }
+
+    return undefined;
+  }
+
+  /**
+   * The owning gateway of an already-open socket, confirmed against the handler's own map.
+   *
+   * `ownerAtOpen` trusts the key because the socket is not registered yet when `handleOpen`
+   * runs. Everything after that verifies, so a handler that assigns `client.gatewayKey` cannot
+   * redirect its own frames at another gateway's handlers.
+   */
+  private ownerOf(ws: ServerWebSocket<WsClientData>): GatewayInstance | undefined {
+    const id = ws.data?.id;
+    const key = ws.data?.gatewayKey;
+
+    if (id !== undefined && key !== undefined) {
+      const gateway = this.gateways.get(key);
+      if (gateway && this.socketsByGateway.get(key)?.get(id) === ws) {
+        return gateway;
+      }
+    }
+
+    // The key is a hint; the maps are the record, and only this class writes them. A client
+    // whose handler assigned itself another gateway's key lands here and resolves back to the
+    // gateway that actually holds the socket.
+    if (id !== undefined) {
+      for (const gateway of this.gateways.values()) {
+        if (this.socketsByGateway.get(gateway.key)?.get(id) === ws) {
+          return gateway;
+        }
+      }
+    }
+
+    // Held by nobody: a socket that never went through handleUpgrade, which is how test
+    // harnesses drive the Bun callbacks. One registered gateway leaves no room for doubt; more
+    // than one does, and guessing is the thing this change removes.
+    return this.gateways.size === 1 ? this.gateways.values().next().value : undefined;
   }
 
   /**
@@ -355,10 +503,20 @@ export class WsHandler {
     let protocol: WsClientData['protocol'] = 'native';
     let gateway: GatewayInstance | undefined;
 
+    // A stated namespace NARROWS the choice; it never refuses a connection. `?namespace=x` that
+    // matches nothing still connects, because it does today and because confinement comes from
+    // binding the client to one gateway, not from turning working apps away.
+    const namespace = url.searchParams.get('namespace') ?? undefined;
+
     if (this.socketioEnabled && path.startsWith(this.socketioPath)) {
       protocol = 'socketio';
+      // Socket.IO clients share one path, so the namespace query is the only declared
+      // discriminator; failing that, the sole gateway, failing that the first one with a warning.
+      // The packet `nsp` cannot be the signal: a client receives @OnConnect's reply before it
+      // ever sends the CONNECT packet.
+      gateway = this.resolveSocketioGateway(namespace);
     } else {
-      gateway = this.getGatewayForPath(path);
+      gateway = this.getGatewayForPath(path, namespace);
       if (!gateway) {
         return new Response('Not Found', { status: 404 });
       }
@@ -384,6 +542,9 @@ export class WsHandler {
         : null,
       metadata: {},
       protocol,
+      // Which gateway admitted this client. Dispatch used to loop every registered gateway, so
+      // a /chat client ran an /admin gateway's handlers and received its broadcasts.
+      gatewayKey: gateway?.key,
     };
 
     // Run the gateway's authenticate hook, if it has one. Without it nothing in the
@@ -448,10 +609,20 @@ export class WsHandler {
 
     this.openSockets.add(ws);
 
-    // Register socket in gateway
-    for (const [_, gateway] of this.gateways) {
-      gateway.instance._registerSocket(client.id, ws);
+    // Register the socket with the gateway that admitted it. This used to register with EVERY
+    // gateway, which is why one client appeared in every gateway's `clients` and received every
+    // gateway's broadcasts.
+    const owner = this.ownerAtOpen(ws);
+    if (!owner) {
+      this.logger.warn(
+        `WebSocket client ${client.id} could not be matched to a gateway (key: `
+        + `${ws.data?.gatewayKey ?? 'none'}); closing rather than leaving it open and mute.`,
+      );
+      ws.close(WS_INTERNAL_ERROR_CODE, 'No gateway owns this connection');
+
+      return;
     }
+    owner.instance._registerSocket(client.id, ws);
 
     if (client.protocol === 'socketio') {
       // Send Socket.IO handshake
@@ -464,18 +635,16 @@ export class WsHandler {
       this.startPingInterval(client.id, ws);
     }
 
-    // Call OnConnect handlers
-    for (const [_, gateway] of this.gateways) {
-      const handlers = gateway.handlers.get(HandlerType.CONNECT) || [];
-      for (const handler of handlers) {
-        try {
-          const result = await this.executeHandler(gateway, handler, ws, undefined, {});
-          if (result && isWsHandlerResponse(result)) {
-            ws.send(this.encodeResponse(client.protocol, result));
-          }
-        } catch (error) {
-          this.logger.error(`Error in OnConnect handler: ${error}`);
+    // Call OnConnect handlers — the owning gateway's only.
+    const connectHandlers = owner.handlers.get(HandlerType.CONNECT) || [];
+    for (const handler of connectHandlers) {
+      try {
+        const result = await this.executeHandler(owner, handler, ws, undefined, {});
+        if (result && isWsHandlerResponse(result)) {
+          ws.send(this.encodeResponse(client.protocol, result));
         }
+      } catch (error) {
+        this.logger.error(`Error in OnConnect handler: ${error}`);
       }
     }
   }
@@ -623,8 +792,10 @@ export class WsHandler {
       return;
     }
 
-    // Find matching message handler
-    for (const [_, gateway] of this.gateways) {
+    // Find matching message handler — in the gateway that admitted this client, and only there.
+    // Looping every gateway meant a /chat client could invoke an /admin gateway's handler.
+    const owner = this.ownerOf(ws);
+    for (const gateway of owner ? [owner] : []) {
       const handlers = gateway.handlers.get(HandlerType.MESSAGE) || [];
 
       for (const handler of handlers) {
@@ -689,8 +860,9 @@ export class WsHandler {
       client.rooms.push(roomName);
     }
 
-    // Call OnJoinRoom handlers
-    for (const [_, gateway] of this.gateways) {
+    // Call OnJoinRoom handlers — owning gateway only.
+    const joinOwner = this.ownerOf(ws);
+    for (const gateway of joinOwner ? [joinOwner] : []) {
       const handlers = gateway.handlers.get(HandlerType.JOIN_ROOM) || [];
 
       for (const handler of handlers) {
@@ -733,8 +905,9 @@ export class WsHandler {
     // Update client data
     client.rooms = client.rooms.filter((r) => r !== roomName);
 
-    // Call OnLeaveRoom handlers
-    for (const [_, gateway] of this.gateways) {
+    // Call OnLeaveRoom handlers — owning gateway only.
+    const leaveOwner = this.ownerOf(ws);
+    for (const gateway of leaveOwner ? [leaveOwner] : []) {
       const handlers = gateway.handlers.get(HandlerType.LEAVE_ROOM) || [];
 
       for (const handler of handlers) {
@@ -864,8 +1037,9 @@ export class WsHandler {
     // Stop ping interval
     this.stopPingInterval(client.id);
 
-    // Call OnDisconnect handlers
-    for (const [_, gateway] of this.gateways) {
+    // Call OnDisconnect handlers — owning gateway only, and unregister from it alone.
+    const closeOwner = this.ownerOf(ws);
+    for (const gateway of closeOwner ? [closeOwner] : []) {
       const handlers = gateway.handlers.get(HandlerType.DISCONNECT) || [];
       for (const handler of handlers) {
         try {
@@ -990,6 +1164,14 @@ export class WsHandler {
 
     // Clear storage
     await this.storage.clear();
+
+    // And the per-gateway socket maps. `closeAll` normally drains them through each socket's
+    // close callback, but a socket whose callback never arrives within the drain timeout is
+    // dropped by `server.stop(true)` with `handleClose` unrun — and its entry would otherwise
+    // stay in a map a live gateway instance still reads.
+    for (const sockets of this.socketsByGateway.values()) {
+      sockets.clear();
+    }
   }
 }
 

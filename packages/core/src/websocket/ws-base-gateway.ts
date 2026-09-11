@@ -20,17 +20,15 @@ import { createFullEventMessage, createNativeMessage } from './ws-socketio-proto
 import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
 
 /**
- * Map of client IDs to their WebSocket connections
- * Stored separately from storage to keep socket references in memory
- */
-const clientSockets = new Map<string, ServerWebSocket<WsClientData>>();
-
-/**
  * Clear all client sockets (for testing purposes only)
+ *
+ * @deprecated A no-op since sockets became per-gateway state: there is no process-wide map left
+ * to clear, and a gateway's own map goes away with the gateway. Kept because it is reachable
+ * from the package root, so removing it is a breaking export change.
  * @internal
  */
 export function _resetClientSocketsForTesting(): void {
-  clientSockets.clear();
+  // Intentionally empty — see the deprecation note.
 }
 
 /**
@@ -73,6 +71,35 @@ export abstract class BaseWebSocketGateway {
 
   /** Unique instance ID (for multi-instance setups) */
   protected instanceId: string = crypto.randomUUID();
+
+  /**
+   * The connections THIS gateway admitted.
+   *
+   * This used to be one module-level `Map` shared by every gateway in the process, so a client
+   * of one gateway appeared in another's `clients`, received its `broadcast()`, and — because
+   * dispatch looped every gateway too — invoked its message handlers. Measured: a client of a
+   * public `/chat` gateway ran an admin gateway's handler and received its broadcast.
+   *
+   * The gateway is BORN with this map so a hand-constructed gateway (which the tests do) works
+   * with no handler in sight. `_attachSockets` replaces the reference with the handler's map for
+   * the same key, so the two hold one object and `WsHandler.cleanup()` can empty it.
+   * @internal
+   */
+  private ownSockets = new Map<string, ServerWebSocket<WsClientData>>();
+
+  /**
+   * Share the handler's socket map for this gateway's key.
+   *
+   * Called once at registration. Anything already registered directly on the instance is carried
+   * over, so the order of registration and connection does not matter.
+   * @internal
+   */
+  _attachSockets(sockets: Map<string, ServerWebSocket<WsClientData>>): void {
+    for (const [clientId, socket] of this.ownSockets) {
+      sockets.set(clientId, socket);
+    }
+    this.ownSockets = sockets;
+  }
 
   /** Flag to track initialization status */
   private _initialized = false;
@@ -206,7 +233,7 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   _registerSocket(clientId: string, socket: ServerWebSocket<WsClientData>): void {
-    clientSockets.set(clientId, socket);
+    this.ownSockets.set(clientId, socket);
   }
 
   /**
@@ -214,7 +241,7 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   _unregisterSocket(clientId: string): void {
-    clientSockets.delete(clientId);
+    this.ownSockets.delete(clientId);
   }
 
   /**
@@ -222,7 +249,7 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   protected getSocket(clientId: string): ServerWebSocket<WsClientData> | undefined {
-    return clientSockets.get(clientId);
+    return this.ownSockets.get(clientId);
   }
 
   // ============================================================================
@@ -237,7 +264,7 @@ export abstract class BaseWebSocketGateway {
     // For sync access, maintain a local cache
     const result = new Map<string, WsClientData>();
     // Note: This returns only locally connected clients
-    for (const [id, socket] of clientSockets) {
+    for (const [id, socket] of this.ownSockets) {
       if (socket.data) {
         result.set(id, socket.data);
       }
@@ -344,7 +371,7 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   private _localEmit(clientId: string, event: string, data: unknown): void {
-    const socket = clientSockets.get(clientId);
+    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.send(this._encodeMessage(socket.data.protocol, event, data));
     }
@@ -373,7 +400,7 @@ export abstract class BaseWebSocketGateway {
   private _localBroadcast(event: string, data: unknown, excludeClientIds?: string[]): void {
     const excludeSet = new Set(excludeClientIds || []);
 
-    for (const [clientId, socket] of clientSockets) {
+    for (const [clientId, socket] of this.ownSockets) {
       if (!excludeSet.has(clientId)) {
         socket.send(this._encodeMessage(socket.data.protocol, event, data));
       }
@@ -417,7 +444,7 @@ export abstract class BaseWebSocketGateway {
 
     for (const clientId of clientIds) {
       if (!excludeSet.has(clientId)) {
-        const socket = clientSockets.get(clientId);
+        const socket = this.ownSockets.get(clientId);
         if (socket) {
           socket.send(this._encodeMessage(socket.data.protocol, event, data));
         }
@@ -448,7 +475,7 @@ export abstract class BaseWebSocketGateway {
 
     for (const clientId of clientIdsSet) {
       if (!excludeSet.has(clientId)) {
-        const socket = clientSockets.get(clientId);
+        const socket = this.ownSockets.get(clientId);
         if (socket) {
           socket.send(this._encodeMessage(socket.data.protocol, event, data));
         }
@@ -478,7 +505,7 @@ export abstract class BaseWebSocketGateway {
    * Disconnect a specific client
    */
   disconnectClient(clientId: string, reason?: string): void {
-    const socket = clientSockets.get(clientId);
+    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.close(1000, reason || 'Disconnected by server');
     }
@@ -488,7 +515,7 @@ export abstract class BaseWebSocketGateway {
    * Disconnect all clients
    */
   disconnectAll(reason?: string): void {
-    for (const [_, socket] of clientSockets) {
+    for (const [_, socket] of this.ownSockets) {
       socket.close(1000, reason || 'Server shutdown');
     }
   }
@@ -531,7 +558,7 @@ export abstract class BaseWebSocketGateway {
     await this.storage.addClientToRoom(clientId, roomName);
 
     // Also subscribe to Bun's native pub/sub topic
-    const socket = clientSockets.get(clientId);
+    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.subscribe(roomName);
     }
@@ -547,7 +574,7 @@ export abstract class BaseWebSocketGateway {
     await this.storage.removeClientFromRoom(clientId, roomName);
 
     // Also unsubscribe from Bun's native pub/sub topic
-    const socket = clientSockets.get(clientId);
+    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.unsubscribe(roomName);
     }

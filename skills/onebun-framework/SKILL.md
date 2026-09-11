@@ -910,6 +910,7 @@ at least in the areas you're modifying.
 | `autoMigrate: true` in DrizzleModule.forRoot() | It's the default — omit it |
 | Importing a module just for one service | Use `@Global()` on shared modules |
 | Using `@Inject()` tokens | OneBun resolves by type — just use constructor params |
+| Expecting one gateway's `broadcast()` to reach another gateway's clients | A connection is bound to ONE gateway at upgrade: its handlers are the only ones that run, and `broadcast`/`emit`/`clients`/`emitToRoom*`/`disconnect*` cover only the connections THAT gateway admitted, in that application. Two gateways sharing a path are told apart by `namespace`, which the client selects with `?namespace=<name>` |
 | Wrapping every return in `this.success()` | Return plain objects — auto-wrapped to `{ success: true, result }` |
 | Using `this.error()` for error responses | `throw new HttpException(statusCode, message)` — caught by exception filter |
 | Manual `.env` parsing | Use `envSchema` with `Env.string/number/boolean` |

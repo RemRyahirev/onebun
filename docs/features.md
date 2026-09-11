@@ -173,7 +173,7 @@ Built on Bun's native WebSocket support for maximum performance.
 
 ### Socket.IO Support
 Optional Socket.IO adapter for browser compatibility,
-rooms, namespaces, and broadcasting.
+rooms and broadcasting.
 
 ### Typed WebSocket Client
 Auto-generated typed client for type-safe frontend ↔ backend
