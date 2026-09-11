@@ -745,6 +745,15 @@ export abstract class BaseWebSocketGateway {
     // addresses it and must keep working, and the gateway-scoped one that `publishToRoom()`
     // uses so a colliding room name in another gateway cannot be reached by accident.
     if (socket) {
+      // `ws.data.rooms` is what `WsRoomGuard` reads and what `rooms` is built from, and this is
+      // the only thing that keeps it current. It used to be updated by accident, and only under
+      // one adapter: `InMemoryWsStorage` stored a copy that still shared the caller's `rooms`
+      // ARRAY, so the push inside `addClientToRoom` landed here. Under Redis nothing shared, so
+      // the guard denied a client the storage said was in the room.
+      if (!socket.data.rooms.includes(roomName)) {
+        socket.data.rooms.push(roomName);
+      }
+
       socket.subscribe(roomName);
       const scoped = this.roomTopic(roomName);
       if (scoped !== roomName) {
@@ -769,6 +778,11 @@ export abstract class BaseWebSocketGateway {
 
     // Also unsubscribe from Bun's native pub/sub topics
     if (socket) {
+      // The removal half of the same problem, and the sharper one: the in-memory adapter
+      // REASSIGNS `client.rooms` on a leave rather than mutating it, so the room stayed in
+      // `ws.data.rooms` and `WsRoomGuard` kept admitting a client the room no longer had.
+      socket.data.rooms = socket.data.rooms.filter((room) => room !== roomName);
+
       socket.unsubscribe(roomName);
       const scoped = this.roomTopic(roomName);
       if (scoped !== roomName) {
