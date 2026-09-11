@@ -160,6 +160,13 @@ app.getApplication('users')?.getPort();
 await app.getApplication('users')?.stop({ closeSharedRedis: false });
 ```
 
+**One shared Redis configuration per process.** `SharedRedisProvider.configure()` refuses a second
+call naming a different `url`, `keyPrefix`, `reconnect` or `tls` — there is a single shared
+connection, so a second target cannot be honoured and used to be accepted silently, leaving two
+services on one database under one prefix. For a genuinely different target build a dedicated
+client (`SharedRedisProvider.createClient({ url })`, or the consumer's own options); in tests call
+`await SharedRedisProvider.reset()` between configurations.
+
 ## Environment Config
 
 Define in `src/config.ts`. **All defaults belong here, not in service class properties.**

@@ -686,6 +686,16 @@ console.log(cache.isUsingSharedClient()); // true
 - Reduced memory footprint
 - Consistent key prefixing across features
 
+**One configuration per process.** There is a single shared connection, so there is a single
+configuration: a second `configure()` asking for a different URL, key prefix, `reconnect` or
+`tls` throws `OneBunSharedRedisConflictError`, naming both targets and both call sites. It used
+to be accepted and ignored — two applications pointing at different Redis databases both kept
+whichever connection existed first, under the first one's key prefix, so one application's
+`clear()` reached the other's data. Re-stating the same configuration is fine. For a second,
+genuinely different target use a dedicated client — `SharedRedisProvider.createClient({ url })`,
+or the consumer's own connection options — and in tests call `SharedRedisProvider.reset()`
+between configurations.
+
 ## Effect.js Integration
 
 For Effect.js-based usage:

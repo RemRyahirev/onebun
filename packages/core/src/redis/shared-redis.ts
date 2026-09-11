@@ -28,6 +28,44 @@ export interface SharedRedisOptions {
 }
 
 /**
+ * A Redis target as it can safely be printed: the credentials are the one part of a URL that
+ * must never reach a log line or an error message.
+ */
+function describeTarget(options: SharedRedisOptions): string {
+  let url = options.url;
+  try {
+    const parsed = new URL(options.url);
+    if (parsed.password) {
+      parsed.password = '***';
+    }
+    url = parsed.toString();
+  } catch {
+    // Not a parsable URL — print it as given rather than guess at its shape.
+  }
+
+  const prefix = options.keyPrefix ? `, keyPrefix: "${options.keyPrefix}"` : '';
+
+  return `${url}${prefix}`;
+}
+
+/**
+ * Where the caller of `configure()` wrote it.
+ *
+ * Frames inside this file are ours. Stacks are best-effort; when the shape is not what we
+ * expect, say so rather than print a frame that means something else.
+ */
+function captureCallSite(): string {
+  const stack = new Error().stack;
+  if (stack === undefined) {
+    return 'unknown location';
+  }
+
+  const caller = stack.split('\n').slice(1).find((frame) => !frame.includes('shared-redis.ts'));
+
+  return caller?.match(/\(?([^()\s]+:\d+:\d+)\)?\s*$/)?.[1] ?? 'unknown location';
+}
+
+/**
  * Singleton provider for shared Redis connection
  *
  * @example
@@ -64,13 +102,55 @@ export class SharedRedisProvider {
    */
   private static leases = 0;
 
+  /** Where the configuration in force was written, for the message when a second one disagrees. */
+  private static configuredAt: string | null = null;
+
   /**
    * Configure the shared Redis connection
    * Must be called before getClient()
+   *
+   * There is ONE shared connection per process, so there is one configuration. A second call
+   * that asks for a different target is refused rather than accepted: it cannot be honoured,
+   * and accepting it was silent — measured, two applications pointing at different Redis
+   * databases both ended up on whichever connection existed first, and one application's
+   * `clear()` then wiped the other's keys. Re-stating the same target is fine; `reset()` gives
+   * the configuration up.
    */
   static configure(options: SharedRedisOptions): void {
-    // Note: If already connected, configuration will apply to new connections only
+    const current = SharedRedisProvider.options;
+
+    if (current && !SharedRedisProvider.sameTarget(current, options)) {
+      const error = new Error(
+        'SharedRedisProvider is already configured for a different target, and there is only '
+        + 'one shared connection per process.\n'
+        + `  in force  ${describeTarget(current)}  configured at ${SharedRedisProvider.configuredAt ?? 'unknown location'}\n`
+        + `  requested ${describeTarget(options)}  at ${captureCallSite()}\n`
+        + 'Accepting this would have handed both consumers the same connection, with the first '
+        + "target and the first key prefix — so one consumer's keys and its clear() would reach "
+        + 'the other\'s data. For a second target use a dedicated client '
+        + '(SharedRedisProvider.createClient({ url }), or the consumer\'s own connection options); '
+        + 'in tests, call SharedRedisProvider.reset() between configurations.',
+      );
+      error.name = 'OneBunSharedRedisConflictError';
+      throw error;
+    }
+
     SharedRedisProvider.options = options;
+    SharedRedisProvider.configuredAt = captureCallSite();
+  }
+
+  /**
+   * Whether two configurations describe the same connection.
+   *
+   * Every field shapes the connection or the keys written through it, so any difference makes
+   * one configuration unable to stand in for the other. `reconnect` defaults to true in
+   * `RedisClient`, so absent and `true` are the same request.
+   */
+  private static sameTarget(left: SharedRedisOptions, right: SharedRedisOptions): boolean {
+    return left.url === right.url
+      && left.keyPrefix === right.keyPrefix
+      && (left.reconnect ?? true) === (right.reconnect ?? true)
+      && (left.tls ?? false) === (right.tls ?? false);
   }
 
   /**
@@ -239,6 +319,7 @@ export class SharedRedisProvider {
     // configuration, so a suite starts from a clean provider.
     await SharedRedisProvider.disconnect();
     SharedRedisProvider.options = null;
+    SharedRedisProvider.configuredAt = null;
   }
 }
 

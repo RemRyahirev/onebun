@@ -6346,7 +6346,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     /**
      * @source docs:api/websocket.md#storage-adapters
      */
-    it('should point the shared Redis connection at the configured url, lazily', () => {
+    it('should point the shared Redis connection at the configured url, lazily', async () => {
       // The provider is process-global, so put back whatever this process already had.
       const saved = SharedRedisProvider.getOptions();
 
@@ -6377,8 +6377,13 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
         // is covered by the integration suites, not here.)
         expect(shared.isConnected()).toBe(false);
       } finally {
+        // Restoring ONLY when something was saved left this file's fake target in force for
+        // every later test FILE in the process — which is how an unrelated suite ended up
+        // refused when it configured its own container. Nothing saved means nothing configured.
         if (saved) {
           SharedRedisProvider.configure(saved);
+        } else {
+          await SharedRedisProvider.reset();
         }
       }
     });

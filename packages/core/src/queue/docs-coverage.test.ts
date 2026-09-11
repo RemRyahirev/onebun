@@ -126,6 +126,9 @@ describe('RedisQueueAdapter (docs/api/queue.md)', () => {
   it(
     'takes the shared Redis connection and subscribes under the configured prefix',
     async () => {
+      // The provider holds ONE configuration per process and refuses a conflicting second one,
+      // so take it over explicitly rather than inheriting whatever an earlier FILE left behind.
+      await SharedRedisProvider.reset();
       SharedRedisProvider.configure({ url: container.url });
 
       const received: Array<{ id: string }> = [];

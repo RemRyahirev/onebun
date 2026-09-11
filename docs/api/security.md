@@ -292,6 +292,10 @@ const app = new OneBunApplication(AppModule, {
 `getClient()` takes a lease on the shared connection — call `await SharedRedisProvider.release()`
 on shutdown to give it back.
 
+There is one shared connection per process and therefore one configuration: a second
+`configure()` with a different target throws rather than being quietly ignored. See
+[Shared Redis Connection](/api/cache#shared-redis-connection).
+
 ### Custom key generator
 
 ```typescript
