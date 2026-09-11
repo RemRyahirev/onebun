@@ -525,6 +525,28 @@ export class RedisClient {
     return await client.send(command, args) as T;
   }
 
+  /**
+   * Run a Lua script on the server, with this client's prefix applied to every key.
+   *
+   * A script is the only way to make a read-then-write pair indivisible: `SCARD` followed by
+   * `DEL` from here leaves a window in which someone else writes to the key that is about to be
+   * deleted. `raw('EVAL', …)` would do the same work, but deliberately does not prefix — and a
+   * caller assembling `KEYS` by hand is a caller who will eventually forget.
+   *
+   * The script is Lua, run by Redis, not JavaScript. Pass it as a CONSTANT: everything that
+   * varies belongs in `keys` or `args`, which Redis keeps out of the program text.
+   */
+  async runScript<T = unknown>(script: string, keys: string[], args: string[] = []): Promise<T> {
+    const client = this.ensureConnected();
+
+    return await client.send('EVAL', [
+      script,
+      String(keys.length),
+      ...keys.map((key) => this.prefixKey(key)),
+      ...args,
+    ]) as T;
+  }
+
   // ============================================================================
   // List and Sorted-Set Operations
   // ============================================================================

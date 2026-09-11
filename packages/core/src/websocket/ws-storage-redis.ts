@@ -24,6 +24,42 @@ const KEYS = {
 };
 
 /**
+ * Join and leave, each as ONE indivisible step.
+ *
+ * Lua, run by Redis. Both used to be several round trips — the join checked whether the room
+ * record existed and then added the member; the leave removed the member, counted what was left
+ * and then deleted. Every gap between those was a window, and the windows are not symmetrical:
+ * a leave that counted zero and deleted took with it a join that landed in between, and a join
+ * that had already seen the room record skipped creating it and left a member set with no room.
+ * Measured, a join three round trips into a leave lost its membership entirely.
+ *
+ * Written as one script each, any interleaving leaves the same two outcomes: the room exists and
+ * has members, or it is gone completely.
+ *
+ * KEYS[1] room member set · KEYS[2] the client's room set · KEYS[3] the room record.
+ * ARGV[1] client id · ARGV[2] room name · ARGV[3] the room record to create, on join.
+ */
+const JOIN_ROOM = `
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('SADD', KEYS[2], ARGV[2])
+if redis.call('EXISTS', KEYS[3]) == 0 then
+  redis.call('SET', KEYS[3], ARGV[3])
+end
+return 1
+`;
+
+const LEAVE_ROOM = `
+redis.call('SREM', KEYS[1], ARGV[1])
+redis.call('SREM', KEYS[2], ARGV[2])
+if redis.call('SCARD', KEYS[1]) == 0 then
+  redis.call('DEL', KEYS[1])
+  redis.call('DEL', KEYS[3])
+  return 1
+end
+return 0
+`;
+
+/**
  * Redis-based storage for WebSocket clients and rooms
  * with pub/sub support for multi-instance deployments
  */
@@ -40,8 +76,15 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
   // ============================================================================
 
   async addClient(client: WsClientData): Promise<void> {
+    // `rooms` is deliberately NOT stored in the blob. Membership lives in the set below, and a
+    // second copy here is a mirror that drifts: every update to it was read-modify-write, so
+    // three joins in one tick left this array holding one of them.
     const key = KEYS.CLIENTS + client.id;
-    await this.redisClient.set(key, JSON.stringify(client));
+    await this.redisClient.set(key, JSON.stringify({ ...client, rooms: [] }));
+
+    if (client.rooms.length > 0) {
+      await this.redisClient.sadd(KEYS.CLIENT_ROOMS + client.id, ...client.rooms);
+    }
   }
 
   async removeClient(clientId: string): Promise<void> {
@@ -58,11 +101,19 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
       return null;
     }
 
+    let client: WsClientData;
     try {
-      return JSON.parse(data) as WsClientData;
+      client = JSON.parse(data) as WsClientData;
     } catch {
       return null;
     }
+
+    // The extra round trip buys the thing that matters: `client.rooms` is what `WsRoomGuard`
+    // reads, and it used to be a mirror of the set rather than the set. `deleteRoom` cleaned the
+    // set only, so a deleted room kept granting access through this field.
+    client.rooms = await this.redisClient.smembers(KEYS.CLIENT_ROOMS + clientId);
+
+    return client;
   }
 
   async getAllClients(): Promise<WsClientData[]> {
@@ -82,9 +133,20 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
 
   async updateClient(clientId: string, data: Partial<WsClientData>): Promise<void> {
     const client = await this.getClient(clientId);
-    if (client) {
-      const updated = { ...client, ...data };
-      await this.redisClient.set(KEYS.CLIENTS + clientId, JSON.stringify(updated));
+    if (!client) {
+      return;
+    }
+
+    const updated = { ...client, ...data };
+    await this.redisClient.set(KEYS.CLIENTS + clientId, JSON.stringify({ ...updated, rooms: [] }));
+
+    // An update that names `rooms` is asking to REPLACE membership, so it goes to the set the
+    // rest of the adapter reads rather than into the blob, where nothing would ever see it.
+    if (data.rooms) {
+      await this.redisClient.del(KEYS.CLIENT_ROOMS + clientId);
+      if (data.rooms.length > 0) {
+        await this.redisClient.sadd(KEYS.CLIENT_ROOMS + clientId, ...data.rooms);
+      }
     }
   }
 
@@ -175,47 +237,23 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
   // ============================================================================
 
   async addClientToRoom(clientId: string, roomName: string): Promise<void> {
-    // Ensure room exists
-    let room = await this.getRoom(roomName);
-    if (!room) {
-      room = { name: roomName, clientIds: [] };
-      await this.redisClient.set(KEYS.ROOMS + roomName, JSON.stringify(room));
-    }
-
-    // Add to room members set
-    await this.redisClient.sadd(KEYS.ROOM_MEMBERS + roomName, clientId);
-
-    // Add to client's rooms set
-    await this.redisClient.sadd(KEYS.CLIENT_ROOMS + clientId, roomName);
-
-    // Update client's room list in client data
-    const client = await this.getClient(clientId);
-    if (client && !client.rooms.includes(roomName)) {
-      client.rooms.push(roomName);
-      await this.updateClient(clientId, { rooms: client.rooms });
-    }
+    // The member set is the only place membership is recorded. It used to be mirrored into the
+    // client blob as well, by a read-modify-write that lost concurrent joins.
+    await this.redisClient.runScript(
+      JOIN_ROOM,
+      [KEYS.ROOM_MEMBERS + roomName, KEYS.CLIENT_ROOMS + clientId, KEYS.ROOMS + roomName],
+      [clientId, roomName, JSON.stringify({ name: roomName, clientIds: [] })],
+    );
   }
 
   async removeClientFromRoom(clientId: string, roomName: string): Promise<void> {
-    // Remove from room members set
-    await this.redisClient.srem(KEYS.ROOM_MEMBERS + roomName, clientId);
-
-    // Remove from client's rooms set
-    await this.redisClient.srem(KEYS.CLIENT_ROOMS + clientId, roomName);
-
-    // Update client's room list in client data
-    const client = await this.getClient(clientId);
-    if (client) {
-      client.rooms = client.rooms.filter((r) => r !== roomName);
-      await this.updateClient(clientId, { rooms: client.rooms });
-    }
-
-    // Delete room if empty
-    const memberCount = await this.redisClient.scard(KEYS.ROOM_MEMBERS + roomName);
-    if (memberCount === 0) {
-      await this.redisClient.del(KEYS.ROOMS + roomName);
-      await this.redisClient.del(KEYS.ROOM_MEMBERS + roomName);
-    }
+    // Removal and empty-room teardown together, so nothing can land between the count and the
+    // deletes. There is no blob copy of membership to keep in step any more either.
+    await this.redisClient.runScript(
+      LEAVE_ROOM,
+      [KEYS.ROOM_MEMBERS + roomName, KEYS.CLIENT_ROOMS + clientId, KEYS.ROOMS + roomName],
+      [clientId, roomName],
+    );
   }
 
   async getClientsInRoom(roomName: string): Promise<string[]> {
