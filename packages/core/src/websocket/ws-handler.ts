@@ -1353,8 +1353,29 @@ export class WsHandler {
       this.stopPingInterval(clientId);
     }
 
-    // Clear storage
-    await this.storage.clear();
+    // Remove the clients THIS handler still holds, and only those. It used to call
+    // `storage.clear()`, which under the Redis adapter globs the whole prefix — so one pod
+    // shutting down cleanly deleted every other pod's live clients and emptied their shared
+    // rooms. Measured: a rolling deploy blanked the survivors on every replica it cycled.
+    const ours = new Set<string>();
+    for (const sockets of this.socketsByGateway.values()) {
+      for (const clientId of sockets.keys()) {
+        ours.add(clientId);
+      }
+    }
+    for (const socket of this.openSockets) {
+      if (socket.data?.id !== undefined) {
+        ours.add(socket.data.id);
+      }
+    }
+
+    await Promise.all([...ours].map(async (clientId) => {
+      try {
+        await this.storage.removeClient(clientId);
+      } catch (error) {
+        this.logger.warn(`Failed to remove WebSocket client ${clientId} during shutdown: ${error}`);
+      }
+    }));
 
     // And the per-gateway socket maps. `closeAll` normally drains them through each socket's
     // close callback, but a socket whose callback never arrives within the drain timeout is
@@ -1363,6 +1384,7 @@ export class WsHandler {
     for (const sockets of this.socketsByGateway.values()) {
       sockets.clear();
     }
+    this.openSockets.clear();
   }
 }
 

@@ -30,10 +30,15 @@ import {
 
 import type { WsStorageAdapter } from './ws-storage';
 import type { WsClientData } from './ws.types';
+import type { ServerWebSocket } from 'bun';
 
 import { createRedisClient, type RedisClient } from '../redis/redis-client';
 import { createRedisContainer, type TestContainer } from '../testing/containers';
+import { createMockSyncLogger } from '../testing/test-utils';
 
+import { BaseWebSocketGateway } from './ws-base-gateway';
+import { WebSocketGateway } from './ws-decorators';
+import { WsHandler } from './ws-handler';
 import { InMemoryWsStorage } from './ws-storage-memory';
 import { createRedisWsStorage } from './ws-storage-redis';
 
@@ -171,6 +176,35 @@ describe('storage adapters agree about room membership', () => {
 
         await storage.clear();
       }
+    });
+
+    test('should remove only its own clients on shutdown, not the whole namespace', async () => {
+      const handler = new WsHandler(createMockSyncLogger());
+      handler.setStorage(storage);
+
+      @WebSocketGateway({ path: '/shutdown' })
+      class ShutdownGateway extends BaseWebSocketGateway {}
+
+      const gateway = new ShutdownGateway();
+      handler.registerGateway(ShutdownGateway, gateway);
+
+      await storage.addClient(createClient('ours'));
+      gateway._registerSocket('ours', { data: { id: 'ours' } } as unknown as ServerWebSocket<WsClientData>);
+
+      // Another pod's connection, on the same Redis. It is not in this handler's socket map and
+      // this handler has no business touching it.
+      await storage.addClient(createClient('another-pods'));
+      await storage.addClientToRoom('another-pods', 'lobby');
+
+      await handler.cleanup();
+
+      // Was gone: `cleanup()` called `storage.clear()`, which globs the whole prefix. One pod
+      // shutting down cleanly emptied every other pod's clients and rooms — so a rolling deploy
+      // blanked the survivors on every replica it cycled.
+      expect(await storage.getClient('another-pods')).not.toBeNull();
+      expect(await storage.getClientsInRoom('lobby')).toEqual(['another-pods']);
+
+      expect(await storage.getClient('ours')).toBeNull();
     });
   });
 });
