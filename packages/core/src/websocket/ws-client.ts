@@ -45,8 +45,10 @@ const NATIVE_WS_DUMMY_DEFINITION: WsServiceDefinition = {
 import { matchPattern, isPattern } from './ws-pattern-matcher';
 import {
   parseMessage,
+  createConnectPacket,
   createPongPacket,
   createFullEventMessage,
+  wrapInEngineIO,
   EngineIOPacketType,
   SocketIOPacketType,
   parseNativeMessage,
@@ -258,6 +260,12 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
           }
         }
 
+        // Answer the handshake by joining a namespace, which is what every Socket.IO client does
+        // and what this one never did. It is also how the server learns which gateway is wanted:
+        // the CONNECT packet is the only place the namespace is stated, and the server holds
+        // `@OnConnect` until it arrives.
+        this.ws?.send(wrapInEngineIO(createConnectPacket(this.socketioNamespace())));
+
         return;
 
       case EngineIOPacketType.PING:
@@ -280,6 +288,19 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
 
         return;
     }
+  }
+
+  /**
+   * This client's namespace in Socket.IO's own spelling: `/name`, or `/` for the default.
+   *
+   * `namespace` also travels in the query, which is what OneBun resolves the gateway from at
+   * upgrade. Stating it here too keeps the two agreeing, and is what a plain `socket.io-client`
+   * would send on its own.
+   */
+  private socketioNamespace(): string {
+    const namespace = this.options.namespace;
+
+    return namespace ? `/${namespace.replace(/^\//, '')}` : '/';
   }
 
   /**

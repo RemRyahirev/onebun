@@ -41,8 +41,10 @@ import {
   createOpenPacket,
   createHandshake,
   createPongPacket,
+  createConnectErrorPacket,
   createFullAckMessage,
   createFullEventMessage,
+  wrapInEngineIO,
   EngineIOPacketType,
   SocketIOPacketType,
   parseNativeMessage,
@@ -190,6 +192,14 @@ export class WsHandler {
 
   /** Resolved when a socket's close has been fully handled, so shutdown can wait for it. */
   private readonly closeWaiters = new Map<ServerWebSocket<WsClientData>, () => void>();
+
+  /**
+   * Socket.IO sockets whose CONNECT packet has been served.
+   *
+   * A second CONNECT would otherwise run `@OnConnect` again on a connection already bound; a
+   * refused one is deliberately NOT recorded, so a client can name a namespace it may reach.
+   */
+  private readonly socketioConnected = new WeakSet<ServerWebSocket<WsClientData>>();
 
   constructor(
     private logger: SyncLogger,
@@ -699,15 +709,27 @@ export class WsHandler {
       });
       ws.send(createOpenPacket(handshake));
       this.startPingInterval(client.id, ws);
+
+      // And stop here. A Socket.IO client states its namespace in the CONNECT packet, which
+      // cannot arrive before the handshake it answers — so running `@OnConnect` now is what made
+      // `nsp` unusable as a routing signal. The binding above is provisional; the client's own
+      // CONNECT packet decides it, and `@OnConnect` runs there.
+      return;
     }
 
-    // Call OnConnect handlers — the owning gateway's only.
+    await this.runConnectHandlers(owner, ws);
+  }
+
+  /**
+   * Run the owning gateway's `@OnConnect` handlers and send whatever they answer.
+   */
+  private async runConnectHandlers(owner: GatewayInstance, ws: ServerWebSocket<WsClientData>): Promise<void> {
     const connectHandlers = owner.handlers.get(HandlerType.CONNECT) || [];
     for (const handler of connectHandlers) {
       try {
         const result = await this.executeHandler(owner, handler, ws, undefined, {});
         if (result && isWsHandlerResponse(result)) {
-          ws.send(this.encodeResponse(client.protocol, result));
+          ws.send(this.encodeResponse(ws.data.protocol, result));
         }
       } catch (error) {
         this.logger.error(`Error in OnConnect handler: ${error}`);
@@ -788,8 +810,8 @@ export class WsHandler {
   ): Promise<void> {
     switch (packet.type) {
       case SocketIOPacketType.CONNECT:
-        // Client connecting to namespace - send CONNECT acknowledgement
-        ws.send(createFullEventMessage('connect', { sid: ws.data.id }, packet.nsp));
+        // The only point at which a Socket.IO client says which gateway it wants.
+        await this.completeSocketioConnect(ws, packet.nsp);
         break;
 
       case SocketIOPacketType.DISCONNECT:
@@ -810,6 +832,109 @@ export class WsHandler {
         // Acknowledgement - not implemented yet
         break;
     }
+  }
+
+  /**
+   * Bind a Socket.IO client to the namespace it just named, and run `@OnConnect` there.
+   *
+   * Every Socket.IO client arrives on one path, so the URL cannot tell two gateways apart. The
+   * protocol's own discriminator is this packet's `nsp`, and it used to be echoed back and
+   * otherwise ignored — `io('/admin')` puts nothing in the query, so a client written the normal
+   * Socket.IO way was bound to whichever gateway was registered first.
+   */
+  private async completeSocketioConnect(ws: ServerWebSocket<WsClientData>, nsp: string): Promise<void> {
+    if (this.socketioConnected.has(ws)) {
+      this.logger.warn(
+        `Socket.IO client ${ws.data.id} sent a second CONNECT packet, for "${nsp}"; ignoring it. `
+        + 'One OneBun connection serves one gateway.',
+      );
+
+      return;
+    }
+
+    const provisional = this.ownerOf(ws);
+    if (!provisional) {
+      this.logger.warn(
+        `Socket.IO CONNECT for "${nsp}" from ${ws.data?.id ?? 'an unknown client'} could not be `
+        + 'matched to a gateway; closing rather than leaving it open and mute.',
+      );
+      ws.close(WS_INTERNAL_ERROR_CODE, 'No gateway owns this connection');
+
+      return;
+    }
+
+    const target = this.gatewayForPacketNamespace(nsp) ?? provisional;
+
+    if (target !== provisional) {
+      // The upgrade ran the PROVISIONAL gateway's `authenticate` hook, and the upgrade request it
+      // would need is gone. A gateway that guards its connections must not be handed one its own
+      // hook never saw, so the switch is refused — and the transport stays open, so a client can
+      // name a namespace it is allowed to reach.
+      if (target.metadata?.authenticate) {
+        this.logger.warn(
+          `Socket.IO client ${ws.data.id} asked for namespace "${nsp}", whose gateway authenticates `
+          + 'connections at upgrade. Connect with ?namespace= so the hook runs.',
+        );
+        ws.send(wrapInEngineIO(createConnectErrorPacket({
+          message: `Namespace "${nsp}" authenticates at upgrade; connect with ?namespace=`,
+        }, nsp)));
+
+        return;
+      }
+
+      await this.rebindSocket(ws, provisional, target);
+    }
+
+    this.socketioConnected.add(ws);
+    ws.send(createFullEventMessage('connect', { sid: ws.data.id }, nsp));
+    await this.runConnectHandlers(target, ws);
+  }
+
+  /**
+   * The gateway a CONNECT packet's `nsp` names, if any.
+   *
+   * `/` is the default namespace and names no gateway, so it leaves the binding the upgrade made
+   * — including one `?namespace=` already chose. A namespace that matches nothing is reported and
+   * likewise leaves the binding alone: a stated namespace narrows the choice, it never refuses
+   * the connection.
+   */
+  private gatewayForPacketNamespace(nsp: string): GatewayInstance | undefined {
+    const name = nsp.startsWith('/') ? nsp.slice(1) : nsp;
+    if (name === '') {
+      return undefined;
+    }
+
+    for (const gateway of this.gateways.values()) {
+      if (gateway.metadata?.namespace === name) {
+        return gateway;
+      }
+    }
+
+    this.logger.warn(
+      `Socket.IO client asked for namespace "${nsp}", which matches no gateway. `
+      + 'Keeping the gateway resolved at upgrade.',
+    );
+
+    return undefined;
+  }
+
+  /** Move an open socket from one gateway to another, registry and stored record together. */
+  private async rebindSocket(
+    ws: ServerWebSocket<WsClientData>,
+    from: GatewayInstance,
+    to: GatewayInstance,
+  ): Promise<void> {
+    const clientId = ws.data.id;
+
+    // The gateway's own map IS the handler's map for that key — `_attachSockets` shares the one
+    // object — so these two calls move the socket in both at once.
+    from.instance._unregisterSocket(clientId);
+    ws.data.gatewayKey = to.key;
+    to.instance._registerSocket(clientId, ws);
+
+    // The stored record carries the key every other gateway's reads are fenced against, so it
+    // has to move too or the connection is invisible to the gateway now serving it.
+    await this.storage.updateClient(clientId, { gatewayKey: to.key });
   }
 
   /**

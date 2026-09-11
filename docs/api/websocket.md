@@ -306,18 +306,35 @@ connecting with `?namespace=<name>`; OneBun's own `WsClient` sends that automati
 back to the path — it never refuses the connection. Isolation does not depend on this option:
 the binding above holds either way.
 
+With the Socket.IO protocol enabled, every client arrives on one path, so the URL cannot tell two
+gateways apart. Two things can: `?namespace=` in the query, and the `nsp` of the CONNECT packet —
+what `io('/admin')` sends and puts nowhere else.
+
+The CONNECT packet decides, and `@OnConnect` runs when it arrives rather than at upgrade:
+
+1. at upgrade the connection is bound provisionally — by `?namespace=`, or to the sole registered
+   gateway, or to the first with a warning;
+2. the Engine.IO handshake goes out and the client answers with `40` or `40/admin,`;
+3. `/admin` binds the gateway declaring `namespace: 'admin'`. A bare `40` is the default
+   namespace: it names no gateway and leaves the provisional binding alone. A namespace matching
+   no gateway is logged and likewise leaves it alone — a stated namespace narrows the choice, it
+   never refuses the connection;
+4. `@OnConnect` runs on the gateway that was chosen.
+
 ::: warning
-With the Socket.IO protocol enabled, every client arrives on one path, so `?namespace=` is the
-only thing that can tell two gateways apart. Without it, a single registered gateway is
-unambiguous; with more than one the client is bound to the first and a warning is logged. The
-Socket.IO `nsp` field in the CONNECT packet is echoed but does not select a gateway — the client
-receives the `@OnConnect` reply before it sends that packet.
+A Socket.IO client that never sends a CONNECT packet never gets `@OnConnect`. OneBun's own
+`WsClient` sends it as soon as the handshake arrives, carrying its `namespace` option.
+
+Switching to a gateway that declares an `authenticate` hook is refused with a Socket.IO
+`connect_error`: the hook gates the upgrade, and by CONNECT time there is no upgrade request left
+to run it against. Reach such a gateway with `?namespace=` so the hook runs where it belongs. The
+transport stays open, so the client may name another namespace.
 :::
 
-Because a Socket.IO client is now bound to a gateway at upgrade, that gateway's `authenticate`
-hook runs for it. It did not before: no gateway was resolved on the Socket.IO branch, so the hook
-was skipped. A hook that returns `false` will now refuse a Socket.IO connection that previously
-succeeded.
+Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
+gateway's `authenticate` hook runs for it. It did not before: no gateway was resolved on the
+Socket.IO branch, so the hook was skipped. A hook that returns `false` will now refuse a
+Socket.IO connection that previously succeeded.
 
 ### Authentication
 

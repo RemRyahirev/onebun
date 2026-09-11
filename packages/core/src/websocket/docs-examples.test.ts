@@ -457,15 +457,18 @@ describe('docs/api/websocket.md', () => {
       expect(handshake.pingInterval).toBe(SOCKETIO_PING_INTERVAL);
       expect(handshake.pingTimeout).toBe(SOCKETIO_PING_TIMEOUT);
 
+      // socket.io-client joins a namespace with `40` before anything else happens on the socket,
+      // and that packet is what binds the connection to a gateway — so `@OnConnect` waits for it.
+      expect(raw.frames.some((f) => f.startsWith('42["welcome"'))).toBe(false);
+
+      raw.send('40');
+      const connected = await waitUntil(() => raw.frames.find((f) => f.startsWith('42["connect"')), 'connect event');
+      expect(JSON.parse(connected.slice(2))).toEqual(['connect', { sid: handshake.sid }]);
+
       // socket.on('welcome', ...) — pushed as MESSAGE(4) + EVENT(2), and the gateway sees the
       // connection as Socket.IO rather than native
       const welcome = await waitUntil(() => raw.frames.find((f) => f.startsWith('42["welcome"')), 'welcome event');
       expect(JSON.parse(welcome.slice(2))).toEqual(['welcome', { id: handshake.sid, protocol: 'socketio' }]);
-
-      // socket.io-client joins the default namespace with a bare `40`
-      raw.send('40');
-      const connected = await waitUntil(() => raw.frames.find((f) => f.startsWith('42["connect"')), 'connect event');
-      expect(JSON.parse(connected.slice(2))).toEqual(['connect', { sid: handshake.sid }]);
 
       // socket.emit('join', 'room:general', cb) — ack id 1, answered as ACK(3) id 1
       raw.send('421["join","room:general"]');
