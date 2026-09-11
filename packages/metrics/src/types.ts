@@ -111,6 +111,20 @@ export interface SystemMetricsData {
 }
 
 /**
+ * One outgoing HTTP call, as the metrics service records it.
+ *
+ * `host` rather than the full URL: the label is a dimension, and a URL with a path, a query
+ * string and an ephemeral port is unbounded.
+ */
+export interface OutgoingRequestMetricsData {
+  method: string;
+  host: string;
+  statusCode: number;
+  /** Seconds. */
+  duration: number;
+}
+
+/**
  * Metrics registry interface
  */
 export interface MetricsRegistry {

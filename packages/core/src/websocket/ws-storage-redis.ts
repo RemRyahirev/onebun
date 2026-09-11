@@ -238,7 +238,7 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
   // Pub/Sub Operations
   // ============================================================================
 
-  async subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<void> {
+  async subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<() => void> {
     this.eventHandlers.push(handler);
 
     // Memoised, not a boolean set after the await. The flag was raised AFTER
@@ -264,6 +264,15 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
     });
 
     await this.subscription;
+
+    // Removes this handler alone. `unsubscribe()` drops them all, and the adapter is shared by
+    // every gateway in the application, so using it to detach one silences the rest.
+    return (): void => {
+      const at = this.eventHandlers.indexOf(handler);
+      if (at !== -1) {
+        this.eventHandlers.splice(at, 1);
+      }
+    };
   }
 
   async publish(payload: WsStorageEventPayload): Promise<void> {

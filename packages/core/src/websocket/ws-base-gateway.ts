@@ -107,6 +107,21 @@ export abstract class BaseWebSocketGateway {
   pubSubReady?: Promise<void>;
 
   /**
+   * Detaches THIS gateway's pub/sub handler.
+   *
+   * `unsubscribe()` on the adapter drops every handler, and the adapter is shared by every
+   * gateway in the application — using it to detach one would silence the rest.
+   * @internal
+   */
+  private pubSubDispose?: () => void;
+
+  /** Stop receiving remote events, without affecting sibling gateways. @internal */
+  _detachPubSub(): void {
+    this.pubSubDispose?.();
+    this.pubSubDispose = undefined;
+  }
+
+  /**
    * Share the handler's socket map for this gateway's key.
    *
    * Called once at registration. Anything already registered directly on the instance is carried
@@ -243,7 +258,7 @@ export abstract class BaseWebSocketGateway {
    * @internal
    */
   private async _setupPubSub(storage: WsPubSubStorageAdapter): Promise<void> {
-    await storage.subscribe((payload) => {
+    this.pubSubDispose = await storage.subscribe((payload) => {
       // Ignore events from this instance
       if (payload.sourceInstanceId === this.instanceId) {
         return;
@@ -676,6 +691,40 @@ export abstract class BaseWebSocketGateway {
   // ============================================================================
 
   /**
+   * The native pub/sub topic this gateway uses for a room.
+   *
+   * Bun's topics are a process-wide namespace and the framework subscribes sockets to the raw
+   * room name, so two gateways with a colliding room name share a topic. The raw subscription
+   * stays — a user's own `getWsServer().publish('lobby', …)` must keep working exactly as it
+   * does — and this is the scoped one that {@link publishToRoom} addresses.
+   */
+  protected roomTopic(roomName: string): string {
+    return this.gatewayKey === undefined ? roomName : `${this.gatewayKey}::${roomName}`;
+  }
+
+  /**
+   * Fan a message out to a room through Bun's native pub/sub, scoped to this gateway.
+   *
+   * The difference from {@link emitToRoom}: that one walks this gateway's own sockets and sends
+   * to each; this hands the fan-out to the runtime in a single call. Both reach only the
+   * connections this gateway admitted — unlike `getWsServer().publish(roomName, …)`, which
+   * addresses the raw topic shared by the whole process and is documented as unfenced.
+   *
+   * Local to this instance: it does not publish to Redis for other instances.
+   */
+  publishToRoom(roomName: string, event: string, data: unknown): void {
+    if (!this.server) {
+      return;
+    }
+
+    // Native fan-out addresses one topic with one payload, so the encoding cannot follow each
+    // socket's protocol the way a per-socket send does. Native framing is what a raw
+    // `getWsServer().publish()` produces too, so this matches the path it replaces.
+    const message = this._encodeMessage('native', event, data);
+    this.server.publish(this.roomTopic(roomName), message);
+  }
+
+  /**
    * Add a client to a room
    */
   async joinRoom(clientId: string, roomName: string): Promise<void> {
@@ -692,9 +741,15 @@ export abstract class BaseWebSocketGateway {
 
     await this.storage.addClientToRoom(clientId, roomName);
 
-    // Also subscribe to Bun's native pub/sub topic
+    // Both topics: the raw one, because a user's own `getWsServer().publish(roomName, …)`
+    // addresses it and must keep working, and the gateway-scoped one that `publishToRoom()`
+    // uses so a colliding room name in another gateway cannot be reached by accident.
     if (socket) {
       socket.subscribe(roomName);
+      const scoped = this.roomTopic(roomName);
+      if (scoped !== roomName) {
+        socket.subscribe(scoped);
+      }
     }
   }
 
@@ -712,9 +767,13 @@ export abstract class BaseWebSocketGateway {
 
     await this.storage.removeClientFromRoom(clientId, roomName);
 
-    // Also unsubscribe from Bun's native pub/sub topic
+    // Also unsubscribe from Bun's native pub/sub topics
     if (socket) {
       socket.unsubscribe(roomName);
+      const scoped = this.roomTopic(roomName);
+      if (scoped !== roomName) {
+        socket.unsubscribe(scoped);
+      }
     }
   }
 

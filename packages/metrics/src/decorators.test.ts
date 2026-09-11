@@ -640,6 +640,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -684,6 +685,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -719,6 +721,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -760,6 +763,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -801,6 +805,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -838,6 +843,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },

@@ -542,7 +542,26 @@ export interface RequestsOptions {
   /** Partial: every field left out keeps its {@link DEFAULT_RETRY_CONFIG} value. */
   retries?: Partial<RetryConfig>;
   tracing?: boolean;
+  /**
+   * Whether to report request metrics at all. Reporting also needs a {@link metricsSink}.
+   *
+   * @defaultValue true
+   */
   metrics?: boolean;
+  /**
+   * Where request metrics go.
+   *
+   * This client is a free function: it has no application and no instance, so it cannot find
+   * out which application it belongs to. It used to reach a process-wide slot — which in a
+   * multi-application process belongs to whichever application started LAST — and record an
+   * OUTGOING call into the SERVER's own `http_requests_total`, with the full URL as the route.
+   * Measured: a call made by one application produced
+   * `beta_http_requests_total{controller="requests-client",route="http://127.0.0.1:35379/alpha/ping",app="beta"}`.
+   *
+   * So the destination is passed in. `@onebun/metrics` provides a sink that records into a
+   * client-specific metric family; without one, nothing is recorded.
+   */
+  metricsSink?: (data: RequestMetricsData) => void;
   userAgent?: string;
 }
 
@@ -671,7 +690,7 @@ export interface ReqConfig {
  */
 export const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
-export const DEFAULT_REQUESTS_OPTIONS: Required<Omit<RequestsOptions, 'baseUrl' | 'auth'>> = {
+export const DEFAULT_REQUESTS_OPTIONS: Required<Omit<RequestsOptions, 'baseUrl' | 'auth' | 'metricsSink'>> = {
   timeout: DEFAULT_TIMEOUT_MS,
   headers: {},
   retries: DEFAULT_RETRY_CONFIG,

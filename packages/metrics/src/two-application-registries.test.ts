@@ -30,8 +30,17 @@ import {
   OneBunApplication,
   Service,
 } from '@onebun/core';
+import { createHttpClient } from '@onebun/requests';
 
 import { Counted } from './decorators';
+import { createRequestsMetricsSink } from './requests-sink';
+
+/** Only what this test needs of the service it hands to the sink. */
+interface MetricsServiceShape {
+  recordOutgoingRequest(data: {
+    method: string; host: string; statusCode: number; duration: number;
+  }): void;
+}
 
 
 const USERS_LABEL = { service: 'users' };
@@ -39,8 +48,13 @@ const ORDERS_LABEL = { service: 'orders' };
 
 @Service()
 class UsersService extends BaseService {
+  // Created once, not per call: `createCounter` throws on a name the registry already holds,
+  // which is what real user code has to cope with too.
+  private counter?: { inc(): void };
+
   count(): void {
-    this.metrics?.createCounter({ name: 'users_jobs_total', help: 'jobs' }).inc();
+    this.counter ??= this.metrics?.createCounter({ name: 'users_jobs_total', help: 'jobs' });
+    this.counter?.inc();
   }
 
   @Counted('decorated_calls_total')
@@ -203,6 +217,40 @@ describe('a metrics registry per application', () => {
     expect(usersBody).toContain('users_decorated_calls_total');
     expect(usersBody).toContain('service="users"');
     expect(ordersBody).not.toContain('decorated_calls_total');
+  });
+
+  test('should record an outgoing call in the client family, not the server one', async () => {
+    const users = boot(UsersModule, { prefix: 'users_', defaultLabels: USERS_LABEL });
+    const orders = boot(OrdersModule, { prefix: 'orders_', defaultLabels: ORDERS_LABEL });
+
+    await users.start();
+    await orders.start();
+
+    // The sink is what carries the answer the client cannot work out for itself. Taken from
+    // the FIRST application while the SECOND owns the process-wide slot the client used to read.
+    const service = (users as unknown as { metricsService: MetricsServiceShape }).metricsService;
+    const client = createHttpClient({ metricsSink: createRequestsMetricsSink(service as never) });
+
+    await client.get(`${users.getHttpUrl()}/users/ping`);
+    await client.get(`${users.getHttpUrl()}/users/ping?other=path`);
+
+    const usersBody = await scrape(users);
+    const ordersBody = await scrape(orders);
+
+    // Its own family: egress used to inflate the SERVER's http_requests_total with
+    // controller="requests-client", so the service's own request rate counted calls it made.
+    expect(usersBody).toContain('users_http_client_requests_total');
+    expect(usersBody).not.toContain('controller="requests-client"');
+    // And in the right application: this used to land in `orders`, which merely started last.
+    expect(ordersBody).not.toContain('http_client_requests_total');
+
+    // One series for two different paths on one host. `route: data.url` minted a fresh series
+    // per path, per query string and per ephemeral port.
+    const clientSeries = usersBody.split('\n')
+      .filter((line) => line.startsWith('users_http_client_requests_total{'));
+
+    expect(clientSeries).toHaveLength(1);
+    expect(clientSeries[0]).toContain('host="127.0.0.1:');
   });
 
   test('should release the registry and the process slot when the application stops', async () => {

@@ -270,11 +270,16 @@ other: the published payload carries the publishing gateway's key. A payload tha
 published by an instance running an older build — is still delivered, and the receiving gateway
 says so once, so a rolling deploy neither breaks nor goes quiet.
 
+For a room fan-out through Bun's native pub/sub — one call, fan-out in the runtime rather than
+a send per socket — use `publishToRoom(room, event, data)`. It addresses a topic scoped to this
+gateway, so a room name used by two gateways does not collide.
+
 ::: warning
-`getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are the raw room
-names, shared by every gateway in the process, so a message published that way reaches any
-socket subscribed to that topic regardless of which gateway admitted it. The framework's own
-room emit does not use it. Use `emitToRoom()` unless you specifically want that reach.
+`getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are a process-wide
+namespace and sockets are subscribed to the raw room name, so a message published that way
+reaches any socket subscribed to that topic regardless of which gateway admitted it. That is
+unchanged on purpose — existing `publish('lobby', …)` calls keep working exactly as they did.
+Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
 :::
 
 `namespace` distinguishes two gateways that would otherwise share a path. A client selects one by

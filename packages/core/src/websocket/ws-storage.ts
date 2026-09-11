@@ -198,9 +198,14 @@ export interface WsStorageEventPayload {
 export interface WsPubSubStorageAdapter extends WsStorageAdapter {
   /**
    * Subscribe to storage events
+   *
+   * Returns a disposer that removes THIS handler and nothing else. `unsubscribe()` drops every
+   * handler on the adapter, which is shared by every gateway in the application — so one
+   * gateway using it to detach silences its siblings.
+   *
    * @param handler - Event handler function
    */
-  subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<void>;
+  subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<() => void>;
 
   /**
    * Publish an event to all instances

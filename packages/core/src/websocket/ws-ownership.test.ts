@@ -101,6 +101,7 @@ interface GatewayProbe {
   clients: Map<string, unknown>;
   rooms: Map<string, { name: string; clientIds: string[] }>;
   joinRoom(clientId: string, roomName: string): Promise<void>;
+  publishToRoom(roomName: string, event: string, data: unknown): void;
   getRoom(roomName: string): Promise<{ name: string; clientIds: string[] } | undefined>;
   getRoomsByPattern(pattern: string): Promise<Array<{ name: string; clientIds: string[] }>>;
   getClientsByRoom(roomName: string): Promise<unknown[]>;
@@ -353,6 +354,34 @@ describe('a connection belongs to one gateway', () => {
 
     expect([...rooms.keys()]).toEqual(['lobby']);
     expect(rooms.get('lobby')!.clientIds).toEqual([clientId]);
+  });
+
+  test('should keep a scoped room publish inside its own gateway', async () => {
+    const app = boot(TwoGatewayModule);
+    await app.start();
+
+    const chat = await connect(wsUrl(app, '/chat'));
+    const admin = await connect(wsUrl(app, '/admin'));
+    sockets.push(chat.socket, admin.socket);
+    await settle();
+
+    const registry = (app as unknown as {
+      wsHandler: { gateways: Map<string, { instance: GatewayProbe }> };
+    }).wsHandler;
+    const chatGateway = registry.gateways.get('/chat')!.instance;
+    const adminGateway = registry.gateways.get('/admin:admin')!.instance;
+
+    // The same room NAME in both gateways. Bun's topics are a process-wide namespace, so a raw
+    // publish to 'lobby' reaches every socket subscribed to it, whichever gateway admitted it.
+    await chatGateway.joinRoom([...chatGateway.clients.keys()][0], 'lobby');
+    await adminGateway.joinRoom([...adminGateway.clients.keys()][0], 'lobby');
+    await settle();
+
+    chatGateway.publishToRoom('lobby', 'chat:scoped', { from: 'chat' });
+    await settle();
+
+    expect(chat.inbox.join('\n')).toContain('chat:scoped');
+    expect(admin.inbox.join('\n')).not.toContain('chat:scoped');
   });
 
   test('should refuse two different gateway classes on one key', () => {

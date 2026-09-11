@@ -16,6 +16,7 @@ import {
 import type {
   CustomMetricConfig,
   HttpMetricsData,
+  OutgoingRequestMetricsData,
   MetricsOptions,
   MetricsRegistry,
 } from './types';
@@ -138,6 +139,15 @@ export interface MetricsService {
   recordHttpRequest(data: HttpMetricsData): void;
 
   /**
+   * Record an OUTGOING HTTP call made by this application.
+   *
+   * A separate metric family from {@link recordHttpRequest} on purpose: egress recorded into
+   * the server's own `http_requests_total` inflated the request rate with traffic the service
+   * did not serve, and `sum by (controller)` grew a bucket that was not a controller.
+   */
+  recordOutgoingRequest(data: OutgoingRequestMetricsData): void;
+
+  /**
    * Create a custom counter
    */
   createCounter(config: Omit<CustomMetricConfig, 'type'>): Counter<string>;
@@ -228,6 +238,9 @@ class MetricsServiceImpl implements MetricsService {
   private readonly registry: Registry;
   /** Whether the orphan diagnostic has already been reported; it is a once-per-app notice. */
   private orphansReported = false;
+  /** Outgoing-call metrics, built on first use so a client-less application exposes neither. */
+  private clientRequestsTotal?: Counter<string>;
+  private clientRequestDuration?: Histogram<string>;
 
   constructor(options: MetricsOptions = {}) {
     this.options = {
@@ -341,6 +354,40 @@ class MetricsServiceImpl implements MetricsService {
 
     this.httpRequestsTotal.inc(labels);
     this.httpRequestDuration.observe(labels, data.duration);
+  }
+
+  recordOutgoingRequest(data: OutgoingRequestMetricsData): void {
+    if (!this.options.enabled || !this.options.collectHttpMetrics) {
+      return;
+    }
+
+    // Built on first use rather than at startup, so an application that never calls out does
+    // not expose two empty families.
+    this.clientRequestsTotal ??= new Counter({
+      name: `${this.options.prefix}http_client_requests_total`,
+      help: 'Total number of outgoing HTTP requests',
+      labelNames: ['method', 'host', 'status_code'],
+      registers: [this.registry],
+    });
+    this.clientRequestDuration ??= new Histogram({
+      name: `${this.options.prefix}http_client_request_duration_seconds`,
+      help: 'Outgoing HTTP request duration in seconds',
+      labelNames: ['method', 'host', 'status_code'],
+      buckets: this.options.httpDurationBuckets!,
+      registers: [this.registry],
+    });
+
+    const labels = {
+      method: data.method,
+      // The HOST, not the URL. `route: data.url` minted a fresh series for every path, every
+      // query string and every ephemeral port — measured,
+      // `route="http://127.0.0.1:35379/alpha/ping"`, which is a new series on every restart.
+      host: data.host,
+      status_code: getStatusCodeString(data.statusCode),
+    };
+
+    this.clientRequestsTotal.inc(labels);
+    this.clientRequestDuration.observe(labels, data.duration);
   }
 
   createCounter(config: Omit<CustomMetricConfig, 'type'>): Counter<string> {

@@ -37,6 +37,8 @@ export {
   measureExecutionTime,
   WithMetrics,
 } from './decorators';
+// Outgoing-request metrics for @onebun/requests
+export { createRequestsMetricsSink } from './requests-sink';
 // Core service
 export {
   createMetricsService,

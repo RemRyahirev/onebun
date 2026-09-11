@@ -124,11 +124,33 @@ slot, which in a multi-service process belongs to whichever service started last
 attribution matters, put the method on a `@Service()` or `@Controller()` the application builds,
 or use `this.metrics` directly.
 
-`createHttpClient`'s own metrics are a separate case: it is a free function with no application,
-so an outgoing call is still recorded against the last-started application — and into the
-SERVER-side `http_requests_total` family, with the full URL as the route. Turn it off with
-`metrics: false` if that matters to you.
 :::
+
+### Outgoing HTTP calls
+
+`createHttpClient` is a free function: it has no application, so it cannot work out which
+registry to record into. Hand it one:
+
+```typescript
+import { createHttpClient } from '@onebun/requests';
+import { createRequestsMetricsSink } from '@onebun/metrics';
+
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  metricsSink: createRequestsMetricsSink(metricsService),
+});
+```
+
+Calls land in `<prefix>http_client_requests_total` and
+`<prefix>http_client_request_duration_seconds`, labelled `method`, `host` and `status_code`.
+Without a sink nothing is recorded — `metrics: true` alone is not enough.
+
+Two things changed here and both were deliberate. Outgoing calls used to be written into the
+SERVER's own `http_requests_total` with `controller="requests-client"`, so a service's request
+rate counted the calls it made as well as the ones it served; they now have their own family.
+And the route label used to be the full URL — measured,
+`route="http://127.0.0.1:35379/alpha/ping"` — which mints a fresh series per path, per query
+string and per ephemeral port; the label is the host.
 
 ## Built-in Metrics
 
