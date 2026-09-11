@@ -930,6 +930,9 @@ at least in the areas you're modifying.
 | Importing a module just for one service | Use `@Global()` on shared modules |
 | Using `@Inject()` tokens | OneBun resolves by type — just use constructor params |
 | Expecting one gateway's `broadcast()` to reach another gateway's clients | A connection is bound to ONE gateway at upgrade: its handlers are the only ones that run, and `broadcast`/`emit`/`clients`/`emitToRoom*`/`disconnect*` cover only the connections THAT gateway admitted, in that application. Two gateways sharing a path are told apart by `namespace`, which the client selects with `?namespace=<name>` |
+| Expecting `@WebSocketGateway({ path: '/chat' })` to serve `/chatterbox` | A path prefix ends on a segment boundary: `/chat` serves `/chat` and `/chat/room1`, not `/chatterbox`. The most specific declared path wins, not the first registered. `/` — the default when `path` is omitted — still covers everything |
+| Expecting a Socket.IO client's `@OnConnect` at upgrade | It runs when the client sends its CONNECT packet (`40` / `40/admin,`), because that packet is where the namespace — and therefore the gateway — is named. A Socket.IO client that never sends one gets no `@OnConnect` |
+| Assuming `websocket.storage` is decoration | `{ type: 'redis', redis: { url, prefix } }` really does put clients and rooms in Redis and share them across instances, and makes Redis a startup dependency — an unreachable one fails `start()` |
 | Wrapping every return in `this.success()` | Return plain objects — auto-wrapped to `{ success: true, result }` |
 | Using `this.error()` for error responses | `throw new HttpException(statusCode, message)` — caught by exception filter |
 | Manual `.env` parsing | Use `envSchema` with `Env.string/number/boolean` |
