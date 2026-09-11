@@ -131,6 +131,24 @@ function gatewayKeyFor(metadata: { path: string; namespace?: string } | undefine
 }
 
 /**
+ * Whether a request path is the gateway's own path or lives below it.
+ *
+ * `startsWith` alone is a prefix of the STRING, which is why `/chat` used to claim `/chatterbox`.
+ * A path prefix has to end on a segment boundary. `/` is the exception and stays one: it is the
+ * declared default, so every application that never named a path relies on it covering whatever
+ * URL its clients connect to.
+ */
+function pathIsUnder(path: string, base: string): boolean {
+  if (base === '/' || path === base) {
+    return true;
+  }
+
+  const boundary = base.endsWith('/') ? base : `${base}/`;
+
+  return path.startsWith(boundary);
+}
+
+/**
  * WebSocket handler for OneBunApplication
  */
 export class WsHandler {
@@ -327,10 +345,12 @@ export class WsHandler {
       }
 
       // A namespace declared on a gateway whose path this one only prefixes.
-      for (const gateway of this.gateways.values()) {
-        if (gateway.metadata?.namespace === namespace && path.startsWith(gateway.metadata.path)) {
-          return gateway;
-        }
+      const withNamespace = this.longestPrefixMatch(
+        path,
+        (gateway) => gateway.metadata?.namespace === namespace,
+      );
+      if (withNamespace) {
+        return withNamespace;
       }
 
       this.logger.warn(
@@ -344,14 +364,53 @@ export class WsHandler {
       return this.gateways.get(path);
     }
 
-    // Try prefix match
-    for (const [_, gateway] of this.gateways) {
-      if (gateway.metadata && path.startsWith(gateway.metadata.path)) {
-        return gateway;
+    return this.longestPrefixMatch(path, () => true);
+  }
+
+  /**
+   * The gateway whose declared path covers this one most specifically.
+   *
+   * Two things this replaces. The match was a raw `startsWith`, so `/chat` claimed `/chatterbox`
+   * — a prefix of the STRING rather than of the PATH. And the loop returned on the first hit, so
+   * with `/chat` and `/chat/admin` both declared, a request below both went to whichever was
+   * registered first: declaration order decided routing.
+   *
+   * `/` still covers everything. It is what `@WebSocketGateway()` defaults to, so an application
+   * that declares no path and connects on `/ws` works today; narrowing it would answer 404.
+   */
+  private longestPrefixMatch(
+    path: string,
+    accept: (gateway: GatewayInstance) => boolean,
+  ): GatewayInstance | undefined {
+    let best: GatewayInstance | undefined;
+    let bestLength = -1;
+    let tied = 0;
+
+    for (const gateway of this.gateways.values()) {
+      const base = gateway.metadata?.path;
+      if (base === undefined || !accept(gateway) || !pathIsUnder(path, base)) {
+        continue;
+      }
+
+      if (base.length > bestLength) {
+        best = gateway;
+        bestLength = base.length;
+        tied = 1;
+      } else if (base.length === bestLength) {
+        tied += 1;
       }
     }
 
-    return undefined;
+    if (tied > 1 && best) {
+      // Same path, different namespaces, and the client named none. Resolved the same way the
+      // Socket.IO handshake resolves it: loudly, rather than by picking in silence.
+      this.logger.warn(
+        `WebSocket upgrade on ${path} matches ${tied} gateways declared at the same path. `
+        + `Binding it to ${best.key}. Connect with ?namespace=<name> to choose.`,
+      );
+    }
+
+    return best;
   }
 
   /**

@@ -246,6 +246,24 @@ export class ChatGateway extends BaseWebSocketGateway {
 | `namespace` | `string` | - | Distinguishes gateways that share a path. See [Which gateway a connection belongs to](#which-gateway-a-connection-belongs-to) |
 | `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
 
+### Which gateway serves a path
+
+An upgrade goes to the gateway whose declared `path` covers the request most specifically:
+
+1. an exact match on the path (and on `?namespace=`, when one is stated);
+2. otherwise the LONGEST declared path the request lives under — `/chat/admin` beats `/chat` for
+   `/chat/admin/audit`;
+3. otherwise 404.
+
+"Lives under" means the request is the declared path or continues it at a segment boundary.
+`/chat` serves `/chat` and `/chat/room1`, and does NOT serve `/chatterbox`.
+
+The default path — `@WebSocketGateway()` with no options — is `/`, and `/` covers every path. An
+application that declares no path keeps accepting clients on whatever URL they connect to.
+
+Two gateways declared at the same path are told apart by `namespace`; a client that states none
+is bound to the first and a warning names the gateway that took it.
+
 ### Which gateway a connection belongs to
 
 A connection is bound to exactly ONE gateway, decided at upgrade from the URL it connected to.
