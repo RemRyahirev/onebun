@@ -88,17 +88,58 @@ export abstract class BaseWebSocketGateway {
   private ownSockets = new Map<string, ServerWebSocket<WsClientData>>();
 
   /**
+   * This gateway's registry key — its path, or `path:namespace`.
+   *
+   * Set when the handler attaches the socket map. `undefined` for a gateway nobody registered,
+   * which is what keeps a hand-constructed gateway readable in tests.
+   */
+  private gatewayKey?: string;
+
+  /** The unkeyed-frame notice is given once per gateway, not once per message. */
+  private unkeyedFrameReported = false;
+
+  /**
+   * Resolves once this gateway's pub/sub subscription is established (or has failed).
+   * @internal
+   */
+  pubSubReady?: Promise<void>;
+
+  /**
    * Share the handler's socket map for this gateway's key.
    *
    * Called once at registration. Anything already registered directly on the instance is carried
    * over, so the order of registration and connection does not matter.
    * @internal
    */
-  _attachSockets(sockets: Map<string, ServerWebSocket<WsClientData>>): void {
+  _attachSockets(key: string, sockets: Map<string, ServerWebSocket<WsClientData>>): void {
+    this.gatewayKey = key;
     for (const [clientId, socket] of this.ownSockets) {
       sockets.set(clientId, socket);
     }
     this.ownSockets = sockets;
+  }
+
+  /**
+   * Whether this gateway may see a client record.
+   *
+   * Storage is shared by every gateway in the application and rooms are keyed by name alone, so
+   * a read went straight to another gateway's data: measured, `getClientsByRoom` on a room only
+   * `/admin` ever touched returned the full record of an `/admin` client — `auth`, `metadata`
+   * and all. The socket fence stopped messages crossing; it never stopped reads.
+   *
+   * Two deliberate escapes. A gateway with no key of its own (constructed by hand, never
+   * registered) filters nothing — it has no identity to compare against. A record with no key
+   * is visible to everyone: records written before this shipped, and sockets that never went
+   * through the upgrade path, must not become invisible to the gateway that owns them.
+   */
+  protected _owns(client: WsClientData | null | undefined): boolean {
+    if (!client) {
+      return false;
+    }
+
+    return this.gatewayKey === undefined
+      || client.gatewayKey === undefined
+      || client.gatewayKey === this.gatewayKey;
   }
 
   /** Flag to track initialization status */
@@ -176,9 +217,15 @@ export abstract class BaseWebSocketGateway {
     this.storage = storage;
     this.server = server;
 
-    // Subscribe to pub/sub events if Redis storage
+    // Subscribe to pub/sub events if Redis storage. Kept so a failure is a logged error
+    // rather than an unhandled rejection, and so a test has something to await.
     if (isPubSubAdapter(storage)) {
-      this._setupPubSub(storage);
+      this.pubSubReady = this._setupPubSub(storage).catch((error: unknown) => {
+        this.logger?.error(
+          'WebSocket pub/sub subscription failed; this gateway will not receive remote events',
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      });
     }
   }
 
@@ -190,6 +237,26 @@ export abstract class BaseWebSocketGateway {
     await storage.subscribe((payload) => {
       // Ignore events from this instance
       if (payload.sourceInstanceId === this.instanceId) {
+        return;
+      }
+
+      // Ignore events published by a DIFFERENT gateway. `sourceInstanceId` is minted per
+      // gateway, not per process, so without this a publish loops back through Redis and the
+      // sibling gateway in the same process replays it to clients that never belonged to the
+      // publisher — measured, one /chat broadcast reaching every /admin client on every
+      // instance. A frame with no key comes from a build that predates this and is accepted;
+      // said once, so a rolling deploy is not silent and not noisy either.
+      if (payload.gatewayKey === undefined) {
+        if (!this.unkeyedFrameReported) {
+          this.unkeyedFrameReported = true;
+          this.logger?.warn(
+            'Received a WebSocket pub/sub frame with no gateway key — it is being accepted, but '
+            + 'it can reach clients of a gateway that did not publish it. This happens while '
+            + 'instances running different versions share one Redis; it should stop once the '
+            + 'rollout completes.',
+          );
+        }
+      } else if (payload.gatewayKey !== this.gatewayKey) {
         return;
       }
 
@@ -277,8 +344,20 @@ export abstract class BaseWebSocketGateway {
    * Get all rooms
    */
   get rooms(): Map<string, WsRoom> {
-    // Note: For async storage, use getRoomsAsync()
-    return new Map();
+    // Built from this gateway's own sockets, like `clients` — local to this instance and to
+    // this gateway. It used to return an empty Map unconditionally, with a comment pointing at
+    // a `getRoomsAsync()` that exists nowhere in the framework.
+    const result = new Map<string, WsRoom>();
+
+    for (const [clientId, socket] of this.ownSockets) {
+      for (const roomName of socket.data?.rooms ?? []) {
+        const room = result.get(roomName) ?? { name: roomName, clientIds: [] };
+        room.clientIds.push(clientId);
+        result.set(roomName, room);
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -288,9 +367,11 @@ export abstract class BaseWebSocketGateway {
     if (!this.storage) {
       return undefined;
     }
-    const client = await this.storage.getClient(clientId);
+    // A local socket answers without a storage round trip; either way the record has to be
+    // one this gateway may see.
+    const client = this.ownSockets.get(clientId)?.data ?? await this.storage.getClient(clientId);
 
-    return client || undefined;
+    return this._owns(client) ? client ?? undefined : undefined;
   }
 
   /**
@@ -301,8 +382,16 @@ export abstract class BaseWebSocketGateway {
       return undefined;
     }
     const room = await this.storage.getRoom(roomName);
+    if (!room) {
+      return undefined;
+    }
 
-    return room || undefined;
+    const mine = await this._ownedMembers(room.clientIds);
+
+    // A room is visible when at least one member is ours, and it shows only those members.
+    // Before, `getRoom` on a room only another gateway ever touched returned its exact
+    // membership.
+    return mine.length > 0 ? { ...room, clientIds: mine } : undefined;
   }
 
   /**
@@ -316,8 +405,8 @@ export abstract class BaseWebSocketGateway {
     const clients: WsClientData[] = [];
 
     for (const id of clientIds) {
-      const client = await this.storage.getClient(id);
-      if (client) {
+      const client = this.ownSockets.get(id)?.data ?? await this.storage.getClient(id);
+      if (client && this._owns(client)) {
         clients.push(client);
       }
     }
@@ -333,7 +422,33 @@ export abstract class BaseWebSocketGateway {
       return [];
     }
 
-    return await this.storage.getRoomsByPattern(pattern);
+    const rooms = await this.storage.getRoomsByPattern(pattern);
+    const visible: WsRoom[] = [];
+
+    for (const room of rooms) {
+      const mine = await this._ownedMembers(room.clientIds);
+      if (mine.length > 0) {
+        visible.push({ ...room, clientIds: mine });
+      }
+    }
+
+    // `emitToRoomPattern` and `disconnectRoomPattern` enumerate through here, so they inherit
+    // the fence rather than each needing their own.
+    return visible;
+  }
+
+  /** The members of a room this gateway may see. */
+  private async _ownedMembers(clientIds: string[]): Promise<string[]> {
+    const mine: string[] = [];
+
+    for (const id of clientIds) {
+      const client = this.ownSockets.get(id)?.data ?? await this.storage?.getClient(id);
+      if (this._owns(client)) {
+        mine.push(id);
+      }
+    }
+
+    return mine;
   }
 
   // ============================================================================
@@ -351,6 +466,7 @@ export abstract class BaseWebSocketGateway {
       this.storage.publish({
         type: WsStorageEvent.CLIENT_MESSAGE,
         sourceInstanceId: this.instanceId,
+        gatewayKey: this.gatewayKey,
         data: { clientId, event, message: data },
       });
     }
@@ -388,6 +504,7 @@ export abstract class BaseWebSocketGateway {
       this.storage.publish({
         type: WsStorageEvent.BROADCAST,
         sourceInstanceId: this.instanceId,
+        gatewayKey: this.gatewayKey,
         data: { event, message: data, excludeClientIds },
       });
     }
@@ -418,6 +535,7 @@ export abstract class BaseWebSocketGateway {
       this.storage.publish({
         type: WsStorageEvent.ROOM_BROADCAST,
         sourceInstanceId: this.instanceId,
+        gatewayKey: this.gatewayKey,
         data: {
           roomName, event, message: data, excludeClientIds, 
         },
@@ -555,10 +673,17 @@ export abstract class BaseWebSocketGateway {
     if (!this.storage) {
       return;
     }
+    // Only for a client this gateway admitted. The storage half used to run unconditionally
+    // while only the subscribe half was fenced, so one gateway could enrol another's client
+    // into a room — a write neither gateway could then see.
+    const socket = this.ownSockets.get(clientId);
+    if (!socket && !this._owns(await this.storage.getClient(clientId))) {
+      return;
+    }
+
     await this.storage.addClientToRoom(clientId, roomName);
 
     // Also subscribe to Bun's native pub/sub topic
-    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.subscribe(roomName);
     }
@@ -571,10 +696,14 @@ export abstract class BaseWebSocketGateway {
     if (!this.storage) {
       return;
     }
+    const socket = this.ownSockets.get(clientId);
+    if (!socket && !this._owns(await this.storage.getClient(clientId))) {
+      return;
+    }
+
     await this.storage.removeClientFromRoom(clientId, roomName);
 
     // Also unsubscribe from Bun's native pub/sub topic
-    const socket = this.ownSockets.get(clientId);
     if (socket) {
       socket.unsubscribe(roomName);
     }

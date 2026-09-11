@@ -96,6 +96,17 @@ interface Probe {
   inbox: string[];
 }
 
+/** The gateway surface these tests reach through the handler's registry. */
+interface GatewayProbe {
+  clients: Map<string, unknown>;
+  rooms: Map<string, { name: string; clientIds: string[] }>;
+  joinRoom(clientId: string, roomName: string): Promise<void>;
+  getRoom(roomName: string): Promise<{ name: string; clientIds: string[] } | undefined>;
+  getRoomsByPattern(pattern: string): Promise<Array<{ name: string; clientIds: string[] }>>;
+  getClientsByRoom(roomName: string): Promise<unknown[]>;
+  getClient(clientId: string): Promise<unknown | undefined>;
+}
+
 async function connect(url: string): Promise<Probe> {
   const socket = new WebSocket(url);
   const inbox: string[] = [];
@@ -261,6 +272,87 @@ describe('a connection belongs to one gateway', () => {
     await settle();
 
     expect(fired.filter((entry) => entry.startsWith('chat.connect'))).toHaveLength(1);
+  });
+
+  test('should not let one gateway read another gateway\'s rooms or clients', async () => {
+    const app = boot(TwoGatewayModule);
+    await app.start();
+
+    const chat = await connect(wsUrl(app, '/chat'));
+    const admin = await connect(wsUrl(app, '/admin'));
+    sockets.push(chat.socket, admin.socket);
+    await settle();
+
+    const registry = (app as unknown as {
+      wsHandler: { gateways: Map<string, { instance: GatewayProbe }> };
+    }).wsHandler;
+    const chatGateway = registry.gateways.get('/chat')!.instance;
+    const adminGateway = registry.gateways.get('/admin:admin')!.instance;
+
+    const adminClientId = [...adminGateway.clients.keys()][0];
+
+    await chatGateway.joinRoom([...chatGateway.clients.keys()][0], 'zone:chat');
+    await adminGateway.joinRoom(adminClientId, 'zone:admin');
+
+    // Before: `getRoom('zone:admin')` returned the admin room with its exact membership, and
+    // `getClientsByRoom` handed back the FULL record of a foreign client — auth, metadata and
+    // the gateway key naming its owner. The socket fence stopped messages crossing; it never
+    // stopped reads.
+    expect(await chatGateway.getRoom('zone:admin')).toBeUndefined();
+    expect(await chatGateway.getClientsByRoom('zone:admin')).toEqual([]);
+    expect(await chatGateway.getClient(adminClientId)).toBeUndefined();
+
+    const visible = await chatGateway.getRoomsByPattern('zone:*');
+
+    expect(visible.map((room) => room.name)).toEqual(['zone:chat']);
+  });
+
+  test('should not enrol another gateway\'s client into a room', async () => {
+    const app = boot(TwoGatewayModule);
+    await app.start();
+
+    const chat = await connect(wsUrl(app, '/chat'));
+    const admin = await connect(wsUrl(app, '/admin'));
+    sockets.push(chat.socket, admin.socket);
+    await settle();
+
+    const registry = (app as unknown as {
+      wsHandler: { gateways: Map<string, { instance: GatewayProbe }> };
+    }).wsHandler;
+    const chatGateway = registry.gateways.get('/chat')!.instance;
+    const adminGateway = registry.gateways.get('/admin:admin')!.instance;
+    const adminClientId = [...adminGateway.clients.keys()][0];
+
+    // The storage half of joinRoom used to run unconditionally while only the socket
+    // subscription was fenced — so this wrote a membership neither gateway could then see.
+    await chatGateway.joinRoom(adminClientId, 'zone:chat');
+
+    expect(await adminGateway.getRoom('zone:chat')).toBeUndefined();
+    expect(await chatGateway.getClientsByRoom('zone:chat')).toEqual([]);
+  });
+
+  test('should report this gateway\'s own rooms instead of an empty map', async () => {
+    const app = boot(TwoGatewayModule);
+    await app.start();
+
+    const chat = await connect(wsUrl(app, '/chat'));
+    sockets.push(chat.socket);
+    await settle();
+
+    const registry = (app as unknown as {
+      wsHandler: { gateways: Map<string, { instance: GatewayProbe }> };
+    }).wsHandler;
+    const chatGateway = registry.gateways.get('/chat')!.instance;
+    const clientId = [...chatGateway.clients.keys()][0];
+
+    await chatGateway.joinRoom(clientId, 'lobby');
+
+    // `rooms` used to return `new Map()` unconditionally, with a comment pointing at a
+    // `getRoomsAsync()` that exists nowhere in the framework.
+    const rooms = chatGateway.rooms;
+
+    expect([...rooms.keys()]).toEqual(['lobby']);
+    expect(rooms.get('lobby')!.clientIds).toEqual([clientId]);
   });
 
   test('should refuse two different gateway classes on one key', () => {

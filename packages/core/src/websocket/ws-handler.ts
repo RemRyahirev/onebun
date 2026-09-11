@@ -290,7 +290,7 @@ export class WsHandler {
     // and carries over anything already registered, so gateway and handler share one object.
     const sockets = this.socketsByGateway.get(key) ?? new Map<string, ServerWebSocket<WsClientData>>();
     this.socketsByGateway.set(key, sockets);
-    instance._attachSockets(sockets);
+    instance._attachSockets(key, sockets);
 
     this.gateways.set(key, {
       instance, metadata, handlers, key,
@@ -604,14 +604,11 @@ export class WsHandler {
     const client = ws.data;
     this.logger.debug(`WebSocket client connected: ${client.id} (${client.protocol})`);
 
-    // Store client
-    await this.storage.addClient(client);
-
-    this.openSockets.add(ws);
-
-    // Register the socket with the gateway that admitted it. This used to register with EVERY
-    // gateway, which is why one client appeared in every gateway's `clients` and received every
-    // gateway's broadcasts.
+    // Resolve the owner BEFORE the record is stored. The record carries the owning gateway's
+    // key, and every gateway reads the same storage — a record written first and owned second
+    // is a record other gateways can see in the meantime, and a socket that never went through
+    // handleUpgrade (a test harness driving the Bun callbacks) would carry no key at all.
+    // It also stops a record being written for a connection that is about to be closed.
     const owner = this.ownerAtOpen(ws);
     if (!owner) {
       this.logger.warn(
@@ -622,6 +619,16 @@ export class WsHandler {
 
       return;
     }
+    client.gatewayKey ??= owner.key;
+
+    // Store client
+    await this.storage.addClient(client);
+
+    this.openSockets.add(ws);
+
+    // Register the socket with the gateway that admitted it. This used to register with EVERY
+    // gateway, which is why one client appeared in every gateway's `clients` and received every
+    // gateway's broadcasts.
     owner.instance._registerSocket(client.id, ws);
 
     if (client.protocol === 'socketio') {

@@ -253,10 +253,29 @@ That gateway's `@OnConnect`, `@OnMessage`, `@OnJoinRoom`, `@OnLeaveRoom` and `@O
 handlers are the only ones that run for it, and it appears only in that gateway's `clients`.
 
 Everything a gateway sends covers the connections IT admitted: `broadcast()`, `emit()`,
-`emitToRoom()`/`emitToRooms()`/`emitToRoomPattern()`, `disconnectClient()`, `disconnectAll()`,
-`clients` and `getClientsByRoom()`. `emit()`, `joinRoom()`, `leaveRoom()` and
-`disconnectClient()` do nothing for a client another gateway owns. The scope is also
-per-application: two applications in one process do not see each other's connections.
+`emitToRoom()`/`emitToRooms()`/`emitToRoomPattern()`, `disconnectClient()`, `disconnectAll()`.
+`emit()`, `joinRoom()`, `leaveRoom()` and `disconnectClient()` do nothing for a client another
+gateway owns. The scope is also per-application: two applications in one process do not see
+each other's connections.
+
+Everything a gateway READS is scoped the same way. `clients`, `rooms`, `getClient()`,
+`getRoom()`, `getClientsByRoom()` and `getRoomsByPattern()` answer only about connections this
+gateway admitted: a room only another gateway ever touched does not exist as far as this one is
+concerned, and a room with members on both sides lists only its own. Room storage is shared by
+every gateway in the application, so this is a filter rather than a partition — two gateways may
+use the same room name without meeting.
+
+With the Redis storage adapter, a remote event reaches the gateway that published it and no
+other: the published payload carries the publishing gateway's key. A payload that carries none —
+published by an instance running an older build — is still delivered, and the receiving gateway
+says so once, so a rolling deploy neither breaks nor goes quiet.
+
+::: warning
+`getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are the raw room
+names, shared by every gateway in the process, so a message published that way reaches any
+socket subscribed to that topic regardless of which gateway admitted it. The framework's own
+room emit does not use it. Use `emitToRoom()` unless you specifically want that reach.
+:::
 
 `namespace` distinguishes two gateways that would otherwise share a path. A client selects one by
 connecting with `?namespace=<name>`; OneBun's own `WsClient` sends that automatically when its

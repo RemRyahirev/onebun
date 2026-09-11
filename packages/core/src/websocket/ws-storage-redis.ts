@@ -30,6 +30,8 @@ const KEYS = {
 export class RedisWsStorage implements WsPubSubStorageAdapter {
   private eventHandlers: Array<(payload: WsStorageEventPayload) => void> = [];
   private subscribed = false;
+  /** The in-flight or completed channel subscription, so concurrent callers share one. */
+  private subscription?: Promise<void>;
 
   constructor(private redisClient: RedisClient) {}
 
@@ -239,23 +241,29 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
   async subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<void> {
     this.eventHandlers.push(handler);
 
-    if (!this.subscribed) {
-      await this.redisClient.subscribe(KEYS.PUBSUB_CHANNEL, (message: string) => {
-        try {
-          const payload = JSON.parse(message) as WsStorageEventPayload;
-          for (const h of this.eventHandlers) {
-            try {
-              h(payload);
-            } catch {
-              // Ignore handler errors
-            }
+    // Memoised, not a boolean set after the await. The flag was raised AFTER
+    // `redisClient.subscribe` resolved, and gateways subscribe concurrently — every gateway
+    // raced past the guard, each installing its own Redis-level listener that then iterated
+    // the SHARED handler list. N gateways therefore delivered every message N x N times:
+    // measured, 2 gateways gave 4 copies of one broadcast to every client, 3 would give 9.
+    this.subscription ??= this.redisClient.subscribe(KEYS.PUBSUB_CHANNEL, (message: string) => {
+      try {
+        const payload = JSON.parse(message) as WsStorageEventPayload;
+        for (const h of this.eventHandlers) {
+          try {
+            h(payload);
+          } catch {
+            // Ignore handler errors
           }
-        } catch {
-          // Ignore invalid messages
         }
-      });
+      } catch {
+        // Ignore invalid messages
+      }
+    }).then(() => {
       this.subscribed = true;
-    }
+    });
+
+    await this.subscription;
   }
 
   async publish(payload: WsStorageEventPayload): Promise<void> {
@@ -264,6 +272,7 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
 
   async unsubscribe(): Promise<void> {
     this.eventHandlers = [];
+    this.subscription = undefined;
     if (this.subscribed) {
       await this.redisClient.unsubscribe(KEYS.PUBSUB_CHANNEL);
       this.subscribed = false;
