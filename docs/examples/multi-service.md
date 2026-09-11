@@ -297,7 +297,7 @@ await app.stop();
 ```
 
 ::: tip
-`OneBunApplication.stop()` in multi-service mode calls `stop()` on each child `OneBunApplication` instance. The parent accepts `{ closeSharedRedis?: boolean; signal?: string }` for signature compatibility but **discards it** — every child is stopped with defaults, so `closeSharedRedis: false` on the parent does not keep shared Redis open and a `signal` never reaches the hooks. To control that, reach the child yourself: `await app.getApplication('users')?.stop({ closeSharedRedis: false })` (`getApplication` returns `OneBunApplication | undefined`).
+`OneBunApplication.stop()` in multi-service mode calls `stop()` on each child `OneBunApplication` instance. `closeSharedRedis` is deprecated and ignored everywhere — no application releases the shared Redis client. Each child's consumers release their own holds as they close, and the connection goes down when the last holder in the process lets go, whichever service that belongs to. A `signal` passed to the parent still never reaches the children's hooks; to pass one, reach the child yourself: `await app.getApplication('users')?.stop({ signal: 'SIGTERM' })` (`getApplication` returns `OneBunApplication | undefined`).
 :::
 
 ### Lifecycle Hook Reference

@@ -277,6 +277,8 @@ import { SharedRedisProvider } from '@onebun/core';
 SharedRedisProvider.configure({ url: 'redis://localhost:6379' });
 
 const redis = await SharedRedisProvider.getClient();
+// ...and on shutdown, give the hold back — nothing else will:
+// await SharedRedisProvider.release();
 
 const app = new OneBunApplication(AppModule, {
   middleware: [
@@ -289,8 +291,10 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-`getClient()` takes a lease on the shared connection — call `await SharedRedisProvider.release()`
-on shutdown to give it back.
+`getClient()` takes a hold on the shared connection — call `await SharedRedisProvider.release()`
+on shutdown to give it back. This is not optional: an application's `stop()` releases nothing, so a
+hold nobody gives back keeps the socket open and the process alive. The shutdown log names what
+still holds it.
 
 There is one shared connection per process and therefore one configuration: a second
 `configure()` with a different target throws rather than being quietly ignored. See

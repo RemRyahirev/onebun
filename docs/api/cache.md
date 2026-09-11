@@ -314,16 +314,23 @@ CacheModule.forRoot({
 
 `CacheService` implements `OnModuleDestroy` and closes the cache when the application stops. It **does not disconnect a shared Redis client**: `close()` disconnects only a client the service owns.
 
-A shared client is **reference-counted**. Each consumer takes a hold when it first obtains the client, `app.stop()` releases that hold, and the connection is closed only when the last one lets go — so in multi-service mode the first sub-application to stop no longer tears the client away from its still-running siblings. `app.stop({ closeSharedRedis: false })` skips releasing altogether.
+A shared client is **reference-counted, and whoever takes a hold gives it back**. The cache releases its hold when it closes; the Redis queue adapter releases its when it disconnects; code that took the client itself with `SharedRedisProvider.getClient()` releases it with `SharedRedisProvider.release()`. The connection is closed when the last holder lets go — and never because an application stopped.
+
+`app.stop()` releases nothing. It used to release exactly one hold per stop, whether or not anything in that application had ever acquired: measured, a service with no Redis at all took a sibling's hold to zero on its own shutdown and the sibling's next queue publish threw `Redis client not connected`, while a service with a cache AND a queue gave back one of the two holds it took, so the socket outlived every application in the process. `stop({ closeSharedRedis })` is deprecated and ignored.
+
+If a process will not exit, the shutdown log names what still holds the connection (`Shared Redis still held by 1: …`) at debug level.
 
 If the shared client is gone when a cache operation runs, the cache re-acquires it rather than reporting a miss. When it cannot — the server is unreachable — the operation **throws**. A cache read returns `undefined` only for a key that genuinely is not there; a broken cache is an error, because code that treats a miss as "not present" (rate limits, replay guards, locks) would otherwise decide wrongly. The re-acquire is bounded by a short deadline, since the driver's auto-reconnect retries indefinitely and would otherwise turn a dead cache into a hung request.
 
 ```typescript
 const app = new OneBunApplication(AppModule);
 await app.start();
-await app.stop();               // the cache is closed
-// with a shared Redis client:
-await app.stop({ closeSharedRedis: false });  // the shared client stays connected
+await app.stop();               // the cache is closed, and it releases its own shared hold
+
+// A hold you took yourself is yours to give back:
+const client = await SharedRedisProvider.getClient();
+// ...
+await SharedRedisProvider.release();
 ```
 
 Before 0.4.5 nothing in the lifecycle called `close()`, so a cache built by one test suite stayed open into the next.

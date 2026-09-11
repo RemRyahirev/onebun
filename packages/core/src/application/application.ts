@@ -577,6 +577,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private metricsService: any = null;
   /** Why the metrics service could not be built, when it could not. Shapes the startup summary. */
   private metricsFailure: Error | null = null;
+  /** The `closeSharedRedis` deprecation is said once per process, not once per stop(). */
+  private static closeSharedRedisWarned = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
   private wsHandler: WsHandler | null = null;
@@ -3018,7 +3020,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *
    * @param options - Shutdown options
    */
-  async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
+  async stop(options?: {
+    /**
+     * @deprecated Ignored. An application no longer releases the shared Redis client — whoever
+     * acquired a hold gives it back, and the connection closes when the last holder does.
+     */
+    closeSharedRedis?: boolean;
+    signal?: string;
+  }): Promise<void> {
     await this.runShutdown(options);
   }
 
@@ -3150,7 +3159,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return;
     }
 
-    const closeRedis = options?.closeSharedRedis ?? true;
+    if (options?.closeSharedRedis !== undefined && !OneBunApplication.closeSharedRedisWarned) {
+      OneBunApplication.closeSharedRedisWarned = true;
+      this.logger.warn(
+        'stop({ closeSharedRedis }) is deprecated and ignored: an application no longer releases '
+        + 'the shared Redis client. Whoever acquired a hold gives it back — the cache when it '
+        + 'closes, the queue adapter when it disconnects — and the connection closes when the '
+        + 'last holder lets go. Code that took a hold with SharedRedisProvider.getClient() must '
+        + 'call SharedRedisProvider.release() itself.',
+      );
+    }
     const signal = options?.signal;
 
     this.logger.info('Stopping OneBun application...');
@@ -3259,15 +3277,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.queueAdapter = null;
     }
 
-    // Release this application's hold on the shared Redis client. It is disconnected only
-    // when the last consumer lets go — previously every application called disconnect()
-    // outright, so in multi-service mode the FIRST one to stop tore the client out from
-    // under its still-running siblings.
-    if (closeRedis && SharedRedisProvider.isConnected()) {
-      await this.runShutdownStep(outcome, 'releasing the shared Redis client', async () => {
-        this.logger.debug('Releasing shared Redis');
-        await SharedRedisProvider.release();
-      });
+    // The application releases NOTHING. Whoever acquired a hold on the shared Redis client
+    // gives it back — the cache in its close(), the queue adapter in its disconnect() — and
+    // the connection closes when the last holder lets go.
+    //
+    // This step used to call release() once per stop(), gated on the client being connected
+    // rather than on this application having acquired anything. Measured: an application with
+    // no Redis at all took a sibling's hold to zero on its own shutdown, and the sibling's
+    // next queue publish threw `Redis client not connected`. An application with a cache AND a
+    // queue took two holds and gave back one, so the socket outlived every application.
+    //
+    // What replaces it is a diagnostic. A process that will not exit because something still
+    // holds the connection is otherwise a hang with nothing to grep for; this names the holder
+    // in the shutdown output the operator is already reading. Debug, not warn: in
+    // multi-service mode a non-zero count at a child's stop is the normal, correct state.
+    if (SharedRedisProvider.isConnected()) {
+      const holders = SharedRedisProvider.leaseHolders();
+      if (holders.length > 0) {
+        this.logger.debug(
+          `Shared Redis still held by ${holders.length}: ${holders.join(', ')}`,
+        );
+      }
     }
 
     // Call onApplicationDestroy lifecycle hook

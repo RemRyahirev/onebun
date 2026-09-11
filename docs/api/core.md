@@ -323,6 +323,7 @@ class OneBunApplication {
    * Always resolves within `shutdownTimeout`.
    */
   async stop(options?: { 
+    /** @deprecated Ignored — an application releases no shared Redis hold. */
     closeSharedRedis?: boolean; 
     signal?: string;  // e.g., 'SIGTERM', 'SIGINT'
   }): Promise<void>;
@@ -543,10 +544,12 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 app.enableGracefulShutdown(); // Register the handlers yourself instead
 
-// Programmatic shutdown — drains, then closes server, WebSocket, and shared Redis
+// Programmatic shutdown — drains, then closes the server and WebSocket connections.
+// The shared Redis client is NOT released here: whoever acquired a hold gives it back, and
+// the connection closes when the last holder does.
 await app.stop();
 
-// Keep shared Redis open for other consumers
+// Deprecated and ignored — kept only so existing call sites still compile
 await app.stop({ closeSharedRedis: false });
 
 // Pass signal for lifecycle hooks

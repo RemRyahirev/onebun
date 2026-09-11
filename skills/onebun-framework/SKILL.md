@@ -157,8 +157,14 @@ Always use optional chaining; `app.getApplication('users').getPort()` is a TS253
 <!-- typecheck: skip -->
 ```typescript
 app.getApplication('users')?.getPort();
-await app.getApplication('users')?.stop({ closeSharedRedis: false });
+await app.getApplication('users')?.stop({ signal: 'SIGTERM' });
 ```
+
+**An application releases no shared Redis hold.** Whoever acquires gives back — the cache in its
+`close()`, the queue adapter in its `disconnect()`, and your own code with
+`await SharedRedisProvider.release()` if it called `getClient()`. The connection closes when the
+last holder lets go. `stop({ closeSharedRedis })` is deprecated and ignored; a process that will
+not exit is reported at debug as `Shared Redis still held by N: <call sites>`.
 
 **One shared Redis configuration per process.** `SharedRedisProvider.configure()` refuses a second
 call naming a different `url`, `keyPrefix`, `reconnect` or `tls` — there is a single shared

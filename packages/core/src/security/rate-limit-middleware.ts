@@ -196,6 +196,7 @@ function defaultKeyGenerator(req: OneBunRequest): string {
  * @example Redis-backed rate limiting with custom window
  * ```typescript
  * const redis = await SharedRedisProvider.getClient();
+ * // ...and on shutdown: await SharedRedisProvider.release(); nothing else gives the hold back.
  * const app = new OneBunApplication(AppModule, {
  *   middleware: [
  *     RateLimitMiddleware.configure({

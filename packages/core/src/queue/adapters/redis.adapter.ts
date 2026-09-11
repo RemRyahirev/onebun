@@ -11,6 +11,7 @@
  * - Consumer groups for load balancing
  */
 
+import type { SharedRedisLease } from '../../redis/shared-redis';
 import type {
   QueueAdapter,
   QueueAdapterType,
@@ -23,6 +24,7 @@ import type {
   Subscription,
   MessageHandler,
 } from '../types';
+
 
 import { RedisClient } from '../../redis/redis-client';
 import { SharedRedisProvider } from '../../redis/shared-redis';
@@ -250,6 +252,8 @@ export class RedisQueueAdapter implements QueueAdapter {
 
   private client: RedisClient | null = null;
   private ownsClient = false;
+  /** This adapter's hold on the shared client, given back in disconnect(). */
+  private sharedLease: SharedRedisLease | null = null;
   private connected = false;
   private scheduler: QueueScheduler | null = null;
   private subscriptions: RedisSubscriptionEntry[] = [];
@@ -302,8 +306,10 @@ export class RedisQueueAdapter implements QueueAdapter {
 
     try {
       if (this.options.useSharedClient) {
-        // Use shared client (default)
-        this.client = await SharedRedisProvider.getClient();
+        // One hold per adapter. The guard above is `this.connected`, which is set only AFTER a
+        // successful connect, so every retry of a failed connect used to take another hold.
+        this.sharedLease ??= await SharedRedisProvider.acquire('RedisQueueAdapter');
+        this.client = this.sharedLease.client;
         this.ownsClient = false;
       } else {
         // Create own client
@@ -328,13 +334,30 @@ export class RedisQueueAdapter implements QueueAdapter {
       // Emit ready event
       this.emit('onReady');
     } catch (error) {
+      // `disconnect()` early-returns while `connected` is false, so anything that throws after
+      // the hold was taken — the scheduler, the delayed processor — would strand it.
+      await this.releaseSharedLease();
       this.emit('onError', error as Error);
       throw error;
     }
   }
 
+  /** Give back this adapter's hold on the shared client, if it has one. */
+  private async releaseSharedLease(): Promise<void> {
+    if (!this.sharedLease) {
+      return;
+    }
+
+    const lease = this.sharedLease;
+    this.sharedLease = null;
+    await lease.release();
+  }
+
   async disconnect(): Promise<void> {
     if (!this.connected) {
+      // Still give back a hold taken by a connect that never finished.
+      await this.releaseSharedLease();
+
       return;
     }
 
@@ -364,6 +387,9 @@ export class RedisQueueAdapter implements QueueAdapter {
     if (this.ownsClient && this.client) {
       await this.client.disconnect();
     }
+
+    // A shared client is not ours to disconnect; the hold is ours to give back.
+    await this.releaseSharedLease();
 
     this.client = null;
     this.connected = false;
