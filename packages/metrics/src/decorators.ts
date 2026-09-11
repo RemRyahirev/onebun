@@ -9,6 +9,7 @@ import { Effect } from 'effect';
 import type { CustomMetricConfig } from './types';
 
 import { MetricsService } from './metrics.service';
+import { ownerMetricsService } from './owner';
 
 /**
  * Decorator for measuring method execution time.
@@ -28,6 +29,9 @@ export function Timed(metricName?: string, labels?: string[]): MethodDecorator {
 
     descriptor.value = function (...args: any[]): any {
       const startTime = Date.now();
+      // Captured before the continuations: `this` is what says which application owns this
+      // measurement, and the `.then`/`.catch` closures do not have it.
+      const owner = this;
 
       try {
         const result = originalMethod.apply(this, args);
@@ -35,21 +39,21 @@ export function Timed(metricName?: string, labels?: string[]): MethodDecorator {
         if (result instanceof Promise) {
           return result
             .then((res) => {
-              recordDuration(methodName, startTime, labels);
+              recordDuration(methodName, startTime, labels, owner);
 
               return res;
             })
             .catch((err) => {
-              recordDuration(methodName, startTime, labels);
+              recordDuration(methodName, startTime, labels, owner);
               throw err;
             });
         } else {
-          recordDuration(methodName, startTime, labels);
+          recordDuration(methodName, startTime, labels, owner);
 
           return result;
         }
       } catch (err) {
-        recordDuration(methodName, startTime, labels);
+        recordDuration(methodName, startTime, labels, owner);
         throw err;
       }
     };
@@ -76,7 +80,7 @@ export function Counted(metricName?: string, labels?: string[]): MethodDecorator
       metricName || `${target.constructor.name}_${String(propertyKey)}_calls_total`;
 
     descriptor.value = function (...args: any[]): any {
-      incrementCounter(counterName, labels);
+      incrementCounter(counterName, labels, this);
 
       return originalMethod.apply(this, args);
     };
@@ -129,11 +133,11 @@ export function Gauged<T extends object>(
 
           if (valueOrPromise instanceof Promise) {
             valueOrPromise.then(
-              (value) => setGaugeValue(metricName, value, labels),
+              (value) => setGaugeValue(metricName, value, labels, instance),
               logWarn,
             );
           } else {
-            setGaugeValue(metricName, valueOrPromise, labels);
+            setGaugeValue(metricName, valueOrPromise, labels, instance);
           }
         } catch (error) {
           logWarn(error);
@@ -214,9 +218,10 @@ export function WithMetrics(
 function resolveMetric(
   kind: 'histogram' | 'counter' | 'gauge',
   metricName: string,
-  labels?: string[],
+  labels: string[] | undefined,
+  owner: unknown,
 ): any {
-  const metricsService = getMetricsService();
+  const metricsService = getMetricsService(owner);
   if (!metricsService) {
     return undefined;
   }
@@ -250,25 +255,25 @@ function resolveMetric(
 /**
  * Helper functions for metric operations
  */
-function recordDuration(metricName: string, startTime: number, labels?: string[]): void {
+function recordDuration(metricName: string, startTime: number, labels: string[] | undefined, owner: unknown): void {
   const duration = (Date.now() - startTime) / 1000;
-  const histogram = resolveMetric('histogram', metricName, labels);
+  const histogram = resolveMetric('histogram', metricName, labels, owner);
 
   if (histogram && typeof histogram.observe === 'function') {
     histogram.observe(labels ? { labels: labels.join(',') } : {}, duration);
   }
 }
 
-function incrementCounter(metricName: string, labels?: string[]): void {
-  const counter = resolveMetric('counter', metricName, labels);
+function incrementCounter(metricName: string, labels: string[] | undefined, owner: unknown): void {
+  const counter = resolveMetric('counter', metricName, labels, owner);
 
   if (counter && typeof counter.inc === 'function') {
     counter.inc(labels ? { labels: labels.join(',') } : {});
   }
 }
 
-function setGaugeValue(metricName: string, value: number, labels?: string[]): void {
-  const gauge = resolveMetric('gauge', metricName, labels);
+function setGaugeValue(metricName: string, value: number, labels: string[] | undefined, owner: unknown): void {
+  const gauge = resolveMetric('gauge', metricName, labels, owner);
 
   if (gauge && typeof gauge.set === 'function') {
     gauge.set(labels ? { labels: labels.join(',') } : {}, value);
@@ -276,10 +281,23 @@ function setGaugeValue(metricName: string, value: number, labels?: string[]): vo
 }
 
 /**
- * Get metrics service from global context
- * This is a temporary solution until proper DI is implemented
+ * The metrics service these decorators should record into.
+ *
+ * The instance the decorated method is running on FIRST: a method decorator has no application
+ * at decoration time, but `this` at call time carries the scope of the application that built
+ * it. Reading the process-wide slot alone put a first application's measurements into a second
+ * application's registry, under its prefix and its labels.
+ *
+ * The slot remains the fallback, for an instance the framework did not build — a plain class,
+ * a static method, a detached function reference. In a single-application process that is the
+ * same service either way.
  */
-function getMetricsService(): any {
+function getMetricsService(owner?: unknown): any {
+  const fromOwner = ownerMetricsService(owner);
+  if (fromOwner) {
+    return fromOwner;
+  }
+
   if (typeof globalThis !== 'undefined') {
     return (globalThis as any).__onebunMetricsService;
   }

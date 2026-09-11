@@ -111,12 +111,23 @@ Metrics created through `this.metrics` in a service or controller, and through
 `metricsService.createCounter()` and friends, always land in the owning application's registry —
 nothing to change there.
 
+**Decorators record into the application that built the instance.** A method decorator has no
+application at decoration time, but it has `this` at call time, and the framework stamps every
+instance it builds with the scope of the application that built it. `@Timed()`, `@Counted()`,
+`@Gauged()` and `WithMetrics()` read that stamp, falling back to the process-wide slot for an
+instance the framework did not build — a plain class, a static method, a detached function
+reference. In a single-application process the two are the same service.
+
 ::: warning
-The `@Timed()`, `@Counted()` and `@Gauged()` decorators, and `WithMetrics()` used as a method
-decorator, still resolve the metrics service through a process-wide slot: a method decorator runs
-at class-definition time and has no application to ask. In a multi-service process they attach to
-whichever service started last. Prefer `this.metrics` inside a service or controller when the
-attribution matters.
+A decorated method on a class the framework never constructed still resolves the process-wide
+slot, which in a multi-service process belongs to whichever service started last. If the
+attribution matters, put the method on a `@Service()` or `@Controller()` the application builds,
+or use `this.metrics` directly.
+
+`createHttpClient`'s own metrics are a separate case: it is a free function with no application,
+so an outgoing call is still recorded against the last-started application — and into the
+SERVER-side `http_requests_total` family, with the full URL as the route. Turn it off with
+`metrics: false` if that matters to you.
 :::
 
 ## Built-in Metrics

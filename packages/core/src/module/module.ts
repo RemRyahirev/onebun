@@ -55,6 +55,7 @@ import {
   hasOnApplicationDestroy,
   hasConfigureMiddleware,
 } from './lifecycle';
+import { attachMetricsOwner } from './metrics-owner';
 import { BaseMiddleware } from './middleware';
 import {
   describeRegistrationToken,
@@ -885,6 +886,9 @@ export class OneBunModule implements ModuleInstance {
         } finally {
           BaseService.clearInitContext();
         }
+        // Which application built it, for a method decorator that has `this` but no
+        // application handle — see metrics-owner.ts.
+        attachMetricsOwner(serviceInstance as object, this.scope);
 
         // Fallback: call initializeService for services that have it but were not
         // initialized via the constructor (e.g., services not extending BaseService
@@ -1044,13 +1048,14 @@ export class OneBunModule implements ModuleInstance {
 
       // Set ambient init context so BaseMiddleware constructor can pick up logger/config,
       // making them available immediately after super() in subclass constructors.
-      BaseMiddleware.setInitContext(this.logger, this.config);
+      BaseMiddleware.setInitContext(this.logger, this.config, this.scope);
       let instance: BaseMiddleware;
       try {
         instance = new middlewareConstructor(...deps);
       } finally {
         BaseMiddleware.clearInitContext();
       }
+      attachMetricsOwner(instance, this.scope);
 
       // Fallback: call initializeMiddleware for middleware not initialized via
       // the constructor (e.g., not extending BaseMiddleware, or for backwards compatibility).
@@ -1126,13 +1131,14 @@ export class OneBunModule implements ModuleInstance {
       const interceptorConstructor = cls as new (...args: unknown[]) => Interceptor;
 
       // Set ambient init context so BaseInterceptor constructor can pick up logger/config
-      BaseInterceptor.setInitContext(this.logger, this.config);
+      BaseInterceptor.setInitContext(this.logger, this.config, this.scope);
       let instance: Interceptor;
       try {
         instance = new interceptorConstructor(...deps);
       } finally {
         BaseInterceptor.clearInitContext();
       }
+      attachMetricsOwner(instance as object, this.scope);
 
       // Fallback initialization for interceptors extending BaseInterceptor
       if ('initializeInterceptor' in instance) {
@@ -1208,6 +1214,7 @@ export class OneBunModule implements ModuleInstance {
       } finally {
         BaseService.clearInitContext();
       }
+      attachMetricsOwner(instance as object, this.scope);
 
       if (instance instanceof BaseService) {
         instance.initializeService(this.logger, this.config, this.scope);
@@ -1312,6 +1319,7 @@ export class OneBunModule implements ModuleInstance {
           } finally {
             BaseService.clearInitContext();
           }
+          attachMetricsOwner(instance as object, scope);
 
           if (instance instanceof BaseService) {
             instance.initializeService(logger, config, scope);
@@ -1392,7 +1400,7 @@ export class OneBunModule implements ModuleInstance {
       let controller: Controller;
 
       if (isGateway) {
-        BaseWebSocketGateway.setInitContext(this.logger, this.config);
+        BaseWebSocketGateway.setInitContext(this.logger, this.config, this.scope);
       } else {
         Controller.setInitContext(this.logger, this.config, this.scope);
       }
@@ -1406,6 +1414,7 @@ export class OneBunModule implements ModuleInstance {
           Controller.clearInitContext();
         }
       }
+      attachMetricsOwner(controller as object, this.scope);
 
       // Fallback: call initializeController / _initializeBase for controllers/gateways
       // that were not initialized via the constructor (e.g., not extending the base class,

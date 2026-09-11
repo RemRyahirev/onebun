@@ -141,6 +141,12 @@ Multi-service mode methods: `getApplication(name)`, `getServiceUrl(name)`,
 (`getConfig`, `getPort`, etc.) throw in multi-service mode — reach them through the
 sub-application instead.
 
+**Metrics decorators follow the instance.** `@Timed()`, `@Counted()`, `@Gauged()` and
+`WithMetrics()` record into the application that BUILT the object the method runs on — the
+framework stamps every instance it constructs. A decorated method on a class the framework never
+built falls back to a process-wide slot owned by whichever service started last, so put it on a
+`@Service()`/`@Controller()` when attribution matters.
+
 **Metrics are per service.** Each application owns its own Prometheus registry, so a scrape of
 one service's `/metrics` returns that service's series with that service's `defaultLabels` and
 nothing else. `metrics.prefix` is a naming choice, not the isolation mechanism. Process-level

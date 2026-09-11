@@ -3315,6 +3315,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.globalScope.processedModules.clear();
       this.globalScope.overrides.clear();
       this.globalScope.moduleOptions.clear();
+      // Dropped explicitly: a decorator stamped with this scope dereferences `metrics` on every
+      // call, so clearing it makes a stopped application's instances record nothing rather than
+      // write into a registry that dispose() already emptied.
+      this.globalScope.metrics = undefined;
       this.globalScope = null;
     }
 

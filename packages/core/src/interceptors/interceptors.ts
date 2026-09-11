@@ -9,11 +9,13 @@
  */
 
 import type { IConfig, OneBunAppConfig } from '../module/config.interface';
+import type { GlobalScope } from '../module/module';
 import type {
   ExecutionContext,
   Interceptor,
   ResolvedInterceptor,
 } from '../types';
+
 
 import type { SyncLogger } from '@onebun/logger';
 import { HttpStatusCode } from '@onebun/requests';
@@ -140,16 +142,23 @@ export abstract class BaseInterceptor implements Interceptor {
    * Ambient init context set by the framework before interceptor construction.
    * @internal
    */
-  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
-    null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+  } | null = null;
 
   /**
    * Set the ambient init context before constructing an interceptor.
    * Called by the framework (OneBunModule) before `new InterceptorClass(...)`.
    * @internal
    */
-  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
-    BaseInterceptor._initContext = { logger, config };
+  static setInitContext(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+  ): void {
+    BaseInterceptor._initContext = { logger, config, scope };
   }
 
   /**

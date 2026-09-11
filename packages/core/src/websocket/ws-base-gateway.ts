@@ -12,7 +12,9 @@ import type {
   WsServer,
 } from './ws.types';
 import type { IConfig, OneBunAppConfig } from '../module/config.interface';
+import type { GlobalScope } from '../module/module';
 import type { Server, ServerWebSocket } from 'bun';
+
 
 import type { SyncLogger } from '@onebun/logger';
 
@@ -151,16 +153,23 @@ export abstract class BaseWebSocketGateway {
    * so they are available immediately after super() in subclass constructors.
    * @internal
    */
-  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
-    null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+  } | null = null;
 
   /**
    * Set the ambient init context before constructing a gateway.
    * Called by the framework (OneBunModule) before `new GatewayClass(...)`.
    * @internal
    */
-  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
-    BaseWebSocketGateway._initContext = { logger, config };
+  static setInitContext(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+  ): void {
+    BaseWebSocketGateway._initContext = { logger, config, scope };
   }
 
   /**

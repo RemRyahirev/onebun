@@ -31,6 +31,9 @@ import {
   Service,
 } from '@onebun/core';
 
+import { Counted } from './decorators';
+
+
 const USERS_LABEL = { service: 'users' };
 const ORDERS_LABEL = { service: 'orders' };
 
@@ -38,6 +41,11 @@ const ORDERS_LABEL = { service: 'orders' };
 class UsersService extends BaseService {
   count(): void {
     this.metrics?.createCounter({ name: 'users_jobs_total', help: 'jobs' }).inc();
+  }
+
+  @Counted('decorated_calls_total')
+  decorated(): void {
+    // Body irrelevant: what matters is which application's registry the decorator records into.
   }
 }
 
@@ -50,6 +58,7 @@ class UsersController extends BaseController {
   @Get('/ping')
   ping(): { ok: boolean } {
     this.users.count();
+    this.users.decorated();
 
     return { ok: true };
   }
@@ -173,6 +182,27 @@ describe('a metrics registry per application', () => {
     // ORDERS service — with the orders prefix, in the orders registry.
     expect(usersBody).toContain('users_users_jobs_total');
     expect(ordersBody).not.toContain('users_jobs_total');
+  });
+
+  test('should record a decorated method into ITS application, not the last one started', async () => {
+    const users = boot(UsersModule, { prefix: 'users_', defaultLabels: USERS_LABEL });
+    const orders = boot(OrdersModule, { prefix: 'orders_', defaultLabels: ORDERS_LABEL });
+
+    // Order matters: `orders` starts LAST and therefore owns the process-wide slot that the
+    // decorators used to read.
+    await users.start();
+    await orders.start();
+    await fetch(`${users.getHttpUrl()}/users/ping`);
+
+    const usersBody = await scrape(users);
+    const ordersBody = await scrape(orders);
+
+    // Before: `orders_decorated_calls_total{service="orders"}` — wrong prefix, wrong identity,
+    // wrong endpoint, and CREATED in the orders registry, so that application permanently owned
+    // a series describing work it never did.
+    expect(usersBody).toContain('users_decorated_calls_total');
+    expect(usersBody).toContain('service="users"');
+    expect(ordersBody).not.toContain('decorated_calls_total');
   });
 
   test('should release the registry and the process slot when the application stops', async () => {
