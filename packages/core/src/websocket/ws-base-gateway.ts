@@ -426,16 +426,11 @@ export abstract class BaseWebSocketGateway {
       return [];
     }
     const clientIds = await this.storage.getClientsInRoom(roomName);
-    const clients: WsClientData[] = [];
+    const resolved = await Promise.all(clientIds.map(async (id) => (
+      this.ownSockets.get(id)?.data ?? await this.storage?.getClient(id)
+    )));
 
-    for (const id of clientIds) {
-      const client = this.ownSockets.get(id)?.data ?? await this.storage.getClient(id);
-      if (client && this._owns(client)) {
-        clients.push(client);
-      }
-    }
-
-    return clients;
+    return resolved.filter((client): client is WsClientData => !!client && this._owns(client));
   }
 
   /**
@@ -461,18 +456,19 @@ export abstract class BaseWebSocketGateway {
     return visible;
   }
 
-  /** The members of a room this gateway may see. */
+  /**
+   * The members of a room this gateway may see.
+   *
+   * A member with no local socket costs a storage round trip to read its owning gateway off its
+   * record; concurrently rather than one after another, because in a fleet most members of a
+   * room belong to other instances and the wait was the whole cost.
+   */
   private async _ownedMembers(clientIds: string[]): Promise<string[]> {
-    const mine: string[] = [];
+    const owned = await Promise.all(clientIds.map(async (id) => (
+      this._owns(this.ownSockets.get(id)?.data ?? await this.storage?.getClient(id)) ? id : null
+    )));
 
-    for (const id of clientIds) {
-      const client = this.ownSockets.get(id)?.data ?? await this.storage?.getClient(id);
-      if (this._owns(client)) {
-        mine.push(id);
-      }
-    }
-
-    return mine;
+    return owned.filter((id): id is string => id !== null);
   }
 
   // ============================================================================
@@ -603,26 +599,15 @@ export abstract class BaseWebSocketGateway {
     data: unknown,
     excludeClientIds?: string[],
   ): Promise<void> {
-    // Collect unique client IDs from all rooms
-    const clientIdsSet = new Set<string>();
-
-    for (const roomName of roomNames) {
-      if (this.storage) {
-        const ids = await this.storage.getClientsInRoom(roomName);
-        ids.forEach((id) => clientIdsSet.add(id));
-      }
+    if (!this.storage) {
+      return;
     }
 
-    const excludeSet = new Set(excludeClientIds || []);
+    const memberships = await Promise.all(
+      roomNames.map(async (roomName) => await this.storage!.getClientsInRoom(roomName)),
+    );
 
-    for (const clientId of clientIdsSet) {
-      if (!excludeSet.has(clientId)) {
-        const socket = this.ownSockets.get(clientId);
-        if (socket) {
-          socket.send(this._encodeMessage(socket.data.protocol, event, data));
-        }
-      }
-    }
+    this._sendToClients(memberships.flat(), event, data, excludeClientIds);
   }
 
   /**
@@ -634,9 +619,42 @@ export abstract class BaseWebSocketGateway {
     data: unknown,
     excludeClientIds?: string[],
   ): Promise<void> {
-    const rooms = await this.getRoomsByPattern(pattern);
-    const roomNames = rooms.map((r) => r.name);
-    await this.emitToRooms(roomNames, event, data, excludeClientIds);
+    if (!this.storage) {
+      return;
+    }
+
+    // Straight to storage, not through this gateway's own `getRoomsByPattern`. That one resolves
+    // every member's record to decide whether the ROOM is visible here — one round trip per
+    // member, and in a fleet most members belong to other instances. The fence on this path is
+    // `ownSockets`: every send below goes to a socket this gateway admitted, so resolving a
+    // remote member changes nothing except the bill. Measured, 50 rooms of 20 members cost 1151
+    // commands, of which 1000 were those lookups and 100 were each member set fetched twice.
+    const rooms = await this.storage.getRoomsByPattern(pattern);
+
+    this._sendToClients(rooms.flatMap((room) => room.clientIds), event, data, excludeClientIds);
+  }
+
+  /** Send one message to whichever of these clients this gateway holds a socket for. */
+  private _sendToClients(
+    clientIds: string[],
+    event: string,
+    data: unknown,
+    excludeClientIds?: string[],
+  ): void {
+    const excluded = new Set(excludeClientIds ?? []);
+    const reached = new Set<string>();
+
+    for (const clientId of clientIds) {
+      if (excluded.has(clientId) || reached.has(clientId)) {
+        continue;
+      }
+
+      const socket = this.ownSockets.get(clientId);
+      if (socket) {
+        reached.add(clientId);
+        socket.send(this._encodeMessage(socket.data.protocol, event, data));
+      }
+    }
   }
 
   // ============================================================================
@@ -680,9 +698,16 @@ export abstract class BaseWebSocketGateway {
    * Disconnect all clients in rooms matching a pattern
    */
   async disconnectRoomPattern(pattern: string, reason?: string): Promise<void> {
-    const rooms = await this.getRoomsByPattern(pattern);
-    for (const room of rooms) {
-      await this.disconnectRoom(room.name, reason);
+    if (!this.storage) {
+      return;
+    }
+
+    // Same reasoning as `emitToRoomPattern`: `disconnectClient` only closes a socket this
+    // gateway holds, so the membership the pattern lookup already returned is enough — no need
+    // to resolve every member's record, nor to fetch each room's member set a second time.
+    const rooms = await this.storage.getRoomsByPattern(pattern);
+    for (const clientId of new Set(rooms.flatMap((room) => room.clientIds))) {
+      this.disconnectClient(clientId, reason);
     }
   }
 
