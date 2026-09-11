@@ -147,7 +147,10 @@ DependencyResolutionError: Could not resolve dependency CacheService for service
 The error message searches all registered modules and reports:
 - Whether the dependency exists in another module and needs to be imported
 - Whether the dependency exists but is not exported from its module
-- Whether a global module should have auto-resolved it
+- Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
+- Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
+
+Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it no longer suppresses the "decorate it with `@Service()` and list it in a module's providers" advice, which prints when nothing else matched.
 
 ### Circular Dependencies
 

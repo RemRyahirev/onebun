@@ -56,7 +56,12 @@ import {
   hasConfigureMiddleware,
 } from './lifecycle';
 import { BaseMiddleware } from './middleware';
-import { describeRegistrationToken, findRegistrationModule } from './registration';
+import {
+  describeRegistrationToken,
+  findRegistrationModule,
+  getRegistrationBase,
+  isRegistrationModule,
+} from './registration';
 import {
   BaseService,
   getServiceMetadata,
@@ -1602,7 +1607,11 @@ export class OneBunModule implements ModuleInstance {
   private buildResolutionSuggestions(missingType: Function): string[] {
     const suggestions: string[] = [];
     const metadata = getModuleMetadata(this.moduleClass);
-    const currentImports = new Set((metadata?.imports ?? []).map((m) => m.name));
+    // Classes, not names. Every comparison below used to be `.name === .name`, so a service
+    // called MailerService in a package this application never imports matched the one the
+    // user is missing — and the false hit then suppressed the correct advice, which only
+    // prints when nothing else was found.
+    const currentImports = new Set<Function>((metadata?.imports ?? []) as Function[]);
 
     // 1. Search imported child modules
     for (const child of this.childModules) {
@@ -1610,8 +1619,8 @@ export class OneBunModule implements ModuleInstance {
       const childProviders = (childMeta?.providers ?? []) as Function[];
       const childExports = (childMeta?.exports ?? []) as Function[];
 
-      const isProvided = childProviders.some((p) => typeof p === 'function' && p.name === missingType.name);
-      const isExported = childExports.some((e) => typeof e === 'function' && e.name === missingType.name);
+      const isProvided = childProviders.includes(missingType);
+      const isExported = childExports.includes(missingType);
 
       if (isProvided && isExported) {
         suggestions.push(
@@ -1631,28 +1640,55 @@ export class OneBunModule implements ModuleInstance {
       if (moduleClass === this.moduleClass) {
         continue;
       }
-      if (currentImports.has(moduleClass.name)) {
+      if (currentImports.has(moduleClass)) {
         continue;
       }
 
       const providers = (moduleMeta.providers ?? []) as Function[];
       const exports = (moduleMeta.exports ?? []) as Function[];
-      const hasProvider = providers.some((p) => typeof p === 'function' && p.name === missingType.name);
-      const hasExport = exports.some((e) => typeof e === 'function' && e.name === missingType.name);
+      const hasProvider = providers.includes(missingType);
+      const hasExport = exports.includes(missingType);
 
-      if (hasProvider && hasExport) {
+      if (!hasProvider) {
+        continue;
+      }
+
+      if (isRegistrationModule(moduleClass)) {
+        // The minted class name is internal — telling the user to import
+        // `CacheModule_fragments` names something they cannot write. The token is what they can.
+        suggestions.push(
+          `${missingType.name} is provided by a named registration of ` +
+            `${getRegistrationBase(moduleClass).name}. Import ` +
+            `${getRegistrationBase(moduleClass).name}.forFeature(<token>) in ` +
+            `${this.moduleClass.name} — the registration's own class is internal.`,
+        );
+        continue;
+      }
+
+      if (hasExport) {
         if (isGlobalModule(moduleClass)) {
-          suggestions.push(
-            `${missingType.name} is available in global module ${moduleClass.name} — ` +
-              'it should be auto-resolved. Check module initialization order.',
-          );
+          if (this.scope.sharedModules.has(moduleClass)) {
+            suggestions.push(
+              `${missingType.name} is available in global module ${moduleClass.name} — ` +
+                'it should be auto-resolved. Check module initialization order.',
+            );
+          } else {
+            // @Global() is process-wide state, so the module can be marked global without
+            // this application ever importing it — in which case nothing built it and
+            // "check initialization order" sends the reader looking in the wrong place.
+            suggestions.push(
+              `${missingType.name} is exported from ${moduleClass.name}, which is @Global() — but ` +
+                'nothing in this application imports it, so it was never constructed. A @Global() ' +
+                'module still has to be imported once, anywhere in the application.',
+            );
+          }
         } else {
           suggestions.push(
             `${missingType.name} is exported from ${moduleClass.name}. ` +
               `Add ${moduleClass.name} to imports of ${this.moduleClass.name}.`,
           );
         }
-      } else if (hasProvider && !hasExport) {
+      } else {
         suggestions.push(
           `${missingType.name} exists in ${moduleClass.name} but is not exported. ` +
             `Add it to exports and import ${moduleClass.name}.`,
