@@ -575,6 +575,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private orchestrator: MultiServiceOrchestrator<TServices> | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
+  /** Why the metrics service could not be built, when it could not. Shapes the startup summary. */
+  private metricsFailure: Error | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
   private wsHandler: WsHandler | null = null;
@@ -726,14 +728,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
         this.logger.info('Metrics service initialized successfully');
       } catch (error) {
+        // Remembered, not just logged: the startup summary used to tell the operator that
+        // @onebun/metrics was not installed, which is a different problem with a different
+        // remedy — and false, since the package is right here and threw.
+        this.metricsFailure = error instanceof Error ? error : new Error(String(error));
+        this.logger.error('Failed to initialize metrics service:', this.metricsFailure);
+        // At ERROR, not DEBUG. This line is the only thing that says WHY /metrics will 404,
+        // and it used to sit a level below the default so nobody saw it.
         this.logger.error(
-          'Failed to initialize metrics service:',
-          error instanceof Error ? error : new Error(String(error)),
+          `Metrics will be unavailable for this application: ${this.metricsFailure.stack ?? 'no stack'}`,
         );
-        this.logger.debug('Full error details:', {
-          error,
-          stack: error instanceof Error ? error.stack : 'No stack',
-        });
       }
     } else if (this.options.metrics?.enabled !== false) {
       this.logger.debug('createMetricsService not available, metrics will be disabled');
@@ -1079,6 +1083,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // process-wide registry, which is what keeps a second application's @Global() services
       // — and a second DrizzleModule.forRoot() — from being the first one's.
       this.globalScope = createGlobalScope();
+      // BaseService.metrics and BaseController.metrics read this first, so a custom counter
+      // created inside a service belongs to the application that built the service rather than
+      // to whichever one started last.
+      this.globalScope.metrics = this.metricsService ?? undefined;
 
       // Test provider overrides are seeded BEFORE the tree is built, so PHASE -1 of every
       // module picks them up. Patching the root module afterwards, as this used to, reached
@@ -2091,6 +2099,21 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
           async GET() {
             try {
+              // Said once per application, on the first scrape: a metric registered against
+              // prom-client's process-global `register` is no longer part of what this
+              // application serves, and the alternative to naming it is a silently shorter body.
+              if (app.metricsService.shouldReportOrphans?.()) {
+                const orphans = app.metricsService.getOrphanedMetricNames?.() ?? [];
+                if (orphans.length > 0) {
+                  app.logger.warn(
+                    `${orphans.length} metric(s) are registered against prom-client's global registry `
+                    + `and are NOT served here: ${orphans.join(', ')}. Each application owns its own `
+                    + 'registry now — build them with metricsService.createCounter()/createGauge(), or '
+                    + 'pass metrics: { registry: register } to put this application back on the global one.',
+                  );
+                }
+              }
+
               const metrics = await app.metricsService.getMetrics();
 
               return new Response(metrics, {
@@ -2415,6 +2438,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (this.metricsService) {
         this.logger.info(
           `Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`,
+        );
+      } else if (this.metricsFailure) {
+        this.logger.warn(
+          'Metrics are enabled but this application has none: the metrics service failed to '
+          + `initialize (${this.metricsFailure.message}). ${metricsPath} is not registered for it.`,
         );
       } else if (this.options.metrics?.enabled !== false) {
         this.logger.warn(
@@ -3189,6 +3217,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // looking for it: in the default configuration the start is in the log and the stop is not.
         this.logger.info('System metrics collection stopped');
         this.metricsService!.stopSystemMetricsCollection!();
+        // Release this application's registry too, and hand back the process-wide slot if it
+        // still points here — nothing ever cleared it, so a stopped application kept receiving
+        // writes from every code path that has no application handle.
+        this.metricsService!.dispose?.();
+        if (
+          typeof globalThis !== 'undefined'
+          && (globalThis as Record<string, unknown>).__onebunMetricsService === this.metricsService
+        ) {
+          delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+        }
       });
     }
 

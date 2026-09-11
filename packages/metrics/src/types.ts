@@ -1,4 +1,4 @@
-import type { register } from 'prom-client';
+import type { register, Registry } from 'prom-client';
 
 /**
  * Default system metrics collection interval (5 seconds)
@@ -28,6 +28,18 @@ export interface MetricsOptions {
    * @defaultValue true
    */
   enabled?: boolean;
+
+  /**
+   * The Prometheus registry this application writes to and scrapes.
+   *
+   * Each application gets its own by default, so two applications in one process no longer
+   * collide on metric names or serve each other's series. Pass prom-client's `register` to
+   * restore the previous process-wide behaviour — the supported route for code that registers
+   * metrics against that registry directly.
+   *
+   * @defaultValue a fresh `Registry` per application
+   */
+  registry?: Registry;
 
   /**
    * HTTP path for exposing metrics endpoint

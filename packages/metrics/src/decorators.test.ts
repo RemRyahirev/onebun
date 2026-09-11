@@ -658,6 +658,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -700,6 +702,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -733,6 +737,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -772,6 +778,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -811,6 +819,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -846,6 +856,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);

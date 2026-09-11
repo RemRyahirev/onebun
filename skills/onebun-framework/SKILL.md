@@ -141,6 +141,14 @@ Multi-service mode methods: `getApplication(name)`, `getServiceUrl(name)`,
 (`getConfig`, `getPort`, etc.) throw in multi-service mode — reach them through the
 sub-application instead.
 
+**Metrics are per service.** Each application owns its own Prometheus registry, so a scrape of
+one service's `/metrics` returns that service's series with that service's `defaultLabels` and
+nothing else. `metrics.prefix` is a naming choice, not the isolation mechanism. Process-level
+series (CPU, memory, event loop) describe the process and so appear on every service's endpoint —
+aggregate them with `max`, not `sum`. A metric registered directly against prom-client's global
+`register` is no longer served by any application; build them with `this.metrics.createCounter()`,
+or pass `metrics: { registry: register }` to put one application back on the global registry.
+
 **`getApplication()` returns `OneBunApplication | undefined`** — it is a `Map.get` on the
 running-applications map, so it is `undefined` for an unknown name and before `start()` resolves.
 Always use optional chaining; `app.getApplication('users').getPort()` is a TS2532 error under

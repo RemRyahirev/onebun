@@ -97,6 +97,15 @@ export interface GlobalScope {
    * leaves, three initializations, and state written in one invisible in another.
    */
   sharedModules: Map<Function, OneBunModule>;
+  /**
+   * This application's metrics service, when it has one.
+   *
+   * `BaseService.metrics` and `BaseController.metrics` used to read a single `globalThis` slot
+   * that every application overwrote as it started, so a custom counter created in one service
+   * landed in whichever application booted last. Typed as `unknown` because `@onebun/core` does
+   * not depend on `@onebun/metrics`; the base classes narrow it at the getter.
+   */
+  metrics?: unknown;
 }
 
 /**
@@ -1380,7 +1389,7 @@ export class OneBunModule implements ModuleInstance {
       if (isGateway) {
         BaseWebSocketGateway.setInitContext(this.logger, this.config);
       } else {
-        Controller.setInitContext(this.logger, this.config);
+        Controller.setInitContext(this.logger, this.config, this.scope);
       }
 
       try {

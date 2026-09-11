@@ -12,7 +12,7 @@ import {
   afterEach,
 } from 'bun:test';
 import { Effect } from 'effect';
-import { Counter } from 'prom-client';
+import { Counter, register as globalRegister } from 'prom-client';
 
 import type { MetricsService as MetricsServiceInterface } from './metrics.service';
 
@@ -540,5 +540,35 @@ describe('decorators create the metric they record into', () => {
 
     expect(scrape).toContain('test_cache_hits_total');
     expect(scrape).not.toContain('\ncache_hits_total');
+  });
+});
+
+describe('One registry per application (docs/api/metrics.md)', () => {
+  /**
+   * @source docs:api/metrics.md#one-registry-per-application
+   */
+  it('puts an application back on the global registry when asked', async () => {
+    // From docs: a metric registered against prom-client's global `register` no longer appears
+    // in any application's /metrics — unless that application opted back onto it.
+    const external = new Counter({
+      name: 'docs_externally_registered_total',
+      help: 'registered against the global registry rather than through the service',
+      registers: [globalRegister],
+    });
+    external.inc();
+
+    const optedIn = Effect.runSync(createMetricsService({ registry: globalRegister, prefix: 'optedin_' }));
+    const isolated = Effect.runSync(createMetricsService({ prefix: 'isolated_' }));
+
+    expect(await optedIn.getMetrics()).toContain('docs_externally_registered_total');
+    expect(await isolated.getMetrics()).not.toContain('docs_externally_registered_total');
+
+    // And the framework says so once rather than serving a silently shorter body.
+    expect(isolated.getOrphanedMetricNames()).toContain('docs_externally_registered_total');
+    expect(optedIn.getOrphanedMetricNames()).toEqual([]);
+
+    optedIn.dispose();
+    isolated.dispose();
+    globalRegister.removeSingleMetric('docs_externally_registered_total');
   });
 });

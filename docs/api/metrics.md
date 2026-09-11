@@ -68,8 +68,56 @@ interface MetricsOptions {
 
   /** HTTP request duration histogram buckets */
   httpDurationBuckets?: number[];
+
+  /** The Prometheus registry this application writes to and scrapes (default: its own) */
+  registry?: Registry;
 }
 ```
+
+### One registry per application
+
+Each application owns its own Prometheus `Registry`. Two applications in one process — which is
+what multi-service mode is — no longer collide on metric names and no longer serve each other's
+series: a scrape of one service returns that service's metrics, stamped with that service's
+`defaultLabels`.
+
+Before, everything went into prom-client's process-global `register`. With the default prefix the
+second application threw on a duplicate metric name, its metrics service was never built, and its
+`/metrics` answered 404 — while the first application's series had already been restamped with
+the second one's labels. With a distinct `prefix` per service, as this page recommends for
+multi-service, there was no error and both endpoints served everything, all labelled with
+whichever service started last.
+
+Two consequences worth knowing:
+
+- **Process-level series are replicated per service.** `process_cpu_*`, memory and event-loop
+  metrics describe the process, and every service in it now exposes them. Summing across targets
+  double-counts them; aggregate with `max` or scrape one service for process-level data.
+- **`register` is no longer what an application scrapes.** A metric built as
+  `new Counter({ ..., registers: [register] })` still registers, but never appears in any
+  `/metrics` body. The framework names such metrics once, on the first scrape, in a WARN. Reach
+  the application's registry with `metricsService.getRegistry().register`, or opt an application
+  back onto the global one:
+
+```typescript
+import { register } from '@onebun/metrics';
+
+const app = new OneBunApplication(AppModule, {
+  metrics: { registry: register },
+});
+```
+
+Metrics created through `this.metrics` in a service or controller, and through
+`metricsService.createCounter()` and friends, always land in the owning application's registry —
+nothing to change there.
+
+::: warning
+The `@Timed()`, `@Counted()` and `@Gauged()` decorators, and `WithMetrics()` used as a method
+decorator, still resolve the metrics service through a process-wide slot: a method decorator runs
+at class-definition time and has no application to ask. In a multi-service process they attach to
+whichever service started last. Prefer `this.metrics` inside a service or controller when the
+attribution matters.
+:::
 
 ## Built-in Metrics
 

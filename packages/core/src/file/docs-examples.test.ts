@@ -998,16 +998,25 @@ describe('Multi-Service Example (docs/examples/multi-service.md)', () => {
       expect(await orders.json()).toEqual({ success: true, result: { service: 'orders' } });
 
       // "metrics.prefix is not affected and is honoured as written" — each service's counters
-      // carry the prefix it was configured with
+      // carry the prefix it was configured with, and ONLY its own series. This block used to
+      // assert the opposite in its second expectation: scraping the users port returned the
+      // orders service's counters too, because every service wrote into one process-wide
+      // registry and the prefix only namespaced names inside it.
       const metrics = await fetch(`${usersUrl}/metrics`);
       expect(metrics.status).toBe(HttpStatusCode.OK);
       const metricsText = await metrics.text();
       expect(metricsText).toMatch(
         /docsmsusers_http_requests_total\{[^}]*route="\/users\/profile"[^}]*\} 1/,
       );
-      expect(metricsText).toMatch(
+      expect(metricsText).not.toContain('docsmsorders_http_requests_total');
+
+      const ordersMetrics = await fetch(`${ordersUrl}/metrics`);
+      expect(ordersMetrics.status).toBe(HttpStatusCode.OK);
+      const ordersMetricsText = await ordersMetrics.text();
+      expect(ordersMetricsText).toMatch(
         /docsmsorders_http_requests_total\{[^}]*route="\/orders\/basket"[^}]*\} 1/,
       );
+      expect(ordersMetricsText).not.toContain('docsmsusers_http_requests_total');
     } finally {
       await app.stop();
       TypedEnv.clear();

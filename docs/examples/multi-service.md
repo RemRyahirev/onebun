@@ -119,7 +119,7 @@ app.start().then(() => {
 
 Two things the type system accepts but the runtime overrides, so do not configure them per service:
 
-- **`tracing.serviceName`** is always replaced with the services-map key. `tracing: { serviceName: 'users-service' }` reaches nothing — the tracer reports `users`. An application-level `serviceName` is overwritten the same way. Name the map key what you want to see in traces. `metrics.prefix` is *not* affected and is honoured as written; only `metrics.defaultLabels.service` is forced to the key.
+- **`tracing.serviceName`** is always replaced with the services-map key. `tracing: { serviceName: 'users-service' }` reaches nothing — the tracer reports `users`. An application-level `serviceName` is overwritten the same way. Name the map key what you want to see in traces. `metrics.prefix` is *not* affected and is honoured as written; only `metrics.defaultLabels.service` is forced to the key. The prefix is a naming choice, not an isolation mechanism — each service has its own registry regardless, so two services may share a prefix without their series meeting.
 - **`envOverrides`** keys are environment variable **names** (`ORDERS_DATABASE_URL`), never `config.get()` paths — a `'database.url'` key is silently ignored. Scoping to one service does hold: each service gets its own configuration instance. Here nothing is needed anyway — `orders.database.url` is already bound to `ORDERS_DATABASE_URL` by the schema.
 
 ## Inter-Service Communication
@@ -320,7 +320,10 @@ await app.stop();
 4. **Inter-service Communication**: Use `createHttpClient` with typed config URLs
 5. **Shared Configuration**: Common settings via `envSchema`
 6. **Trace Propagation**: Traces automatically flow between services
-7. **Metrics Aggregation**: All services expose metrics on their respective ports
+7. **Metrics Aggregation**: All services expose metrics on their respective ports, and each
+   endpoint serves only its own service's series with its own labels — one registry per
+   service. Process-level metrics (CPU, memory, event loop) describe the process and are
+   therefore repeated on every service's endpoint: aggregate them with `max`, not `sum`
 8. **Graceful Shutdown**: Lifecycle hooks for clean resource management
 
 ## Production: Service Selection via Environment
