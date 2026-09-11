@@ -563,6 +563,16 @@ memory and said nothing.
 Shutdown removes the clients THIS instance was serving. It does not clear the namespace, so a
 rolling deploy leaves the surviving instances' connections and rooms alone.
 
+An instance that does not get to run its shutdown path — a crash, an OOM kill, a lost node —
+leaves its clients behind. Each instance keeps a liveness key with a 30-second TTL, refreshed
+every 10 seconds, and records which clients it admitted; the next instance to take a connection
+removes the clients of any instance whose key is gone. So a crashed pod's ghosts disappear within
+about half a minute rather than counting towards `getClientCount()` and appearing in rooms
+forever.
+
+The liveness is per INSTANCE, not per client: native connections have no per-connection
+heartbeat, so a TTL on the client keys would evict live clients mid-session.
+
 ## WebSocket client options
 
 | Option | Type | Default | Description |

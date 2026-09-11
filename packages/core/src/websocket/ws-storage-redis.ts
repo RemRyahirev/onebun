@@ -21,7 +21,24 @@ const KEYS = {
   ROOM_MEMBERS: 'ws:room:members:',
   CLIENT_ROOMS: 'ws:client:rooms:',
   PUBSUB_CHANNEL: 'ws:events',
+  /** `ws:instance:alive:<id>` — present only while that instance is running. */
+  INSTANCE_ALIVE: 'ws:instance:alive:',
+  /** `ws:instance:clients:<id>` — the clients that instance admitted. */
+  INSTANCE_CLIENTS: 'ws:instance:clients:',
 };
+
+/**
+ * How long an instance's liveness key survives without a refresh.
+ *
+ * Per INSTANCE rather than per client, deliberately. A TTL on the client keys would need a
+ * per-connection heartbeat to refresh it, and there is none for native connections —
+ * `startPingInterval` runs only for Socket.IO. Measured, a naive per-client TTL evicted a live
+ * native client one second into its session and left its room membership behind.
+ */
+const INSTANCE_TTL_MS = 30_000;
+
+/** Refreshed three times inside the TTL, so one missed tick is not a death sentence. */
+const INSTANCE_REFRESH_MS = 10_000;
 
 /**
  * Join and leave, each as ONE indivisible step.
@@ -97,13 +114,93 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
   /** The in-flight or completed channel subscription, so concurrent callers share one. */
   private subscription?: Promise<void>;
 
+  /**
+   * This instance's identity in the shared keyspace.
+   *
+   * A fresh random id per adapter, NOT the hostname. Seeding it from `HOSTNAME`/`POD_NAME` would
+   * let two processes that share a hostname — bare-metal multi-process, `hostNetwork: true`,
+   * `docker --net=host` — share an ownership index, and one's teardown would then reap the
+   * other's live clients. That trades a leak for data loss. The only thing a stable id would buy
+   * is a restarting pod recognising its own keys, and the sweep does that job anyway.
+   */
+  readonly instanceId: string = crypto.randomUUID();
+
+  /** Refreshes the liveness key. Armed on the first client, cleared by `close()`. */
+  private refreshTimer?: ReturnType<typeof setInterval>;
+
+  /** The one sweep this instance performs, so concurrent first writes share it. */
+  private sweep?: Promise<void>;
+
   constructor(private redisClient: RedisClient) {}
+
+  /**
+   * Say this instance is alive, arm the refresh, and reap whoever is not.
+   *
+   * Called on the first client rather than from the constructor: an adapter built only to read
+   * or to clear never arms a timer, and the liveness key means "this instance has connections"
+   * rather than "this object exists".
+   */
+  private async announce(): Promise<void> {
+    if (this.refreshTimer) {
+      return;
+    }
+
+    await this.redisClient.set(
+      KEYS.INSTANCE_ALIVE + this.instanceId,
+      String(Date.now()),
+      INSTANCE_TTL_MS,
+    );
+
+    this.refreshTimer = setInterval(() => {
+      void this.redisClient
+        .set(KEYS.INSTANCE_ALIVE + this.instanceId, String(Date.now()), INSTANCE_TTL_MS)
+        .catch(() => undefined);
+    }, INSTANCE_REFRESH_MS);
+    this.refreshTimer.unref?.();
+
+    // Once, and awaited: an instance that is about to serve its first connection should not
+    // report someone else's dead sockets as present. With no dead instance it is one `SCAN`.
+    this.sweep ??= this.reapDeadInstances().catch(() => undefined);
+    await this.sweep;
+  }
+
+  /**
+   * Remove the clients of every instance whose liveness key is gone.
+   *
+   * Through `removeClient`, which already leaves every room and drops a room that empties — so
+   * there is no TTL on room keys to get wrong, and no second cleanup path to keep in step.
+   */
+  private async reapDeadInstances(): Promise<void> {
+    const indexes = await this.redisClient.scan(KEYS.INSTANCE_CLIENTS + '*');
+
+    for (const key of indexes) {
+      const instanceId = withoutFamily(key, KEYS.INSTANCE_CLIENTS);
+      if (instanceId === this.instanceId) {
+        continue;
+      }
+
+      if (await this.redisClient.exists(KEYS.INSTANCE_ALIVE + instanceId)) {
+        continue;
+      }
+
+      for (const clientId of await this.redisClient.smembers(key)) {
+        await this.removeClient(clientId);
+      }
+
+      await this.redisClient.del(key);
+    }
+  }
 
   // ============================================================================
   // Client Operations
   // ============================================================================
 
   async addClient(client: WsClientData): Promise<void> {
+    // Before the client is recorded, so nothing can be in the ownership index while this
+    // instance looks dead to a concurrent sweep.
+    await this.announce();
+    await this.redisClient.sadd(KEYS.INSTANCE_CLIENTS + this.instanceId, client.id);
+
     // `rooms` is deliberately NOT stored in the blob. Membership lives in the set below, and a
     // second copy here is a mirror that drifts: every update to it was read-modify-write, so
     // three joins in one tick left this array holding one of them.
@@ -121,6 +218,7 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
 
     // Remove client data
     await this.redisClient.del(KEYS.CLIENTS + clientId);
+    await this.redisClient.srem(KEYS.INSTANCE_CLIENTS + this.instanceId, clientId);
   }
 
   async getClient(clientId: string): Promise<WsClientData | null> {
@@ -364,6 +462,8 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
       this.redisClient.scan(KEYS.ROOMS + '*'),
       this.redisClient.scan(KEYS.ROOM_MEMBERS + '*'),
       this.redisClient.scan(KEYS.CLIENT_ROOMS + '*'),
+      this.redisClient.scan(KEYS.INSTANCE_ALIVE + '*'),
+      this.redisClient.scan(KEYS.INSTANCE_CLIENTS + '*'),
     ]);
 
     // Batched, where this was one `DEL` round trip per key: 500 keys took 26.81 ms as a loop and
@@ -372,10 +472,31 @@ export class RedisWsStorage implements WsPubSubStorageAdapter {
     for (let at = 0; at < keys.length; at += UNLINK_BATCH) {
       await this.redisClient.unlink(...keys.slice(at, at + UNLINK_BATCH));
     }
+
+    // `clear()` means everything, this instance's liveness key included — and a running
+    // instance that looks dead gets its next connections reaped by a sibling. Put it back.
+    if (this.refreshTimer) {
+      await this.redisClient.set(
+        KEYS.INSTANCE_ALIVE + this.instanceId,
+        String(Date.now()),
+        INSTANCE_TTL_MS,
+      );
+    }
   }
 
   async close(): Promise<void> {
+    if (this.refreshTimer) {
+      clearInterval(this.refreshTimer);
+      this.refreshTimer = undefined;
+    }
+
     await this.unsubscribe();
+
+    // Drop the liveness key; deliberately keep the ownership index. Anything the shutdown path
+    // failed to remove has to stay reapable, or a close that ran half-way leaks exactly as a
+    // crash used to. An index that empties is deleted by Redis on the last `SREM`.
+    await this.redisClient.del(KEYS.INSTANCE_ALIVE + this.instanceId);
+
     // Note: We don't disconnect the Redis client here
     // because it might be shared with other consumers
   }

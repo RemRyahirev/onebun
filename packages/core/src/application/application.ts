@@ -11,6 +11,7 @@ import type { Controller } from '../module/controller';
 import type { ResolvedInterceptor } from '../types';
 import type { MultiServiceOrchestrator } from './multi-service-orchestrator';
 import type { MultiServiceApplicationOptions, ServicesMap } from './multi-service.types';
+import type { WsStorageAdapter } from '../websocket/ws-storage';
 import type { WsClientData } from '../websocket/ws.types';
 import type { Tracer } from '@opentelemetry/api';
 
@@ -592,6 +593,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * no business knowing whether one arrived with a socket attached.
    */
   private wsStorageClient: RedisClient | null = null;
+
+  /**
+   * The adapter built for that connection, so stop() can close it.
+   *
+   * Closing it is what stops the liveness refresh and tells the rest of the fleet this instance
+   * is gone — without which a sibling would keep this instance's records alive for the length of
+   * the TTL and not reap what the shutdown path failed to remove.
+   */
+  private wsStorage: WsStorageAdapter | null = null;
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
@@ -3227,12 +3237,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.wsHandler = null;
     }
 
-    // After cleanup, which is the last thing that needs the connection.
-    if (this.wsStorageClient) {
+    // After cleanup, which is the last thing that needs either of them.
+    if (this.wsStorage || this.wsStorageClient) {
+      const storage = this.wsStorage;
       const client = this.wsStorageClient;
+      this.wsStorage = null;
       this.wsStorageClient = null;
       await this.runShutdownStep(outcome, 'closing the WebSocket Redis connection', async () => {
-        await client.disconnect();
+        await storage?.close();
+        await client?.disconnect();
       });
     }
 
@@ -3484,7 +3497,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     await client.connect();
     this.wsStorageClient = client;
-    this.wsHandler.setStorage(createRedisWsStorage(client));
+    this.wsStorage = createRedisWsStorage(client);
+    this.wsHandler.setStorage(this.wsStorage);
     this.logger.info(`WebSocket state stored in Redis under "${keyPrefix}"`);
   }
 
