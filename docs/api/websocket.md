@@ -284,9 +284,16 @@ every gateway in the application, so this is a filter rather than a partition �
 use the same room name without meeting.
 
 With the Redis storage adapter, a remote event reaches the gateway that published it and no
-other: the published payload carries the publishing gateway's key. A payload that carries none —
-published by an instance running an older build — is still delivered, and the receiving gateway
-says so once, so a rolling deploy neither breaks nor goes quiet.
+other: the published payload carries the publishing gateway's key, exactly as a stored client
+record does.
+
+A payload or a record that carries NO key — written by an instance running a build from before
+the key existed — is accepted only where it cannot be ambiguous: an application that registered
+exactly one gateway. There is nothing for it to be confused with there, so a rolling deploy keeps
+working. With more than one gateway it is refused and the receiving gateway says so once:
+delivering it would reach clients of a gateway that did not publish it, which is the thing the
+key exists to prevent. This is the same rule the upgrade path already applies — a connection
+whose gateway cannot be established is refused rather than guessed at.
 
 For a room fan-out through Bun's native pub/sub — one call, fan-out in the runtime rather than
 a send per socket — use `publishToRoom(room, event, data)`. It addresses a topic scoped to this

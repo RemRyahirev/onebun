@@ -5522,6 +5522,11 @@ async function createWsGatewayHarness(gatewayClass: Function, instance: BaseWebS
         auth: null,
         metadata: {},
         protocol: 'native',
+        // The key the handler gave this gateway at registration — which is what `handleOpen`
+        // stamps onto every real connection. Without it the peer is a record no gateway owns,
+        // and the fenced readers only keep showing it because this harness happens to register
+        // a single gateway.
+        gatewayKey: (instance as unknown as { gatewayKey?: string }).gatewayKey,
       };
 
       await storage.addClient(peer);

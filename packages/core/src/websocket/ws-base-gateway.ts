@@ -5,7 +5,11 @@
  * Provides methods for client/room management and message broadcasting.
  */
 
-import type { WsStorageAdapter, WsPubSubStorageAdapter } from './ws-storage';
+import type {
+  WsStorageAdapter,
+  WsPubSubStorageAdapter,
+  WsStorageEventPayload,
+} from './ws-storage';
 import type {
   WsClientData,
   WsRoom,
@@ -100,6 +104,9 @@ export abstract class BaseWebSocketGateway {
   /** The unkeyed-frame notice is given once per gateway, not once per message. */
   private unkeyedFrameReported = false;
 
+  /** The same, for the publishing side. */
+  private unkeyedPublishReported = false;
+
   /**
    * Resolves once this gateway's pub/sub subscription is established (or has failed).
    * @internal
@@ -128,12 +135,40 @@ export abstract class BaseWebSocketGateway {
    * over, so the order of registration and connection does not matter.
    * @internal
    */
-  _attachSockets(key: string, sockets: Map<string, ServerWebSocket<WsClientData>>): void {
+  _attachSockets(
+    key: string,
+    sockets: Map<string, ServerWebSocket<WsClientData>>,
+    registeredGateways?: () => number,
+  ): void {
     this.gatewayKey = key;
+    this.registeredGateways = registeredGateways;
     for (const [clientId, socket] of this.ownSockets) {
       sockets.set(clientId, socket);
     }
     this.ownSockets = sockets;
+  }
+
+  /**
+   * How many gateways this application registered. Read on demand — registration is one at a
+   * time, so a count taken at attach would say "one" to whoever went first.
+   */
+  private registeredGateways?: () => number;
+
+  /**
+   * Whether this application has exactly one gateway, so nothing unkeyed can be ambiguous.
+   *
+   * This is what is left of two compatibility escapes. A client record and a pub/sub payload both
+   * carry the key of the gateway they belong to, and both readers used to ACCEPT anything that
+   * carried none, so an instance running a build from before the key stayed interoperable. But
+   * accepting IS the leak the key was added to close: measured, one unkeyed frame arriving at a
+   * two-gateway instance was delivered to `/chat` and `/admin` alike.
+   *
+   * With one gateway there is nothing to leak to and the answer is not in doubt; with more than
+   * one it is a guess. `WsHandler.ownerAtOpen` already refuses to guess on exactly this
+   * condition — the same rule, applied to the other two readers.
+   */
+  private soleGateway(): boolean {
+    return this.registeredGateways?.() === 1;
   }
 
   /**
@@ -145,9 +180,11 @@ export abstract class BaseWebSocketGateway {
    * and all. The socket fence stopped messages crossing; it never stopped reads.
    *
    * Two deliberate escapes. A gateway with no key of its own (constructed by hand, never
-   * registered) filters nothing — it has no identity to compare against. A record with no key
-   * is visible to everyone: records written before this shipped, and sockets that never went
-   * through the upgrade path, must not become invisible to the gateway that owns them.
+   * registered) filters nothing — it has no identity to compare against. And a record with no key
+   * is accepted where it cannot be ambiguous: an application with exactly one gateway. That
+   * second escape used to be unconditional, which made a keyless record EVERYBODY's — the
+   * opposite of what the key is for, and reachable from user code, since `storage` is protected
+   * and any caller can write a record without one.
    */
   protected _owns(client: WsClientData | null | undefined): boolean {
     if (!client) {
@@ -155,7 +192,7 @@ export abstract class BaseWebSocketGateway {
     }
 
     return this.gatewayKey === undefined
-      || client.gatewayKey === undefined
+      || (client.gatewayKey === undefined && this.soleGateway())
       || client.gatewayKey === this.gatewayKey;
   }
 
@@ -268,17 +305,32 @@ export abstract class BaseWebSocketGateway {
       // gateway, not per process, so without this a publish loops back through Redis and the
       // sibling gateway in the same process replays it to clients that never belonged to the
       // publisher — measured, one /chat broadcast reaching every /admin client on every
-      // instance. A frame with no key comes from a build that predates this and is accepted;
-      // said once, so a rolling deploy is not silent and not noisy either.
+      // instance.
+      //
+      // A frame with no key comes from a build that predates the key. It is accepted only where
+      // it cannot be ambiguous — an application with one gateway — and refused otherwise:
+      // accepting it unconditionally re-opened the very leak above, measured as one unkeyed
+      // frame delivered to both /chat and /admin. Said once either way, so a rolling deploy is
+      // neither silent nor noisy.
       if (payload.gatewayKey === undefined) {
+        const accepted = this.soleGateway();
         if (!this.unkeyedFrameReported) {
           this.unkeyedFrameReported = true;
           this.logger?.warn(
-            'Received a WebSocket pub/sub frame with no gateway key — it is being accepted, but '
-            + 'it can reach clients of a gateway that did not publish it. This happens while '
-            + 'instances running different versions share one Redis; it should stop once the '
-            + 'rollout completes.',
+            accepted
+              ? 'Received a WebSocket pub/sub frame with no gateway key. It is being accepted '
+                + 'because this application has a single gateway, so there is nothing it could be '
+                + 'confused with. This happens while instances running different versions share '
+                + 'one Redis; it should stop once the rollout completes.'
+              : 'Refused a WebSocket pub/sub frame with no gateway key. This application has more '
+                + 'than one gateway, so there is no way to tell which one the frame belongs to, '
+                + 'and delivering it would reach clients of a gateway that did not publish it. '
+                + 'This happens while instances running different versions share one Redis.',
           );
+        }
+
+        if (!accepted) {
+          return;
         }
       } else if (payload.gatewayKey !== this.gatewayKey) {
         return;
@@ -481,15 +533,46 @@ export abstract class BaseWebSocketGateway {
   emit(clientId: string, event: string, data: unknown): void {
     this._localEmit(clientId, event, data);
 
-    // If using Redis, also publish for other instances
-    if (this.storage && isPubSubAdapter(this.storage)) {
-      this.storage.publish({
-        type: WsStorageEvent.CLIENT_MESSAGE,
-        sourceInstanceId: this.instanceId,
-        gatewayKey: this.gatewayKey,
-        data: { clientId, event, message: data },
-      });
+    this._publishRemote({
+      type: WsStorageEvent.CLIENT_MESSAGE,
+      data: { clientId, event, message: data },
+    });
+  }
+
+  /**
+   * Publish an event for the other instances of this application.
+   *
+   * One place for all three publishers, so the warning below cannot be added to two of them and
+   * forgotten on the third. A gateway that was never registered has no key to stamp, and a
+   * subscriber with more than one gateway now refuses an unkeyed frame — so without this the
+   * events would reach nothing, with nothing said.
+   */
+  private _publishRemote(
+    payload: Omit<WsStorageEventPayload, 'sourceInstanceId' | 'gatewayKey'>,
+  ): void {
+    if (!this.storage || !isPubSubAdapter(this.storage)) {
+      return;
     }
+
+    if (this.gatewayKey === undefined && !this.unkeyedPublishReported) {
+      this.unkeyedPublishReported = true;
+      this.logger?.warn(
+        `${this.constructor.name} is publishing WebSocket events with no gateway key, because it `
+        + 'was never registered with a WsHandler. An instance running more than one gateway '
+        + 'refuses a frame it cannot attribute, so these events reach nothing there.',
+      );
+    }
+
+    void this.storage.publish({
+      ...payload,
+      sourceInstanceId: this.instanceId,
+      gatewayKey: this.gatewayKey,
+    }).catch((error: unknown) => {
+      this.logger?.error(
+        'Failed to publish a WebSocket event to the other instances',
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
   }
 
   /**
@@ -519,15 +602,10 @@ export abstract class BaseWebSocketGateway {
   broadcast(event: string, data: unknown, excludeClientIds?: string[]): void {
     this._localBroadcast(event, data, excludeClientIds);
 
-    // If using Redis, also publish for other instances
-    if (this.storage && isPubSubAdapter(this.storage)) {
-      this.storage.publish({
-        type: WsStorageEvent.BROADCAST,
-        sourceInstanceId: this.instanceId,
-        gatewayKey: this.gatewayKey,
-        data: { event, message: data, excludeClientIds },
-      });
-    }
+    this._publishRemote({
+      type: WsStorageEvent.BROADCAST,
+      data: { event, message: data, excludeClientIds },
+    });
   }
 
   /**
@@ -550,17 +628,12 @@ export abstract class BaseWebSocketGateway {
   emitToRoom(roomName: string, event: string, data: unknown, excludeClientIds?: string[]): void {
     this._localEmitToRoom(roomName, event, data, excludeClientIds);
 
-    // If using Redis, also publish for other instances
-    if (this.storage && isPubSubAdapter(this.storage)) {
-      this.storage.publish({
-        type: WsStorageEvent.ROOM_BROADCAST,
-        sourceInstanceId: this.instanceId,
-        gatewayKey: this.gatewayKey,
-        data: {
-          roomName, event, message: data, excludeClientIds, 
-        },
-      });
-    }
+    this._publishRemote({
+      type: WsStorageEvent.ROOM_BROADCAST,
+      data: {
+        roomName, event, message: data, excludeClientIds,
+      },
+    });
   }
 
   /**

@@ -318,7 +318,9 @@ export class WsHandler {
     // and carries over anything already registered, so gateway and handler share one object.
     const sockets = this.socketsByGateway.get(key) ?? new Map<string, ServerWebSocket<WsClientData>>();
     this.socketsByGateway.set(key, sockets);
-    instance._attachSockets(key, sockets);
+    // Read on demand, not counted here: gateways register one at a time, so a number taken now
+    // would say "one" to whichever registered first and never be corrected.
+    instance._attachSockets(key, sockets, () => this.gateways.size);
 
     this.gateways.set(key, {
       instance, metadata, handlers, key,
