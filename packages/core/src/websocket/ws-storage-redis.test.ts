@@ -32,6 +32,9 @@ describe('RedisWsStorage', () => {
     redis = await createRedisContainer();
 
     // Configure shared Redis
+    // The provider holds ONE configuration per process and refuses a conflicting second one,
+    // so take it over explicitly rather than inheriting whatever an earlier FILE left behind.
+    await SharedRedisProvider.reset();
     SharedRedisProvider.configure({
       url: redis.url,
       keyPrefix: 'ws:test:',

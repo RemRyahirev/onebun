@@ -152,8 +152,11 @@ describe('MultiServiceOrchestrator queue enablement', () => {
     // decision before the loop and strips the backend keys before handing them to children.
     expect(contradictionWarnings()).toHaveLength(1);
     expect(SpyQueueAdapter.constructCount).toBe(0);
-    expect(orchestrator.getApplication('svcA')!.getQueueService()).toBeNull();
-    expect(orchestrator.getApplication('svcB')!.getQueueService()).toBeNull();
+    const svcA = orchestrator.getApplication('svcA')!;
+    const svcB = orchestrator.getApplication('svcB')!;
+
+    expect(() => svcA.getQueueService()).toThrow();
+    expect(() => svcB.getQueueService()).toThrow();
   });
 
   test('does not warn when enabled: false carries no backend config', async () => {
@@ -171,7 +174,10 @@ describe('MultiServiceOrchestrator queue enablement', () => {
     await orchestrator.startAll();
 
     expect(contradictionWarnings()).toHaveLength(0);
-    expect(orchestrator.getApplication('svcA')!.getQueueService()).toBeNull();
+
+    const svcA = orchestrator.getApplication('svcA')!;
+
+    expect(() => svcA.getQueueService()).toThrow();
   });
 
   test('does not warn when a configured adapter is actually used', async () => {

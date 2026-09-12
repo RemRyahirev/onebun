@@ -170,6 +170,18 @@ export interface WsStorageEventPayload {
   type: WsStorageEvent;
   /** Source instance ID (for multi-instance setups) */
   sourceInstanceId: string;
+  /**
+   * Which gateway published this — its path, or `path:namespace`.
+   *
+   * Without it, the only filter was `sourceInstanceId`, which is per GATEWAY rather than per
+   * process: a publish looped back through Redis and the SIBLING gateway in the same process
+   * replayed it to its own clients, re-opening the boundary the socket fence closed. Measured,
+   * one broadcast from a `/chat` gateway reached `/admin` clients on every instance.
+   *
+   * Optional so a frame published by an older build is still accepted during a rolling deploy;
+   * a subscriber that sees one says so once.
+   */
+  gatewayKey?: string;
   /** Event-specific data */
   data: {
     clientId?: string;
@@ -186,9 +198,14 @@ export interface WsStorageEventPayload {
 export interface WsPubSubStorageAdapter extends WsStorageAdapter {
   /**
    * Subscribe to storage events
+   *
+   * Returns a disposer that removes THIS handler and nothing else. `unsubscribe()` drops every
+   * handler on the adapter, which is shared by every gateway in the application — so one
+   * gateway using it to detach silences its siblings.
+   *
    * @param handler - Event handler function
    */
-  subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<void>;
+  subscribe(handler: (payload: WsStorageEventPayload) => void): Promise<() => void>;
 
   /**
    * Publish an event to all instances

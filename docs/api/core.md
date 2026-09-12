@@ -291,6 +291,13 @@ await app.start();
 // GET /api/*, /docs, /metrics, /ws handled by framework; GET /, /dashboard, etc. serve dist/ or index.html
 ```
 
+**Static responses go through the global middleware chain.** A served file carries the same
+`security` headers a controller route does — which is the reason to serve a SPA from the API origin
+at all — and it consumes `rateLimit` budget like any other request. Size `max` for the number of
+assets a page pulls, or put the assets behind a CDN. Through 0.6.0 static responses and unmatched
+paths bypassed the chain entirely: no security headers, and rate limiting bounded only the paths
+that happened to match a controller.
+
 **Example: static under a path prefix**
 
 ```typescript
@@ -316,6 +323,7 @@ class OneBunApplication {
    * Always resolves within `shutdownTimeout`.
    */
   async stop(options?: { 
+    /** @deprecated Ignored — an application releases no shared Redis hold. */
     closeSharedRedis?: boolean; 
     signal?: string;  // e.g., 'SIGTERM', 'SIGINT'
   }): Promise<void>;
@@ -536,10 +544,12 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 app.enableGracefulShutdown(); // Register the handlers yourself instead
 
-// Programmatic shutdown — drains, then closes server, WebSocket, and shared Redis
+// Programmatic shutdown — drains, then closes the server and WebSocket connections.
+// The shared Redis client is NOT released here: whoever acquired a hold gives it back, and
+// the connection closes when the last holder does.
 await app.stop();
 
-// Keep shared Redis open for other consumers
+// Deprecated and ignored — kept only so existing call sites still compile
 await app.stop({ closeSharedRedis: false });
 
 // Pass signal for lifecycle hooks
@@ -642,11 +652,13 @@ on the `users` service reaches nothing — the tracer reports `users`. Rename th
 `static` is the one option that does **not** cascade: it is honoured per service only, an
 application-level `static` is not passed to the children.
 
-::: warning envOverrides are not per-service yet
+::: warning envOverrides keys are variable names
 Keys are **environment variable names** (`DB_NAME`), never `config.get()` paths — a wrong key is
-ignored silently. And with two or more services the scoping does not hold: every service reads the
-ENV resolved for the first service to start, so the other services' `envOverrides` are dropped.
-With a single service, or with overrides declared at application level, they apply as written.
+ignored silently.
+
+Per-service scoping itself holds: each service gets its own configuration instance, so its
+`envOverrides` and `envSchemaExtend` apply to it alone. Through 0.6.0 they did not — every service
+after the first read the ENV resolved for the first one to start.
 :::
 
 ### Usage Example
@@ -745,6 +757,8 @@ export class UserModule {}
 **Visibility, not instance count.** `@Global()` makes a module's exported services reachable from every module without an explicit import; a module without it is reachable only where it is imported. Either way the module itself is constructed exactly ONCE per application, so two modules importing the same one share its services rather than each getting a copy.
 
 **Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
+
+**Globality itself is still per process.** The instances are per application; the answer to "is this module ambient?" is not — it lives in one `Set` keyed by the module class. Two unnamed `forRoot()` calls that disagree about it, or about what they configure, therefore cannot each be honoured, and the framework refuses rather than letting the last one decide: an application importing the contested module fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. Give each configuration a token — `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` — when they must coexist.
 
 The options a dynamic module was imported with are **captured per application** at import time, so a later `forRoot()` in the same process cannot retroactively change what an already-running application is using.
 

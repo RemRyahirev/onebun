@@ -3,9 +3,11 @@
 ## Queue System Overview
 
 The queue system in `@onebun/core` provides a unified API across multiple backends.
-Queue handlers are discovered only in classes listed in a module's `controllers` array —
-placing them in `providers` will silently skip them. The queue system is enabled when **any**
-of these holds:
+Queue handlers are discovered only in classes listed in a module's `controllers` array. Placing
+them in `providers` skips them — no longer silently: startup emits one warning per offending
+class, naming it and every decorated method, and an application whose only handlers are on
+providers gets a debug line saying exactly that instead of "no handlers detected". The queue
+system is enabled when **any** of these holds:
 
 1. a controller carries a `@Subscribe`, `@Cron`, `@Interval`, or `@Timeout` decorator, or
 2. `queue.enabled: true` is set in `ApplicationOptions`, or
@@ -370,9 +372,9 @@ chain, and failing open would be a silent authorization bypass).
 
 `@UseMessageGuards` still exists and still works — method-level and queue-only, so the type system checks
 the context for you. `getMessageGuards()` merges it with the shared `@UseGuards` list, shared first.
-**The merge does not deduplicate**: a guard listed under both decorators on the same consumer runs
-**twice per message** (on WebSocket the equivalent merge *is* deduplicated — the queue path is the
-exception). List each guard under one decorator only.
+**The merge deduplicates by identity**: a guard listed under both decorators on the same consumer
+runs once per message. Through 0.6.0 it ran twice — WebSocket was the only transport that dropped
+duplicates.
 
 Built-in message guards: `MessageAuthGuard`, `MessageServiceGuard`, `MessageHeaderGuard`,
 `MessageTraceGuard`, `MessageAllGuards`, `MessageAnyGuard`. The four leaf guards — and anything from

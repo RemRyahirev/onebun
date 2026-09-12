@@ -227,37 +227,19 @@ const logRetryAttempt = (
 /**
  * Record request metrics
  */
-const recordRequestMetrics = (data: RequestMetricsData): Effect.Effect<void, never> => {
+const recordRequestMetrics = (
+  data: RequestMetricsData,
+  sink: ((data: RequestMetricsData) => void) | undefined,
+): Effect.Effect<void, never> => {
   return Effect.sync(() => {
+    if (!sink) {
+      return;
+    }
+
     try {
-      // Try to record metrics if metrics service is available
-      interface OneBunMetricsService {
-        recordHttpRequest(input: {
-          method: string;
-          route: string;
-          statusCode: number;
-          duration: number;
-          controller: string;
-          action: string;
-        }): void;
-      }
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      const g = globalThis as unknown as { __onebunMetricsService?: OneBunMetricsService };
-      if (typeof globalThis !== 'undefined' && g.__onebunMetricsService) {
-        const metricsService = g.__onebunMetricsService;
-        if (metricsService && metricsService.recordHttpRequest) {
-          metricsService.recordHttpRequest({
-            method: data.method,
-            route: data.url,
-            statusCode: data.statusCode,
-            duration: data.duration / 1000, // Convert to seconds
-            controller: 'requests-client',
-            action: 'http-request',
-          });
-        }
-      }
+      sink(data);
     } catch (error) {
-      // Silently ignore metrics errors
+      // A metrics sink must never fail a request.
       // eslint-disable-next-line no-console
       console.debug('Failed to record request metrics:', error);
     }
@@ -595,7 +577,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
             success: result.success,
             retryCount: result.retryCount || 0,
             baseUrl: mergedOptions.baseUrl,
-          })
+          }, mergedOptions.metricsSink)
           : Effect.succeed(undefined);
 
       return pipe(

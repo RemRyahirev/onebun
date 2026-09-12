@@ -8,7 +8,8 @@ throws at startup, the interceptor just misbehaves or never runs:
 
 1. **A class with constructor parameters MUST carry a class decorator** (`@Service()`).
    `extends BaseInterceptor` does NOT buy DI.
-2. **One instance per registration site, built at startup** — never keep per-request state on `this`.
+2. **One instance per class per application, built at startup** — shared by every route, gateway
+   handler and subscription that names the class; never keep per-request state on `this`.
 3. **On the queue side only `@Subscribe` is intercepted, and only via a CLASS-level
    `@UseInterceptors`** — `@Cron`/`@Interval`/`@Timeout` and method-level `@UseInterceptors` on a
    subscriber are ignored.
@@ -33,19 +34,26 @@ isWsContext(ctx)     // → ctx is WsExecutionContext
 isQueueContext(ctx)  // → ctx is MessageExecutionContext
 ```
 
-## Lifetime: one instance per registration site, shared by every request
+## Lifecycle hooks
+
+An interceptor class receives the module lifecycle hooks on the instance that serves requests:
+`onModuleInit` runs in its own pass after routes are registered and before the server accepts
+anything, and `onModuleDestroy` on the way down. The same holds for middleware. Guards do not get
+them — a guard is constructed per request, so there is no instance to initialize, and the framework
+warns at startup if a guard class implements `onModuleInit`.
+
+## Lifetime: one instance per class, shared by every request
 
 An interceptor class is instantiated when handlers are **registered** (application startup), once
-per registration site, and that instance serves every request or message that reaches the handler.
-A global interceptor gets a separate instance for each route it wraps. An interceptor passed as an
-**instance** (`new TimeoutInterceptor(5000)`) is not copied at all — the resolver hands it through
-untouched, so that one object serves every site the decorator is attached to. Wider sharing, same
-rule about `this`.
+per class per application, and that instance serves every request or message that reaches any
+handler it wraps — including a global interceptor across every route, and the same class used on
+HTTP, WebSocket and the queue. An interceptor passed as an **instance**
+(`new TimeoutInterceptor(5000)`) is not copied either: the resolver hands it through untouched, so
+the caller owns its lifetime and two instances of one class stay two.
 
-Measured on a two-route controller with the same interceptor registered both globally and at
-controller level: **4 instances constructed at startup, 0 more after any number of requests**; two
-hits on `/c/a` were served by one instance (its own counter read 1, then 2) and `/c/b` by a
-different one.
+Through 0.6.0 the instance was per registration SITE: a class covering three routes was constructed
+three times, each route bound to its own copy, so a counter or a limiter on `this` counted per route
+without saying so.
 
 Consequences, in order of how often they bite:
 
@@ -166,7 +174,8 @@ class OrderController extends BaseController {
   sweep() { ... }                          // NOT intercepted (pattern is required)
 }
 
-// Global (ApplicationOptions) — HTTP routes only, never WS or queue
+// Global (ApplicationOptions) — every transport: HTTP routes, WS message handlers and
+// @Subscribe subscribers, wrapping outermost. Scheduled handlers are still not wrapped.
 const app = new OneBunApplication(AppModule, {
   interceptors: [LoggingInterceptor],
 });
@@ -224,10 +233,12 @@ The same trap applies to guards, filters and middleware. The interceptor itself 
 
 ## Execution order by transport
 
-**HTTP:** middleware → guards[→filters] → interceptors[→filters] → handler[→filters]. Filters sit
-INSIDE the interceptor chain, not after it — an interceptor's try/catch around `await next()` never
-sees a handler error, because the handler is already filtered by then; an error the interceptor
-itself throws is filtered.
+**HTTP:** middleware → guards[→filters] → [filters→ interceptors → params + validation → handler].
+Filters sit ABOVE the interceptor chain and below the middleware chain — an interceptor's try/catch
+around `await next()` sees a handler error, a validation error, and can rethrow for the filters to
+answer; an error the interceptor itself throws is filtered the same way. A guard rejection is
+filtered outside the chain and never reaches an interceptor. Through 0.6.0 the handler was already
+filtered by the time `next()` returned, so that catch block was dead code on HTTP only.
 **WebSocket:** guards → interceptors → handler
 **Queue:** guards → interceptors → handler, for `@Subscribe` subscribers only. `@Cron`, `@Interval`
 and `@Timeout` jobs are handed to the scheduler as bound methods, so neither interceptors nor guards
@@ -246,5 +257,5 @@ Interceptors wrap in onion order: global outermost → class-level → method-le
   only class level (NestJS has separate patterns)
 - `BaseInterceptor` with ambient init context (same pattern as `BaseMiddleware`) — it supplies
   `this.logger`/`this.config`, not constructor DI
-- Interceptors are singletons per registration site; NestJS scopes them with `Scope.REQUEST`, which
-  has no equivalent here
+- Interceptors are singletons per class per application; NestJS scopes them with `Scope.REQUEST`,
+  which has no equivalent here

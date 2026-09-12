@@ -4,6 +4,7 @@ import {
   Layer,
 } from 'effect';
 
+import type { ExceptionFilter } from '../exception-filters/exception-filters';
 import type { Guard } from '../http-guards/http-guards';
 import type { ModuleInstance } from '../types';
 import type { Interceptor, ResolvedInterceptor } from '../types';
@@ -54,8 +55,14 @@ import {
   hasOnApplicationDestroy,
   hasConfigureMiddleware,
 } from './lifecycle';
+import { attachMetricsOwner } from './metrics-owner';
 import { BaseMiddleware } from './middleware';
-import { describeRegistrationToken, findRegistrationModule } from './registration';
+import {
+  describeRegistrationToken,
+  findRegistrationModule,
+  getRegistrationBase,
+  isRegistrationModule,
+} from './registration';
 import {
   BaseService,
   getServiceMetadata,
@@ -96,6 +103,15 @@ export interface GlobalScope {
    * leaves, three initializations, and state written in one invisible in another.
    */
   sharedModules: Map<Function, OneBunModule>;
+  /**
+   * This application's metrics service, when it has one.
+   *
+   * `BaseService.metrics` and `BaseController.metrics` used to read a single `globalThis` slot
+   * that every application overwrote as it started, so a custom counter created in one service
+   * landed in whichever application booted last. Typed as `unknown` because `@onebun/core` does
+   * not depend on `@onebun/metrics`; the base classes narrow it at the getter.
+   */
+  metrics?: unknown;
 }
 
 /**
@@ -288,6 +304,38 @@ export class OneBunModule implements ModuleInstance {
    * Child modules instances (for accessing their exported services)
    */
   private childModules: OneBunModule[] = [];
+
+  /**
+   * One resolved interceptor per class, for this module.
+   *
+   * Keyed by the constructor and holding the BOUND `intercept`, so every registration site that
+   * names the class gets the same instance and the same function. Per module rather than per
+   * process: the DI scope an interceptor resolves its dependencies from is the module's, and two
+   * applications in one process must not share one.
+   */
+  private readonly interceptorInstances = new Map<Function, ResolvedInterceptor>();
+
+  /**
+   * Middleware and interceptor instances this module built for the pipeline.
+   *
+   * They are constructed by `resolveMiddleware` / `resolveInterceptors` and live in neither
+   * `serviceInstances` nor `controllerInstances`, so every lifecycle pass walked straight past
+   * them: a middleware that opened a pool in `onModuleInit` never had the hook run on the object
+   * that serves requests. Registering the class in `providers` did not help — that produced a
+   * SECOND instance which got the hook and never saw a request.
+   *
+   * A Set keyed by identity, so a class registered at several sites is initialized once.
+   */
+  private readonly pipelineInstances = new Set<object>();
+
+  /**
+   * One resolved exception filter per class, for this module. Same rule as interceptors: the
+   * filter is shared by every route that names the class.
+   */
+  private readonly filterInstances = new Map<Function, ExceptionFilter>();
+
+  /** Guard classes already reported as carrying a lifecycle hook that cannot run. */
+  private readonly guardHookReported = new Set<Function>();
 
   /**
    * Global modules this module constructed in the pre-pass, so the import loop can merge
@@ -838,6 +886,9 @@ export class OneBunModule implements ModuleInstance {
         } finally {
           BaseService.clearInitContext();
         }
+        // Which application built it, for a method decorator that has `this` but no
+        // application handle — see metrics-owner.ts.
+        attachMetricsOwner(serviceInstance as object, this.scope);
 
         // Fallback: call initializeService for services that have it but were not
         // initialized via the constructor (e.g., services not extending BaseService
@@ -997,17 +1048,20 @@ export class OneBunModule implements ModuleInstance {
 
       // Set ambient init context so BaseMiddleware constructor can pick up logger/config,
       // making them available immediately after super() in subclass constructors.
-      BaseMiddleware.setInitContext(this.logger, this.config);
+      BaseMiddleware.setInitContext(this.logger, this.config, this.scope);
       let instance: BaseMiddleware;
       try {
         instance = new middlewareConstructor(...deps);
       } finally {
         BaseMiddleware.clearInitContext();
       }
+      attachMetricsOwner(instance, this.scope);
 
       // Fallback: call initializeMiddleware for middleware not initialized via
       // the constructor (e.g., not extending BaseMiddleware, or for backwards compatibility).
       instance.initializeMiddleware(this.logger, this.config);
+
+      this.pipelineInstances.add(instance);
 
       const bound = instance.use.bind(instance);
       // Preserve class name for profiling and debugging
@@ -1032,6 +1086,19 @@ export class OneBunModule implements ModuleInstance {
    */
   resolveInterceptors(classes: (Function | Interceptor)[]): ResolvedInterceptor[] {
     return classes.map((cls) => {
+      // One instance per class per module, which is what `BaseInterceptor`'s own documentation
+      // has always promised. This method is called once per REGISTRATION SITE — per route on
+      // HTTP, per handler on WebSocket, per subscription on the queue — so without the cache a
+      // class covering three routes became three instances, each route bound to its own, and any
+      // state the interceptor kept (a counter, a limiter, a cache) was silently per route.
+      // Guards deliberately do NOT share an instance; see resolveGuards.
+      if (typeof cls === 'function') {
+        const cached = this.interceptorInstances.get(cls);
+        if (cached) {
+          return cached;
+        }
+      }
+
       // If already an instance (not a constructor), bind intercept() directly
       if (typeof cls !== 'function') {
         const instance = cls;
@@ -1064,13 +1131,14 @@ export class OneBunModule implements ModuleInstance {
       const interceptorConstructor = cls as new (...args: unknown[]) => Interceptor;
 
       // Set ambient init context so BaseInterceptor constructor can pick up logger/config
-      BaseInterceptor.setInitContext(this.logger, this.config);
+      BaseInterceptor.setInitContext(this.logger, this.config, this.scope);
       let instance: Interceptor;
       try {
         instance = new interceptorConstructor(...deps);
       } finally {
         BaseInterceptor.clearInitContext();
       }
+      attachMetricsOwner(instance as object, this.scope);
 
       // Fallback initialization for interceptors extending BaseInterceptor
       if ('initializeInterceptor' in instance) {
@@ -1079,7 +1147,83 @@ export class OneBunModule implements ModuleInstance {
 
       const bound = instance.intercept.bind(instance);
 
+      this.pipelineInstances.add(instance);
+      this.interceptorInstances.set(cls, bound);
+
       return bound;
+    });
+  }
+
+  /**
+   * Resolve exception filter classes into instances with dependency injection, once.
+   *
+   * Filters were the one element of the documented pipeline with no DI path at all: the types
+   * accepted instances only, so a class was a compile error, and an instance was merged into the
+   * route metadata untouched — `this.logger`, `this.config` and every injected service were
+   * `undefined` inside `catch()`. That is the one place in an application that sees every
+   * unhandled error, and it was the one place that could not reach a service to report it to.
+   *
+   * Mirrors `resolveInterceptors`: one instance per class per module, an already-constructed
+   * instance passed through (and initialized if it extends `BaseService`, as `resolveGuards`
+   * does), and an unresolvable dependency failing the application at startup.
+   *
+   * @see docs:api/exception-filters.md
+   */
+  resolveFilters(filters: (Function | ExceptionFilter)[]): ExceptionFilter[] {
+    return filters.map((filter) => {
+      if (typeof filter !== 'function') {
+        // Already an instance — the caller owns its lifetime. Initialize it if it can be, so a
+        // filter written as `new MyFilter()` still gets this.logger and this.config.
+        if (filter instanceof BaseService) {
+          filter.initializeService(this.logger, this.config, this.scope);
+        }
+
+        return filter;
+      }
+
+      const cached = this.filterInstances.get(filter);
+      if (cached) {
+        return cached;
+      }
+
+      const paramTypes = getConstructorParamTypes(filter);
+      const deps: unknown[] = [];
+
+      if (paramTypes && paramTypes.length > 0) {
+        for (let i = 0; i < paramTypes.length; i++) {
+          const paramType = paramTypes[i];
+          const dep = this.resolveDependencyByType(paramType, filter, i);
+          if (dep) {
+            deps.push(dep);
+          } else if (isOptionalParam(filter, i)) {
+            deps.push(undefined);
+          } else {
+            const suggestions = this.buildResolutionSuggestions(paramType);
+            throw new DependencyResolutionError(filter.name, paramType.name, 'filter', suggestions);
+          }
+        }
+      }
+
+      const filterConstructor = filter as new (...args: unknown[]) => ExceptionFilter;
+
+      // Ambient init context, so a filter extending BaseService has logger/config after super()
+      BaseService.setInitContext(this.logger, this.config, this.scope);
+      let instance: ExceptionFilter;
+      try {
+        instance = new filterConstructor(...deps);
+      } finally {
+        BaseService.clearInitContext();
+      }
+      attachMetricsOwner(instance as object, this.scope);
+
+      if (instance instanceof BaseService) {
+        instance.initializeService(this.logger, this.config, this.scope);
+      }
+
+      this.pipelineInstances.add(instance);
+      this.filterInstances.set(filter, instance);
+
+      return instance;
     });
   }
 
@@ -1103,6 +1247,23 @@ export class OneBunModule implements ModuleInstance {
    */
   resolveGuards(guards: (Function | Guard)[]): Guard[] {
     return guards.map((guard) => {
+      // A guard is constructed per request on purpose, so there is no one instance for a
+      // lifecycle hook to belong to. Running it per request would not be a hook, and running it
+      // on a throwaway instance would be a lie — so the hook is refused out loud instead of
+      // being silently skipped, which is what a guard author would otherwise discover from a
+      // field that is undefined on the hot path.
+      if (typeof guard === 'function' && !this.guardHookReported.has(guard)) {
+        this.guardHookReported.add(guard);
+
+        if (hasOnModuleInit(guard.prototype)) {
+          this.logger.warn(
+            `Guard ${guard.name} implements onModuleInit, and it will not run: guards are `
+            + 'constructed per request by design, so there is no single instance to initialize. '
+            + 'Move the setup into a @Service() the guard injects, which does get the hook.',
+          );
+        }
+      }
+
       if (typeof guard !== 'function') {
         // Already an instance — the caller owns its lifetime, as before. Initialize it if
         // it can be, then use it as-is.
@@ -1158,6 +1319,7 @@ export class OneBunModule implements ModuleInstance {
           } finally {
             BaseService.clearInitContext();
           }
+          attachMetricsOwner(instance as object, scope);
 
           if (instance instanceof BaseService) {
             instance.initializeService(logger, config, scope);
@@ -1238,9 +1400,9 @@ export class OneBunModule implements ModuleInstance {
       let controller: Controller;
 
       if (isGateway) {
-        BaseWebSocketGateway.setInitContext(this.logger, this.config);
+        BaseWebSocketGateway.setInitContext(this.logger, this.config, this.scope);
       } else {
-        Controller.setInitContext(this.logger, this.config);
+        Controller.setInitContext(this.logger, this.config, this.scope);
       }
 
       try {
@@ -1252,6 +1414,7 @@ export class OneBunModule implements ModuleInstance {
           Controller.clearInitContext();
         }
       }
+      attachMetricsOwner(controller as object, this.scope);
 
       // Fallback: call initializeController / _initializeBase for controllers/gateways
       // that were not initialized via the constructor (e.g., not extending the base class,
@@ -1453,7 +1616,11 @@ export class OneBunModule implements ModuleInstance {
   private buildResolutionSuggestions(missingType: Function): string[] {
     const suggestions: string[] = [];
     const metadata = getModuleMetadata(this.moduleClass);
-    const currentImports = new Set((metadata?.imports ?? []).map((m) => m.name));
+    // Classes, not names. Every comparison below used to be `.name === .name`, so a service
+    // called MailerService in a package this application never imports matched the one the
+    // user is missing — and the false hit then suppressed the correct advice, which only
+    // prints when nothing else was found.
+    const currentImports = new Set<Function>((metadata?.imports ?? []) as Function[]);
 
     // 1. Search imported child modules
     for (const child of this.childModules) {
@@ -1461,8 +1628,8 @@ export class OneBunModule implements ModuleInstance {
       const childProviders = (childMeta?.providers ?? []) as Function[];
       const childExports = (childMeta?.exports ?? []) as Function[];
 
-      const isProvided = childProviders.some((p) => typeof p === 'function' && p.name === missingType.name);
-      const isExported = childExports.some((e) => typeof e === 'function' && e.name === missingType.name);
+      const isProvided = childProviders.includes(missingType);
+      const isExported = childExports.includes(missingType);
 
       if (isProvided && isExported) {
         suggestions.push(
@@ -1482,28 +1649,55 @@ export class OneBunModule implements ModuleInstance {
       if (moduleClass === this.moduleClass) {
         continue;
       }
-      if (currentImports.has(moduleClass.name)) {
+      if (currentImports.has(moduleClass)) {
         continue;
       }
 
       const providers = (moduleMeta.providers ?? []) as Function[];
       const exports = (moduleMeta.exports ?? []) as Function[];
-      const hasProvider = providers.some((p) => typeof p === 'function' && p.name === missingType.name);
-      const hasExport = exports.some((e) => typeof e === 'function' && e.name === missingType.name);
+      const hasProvider = providers.includes(missingType);
+      const hasExport = exports.includes(missingType);
 
-      if (hasProvider && hasExport) {
+      if (!hasProvider) {
+        continue;
+      }
+
+      if (isRegistrationModule(moduleClass)) {
+        // The minted class name is internal — telling the user to import
+        // `CacheModule_fragments` names something they cannot write. The token is what they can.
+        suggestions.push(
+          `${missingType.name} is provided by a named registration of ` +
+            `${getRegistrationBase(moduleClass).name}. Import ` +
+            `${getRegistrationBase(moduleClass).name}.forFeature(<token>) in ` +
+            `${this.moduleClass.name} — the registration's own class is internal.`,
+        );
+        continue;
+      }
+
+      if (hasExport) {
         if (isGlobalModule(moduleClass)) {
-          suggestions.push(
-            `${missingType.name} is available in global module ${moduleClass.name} — ` +
-              'it should be auto-resolved. Check module initialization order.',
-          );
+          if (this.scope.sharedModules.has(moduleClass)) {
+            suggestions.push(
+              `${missingType.name} is available in global module ${moduleClass.name} — ` +
+                'it should be auto-resolved. Check module initialization order.',
+            );
+          } else {
+            // @Global() is process-wide state, so the module can be marked global without
+            // this application ever importing it — in which case nothing built it and
+            // "check initialization order" sends the reader looking in the wrong place.
+            suggestions.push(
+              `${missingType.name} is exported from ${moduleClass.name}, which is @Global() — but ` +
+                'nothing in this application imports it, so it was never constructed. A @Global() ' +
+                'module still has to be imported once, anywhere in the application.',
+            );
+          }
         } else {
           suggestions.push(
             `${missingType.name} is exported from ${moduleClass.name}. ` +
               `Add ${moduleClass.name} to imports of ${this.moduleClass.name}.`,
           );
         }
-      } else if (hasProvider && !hasExport) {
+      } else {
         suggestions.push(
           `${missingType.name} exists in ${moduleClass.name} but is not exported. ` +
             `Add it to exports and import ${moduleClass.name}.`,
@@ -1637,6 +1831,39 @@ export class OneBunModule implements ModuleInstance {
    *   module that can see it, so without this its hook fired once per module — five times in
    *   a five-module tree. Test overrides seeded into every module amplify the same effect.
    */
+  /**
+   * Run `onModuleInit` on the middleware and interceptor instances this module built.
+   *
+   * A separate pass, and a later one, because these instances do not exist when `setup()` runs:
+   * they are constructed while routes are registered, which is after every service and controller
+   * hook has already fired. The application awaits this between route registration and
+   * `onApplicationInit`, so a middleware that opens a pool has done it before the first request
+   * and before anything that might use it.
+   *
+   * Guards are absent on purpose — they are constructed per request, so there is no instance for
+   * the hook to belong to; `resolveGuards` reports a guard that implements it.
+   */
+  async callPipelineOnModuleInit(invoked: Set<unknown> = new Set()): Promise<void> {
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnModuleInit(instance)) {
+        try {
+          await instance.onModuleInit();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onModuleInit completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onModuleInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    for (const childModule of this.childModules) {
+      await childModule.callPipelineOnModuleInit(invoked);
+    }
+  }
+
   async callOnApplicationInit(invoked: Set<unknown> = new Set()): Promise<void> {
     // Call for services
     for (const [, instance] of this.serviceInstances) {
@@ -1662,6 +1889,22 @@ export class OneBunModule implements ModuleInstance {
           this.logger.debug(`Controller ${controller.constructor.name} onApplicationInit completed`);
         } catch (error) {
           this.logger.error(`Controller ${controller.constructor.name} onApplicationInit failed: ${error}`);
+          throw error;
+        }
+      }
+    }
+
+    // Call for pipeline elements (middleware, interceptors)
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnApplicationInit(instance)) {
+        try {
+          await instance.onApplicationInit();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onApplicationInit completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onApplicationInit failed: ${error}`);
           throw error;
         }
       }
@@ -1734,6 +1977,22 @@ export class OneBunModule implements ModuleInstance {
    *   Without it a `@Global()` service's `close()` runs once per module that can see it.
    */
   async callOnModuleDestroy(invoked: Set<unknown> = new Set()): Promise<void> {
+    // Pipeline elements first: they were constructed last, during route registration, and a
+    // middleware holding a pool has to release it before the services it borrowed from go.
+    for (const instance of this.pipelineInstances) {
+      if (!this.markInvoked(invoked, instance)) {
+        continue;
+      }
+      if (hasOnModuleDestroy(instance)) {
+        try {
+          await instance.onModuleDestroy();
+          this.logger.debug(`Pipeline ${instance.constructor.name} onModuleDestroy completed`);
+        } catch (error) {
+          this.logger.error(`Pipeline ${instance.constructor.name} onModuleDestroy failed: ${error}`);
+        }
+      }
+    }
+
     // Call for controllers first (reverse order of creation)
     const controllers = Array.from(this.controllerInstances.values()).reverse();
     for (const controller of controllers) {
@@ -1817,6 +2076,23 @@ export class OneBunModule implements ModuleInstance {
     const fromChildren = this.childModules.flatMap((child) => child.getControllers());
 
     return [...this.controllers, ...fromChildren];
+  }
+
+  /**
+   * Provider CLASSES declared by this module and its children (recursive), deduplicated.
+   *
+   * Classes rather than instances, because the only caller reads decorator metadata off the
+   * constructor: a `{ provide, useValue }` entry has no class to read and is skipped. One module
+   * imported from two places appears once.
+   */
+  getProviderClasses(): Function[] {
+    const metadata = getModuleMetadata(this.moduleClass);
+    const own = (metadata?.providers ?? []).filter(
+      (provider): provider is Function => typeof provider === 'function',
+    );
+    const fromChildren = this.childModules.flatMap((child) => child.getProviderClasses());
+
+    return Array.from(new Set([...own, ...fromChildren]));
   }
 
   /**

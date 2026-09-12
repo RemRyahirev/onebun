@@ -137,9 +137,24 @@ export interface ModuleInstance {
   getControllers(): Function[];
 
   /**
+   * Get provider classes declared by this module and its children.
+   *
+   * Optional: a substituted module double in a test need not implement it, and the one caller
+   * — the queue's report about handlers that will never run — treats its absence as "none".
+   */
+  getProviderClasses?(): Function[];
+
+  /**
    * Get controller instance
    */
   getControllerInstance?(controllerClass: Function): unknown;
+
+  /**
+   * Run `onModuleInit` on the middleware and interceptor instances the module built for the
+   * pipeline. Optional: those instances do not exist until routes are registered, so this is a
+   * pass of its own rather than part of `setup()`.
+   */
+  callPipelineOnModuleInit?(): Promise<void>;
 
   /**
    * Call onApplicationInit lifecycle hook for all services and controllers
@@ -198,6 +213,13 @@ export interface ModuleInstance {
    * using this module's DI scope (services + logger + config).
    */
   resolveInterceptors?(classes: (Function | Interceptor)[]): ResolvedInterceptor[];
+
+  /**
+   * Resolve exception filter classes (or instances) into initialized filters using this module's
+   * DI scope. Optional for the same reason as the others: a module double in a test may omit it.
+   */
+  resolveFilters?(filters: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[]):
+  import('./exception-filters/exception-filters').ExceptionFilter[];
 
   /**
    * Resolve guard classes into instances with dependency injection, once at route-build time.
@@ -640,7 +662,7 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
    * });
    * ```
    */
-  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+  filters?: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[];
 
   /**
    * Global interceptors applied to all routes.
@@ -1183,7 +1205,7 @@ export interface RouteMetadata {
   /** Guards to execute before the route handler. Supports class constructors and instances. */
   guards?: (Function | HttpGuard)[];
   /** Exception filters to apply when the route handler throws. */
-  filters?: import('./exception-filters/exception-filters').ExceptionFilter[];
+  filters?: (Function | import('./exception-filters/exception-filters').ExceptionFilter)[];
   /** Interceptors to wrap the route handler. Supports class constructors and instances. */
   interceptors?: (Function | Interceptor)[];
   /**

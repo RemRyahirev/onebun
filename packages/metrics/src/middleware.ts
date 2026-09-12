@@ -5,6 +5,7 @@ import type { HttpMetricsData } from './types';
 import { HttpStatusCode } from '@onebun/requests';
 
 import { MetricsService } from './metrics.service';
+import { ownerMetricsService } from './owner';
 
 /**
  * Metrics middleware for automatic HTTP metrics collection
@@ -103,7 +104,9 @@ export function WithMetrics(route?: string): any {
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     descriptor.value = function (...args: any[]) {
-      const startTime = Date.now(); 
+      const startTime = Date.now();
+      // The instance names the owning application; the continuations below do not have `this`.
+      const owner = this;
 
       try {
         const result = originalMethod.apply(this, args);
@@ -112,7 +115,7 @@ export function WithMetrics(route?: string): any {
         if (result instanceof Promise) {
           return result
             .then((res) => {
-              recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.OK);
+              recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.OK, owner);
 
               return res;
             })
@@ -123,11 +126,12 @@ export function WithMetrics(route?: string): any {
                 routePath,
                 startTime,
                 HttpStatusCode.INTERNAL_SERVER_ERROR,
+                owner,
               );
               throw err;
             });
         } else {
-          recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.OK);
+          recordMetrics(controllerName, propertyKey, routePath, startTime, HttpStatusCode.OK, owner);
 
           return result;
         }
@@ -138,6 +142,7 @@ export function WithMetrics(route?: string): any {
           routePath,
           startTime,
           HttpStatusCode.INTERNAL_SERVER_ERROR,
+          owner,
         );
         throw err;
       }
@@ -156,15 +161,19 @@ function recordMetrics(
   route: string,
   startTime: number,
   statusCode: number,
+  owner?: unknown,
 ): void {
   const duration = (Date.now() - startTime) / 1000;
 
-  // This would ideally get the metrics service from the current context
-  // For now, we'll store this information and let the application handle it
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  if (typeof globalThis !== 'undefined' && (globalThis as any).__onebunMetricsService) {
+  // The instance the decorated method ran on names the application that built it; the
+  // process-wide slot, which the last application to start owns, is the fallback for an
+  // instance the framework did not build.
+   
+  const metricsService = ownerMetricsService(owner)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const metricsService = (globalThis as any).__onebunMetricsService; 
+    ?? (typeof globalThis !== 'undefined' ? (globalThis as any).__onebunMetricsService : undefined);
+
+  if (metricsService) {
     metricsService.recordHttpRequest({
       method: 'UNKNOWN',
       route,

@@ -11,6 +11,41 @@ import type { WsClientData, WsRoom } from './ws.types';
 import { isPatternMatch } from './ws-pattern-matcher';
 
 /**
+ * A client record that shares nothing mutable with the one handed in or handed out.
+ *
+ * `{...client}` copied the object and kept the caller's `rooms` ARRAY, `metadata` and `auth`. The
+ * caller of `addClient` is the WebSocket handler passing `ws.data`, so the alias made
+ * `addClientToRoom`'s `push()` land on the live socket — which is how room membership appeared to
+ * work in memory mode and did not under Redis, and how a caller could write into storage it had
+ * only read from.
+ *
+ * Optional keys are preserved as ABSENT rather than materialised: `{...undefined}` is `{}`, and a
+ * record that grows a `metadata: {}` it never had changes shape for every reader.
+ */
+function copyClient(client: WsClientData): WsClientData {
+  return {
+    ...client,
+    rooms: [...client.rooms],
+    metadata: { ...client.metadata },
+    auth: client.auth
+      ? {
+        ...client.auth,
+        ...(client.auth.permissions ? { permissions: [...client.auth.permissions] } : {}),
+      }
+      : client.auth,
+  };
+}
+
+/** The same, for a room: `clientIds` was already copied, `metadata` was not. */
+function copyRoom(room: WsRoom): WsRoom {
+  return {
+    ...room,
+    clientIds: [...room.clientIds],
+    ...(room.metadata ? { metadata: { ...room.metadata } } : {}),
+  };
+}
+
+/**
  * In-memory storage for WebSocket clients and rooms
  */
 export class InMemoryWsStorage implements WsStorageAdapter {
@@ -22,7 +57,7 @@ export class InMemoryWsStorage implements WsStorageAdapter {
   // ============================================================================
 
   async addClient(client: WsClientData): Promise<void> {
-    this.clients.set(client.id, { ...client });
+    this.clients.set(client.id, copyClient(client));
   }
 
   async removeClient(clientId: string): Promise<void> {
@@ -35,17 +70,17 @@ export class InMemoryWsStorage implements WsStorageAdapter {
   async getClient(clientId: string): Promise<WsClientData | null> {
     const client = this.clients.get(clientId);
 
-    return client ? { ...client } : null;
+    return client ? copyClient(client) : null;
   }
 
   async getAllClients(): Promise<WsClientData[]> {
-    return Array.from(this.clients.values()).map((c) => ({ ...c }));
+    return Array.from(this.clients.values()).map((client) => copyClient(client));
   }
 
   async updateClient(clientId: string, data: Partial<WsClientData>): Promise<void> {
     const client = this.clients.get(clientId);
     if (client) {
-      this.clients.set(clientId, { ...client, ...data });
+      this.clients.set(clientId, copyClient({ ...client, ...data }));
     }
   }
 
@@ -58,7 +93,7 @@ export class InMemoryWsStorage implements WsStorageAdapter {
   // ============================================================================
 
   async createRoom(room: WsRoom): Promise<void> {
-    this.rooms.set(room.name, { ...room, clientIds: [...room.clientIds] });
+    this.rooms.set(room.name, copyRoom(room));
   }
 
   async deleteRoom(name: string): Promise<void> {
@@ -78,14 +113,11 @@ export class InMemoryWsStorage implements WsStorageAdapter {
   async getRoom(name: string): Promise<WsRoom | null> {
     const room = this.rooms.get(name);
 
-    return room ? { ...room, clientIds: [...room.clientIds] } : null;
+    return room ? copyRoom(room) : null;
   }
 
   async getAllRooms(): Promise<WsRoom[]> {
-    return Array.from(this.rooms.values()).map((r) => ({
-      ...r,
-      clientIds: [...r.clientIds],
-    }));
+    return Array.from(this.rooms.values()).map((room) => copyRoom(room));
   }
 
   async getRoomsByPattern(pattern: string): Promise<WsRoom[]> {
@@ -93,7 +125,7 @@ export class InMemoryWsStorage implements WsStorageAdapter {
 
     for (const [name, room] of this.rooms) {
       if (isPatternMatch(pattern, name)) {
-        matchingRooms.push({ ...room, clientIds: [...room.clientIds] });
+        matchingRooms.push(copyRoom(room));
       }
     }
 

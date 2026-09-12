@@ -16,6 +16,7 @@ import {
   afterAll,
   afterEach,
   beforeAll,
+  beforeEach,
   describe,
   expect,
   test,
@@ -27,8 +28,11 @@ import {
   Controller,
   Get,
   Inject,
+  Global as GlobalDecorator,
+  isGlobalModule,
   Module,
   OneBunApplication,
+  removeFromGlobalModules,
   resetRegistrations,
   Service,
 } from '@onebun/core';
@@ -472,5 +476,97 @@ describe('named registrations', () => {
     } finally {
       await app.stop();
     }
+  });
+});
+
+/**
+ * `isGlobal` alongside `as` — the mirror of the CacheModule case.
+ *
+ * `{ as, isGlobal: false }` used to run `removeFromGlobalModules(DrizzleModule)` against the
+ * process-wide registry, so naming a second database switched off ambient resolution for the
+ * FIRST one, in every application in the process. The boot then failed inside an unrelated
+ * module that injected `DrizzleService` and imported nothing.
+ */
+describe('isGlobal alongside a registration token', () => {
+  let scratch: string;
+  let wasGlobal: boolean;
+
+  const conn = (url: string) => ({ type: DatabaseType.SQLITE as const, options: { url } });
+
+  beforeAll(() => {
+    scratch = mkdtempSync(join(tmpdir(), 'onebun-as-isglobal-'));
+  });
+
+  afterAll(() => {
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    resetRegistrations();
+    wasGlobal = isGlobalModule(DrizzleModule);
+  });
+
+  afterEach(() => {
+    resetRegistrations();
+    DrizzleModule.clearOptions();
+    // Leave the process-wide registry as this file found it.
+    if (wasGlobal) {
+      GlobalDecorator()(DrizzleModule);
+    } else {
+      removeFromGlobalModules(DrizzleModule);
+    }
+  });
+
+  test('a named registration does not change the base module globality', () => {
+    DrizzleModule.forRoot({ connection: conn(join(scratch, 'base.sqlite')) });
+    const before = isGlobalModule(DrizzleModule);
+
+    DrizzleModule.forRoot({ connection: conn(join(scratch, 'named.sqlite')), as: ANALYTICS, isGlobal: false });
+
+    expect(isGlobalModule(DrizzleModule)).toBe(before);
+  });
+
+  test('an unrelated module still resolves the service ambiently', async () => {
+    @Service()
+    class ReportService extends BaseService {
+      constructor(public db: DrizzleService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [ReportService], exports: [ReportService] })
+    class ReportModule {}
+
+    @Module({
+      imports: [
+        DrizzleModule.forRoot({ connection: conn(join(scratch, 'main.sqlite')) }),
+        DrizzleModule.forRoot({ connection: conn(join(scratch, 'analytics.sqlite')), as: ANALYTICS, isGlobal: false }),
+        ReportModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      // Pre-fix: "Could not resolve dependency DrizzleService for service ReportService".
+      await app.start();
+
+      expect(app.getService(ReportService).db).toBeInstanceOf(DrizzleService);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('still throws for the combination that asks for the impossible', () => {
+    expect(() => DrizzleModule.forRoot({
+      connection: conn(join(scratch, 'never.sqlite')),
+      as: MAIN,
+      isGlobal: true,
+    })).toThrow(/never global/);
   });
 });

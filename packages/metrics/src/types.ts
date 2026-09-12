@@ -1,4 +1,4 @@
-import type { register } from 'prom-client';
+import type { register, Registry } from 'prom-client';
 
 /**
  * Default system metrics collection interval (5 seconds)
@@ -28,6 +28,18 @@ export interface MetricsOptions {
    * @defaultValue true
    */
   enabled?: boolean;
+
+  /**
+   * The Prometheus registry this application writes to and scrapes.
+   *
+   * Each application gets its own by default, so two applications in one process no longer
+   * collide on metric names or serve each other's series. Pass prom-client's `register` to
+   * restore the previous process-wide behaviour — the supported route for code that registers
+   * metrics against that registry directly.
+   *
+   * @defaultValue a fresh `Registry` per application
+   */
+  registry?: Registry;
 
   /**
    * HTTP path for exposing metrics endpoint
@@ -96,6 +108,20 @@ export interface SystemMetricsData {
   memoryUsage: NodeJS.MemoryUsage;
   cpuUsage: NodeJS.CpuUsage;
   uptime: number;
+}
+
+/**
+ * One outgoing HTTP call, as the metrics service records it.
+ *
+ * `host` rather than the full URL: the label is a dimension, and a URL with a path, a query
+ * string and an ephemeral port is unbounded.
+ */
+export interface OutgoingRequestMetricsData {
+  method: string;
+  host: string;
+  statusCode: number;
+  /** Seconds. */
+  duration: number;
 }
 
 /**

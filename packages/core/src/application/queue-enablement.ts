@@ -23,6 +23,40 @@ export const QUEUE_DISABLED_WITH_ADAPTER_WARNING =
   + 'constructed, and an injected QueueService will throw. Remove queue.enabled: false to enable it.';
 
 /**
+ * Warning emitted when a class registered in `providers` carries queue decorators.
+ *
+ * Handler discovery walks controllers only, so those decorators are metadata nothing reads and
+ * the handler never runs. Naming the class AND the method is the point: before this, the single
+ * line such an application printed was "no handlers detected", three lines below a handler the
+ * user had just written.
+ *
+ * A function rather than a constant, because the text has to carry the offending names. Exported
+ * so tests assert against it rather than duplicating its wording.
+ *
+ * @see docs:api/queue.md
+ */
+export function queueHandlerOnProviderWarning(className: string, handlerNames: string[]): string {
+  const handlers = handlerNames.map((name) => `${name}()`).join(', ');
+
+  return `Queue decorators on "${className}" are ignored: ${handlers}. Handler discovery walks `
+    + `controllers only, and "${className}" is registered in a module's providers — move it into `
+    + 'that module\'s controllers array to run them.';
+}
+
+/**
+ * Debug line for an application whose only queue decorators sit on providers.
+ *
+ * Separate from the general "nothing configured" wording, because the two situations need
+ * different actions and the general one reads as a denial that the user's handlers exist.
+ *
+ * @see docs:api/queue.md
+ */
+export const QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG =
+  'Queue system not enabled: the queue decorators in this application are on providers, which '
+  + 'handler discovery does not walk. Move those classes into controllers, or set '
+  + 'queue.enabled: true if the queue is meant to run without them.';
+
+/**
  * Outcome of resolving whether the queue system should be initialized.
  *
  * @see docs:api/queue.md

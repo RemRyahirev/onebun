@@ -18,7 +18,11 @@ import type {
   OnModuleDestroy,
 } from '../module/lifecycle';
 import type { QueueAdapter, Subscription } from '../queue/types';
-import type { ApplicationOptions, ModuleInstance } from '../types';
+import type {
+  ApplicationOptions,
+  Interceptor,
+  ModuleInstance,
+} from '../types';
 import type {
   MiddlewareClass,
   OneBunRequest,
@@ -26,6 +30,7 @@ import type {
 } from '../types';
 import type { OnModuleConfigure } from '../types';
 
+import { Env, TypedEnv } from '@onebun/envs';
 import { LoggerService, type Logger } from '@onebun/logger';
 import { register } from '@onebun/metrics';
 
@@ -43,6 +48,7 @@ import {
   UseMiddleware,
   UseGuards,
   UseInterceptors,
+  UseFilters,
   Middleware,
 } from '../decorators/decorators';
 import { createHttpGuard } from '../http-guards/http-guards';
@@ -299,6 +305,50 @@ describe('OneBunApplication', () => {
       // Config service is created eagerly in the constructor
       const config = app.getConfig();
       expect(config).toBeDefined();
+    });
+
+    test('should give each application its own config when two apps declare different envSchema', async () => {
+      @Module({})
+      class ConfigAppAModule {}
+
+      @Module({})
+      class ConfigAppBModule {}
+
+      process.env.TEST_APP_A_TOKEN = 'token-a';
+      process.env.TEST_APP_B_TOKEN = 'token-b';
+      TypedEnv.clear();
+
+      const appA = createTestApp(ConfigAppAModule, {
+        port: 0,
+        host: '127.0.0.1',
+        envSchema: { a: { token: Env.string({ env: 'TEST_APP_A_TOKEN', default: 'none' }) } },
+        metrics: { enabled: false },
+        tracing: { enabled: false },
+        gracefulShutdown: false,
+      });
+      const appB = createTestApp(ConfigAppBModule, {
+        port: 0,
+        host: '127.0.0.1',
+        envSchema: { b: { token: Env.string({ env: 'TEST_APP_B_TOKEN', default: 'none' }) } },
+        metrics: { enabled: false },
+        tracing: { enabled: false },
+        gracefulShutdown: false,
+      });
+
+      try {
+        await appA.start();
+        await appB.start();
+
+        expect(appA.getConfigValue<string>('a.token')).toBe('token-a');
+        // Before the per-schema cache this was `undefined`: appB was handed appA's ConfigProxy.
+        expect(appB.getConfigValue<string>('b.token')).toBe('token-b');
+      } finally {
+        await appA.stop();
+        await appB.stop();
+        delete process.env.TEST_APP_A_TOKEN;
+        delete process.env.TEST_APP_B_TOKEN;
+        TypedEnv.clear();
+      }
     });
 
     test('should provide typed access to config values via getConfig()', () => {
@@ -2420,8 +2470,9 @@ describe('OneBunApplication', () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await (mockServer as any).fetchHandler(request);
 
-      // Current implementation returns 404 for method not allowed, not 405
-      expect(response.status).toBe(404);
+      // 405 with `Allow`, not the 404 an unknown path gets: the path exists, the verb does not.
+      expect(response.status).toBe(405);
+      expect(response.headers.get('allow')).toContain('GET');
     });
 
     test('should handle controller method errors', async () => {
@@ -4361,7 +4412,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(PlainModule, { port: 0 });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4381,7 +4432,7 @@ describe('OneBunApplication', () => {
       const app = createTestApp(LifecycleOnlyModule, { port: 0 });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4402,7 +4453,7 @@ describe('OneBunApplication', () => {
       });
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4452,7 +4503,7 @@ describe('OneBunApplication', () => {
       await app.stop();
     });
 
-    test('getQueueService() returns null when queue not enabled', async () => {
+    test('getQueueService() explains itself when the queue is not enabled', async () => {
       @Controller('/no-queue')
       class NoQueueController extends BaseController {
         @Get('/')
@@ -4467,8 +4518,9 @@ describe('OneBunApplication', () => {
       const app = createTestApp(NoQueueModule, { port: 0 });
       await app.start();
 
-      const queueService = app.getQueueService();
-      expect(queueService).toBeNull();
+      // The explanation the DI path has always given, on the accessor that used to answer null
+      // and leave the caller with a TypeError on the next line.
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
 
       await app.stop();
     });
@@ -4652,7 +4704,7 @@ describe('OneBunApplication', () => {
 
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
       expect(SpyQueueAdapter.constructCount).toBe(0);
       expect(SpyQueueAdapter.connectCount).toBe(0);
       // Filter by exact equality: other subsystems warn during start() too.
@@ -4680,7 +4732,7 @@ describe('OneBunApplication', () => {
 
       await app.start();
 
-      expect(app.getQueueService()).toBeNull();
+      expect(() => app.getQueueService()).toThrow(QUEUE_NOT_ENABLED_ERROR_MESSAGE);
       expect(warnings.filter(m => m === QUEUE_DISABLED_WITH_ADAPTER_WARNING)).toHaveLength(0);
 
       await app.stop();
@@ -5016,7 +5068,508 @@ describe('OneBunApplication', () => {
     });
   });
 
+  describe('guard merging', () => {
+    // Controller-level and route-level lists used to be concatenated, so a guard named on both
+    // ran twice per request: doubled database or cache work, doubled denial lines in the log,
+    // and a decision that is only idempotent if the guard happens to be. WebSocket already
+    // deduplicated; now all three transports do.
+    test('should run a guard named at both controller and route level once per request', async () => {
+      let invocations = 0;
+
+      @Service()
+      class CountingGuard extends BaseService {
+        canActivate(): boolean {
+          invocations += 1;
+
+          return true;
+        }
+      }
+
+      @UseGuards(CountingGuard)
+      @Controller('/deduped')
+      class DedupedController extends BaseController {
+        @UseGuards(CountingGuard)
+        @Get('/')
+        index() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [DedupedController] })
+      class DedupedModule {}
+
+      const app = createTestApp(DedupedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/deduped`);
+
+        expect(response.status).toBe(200);
+        expect(invocations).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  describe('interceptors see handler errors', () => {
+    // Filters used to be applied inside the two handler arms, below the interceptor chain, so by
+    // the time next() returned the throw was already a Response and `try { await next() } catch`
+    // was dead code — on HTTP only. The same interceptor class on the queue and on WebSocket saw
+    // the throw, because those transports have no filter layer.
+    test('should let an interceptor catch a handler error and still return the filtered response', async () => {
+      const seen: string[] = [];
+
+      class ObservingInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            const result = await next();
+            seen.push(`resolved ${(result as Response).status}`);
+
+            return result;
+          } catch (error) {
+            seen.push(`caught ${(error as Error).message}`);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(ObservingInterceptor)
+      @Controller('/observed')
+      class ObservedController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('handler blew up');
+        }
+      }
+
+      @Module({ controllers: [ObservedController] })
+      class ObservedModule {}
+
+      const app = createTestApp(ObservedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/observed/boom`);
+        const body = await response.json() as { success: boolean; error: string; code: number };
+
+        expect(seen).toEqual(['caught handler blew up']);
+        // Rethrowing leaves the answer exactly as it was before the boundary moved, masking
+        // included: the default filter does not disclose a non-HttpException message.
+        expect(response.status).toBe(500);
+        expect(body.success).toBe(false);
+        expect(body.error).toBe('Internal Server Error');
+        expect(body.code).toBe(500);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // The boundary sits below the middleware chain on purpose: CorsMiddleware and its siblings
+    // set headers AFTER `await next()`, and filtering any higher would unwind past those blocks
+    // and strip them from every error response.
+    test('should keep middleware headers on a filtered error response', async () => {
+      class PassThroughInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          return await next();
+        }
+      }
+
+      @UseInterceptors(PassThroughInterceptor)
+      @Controller('/cors-error')
+      class CorsErrorController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('still needs headers');
+        }
+      }
+
+      @Module({ controllers: [CorsErrorController] })
+      class CorsErrorModule {}
+
+      const app = createTestApp(CorsErrorModule, {
+        port: 0,
+        cors: { origin: ['http://localhost:5173'] },
+      });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/cors-error/boom`, {
+          headers: { origin: 'http://localhost:5173' },
+        });
+
+        expect(response.status).toBe(500);
+        expect(response.headers.get('access-control-allow-origin')).toBe('http://localhost:5173');
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // Transport parity: the same shape on a queue handler, which never had a filter layer and
+    // therefore always showed the throw. The point of the test is that HTTP now matches it.
+    test('should show a queue handler error to the interceptor, as it always did', async () => {
+      const seen: string[] = [];
+
+      class QueueObservingInterceptor implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            return await next();
+          } catch (error) {
+            seen.push(`caught ${(error as Error).message}`);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(QueueObservingInterceptor)
+      @Controller('/queue-observed')
+      class QueueObservedController extends BaseController {
+        @Get('/')
+        ping() {
+          return { ok: true };
+        }
+
+        @Subscribe('observed.event')
+        handle(): never {
+          throw new Error('queue handler blew up');
+        }
+      }
+
+      @Module({ controllers: [QueueObservedController] })
+      class QueueObservedModule {}
+
+      const app = createTestApp(QueueObservedModule, {
+        port: 0,
+        queue: { enabled: true, adapter: 'memory' },
+      });
+      await app.start();
+
+      try {
+        await app.getQueueService().publish('observed.event', { id: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        expect(seen).toEqual(['caught queue handler blew up']);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    // Decided rather than inherited: the boundary now also covers parameter extraction and
+    // schema validation, so an interceptor counting failures counts a 400 too.
+    test('should show a validation error to the interceptor as well', async () => {
+      const seen: string[] = [];
+
+      class ValidationObserver implements Interceptor {
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          try {
+            return await next();
+          } catch (error) {
+            seen.push((error as Error).constructor.name);
+            throw error;
+          }
+        }
+      }
+
+      @UseInterceptors(ValidationObserver)
+      @Controller('/validated')
+      class ValidatedController extends BaseController {
+        @Post('/users')
+        create(@Body(arktype({ name: 'string' })) user: { name: string }) {
+          return user;
+        }
+      }
+
+      @Module({ controllers: [ValidatedController] })
+      class ValidatedModule {}
+
+      const app = createTestApp(ValidatedModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/validated/users`, {
+          method: 'POST',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 42 }),
+        });
+
+        expect(response.status).toBe(400);
+        expect(seen.length).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  describe('exception filter DI', () => {
+    // Filters were the one pipeline element with no DI path: the types accepted instances only,
+    // so a class was a compile error, and an instance was merged into the route metadata
+    // untouched — this.logger, this.config and every injected service were undefined inside
+    // catch(), in the one place that sees every unhandled error.
+    test('should inject a service into a filter class and give it logger and config', async () => {
+      const reported: string[] = [];
+
+      @Service()
+      class ErrorReporter extends BaseService {
+        report(message: string): void {
+          reported.push(message);
+        }
+      }
+
+      // Same rule as interceptors: constructor DI needs a class decorator, because that is what
+      // makes TypeScript emit design:paramtypes.
+      @Service()
+      class ReportingFilter extends BaseService {
+        constructor(private readonly reporter: ErrorReporter) {
+          super();
+        }
+
+        catch(error: unknown): Response {
+          this.reporter.report(error instanceof Error ? error.message : String(error));
+
+          return Response.json(
+            { hasLogger: this.logger !== undefined, hasConfig: this.config !== undefined },
+            { status: 418 },
+          );
+        }
+      }
+
+      @UseFilters(ReportingFilter)
+      @Controller('/filtered')
+      class FilteredController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('kaboom');
+        }
+      }
+
+      @Module({ controllers: [FilteredController], providers: [ErrorReporter] })
+      class FilteredModule {}
+
+      const app = createTestApp(FilteredModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/filtered/boom`);
+        const body = await response.json() as { hasLogger: boolean; hasConfig: boolean };
+
+        expect(response.status).toBe(418);
+        expect(reported).toEqual(['kaboom']);
+        expect(body.hasLogger).toBe(true);
+        expect(body.hasConfig).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('should initialize a filter passed as an instance', async () => {
+      class InstanceFilter extends BaseService {
+        catch(): Response {
+          return Response.json({ hasLogger: this.logger !== undefined }, { status: 418 });
+        }
+      }
+
+      @UseFilters(new InstanceFilter())
+      @Controller('/instance-filtered')
+      class InstanceFilteredController extends BaseController {
+        @Get('/boom')
+        boom(): never {
+          throw new Error('kaboom');
+        }
+      }
+
+      @Module({ controllers: [InstanceFilteredController] })
+      class InstanceFilteredModule {}
+
+      const app = createTestApp(InstanceFilteredModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/instance-filtered/boom`);
+        const body = await response.json() as { hasLogger: boolean };
+
+        expect(body.hasLogger).toBe(true);
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  describe('pipeline lifecycle hooks', () => {
+    // Middleware and interceptors live in neither serviceInstances nor controllerInstances, so
+    // every lifecycle pass walked past them: the hook ran on a second instance built from
+    // `providers` and every request was served by the pipeline's own, with the flag still false.
+    test('should run onModuleInit on the middleware and interceptor that serve requests', async () => {
+      class WarmingMiddleware extends BaseMiddleware {
+        warm = false;
+
+        async onModuleInit(): Promise<void> {
+          this.warm = true;
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          const response = await next();
+
+          response.headers.set('x-middleware-warm', String(this.warm));
+
+          return response;
+        }
+      }
+
+      class WarmingInterceptor implements Interceptor {
+        warm = false;
+
+        async onModuleInit(): Promise<void> {
+          this.warm = true;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          const response = await next() as Response;
+
+          response.headers.set('x-interceptor-warm', String(this.warm));
+
+          return response;
+        }
+      }
+
+      @UseMiddleware(WarmingMiddleware)
+      @UseInterceptors(WarmingInterceptor)
+      @Controller('/warm')
+      class WarmController extends BaseController {
+        @Get('/')
+        index() {
+          return { ok: true };
+        }
+      }
+
+      @Module({ controllers: [WarmController] })
+      class WarmModule {}
+
+      const app = createTestApp(WarmModule, { port: 0 });
+      await app.start();
+
+      try {
+        const response = await fetch(`http://localhost:${app.getPort()}/warm`);
+
+        expect(response.headers.get('x-middleware-warm')).toBe('true');
+        expect(response.headers.get('x-interceptor-warm')).toBe('true');
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
   describe('HTTP Interceptors', () => {
+    // The BaseInterceptor JSDoc promises one instance per application, reused for every matching
+    // request. `resolveInterceptors` was called inside the per-route loop and constructed
+    // unconditionally, so a class covering three routes became three instances — each route
+    // permanently bound to its own — and any state the class kept was per route.
+    test('should construct a class interceptor once, however many routes it covers', async () => {
+      let constructed = 0;
+      let intercepted = 0;
+
+      class CountingInterceptor implements Interceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          intercepted += 1;
+
+          return await next();
+        }
+      }
+
+      @UseInterceptors(CountingInterceptor)
+      @Controller('/counted')
+      class CountedController extends BaseController {
+        @Get('/one')
+        one() {
+          return { route: 'one' };
+        }
+
+        @Get('/two')
+        two() {
+          return { route: 'two' };
+        }
+
+        @Get('/three/:id')
+        three(@Param('id') id: string) {
+          return { route: 'three', id };
+        }
+      }
+
+      @Module({ controllers: [CountedController] })
+      class CountedModule {}
+
+      const app = createTestApp(CountedModule, { port: 0 });
+      await app.start();
+
+      try {
+        expect(constructed).toBe(1);
+
+        await fetch(`http://localhost:${app.getPort()}/counted/one`);
+        await fetch(`http://localhost:${app.getPort()}/counted/two`);
+        await fetch(`http://localhost:${app.getPort()}/counted/three/42`);
+
+        // One instance means one counter: three different routes advance the same one.
+        expect(intercepted).toBe(3);
+        expect(constructed).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+
+    test('should construct a global class interceptor once for the whole application', async () => {
+      let constructed = 0;
+
+      class GlobalCountingInterceptor implements Interceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: unknown, next: () => unknown): Promise<unknown> {
+          return await next();
+        }
+      }
+
+      @Controller('/first')
+      class FirstController extends BaseController {
+        @Get('/a')
+        a() {
+          return { ok: 'a' };
+        }
+
+        @Get('/b')
+        b() {
+          return { ok: 'b' };
+        }
+      }
+
+      @Controller('/second')
+      class SecondController extends BaseController {
+        @Get('/c')
+        c() {
+          return { ok: 'c' };
+        }
+      }
+
+      @Module({ controllers: [FirstController, SecondController] })
+      class GlobalInterceptorModule {}
+
+      const app = createTestApp(GlobalInterceptorModule, {
+        port: 0,
+        interceptors: [GlobalCountingInterceptor],
+      });
+      await app.start();
+
+      try {
+        expect(constructed).toBe(1);
+      } finally {
+        await app.stop();
+      }
+    });
+
     test('route-level interceptor wraps handler', async () => {
       const addHeaderInterceptor = createInterceptor(async (_ctx, next) => {
         const response = await next() as Response;

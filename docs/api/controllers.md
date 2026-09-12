@@ -258,6 +258,13 @@ class AdminController extends ProtectedController {
 }
 ```
 
+**A wrong verb answers 405, not 404.** A path that some route declares answers `405 Method Not
+Allowed` with an `Allow` header listing what it does declare, so a client that sent `POST` to a
+`@Get` route is told exactly that instead of being sent hunting for a route that exists. A path no
+route declares still answers 404. `HEAD` is answered from the matching `@Get` handler — same status,
+same headers, no body — unless the controller declares its own `@Head`, which wins. When `cors` is
+configured the `OPTIONS` verb is left to the CORS preflight rather than answering 405.
+
 **Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
 
 ::: warning Upgrading from 0.4.4 or earlier
@@ -384,7 +391,17 @@ async logout(@Req() req: OneBunRequest) {
 
 ## Custom Response Headers
 
-To return custom headers, return a `Response` object directly from your handler:
+To return custom headers, return a `Response` object directly from your handler. **What you build is
+what the client receives** — the framework does not read, re-parse or re-serialize it, so the bytes,
+the headers and a streaming body all arrive as written. Through 0.6.0 that was true only for a route
+with no decorated parameters: one `@Param`, `@Body`, `@Query` or `@Req` sent the response through a
+`JSON.parse`/`JSON.stringify` round trip, which rounded 64-bit numbers and buffered streams until
+the producer finished.
+
+The one consequence: an `@ApiResponse` schema on such a route documents the endpoint but does not
+validate or reshape what the handler built — reading the body to check it is what caused both of
+those defects. The framework logs that once per route at startup-time granularity. Return a plain
+object instead if you want the schema enforced.
 
 ```typescript
 @Controller('/api')
@@ -436,6 +453,8 @@ OneBun provides a class-based middleware system that operates at four levels: **
 ### BaseMiddleware
 
 Every middleware class extends `BaseMiddleware` and implements the `use()` method. Use the `@Middleware()` decorator on the class so that constructor dependencies (if any) are resolved automatically:
+
+A middleware class is a lifecycle citizen: implement `OnModuleInit` and the hook runs on the instance that serves requests, after routes are registered and before the server starts, with `onModuleDestroy` on the way down. The same holds for interceptors. Guards are the exception — they are constructed per request, so they get no hooks and the framework says so at startup if one implements them.
 
 ```typescript
 import { BaseMiddleware, Middleware, type OneBunRequest, type OneBunResponse } from '@onebun/core';

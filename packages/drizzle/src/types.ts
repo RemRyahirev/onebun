@@ -253,6 +253,7 @@ export interface DrizzleModuleOptions {
    * Whether to register module as global
    * When true, DrizzleService is available in all modules without explicit import.
    * When false, a module reaches it only by importing DrizzleModule explicitly.
+   * Ignored when `as` is given: a named registration is never global.
    * Default: true
    */
   isGlobal?: boolean;
@@ -263,7 +264,10 @@ export interface DrizzleModuleOptions {
    *
    * This is how one application runs more than one database. Without it, `forRoot()`
    * configures the single default registration and a second call replaces the first.
-   * A named registration is never global — it reaches a module only by being imported.
+   * A named registration is never global — it reaches a module only by being imported. So
+   * `isGlobal: true` alongside `as` throws, and `isGlobal: false` is accepted and does nothing,
+   * because it asks for what already holds. Neither spelling changes `DrizzleModule`'s own
+   * globality: only an unnamed `forRoot()` decides that.
    *
    * @see docs:api/drizzle.md
    */

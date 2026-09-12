@@ -1,4 +1,5 @@
 import type { IConfig, OneBunAppConfig } from './config.interface';
+import type { GlobalScope } from './module';
 import type { OneBunRequest, OneBunResponse } from '../types';
 
 import type { SyncLogger } from '@onebun/logger';
@@ -68,16 +69,23 @@ export abstract class BaseMiddleware {
    * so they are available immediately after super() in subclass constructors.
    * @internal
    */
-  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
-    null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+  } | null = null;
 
   /**
    * Set the ambient init context before constructing a middleware.
    * Called by the framework (OneBunModule) before `new MiddlewareClass(...)`.
    * @internal
    */
-  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
-    BaseMiddleware._initContext = { logger, config };
+  static setInitContext(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+  ): void {
+    BaseMiddleware._initContext = { logger, config, scope };
   }
 
   /**

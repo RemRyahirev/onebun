@@ -168,7 +168,14 @@ export class QueueService {
   /**
    * Stop the queue service (disconnect and stop scheduler)
    */
-  async stop(): Promise<void> {
+  /**
+   * Stop consuming and scheduling.
+   *
+   * `disconnectAdapter: false` leaves the transport open, which is what lets `onModuleDestroy`
+   * publish a goodbye message: the application stops the consumers before the modules tear down
+   * and disconnects afterwards. Defaults to true, so every other caller is unchanged.
+   */
+  async stop(options?: { disconnectAdapter?: boolean }): Promise<void> {
     if (!this.started) {
       return;
     }
@@ -188,7 +195,7 @@ export class QueueService {
     this.subscriptions = [];
 
     // Disconnect adapter
-    if (this.adapter) {
+    if (this.adapter && options?.disconnectAdapter !== false) {
       await this.adapter.disconnect();
     }
 
@@ -387,6 +394,7 @@ export class QueueService {
     serviceInstance: any,
     serviceClass: new (...args: any[]) => any,
     resolveInterceptorsFn?: (classes: (Function | import('../types').Interceptor)[]) => ResolvedInterceptor[],
+    globalInterceptors: (Function | import('../types').Interceptor)[] = [],
   ): Promise<void> {
   /* eslint-enable @typescript-eslint/no-explicit-any, @typescript-eslint/explicit-module-boundary-types */
     // Collect class-level interceptors
@@ -410,18 +418,26 @@ export class QueueService {
       // Resolution happens HERE, at registration, so a guard whose constructor dependency
       // cannot be resolved fails the application at STARTUP with DependencyResolutionError
       // naming it — rather than throwing once per delivered message and dropping each one.
-      const declaredGuards = [
+      // Deduplicated by identity, the same rule the other two transports use: a guard named on
+      // both the class and the method runs once per message, not twice.
+      const declaredGuards = [...new Set([
         ...classGuards,
         ...getMessageGuards(serviceClass, sub.propertyKey),
-      ] as Array<MessageGuard | MessageGuardConstructor>;
+      ])] as Array<MessageGuard | MessageGuardConstructor>;
       const guards = declaredGuards.length > 0 && guardBinding
         ? (guardBinding.resolve(declaredGuards as unknown as (Function | Guard)[]) as
             unknown as Array<MessageGuard | MessageGuardConstructor>)
         : declaredGuards;
 
-      // Merge interceptors: class-level + method-level, resolve via DI
+      // Merge interceptors: application-global + class-level + method-level, outermost first —
+      // the same order HTTP routes use. The global list reached HTTP route registration only, so
+      // an application-wide interceptor silently skipped every queue delivery.
       const methodInterceptors = getMessageInterceptors(serviceClass, sub.propertyKey);
-      const mergedInterceptorClasses = [...classInterceptors, ...methodInterceptors];
+      const mergedInterceptorClasses = [
+        ...globalInterceptors,
+        ...classInterceptors,
+        ...methodInterceptors,
+      ];
       const resolvedInterceptors = mergedInterceptorClasses.length > 0 && resolveInterceptorsFn
         ? resolveInterceptorsFn(mergedInterceptorClasses)
         : [];

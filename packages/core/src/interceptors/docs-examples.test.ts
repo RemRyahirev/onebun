@@ -501,10 +501,11 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
    * @source docs:api/interceptors.md#class-based
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('builds one interceptor instance per registration site and reuses it for every request', async () => {
-    // Two routes on one controller — the class-level interceptor is a registration site per
-    // route, so exactly two instances exist, both created before any request arrived.
-    expect(lifetimeConstructions).toBe(2);
+  it('builds one interceptor instance per class and reuses it for every request', async () => {
+    // Two routes on one controller and one class-level interceptor: one instance, created before
+    // any request arrived. It used to be one per registration site, so this read 2 and a counter
+    // on `this` counted per route.
+    expect(lifetimeConstructions).toBe(1);
 
     const before = lifetimeCalls.length;
     await fetch(`${base}/lifetime/a`);
@@ -513,10 +514,11 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
     await fetch(`${base}/lifetime/b`);
     const served = lifetimeCalls.slice(before);
 
-    // Still two instances after four requests: per-request construction would show four ids.
-    expect(lifetimeConstructions).toBe(2);
+    // Still one instance after four requests, and both routes were served by it: per-request
+    // construction would show four ids, per-site would show two.
+    expect(lifetimeConstructions).toBe(1);
     expect(served.length).toBe(4);
-    expect(new Set(served).size).toBe(2);
+    expect(new Set(served).size).toBe(1);
   });
 
   /**
@@ -556,14 +558,15 @@ describe('docs/api/interceptors.md — creating and applying interceptors (HTTP)
   /**
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('hides handler errors from an interceptor try/catch but filters the interceptor own throw', async () => {
+  it('shows handler errors to an interceptor try/catch and filters the interceptor own throw', async () => {
     observed.length = 0;
     const handlerFailure = await fetch(`${base}/errors/handler-throws`);
 
-    // Filters sit INSIDE the interceptor chain: by the time next() returns, the throw has
-    // already become a 418 Response, so the catch block never runs.
+    // Filters sit ABOVE the interceptor chain, so the throw reaches the catch block and only
+    // then becomes a 418 Response. It used to be the other way round, and this line read
+    // `resolved 418` — the interceptor recorded a success for a request that failed.
     expect(handlerFailure.status).toBe(HTTP_TEAPOT);
-    expect(observed).toEqual([`resolved ${HTTP_TEAPOT}`]);
+    expect(observed).toEqual(['caught handler exploded']);
 
     const interceptorFailure = await fetch(`${base}/errors/interceptor-throws`);
     const body = await interceptorFailure.json() as { success: boolean; error: string };
@@ -854,7 +857,7 @@ describe('docs/api/interceptors.md — global and combined interceptors', () => 
    * @source docs:api/interceptors.md#global
    * @source docs:api/interceptors.md#quick-reference-for-ai
    */
-  it('never reaches a queue subscriber with the global list, while the class-level one still runs', async () => {
+  it('reaches a queue subscriber with the global list, wrapping outside the class-level one', async () => {
     trace.length = 0;
     const queue = app.getQueueService();
     if (!queue) {
@@ -864,8 +867,15 @@ describe('docs/api/interceptors.md — global and combined interceptors', () => 
     await queue.publish('pipeline.job', { id: 'j-1' });
     await sleep(SETTLE_MS);
 
-    // The global list is merged at HTTP route registration only: no 'global:*' entry here.
-    expect(trace).toEqual(['controller:before', 'queue-handler', 'controller:after']);
+    // The global list reaches every transport now, outermost. It used to be merged at HTTP route
+    // registration only, and this read ['controller:before', 'queue-handler', 'controller:after'].
+    expect(trace).toEqual([
+      'global:before',
+      'controller:before',
+      'queue-handler',
+      'controller:after',
+      'global:after',
+    ]);
   });
 });
 

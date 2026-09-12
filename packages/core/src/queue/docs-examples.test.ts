@@ -715,6 +715,25 @@ describe('Cron Parser Examples (docs/api/queue.md)', () => {
     expect(isValidCronExpression('0 0 * * *')).toBe(true);
     expect(isValidCronExpression('invalid')).toBe(false);
   });
+
+  it('should report which day fields were restricted', () => {
+    // From docs/api/queue.md: Cron Parser section — the parsed shape
+    const schedule = parseCronExpression('0 30 9 * * 1-5');
+
+    expect(schedule.daysOfMonthRestricted).toBe(false);
+    expect(schedule.daysOfWeekRestricted).toBe(true);
+  });
+
+  it('should match either day field when both are restricted', () => {
+    // From docs/api/queue.md: Supported Syntax — `0 0 1 * 1` is the 1st OR any Monday
+    const schedule = parseCronExpression('0 0 1 * 1');
+    const firstOfMonth = getNextRun(schedule, new Date(2026, 0, 27, 12, 0, 0));
+    const monday = getNextRun(schedule, new Date(2026, 0, 1, 12, 0, 0));
+
+    expect(firstOfMonth!.getDate()).toBe(1);
+    expect(monday!.getDay()).toBe(1);
+    expect(monday!.getDate()).toBe(5);
+  });
 });
 
 /**

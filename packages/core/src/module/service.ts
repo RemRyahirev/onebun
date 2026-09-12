@@ -267,6 +267,13 @@ export class BaseService {
    * - `this.metrics?.getMetric<Counter>(name)`
    */
   protected get metrics(): import('@onebun/metrics').MetricsService | undefined {
+    // This application's own service first. The globalThis slot is one per process and the
+    // last application to start owns it, so reading it alone put a service's custom metrics
+    // into a sibling application's registry.
+    if (this._scope?.metrics !== undefined) {
+      return this._scope.metrics as import('@onebun/metrics').MetricsService;
+    }
+
     if (typeof globalThis !== 'undefined') {
       return (globalThis as Record<string, unknown>).__onebunMetricsService as
         import('@onebun/metrics').MetricsService | undefined;

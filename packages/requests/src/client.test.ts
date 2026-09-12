@@ -114,10 +114,11 @@ describe('client.executeRequest', () => {
     // client could read a global the framework never wrote. The header was absent in every real
     // application, and the suite was green.
     setTraceContextProvider(() => ({ traceId, spanId, traceFlags: 1 }));
-    (globalThis as any).__onebunMetricsService = {
-      recordHttpRequest(input: any) {
-        recorded = input;
-      },
+    // Through the sink the caller supplies, not a process-wide slot. The client has no
+    // application to ask, so reading a slot recorded an outgoing call into whichever
+    // application happened to start last — and into its SERVER-side request metric.
+    const metricsSink = (input: any): void => {
+      recorded = input;
     };
 
     globalThis.fetch = ((_: string, init: RequestInit) => {
@@ -128,7 +129,7 @@ describe('client.executeRequest', () => {
 
     try {
       await Effect.runPromise(
-        executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/m' }),
+        executeRequest<{ ok: boolean }>({ method: HttpMethod.GET, url: '/m' }, { metricsSink }),
       );
 
       const headers = calls[0]!.headers as Record<string, string>;
@@ -1099,10 +1100,8 @@ describe('outgoing request metrics', () => {
 
   async function statusRecordedFor(upstreamStatus: number): Promise<number | undefined> {
     let recorded: { statusCode: number } | undefined;
-    (globalThis as any).__onebunMetricsService = {
-      recordHttpRequest(input: { statusCode: number }) {
-        recorded = input;
-      },
+    const metricsSink = (input: { statusCode: number }): void => {
+      recorded = input;
     };
 
     globalThis.fetch = (() => Promise.resolve(
@@ -1113,10 +1112,10 @@ describe('outgoing request metrics', () => {
 
     try {
       await Effect.runPromise(
-        executeRequest({ method: HttpMethod.GET, url: '/thing' }, { retries: { max: 0 } }),
+        executeRequest({ method: HttpMethod.GET, url: '/thing' }, { retries: { max: 0 }, metricsSink }),
       ).catch(() => undefined);
     } finally {
-      delete (globalThis as any).__onebunMetricsService;
+      globalThis.fetch = fetchBeforeSuite;
     }
 
     return recorded?.statusCode;

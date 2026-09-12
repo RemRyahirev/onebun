@@ -7,13 +7,23 @@
 
 import { DEFAULT_HTTP_DURATION_BUCKETS, DEFAULT_SYSTEM_METRICS_INTERVAL } from './types';
 
-// Re-export commonly used prom-client types and registry
+// Re-export commonly used prom-client types, plus the Registry class so `metrics: { registry }`
+// is constructible without a direct prom-client dependency.
 export type {
   Counter,
   Gauge,
   Histogram,
   Summary,
 } from 'prom-client';
+export { Registry } from 'prom-client';
+/**
+ * prom-client's PROCESS-GLOBAL registry.
+ *
+ * @deprecated This is no longer the registry an application scrapes — each one owns its own,
+ * so two applications in a process do not collide or serve each other's series. Reach the
+ * application's registry through `metricsService.getRegistry().register`, or pass
+ * `metrics: { registry: register }` to opt an application back onto this one.
+ */
 export { register } from 'prom-client';
 // Decorators
 export {
@@ -27,6 +37,8 @@ export {
   measureExecutionTime,
   WithMetrics,
 } from './decorators';
+// Outgoing-request metrics for @onebun/requests
+export { createRequestsMetricsSink } from './requests-sink';
 // Core service
 export {
   createMetricsService,

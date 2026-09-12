@@ -640,6 +640,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -658,6 +659,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -682,6 +685,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -700,6 +704,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -715,6 +721,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -733,6 +740,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -754,6 +763,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -772,6 +782,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -793,6 +805,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -811,6 +824,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);
@@ -828,6 +843,7 @@ describe('Metrics Decorators', () => {
         getMetrics: async () => '',
         getContentType: () => '',
         recordHttpRequest() {},
+        recordOutgoingRequest() {},
         createCounter() {
           throw new Error('not needed'); 
         },
@@ -846,6 +862,8 @@ describe('Metrics Decorators', () => {
         },
         startSystemMetricsCollection() {},
         stopSystemMetricsCollection() {},
+        getOrphanedMetricNames: () => [],
+        dispose() {},
       };
 
       const serviceLayer = Layer.succeed(MetricsService, mockService);

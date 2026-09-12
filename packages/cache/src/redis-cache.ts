@@ -15,7 +15,7 @@ import type {
   RedisCacheOptions,
 } from './types';
 
-import type { RedisClientOptions } from '@onebun/core';
+import type { RedisClientOptions, SharedRedisLease } from '@onebun/core';
 import {
   RedisClient,
   SharedRedisProvider,
@@ -73,6 +73,14 @@ export class RedisCache implements CacheService {
   private useShared = false;
 
   /**
+   * This instance's hold on the shared client, when it uses one.
+   *
+   * Whoever acquires gives back: the connection closes when the last holder releases, not when
+   * some application happens to stop.
+   */
+  private sharedLease: SharedRedisLease | null = null;
+
+  /**
    * Create a new Redis cache instance
    * @param optionsOrClient - Redis cache configuration options or existing RedisClient
    */
@@ -125,8 +133,11 @@ export class RedisCache implements CacheService {
 
     try {
       if (this.useShared) {
-        // Use shared client from core
-        this.client = await SharedRedisProvider.getClient();
+        // Take the hold ONCE per instance. `connect()`'s early return is guarded on the client
+        // being connected, so over a dead shared client it used to fall through here and take a
+        // second hold that nothing would ever give back.
+        this.sharedLease ??= await SharedRedisProvider.acquire('RedisCache');
+        this.client = this.sharedLease.client;
         this.ownsClient = false;
       } else if (!this.client) {
         // Create new client
@@ -444,6 +455,16 @@ export class RedisCache implements CacheService {
       } catch {
         // Ignore errors during cleanup
       }
+    }
+
+    // A shared client is not ours to disconnect, but the HOLD is ours to give back — and
+    // giving it back is what eventually closes the connection, once every other consumer has
+    // done the same. The application used to do this on our behalf, once per stop() whether
+    // or not anything had acquired.
+    if (this.sharedLease) {
+      const lease = this.sharedLease;
+      this.sharedLease = null;
+      await lease.release();
     }
 
     this.client = null;

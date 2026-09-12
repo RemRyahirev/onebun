@@ -297,5 +297,86 @@ describe('SharedRedisProvider', () => {
       expect(SharedRedisProvider.isConnected()).toBe(false);
       expect(SharedRedisProvider.leaseCount()).toBe(0);
     });
+
+    it('takes no hold when the acquire fails', async () => {
+      // The increment used to be the first statement in getClient(), before the configuration
+      // check — so an unconfigured provider left a hold behind that nothing could give back.
+      await expect(SharedRedisProvider.getClient()).rejects.toThrow('not configured');
+
+      expect(SharedRedisProvider.leaseCount()).toBe(0);
+    });
+
+    it('does not force-close a client when the caller holds nothing', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      const held = await SharedRedisProvider.acquire('the-real-holder');
+
+      // A release with nothing outstanding of its own. The `=== 0` check used to sit OUTSIDE
+      // the `> 0` guard, so this fell straight through to disconnect() and took the connection
+      // away from a consumer that had just acquired it.
+      await SharedRedisProvider.release();
+      await SharedRedisProvider.release();
+
+      expect(held.client.isConnected()).toBe(true);
+      // The real holder's hold is untouched: `release()` gives back a hold taken with
+      // `getClient()`, and there were none.
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+
+      await held.release();
+      expect(SharedRedisProvider.isConnected()).toBe(false);
+    });
+
+    it('gives a hold back exactly once, however often release is called', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      const first = await SharedRedisProvider.acquire('first');
+      const second = await SharedRedisProvider.acquire('second');
+
+      await first.release();
+      await first.release();
+      await first.release();
+
+      // Three calls, one hold given back — `second` still holds the connection.
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+      expect(second.client.isConnected()).toBe(true);
+
+      await second.release();
+      expect(SharedRedisProvider.isConnected()).toBe(false);
+    });
+
+    it('releases nothing from a hold that disconnect() voided', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      const stale = await SharedRedisProvider.acquire('stale');
+
+      await SharedRedisProvider.disconnect();
+
+      const fresh = await SharedRedisProvider.acquire('fresh');
+      await stale.release();
+
+      // The voided hold must not decrement on behalf of the holder that acquired after it.
+      expect(SharedRedisProvider.leaseCount()).toBe(1);
+      expect(fresh.client.isConnected()).toBe(true);
+
+      await fresh.release();
+    });
+
+    it('names what is holding the client', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      const lease = await SharedRedisProvider.acquire('RedisCache');
+
+      // A process that will not exit because something still holds the connection is otherwise
+      // a hang with nothing to grep for.
+      expect(SharedRedisProvider.leaseHolders()).toEqual(['RedisCache']);
+
+      await lease.release();
+      expect(SharedRedisProvider.leaseHolders()).toEqual([]);
+    });
+
+    it('labels an unlabelled hold with its call site', async () => {
+      SharedRedisProvider.configure({ url: redis.url });
+      await SharedRedisProvider.getClient();
+
+      expect(SharedRedisProvider.leaseHolders()[0]).toMatch(/shared-redis\.test\.ts:\d+:\d+/);
+
+      await SharedRedisProvider.release();
+    });
   });
 });

@@ -9,15 +9,18 @@ import {
   Gauge,
   Histogram,
   register,
+  Registry,
   Summary,
 } from 'prom-client';
 
 import type {
   CustomMetricConfig,
   HttpMetricsData,
+  OutgoingRequestMetricsData,
   MetricsOptions,
   MetricsRegistry,
 } from './types';
+import type { Metric } from 'prom-client';
 
 import {
   DEFAULT_HTTP_DURATION_BUCKETS,
@@ -57,6 +60,52 @@ const MICROSECONDS_TO_SECONDS = 1000000;
  */
 const statusCodeCache = new Map<number, string>();
 
+/**
+ * The process-metric collectors prom-client installs, kept once per prefix.
+ *
+ * `collectDefaultMetrics()` has no disposer and its collectors install a `PerformanceObserver`
+ * and an event-loop-delay monitor that nothing can take back, so calling it once per
+ * application would leak a set per application — measured at ~90 KB and two live observers
+ * each. Before registries were per application the second call THREW on the duplicate name,
+ * which capped the process at one set by accident; this keeps that cap on purpose.
+ *
+ * The same metric objects are then registered into each application's registry, which
+ * prom-client allows: `registerMetric` only rejects a DIFFERENT metric owning the name.
+ * Two applications sharing a prefix therefore share the underlying counters — their totals
+ * stay correct (the process collectors describe the process, not the application), but a
+ * delta-based collector like `process_cpu_*` is consumed by whichever scrape arrives first.
+ * In multi-service mode the documented setup gives each service its own prefix, so they do
+ * not share at all.
+ */
+const defaultCollectorsByPrefix = new Map<string, Metric<string>[]>();
+
+/**
+ * Install prom-client's process metrics into a registry, collecting them at most once per prefix.
+ */
+function installDefaultCollectors(target: Registry, prefix: string): void {
+  let collectors = defaultCollectorsByPrefix.get(prefix);
+
+  if (collectors === undefined) {
+    const staging = new Registry();
+    collectDefaultMetrics({
+      register: staging,
+      prefix,
+      gcDurationBuckets: GC_DURATION_BUCKETS,
+    });
+
+    // `getMetricsAsArray()` returns the metric OBJECTS (`Object.values(this._metrics)` in
+    // prom-client's registry.js), which is what has to be re-registered. The published type
+    // describes the serialized shape instead, hence the cast — and if that ever stops being
+    // true, `registerMetric` throws at boot rather than quietly exposing nothing.
+    collectors = staging.getMetricsAsArray() as unknown as Metric<string>[];
+    defaultCollectorsByPrefix.set(prefix, collectors);
+  }
+
+  for (const collector of collectors) {
+    target.registerMetric(collector);
+  }
+}
+
 function getStatusCodeString(code: number): string {
   let str = statusCodeCache.get(code);
   if (str === undefined) {
@@ -88,6 +137,15 @@ export interface MetricsService {
    * Record HTTP request metrics
    */
   recordHttpRequest(data: HttpMetricsData): void;
+
+  /**
+   * Record an OUTGOING HTTP call made by this application.
+   *
+   * A separate metric family from {@link recordHttpRequest} on purpose: egress recorded into
+   * the server's own `http_requests_total` inflated the request rate with traffic the service
+   * did not serve, and `sum by (controller)` grew a bucket that was not a controller.
+   */
+  recordOutgoingRequest(data: OutgoingRequestMetricsData): void;
 
   /**
    * Create a custom counter
@@ -134,6 +192,21 @@ export interface MetricsService {
    * Stop collecting system metrics
    */
   stopSystemMetricsCollection(): void;
+
+  /**
+   * Metric names registered against prom-client's process-global registry that this
+   * application's registry does not have, and which therefore never reach its /metrics.
+   *
+   * A metric built as `new Counter({ ..., registers: [register] })` used to be scraped because
+   * the application scraped that same registry. It no longer does, and this is what lets the
+   * framework say so instead of serving a silently shorter body.
+   */
+  getOrphanedMetricNames(): string[];
+
+  /**
+   * Release what this service holds: the system-metrics timer and its own registry.
+   */
+  dispose(): void;
 }
 
 /**
@@ -154,6 +227,20 @@ class MetricsServiceImpl implements MetricsService {
   private systemUptime!: Gauge<string>;
   private systemMetricsInterval?: Timer;
   private cpuUsageBaseline: NodeJS.CpuUsage;
+  /**
+   * This application's own registry.
+   *
+   * Everything used to go into prom-client's process-global `register`, so a second
+   * application in the process either threw on a duplicate metric name or — with a distinct
+   * prefix, which is what the multi-service docs recommend — served every other service's
+   * series from its own /metrics, all stamped with whichever service started last.
+   */
+  private readonly registry: Registry;
+  /** Whether the orphan diagnostic has already been reported; it is a once-per-app notice. */
+  private orphansReported = false;
+  /** Outgoing-call metrics, built on first use so a client-less application exposes neither. */
+  private clientRequestsTotal?: Counter<string>;
+  private clientRequestDuration?: Histogram<string>;
 
   constructor(options: MetricsOptions = {}) {
     this.options = {
@@ -169,6 +256,9 @@ class MetricsServiceImpl implements MetricsService {
     };
 
     this.cpuUsageBaseline = process.cpuUsage();
+    // `registry` is the escape hatch: passing prom-client's `register` restores the previous
+    // process-wide behaviour verbatim, for code that registered metrics against it directly.
+    this.registry = (this.options.registry as Registry | undefined) ?? new Registry();
 
     if (this.options.enabled) {
       this.initializeMetrics();
@@ -178,16 +268,14 @@ class MetricsServiceImpl implements MetricsService {
   private initializeMetrics(): void {
     // Set default labels if provided
     if (this.options.defaultLabels) {
-      register.setDefaultLabels(this.options.defaultLabels);
+      // Per registry, and applied at render time — which is why setting them on the shared
+      // registry restamped an already-running application's series with a later one's identity.
+      this.registry.setDefaultLabels(this.options.defaultLabels);
     }
 
     // Collect default metrics (GC, etc.)
     if (this.options.collectGcMetrics) {
-      collectDefaultMetrics({
-        register,
-        prefix: this.options.prefix,
-        gcDurationBuckets: GC_DURATION_BUCKETS,
-      });
+      installDefaultCollectors(this.registry, this.options.prefix!);
     }
 
     // Initialize HTTP metrics
@@ -206,7 +294,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}http_requests_total`,
       help: 'Total number of HTTP requests',
       labelNames: ['method', 'route', 'status_code', 'controller', 'action'],
-      registers: [register],
+      registers: [this.registry],
     });
 
     this.httpRequestDuration = new Histogram({
@@ -214,7 +302,7 @@ class MetricsServiceImpl implements MetricsService {
       help: 'HTTP request duration in seconds',
       labelNames: ['method', 'route', 'status_code', 'controller', 'action'],
       buckets: this.options.httpDurationBuckets!,
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -223,19 +311,19 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}memory_usage_bytes`,
       help: 'Memory usage in bytes',
       labelNames: ['type'],
-      registers: [register],
+      registers: [this.registry],
     });
 
     this.systemCpuUsage = new Gauge({
       name: `${this.options.prefix}cpu_usage_ratio`,
       help: 'CPU usage ratio',
-      registers: [register],
+      registers: [this.registry],
     });
 
     this.systemUptime = new Gauge({
       name: `${this.options.prefix}uptime_seconds`,
       help: 'Process uptime in seconds',
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -244,11 +332,11 @@ class MetricsServiceImpl implements MetricsService {
       return '';
     }
 
-    return await register.metrics();
+    return await this.registry.metrics();
   }
 
   getContentType(): string {
-    return register.contentType;
+    return this.registry.contentType;
   }
 
   recordHttpRequest(data: HttpMetricsData): void {
@@ -268,12 +356,46 @@ class MetricsServiceImpl implements MetricsService {
     this.httpRequestDuration.observe(labels, data.duration);
   }
 
+  recordOutgoingRequest(data: OutgoingRequestMetricsData): void {
+    if (!this.options.enabled || !this.options.collectHttpMetrics) {
+      return;
+    }
+
+    // Built on first use rather than at startup, so an application that never calls out does
+    // not expose two empty families.
+    this.clientRequestsTotal ??= new Counter({
+      name: `${this.options.prefix}http_client_requests_total`,
+      help: 'Total number of outgoing HTTP requests',
+      labelNames: ['method', 'host', 'status_code'],
+      registers: [this.registry],
+    });
+    this.clientRequestDuration ??= new Histogram({
+      name: `${this.options.prefix}http_client_request_duration_seconds`,
+      help: 'Outgoing HTTP request duration in seconds',
+      labelNames: ['method', 'host', 'status_code'],
+      buckets: this.options.httpDurationBuckets!,
+      registers: [this.registry],
+    });
+
+    const labels = {
+      method: data.method,
+      // The HOST, not the URL. `route: data.url` minted a fresh series for every path, every
+      // query string and every ephemeral port — measured,
+      // `route="http://127.0.0.1:35379/alpha/ping"`, which is a new series on every restart.
+      host: data.host,
+      status_code: getStatusCodeString(data.statusCode),
+    };
+
+    this.clientRequestsTotal.inc(labels);
+    this.clientRequestDuration.observe(labels, data.duration);
+  }
+
   createCounter(config: Omit<CustomMetricConfig, 'type'>): Counter<string> {
     return new Counter({
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -282,7 +404,7 @@ class MetricsServiceImpl implements MetricsService {
       name: `${this.options.prefix}${config.name}`,
       help: config.help,
       labelNames: config.labelNames || [],
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -292,7 +414,7 @@ class MetricsServiceImpl implements MetricsService {
       help: config.help,
       labelNames: config.labelNames || [],
       buckets: config.buckets || DEFAULT_CUSTOM_HISTOGRAM_BUCKETS,
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -304,7 +426,7 @@ class MetricsServiceImpl implements MetricsService {
       percentiles: config.percentiles || DEFAULT_SUMMARY_PERCENTILES,
       maxAgeSeconds: config.maxAgeSeconds || DEFAULT_METRICS_MAX_AGE_SECONDS,
       ageBuckets: config.ageBuckets || DEFAULT_SUMMARY_AGE_BUCKETS,
-      registers: [register],
+      registers: [this.registry],
     });
   }
 
@@ -312,11 +434,11 @@ class MetricsServiceImpl implements MetricsService {
   getMetric<T = any>(name: string): T | undefined {
     const fullName = name.startsWith(this.options.prefix!) ? name : `${this.options.prefix}${name}`;
 
-    return register.getSingleMetric(fullName) as T;
+    return this.registry.getSingleMetric(fullName) as T;
   }
 
   clear(): void {
-    register.clear();
+    this.registry.clear();
   }
 
   getRegistry(): MetricsRegistry {
@@ -324,7 +446,7 @@ class MetricsServiceImpl implements MetricsService {
       getMetrics: () => this.getMetrics(),
       getContentType: () => this.getContentType(),
       clear: () => this.clear(),
-      register,
+      register: this.registry,
     };
   }
 
@@ -346,6 +468,37 @@ class MetricsServiceImpl implements MetricsService {
       clearInterval(this.systemMetricsInterval);
       delete this.systemMetricsInterval;
     }
+  }
+
+  getOrphanedMetricNames(): string[] {
+    // Nothing is orphaned when this application IS scraping the process-global registry.
+    if (this.registry === register) {
+      return [];
+    }
+
+    const mine = new Set(this.registry.getMetricsAsArray().map((metric) => metric.name));
+
+    return register.getMetricsAsArray()
+      .map((metric) => metric.name)
+      .filter((name) => !mine.has(name));
+  }
+
+  /** Whether the orphan notice has been given yet. Once per application, not once per scrape. */
+  shouldReportOrphans(): boolean {
+    if (this.orphansReported) {
+      return false;
+    }
+    this.orphansReported = true;
+
+    return true;
+  }
+
+  dispose(): void {
+    this.stopSystemMetricsCollection();
+    // Only this application's registry. The shared process collectors stay in the per-prefix
+    // cache and in any sibling application's registry — clearing those would blind a service
+    // that is still running.
+    this.registry.clear();
   }
 
   private collectSystemMetrics(): void {

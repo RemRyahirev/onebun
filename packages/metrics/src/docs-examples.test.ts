@@ -12,11 +12,14 @@ import {
   afterEach,
 } from 'bun:test';
 import { Effect } from 'effect';
-import { Counter } from 'prom-client';
+import { Counter, register as globalRegister } from 'prom-client';
+
 
 import type { MetricsService as MetricsServiceInterface } from './metrics.service';
 
 import { BaseService, Service } from '@onebun/core';
+
+import { createRequestsMetricsSink } from './requests-sink';
 
 import {
   Timed,
@@ -540,5 +543,68 @@ describe('decorators create the metric they record into', () => {
 
     expect(scrape).toContain('test_cache_hits_total');
     expect(scrape).not.toContain('\ncache_hits_total');
+  });
+});
+
+describe('One registry per application (docs/api/metrics.md)', () => {
+  /**
+   * @source docs:api/metrics.md#one-registry-per-application
+   */
+  it('puts an application back on the global registry when asked', async () => {
+    // From docs: a metric registered against prom-client's global `register` no longer appears
+    // in any application's /metrics — unless that application opted back onto it.
+    const external = new Counter({
+      name: 'docs_externally_registered_total',
+      help: 'registered against the global registry rather than through the service',
+      registers: [globalRegister],
+    });
+    external.inc();
+
+    const optedIn = Effect.runSync(createMetricsService({ registry: globalRegister, prefix: 'optedin_' }));
+    const isolated = Effect.runSync(createMetricsService({ prefix: 'isolated_' }));
+
+    expect(await optedIn.getMetrics()).toContain('docs_externally_registered_total');
+    expect(await isolated.getMetrics()).not.toContain('docs_externally_registered_total');
+
+    // And the framework says so once rather than serving a silently shorter body.
+    expect(isolated.getOrphanedMetricNames()).toContain('docs_externally_registered_total');
+    expect(optedIn.getOrphanedMetricNames()).toEqual([]);
+
+    optedIn.dispose();
+    isolated.dispose();
+    globalRegister.removeSingleMetric('docs_externally_registered_total');
+  });
+});
+
+describe('Outgoing HTTP calls (docs/api/metrics.md)', () => {
+  /**
+   * @source docs:api/metrics.md#outgoing-http-calls
+   */
+  it('records an outgoing call into its own family, labelled by host', async () => {
+    const service = Effect.runSync(createMetricsService({ prefix: 'docsout_' }));
+
+    // From docs: hand the client a sink built from THIS application's metrics service.
+    const sink = createRequestsMetricsSink(service);
+
+    sink({
+      method: 'GET',
+      url: 'https://api.example.com/v1/things?page=2',
+      statusCode: 200,
+      duration: 120,
+      success: true,
+      retryCount: 0,
+    });
+
+    const scrape = await service.getMetrics();
+
+    expect(scrape).toContain('docsout_http_client_requests_total');
+    // The HOST, not the URL: a label is a dimension, and a URL with a path and a query string
+    // is unbounded.
+    expect(scrape).toContain('host="api.example.com"');
+    expect(scrape).not.toContain('/v1/things');
+    // And never the server's own family, which is what egress used to inflate.
+    expect(scrape).not.toContain('docsout_http_requests_total{');
+
+    service.dispose();
   });
 });

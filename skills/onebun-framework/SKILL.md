@@ -141,6 +141,20 @@ Multi-service mode methods: `getApplication(name)`, `getServiceUrl(name)`,
 (`getConfig`, `getPort`, etc.) throw in multi-service mode — reach them through the
 sub-application instead.
 
+**Metrics decorators follow the instance.** `@Timed()`, `@Counted()`, `@Gauged()` and
+`WithMetrics()` record into the application that BUILT the object the method runs on — the
+framework stamps every instance it constructs. A decorated method on a class the framework never
+built falls back to a process-wide slot owned by whichever service started last, so put it on a
+`@Service()`/`@Controller()` when attribution matters.
+
+**Metrics are per service.** Each application owns its own Prometheus registry, so a scrape of
+one service's `/metrics` returns that service's series with that service's `defaultLabels` and
+nothing else. `metrics.prefix` is a naming choice, not the isolation mechanism. Process-level
+series (CPU, memory, event loop) describe the process and so appear on every service's endpoint —
+aggregate them with `max`, not `sum`. A metric registered directly against prom-client's global
+`register` is no longer served by any application; build them with `this.metrics.createCounter()`,
+or pass `metrics: { registry: register }` to put one application back on the global registry.
+
 **`getApplication()` returns `OneBunApplication | undefined`** — it is a `Map.get` on the
 running-applications map, so it is `undefined` for an unknown name and before `start()` resolves.
 Always use optional chaining; `app.getApplication('users').getPort()` is a TS2532 error under
@@ -149,8 +163,21 @@ Always use optional chaining; `app.getApplication('users').getPort()` is a TS253
 <!-- typecheck: skip -->
 ```typescript
 app.getApplication('users')?.getPort();
-await app.getApplication('users')?.stop({ closeSharedRedis: false });
+await app.getApplication('users')?.stop({ signal: 'SIGTERM' });
 ```
+
+**An application releases no shared Redis hold.** Whoever acquires gives back — the cache in its
+`close()`, the queue adapter in its `disconnect()`, and your own code with
+`await SharedRedisProvider.release()` if it called `getClient()`. The connection closes when the
+last holder lets go. `stop({ closeSharedRedis })` is deprecated and ignored; a process that will
+not exit is reported at debug as `Shared Redis still held by N: <call sites>`.
+
+**One shared Redis configuration per process.** `SharedRedisProvider.configure()` refuses a second
+call naming a different `url`, `keyPrefix`, `reconnect` or `tls` — there is a single shared
+connection, so a second target cannot be honoured and used to be accepted silently, leaving two
+services on one database under one prefix. For a genuinely different target build a dedicated
+client (`SharedRedisProvider.createClient({ url })`, or the consumer's own options); in tests call
+`await SharedRedisProvider.reset()` between configurations.
 
 ## Environment Config
 
@@ -257,6 +284,14 @@ one per sub-application. Two applications in the same process each build their o
 silently reusing the first one's. The options a dynamic module is imported with are captured
 per application at import time.
 
+**Globality itself is still per process.** The instances are per application; the answer to "is
+this module ambient?" lives in one Set keyed by the module class. So two unnamed `forRoot()`
+calls that disagree — about `isGlobal`, or about what they configure — cannot both be honoured,
+and the framework refuses rather than letting the last one win: an application importing the
+contested module fails at `start()` with `OneBunConflictingRegistrationError` naming both calls.
+Give each configuration a token (`forRoot({ as: TOKEN })` + `forFeature(TOKEN)`) when they must
+coexist; in tests, call `resetRegistrations()` in `beforeEach`.
+
 **Class-based providers only.** An object entry — `{ provide: X, useValue: v }` — throws
 `OneBunInvalidProviderError` naming the module. Substitute implementations with
 `TestingModule.overrideProvider()` instead.
@@ -317,6 +352,10 @@ Key rules:
   Cost: such a service cannot be built by `createTestService` — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
+- `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
+  is held until the handlers are registered and then delivered, and the shutdown message goes out
+  before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the
+  adapter) is only usable from `onApplicationInit` onwards
 
 ## Controllers
 
@@ -615,7 +654,10 @@ bunx onebun-drizzle studio      # visual browser
 See `references/queues-and-nats.md` for the full queue system reference including all adapters,
 NATS/JetStream configuration, message guards, and scheduled jobs.
 
-Queue handlers are discovered only in `controllers` (not `providers`). The queue system is
+Queue handlers are discovered only in `controllers` (not `providers`). A class in `providers`
+carrying queue decorators is reported at startup — one warning naming the class and every
+decorated method — instead of being skipped in silence, and when those are the only handlers the
+disabled-queue debug line says so rather than claiming none were found. The queue system is
 enabled when **any** of these holds:
 
 1. a controller carries a queue decorator (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`), or
@@ -887,6 +929,10 @@ at least in the areas you're modifying.
 | `autoMigrate: true` in DrizzleModule.forRoot() | It's the default — omit it |
 | Importing a module just for one service | Use `@Global()` on shared modules |
 | Using `@Inject()` tokens | OneBun resolves by type — just use constructor params |
+| Expecting one gateway's `broadcast()` to reach another gateway's clients | A connection is bound to ONE gateway at upgrade: its handlers are the only ones that run, and `broadcast`/`emit`/`clients`/`emitToRoom*`/`disconnect*` cover only the connections THAT gateway admitted, in that application. Two gateways sharing a path are told apart by `namespace`, which the client selects with `?namespace=<name>` |
+| Expecting `@WebSocketGateway({ path: '/chat' })` to serve `/chatterbox` | A path prefix ends on a segment boundary: `/chat` serves `/chat` and `/chat/room1`, not `/chatterbox`. The most specific declared path wins, not the first registered. `/` — the default when `path` is omitted — still covers everything |
+| Expecting a Socket.IO client's `@OnConnect` at upgrade | It runs when the client sends its CONNECT packet (`40` / `40/admin,`), because that packet is where the namespace — and therefore the gateway — is named. A Socket.IO client that never sends one gets no `@OnConnect` |
+| Assuming `websocket.storage` is decoration | `{ type: 'redis', redis: { url, prefix } }` really does put clients and rooms in Redis and share them across instances, and makes Redis a startup dependency — an unreachable one fails `start()` |
 | Wrapping every return in `this.success()` | Return plain objects — auto-wrapped to `{ success: true, result }` |
 | Using `this.error()` for error responses | `throw new HttpException(statusCode, message)` — caught by exception filter |
 | Manual `.env` parsing | Use `envSchema` with `Env.string/number/boolean` |

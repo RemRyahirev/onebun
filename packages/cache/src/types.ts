@@ -333,6 +333,7 @@ export interface CacheModuleOptions {
    * Whether the module should be global (available in all modules without explicit import).
    * When true (default), CacheService is available everywhere after a single import in root module.
    * When false, each module that needs CacheService must explicitly import CacheModule.
+   * Ignored when `as` is given: a named registration is never global.
    * @defaultValue true
    */
   isGlobal?: boolean;
@@ -342,7 +343,10 @@ export interface CacheModuleOptions {
    *
    * Two caches in one application: each `forRoot({ as })` keeps its own options and its own
    * `CacheService`, and a feature module picks one by importing `forFeature(token)`. A named
-   * registration is never global — combining `as` with `isGlobal: true` throws.
+   * registration is never global — combining `as` with `isGlobal: true` throws, and
+   * `isGlobal: false` alongside `as` is accepted and does nothing, because it asks for what a
+   * named registration already guarantees. Neither spelling changes `CacheModule`'s own
+   * globality: only an unnamed `forRoot()` decides that.
    *
    * @see docs:api/cache.md
    */

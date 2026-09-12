@@ -184,6 +184,77 @@ describe('QueueScheduler', () => {
    * Measured on the old code, 50 ms period and a 120 ms body over 400 ms: 8 invocations, 3 bodies
    * at once, a duplicate published every tick; leading runs start=1, resume=2, update=3.
    */
+  describe('two jobs claiming one name', () => {
+    // Job names are one flat map keyed by the method name unless `name` is given, so two
+    // controllers with a `cleanup()` method collided. The second registration replaced the first
+    // in the map and armed a timer on its own object — leaving the displaced job's timer live and
+    // unreachable, so neither stop() nor removeJob() could ever clear it.
+    it('should refuse a second job under a name already taken', () => {
+      scheduler.addCronJob('cleanup', '0 0 * * *', 'first.cleanup');
+
+      expect(() => scheduler.addCronJob('cleanup', '0 0 * * *', 'second.cleanup'))
+        .toThrow('cleanup');
+      expect(scheduler.getJob('cleanup')!.pattern).toBe('first.cleanup');
+    });
+
+    it('should name both patterns when a name collides', () => {
+      scheduler.addIntervalJob('tick', 50, 'first.tick');
+
+      expect(() => scheduler.addIntervalJob('tick', 50, 'second.tick'))
+        .toThrow('second.tick');
+    });
+
+    it('should leave no timer running after stop when a name was reused', async () => {
+      const published: string[] = [];
+      await adapter.subscribe('*.tick', async (message) => {
+        published.push(message.pattern);
+      });
+
+      scheduler.addIntervalJob('tick', 50, 'first.tick', () => ({}));
+      expect(() => scheduler.addIntervalJob('tick', 50, 'second.tick', () => ({}))).toThrow();
+
+      scheduler.start();
+      advanceTime(200);
+      await flush();
+
+      const beforeStop = published.length;
+      expect(beforeStop).toBeGreaterThan(0);
+
+      scheduler.stop();
+      advanceTime(500);
+      await flush();
+
+      // Nothing survives the stop: the displaced job used to keep publishing forever.
+      expect(published.length).toBe(beforeStop);
+    });
+  });
+
+  describe('a schedule with no reachable run', () => {
+    // '0 0 30 2 *' is February 30th: it parses, and it can never match. Registering it used to
+    // succeed and produce a job that was listed, unpaused, and permanently inert.
+    it('should refuse to register a cron that can never run', () => {
+      expect(() => scheduler.addCronJob('feb30', '0 0 30 2 *', 'never.fires'))
+        .toThrow('feb30');
+      expect(() => scheduler.addCronJob('feb30', '0 0 30 2 *', 'never.fires'))
+        .toThrow('0 0 30 2 *');
+      expect(scheduler.hasJob('feb30')).toBe(false);
+    });
+
+    it('should register a reachable cron without complaint', () => {
+      expect(() => scheduler.addCronJob('daily', '0 0 * * *', 'runs.daily')).not.toThrow();
+      expect(scheduler.hasJob('daily')).toBe(true);
+    });
+
+    it('should refuse to update a job onto a schedule that can never run', () => {
+      scheduler.addCronJob('daily', '0 0 * * *', 'runs.daily');
+
+      expect(() => scheduler.updateJob({ type: 'cron', name: 'daily', expression: '0 0 30 2 *' }))
+        .toThrow('daily');
+      // The job keeps the schedule it had, rather than being left with none.
+      expect(scheduler.getJob('daily')!.schedule.cron).toBe('0 0 * * *');
+    });
+  });
+
   describe('interval overlap and the leading run', () => {
     it('does not enter a body that outlives its period a second time', async () => {
       let entered = 0;

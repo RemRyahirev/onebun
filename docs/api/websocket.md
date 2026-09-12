@@ -226,7 +226,7 @@ await client.connect();
 
 - Engine.IO v4, Socket.IO v4
 - WebSocket and HTTP long-polling transports
-- Namespaces, acknowledgements
+- Acknowledgements
 - Binary data (base64 encoded)
 
 ## WebSocketGateway decorator
@@ -243,8 +243,105 @@ export class ChatGateway extends BaseWebSocketGateway {
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `path` | `string` | `'/'` | WebSocket connection path |
-| `namespace` | `string` | - | Namespace for isolating gateways |
+| `namespace` | `string` | - | Distinguishes gateways that share a path. See [Which gateway a connection belongs to](#which-gateway-a-connection-belongs-to) |
 | `authenticate` | `(ctx) => WsAuthResult \| Promise<WsAuthResult>` | - | Authenticates the client during the upgrade. See below |
+
+### Which gateway serves a path
+
+An upgrade goes to the gateway whose declared `path` covers the request most specifically:
+
+1. an exact match on the path (and on `?namespace=`, when one is stated);
+2. otherwise the LONGEST declared path the request lives under — `/chat/admin` beats `/chat` for
+   `/chat/admin/audit`;
+3. otherwise 404.
+
+"Lives under" means the request is the declared path or continues it at a segment boundary.
+`/chat` serves `/chat` and `/chat/room1`, and does NOT serve `/chatterbox`.
+
+The default path — `@WebSocketGateway()` with no options — is `/`, and `/` covers every path. An
+application that declares no path keeps accepting clients on whatever URL they connect to.
+
+Two gateways declared at the same path are told apart by `namespace`; a client that states none
+is bound to the first and a warning names the gateway that took it.
+
+### Which gateway a connection belongs to
+
+A connection is bound to exactly ONE gateway, decided at upgrade from the URL it connected to.
+That gateway's `@OnConnect`, `@OnMessage`, `@OnJoinRoom`, `@OnLeaveRoom` and `@OnDisconnect`
+handlers are the only ones that run for it, and it appears only in that gateway's `clients`.
+
+Everything a gateway sends covers the connections IT admitted: `broadcast()`, `emit()`,
+`emitToRoom()`/`emitToRooms()`/`emitToRoomPattern()`, `disconnectClient()`, `disconnectAll()`.
+`emit()`, `joinRoom()`, `leaveRoom()` and `disconnectClient()` do nothing for a client another
+gateway owns. The scope is also per-application: two applications in one process do not see
+each other's connections.
+
+Everything a gateway READS is scoped the same way. `clients`, `rooms`, `getClient()`,
+`getRoom()`, `getClientsByRoom()` and `getRoomsByPattern()` answer only about connections this
+gateway admitted: a room only another gateway ever touched does not exist as far as this one is
+concerned, and a room with members on both sides lists only its own. Room storage is shared by
+every gateway in the application, so this is a filter rather than a partition — two gateways may
+use the same room name without meeting.
+
+With the Redis storage adapter, a remote event reaches the gateway that published it and no
+other: the published payload carries the publishing gateway's key, exactly as a stored client
+record does.
+
+A payload or a record that carries NO key — written by an instance running a build from before
+the key existed — is accepted only where it cannot be ambiguous: an application that registered
+exactly one gateway. There is nothing for it to be confused with there, so a rolling deploy keeps
+working. With more than one gateway it is refused and the receiving gateway says so once:
+delivering it would reach clients of a gateway that did not publish it, which is the thing the
+key exists to prevent. This is the same rule the upgrade path already applies — a connection
+whose gateway cannot be established is refused rather than guessed at.
+
+For a room fan-out through Bun's native pub/sub — one call, fan-out in the runtime rather than
+a send per socket — use `publishToRoom(room, event, data)`. It addresses a topic scoped to this
+gateway, so a room name used by two gateways does not collide.
+
+::: warning
+`getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are a process-wide
+namespace and sockets are subscribed to the raw room name, so a message published that way
+reaches any socket subscribed to that topic regardless of which gateway admitted it. That is
+unchanged on purpose — existing `publish('lobby', …)` calls keep working exactly as they did.
+Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
+:::
+
+`namespace` distinguishes two gateways that would otherwise share a path. A client selects one by
+connecting with `?namespace=<name>`; OneBun's own `WsClient` sends that automatically when its
+`namespace` option is set. A namespace that matches no gateway is ignored and resolution falls
+back to the path — it never refuses the connection. Isolation does not depend on this option:
+the binding above holds either way.
+
+With the Socket.IO protocol enabled, every client arrives on one path, so the URL cannot tell two
+gateways apart. Two things can: `?namespace=` in the query, and the `nsp` of the CONNECT packet —
+what `io('/admin')` sends and puts nowhere else.
+
+The CONNECT packet decides, and `@OnConnect` runs when it arrives rather than at upgrade:
+
+1. at upgrade the connection is bound provisionally — by `?namespace=`, or to the sole registered
+   gateway, or to the first with a warning;
+2. the Engine.IO handshake goes out and the client answers with `40` or `40/admin,`;
+3. `/admin` binds the gateway declaring `namespace: 'admin'`. A bare `40` is the default
+   namespace: it names no gateway and leaves the provisional binding alone. A namespace matching
+   no gateway is logged and likewise leaves it alone — a stated namespace narrows the choice, it
+   never refuses the connection;
+4. `@OnConnect` runs on the gateway that was chosen.
+
+::: warning
+A Socket.IO client that never sends a CONNECT packet never gets `@OnConnect`. OneBun's own
+`WsClient` sends it as soon as the handshake arrives, carrying its `namespace` option.
+
+Switching to a gateway that declares an `authenticate` hook is refused with a Socket.IO
+`connect_error`: the hook gates the upgrade, and by CONNECT time there is no upgrade request left
+to run it against. Reach such a gateway with `?namespace=` so the hook runs where it belongs. The
+transport stays open, so the client may name another namespace.
+:::
+
+Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
+gateway's `authenticate` hook runs for it. It did not before: no gateway was resolved on the
+Socket.IO branch, so the hook was skipped. A hook that returns `false` will now refuse a
+Socket.IO connection that previously succeeded.
 
 ### Authentication
 
@@ -440,7 +537,48 @@ See [Interceptors](/api/interceptors) for full documentation.
 
 ## Storage adapters
 
-Default is in-memory. For Redis, set `websocket.storage: { type: 'redis', redis: { url, prefix } }` and use `createRedisWsStorage(redisClient)` when providing a custom storage to the handler.
+Clients and rooms live in memory by default — one process, state gone when it exits. Point
+`websocket.storage` at Redis and they are shared by every instance, which is also what turns on
+the pub/sub fan-out behind `broadcast()`, `emit()` and `emitToRoom()` across instances.
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  websocket: {
+    storage: {
+      type: 'redis',                       // 'memory' | 'redis'
+      redis: {
+        url: 'redis://localhost:6379',
+        prefix: 'ws:',                     // every key this application writes lives under it
+      },
+    },
+  },
+});
+```
+
+`prefix` is the application's whole WebSocket keyspace, so two applications on one Redis stay out
+of each other's way by giving it different values. `url` may be omitted when
+`SharedRedisProvider` is already configured — its URL is used, and the connection is still this
+application's own so that `prefix` applies.
+
+::: warning
+`type: 'redis'` makes Redis a startup dependency: a connection that cannot be opened fails
+`start()` rather than falling back to memory. Falling back is what the option did for its whole
+life before this — it was read by no code at all, so an application configured for Redis ran in
+memory and said nothing.
+:::
+
+Shutdown removes the clients THIS instance was serving. It does not clear the namespace, so a
+rolling deploy leaves the surviving instances' connections and rooms alone.
+
+An instance that does not get to run its shutdown path — a crash, an OOM kill, a lost node —
+leaves its clients behind. Each instance keeps a liveness key with a 30-second TTL, refreshed
+every 10 seconds, and records which clients it admitted; the next instance to take a connection
+removes the clients of any instance whose key is gone. So a crashed pod's ghosts disappear within
+about half a minute rather than counting towards `getClientCount()` and appearing in rooms
+forever.
+
+The liveness is per INSTANCE, not per client: native connections have no per-connection
+heartbeat, so a TTL on the client keys would evict live clients mid-session.
 
 ## WebSocket client options
 

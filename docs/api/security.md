@@ -29,6 +29,14 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
+**What the chain covers:** every response the application produces — controller routes, static
+files, and unmatched paths answered with a 404. A request that matches nothing consumes rate-limit
+budget, so `max` bounds request volume rather than volume on paths that happen to exist. Through
+0.6.0 the chain was merged into per-route handlers only, so a served SPA carried no CSP and an
+attacker hammering nonexistent paths was unmetered. Two things stay outside it on purpose: the CORS
+preflight short-circuit, which answers with CORS headers alone and must not be seen by rate limiting
+or auth, and a WebSocket upgrade, which hands the socket to Bun rather than producing a response.
+
 **CORS preflight:** answered BEFORE routing, so no `@Options()` route is needed on any path a
 browser preflights. The short-circuit lives at the top of the `Bun.serve` `fetch` fallback, ahead of
 the WebSocket/Socket.IO block — `isSocketIoPath` is method-agnostic, so a cross-origin
@@ -269,6 +277,8 @@ import { SharedRedisProvider } from '@onebun/core';
 SharedRedisProvider.configure({ url: 'redis://localhost:6379' });
 
 const redis = await SharedRedisProvider.getClient();
+// ...and on shutdown, give the hold back — nothing else will:
+// await SharedRedisProvider.release();
 
 const app = new OneBunApplication(AppModule, {
   middleware: [
@@ -281,8 +291,14 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-`getClient()` takes a lease on the shared connection — call `await SharedRedisProvider.release()`
-on shutdown to give it back.
+`getClient()` takes a hold on the shared connection — call `await SharedRedisProvider.release()`
+on shutdown to give it back. This is not optional: an application's `stop()` releases nothing, so a
+hold nobody gives back keeps the socket open and the process alive. The shutdown log names what
+still holds it.
+
+There is one shared connection per process and therefore one configuration: a second
+`configure()` with a different target throws rather than being quietly ignored. See
+[Shared Redis Connection](/api/cache#shared-redis-connection).
 
 ### Custom key generator
 

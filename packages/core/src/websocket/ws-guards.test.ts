@@ -223,9 +223,45 @@ describe('ws-guards', () => {
 
       expect(await guard.canActivate(context)).toBe(false);
     });
+
+    // Every leaf guard in this file narrows to the WS context first; the composites did not, so
+    // a child written against a socket threw instead of denying when handed another transport.
+    it('should deny a context from another transport instead of handing it to a child', async () => {
+      let childSaw = false;
+      const handWritten = {
+        canActivate(): boolean {
+          childSaw = true;
+
+          return true;
+        },
+      };
+      const guard = new WsAllGuards([handWritten as never]);
+
+      const result = await guard.canActivate({ getType: () => 'http' } as never);
+
+      expect(result).toBe(false);
+      expect(childSaw).toBe(false);
+    });
   });
 
   describe('WsAnyGuard', () => {
+    it('should deny a context from another transport instead of handing it to a child', async () => {
+      let childSaw = false;
+      const handWritten = {
+        canActivate(): boolean {
+          childSaw = true;
+
+          return true;
+        },
+      };
+      const guard = new WsAnyGuard([handWritten as never]);
+
+      const result = await guard.canActivate({ getType: () => 'http' } as never);
+
+      expect(result).toBe(false);
+      expect(childSaw).toBe(false);
+    });
+
     it('should pass when any guard passes', async () => {
       const guard = new WsAnyGuard([new WsPermissionGuard('admin'), new WsRoomGuard('vip')]);
 

@@ -495,10 +495,12 @@ export function getMessageGuards(
   const messageGuards: Array<MessageGuard | MessageGuardConstructor> =
     getMetadata(QUEUE_METADATA.GUARDS, target, propertyKey) || [];
 
-  return [
+  // Deduplicated by identity, like every other guard merge: a guard listed under both
+  // `@UseGuards` and `@UseMessageGuards` on one handler runs once per message, not twice.
+  return [...new Set([
     ...(shared as unknown as Array<MessageGuard | MessageGuardConstructor>),
     ...messageGuards,
-  ];
+  ])];
 }
 
 /**
@@ -520,6 +522,24 @@ export function getLifecycleHandlers(
   event: keyof typeof QUEUE_METADATA,
 ): LifecycleMetadata[] {
   return getMetadata(QUEUE_METADATA[event], target) || [];
+}
+
+/**
+ * Names of the methods carrying queue decorators on a class, in declaration order.
+ *
+ * For diagnostics: a class whose handlers will never run has to be reported by NAME, method
+ * included — "this class has queue decorators somewhere" is not something a reader can act on.
+ * Duplicates are collapsed, since one method can carry several decorators.
+ */
+export function getQueueHandlerNames(target: object): string[] {
+  const entries: Array<{ propertyKey: string | symbol }> = [
+    ...getSubscribeMetadata(target),
+    ...getCronMetadata(target),
+    ...getIntervalMetadata(target),
+    ...getTimeoutMetadata(target),
+  ];
+
+  return Array.from(new Set(entries.map((entry) => String(entry.propertyKey))));
 }
 
 /**

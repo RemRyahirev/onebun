@@ -5522,6 +5522,11 @@ async function createWsGatewayHarness(gatewayClass: Function, instance: BaseWebS
         auth: null,
         metadata: {},
         protocol: 'native',
+        // The key the handler gave this gateway at registration — which is what `handleOpen`
+        // stamps onto every real connection. Without it the peer is a record no gateway owns,
+        // and the fenced readers only keep showing it because this harness happens to register
+        // a single gateway.
+        gatewayKey: (instance as unknown as { gatewayKey?: string }).gatewayKey,
       };
 
       await storage.addClient(peer);
@@ -6346,7 +6351,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
     /**
      * @source docs:api/websocket.md#storage-adapters
      */
-    it('should point the shared Redis connection at the configured url, lazily', () => {
+    it('should point the shared Redis connection at the configured url, lazily', async () => {
       // The provider is process-global, so put back whatever this process already had.
       const saved = SharedRedisProvider.getOptions();
 
@@ -6377,8 +6382,13 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
         // is covered by the integration suites, not here.)
         expect(shared.isConnected()).toBe(false);
       } finally {
+        // Restoring ONLY when something was saved left this file's fake target in force for
+        // every later test FILE in the process — which is how an unrelated suite ended up
+        // refused when it configured its own container. Nothing saved means nothing configured.
         if (saved) {
           SharedRedisProvider.configure(saved);
+        } else {
+          await SharedRedisProvider.reset();
         }
       }
     });
@@ -6613,6 +6623,9 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
       // The block survives onto the application; on start() it is what the WebSocket handler
       // is built from (application.ts: `new WsHandler(this.logger, this.options.websocket)`).
+      // `storage` is asserted for its EFFECT in ws-storage-option.test.ts — surviving onto the
+      // options object was all this used to check, and for `storage` that was the whole of what
+      // it did: nothing read it, so an application configured for Redis ran in memory.
       expect((app as unknown as { options: { websocket?: typeof websocket } }).options.websocket)
         .toEqual(websocket);
 
@@ -7696,6 +7709,58 @@ describe('@Req() with OneBunRequest (docs/api/decorators.md)', () => {
   });
 
   /**
+   * The section's claim that an UNDECORATED parameter is not injected, and that the framework
+   * says so at startup rather than leaving the difference to be discovered.
+   *
+   * @source docs:api/decorators.md#req
+   */
+  it('should report a handler parameter that carries no param decorator', async () => {
+    @Controller('/api')
+    class UndecoratedApiController extends BaseController {
+      @Get('/raw')
+      async handleRaw(@Query('q') _q: string, plain: unknown) {
+        return { plain: typeof plain };
+      }
+    }
+
+    @Module({ controllers: [UndecoratedApiController] })
+    class UndecoratedReqModule {}
+
+    const warnings: string[] = [];
+    const { createMockSyncLogger } = await import('./testing/test-utils');
+    const app = new OneBunApplication(UndecoratedReqModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    const capturingLogger = {
+      ...createMockSyncLogger(),
+      warn: (message: string) => warnings.push(message),
+      child: () => capturingLogger,
+    };
+    (app as unknown as { logger: unknown }).logger = capturingLogger;
+
+    await app.start();
+
+    try {
+      const reported = warnings.find((line) => line.includes('UndecoratedApiController.handleRaw'));
+
+      expect(reported).toBeDefined();
+      expect(reported).toContain('parameter(s) 1');
+
+      // And the undecorated parameter really is undefined on this route.
+      const response = await fetch(`${app.getHttpUrl()}/api/raw?q=hi`);
+
+      expect(await response.json()).toEqual({ success: true, result: { plain: 'undefined' } });
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
    * @source docs:api/decorators.md#req
    */
   it('should define handler accessing cookies via req.cookies', async () => {
@@ -7897,6 +7962,46 @@ describe('Custom Response Headers (docs/api/controllers.md)', () => {
       expect(response.headers.get('content-type')).toBe('application/json');
       // A hand-built Response also keeps its own body — no { success, result } envelope.
       expect(await response.json()).toEqual({ data: 'file content' });
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * The section says the client receives what the handler built. That used to hold only for a
+   * route with no decorated parameters — one `@Param` sent the response through a JSON round
+   * trip that rewrote the bytes.
+   *
+   * @source docs:api/controllers.md#custom-response-headers
+   */
+  it('should send a hand-built Response verbatim from a route that has a decorated parameter', async () => {
+    const exactBody = '{"big":12345678901234567890}';
+
+    @Controller('/api')
+    class PrecisionController extends BaseController {
+      @Get('/download/:id')
+      async download(@Param('id') _id: string) {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        return new Response(exactBody, { headers: { 'Content-Type': 'application/json' } });
+      }
+    }
+
+    @Module({ controllers: [PrecisionController] })
+    class PrecisionModule {}
+
+    const app = new OneBunApplication(PrecisionModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      loggerLayer: makeMockLoggerLayer(),
+    });
+    await app.start();
+
+    try {
+      const response = await fetch(`${app.getHttpUrl()}/api/download/1`);
+
+      // Round-tripped, the id read back as 12345678901234567000.
+      expect(await response.text()).toBe(exactBody);
     } finally {
       await app.stop();
     }

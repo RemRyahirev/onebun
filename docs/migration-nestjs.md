@@ -18,7 +18,7 @@ Here are specific reasons a NestJS team might benefit from switching.
 
 ### Performance you can verify
 
-OneBun is **~1.3–2.7× faster** than NestJS on production workloads (depending on stack) while performing **on par with Hono** on Bun. Benchmarks run in CI on every commit and are [published with full methodology](/benchmarks). Yes, OneBun is slower than Elysia (a lightweight Bun-native HTTP toolkit), but that is a different class of tool — no DI, no modules, no observability stack. The comparison that matters is against NestJS, and the gap is significant.
+OneBun is **~1.2–2.7× faster** than NestJS on production-like workloads while performing **on par with Hono** on Bun. How much faster depends entirely on which NestJS you compare against: the gap is widest against the canonical NestJS + TypeORM stack and narrows to ~1.1–1.4× against a hand-tuned NestJS + Drizzle app on the same Bun runtime. Benchmarks run in CI on every commit and are [published with full methodology](/benchmarks). Yes, OneBun is slower than Elysia (a lightweight Bun-native HTTP toolkit), but that is a different class of tool — no DI, no modules, no observability stack. The comparison that matters is against NestJS, and the gap is significant.
 
 ### Zero build step
 

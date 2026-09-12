@@ -705,21 +705,49 @@ describe('Envs API Documentation Examples', () => {
     });
 
     /**
-     * From the warning under "Standalone Usage": `TypedEnv.create` is keyed, not per-schema. A
-     * second call on the same key returns the first instance and discards schema AND options.
+     * From the warning under "Standalone Usage": without a key the cache is per (schema, options),
+     * so a second schema is a second instance rather than the first one handed back.
      *
      * @source docs:api/envs.md#standalone-usage
      */
-    it('should return the cached instance for a key and ignore the new schema', async () => {
+    it('should give a second schema its own instance when no key is passed', async () => {
       const first = TypedEnv.create(schemaA(), { loadDotEnv: false });
       await first.initialize();
 
       const second = TypedEnv.create(schemaB(), { loadDotEnv: false });
       await second.initialize();
 
+      expect(second as unknown).not.toBe(first as unknown);
+      expect(first.values as unknown).toEqual({ server: { port: 3000 } });
+      expect(second.values as unknown).toEqual({ database: { host: 'db.example.com' } });
+    });
+
+    /**
+     * From the same warning: the same schema and options return the same instance, so a repeated
+     * call costs nothing.
+     *
+     * @source docs:api/envs.md#standalone-usage
+     */
+    it('should reuse the instance for the same schema and options', () => {
+      const schema = schemaA();
+
+      const first = TypedEnv.create(schema, { loadDotEnv: false });
+      const second = TypedEnv.create(schema, { loadDotEnv: false });
+
       expect(second as unknown).toBe(first as unknown);
-      expect(second.values as unknown).toEqual({ server: { port: 3000 } });
-      expect(second.get('database.host')).toBeUndefined();
+    });
+
+    /**
+     * From the same warning: one key is one configuration — reusing it for a structurally
+     * different schema throws instead of returning the other configuration.
+     *
+     * @source docs:api/envs.md#standalone-usage
+     */
+    it('should throw when one key is reused for a different schema', () => {
+      TypedEnv.create(schemaA(), { loadDotEnv: false }, 'standalone');
+
+      expect(() => TypedEnv.create(schemaB(), { loadDotEnv: false }, 'standalone'))
+        .toThrow("TypedEnv key 'standalone' is already bound to a different schema");
     });
 
     /**

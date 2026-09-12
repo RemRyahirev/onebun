@@ -115,6 +115,16 @@ class OrderModule {}
 
 ::: warning
 Queue handlers are only discovered in classes registered in the `controllers` array of a `@Module`. Classes in `providers` will **not** be scanned for queue decorators.
+
+The framework says so at startup rather than leaving you to find out. A provider carrying queue decorators produces one warning per class, naming the class and every decorated method:
+
+```
+Queue decorators on "ReindexService" are ignored: handleReindex(). Handler discovery walks
+controllers only, and "ReindexService" is registered in a module's providers — move it into that
+module's controllers array to run them.
+```
+
+If those were the application's only handlers the queue does not start, and the debug line says which case it is — "the queue decorators in this application are on providers, which handler discovery does not walk" — rather than reporting that no handlers exist.
 :::
 
 ::: tip Scheduled-only Controllers
@@ -176,6 +186,8 @@ An application with **zero** queue decorators still gets a live queue as soon as
 - Queue enablement is resolved by `resolveQueueEnablement(queueOptions, hasQueueHandlers)` in `application/queue-enablement.ts`. Resolution order: `queue.enabled === false` is evaluated **first** and always wins — the queue stays disabled and the adapter is never constructed. Otherwise the queue is enabled when **any** of: `queue.enabled === true`, or any **controller** (not provider) passes `hasQueueDecorators()` which inspects `@Subscribe`, `@Cron`, `@Interval`, `@Timeout` metadata, or `hasExplicitQueueAdapterConfig()` finds an explicit `queue.adapter`, `queue.options` or `queue.redis`
 - When `queue.enabled === false` suppresses a configured backend, the decision reports `contradiction: true` and the caller logs exactly one warning (`QUEUE_DISABLED_WITH_ADAPTER_WARNING`); nothing throws
 - Enablement and selection are two functions in `packages/core/src/application/queue-enablement.ts`: `hasExplicitQueueAdapterConfig()` / `resolveQueueEnablement()` decide WHETHER, `resolveQueueAdapterType()` decides WHICH. The second is `queueOptions?.adapter ?? (queueOptions?.redis !== undefined ? 'redis' : 'memory')` — an explicit `adapter` wins, including `adapter: 'memory'` beside a `redis` block. Both are pure and unit-tested in `queue-enablement.test.ts`, which is what makes the redis leg provable without a live broker
+- A class in `providers` that passes `hasQueueDecorators()` is reported before the enablement decision, so the report is made whether or not a queue ends up running: one `queueHandlerOnProviderWarning(className, handlerNames)` per class, built from `getQueueHandlerNames()`. When those were the only handlers, the debug line for the disabled queue is `QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG` instead of the generic "no handlers detected" wording — the two are different situations and need different actions
+- Provider classes are collected recursively via `ModuleInstance.getProviderClasses?.()` (optional on the interface, so a module double in a test can omit it). It returns CLASSES only: a `{ provide, useValue }` entry has no constructor to read metadata from and is skipped
 - Controllers are collected recursively from the entire module tree via `getControllers()` (root + all child modules)
 - `initializeQueue(controllers)` is called during `app.start()` after `ensureModule().setup()` — it receives `getControllers()` result
 - Both `controllerClass` and `instance.constructor` are checked for queue decorators (defensive against `@Controller` wrapping edge cases)
@@ -189,7 +201,7 @@ An application with **zero** queue decorators still gets a live queue as soon as
 - `QueueScheduler.stop()` stays synchronous — it clears timers, which is instant — and `drain(timeoutMs = 30_000)` is the separate awaitable step. The bound matches the consumer side's `HANDLER_DRAIN_TIMEOUT_MS`, so both halves of one shutdown agree on how long "in flight" may last. A run that outlives the bound is reported by name through `setErrorHandler` BEFORE `drain()` resolves and is then abandoned: the application tears the logger down immediately after `stop()`, and on the deploy path calls `process.exit(0)`, so a report made any later is written to nothing. Anything that run publishes afterwards is rejected by a disconnected adapter
 - Debug logging emits per-controller diagnostics during handler registration (controller name, decorator detection result)
 - Dynamic job management: `addJob()`, `getJob()`, `getJobs()`, `hasJob()`, `pauseJob()`, `resumeJob()`, `removeJob()`, `updateJob()` on `QueueService` — all synchronous, delegate to `QueueScheduler`. `QueueScheduler.drain()` is the one exception and is not surfaced on `QueueService`: the application already awaits it inside `stop()`
-- Jobs created via decorators are also accessible through the dynamic API by their name (method name by default, overridable via `name` option)
+- Jobs created via decorators are also accessible through the dynamic API by their name (method name by default, overridable via `name` option). Names are one namespace for the whole application: two handlers resolving to the same name — two controllers each with a `cleanup()` method — fail at registration naming both patterns, rather than the second silently replacing the first
 
 **QueueApplicationOptions interface:**
 ```typescript
@@ -659,6 +671,18 @@ getHealthData() {
 }
 ```
 
+**An expression that can never match is rejected, not registered.** `'0 0 30 2 *'` — February 30th
+— parses cleanly and has no reachable run, so the job would sit in the schedule and never fire.
+Registration throws instead, naming the job and the expression, and the application does not start.
+The same applies to `updateJob()`, which leaves the job on its previous schedule rather than
+stripping it. A job that runs out of reachable runs while the application is live is reported
+through the scheduler's error handler, which the application logs as a warning.
+
+**Day-of-month and day-of-week are OR'd when both are restricted**, as crontab(5) specifies.
+`@Cron('0 0 0 1 * 1')` — the 5-field equivalent is `'0 0 1 * 1'` — fires on the 1st of every month
+**and** on every Monday, not only on a Monday that happens to be the 1st. When either field is `*`
+only the other one applies, which is the common case and behaves as you would expect.
+
 #### CronExpression Constants
 
 | Constant | Expression | Description |
@@ -814,6 +838,20 @@ Applied to a method, the decorator records itself on the class **prototype**, wh
 :::
 
 See [Interceptors](/api/interceptors) for full documentation.
+
+## Using QueueService from module lifecycle hooks
+
+Announcing an instance on boot and on shutdown is the ordinary reason to publish from a lifecycle hook, and both ends work:
+
+| From | `publish()` / `publishBatch()` | Everything else on `QueueService` |
+|---|---|---|
+| `onModuleInit` | accepted, sent once the queue is up | throws — the adapter and the handlers do not exist yet |
+| `onApplicationInit` | sent immediately | available |
+| request / message handlers | sent immediately | available |
+| `onModuleDestroy` | sent immediately — the transport is still open | scheduler and consumers already stopped |
+| `beforeApplicationDestroy` | sent immediately | available |
+
+A `publish()` issued from `onModuleInit` returns as soon as the message is accepted, not when it reaches the broker — the flush cannot run until your hook returns. The value it resolves to is the real message id, and it is delivered after the application's own `@Subscribe` handlers are registered, so a subscriber declared in the same application receives it. If the queue is not enabled at all, the call still throws the "Queue is not enabled" error naming the three ways to enable one.
 
 ## Lifecycle Decorators
 
@@ -1481,7 +1519,7 @@ The queue system is initialized during `app.start()`, after the module is set up
 The injected instance is a proxy. Any call to a method (e.g. `publish()`, `subscribe()`) will throw an error with a message explaining how to enable the queue (register a controller with queue decorators, set `queue.enabled: true` in application options, or configure a backend via `queue.adapter`, `queue.options` or `queue.redis` — the message also states that an explicit `queue.enabled: false` overrides a configured backend and keeps the queue disabled).
 
 **Getting QueueService without DI:**  
-Use `app.getQueueService()` when you do not have DI (e.g. bootstrap scripts or code that only has the app reference). It returns `QueueService | null` when the queue is not enabled.
+Use `app.getQueueService()` when you do not have DI (e.g. bootstrap scripts or code that only has the app reference). It returns a `QueueService` and **throws** when there is none — with the same explanation the injected proxy gives, and naming which of the three states applies: never enabled, still starting, already stopped. It used to answer `null`, so the natural next line was a `TypeError` on `queue.publish` and the diagnosis the framework already had never reached the caller. Wrap it in `try`/`catch` if a missing queue is a case your code handles rather than a misconfiguration.
 
 ### QueueService
 
@@ -1517,6 +1555,8 @@ class OrderService extends BaseService {
   }
 }
 ```
+
+**`delay` and `priority` together.** `delay` decides *when* a message becomes deliverable and `priority` decides *who goes first among those that are* — the two never trade places. On the in-memory adapter a message due in a minute is delivered then, whatever priority a message due in an hour carries; messages that come due in the same pass are delivered highest priority first. Until 0.6.0 the delayed buffer was sorted by priority and read from the head, so a far-future high-priority message parked itself in front and withheld every earlier-due one.
 
 **`messageId` and deduplication.** On JetStream the id is sent as the `Nats-Msg-Id` header, and the server refuses a second message carrying an id it has already seen inside the stream's deduplication window. That makes an outbox safe to replay: publishing the same logical message twice stores it once. The duplicate is dropped *server-side* and `publish()` still resolves normally — there is no error and no local signal, so do not treat a resolved publish as proof that a new message was stored.
 
@@ -1599,7 +1639,7 @@ queueService.updateJob({ type: 'interval', name: 'heartbeat', intervalMs: 10000 
 ```
 
 Jobs created via decorators (`@Cron`, `@Interval`, `@Timeout`) are also accessible
-through this API by their name (defaults to method name, overridable via `name` option in decorator).
+through this API by their name (defaults to method name, overridable via `name` option in decorator). The name has to be unique across the application, not just within a controller: registering a second job under a name already taken throws, naming both jobs and their patterns. It used to overwrite the entry — and for `@Interval`/`@Timeout` the replaced job's timer stayed armed and unreachable, so it kept publishing after `app.stop()`.
 
 <llm-only>
 
@@ -1632,7 +1672,8 @@ import {
 
 // Parse expression
 const schedule = parseCronExpression('0 30 9 * * 1-5');
-// { seconds: [0], minutes: [30], hours: [9], ... }
+// { seconds: [0], minutes: [30], hours: [9], ...,
+//   daysOfMonthRestricted: false, daysOfWeekRestricted: true }
 
 // Get next run time
 const nextRun = getNextRun(schedule);
@@ -1654,6 +1695,20 @@ if (isValidCronExpression('0 0 * * *')) {
 | Day of month | 1-31 | `*`, `*/N`, `N-M`, `N,M` |
 | Month | 1-12 | `*`, `*/N`, `N-M`, `N,M` |
 | Day of week | 0-6 (0=Sun) | `*`, `*/N`, `N-M`, `N,M` |
+
+The two day fields combine the way crontab(5) says they do, and it is not an AND:
+
+| Day of month | Day of week | A day matches when |
+|---|---|---|
+| restricted | restricted | **either** field matches — `0 0 1 * 1` is the 1st **or** any Monday |
+| restricted | `*` | day-of-month matches |
+| `*` | restricted | day-of-week matches |
+| `*` | `*` | always |
+
+"Restricted" means written as something other than a wildcard. A leading `*` is unrestricted even
+with a step, so `*/2` in the day-of-week field does not switch the pair into OR mode. The parsed
+`CronSchedule` carries this as `daysOfMonthRestricted` and `daysOfWeekRestricted`, because the
+value arrays cannot express it — `*` and `1-31` parse to the same 31 numbers.
 
 ## Pattern Matcher
 

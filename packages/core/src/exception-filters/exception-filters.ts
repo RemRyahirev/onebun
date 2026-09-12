@@ -39,6 +39,27 @@ import { HttpException } from './http-exception';
  * ```
  */
 export interface ExceptionFilter {
+  /**
+   * Answer the error, or DECLINE it by returning `undefined`.
+   *
+   * Declining hands the error to the next filter out — route, then controller, then global,
+   * then the framework's default filter. Decline with a return value rather than by rethrowing:
+   * a throw out of `catch()` is a bug in the filter, and it is reported as one and answered by
+   * the default filter, so the two must not look the same.
+   */
+  catch(
+    error: unknown,
+    context: HttpExecutionContext,
+  ): OneBunResponse | undefined | Promise<OneBunResponse | undefined>;
+}
+
+/**
+ * The framework's own last-resort filter, which always answers.
+ *
+ * Narrower than {@link ExceptionFilter} on purpose: it is the end of the chain, so it has
+ * nothing to decline to and callers can rely on getting a Response.
+ */
+export interface AnsweringExceptionFilter extends ExceptionFilter {
   catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Promise<OneBunResponse>;
 }
 
@@ -68,6 +89,24 @@ export interface ExceptionFilter {
  */
 export function createExceptionFilter(
   fn: (error: unknown, context: HttpExecutionContext) => OneBunResponse | Promise<OneBunResponse>,
+): AnsweringExceptionFilter;
+export function createExceptionFilter(
+  fn: (
+    error: unknown,
+    context: HttpExecutionContext,
+  ) => OneBunResponse | undefined | Promise<OneBunResponse | undefined>,
+): ExceptionFilter;
+
+/**
+ * Overloaded so a function that always answers produces a filter that always answers: the
+ * declining form widens the return type, and every caller that does not decline keeps the
+ * narrower one it had before declining existed.
+ */
+export function createExceptionFilter(
+  fn: (
+    error: unknown,
+    context: HttpExecutionContext,
+  ) => OneBunResponse | undefined | Promise<OneBunResponse | undefined>,
 ): ExceptionFilter {
   return { catch: fn };
 }
@@ -129,7 +168,7 @@ export const UNHANDLED_ERROR_MESSAGE = 'Internal Server Error';
  */
 export function createDefaultExceptionFilter(
   options: { httpEnvelope?: boolean; exposeErrorDetails?: boolean } = {},
-): ExceptionFilter {
+): AnsweringExceptionFilter {
   const { httpEnvelope = false, exposeErrorDetails = false } = options;
 
   return {
@@ -219,4 +258,4 @@ export function createDefaultExceptionFilter(
  *
  * @see docs:api/exception-filters.md
  */
-export const defaultExceptionFilter: ExceptionFilter = createDefaultExceptionFilter();
+export const defaultExceptionFilter: AnsweringExceptionFilter = createDefaultExceptionFilter();

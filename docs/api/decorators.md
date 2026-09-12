@@ -222,15 +222,21 @@ export class UserModule {}
 // Check if a module is global
 function isGlobalModule(target: Function): boolean;
 
-// Remove module from global registry (used internally)
+// Remove module from global registry (used internally by forRoot({ isGlobal: false }))
 function removeFromGlobalModules(target: Function): void;
 ```
 
+**The registry is process-wide.** It holds one entry per module CLASS with no application dimension, so `removeFromGlobalModules()` changes globality for every application in the process, not just yours. It is not the multi-database mechanism — `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` is.
+
+**Two unnamed `forRoot()` calls that disagree are refused.** When a process configures the same dynamic module twice without a token, and the two calls differ in `isGlobal` or in what they configure, an application that imports that module fails at `start()` with `OneBunConflictingRegistrationError`, naming both call sites. Before, the call evaluated last silently decided for everyone: an application that wrote `isGlobal: false` could boot with ambient injection anyway, and two applications naming different databases could both open one of them. The check is per application — one that never imports the contested module boots normally — and two calls that agree stay silent.
+
 <llm-only>
 **Technical details for AI agents:**
-- Global modules are stored in a Set and checked during module initialization
+- Global modules are stored in a Set on `globalThis` and checked during module initialization
 - Global services are registered in a separate registry and automatically injected into all modules
-- To opt out of global behavior dynamically, use `removeFromGlobalModules()` (e.g., for multi-DB scenarios)
+- The Set is keyed by module CLASS and shared by the entire process. `removeFromGlobalModules()` is how an UNNAMED `forRoot({ isGlobal: false })` implements itself — a named `forRoot({ as: TOKEN, isGlobal: false })` leaves the Set alone, because a named registration is never ambient anyway; calling it by hand opts out every application at once. For two configurations of one module use `forRoot({ as: TOKEN })` and `forFeature(TOKEN)`
+- The conflict is caught at `app.start()`, not at the second `forRoot()`: the defect is an application booting on an answer it did not declare, and a process that imports two module graphs without booting either is not that
+- The check compares what it can see. Options nested inside a class instance (a driver handle, a custom store) collapse to the class name, so two calls differing only there are not distinguished
 - The `@Global()` decorator only runs once at module definition time
 </llm-only>
 
@@ -553,6 +559,16 @@ Inject the raw request object. The type is `OneBunRequest` (alias for `BunReques
 
 - `.cookies` — a `CookieMap` for reading and setting cookies
 - `.params` — route parameters extracted by Bun's routes API
+
+**A handler parameter without a param decorator is not injected.** What it receives depends on how
+the rest of the handler is written: on a route whose handler has no decorated parameter and no
+response schema the framework calls the handler with the request, so the first parameter happens to
+be it; on any other route the framework fills only the decorated positions and an undecorated one is
+`undefined`. Adding a single `@Query()` therefore flips the meaning of every other parameter on that
+handler. The framework reports each undecorated parameter at startup, by controller, handler and
+0-based index — `Function.length` stops counting at the first defaulted or rest parameter, so a gap
+after one of those is not reported. Decorate the parameter with `@Req()` and the question does not
+arise.
 
 <!-- typecheck: skip -->
 ```typescript

@@ -18,7 +18,7 @@ import { ExceptionFilter, createExceptionFilter, UseFilters, HttpException } fro
 
 **Three ways to create a filter:**
 1. `createExceptionFilter(fn)` — inline function-based filter (simplest)
-2. Implement `ExceptionFilter` interface (class-based)
+2. Implement `ExceptionFilter` interface (class-based) — pass the CLASS to get constructor DI, or an instance to own its lifetime yourself
 3. Use the built-in `defaultExceptionFilter` (always active as the final fallback)
 
 **Applying filters:**
@@ -93,17 +93,26 @@ import type { ExceptionFilter, HttpExecutionContext } from '@onebun/core';
 import { ValidationError } from '@onebun/requests';
 
 class ValidationExceptionFilter implements ExceptionFilter {
-  catch(error: unknown, ctx: HttpExecutionContext): Response {
+  catch(error: unknown, ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
       return Response.json(
         { success: false, error: 'Validation failed', details: error.details },
         { status: 200 },
       );
     }
-    throw error; // pass to next filter
+
+    return undefined; // decline: the next filter outwards gets it
   }
 }
 ```
+
+**Which filter answers.** Filters are tried from the most specific outwards — route, then
+controller, then global, then the framework's default filter — and the first one to return a
+Response answers. Returning `undefined` declines, and the error moves one level out; that is the
+supported way to say "not mine". Do **not** rethrow to decline: a throw out of `catch()` is how a
+BUG in a filter looks, so it is reported with the filter's name and answered by the default filter
+without consulting the rest of the chain. Through 0.6.0 only the most specific filter ran at all,
+and this page told you to rethrow — which reached the default filter rather than the next one.
 
 ## HttpException
 
@@ -154,6 +163,40 @@ import { Controller, UseFilters } from '@onebun/core';
 @Controller('/users')
 class UserController extends BaseController { /* ... */ }
 ```
+
+### With dependency injection
+
+Pass the class rather than an instance and the framework builds it from the owning module's scope — one instance per class, shared by every route that names it. This is the only place in an application that sees every unhandled error, so it is usually the place that wants a reporter:
+
+```typescript
+import {
+  BaseService,
+  Controller,
+  Service,
+  UseFilters,
+  type HttpExecutionContext,
+} from '@onebun/core';
+
+@Service()
+class ReportingFilter extends BaseService {
+  constructor(private readonly reporter: ErrorReporter) {
+    super();
+  }
+
+  catch(error: unknown, context: HttpExecutionContext): Response {
+    this.reporter.report(error, context.getHandler());
+    this.logger.error('Unhandled error reported');
+
+    return Response.json({ success: false, error: 'Internal error' }, { status: 500 });
+  }
+}
+
+@UseFilters(ReportingFilter)
+@Controller('/users')
+class UserController extends BaseController { /* ... */ }
+```
+
+Constructor injection needs a class decorator — `@Service()` is the conventional one — because that is what makes TypeScript emit the parameter types. A dependency that cannot be resolved fails the application at startup, naming the filter, rather than at the first error it was supposed to handle. Extending `BaseService` additionally gives `this.logger` and `this.config`; a filter passed as an INSTANCE gets those too, but nothing injected through its constructor.
 
 ### On a single route
 

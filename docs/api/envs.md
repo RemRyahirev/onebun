@@ -282,23 +282,42 @@ await config.initialize();
 const port = config.get('server.port');
 ```
 
-::: warning `TypedEnv.create` is process-global and cached by key
-The full signature is `TypedEnv.create<T>(schema, options?, key = 'default')`. When an instance
-already exists for `key`, **it is returned as-is and both `schema` and `options` are ignored** — no
-error, no warning.
+::: warning `TypedEnv.create` is process-global and cached
+The full signature is `TypedEnv.create<T>(schema, options?, key?)`, and the cache is shared by the
+whole process. What identifies an instance depends on whether you name it.
 
-`OneBunApplication` creates its own configuration under that same default key, and whichever call
-runs first claims the slot — a standalone `TypedEnv.create(envSchema, options)` at module scope runs
-before the application is constructed. Measured: a standalone call followed by an application
-configured with `valueOverrides: { PORT: 4000 }` starts with `port` still `3000`, the override
-silently discarded. Passing a distinct key, as above, gives the application its own instance and the
-override applies.
+**Without `key`** — the instance is cached per **(schema object, options)** pair. Two different
+schemas get two different instances, and the same schema loaded with different `options` does too,
+which is what makes per-service `valueOverrides` work. Same schema and same options return the same
+instance, so a repeated call is free rather than a second parse.
+
+**With `key`** — the key alone identifies the instance, as in the example above. A second
+`create(schema, options, 'standalone')` returns the first one and **ignores `options`**. Reusing one
+key for a structurally different schema throws, rather than silently handing back the other
+configuration.
 
 `TypedEnv.clear()` drops every cached instance; call it between tests.
 
-This is not the same rule as `getConfig()`, which caches per **schema reference** (see
-[Pre-init Config Access](#pre-init-config-access)) — distinct schemas there get distinct instances.
+`getConfig()` keeps a separate cache, keyed per schema reference (see
+[Pre-init Config Access](#pre-init-config-access)). A standalone `getConfig(envSchema)` and an
+application configured with that same `envSchema` are therefore two instances parsing the same
+variables — cheap, and independent.
 :::
+
+<llm-only>
+
+**Technical details for AI agents:**
+- Default path: `WeakMap<schema, Map<optionsFingerprint, ConfigProxy>>` in
+  `packages/envs/src/typed-env.ts`. The fingerprint is a key-sorted JSON of `EnvLoadOptions`, so
+  option order never splits the cache
+- Named path: `Map<key, { schemaFingerprint, proxy }>`. On a hit with a different schema fingerprint
+  `create()` throws `TypedEnv key '<key>' is already bound to a different schema`
+- Through 0.6.0 both paths were one `Map` keyed by the literal string `'default'`: the second schema
+  in a process was silently discarded, and in multi-service every service after the first ran on the
+  first one's `valueOverrides`
+- `TypedEnv.clear()` clears the named map and replaces the `WeakMap`
+
+</llm-only>
 
 ## Accessing Configuration
 

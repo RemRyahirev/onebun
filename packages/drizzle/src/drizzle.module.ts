@@ -172,16 +172,29 @@ export class DrizzleModule {
     // A NAMED registration gets its own module identity and its own options, so a second
     // forRoot() no longer overwrites the first for everyone. An unnamed one keeps the base
     // module exactly as before.
-    const registration = registerModule(DrizzleModule, options, options.as, [DrizzleService]);
+    // The fifth argument is this call's ambient visibility. Only this module knows its own
+    // options shape, and globality is what a second unnamed forRoot() can silently overrule.
+    const registration = registerModule(
+      DrizzleModule, options, options.as, [DrizzleService],
+      options.as === undefined ? options.isGlobal !== false : undefined,
+    );
 
-    // If isGlobal is explicitly set to false, remove from global modules registry.
-    // The registry is process-wide, so the restore has to be symmetric: without the else
-    // branch one isGlobal:false call de-globalized DrizzleModule for every later forRoot()
-    // in the process, including ones that asked for the default.
-    if (options.isGlobal === false) {
-      removeFromGlobalModules(DrizzleModule);
-    } else if (options.as === undefined) {
-      Global()(DrizzleModule);
+    // Only an UNNAMED call decides the base module's globality. The registry is process-wide
+    // and keyed by the module class, so a named registration touching it would be answering
+    // for the unnamed one — measured, `forRoot({ as, isGlobal: false })` left
+    // isGlobalModule(DrizzleModule) false and an unrelated module's ambient DrizzleService
+    // unresolvable. A named registration is never global anyway: its minted class is
+    // deliberately not @Global(), so isGlobal: false alongside `as` asks for what already holds.
+    //
+    // Both arms stay here, symmetric on purpose: without the else, one isGlobal:false call
+    // de-globalized DrizzleModule for every later unnamed forRoot() in the process, including
+    // ones that asked for the default.
+    if (options.as === undefined) {
+      if (options.isGlobal === false) {
+        removeFromGlobalModules(DrizzleModule);
+      } else {
+        Global()(DrizzleModule);
+      }
     }
 
     return registration as typeof DrizzleModule;

@@ -94,6 +94,56 @@ describe('RedisClient against a real Redis', () => {
     }, CONTAINER_TEST_TIMEOUT_MS);
   });
 
+  describe('scan()', () => {
+    it('returns every match across pages, even when most pages come back empty', async () => {
+      // The hazard this is built around: a SCAN page can be EMPTY while the cursor is still
+      // non-zero. A loop that stops on an empty page returns a fraction of the matches — with a
+      // small COUNT against mostly-noise keys, that is most pages.
+      client = new RedisClient({ url: redis.url, keyPrefix: 'scan-test:' });
+      await client.connect();
+
+      const noise = 3000;
+      const matches = 40;
+      for (let at = 0; at < noise; at += 1) {
+        await client.set(`noise:${at}`, 'x');
+      }
+      for (let at = 0; at < matches; at += 1) {
+        await client.set(`wanted:${at}`, 'x');
+      }
+
+      const found = await client.scan('wanted:*', 10);
+
+      expect(found).toHaveLength(matches);
+      // Prefix stripped, exactly as `keys()` strips it — the callers use the result as a key
+      // name and would otherwise get `scan-test:wanted:0` back.
+      expect(found).toContain('wanted:0');
+      expect(found.every((key) => !key.startsWith('scan-test:'))).toBe(true);
+      // SCAN may hand the same key back twice; the result is a set, not a stream.
+      expect(new Set(found).size).toBe(found.length);
+
+      await client.unlink(...found, ...Array.from({ length: noise }, (_, at) => `noise:${at}`));
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('sees only its own namespace', async () => {
+      const mine = new RedisClient({ url: redis.url, keyPrefix: 'scan-mine:' });
+      await mine.connect();
+      const theirs = new RedisClient({ url: redis.url, keyPrefix: 'scan-theirs:' });
+      await theirs.connect();
+
+      await mine.set('shared-name', 'a');
+      await theirs.set('shared-name', 'b');
+
+      expect(await mine.scan('shared-*')).toEqual(['shared-name']);
+      expect(await theirs.scan('shared-*')).toEqual(['shared-name']);
+      expect(await mine.get('shared-name')).toBe('a');
+
+      await mine.unlink('shared-name');
+      await theirs.unlink('shared-name');
+      await theirs.disconnect();
+      client = mine;
+    }, CONTAINER_TEST_TIMEOUT_MS);
+  });
+
   describe('typed list and sorted-set methods', () => {
     it('prefixes keys, so two namespaces do not collide', async () => {
       const key = nextKey();

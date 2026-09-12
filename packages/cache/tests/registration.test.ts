@@ -8,6 +8,7 @@
 
 import {
   afterEach,
+  beforeEach,
   describe,
   expect,
   test,
@@ -15,8 +16,11 @@ import {
 
 import {
   BaseService,
+  Global as GlobalDecorator,
+  isGlobalModule,
   Module,
   OneBunApplication,
+  removeFromGlobalModules,
   resetRegistrations,
   Service,
 } from '@onebun/core';
@@ -163,5 +167,127 @@ describe('named cache registrations', () => {
     } finally {
       await app.stop();
     }
+  });
+});
+
+/**
+ * `isGlobal` alongside `as`.
+ *
+ * A named registration is never global — its minted class is deliberately not `@Global()` — so
+ * `{ as, isGlobal: true }` asks for the impossible and throws. `{ as, isGlobal: false }` asks for
+ * what already holds, and used to be granted by running `removeFromGlobalModules(CacheModule)`
+ * against the process-wide registry: it answered for the UNNAMED registration, in every
+ * application in the process. Measured, `isGlobalModule(CacheModule)` went true -> false across a
+ * named call, and a module that injected `CacheService` ambiently — importing nothing, having
+ * nothing to do with the token — failed to boot.
+ */
+describe('isGlobal alongside a registration token', () => {
+  let wasGlobal: boolean;
+
+  beforeEach(() => {
+    resetRegistrations();
+    wasGlobal = isGlobalModule(CacheModule);
+  });
+
+  afterEach(() => {
+    resetRegistrations();
+    CacheModule.clearOptions();
+    // Leave the process-wide registry as this file found it: these cases read and write it.
+    if (wasGlobal) {
+      GlobalDecorator()(CacheModule);
+    } else {
+      removeFromGlobalModules(CacheModule);
+    }
+  });
+
+  test('a named registration does not change the base module globality', () => {
+    CacheModule.forRoot({ type: CacheType.MEMORY });
+    const before = isGlobalModule(CacheModule);
+
+    CacheModule.forRoot({ type: CacheType.MEMORY, as: FRAGMENTS, isGlobal: false });
+
+    // Asserted against what it WAS, not against `true` — the registry is process-wide and this
+    // test says nothing about what some other file left in it.
+    expect(isGlobalModule(CacheModule)).toBe(before);
+  });
+
+  test('an unrelated module still resolves the service ambiently', async () => {
+    @Service()
+    class ReportService extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    // Imports nothing. It has no relationship to the token at all — which is what made the
+    // pre-fix failure so misleading: the error named THIS module.
+    @Module({ providers: [ReportService], exports: [ReportService] })
+    class ReportModule {}
+
+    @Module({
+      imports: [
+        CacheModule.forRoot({ type: CacheType.MEMORY }),
+        CacheModule.forRoot({ type: CacheType.MEMORY, as: FRAGMENTS, isGlobal: false }),
+        ReportModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      // Pre-fix: DependencyResolutionError, "Could not resolve dependency CacheService for
+      // service ReportService".
+      await app.start();
+
+      expect(app.getService(ReportService).cache).toBeInstanceOf(CacheService);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('a named registration alone still does not make the service ambient', async () => {
+    removeFromGlobalModules(CacheModule);
+
+    @Service()
+    class LonelyService extends BaseService {
+      constructor(public cache: CacheService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [LonelyService], exports: [LonelyService] })
+    class LonelyModule {}
+
+    @Module({
+      imports: [
+        CacheModule.forRoot({ type: CacheType.MEMORY, as: SESSIONS, isGlobal: false }),
+        LonelyModule,
+      ],
+    })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    try {
+      // The counter-direction: deleting the registry write must not make a NAMED registration
+      // ambient. With no unnamed forRoot() anywhere, nothing reaches a module that imports nothing.
+      await expect(app.start()).rejects.toThrow(/Could not resolve dependency CacheService/);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  test('still throws for the combination that asks for the impossible', () => {
+    expect(() => CacheModule.forRoot({ type: CacheType.MEMORY, as: SESSIONS, isGlobal: true }))
+      .toThrow(/never global/);
   });
 });

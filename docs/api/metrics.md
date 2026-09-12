@@ -68,8 +68,89 @@ interface MetricsOptions {
 
   /** HTTP request duration histogram buckets */
   httpDurationBuckets?: number[];
+
+  /** The Prometheus registry this application writes to and scrapes (default: its own) */
+  registry?: Registry;
 }
 ```
+
+### One registry per application
+
+Each application owns its own Prometheus `Registry`. Two applications in one process — which is
+what multi-service mode is — no longer collide on metric names and no longer serve each other's
+series: a scrape of one service returns that service's metrics, stamped with that service's
+`defaultLabels`.
+
+Before, everything went into prom-client's process-global `register`. With the default prefix the
+second application threw on a duplicate metric name, its metrics service was never built, and its
+`/metrics` answered 404 — while the first application's series had already been restamped with
+the second one's labels. With a distinct `prefix` per service, as this page recommends for
+multi-service, there was no error and both endpoints served everything, all labelled with
+whichever service started last.
+
+Two consequences worth knowing:
+
+- **Process-level series are replicated per service.** `process_cpu_*`, memory and event-loop
+  metrics describe the process, and every service in it now exposes them. Summing across targets
+  double-counts them; aggregate with `max` or scrape one service for process-level data.
+- **`register` is no longer what an application scrapes.** A metric built as
+  `new Counter({ ..., registers: [register] })` still registers, but never appears in any
+  `/metrics` body. The framework names such metrics once, on the first scrape, in a WARN. Reach
+  the application's registry with `metricsService.getRegistry().register`, or opt an application
+  back onto the global one:
+
+```typescript
+import { register } from '@onebun/metrics';
+
+const app = new OneBunApplication(AppModule, {
+  metrics: { registry: register },
+});
+```
+
+Metrics created through `this.metrics` in a service or controller, and through
+`metricsService.createCounter()` and friends, always land in the owning application's registry —
+nothing to change there.
+
+**Decorators record into the application that built the instance.** A method decorator has no
+application at decoration time, but it has `this` at call time, and the framework stamps every
+instance it builds with the scope of the application that built it. `@Timed()`, `@Counted()`,
+`@Gauged()` and `WithMetrics()` read that stamp, falling back to the process-wide slot for an
+instance the framework did not build — a plain class, a static method, a detached function
+reference. In a single-application process the two are the same service.
+
+::: warning
+A decorated method on a class the framework never constructed still resolves the process-wide
+slot, which in a multi-service process belongs to whichever service started last. If the
+attribution matters, put the method on a `@Service()` or `@Controller()` the application builds,
+or use `this.metrics` directly.
+
+:::
+
+### Outgoing HTTP calls
+
+`createHttpClient` is a free function: it has no application, so it cannot work out which
+registry to record into. Hand it one:
+
+```typescript
+import { createHttpClient } from '@onebun/requests';
+import { createRequestsMetricsSink } from '@onebun/metrics';
+
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  metricsSink: createRequestsMetricsSink(metricsService),
+});
+```
+
+Calls land in `<prefix>http_client_requests_total` and
+`<prefix>http_client_request_duration_seconds`, labelled `method`, `host` and `status_code`.
+Without a sink nothing is recorded — `metrics: true` alone is not enough.
+
+Two things changed here and both were deliberate. Outgoing calls used to be written into the
+SERVER's own `http_requests_total` with `controller="requests-client"`, so a service's request
+rate counted the calls it made as well as the ones it served; they now have their own family.
+And the route label used to be the full URL — measured,
+`route="http://127.0.0.1:35379/alpha/ping"` — which mints a fresh series per path, per query
+string and per ephemeral port; the label is the host.
 
 ## Built-in Metrics
 

@@ -96,10 +96,10 @@ class AdminController extends BaseController {
 
 The same `@UseGuards` works on a `@WebSocketGateway` and on a queue consumer, and merges with the
 transport-specific `@UseWsGuards` / `@UseMessageGuards` on the same handler — shared `@UseGuards`
-first. **WebSocket is the only transport that deduplicates a guard merge.** On HTTP and on queue
-every merge is a plain concat — controller+route, class+handler, `@UseGuards` + `@UseMessageGuards` —
-so a guard named twice anywhere runs twice: harmless for a pure check, doubled cost and doubled side
-effects for anything that logs, counts or calls out.
+first. **Every guard merge deduplicates by identity**, on all three transports: controller+route,
+class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once.
+Through 0.6.0 only WebSocket did this and the other two concatenated, so a guard named at two levels
+ran twice — doubled cost and doubled side effects for anything that logs, counts or calls out.
 
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved
@@ -182,10 +182,16 @@ deterministic, so requeueing would deny the same message forever) and surfaces a
 ## Exception Filters
 
 Catch and transform errors thrown by route handlers, guards and interceptors — with or
-without parameter decorators; the two execution paths behave identically. Filters merge
-global → controller → route and **the last one wins**: exactly one filter runs per error,
-there is no fallthrough between user filters. A filter that re-throws or returns a
-non-Response falls back to the built-in default filter, which never throws.
+without parameter decorators; the two execution paths behave identically. Filters are tried
+**most specific outwards** — route, then controller, then global, then the built-in default —
+and the first one to return a Response answers. **Returning `undefined` declines** and hands the
+error one level out; that is the supported way to say "not mine". A filter that THROWS is treated
+as a bug: reported with its name and answered by the default filter, without consulting the rest
+of the chain — so never rethrow to decline. Through 0.6.0 only the most specific filter ran and a
+rethrow reached the default filter, which is what the docs used to call "pass to next filter".
+
+Interceptors now sit INSIDE that boundary: a handler error reaches
+`try { await next() } catch` before any filter sees it.
 
 Middleware is NOT filtered, by design: it post-processes the response `next()` returns, so
 filtering above the chain would strip the headers `cors`/`security`/`rateLimit` add. A

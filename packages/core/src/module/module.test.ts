@@ -2815,4 +2815,100 @@ describe('OneBunModule', () => {
       expect(count()).toBe(1);
     });
   });
+  // Interceptors are resolved once per REGISTRATION SITE — per route on HTTP, per handler on
+  // WebSocket, per subscription on the queue — so the shared resolver is where "one instance per
+  // application" has to hold. Every transport reaches it through this method.
+  describe('resolveInterceptors shares one instance per class', () => {
+    test('returns the same bound function for repeated registration sites', () => {
+      let constructed = 0;
+
+      class SharedInterceptor {
+        constructor() {
+          constructed += 1;
+        }
+
+        async intercept(_ctx: any, next: () => any): Promise<any> {
+          return await next();
+        }
+      }
+
+      @Module({})
+      class InterceptorModule {}
+
+      const module = new OneBunModule(InterceptorModule, mockLoggerLayer);
+
+      const [first] = (module as any).resolveInterceptors([SharedInterceptor]);
+      const [second] = (module as any).resolveInterceptors([SharedInterceptor]);
+
+      expect(constructed).toBe(1);
+      expect(second).toBe(first);
+    });
+
+    test('passes an instance through without caching it', () => {
+      const first = { intercept: async (_ctx: any, next: () => any) => await next() };
+      const second = { intercept: async (_ctx: any, next: () => any) => await next() };
+
+      @Module({})
+      class InstanceInterceptorModule {}
+
+      const module = new OneBunModule(InstanceInterceptorModule, mockLoggerLayer);
+
+      const [boundFirst] = (module as any).resolveInterceptors([first]);
+      const [boundSecond] = (module as any).resolveInterceptors([second]);
+
+      expect(boundFirst).not.toBe(boundSecond);
+    });
+  });
+  // Guards are constructed per request on purpose, so a lifecycle hook on a guard class has no
+  // instance to belong to. It used to be skipped in silence; now it is reported once.
+  describe('resolveGuards reports a lifecycle hook it cannot run', () => {
+    test('warns once for a guard class implementing onModuleInit', () => {
+      const warnings: string[] = [];
+
+      class WarmingGuard {
+        async onModuleInit(): Promise<void> {
+          /* would prewarm something */
+        }
+
+        canActivate(): boolean {
+          return true;
+        }
+      }
+
+      @Module({})
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, mockLoggerLayer);
+      const logger = (module as any).logger;
+      (module as any).logger = { ...logger, warn: (message: string) => warnings.push(message) };
+
+      (module as any).resolveGuards([WarmingGuard]);
+      (module as any).resolveGuards([WarmingGuard]);
+
+      expect(warnings.length).toBe(1);
+      expect(warnings[0]).toContain('WarmingGuard');
+      expect(warnings[0]).toContain('onModuleInit');
+    });
+
+    test('says nothing about a guard without the hook', () => {
+      const warnings: string[] = [];
+
+      class PlainGuard {
+        canActivate(): boolean {
+          return true;
+        }
+      }
+
+      @Module({})
+      class PlainGuardModule {}
+
+      const module = new OneBunModule(PlainGuardModule, mockLoggerLayer);
+      const logger = (module as any).logger;
+      (module as any).logger = { ...logger, warn: (message: string) => warnings.push(message) };
+
+      (module as any).resolveGuards([PlainGuard]);
+
+      expect(warnings).toEqual([]);
+    });
+  });
 });

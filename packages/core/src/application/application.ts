@@ -11,6 +11,7 @@ import type { Controller } from '../module/controller';
 import type { ResolvedInterceptor } from '../types';
 import type { MultiServiceOrchestrator } from './multi-service-orchestrator';
 import type { MultiServiceApplicationOptions, ServicesMap } from './multi-service.types';
+import type { WsStorageAdapter } from '../websocket/ws-storage';
 import type { WsClientData } from '../websocket/ws.types';
 import type { Tracer } from '@opentelemetry/api';
 
@@ -84,12 +85,14 @@ import {
   QueueService,
   QueueServiceProxy,
   QueueServiceTag,
+  QUEUE_NOT_ENABLED_ERROR_MESSAGE,
   type QueueAdapter,
   type QueueConfig,
 } from '../queue';
 import { InMemoryQueueAdapter } from '../queue/adapters/memory.adapter';
 import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
-import { hasQueueDecorators } from '../queue/decorators';
+import { getQueueHandlerNames, hasQueueDecorators } from '../queue/decorators';
+import { type RedisClient } from '../redis/redis-client';
 import { SharedRedisProvider } from '../redis/shared-redis';
 import { getCurrentTraceContext, requestContextStore } from '../request-context';
 import {
@@ -114,9 +117,14 @@ import {
 } from '../types';
 import { validateOrThrow } from '../validation';
 import { WsHandler, isWebSocketGateway } from '../websocket/ws-handler';
+import { createRedisWsStorage } from '../websocket/ws-storage-redis';
 
+import { runMiddlewareChain } from './middleware-chain';
 import {
+  type QueueEnablementDecision,
   QUEUE_DISABLED_WITH_ADAPTER_WARNING,
+  QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG,
+  queueHandlerOnProviderWarning,
   resolveQueueAdapterType,
   resolveQueueEnablement,
 } from './queue-enablement';
@@ -414,6 +422,93 @@ export type ServiceSelection = readonly [
  * `initTracerProvider` uses, so logs and spans from an unconfigured service land under one name
  * in the backend instead of two.
  */
+/**
+ * The verbs a client may reasonably try on a path that exists.
+ *
+ * A path declaring none of them is unknown and keeps its 404 from the fallback; a path declaring
+ * some answers 405 for the rest and names them in `Allow`, so "wrong verb" and "wrong path" stop
+ * being the same answer.
+ */
+const METHOD_NOT_ALLOWED_VERBS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'] as const;
+
+/**
+ * The 405 a declared path gives a verb it does not declare.
+ *
+ * `Allow` is required on a 405 by the HTTP spec, and it is the whole value of the status: it tells
+ * the client what the path does support instead of leaving it to guess.
+ */
+function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Response {
+  return new Response(
+    JSON.stringify(createErrorResponse('Method Not Allowed', HttpStatusCode.METHOD_NOT_ALLOWED)),
+    {
+      status: httpEnvelope ? HttpStatusCode.OK : HttpStatusCode.METHOD_NOT_ALLOWED,
+      headers: {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Content-Type': 'application/json',
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'Allow': allow,
+      },
+    },
+  );
+}
+
+/**
+ * Report handler parameters that carry no param decorator.
+ *
+ * What such a parameter receives depends on which dispatch arm the route lands in, and nothing
+ * told the user which one that is: on a route with no decorated parameters and no response schema
+ * the framework calls `boundHandler(req)`, so parameter 0 IS the request; on every other route it
+ * builds an argument array and writes only the decorated indices, so the same parameter is
+ * `undefined`. Adding one `@Query()` — or a response schema — flips the meaning of every other
+ * parameter on that handler, silently, in both directions.
+ *
+ * The two arms are a measured optimisation and are deliberately left alone; what this removes is
+ * the silence. Reported once per route at registration.
+ *
+ * `Function.length` stops counting at the first defaulted or rest parameter, so a gap after one of
+ * those is invisible here. That is the honest limit of the check: it never false-positives, and it
+ * says nothing about what it cannot see.
+ */
+function reportUndecoratedHandlerParameters(
+  routeMeta: RouteMetadata,
+  boundHandler: Function,
+  controllerName: string,
+  isFastPath: boolean,
+  logger: SyncLogger,
+): void {
+  const declaredCount = boundHandler.length;
+
+  if (declaredCount === 0) {
+    return;
+  }
+
+  const decorated = new Set((routeMeta.params ?? []).map((param) => param.index));
+  const gaps: number[] = [];
+
+  for (let index = 0; index < declaredCount; index++) {
+    if (!decorated.has(index)) {
+      gaps.push(index);
+    }
+  }
+
+  if (gaps.length === 0) {
+    return;
+  }
+
+  const routeName = `${controllerName}.${routeMeta.handler ?? 'unknown'}`;
+  const receives = isFastPath
+    ? 'parameter 0 receives the raw request and any later one receives undefined — but only '
+      + 'because this route has no decorated parameter and no response schema; adding either '
+      + 'makes parameter 0 undefined too'
+    : 'they receive undefined, because the framework fills only decorated positions';
+
+  logger.warn(
+    `${routeName}: parameter(s) ${gaps.join(', ')} carry no param decorator. On this route `
+    + `${receives}. Decorate them — @Req(), @Param(), @Query(), @Body() — so the handler does not `
+    + 'depend on which dispatch path the route happens to take.',
+  );
+}
+
 const DEFAULT_OTLP_SERVICE_NAME = 'onebun-service';
 const DEFAULT_OTLP_SERVICE_VERSION = '1.0.0';
 
@@ -483,12 +578,42 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private orchestrator: MultiServiceOrchestrator<TServices> | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private metricsService: any = null;
+  /** Why the metrics service could not be built, when it could not. Shapes the startup summary. */
+  private metricsFailure: Error | null = null;
+  /** The `closeSharedRedis` deprecation is said once per process, not once per stop(). */
+  private static closeSharedRedisWarned = false;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private traceService: any = null;
   private wsHandler: WsHandler | null = null;
+
+  /**
+   * The connection `websocket.storage: { type: 'redis' }` opened, so stop() can close it.
+   *
+   * Held here rather than inside the handler: the handler is handed a `WsStorageAdapter` and has
+   * no business knowing whether one arrived with a socket attached.
+   */
+  private wsStorageClient: RedisClient | null = null;
+
+  /**
+   * The adapter built for that connection, so stop() can close it.
+   *
+   * Closing it is what stops the liveness refresh and tells the rest of the fleet this instance
+   * is gone — without which a sibling would keep this instance's records alive for the length of
+   * the TTL and not reap what the shutdown path failed to remove.
+   */
+  private wsStorage: WsStorageAdapter | null = null;
   private queueService: QueueService | null = null;
   private queueAdapter: QueueAdapter | null = null;
   private queueServiceProxy: QueueServiceProxy | null = null;
+
+  /**
+   * Whether a queue will run, decided before `setup()` from classes and options alone.
+   *
+   * Kept so `initializeQueue` reuses this answer instead of reaching a second one: two
+   * computations of one decision is how the queue came to be enabled for the adapter and
+   * disabled for the proxy at the same time.
+   */
+  private queueEnablement: QueueEnablementDecision | null = null;
   /**
    * DI state owned by THIS application: `@Global()` service instances, the modules already
    * processed, test overrides and dynamic-module option snapshots. Not on `ApplicationOptions`
@@ -625,14 +750,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
         this.logger.info('Metrics service initialized successfully');
       } catch (error) {
+        // Remembered, not just logged: the startup summary used to tell the operator that
+        // @onebun/metrics was not installed, which is a different problem with a different
+        // remedy — and false, since the package is right here and threw.
+        this.metricsFailure = error instanceof Error ? error : new Error(String(error));
+        this.logger.error('Failed to initialize metrics service:', this.metricsFailure);
+        // At ERROR, not DEBUG. This line is the only thing that says WHY /metrics will 404,
+        // and it used to sit a level below the default so nobody saw it.
         this.logger.error(
-          'Failed to initialize metrics service:',
-          error instanceof Error ? error : new Error(String(error)),
+          `Metrics will be unavailable for this application: ${this.metricsFailure.stack ?? 'no stack'}`,
         );
-        this.logger.debug('Full error details:', {
-          error,
-          stack: error instanceof Error ? error.stack : 'No stack',
-        });
       }
     } else if (this.options.metrics?.enabled !== false) {
       this.logger.debug('createMetricsService not available, metrics will be disabled');
@@ -952,6 +1079,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // cannot see `const app = this` — that one is block-scoped inside the try below.
     const appLogger = this.logger;
 
+    /**
+     * Routes already told that their response schema cannot validate a handler-built Response.
+     *
+     * Once per route, not once per request: it is a property of how the route is written, and a
+     * line per request would bury it.
+     */
+    const unvalidatedResponseRoutes = new Set<string>();
+
     try {
       // Initialize configuration if schema was provided
       let profileMark: ProfileMark | undefined;
@@ -970,6 +1105,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // process-wide registry, which is what keeps a second application's @Global() services
       // — and a second DrizzleModule.forRoot() — from being the first one's.
       this.globalScope = createGlobalScope();
+      // BaseService.metrics and BaseController.metrics read this first, so a custom counter
+      // created inside a service belongs to the application that built the service rather than
+      // to whichever one started last.
+      this.globalScope.metrics = this.metricsService ?? undefined;
 
       // Test provider overrides are seeded BEFORE the tree is built, so PHASE -1 of every
       // module picks them up. Patching the root module afterwards, as this used to, reached
@@ -997,8 +1136,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         profileMark = getProfiler()!.start('bootstrap', 'module:create');
       }
       // A registration selected with forFeature(token) but never configured with
-      // forRoot({ as: token }) is caught here, before anything is constructed.
-      assertRegistrationsConfigured();
+      // forRoot({ as: token }) is caught here, before anything is constructed. So is a pair of
+      // unnamed forRoot() calls that disagree about a module THIS application imports — passing
+      // the root module is what lets that check stay silent about the rest of the process.
+      assertRegistrationsConfigured(this.moduleClass ?? undefined);
 
       this.rootModule = OneBunModule.create(
         this.moduleClass!, this.loggerLayer, this.config,
@@ -1015,6 +1156,20 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (this.metricsService && this.metricsService.startSystemMetricsCollection) {
         this.metricsService.startSystemMetricsCollection();
         this.logger.info('System metrics collection started');
+      }
+
+      // Whether a queue will run is decided HERE, before setup() runs a single onModuleInit,
+      // from the controller classes and the options alone — no instance exists yet. The proxy
+      // needs the answer this early: a service publishing from onModuleInit was told the queue
+      // was not enabled, quoting three remedies it had already applied, when the truth was "not
+      // yet". `initializeQueue` reuses this decision rather than reaching a second one.
+      this.queueEnablement = resolveQueueEnablement(
+        this.options.queue,
+        this.ensureModule().getControllers().some((controller) => hasQueueDecorators(controller)),
+      );
+
+      if (this.queueEnablement.enabled) {
+        this.queueServiceProxy?.markStarting();
       }
 
       // Setup the module and create controller instances
@@ -1051,11 +1206,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
               controllerClass,
               instance as import('../websocket/ws-base-gateway').BaseWebSocketGateway,
               ownerModule.resolveInterceptors?.bind(ownerModule),
+              this.options.interceptors ?? [],
             );
             this.logger.info(`Registered WebSocket gateway: ${controllerClass.name}`);
           }
         }
       }
+
+      // Before anything is served: a Redis that cannot be reached should stop the boot, not
+      // leave the application listening with its state in a Map the operator did not ask for.
+      await this.initializeWebSocketStorage();
 
       // Initialize Queue system if configured or handlers exist
       if (PROFILING_ENABLED) {
@@ -1064,6 +1224,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       await this.initializeQueue(controllers);
       if (profileMark) {
         getProfiler()!.end(profileMark);
+      }
+
+      // Anything published from onModuleInit was held until the handlers existed — with an
+      // in-memory adapter, sending it earlier would have delivered it to nobody.
+      const heldPublishFailures = await (this.queueServiceProxy?.flushPendingPublishes() ?? []);
+      for (const failure of heldPublishFailures) {
+        this.logger.error(
+          `A message published before the queue was ready could not be sent: ${failure.message}`,
+        );
       }
 
       // Initialize Docs (OpenAPI/Swagger) if enabled and available
@@ -1182,6 +1351,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // the two arms — they also differ observably, the fast arm calling
         // boundHandler(req) where executeHandler calls boundHandler(...args).
         const isFastPath = (!routeMeta.params || routeMeta.params.length === 0) && !routeMeta.responseSchemas?.length;
+
+        reportUndecoratedHandlerParameters(routeMeta, boundHandler, controllerName, isFastPath, appLogger);
         const needsQueryParams = routeMeta.params?.some((p) => p.type === ParamType.QUERY) ?? false;
         // An @All route answers every verb, so 'ALL' is not a method any client sent —
         // emitting it as a metric label or span attribute would be a lie, and it would
@@ -1342,9 +1513,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                 // Full path: delegate to executeHandler for param extraction, validation, response wrapping
                 const callHandler = isFastPath
                   ? async (): Promise<Response> => {
-                    // Filtered here rather than in the outer catch, which sits above the
-                    // middleware chain — see applyExceptionFilters.
-                    try {
+                    // Throws rather than filtering: the filter boundary is the wrapper below,
+                    // above the interceptor chain — see applyExceptionFilters.
+                    {
                       let hMark: ProfileMark | undefined;
                       if (profiler) {
                         hMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
@@ -1370,8 +1541,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                           'Content-Type': 'application/json',
                         },
                       });
-                    } catch (error) {
-                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
                   }
                   : (): Promise<Response> => executeHandler(
@@ -1379,7 +1548,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     sseDecoratorOptions, req, queryParams, profiler,
                   );
 
-                // Wrap callHandler with interceptors if any (zero-cost when absent)
+                // The filter boundary. Everything that can throw while producing this route's
+                // response sits inside it: the handler, parameter extraction and validation, and
+                // the interceptors themselves. It is ABOVE the interceptor chain, so an
+                // interceptor's `try { await next() } catch` sees a handler error — on HTTP it
+                // used to see a finished 500 Response, while the same interceptor class on the
+                // queue and on WebSocket saw the throw. It stays BELOW the middleware chain,
+                // because middleware sets headers after `await next()` and filtering higher would
+                // strip them from every error response.
                 const interceptedHandler = (resolvedInterceptors && resolvedInterceptors.length > 0)
                   ? async (): Promise<Response> => {
                     const interceptorCtx = new HttpExecutionContextImpl(
@@ -1388,8 +1564,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       controllerName,
                     );
 
-                    // callHandler already returns a filtered Response, so this only ever
-                    // sees a throw from the interceptors themselves.
                     try {
                       return await (composeInterceptors(
                         resolvedInterceptors, interceptorCtx, callHandler,
@@ -1398,7 +1572,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                       return await applyExceptionFilters(error, req, routeMeta, controllerName);
                     }
                   }
-                  : callHandler;
+                  : async (): Promise<Response> => {
+                    try {
+                      return await callHandler();
+                    } catch (error) {
+                      return await applyExceptionFilters(error, req, routeMeta, controllerName);
+                    }
+                  };
 
                 // Execute middleware chain if any, then guards + handler
                 if (routeMeta.middleware && routeMeta.middleware.length > 0) {
@@ -1449,29 +1629,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                     return await interceptedHandler();
                   };
 
-                  const next = async (index: number): Promise<Response> => {
-                    if (index >= routeMeta.middleware!.length) {
-                      return await guardedHandler();
-                    }
-
-                    const middleware = routeMeta.middleware![index];
-                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                    const mwName = (middleware as any)._middlewareName
-                  || middleware.name
-                  || `middleware[${index}]`;
-
-                    if (profiler) {
-                      const mwMark = profiler.start('middleware', mwName);
-                      const result = await middleware(req, () => next(index + 1));
-                      profiler.end(mwMark);
-
-                      return result;
-                    }
-
-                    return await middleware(req, () => next(index + 1));
-                  };
-
-                  response = await next(0);
+                  response = await runMiddlewareChain(
+                    routeMeta.middleware!,
+                    req,
+                    guardedHandler,
+                    profiler,
+                  );
                 } else {
                 // No middleware — run guards inline (no extra closure)
                   if (routeMeta.guards && routeMeta.guards.length > 0) {
@@ -1807,16 +1970,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // BaseService saw `this.config` and `this.logger` as undefined at request time.
           const ctrlGuards = getControllerGuards(controllerClass);
           const routeGuards = route.guards ?? [];
-          const mergedGuardClasses = [...ctrlGuards, ...routeGuards];
+          // Deduplicated by identity, as WebSocket already did. A guard named on both the
+          // controller and one of its routes used to run twice per request: doubled database or
+          // cache work, doubled denial lines in the log, and a decision that is only idempotent
+          // if the guard happens to be.
+          const mergedGuardClasses = [...new Set([...ctrlGuards, ...routeGuards])];
           const mergedGuards = mergedGuardClasses.length > 0
             ? (ownerModule.resolveGuards?.(mergedGuardClasses) ?? mergedGuardClasses)
             : [];
 
           // Merge exception filters: global → controller → route (route has highest priority)
-          const globalFilters = (this.options.filters as ExceptionFilter[] | undefined) ?? [];
+          const globalFilters = this.options.filters ?? [];
           const ctrlFilters = getControllerFilters(controllerClass);
           const routeFilters = route.filters ?? [];
-          const mergedFilters = [...globalFilters, ...ctrlFilters, ...routeFilters];
+          const mergedFilterEntries = [...globalFilters, ...ctrlFilters, ...routeFilters];
+          // Resolved through the owning module, exactly like interceptors: a filter class gets
+          // constructor DI, an instance is passed through and initialized. Filters used to be
+          // merged raw, which is why `this.logger` was undefined in the one place that sees every
+          // unhandled error.
+          const mergedFilters = mergedFilterEntries.length > 0
+            ? (ownerModule.resolveFilters?.(mergedFilterEntries) ?? (mergedFilterEntries as ExceptionFilter[]))
+            : [];
 
           // Merge interceptors: global → controller → route (global wraps outermost)
           const globalInterceptorClasses = this.options.interceptors ?? [];
@@ -1870,6 +2044,45 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         const { methods, catchAll } = registration;
 
         if (!catchAll) {
+          // HEAD is derived from GET unless the controller declared its own. Bun does not derive
+          // it (measured on 1.3.14) and neither did route registration, so every load-balancer
+          // and uptime probe — which conventionally use HEAD — reported the service down.
+          const getHandler = methods.get('GET');
+          if (getHandler && !methods.has('HEAD')) {
+            methods.set('HEAD', async (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => {
+              const response = await getHandler(req, server);
+
+              // Same status, same headers, no body — the definition of HEAD. Running the GET
+              // handler means the middleware chain, the guards and the interceptors all ran, so
+              // the headers are the ones a GET would really have carried.
+              return new Response(null, { status: response.status, headers: response.headers });
+            });
+          }
+
+          // A verb nobody declared on a path that DOES exist used to reach the fallback and
+          // answer 404, which is the same thing an unknown path says: the developer went looking
+          // for a route that was right there. Registering the remaining verbs here lets Bun do
+          // the matching — including params and wildcards — so `Allow` lists exactly what this
+          // pattern declares.
+          const allowHeader = [...methods.keys()].join(', ');
+          for (const method of METHOD_NOT_ALLOWED_VERBS) {
+            if (methods.has(method)) {
+              continue;
+            }
+
+            // OPTIONS stays unclaimed when `cors` is configured: the preflight short-circuit in
+            // the fallback owns it, and a 405 here would undo that fix.
+            if (method === 'OPTIONS' && corsPreflight !== undefined) {
+              continue;
+            }
+
+            methods.set(method, async (req: OneBunRequest) => await runMiddlewareChain(
+              globalMiddleware,
+              req,
+              async () => methodNotAllowedResponse(allowHeader, app.options.httpEnvelope === true),
+            ));
+          }
+
           bunRoutes[pathKey] = Object.fromEntries(methods);
 
           continue;
@@ -1912,6 +2125,21 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
           async GET() {
             try {
+              // Said once per application, on the first scrape: a metric registered against
+              // prom-client's process-global `register` is no longer part of what this
+              // application serves, and the alternative to naming it is a silently shorter body.
+              if (app.metricsService.shouldReportOrphans?.()) {
+                const orphans = app.metricsService.getOrphanedMetricNames?.() ?? [];
+                if (orphans.length > 0) {
+                  app.logger.warn(
+                    `${orphans.length} metric(s) are registered against prom-client's global registry `
+                    + `and are NOT served here: ${orphans.join(', ')}. Each application owns its own `
+                    + 'registry now — build them with metricsService.createCounter()/createGauge(), or '
+                    + 'pass metrics: { registry: register } to put this application back on the global one.',
+                  );
+                }
+              }
+
               const metrics = await app.metricsService.getMetrics();
 
               return new Response(metrics, {
@@ -1946,6 +2174,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           const method = this.mapHttpMethod(route.method);
           this.logger.info(`Mapped {${method}} route: ${fullPath}`);
         }
+      }
+
+      // Middleware and interceptor instances exist only now — they are built while routes are
+      // registered — so their onModuleInit is a pass of its own, here: after the pipeline is
+      // assembled, before onApplicationInit and before the server accepts anything.
+      if (this.ensureModule().callPipelineOnModuleInit) {
+        await this.ensureModule().callPipelineOnModuleInit!();
       }
 
       // Call onApplicationInit lifecycle hook for all services and controllers
@@ -2127,62 +2362,83 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             }
           }
 
-          // Static file serving (GET/HEAD only)
-          if (staticRootResolved && (req.method === 'GET' || req.method === 'HEAD')) {
-            const requestPath = normalizePath(new URL(req.url).pathname);
-            const prefix = staticPathPrefix ?? '/';
-            const hasPrefix = prefix !== '' && prefix !== '/';
-            if (hasPrefix && !requestPath.startsWith(prefix)) {
-              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-            }
-            const relativePath = hasPrefix ? requestPath.slice(prefix.length) || '/' : requestPath;
-            const resolvedPath = resolvePathUnderRoot(staticRootResolved, relativePath);
-            if (resolvedPath === null) {
-              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-            }
+          // Everything the routes table did not match — a static file, or nothing at all —
+          // now travels the SAME global middleware chain a controller route does. These
+          // responses used to be bare `new Response(...)`: `security: true` put its headers on
+          // controller routes and not on the SPA they serve, and `rateLimit` bounded only the
+          // paths that happened to match a controller, so hammering nonexistent ones was free.
+          //
+          // DECIDED, and it changes what `max` means: an unmatched path and a static asset both
+          // consume rate-limit budget now. One rule for every response the application emits is
+          // worth more than a cheaper 404, and a limit that only counted routed paths did not
+          // bound request volume at all. Size `max` for the assets a page pulls.
+          //
+          // The preflight short-circuit and the WebSocket upgrade above stay OUTSIDE the chain:
+          // the first answers with CORS alone by design, and the second returns `undefined` to
+          // hand the socket to Bun, which is not a Response the chain could carry.
+          const fallbackRequest = Object.assign(req, {
+            params: {},
+            cookies: new Map<string, string>(),
+          }) as unknown as OneBunRequest;
 
-            const cache = staticCacheTtlMs > 0 ? staticExistsCache : null;
-            const cacheKey = resolvedPath;
-            if (cache) {
-              const cached = await cache.get(cacheKey);
-              if (cached === true) {
-                return new Response(Bun.file(resolvedPath));
-              }
-              if (cached === false) {
-                if (staticFallbackFile) {
-                  const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
-                  if (fallbackResolved !== null) {
-                    return new Response(Bun.file(fallbackResolved));
-                  }
-                }
-
+          return await runMiddlewareChain(globalMiddleware, fallbackRequest, async () => {
+            // Static file serving (GET/HEAD only)
+            if (staticRootResolved && (req.method === 'GET' || req.method === 'HEAD')) {
+              const requestPath = normalizePath(new URL(req.url).pathname);
+              const prefix = staticPathPrefix ?? '/';
+              const hasPrefix = prefix !== '' && prefix !== '/';
+              if (hasPrefix && !requestPath.startsWith(prefix)) {
                 return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
               }
-            }
+              const relativePath = hasPrefix ? requestPath.slice(prefix.length) || '/' : requestPath;
+              const resolvedPath = resolvePathUnderRoot(staticRootResolved, relativePath);
+              if (resolvedPath === null) {
+                return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+              }
 
-            const file = Bun.file(resolvedPath);
-            const exists = await file.exists();
-            if (cache && staticCacheTtlMs > 0) {
-              await cache.set(cacheKey, exists, staticCacheTtlMs);
-            }
-            if (exists) {
-              return new Response(file);
-            }
-            if (staticFallbackFile) {
-              const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
-              if (fallbackResolved !== null) {
-                const fallbackFile = Bun.file(fallbackResolved);
-                if (await fallbackFile.exists()) {
-                  return new Response(fallbackFile);
+              const cache = staticCacheTtlMs > 0 ? staticExistsCache : null;
+              const cacheKey = resolvedPath;
+              if (cache) {
+                const cached = await cache.get(cacheKey);
+                if (cached === true) {
+                  return new Response(Bun.file(resolvedPath));
+                }
+                if (cached === false) {
+                  if (staticFallbackFile) {
+                    const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+                    if (fallbackResolved !== null) {
+                      return new Response(Bun.file(fallbackResolved));
+                    }
+                  }
+
+                  return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
                 }
               }
+
+              const file = Bun.file(resolvedPath);
+              const exists = await file.exists();
+              if (cache && staticCacheTtlMs > 0) {
+                await cache.set(cacheKey, exists, staticCacheTtlMs);
+              }
+              if (exists) {
+                return new Response(file);
+              }
+              if (staticFallbackFile) {
+                const fallbackResolved = resolvePathUnderRoot(staticRootResolved, staticFallbackFile);
+                if (fallbackResolved !== null) {
+                  const fallbackFile = Bun.file(fallbackResolved);
+                  if (await fallbackFile.exists()) {
+                    return new Response(fallbackFile);
+                  }
+                }
+              }
+
+              return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
             }
 
+            // 404 for everything not matched by routes
             return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
-          }
-
-          // 404 for everything not matched by routes
-          return new Response('Not Found', { status: HttpStatusCode.NOT_FOUND });
+          });
         },
       });
 
@@ -2208,6 +2464,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (this.metricsService) {
         this.logger.info(
           `Metrics available at http://${this.options.host}:${this.options.port}${metricsPath}`,
+        );
+      } else if (this.metricsFailure) {
+        this.logger.warn(
+          'Metrics are enabled but this application has none: the metrics service failed to '
+          + `initialize (${this.metricsFailure.message}). ${metricsPath} is not registered for it.`,
         );
       } else if (this.options.metrics?.enabled !== false) {
         this.logger.warn(
@@ -2277,12 +2538,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * added outside one is silently unfiltered — that was the original defect, where a
      * handler with no decorated parameters took the fast path and its `HttpException`
      * left the framework as a bare 500 `text/plain`. Call sites, `grep` for the name and
-     * expect five:
-     *   1. `executeHandler`'s catch                        — full-path handler
-     *   2. the `isFastPath` arm of the `callHandler` ternary — fast-path handler
-     *   3. the `interceptedHandler` arm                     — throwing interceptors
-     *   4. the guard call inside `guardedHandler`           — throwing guards, with middleware
-     *   5. the inline guard call                            — throwing guards, without
+     * expect four:
+     *   1. the `interceptedHandler` arm WITH interceptors   — handler, params, validation,
+     *                                                         and the interceptors themselves
+     *   2. the `interceptedHandler` arm WITHOUT them        — the same, minus interceptors
+     *   3. the guard call inside `guardedHandler`           — throwing guards, with middleware
+     *   4. the inline guard call                            — throwing guards, without
+     *
+     * Sites 1 and 2 are one boundary in two shapes, and they are ABOVE the interceptor chain.
+     * `executeHandler` and the fast arm used to filter for themselves, below it, which made
+     * `try { await next() } catch` in an interceptor dead code on HTTP while the identical
+     * class saw the throw on the queue and on WebSocket. Guards keep their own sites because
+     * they run outside the chain — an interceptor never wraps a guard.
      *
      * DELIBERATELY NOT applied to the middleware chain. Middleware post-processes the
      * Response that `next()` returns — `CorsMiddleware`, `SecurityHeadersMiddleware` and
@@ -2292,10 +2559,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * back out through it. A throwing middleware is therefore not filtered by design and
      * falls to the last-resort outer catch.
      *
-     * Only the last filter runs — route-level filters are appended last and win. A filter
-     * that throws, or returns something other than a Response, degrades to the default
-     * filter instead of escaping: applying filters on more paths widens the blast radius
-     * of a buggy user filter, so the fallback is part of the fix rather than a bonus.
+     * Filters are tried from the most specific outwards — route, then controller, then global,
+     * then the framework's default — and the first one to return a Response answers. A filter
+     * DECLINES by returning `undefined`, which is the supported way to say "not mine": the
+     * documentation used to show `throw error` for that, and a throw cannot mean it, because a
+     * bug in a filter throws too.
+     *
+     * A filter that THROWS is treated as the bug it is: reported with the filter's name and
+     * answered by the default filter, without consulting the rest of the chain. A filter that
+     * returns something that is neither a Response nor `undefined` is reported the same way.
+     * Applying filters on more paths widens the blast radius of a buggy user filter, so that
+     * fallback is part of the design rather than a bonus.
      */
     async function applyExceptionFilters(
       error: unknown,
@@ -2313,25 +2587,48 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
 
       const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
-      const filters = routeMeta.filters;
+      // The field is declared wide because a decorator may write CLASSES into it; what reaches
+      // the pipeline is the resolved form, built by `ownerModule.resolveFilters` during route
+      // registration. A class never survives to here.
+      const filters = routeMeta.filters as ExceptionFilter[] | undefined;
 
-      if (filters && filters.length > 0) {
+      // Most specific first: the merged list is global -> controller -> route, so it is walked
+      // backwards. `undefined` declines and moves outwards; anything else ends the walk.
+      for (let index = (filters?.length ?? 0) - 1; index >= 0; index--) {
+        const filter = filters![index];
+        const filterName = filter.constructor?.name ?? 'anonymous filter';
+
         try {
-          const filtered = await filters[filters.length - 1].catch(error, ctx);
+          const filtered = await filter.catch(error, ctx);
+
           if (filtered instanceof Response) {
             return filtered;
           }
 
+          if (filtered === undefined || filtered === null) {
+            // A deliberate decline, not a failure: the next filter out gets the error.
+            appLogger.debug(
+              `Exception filter ${filterName} declined `
+              + `${controllerName}.${routeMeta.handler ?? 'unknown'}`,
+            );
+            continue;
+          }
+
           appLogger.error(
-            'Exception filter returned a non-Response; falling back to the default filter',
+            `Exception filter ${filterName} returned neither a Response nor undefined; `
+            + 'falling back to the default filter',
             new Error(`${controllerName}.${routeMeta.handler ?? 'unknown'}`),
           );
         } catch (filterError) {
           appLogger.error(
-            'Exception filter threw; falling back to the default filter',
+            `Exception filter ${filterName} threw; falling back to the default filter`,
             filterError instanceof Error ? filterError : new Error(String(filterError)),
           );
         }
+
+        // Reached only when the filter misbehaved: stop consulting the chain, since a filter
+        // that cannot be trusted to answer cannot be trusted to have declined either.
+        break;
       }
 
       return await appDefaultExceptionFilter.catch(error, ctx);
@@ -2352,374 +2649,344 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       queryParams: Record<string, string | string[]>,
       profiler: import('../profiler').Profiler | null,
     ): Promise<Response> {
-      try {
-      // Prepare arguments array based on parameter metadata
-        const args: unknown[] = [];
+      // Nothing is caught here any more. A throw from parameter extraction, from schema
+      // validation or from the handler travels up to the filter boundary that wraps the
+      // interceptor chain, so an interceptor's `try { await next() } catch` sees it.
+    // Prepare arguments array based on parameter metadata
+      const args: unknown[] = [];
 
-        // Sort params by index to ensure correct order
-        const sortedParams = [...(routeMeta.params || [])].sort((a, b) => a.index - b.index);
+      // Sort params by index to ensure correct order
+      const sortedParams = [...(routeMeta.params || [])].sort((a, b) => a.index - b.index);
 
-        // Pre-parse body for file upload params (FormData or JSON, cached for all params)
-        const needsFileData = sortedParams.some(
-          (p) =>
-            p.type === ParamType.FILE ||
-          p.type === ParamType.FILES ||
-          p.type === ParamType.FORM_FIELD,
-        );
+      // Pre-parse body for file upload params (FormData or JSON, cached for all params)
+      const needsFileData = sortedParams.some(
+        (p) =>
+          p.type === ParamType.FILE ||
+        p.type === ParamType.FILES ||
+        p.type === ParamType.FORM_FIELD,
+      );
 
-        // Validate that @Body and file decorators are not used on the same method
-        if (needsFileData) {
-          const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
-          if (hasBody) {
+      // Validate that @Body and file decorators are not used on the same method
+      if (needsFileData) {
+        const hasBody = sortedParams.some((p) => p.type === ParamType.BODY);
+        if (hasBody) {
+          throw new HttpException(
+            HttpStatusCode.BAD_REQUEST,
+            'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
+          'Both consume the request body. Use file decorators for multipart/base64 uploads.',
+          );
+        }
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let formData: any = null;
+      let jsonBody: Record<string, unknown> | null = null;
+      let isMultipart = false;
+
+      if (needsFileData) {
+        const contentType = req.headers.get('content-type') || '';
+
+        if (contentType.includes('multipart/form-data')) {
+          isMultipart = true;
+          try {
+            formData = await req.formData();
+          } catch {
+            formData = null;
+          }
+        } else if (contentType.includes('application/json')) {
+          try {
+            const parsed = await req.json();
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              jsonBody = parsed as Record<string, unknown>;
+            }
+          } catch {
+            jsonBody = null;
+          }
+        }
+      }
+
+      let paramsMark: ProfileMark | undefined;
+      if (profiler) {
+        paramsMark = profiler.start('handler', 'params:extract');
+      }
+      for (const param of sortedParams) {
+        switch (param.type) {
+          case ParamType.PATH:
+          // Use req.params from BunRequest (natively populated by Bun routes API)
+            args[param.index] = param.name
+              ? (req.params as Record<string, string>)[param.name]
+              : undefined;
+            break;
+
+          case ParamType.QUERY:
+            args[param.index] = param.name ? queryParams[param.name] : undefined;
+            break;
+
+          case ParamType.BODY:
+            try {
+              args[param.index] = await req.json();
+            } catch {
+              args[param.index] = undefined;
+            }
+            break;
+
+          case ParamType.HEADER:
+            args[param.index] = param.name ? req.headers.get(param.name) : undefined;
+            break;
+
+          case ParamType.COOKIE:
+            args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
+            break;
+
+          case ParamType.REQUEST:
+            args[param.index] = req;
+            break;
+
+          case ParamType.RESPONSE:
+          // For now, we don't support direct response manipulation
+            args[param.index] = undefined;
+            break;
+
+          case ParamType.FILE: {
+            let file: OneBunFile | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (entry instanceof File) {
+                file = new OneBunFile(entry);
+              }
+            } else if (jsonBody && param.name) {
+              file = extractFileFromJson(jsonBody, param.name);
+            }
+
+            if (file && param.fileOptions) {
+              validateFile(file, param.fileOptions, param.name);
+            }
+
+            args[param.index] = file;
+            break;
+          }
+
+          case ParamType.FILES: {
+            let files: OneBunFile[] = [];
+
+            if (isMultipart && formData) {
+              if (param.name) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const entries: any[] = formData.getAll(param.name);
+                files = entries
+                  .filter((entry: unknown): entry is File => entry instanceof File)
+                  .map((f: File) => new OneBunFile(f));
+              } else {
+              // Get all files from all fields
+                for (const [, value] of formData.entries()) {
+                  if (value instanceof File) {
+                    files.push(new OneBunFile(value));
+                  }
+                }
+              }
+            } else if (jsonBody) {
+              if (param.name) {
+                const fieldValue = jsonBody[param.name];
+                if (Array.isArray(fieldValue)) {
+                  files = fieldValue
+                    .map((item) => extractFileFromJsonValue(item))
+                    .filter((f): f is OneBunFile => f !== undefined);
+                }
+              } else {
+              // Extract all file-like values from JSON
+                for (const [, value] of Object.entries(jsonBody)) {
+                  const file = extractFileFromJsonValue(value);
+                  if (file) {
+                    files.push(file);
+                  }
+                }
+              }
+            }
+
+            // Validate maxCount
+            if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
+              throw new HttpException(
+                HttpStatusCode.BAD_REQUEST,
+                `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
+              );
+            }
+
+            // Validate each file
+            if (param.fileOptions) {
+              for (const file of files) {
+                validateFile(file, param.fileOptions, param.name);
+              }
+            }
+
+            args[param.index] = files;
+            break;
+          }
+
+          case ParamType.FORM_FIELD: {
+            let value: string | undefined;
+
+            if (isMultipart && formData && param.name) {
+              const entry = formData.get(param.name);
+              if (typeof entry === 'string') {
+                value = entry;
+              }
+            } else if (jsonBody && param.name) {
+              const jsonValue = jsonBody[param.name];
+              if (jsonValue !== undefined && jsonValue !== null) {
+                value = String(jsonValue);
+              }
+            }
+
+            args[param.index] = value;
+            break;
+          }
+
+          default:
+            args[param.index] = undefined;
+        }
+
+        // Validate parameter if required
+        if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
+          throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+        }
+
+        // For FILES type, also check for empty array when required
+        if (
+          param.isRequired &&
+        param.type === ParamType.FILES &&
+        Array.isArray(args[param.index]) &&
+        (args[param.index] as unknown[]).length === 0
+        ) {
+          throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
+        }
+
+        // Apply arktype schema validation if provided
+        if (param.schema && args[param.index] !== undefined) {
+          try {
+            args[param.index] = validateOrThrow(param.schema, args[param.index]);
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
             throw new HttpException(
               HttpStatusCode.BAD_REQUEST,
-              'Cannot use @Body() together with @UploadedFile/@UploadedFiles/@FormField on the same method. ' +
-            'Both consume the request body. Use file decorators for multipart/base64 uploads.',
+              `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
+            );
+          }
+        }
+      }
+      if (paramsMark) {
+        profiler!.end(paramsMark);
+      }
+      // Call handler with injected parameters
+      let handlerMark: ProfileMark | undefined;
+      if (profiler) {
+        handlerMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
+      }
+      const result = await boundHandler(...args);
+      if (handlerMark) {
+        profiler!.end(handlerMark);
+      }
+
+      // Handle SSE response - wrap async generator in SSE Response
+      if (sseOptions !== undefined) {
+        return createSseResponseFromResult(result, sseOptions);
+      }
+
+      // Initialize variables for response validation
+      let validatedResult = result;
+      let responseStatusCode = HttpStatusCode.OK;
+
+      // A handler that returns a Response has already produced the exact bytes it wants sent, so
+      // they are sent. This used to clone(), text(), JSON.parse() and JSON.stringify() every JSON
+      // response, which changed them: a 64-bit id sent as a JSON number came back rounded
+      // (12345678901234567890 -> 12345678901234567000, silently, 200 OK), and the whole body was
+      // buffered, so a streaming response reached the client only once its producer finished.
+      // The fast arm always passed it through — one decorated parameter was the entire difference
+      // between the two behaviours.
+      //
+      // A declared response schema is not applied here. Reading the body to validate it is what
+      // caused both defects, and for a stream there is no body to read without ending the stream.
+      // The schema still describes the response in the OpenAPI document; it just does not rewrite
+      // what the handler built. Said once per route, because it is a property of the route.
+      if (result instanceof Response) {
+        if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+          const routeKey = `${controllerName}.${routeMeta.handler ?? 'unknown'}`;
+          if (!unvalidatedResponseRoutes.has(routeKey)) {
+            unvalidatedResponseRoutes.add(routeKey);
+            appLogger.warn(
+              `${routeKey} returns a Response, so its @ApiResponse schema is not validated at `
+              + 'runtime — the handler\'s bytes are sent as they are. The schema still documents '
+              + 'the endpoint. Return a plain object if you want the schema enforced.',
             );
           }
         }
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let formData: any = null;
-        let jsonBody: Record<string, unknown> | null = null;
-        let isMultipart = false;
+        return result;
+      }
 
-        if (needsFileData) {
-          const contentType = req.headers.get('content-type') || '';
+      // Validate response against schema if provided
+      if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
+        // Find matching response schema (default to 200 if not found)
+        const responseSchema = routeMeta.responseSchemas.find(
+          (rs) => rs.statusCode === HttpStatusCode.OK,
+        ) || routeMeta.responseSchemas[0];
 
-          if (contentType.includes('multipart/form-data')) {
-            isMultipart = true;
-            try {
-              formData = await req.formData();
-            } catch {
-              formData = null;
-            }
-          } else if (contentType.includes('application/json')) {
-            try {
-              const parsed = await req.json();
-              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-                jsonBody = parsed as Record<string, unknown>;
-              }
-            } catch {
-              jsonBody = null;
-            }
+        if (responseSchema?.schema) {
+          try {
+            validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(validatedResult));
+            responseStatusCode = responseSchema.statusCode;
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            throw new Error(`Response validation failed: ${errorMessage}`);
           }
         }
+      }
 
-        let paramsMark: ProfileMark | undefined;
+      // If the result is already in standardized format, return it as JSON
+      if (
+        typeof validatedResult === 'object' &&
+        validatedResult !== null &&
+        'success' in validatedResult
+      ) {
+        let serMark: ProfileMark | undefined;
         if (profiler) {
-          paramsMark = profiler.start('handler', 'params:extract');
+          serMark = profiler.start('framework', 'response:serialize');
         }
-        for (const param of sortedParams) {
-          switch (param.type) {
-            case ParamType.PATH:
-            // Use req.params from BunRequest (natively populated by Bun routes API)
-              args[param.index] = param.name
-                ? (req.params as Record<string, string>)[param.name]
-                : undefined;
-              break;
-
-            case ParamType.QUERY:
-              args[param.index] = param.name ? queryParams[param.name] : undefined;
-              break;
-
-            case ParamType.BODY:
-              try {
-                args[param.index] = await req.json();
-              } catch {
-                args[param.index] = undefined;
-              }
-              break;
-
-            case ParamType.HEADER:
-              args[param.index] = param.name ? req.headers.get(param.name) : undefined;
-              break;
-
-            case ParamType.COOKIE:
-              args[param.index] = param.name ? req.cookies.get(param.name) ?? undefined : undefined;
-              break;
-
-            case ParamType.REQUEST:
-              args[param.index] = req;
-              break;
-
-            case ParamType.RESPONSE:
-            // For now, we don't support direct response manipulation
-              args[param.index] = undefined;
-              break;
-
-            case ParamType.FILE: {
-              let file: OneBunFile | undefined;
-
-              if (isMultipart && formData && param.name) {
-                const entry = formData.get(param.name);
-                if (entry instanceof File) {
-                  file = new OneBunFile(entry);
-                }
-              } else if (jsonBody && param.name) {
-                file = extractFileFromJson(jsonBody, param.name);
-              }
-
-              if (file && param.fileOptions) {
-                validateFile(file, param.fileOptions, param.name);
-              }
-
-              args[param.index] = file;
-              break;
-            }
-
-            case ParamType.FILES: {
-              let files: OneBunFile[] = [];
-
-              if (isMultipart && formData) {
-                if (param.name) {
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                  const entries: any[] = formData.getAll(param.name);
-                  files = entries
-                    .filter((entry: unknown): entry is File => entry instanceof File)
-                    .map((f: File) => new OneBunFile(f));
-                } else {
-                // Get all files from all fields
-                  for (const [, value] of formData.entries()) {
-                    if (value instanceof File) {
-                      files.push(new OneBunFile(value));
-                    }
-                  }
-                }
-              } else if (jsonBody) {
-                if (param.name) {
-                  const fieldValue = jsonBody[param.name];
-                  if (Array.isArray(fieldValue)) {
-                    files = fieldValue
-                      .map((item) => extractFileFromJsonValue(item))
-                      .filter((f): f is OneBunFile => f !== undefined);
-                  }
-                } else {
-                // Extract all file-like values from JSON
-                  for (const [, value] of Object.entries(jsonBody)) {
-                    const file = extractFileFromJsonValue(value);
-                    if (file) {
-                      files.push(file);
-                    }
-                  }
-                }
-              }
-
-              // Validate maxCount
-              if (param.fileOptions?.maxCount !== undefined && files.length > param.fileOptions.maxCount) {
-                throw new HttpException(
-                  HttpStatusCode.BAD_REQUEST,
-                  `Too many files for "${param.name || 'upload'}". Got ${files.length}, max is ${param.fileOptions.maxCount}`,
-                );
-              }
-
-              // Validate each file
-              if (param.fileOptions) {
-                for (const file of files) {
-                  validateFile(file, param.fileOptions, param.name);
-                }
-              }
-
-              args[param.index] = files;
-              break;
-            }
-
-            case ParamType.FORM_FIELD: {
-              let value: string | undefined;
-
-              if (isMultipart && formData && param.name) {
-                const entry = formData.get(param.name);
-                if (typeof entry === 'string') {
-                  value = entry;
-                }
-              } else if (jsonBody && param.name) {
-                const jsonValue = jsonBody[param.name];
-                if (jsonValue !== undefined && jsonValue !== null) {
-                  value = String(jsonValue);
-                }
-              }
-
-              args[param.index] = value;
-              break;
-            }
-
-            default:
-              args[param.index] = undefined;
-          }
-
-          // Validate parameter if required
-          if (param.isRequired && (args[param.index] === undefined || args[param.index] === null)) {
-            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
-          }
-
-          // For FILES type, also check for empty array when required
-          if (
-            param.isRequired &&
-          param.type === ParamType.FILES &&
-          Array.isArray(args[param.index]) &&
-          (args[param.index] as unknown[]).length === 0
-          ) {
-            throw new HttpException(HttpStatusCode.BAD_REQUEST, `Required parameter ${param.name || param.index} is missing`);
-          }
-
-          // Apply arktype schema validation if provided
-          if (param.schema && args[param.index] !== undefined) {
-            try {
-              args[param.index] = validateOrThrow(param.schema, args[param.index]);
-            } catch (error) {
-              const errorMessage =
-                error instanceof Error ? error.message : String(error);
-              throw new HttpException(
-                HttpStatusCode.BAD_REQUEST,
-                `Parameter ${param.name || param.index} validation failed: ${errorMessage}`,
-              );
-            }
-          }
-        }
-        if (paramsMark) {
-          profiler!.end(paramsMark);
-        }
-        // Call handler with injected parameters
-        let handlerMark: ProfileMark | undefined;
-        if (profiler) {
-          handlerMark = profiler.start('handler', `${controllerName}.${routeMeta.handler ?? 'unknown'}`);
-        }
-        const result = await boundHandler(...args);
-        if (handlerMark) {
-          profiler!.end(handlerMark);
-        }
-
-        // Handle SSE response - wrap async generator in SSE Response
-        if (sseOptions !== undefined) {
-          return createSseResponseFromResult(result, sseOptions);
-        }
-
-        // Initialize variables for response validation
-        let validatedResult = result;
-        let responseStatusCode = HttpStatusCode.OK;
-
-        // If the result is already a Response object, extract body and validate it
-        if (result instanceof Response) {
-          responseStatusCode = result.status;
-
-          // Extract and parse response body for validation
-          const contentType = result.headers.get('content-type') || '';
-          if (contentType.includes('application/json')) {
-            try {
-              // Clone response to avoid consuming the body
-              const clonedResponse = result.clone();
-              const bodyText = await clonedResponse.text();
-              const bodyData = bodyText ? JSON.parse(bodyText) : null;
-
-              // Validate response body if schema is provided
-              if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
-                const responseSchema = routeMeta.responseSchemas.find(
-                  (rs) => rs.statusCode === responseStatusCode,
-                ) || routeMeta.responseSchemas.find(
-                  (rs) => rs.statusCode === HttpStatusCode.OK,
-                ) || routeMeta.responseSchemas[0];
-
-                if (responseSchema?.schema) {
-                  try {
-                    validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(bodyData));
-                  } catch (error) {
-                    const errorMessage =
-                      error instanceof Error ? error.message : String(error);
-                    throw new Error(`Response validation failed: ${errorMessage}`);
-                  }
-                } else {
-                  validatedResult = bodyData;
-                }
-              } else {
-                validatedResult = bodyData;
-              }
-
-              // Preserve all original headers (including multiple Set-Cookie)
-              // using new Headers() constructor instead of Object.fromEntries()
-              // which would lose duplicate header keys
-              const newHeaders = new Headers(result.headers);
-              newHeaders.set('Content-Type', 'application/json');
-
-              // Create new Response with validated data
-              return new Response(JSON.stringify(validatedResult), {
-                status: responseStatusCode,
-                headers: newHeaders,
-              });
-            } catch {
-              // If parsing fails, return original response
-              return result;
-            }
-          } else {
-            // For non-JSON responses, return as-is (can't validate)
-            return result;
-          }
-        }
-
-        // Validate response against schema if provided
-        if (routeMeta.responseSchemas && routeMeta.responseSchemas.length > 0) {
-          // Find matching response schema (default to 200 if not found)
-          const responseSchema = routeMeta.responseSchemas.find(
-            (rs) => rs.statusCode === HttpStatusCode.OK,
-          ) || routeMeta.responseSchemas[0];
-
-          if (responseSchema?.schema) {
-            try {
-              validatedResult = validateOrThrow(responseSchema.schema, stripUndefined(validatedResult));
-              responseStatusCode = responseSchema.statusCode;
-            } catch (error) {
-              const errorMessage =
-                error instanceof Error ? error.message : String(error);
-              throw new Error(`Response validation failed: ${errorMessage}`);
-            }
-          }
-        }
-
-        // If the result is already in standardized format, return it as JSON
-        if (
-          typeof validatedResult === 'object' &&
-          validatedResult !== null &&
-          'success' in validatedResult
-        ) {
-          let serMark: ProfileMark | undefined;
-          if (profiler) {
-            serMark = profiler.start('framework', 'response:serialize');
-          }
-          const resp = new Response(JSON.stringify(validatedResult), {
-            status: responseStatusCode,
-            headers: {
-              // eslint-disable-next-line @typescript-eslint/naming-convention
-              'Content-Type': 'application/json',
-            },
-          });
-          if (serMark) {
-            profiler!.end(serMark);
-          }
-
-          return resp;
-        }
-
-        // Otherwise, wrap in standardized success response
-        let serializeMark: ProfileMark | undefined;
-        if (profiler) {
-          serializeMark = profiler.start('framework', 'response:serialize');
-        }
-        const successResponse = createSuccessResponse(validatedResult);
-
-        const resp = new Response(JSON.stringify(successResponse), {
+        const resp = new Response(JSON.stringify(validatedResult), {
           status: responseStatusCode,
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',
           },
         });
-        if (serializeMark) {
-          profiler!.end(serializeMark);
+        if (serMark) {
+          profiler!.end(serMark);
         }
 
         return resp;
-      } catch (error) {
-        return await applyExceptionFilters(error, req, routeMeta, controllerName);
       }
+
+      // Otherwise, wrap in standardized success response
+      let serializeMark: ProfileMark | undefined;
+      if (profiler) {
+        serializeMark = profiler.start('framework', 'response:serialize');
+      }
+      const successResponse = createSuccessResponse(validatedResult);
+
+      const resp = new Response(JSON.stringify(successResponse), {
+        status: responseStatusCode,
+        headers: {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          'Content-Type': 'application/json',
+        },
+      });
+      if (serializeMark) {
+        profiler!.end(serializeMark);
+      }
+
+      return resp;
     }
 
     /**
@@ -2777,7 +3044,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *
    * @param options - Shutdown options
    */
-  async stop(options?: { closeSharedRedis?: boolean; signal?: string }): Promise<void> {
+  async stop(options?: {
+    /**
+     * @deprecated Ignored. An application no longer releases the shared Redis client — whoever
+     * acquired a hold gives it back, and the connection closes when the last holder does.
+     */
+    closeSharedRedis?: boolean;
+    signal?: string;
+  }): Promise<void> {
     await this.runShutdown(options);
   }
 
@@ -2909,7 +3183,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return;
     }
 
-    const closeRedis = options?.closeSharedRedis ?? true;
+    if (options?.closeSharedRedis !== undefined && !OneBunApplication.closeSharedRedisWarned) {
+      OneBunApplication.closeSharedRedisWarned = true;
+      this.logger.warn(
+        'stop({ closeSharedRedis }) is deprecated and ignored: an application no longer releases '
+        + 'the shared Redis client. Whoever acquired a hold gives it back — the cache when it '
+        + 'closes, the queue adapter when it disconnects — and the connection closes when the '
+        + 'last holder lets go. Code that took a hold with SharedRedisProvider.getClient() must '
+        + 'call SharedRedisProvider.release() itself.',
+      );
+    }
     const signal = options?.signal;
 
     this.logger.info('Stopping OneBun application...');
@@ -2954,23 +3237,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.wsHandler = null;
     }
 
-    // Stop queue service
+    // After cleanup, which is the last thing that needs either of them.
+    if (this.wsStorage || this.wsStorageClient) {
+      const storage = this.wsStorage;
+      const client = this.wsStorageClient;
+      this.wsStorage = null;
+      this.wsStorageClient = null;
+      await this.runShutdownStep(outcome, 'closing the WebSocket Redis connection', async () => {
+        await storage?.close();
+        await client?.disconnect();
+      });
+    }
+
+    // Stop consuming and scheduling, but keep the transport open: `onModuleDestroy` runs below,
+    // and announcing a shutdown from it is the ordinary reason to publish there. Tearing the
+    // adapter down first is what made that message vanish — the throw was caught and logged as a
+    // failed hook, while stop() went on to report a clean shutdown.
     if (this.queueService) {
       await this.runShutdownStep(outcome, 'stopping the queue service', async () => {
         this.logger.debug('Stopping queue service');
-        await this.queueService!.stop();
+        await this.queueService!.stop({ disconnectAdapter: false });
       });
-      this.queueService = null;
-    }
-    this.queueServiceProxy?.setDelegate(null);
-
-    // Disconnect queue adapter
-    if (this.queueAdapter) {
-      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
-        this.logger.debug('Disconnecting queue adapter');
-        await this.queueAdapter!.disconnect();
-      });
-      this.queueAdapter = null;
     }
 
     // Stop the system-metric sampler. `startSystemMetricsCollection()` is called at startup and
@@ -2984,6 +3271,16 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // looking for it: in the default configuration the start is in the log and the stop is not.
         this.logger.info('System metrics collection stopped');
         this.metricsService!.stopSystemMetricsCollection!();
+        // Release this application's registry too, and hand back the process-wide slot if it
+        // still points here — nothing ever cleared it, so a stopped application kept receiving
+        // writes from every code path that has no application handle.
+        this.metricsService!.dispose?.();
+        if (
+          typeof globalThis !== 'undefined'
+          && (globalThis as Record<string, unknown>).__onebunMetricsService === this.metricsService
+        ) {
+          delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+        }
       });
     }
 
@@ -3003,15 +3300,40 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       });
     }
 
-    // Release this application's hold on the shared Redis client. It is disconnected only
-    // when the last consumer lets go — previously every application called disconnect()
-    // outright, so in multi-service mode the FIRST one to stop tore the client out from
-    // under its still-running siblings.
-    if (closeRedis && SharedRedisProvider.isConnected()) {
-      await this.runShutdownStep(outcome, 'releasing the shared Redis client', async () => {
-        this.logger.debug('Releasing shared Redis');
-        await SharedRedisProvider.release();
+    // Now nothing can publish any more: drop the delegate and close the transport the destroy
+    // hooks were still using.
+    this.queueService = null;
+    this.queueServiceProxy?.setDelegate(null);
+
+    if (this.queueAdapter) {
+      await this.runShutdownStep(outcome, 'disconnecting the queue adapter', async () => {
+        this.logger.debug('Disconnecting queue adapter');
+        await this.queueAdapter!.disconnect();
       });
+      this.queueAdapter = null;
+    }
+
+    // The application releases NOTHING. Whoever acquired a hold on the shared Redis client
+    // gives it back — the cache in its close(), the queue adapter in its disconnect() — and
+    // the connection closes when the last holder lets go.
+    //
+    // This step used to call release() once per stop(), gated on the client being connected
+    // rather than on this application having acquired anything. Measured: an application with
+    // no Redis at all took a sibling's hold to zero on its own shutdown, and the sibling's
+    // next queue publish threw `Redis client not connected`. An application with a cache AND a
+    // queue took two holds and gave back one, so the socket outlived every application.
+    //
+    // What replaces it is a diagnostic. A process that will not exit because something still
+    // holds the connection is otherwise a hang with nothing to grep for; this names the holder
+    // in the shutdown output the operator is already reading. Debug, not warn: in
+    // multi-service mode a non-zero count at a child's stop is the normal, correct state.
+    if (SharedRedisProvider.isConnected()) {
+      const holders = SharedRedisProvider.leaseHolders();
+      if (holders.length > 0) {
+        this.logger.debug(
+          `Shared Redis still held by ${holders.length}: ${holders.join(', ')}`,
+        );
+      }
     }
 
     // Call onApplicationDestroy lifecycle hook
@@ -3029,8 +3351,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       this.globalScope.processedModules.clear();
       this.globalScope.overrides.clear();
       this.globalScope.moduleOptions.clear();
+      // Dropped explicitly: a decorator stamped with this scope dereferences `metrics` on every
+      // call, so clearing it makes a stopped application's instances record nothing rather than
+      // write into a registry that dispose() already emptied.
+      this.globalScope.metrics = undefined;
       this.globalScope = null;
     }
+
+    // The module REGISTRATIONS are deliberately not cleared here. `forRoot()` runs at module
+    // evaluation, not at start(), so it does not run again on a restart — clearing the registry
+    // would leave a restarted application with no configuration at all, and would let a second
+    // conflicting unnamed forRoot() through on the next boot. `resetRegistrations()` is the
+    // reset, and it belongs to tests, which are the only thing that needs a clean process.
 
     this.logger.info(
       outcome.forceClosed > 0
@@ -3133,6 +3465,44 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
+   * Put WebSocket state where `websocket.storage` says it goes.
+   *
+   * The option was declared, exported and documented, and read by nobody: `WsHandler` built an
+   * in-memory adapter in its constructor before looking at any of it. Measured against a real
+   * application with `storage: { type: 'redis' }` — the client lived in a Map and Redis held
+   * zero keys, so an operator who configured multi-instance ran single-instance and was told
+   * nothing.
+   *
+   * The connection is this application's own rather than the shared provider's, because the
+   * documented `prefix` has to land somewhere: `RedisClient` IS the namespace, and the shared
+   * client already carries whoever configured it first. A prefix that silently did not apply
+   * would be the same class of lie this is fixing.
+   */
+  private async initializeWebSocketStorage(): Promise<void> {
+    const storage = this.options.websocket?.storage;
+    if (storage?.type !== 'redis' || !this.wsHandler) {
+      return;
+    }
+
+    const keyPrefix = storage.redis?.prefix ?? 'ws:';
+    let client: RedisClient;
+    try {
+      client = SharedRedisProvider.createClient({ url: storage.redis?.url, keyPrefix });
+    } catch {
+      throw new Error(
+        'websocket.storage.type is "redis" but no Redis URL is available. Set '
+        + 'websocket.storage.redis.url, or configure SharedRedisProvider before start().',
+      );
+    }
+
+    await client.connect();
+    this.wsStorageClient = client;
+    this.wsStorage = createRedisWsStorage(client);
+    this.wsHandler.setStorage(this.wsStorage);
+    this.logger.info(`WebSocket state stored in Redis under "${keyPrefix}"`);
+  }
+
+  /**
    * Initialize the queue system based on configuration and detected handlers
    */
   private async initializeQueue(controllers: Function[]): Promise<void> {
@@ -3148,17 +3518,37 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       return hasQueueDecorators(controller) || hasQueueDecorators(instance.constructor);
     });
 
+    // Discovery walks controllers only, so a queue decorator on a provider is metadata nothing
+    // reads and the handler never runs. Reported before the enablement decision, so it is said
+    // whether or not the queue ends up running: the application that needs to hear it most is the
+    // one where these are the ONLY handlers, which is exactly the one that never starts a queue.
+    const providersWithHandlers = (this.ensureModule().getProviderClasses?.() ?? [])
+      .filter((providerClass: Function) => hasQueueDecorators(providerClass));
+
+    for (const providerClass of providersWithHandlers) {
+      this.logger.warn(
+        queueHandlerOnProviderWarning(providerClass.name, getQueueHandlerNames(providerClass)),
+      );
+    }
+
     // Determine if queue should be enabled: a queue decorator on a controller, OR
     // queue.enabled === true, OR an explicit queue.adapter/options/redis backend config.
     // An explicit queue.enabled === false overrides all three, and warns once when it
     // contradicts a configured backend.
-    const enablement = resolveQueueEnablement(queueOptions, hasQueueHandlers);
+    // The pre-setup decision wins when it said yes — it is the one the proxy already acted on.
+    // Recomputed only when it said no, which keeps the instance-level check that covers a
+    // `@Controller` wrapper whose queue metadata does not sit on the class in `controllers`.
+    const enablement = this.queueEnablement?.enabled
+      ? this.queueEnablement
+      : resolveQueueEnablement(queueOptions, hasQueueHandlers);
     if (!enablement.enabled) {
       if (enablement.contradiction) {
         this.logger.warn(QUEUE_DISABLED_WITH_ADAPTER_WARNING);
       } else {
         this.logger.debug(
-          'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
+          providersWithHandlers.length > 0
+            ? QUEUE_NOT_ENABLED_PROVIDERS_ONLY_DEBUG
+            : 'Queue system not enabled (no handlers detected, no backend configured, or explicitly disabled)',
         );
       }
 
@@ -3269,6 +3659,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           instance,
           registrationClass as new (...args: unknown[]) => unknown,
           queueOwnerModule.resolveInterceptors?.bind(queueOwnerModule),
+          this.options.interceptors ?? [],
         );
         this.logger.debug(`Registered queue handlers for controller: ${controllerClass.name}`);
       } else {
@@ -3285,11 +3676,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Get the queue service instance
-   * @returns The queue service or null if not enabled
+   * Get the queue service instance.
+   *
+   * Throws when there is no queue to hand back, with the same explanation an injected
+   * `QueueService` gives — which one depends on why: never enabled, still starting, already
+   * stopped. It used to return `null` here, so the natural next line was a `TypeError` on
+   * `queue.publish` and the diagnosis the framework already had never reached the caller.
+   *
+   * @returns The queue service
+   * @throws Error when the queue is not available, naming the reason and the remedy
+   * @see docs:api/queue.md
    */
-  getQueueService(): QueueService | null {
+  getQueueService(): QueueService {
     this.ensureSingleServiceMode('getQueueService');
+
+    if (this.queueService === null) {
+      throw new Error(this.queueServiceProxy?.unavailableReason() ?? QUEUE_NOT_ENABLED_ERROR_MESSAGE);
+    }
 
     return this.queueService;
   }

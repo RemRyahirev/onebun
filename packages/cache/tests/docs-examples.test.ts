@@ -37,6 +37,14 @@ import {
   CacheService,
 } from '../src';
 
+// forRoot() writes into a process-wide registry that outlives the file. Two unnamed calls that
+// configure the module differently are refused at app.start(), so a test that boots must not
+// inherit a registration written by an earlier test — or by an earlier FILE in the same run,
+// which is how this suite used to leak across package boundaries.
+beforeEach(() => {
+  resetRegistrations();
+});
+
 describe('Cache README Examples', () => {
   describe('Basic In-Memory Cache (README)', () => {
     it('should create in-memory cache with options', async () => {

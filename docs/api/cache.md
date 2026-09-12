@@ -108,7 +108,7 @@ Registering one token twice throws rather than silently replacing the first, and
 
 **One registration per module.** A module that selects two registrations of the same service cannot resolve it by type — the service has a single injection identity — so it must name each one with `@Inject(TOKEN)`. Without the annotation the application refuses to start, naming both candidates.
 
-**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws. An unnamed `forRoot()` keeps the global behaviour it always had.
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws; `isGlobal: false` alongside `as` is accepted and does nothing, because it asks for what a named registration already guarantees. Neither spelling changes `CacheModule`'s own globality — only an unnamed `forRoot()` decides that, and it keeps the global behaviour it always had.
 
 `forFeature()` with no token still SHARES: every module importing the same registration receives the same `CacheService`, so a value written through one is visible through another and the cache is initialized once. `isGlobal` controls visibility, never instance count.
 
@@ -277,9 +277,9 @@ const status = cacheService.getBackendStatus();
 
 **Technical details for AI agents:**
 - `CacheModule` is decorated with `@Global()` — by default `CacheService` is available in all modules without explicit import
-- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. A later unnamed `forRoot()` that does not opt out puts the module back — symmetric, but LAST-WRITER-WINS rather than isolation. The registry holds one entry per module CLASS for the whole process and `forRoot()` normally runs at import time, so the last unnamed `forRoot()` evaluated anywhere decides globality for every application in the process: measured, `{isGlobal:false}` then default leaves both applications global (the opt-out is silently ignored), and default then `{isGlobal:false}` leaves both non-global and both failing at `app.start()`. Use `forRoot({ as: TOKEN })` when two configurations must not interfere
+- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. A later unnamed `forRoot()` that does not opt out puts the module back — symmetric, but not isolation: the registry holds one entry per module CLASS for the whole process. Two unnamed `forRoot()` calls that disagree about `isGlobal`, or about what they configure, are REFUSED: an application importing CacheModule fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. It used to be last-writer-wins — measured, `{isGlobal:false}` then default left both applications global with the opt-out silently ignored, and default then `{isGlobal:false}` left both failing to resolve `CacheService`. An application that does not import CacheModule is unaffected, and two calls that agree stay silent. Use `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` when two configurations must coexist
 - `isGlobal: false` is NOT the multi-cache mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own options and its own `CacheService`. An unnamed `forRoot()` still writes to a single class-static slot shared by the process
-- `as: symbol | string` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws; a module holding two registrations must name each with `@Inject(TOKEN)`
+- `as: symbol | string` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws and `as` with `isGlobal: false` is inert (a named registration is already non-global, and neither spelling changes `CacheModule`'s globality); a module holding two registrations must name each with `@Inject(TOKEN)`
 - `CacheModule.forFeature()` returns the module class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one CacheService — `isGlobal` controls visibility, never instance count
 - `CacheService` auto-initializes in the constructor via `autoInitialize()` (called as `this.initPromise = this.autoInitialize()`). The promise is NOT awaited there — `onModuleInit()` awaits it, which is what makes a failure reject `app.start()`. A rejection handler is attached in the constructor so the pending rejection is not reported as unhandled before the hook runs
 - `createCacheEnvSchema(prefix)` creates env schema with configurable prefix (default: `CACHE`)
@@ -314,16 +314,23 @@ CacheModule.forRoot({
 
 `CacheService` implements `OnModuleDestroy` and closes the cache when the application stops. It **does not disconnect a shared Redis client**: `close()` disconnects only a client the service owns.
 
-A shared client is **reference-counted**. Each consumer takes a hold when it first obtains the client, `app.stop()` releases that hold, and the connection is closed only when the last one lets go — so in multi-service mode the first sub-application to stop no longer tears the client away from its still-running siblings. `app.stop({ closeSharedRedis: false })` skips releasing altogether.
+A shared client is **reference-counted, and whoever takes a hold gives it back**. The cache releases its hold when it closes; the Redis queue adapter releases its when it disconnects; code that took the client itself with `SharedRedisProvider.getClient()` releases it with `SharedRedisProvider.release()`. The connection is closed when the last holder lets go — and never because an application stopped.
+
+`app.stop()` releases nothing. It used to release exactly one hold per stop, whether or not anything in that application had ever acquired: measured, a service with no Redis at all took a sibling's hold to zero on its own shutdown and the sibling's next queue publish threw `Redis client not connected`, while a service with a cache AND a queue gave back one of the two holds it took, so the socket outlived every application in the process. `stop({ closeSharedRedis })` is deprecated and ignored.
+
+If a process will not exit, the shutdown log names what still holds the connection (`Shared Redis still held by 1: …`) at debug level.
 
 If the shared client is gone when a cache operation runs, the cache re-acquires it rather than reporting a miss. When it cannot — the server is unreachable — the operation **throws**. A cache read returns `undefined` only for a key that genuinely is not there; a broken cache is an error, because code that treats a miss as "not present" (rate limits, replay guards, locks) would otherwise decide wrongly. The re-acquire is bounded by a short deadline, since the driver's auto-reconnect retries indefinitely and would otherwise turn a dead cache into a hung request.
 
 ```typescript
 const app = new OneBunApplication(AppModule);
 await app.start();
-await app.stop();               // the cache is closed
-// with a shared Redis client:
-await app.stop({ closeSharedRedis: false });  // the shared client stays connected
+await app.stop();               // the cache is closed, and it releases its own shared hold
+
+// A hold you took yourself is yours to give back:
+const client = await SharedRedisProvider.getClient();
+// ...
+await SharedRedisProvider.release();
 ```
 
 Before 0.4.5 nothing in the lifecycle called `close()`, so a cache built by one test suite stayed open into the next.
@@ -685,6 +692,16 @@ console.log(cache.isUsingSharedClient()); // true
 - Single connection pool for cache and WebSocket
 - Reduced memory footprint
 - Consistent key prefixing across features
+
+**One configuration per process.** There is a single shared connection, so there is a single
+configuration: a second `configure()` asking for a different URL, key prefix, `reconnect` or
+`tls` throws `OneBunSharedRedisConflictError`, naming both targets and both call sites. It used
+to be accepted and ignored — two applications pointing at different Redis databases both kept
+whichever connection existed first, under the first one's key prefix, so one application's
+`clear()` reached the other's data. Re-stating the same configuration is fine. For a second,
+genuinely different target use a dedicated client — `SharedRedisProvider.createClient({ url })`,
+or the consumer's own connection options — and in tests call `SharedRedisProvider.reset()`
+between configurations.
 
 ## Effect.js Integration
 

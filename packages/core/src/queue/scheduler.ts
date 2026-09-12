@@ -94,6 +94,41 @@ interface ScheduledJob {
 // ============================================================================
 
 /**
+ * The expression parsed, and then matched nothing.
+ *
+ * `getNextRun` searches four years ahead, so a null answer means the schedule is unreachable
+ * rather than merely distant — `0 0 30 2 *` is February 30th. Collapsing that to `undefined` is
+ * what let a typo register as a job that was listed, unpaused, and permanently inert: the tick
+ * only runs a job that has a `nextRun`, so it was skipped on every pass forever.
+ */
+function unreachableCronError(name: string, expression: string): Error {
+  return new Error(
+    `Cron job "${name}" has a schedule that can never run: "${expression}". `
+    + 'No matching date exists within the next four years, so the job would be registered and '
+    + 'never fire. Check the day-of-month and month fields together — February 30th is the usual '
+    + 'cause.',
+  );
+}
+
+/**
+ * Two jobs claiming one name.
+ *
+ * Names live in one flat map and default to the bare method name, so two controllers with a
+ * `cleanup()` method collided. Replacing the entry silently lost one schedule — and for interval
+ * and timeout jobs it also stranded the displaced job's timer, which stayed live while no longer
+ * being reachable from the map, so neither `stop()` nor `removeJob()` could clear it and the
+ * process kept publishing after shutdown.
+ */
+function duplicateJobNameError(name: string, existing: ScheduledJob, incoming: ScheduledJob): Error {
+  return new Error(
+    `Scheduled job name "${name}" is already taken: an existing ${existing.type} job publishes to `
+    + `"${existing.pattern}", and the new ${incoming.type} job publishes to "${incoming.pattern}". `
+    + 'Job names are one namespace for the whole application and default to the method name — give '
+    + 'one of them an explicit name in its @Cron / @Interval / @Timeout options.',
+  );
+}
+
+/**
  * Scheduler for managing cron, interval, and timeout jobs
  */
 export class QueueScheduler {
@@ -138,11 +173,49 @@ export class QueueScheduler {
     this.traceScheduledJobs = traceScheduledJobs;
   }
 
+
+  /**
+   * Store a job under its name, refusing to displace one that is already there.
+   *
+   * The refusal is the fix for both halves of the collision: the schedule that would have been
+   * lost is kept, and no timer is ever stranded on an object the map no longer holds.
+   */
+  private registerJob(job: ScheduledJob): void {
+    const existing = this.jobs.get(job.name);
+
+    if (existing) {
+      throw duplicateJobNameError(job.name, existing, job);
+    }
+
+    this.jobs.set(job.name, job);
+  }
+
   /**
    * Set error handler for scheduled job failures
    */
   setErrorHandler(handler: (jobName: string, error: unknown) => void): void {
     this.onJobError = handler;
+  }
+
+  /**
+   * Move a live cron job to its next run, and say so when there is none.
+   *
+   * Used by the paths that recompute an ALREADY REGISTERED job — the tick and `resumeJob` — where
+   * there is no caller to throw at. Registration throws instead; see {@link unreachableCronError}.
+   * The report fires once per job: without a `nextRun` the tick skips it, so it never comes back
+   * here to report again.
+   */
+  private advanceNextRun(job: ScheduledJob, schedule: CronSchedule, from?: Date): void {
+    const next = getNextRun(schedule, from);
+
+    if (next === null) {
+      job.nextRun = undefined;
+      this.onJobError?.(job.name, unreachableCronError(job.name, job.cronExpression ?? '(unknown)'));
+
+      return;
+    }
+
+    job.nextRun = next;
   }
 
   /**
@@ -215,7 +288,11 @@ export class QueueScheduler {
     },
   ): void {
     const schedule = parseCronExpression(expression);
-    const nextRun = getNextRun(schedule) ?? undefined;
+    const nextRun = getNextRun(schedule);
+
+    if (nextRun === null) {
+      throw unreachableCronError(name, expression);
+    }
 
     const job: ScheduledJob = {
       name,
@@ -230,7 +307,7 @@ export class QueueScheduler {
       declarative: options?.declarative,
     };
 
-    this.jobs.set(name, job);
+    this.registerJob(job);
   }
 
   /**
@@ -261,7 +338,7 @@ export class QueueScheduler {
       declarative: options?.declarative,
     };
 
-    this.jobs.set(name, job);
+    this.registerJob(job);
 
     // Start immediately if scheduler is running
     if (this.running) {
@@ -292,7 +369,7 @@ export class QueueScheduler {
       declarative: options?.declarative,
     };
 
-    this.jobs.set(name, job);
+    this.registerJob(job);
 
     // Start immediately if scheduler is running
     if (this.running) {
@@ -365,7 +442,7 @@ export class QueueScheduler {
       } else if (job.type === 'timeout' && job.timeoutMs) {
         this.startTimeoutJob(job);
       } else if (job.type === 'cron' && job.cronSchedule) {
-        job.nextRun = getNextRun(job.cronSchedule) ?? undefined;
+        this.advanceNextRun(job, job.cronSchedule);
       }
     }
 
@@ -384,9 +461,17 @@ export class QueueScheduler {
     switch (options.type) {
       case 'cron': {
         const schedule = parseCronExpression(options.expression);
+        const nextRun = getNextRun(schedule);
+
+        // Checked before anything is written: a rejected update leaves the job on the schedule it
+        // already had, rather than stripping its next run on the way out.
+        if (nextRun === null) {
+          throw unreachableCronError(options.name, options.expression);
+        }
+
         job.cronExpression = options.expression;
         job.cronSchedule = schedule;
-        job.nextRun = getNextRun(schedule) ?? undefined;
+        job.nextRun = nextRun;
         break;
       }
       case 'interval': {
@@ -522,7 +607,7 @@ export class QueueScheduler {
         // Handle overlap strategy
         if (this.hasRunInFlight(job.name) && job.overlapStrategy === 'skip') {
           // Skip this run, but update next run time
-          job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
+          this.advanceNextRun(job, job.cronSchedule, now);
           continue;
         }
 
@@ -530,7 +615,7 @@ export class QueueScheduler {
         this.launch(job);
 
         // Update next run time
-        job.nextRun = getNextRun(job.cronSchedule, now) ?? undefined;
+        this.advanceNextRun(job, job.cronSchedule, now);
       }
     }
   }

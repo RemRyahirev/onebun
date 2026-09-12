@@ -161,7 +161,9 @@ export class CompiledTestingModule {
    * Call this in `afterEach` / `afterAll` to prevent port leaks.
    */
   async close(): Promise<void> {
-    await this.app.stop?.({ closeSharedRedis: false });
+    // No `closeSharedRedis` here: an application releases no Redis hold at all now, so passing
+    // the deprecated option would print its warning on every single test teardown.
+    await this.app.stop?.();
   }
 }
 

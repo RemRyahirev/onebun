@@ -298,8 +298,14 @@ describe('OneBunApplication multi-service mode', () => {
       };
     }
 
+    // `getQueueService()` explains why there is no queue rather than answering null, so the
+    // "this child has none" assertions read that answer through the throw.
     function queueServiceOf(name: string): unknown {
-      return app.getApplication(name as never)!.getQueueService();
+      try {
+        return app.getApplication(name as never)!.getQueueService();
+      } catch {
+        return null;
+      }
     }
 
     test('should accept queue option and pass it to child applications', async () => {

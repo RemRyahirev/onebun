@@ -137,8 +137,17 @@ export class Reconciler extends BaseService {
 Rules: one token per `forRoot()` (registering it twice throws); selecting a token nothing configured fails at
 startup; the bare class in a module holding two registrations throws naming both; `@Inject` with a token the
 module never selected throws naming what it did select. A named registration is never `@Global()` — `as` with
-`isGlobal: true` throws — and it reaches a module only by being imported. An unnamed `forRoot()` keeps the
-global behaviour, and `isGlobal: false` is about VISIBILITY, not about multiple databases.
+`isGlobal: true` throws, and `as` with `isGlobal: false` is inert (it asks for what a named registration
+already guarantees) — a named registration reaches a module only by being imported, and neither spelling
+changes the BASE module's globality. Only an unnamed `forRoot()` decides that; `isGlobal: false` there is
+about VISIBILITY, not about multiple databases.
+
+**Two unnamed `forRoot()` calls that disagree are refused at `app.start()`.** An unnamed registration is
+identified by the module class itself, so a process cannot hold two of them: whichever ran last used to decide
+for everyone, silently. Now a disagreement — about `isGlobal`, or about what the call configures — raises
+`OneBunConflictingRegistrationError` naming both call sites. It fires only for applications that import the
+contested module, and two calls that agree stay silent. This is the reason `as: TOKEN` exists; do not reach for
+a second bare `forRoot()`. In tests, `resetRegistrations()` in `beforeEach` — the registry outlives the file.
 
 From outside the tree, `app.getService(Class, TOKEN)` is the **only** call that works once two registrations
 exist. The untokened `app.getService(Class)` and `app.getLayer()` both THROW an `Error` whose `name` is

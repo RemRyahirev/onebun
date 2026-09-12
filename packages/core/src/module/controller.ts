@@ -1,6 +1,7 @@
 import { trace } from '@opentelemetry/api';
 
 import type { IConfig, OneBunAppConfig } from './config.interface';
+import type { GlobalScope } from './module';
 import type {
   OneBunRequest,
   SseEvent,
@@ -69,16 +70,32 @@ export class Controller {
    * so they are available immediately after super() in subclass constructors.
    * @internal
    */
-  private static _initContext: { logger: SyncLogger; config: IConfig<OneBunAppConfig> } | null =
-    null;
+  private static _initContext: {
+    logger: SyncLogger;
+    config: IConfig<OneBunAppConfig>;
+    scope?: GlobalScope;
+  } | null = null;
+
+  /**
+   * The owning application's DI scope, when the controller was built by one.
+   *
+   * Carries this application's metrics service, so `this.metrics` does not have to read the
+   * one process-wide slot that the last application to start overwrites.
+   * @internal
+   */
+  private _scope?: GlobalScope;
 
   /**
    * Set the ambient init context before constructing a controller.
    * Called by the framework (OneBunModule) before `new ControllerClass(...)`.
    * @internal
    */
-  static setInitContext(logger: SyncLogger, config: IConfig<OneBunAppConfig>): void {
-    Controller._initContext = { logger, config };
+  static setInitContext(
+    logger: SyncLogger,
+    config: IConfig<OneBunAppConfig>,
+    scope?: GlobalScope,
+  ): void {
+    Controller._initContext = { logger, config, scope };
   }
 
   /**
@@ -95,7 +112,8 @@ export class Controller {
     // This makes this.config and this.logger available immediately after super()
     // in subclass constructors.
     if (Controller._initContext) {
-      const { logger, config } = Controller._initContext;
+      const { logger, config, scope } = Controller._initContext;
+      this._scope = scope;
       const className = this.constructor.name;
       this.logger = logger.child({ className });
       this.config = config;
@@ -151,6 +169,12 @@ export class Controller {
    * - `this.metrics?.getMetric<Counter>(name)`
    */
   protected get metrics(): import('@onebun/metrics').MetricsService | undefined {
+    // This application's own service first — see BaseService.metrics for why the process-wide
+    // slot alone is the wrong answer whenever more than one application exists.
+    if (this._scope?.metrics !== undefined) {
+      return this._scope.metrics as import('@onebun/metrics').MetricsService;
+    }
+
     if (typeof globalThis !== 'undefined') {
       return (globalThis as Record<string, unknown>).__onebunMetricsService as
         import('@onebun/metrics').MetricsService | undefined;
