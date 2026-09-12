@@ -1,6 +1,65 @@
 # Changelog
 
-## [0.7.0]
+## 0.7.0 — 2026-09-12
+
+### Package Versions
+
+Every package moves together, for the same reason as the last two releases. `workspace:^` is
+rewritten to `^<version>` at publish time and a caret on a 0.x version pins the minor, so once one
+package crosses a minor, everything that depends on it must cross with it — otherwise an install
+resolves two copies of the same package. Independent per-package versions become viable again at
+1.0.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.6.0 | 0.7.0 |
+| `@onebun/drizzle` | 0.6.0 | 0.7.0 |
+| `@onebun/trace` | 0.6.0 | 0.7.0 |
+| `@onebun/requests` | 0.6.0 | 0.7.0 |
+| `@onebun/nats` | 0.6.0 | 0.7.0 |
+| `@onebun/logger` | 0.6.0 | 0.7.0 |
+| `@onebun/cache` | 0.6.0 | 0.7.0 |
+| `@onebun/docs` | 0.6.0 | 0.7.0 |
+| `@onebun/metrics` | 0.6.0 | 0.7.0 |
+| `@onebun/envs` | 0.6.0 | 0.7.0 |
+| `@onebun/create` | 0.6.0 | 0.7.0 |
+
+### Read This First
+
+Twenty entries below are breaking. Each carries its own **Migration** note where it appears; this
+is the index, grouped by what kind of surprise it is.
+
+**It stops the application booting — and that is the fix.** Two unnamed `forRoot()` calls that
+disagree are now refused at `app.start()` instead of being resolved by whichever ran last, and a
+second `SharedRedisProvider.configure()` naming a different target is refused instead of accepted
+and ignored. Both were silences in which one consumer used another's database.
+
+**It changes what gets served.** A wrong verb on a declared path answers `405` with an `Allow`
+header instead of `404`. A `Response` a handler built now reaches the client exactly as built on
+every route, not only on routes with no decorated parameters. Static files and unmatched paths go
+through the global middleware chain, so they carry the security headers everything else carries.
+Exception filters are tried most-specific-first and may decline. An HTTP interceptor now sees a
+handler error instead of a Response the filter already made. `ApplicationOptions.interceptors`
+covers every transport rather than HTTP alone.
+
+**It changes what gets admitted.** A WebSocket upgrade goes to the gateway whose declared `path`
+covers it most specifically, and a path prefix must end on a segment boundary — `/chat` no longer
+claims `/chatterbox`. A Socket.IO client picks its gateway with the namespace in its CONNECT
+packet, and `@OnConnect` runs when that packet arrives rather than at upgrade. A connection
+belongs to exactly one gateway, and a frame or record naming no gateway is refused wherever more
+than one gateway could claim it.
+
+**It changes where state and metrics go.** Each application owns its Prometheus registry rather
+than sharing a process-wide one, and outgoing HTTP calls get their own metric family with a
+bounded label instead of being written into the last-started application's incoming-request
+metrics. Whoever takes a hold on the shared Redis client gives it back; an application releases
+nothing.
+
+**Smaller, but they will bite silently.** A duplicate scheduled-job name throws instead of
+replacing the existing job. A cron expression that can never match is refused at registration. A
+cron restricting both day-of-month and day-of-week matches when EITHER matches, as crontab(5)
+specifies. `app.getQueueService()` returns the service and throws when there is none, instead of
+returning `null`. `TypedEnv.create()` throws when a key is already bound to a different schema.
 
 ### Added
 
@@ -83,6 +142,9 @@
   - Migration: Affects only an instance sharing one Redis with an instance running @onebun/core 0.6.0 or earlier that reached the Redis WebSocket storage by hand (`wsHandler.setStorage(createRedisWsStorage(client))` — the `websocket.storage` option did nothing in those versions). If that instance's application has more than one gateway, its events stop reaching the new instance and its clients become invisible to it; events published the other way are unaffected. Single-gateway applications are unchanged.
 
 ### Internal
+
+Bookkeeping. These close feedback reports whose fixes shipped in earlier releases, so the
+reporters get a version to look for — nothing in this section is new in 0.7.0.
 
 - Shipped in 0.6.0 as WI-188 — `json`/`jsonb` values were stored double-encoded on the Bun SQL PostgreSQL path. This entry exists only so the originating report onebun-FB-7 carries a fix version; the user-facing entry is already in the 0.6.0 notes, and nothing new ships here. (FB-1)
 - Shipped in 0.5.0 as WI-196 and WI-200 — JetStream consumers are released and the pull loop stopped on unsubscribe, and `deleteDurableConsumer()` is the explicit API for decommissioning a durable. This entry exists only so the originating report onebun-FB-8 carries a fix version; nothing new ships here. (FB-2)
