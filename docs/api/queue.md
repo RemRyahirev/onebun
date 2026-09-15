@@ -1077,6 +1077,75 @@ await app.start();
 
 The framework instantiates the adapter with `new Adapter(queue.options)` and uses it as the queue backend. When you pass a class constructor as `adapter`, `options` is automatically typed to match the adapter's constructor argument — no type assertions needed. For a ready-made NATS/JetStream adapter, use the `@onebun/nats` package if available and pass its adapter class and options the same way.
 
+### Connecting to NATS
+
+Both `@onebun/nats` adapters take the same connection options. `servers` is the only required one:
+
+| Option | Meaning |
+| --- | --- |
+| `servers` | Server URL, or a list of them. Required. |
+| `name` | Connection name, as it appears in `nats server report connections`. |
+| `token` / `user` / `pass` | Credentials. |
+| `maxReconnectAttempts` | Reconnection attempts before the client gives up. |
+| `reconnectTimeWait` | Milliseconds between reconnection attempts. |
+| `timeout` | Connection timeout in milliseconds. |
+| `tls` | `true` negotiates TLS with the driver's defaults. |
+| `inboxPrefix` | Subject prefix for the inboxes this client generates. |
+| `driverOptions` | Anything else nats.js accepts, merged last. |
+
+#### inboxPrefix: connecting to a multi-tenant broker {#inboxprefix}
+
+A broker that separates tenants by subject grants each user SUBSCRIBE on its own inbox space
+rather than the global one — `["<app>.>", "_INBOX_<tenant>_<app>.>"]` and nothing wider. The
+driver's default inbox is `_INBOX`, which such a grant does not cover, and **every** JetStream
+operation is request/reply over the inbox: the manager's API calls, a publish's PubAck, every pull
+fetch. The result is not a degraded connection but one that opens and can then do nothing at all.
+
+`inboxPrefix` is what the grant names:
+
+```typescript
+import { OneBunApplication } from '@onebun/core';
+import { JetStreamQueueAdapter } from '@onebun/nats';
+
+const app = new OneBunApplication(AppModule, {
+  queue: {
+    adapter: JetStreamQueueAdapter,
+    options: {
+      servers: 'nats://nats.internal:4222',
+      user: 'acme-api',
+      pass: process.env.NATS_PASSWORD,
+      inboxPrefix: '_INBOX_acme_api',
+      streams: [{ name: 'ACME_EVENTS', subjects: ['acme.events.>'] }],
+    },
+  },
+});
+```
+
+#### driverOptions: everything OneBun does not name {#driveroptions}
+
+The options above are the ones OneBun names itself, and it translates where the two spellings
+disagree — `tls: true` becomes the driver's empty options object, for instance. `driverOptions`
+carries everything else `@nats-io/transport-node` accepts, and is merged **last**, so it also
+overrides anything above it:
+
+```typescript
+import { JetStreamQueueAdapter } from '@onebun/nats';
+
+const adapter = new JetStreamQueueAdapter({
+  servers: 'nats://localhost:4222',
+  streams: [{ name: 'EVENTS', subjects: ['events.>'] }],
+  driverOptions: {
+    noEcho: true,
+    pingInterval: 30_000,
+    // Full TLS settings, where the boolean above is not enough.
+    tls: { caFile: '/etc/ssl/nats-ca.pem' },
+  },
+});
+```
+
+This exists so the named list is not a ceiling: without it, a nats.js option OneBun has not named
+yet could not be reached until `@onebun/nats` shipped a release that names it.
+
 ### NatsQueueAdapter
 
 NATS pub/sub for lightweight messaging (no persistence). Pass the adapter class in application options — the framework handles instantiation and connection automatically:
@@ -1157,7 +1226,54 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 ```
 
-Streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter resolves the stream from these declarations — `agent_events`, whose `agent.events.>` binds it — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
+Declared streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter resolves the stream from these declarations — `agent_events`, whose `agent.events.>` binds it — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
+
+#### A declaration says two things, and they can be separated {#stream-declarations}
+
+Declaring a stream means both "resolve my subscriptions against this" and "reconcile this on the
+broker". The second is not always this application's to do, so each half can be turned off on its
+own:
+
+- **`streams` may be empty or omitted.** That is a publish-only unit: it declares nothing, touches
+  no stream, and can still publish anywhere the broker routes. A `subscribe()` on such an adapter
+  is refused with a message saying why the two are not symmetric.
+- **`manage: false` on a stream declares it for resolution only.** No `STREAM.INFO` probe, no
+  create, no update. This is how a stream that belongs to a platform operator, an infrastructure
+  repository or another team is declared — a tenant-scoped user is usually granted no write on its
+  configuration, and the reconcile pass would fail the boot rather than converge. It governs the
+  stream's own config and nothing else: `subscribe()` still creates and reconciles its *consumer*
+  on that stream, which is a separate grant (`$JS.API.CONSUMER.*.<stream>.>`) and the one a
+  consuming tenant is normally given.
+- **`manageStreams: false` is the same switch, adapter-wide.** A per-stream `manage` overrides it
+  in either direction, which is what a unit that owns some of its streams and only reads from the
+  rest needs. `streamDefaults: { manage: false }` says the same thing and is likewise overridable
+  per stream.
+
+```typescript
+import { JetStreamQueueAdapter } from '@onebun/nats';
+
+// Owns its own stream; reads from one the platform provisions.
+const worker = new JetStreamQueueAdapter({
+  servers: 'nats://localhost:4222',
+  streams: [
+    { name: 'WORKER_JOBS', subjects: ['worker.jobs.>'] },
+    { name: 'PLATFORM_EVENTS', subjects: ['platform.events.>'], manage: false },
+  ],
+});
+
+// Publishes into streams other units own, and declares nothing.
+const producer = new JetStreamQueueAdapter({
+  servers: 'nats://localhost:4222',
+});
+```
+
+::: warning What turning reconciliation off costs you
+The subject-narrowing guard, the create-only divergence guard and the create-if-missing branch all
+ride on the reconcile pass. An unmanaged stream that is missing, or bound to different subjects, is
+therefore no longer caught at `app.start()` — it surfaces at the first `publish()` or `subscribe()`
+instead. That is the trade: the declaration stops being an assertion about the broker and becomes a
+local fact about routing.
+:::
 
 #### Stream resolution: exactly one, or the application does not start
 
@@ -1171,6 +1287,12 @@ the streams this application declares:
    working.
 3. Nothing matches, **or more than one matches on either pass**: `app.start()` throws, naming the
    pattern, the NATS subject it translated to, and every stream you declared.
+
+An adapter that declares no streams at all is the degenerate case of rule 3: every `subscribe()`
+throws, and the message says that this is how a publish-only unit is configured rather than
+listing an empty set of candidates. A `manage: false` stream is a candidate like any other —
+turning reconciliation off does not take the declaration out of resolution, which is the whole
+reason to keep declaring it.
 
 ::: danger There is no broker-side check to fall back on
 Measured against nats-server 2.10: a `filter_subject` completely unrelated to what the stream holds
@@ -1191,8 +1313,9 @@ Narrow the declarations until exactly one binds each subscribed subject, or drop
 service does not consume from.
 
 **`publish()` is not symmetric and needs no declaration at all.** It addresses a subject and lets the
-server route it, so a producer-only service declares nothing. `subscribe()` cannot do that, because
-the API it calls demands a stream name.
+server route it, so a producer-only service declares nothing — `streams` omitted entirely, and the
+reconcile pass has nothing to do. `subscribe()` cannot do that, because the API it calls demands a
+stream name; on an adapter with no declarations it refuses and says so rather than guessing.
 
 **Supported Features:**
 - Pattern subscriptions
@@ -1201,7 +1324,7 @@ the API it calls demands a stream name.
 - Retry
 - Scheduled jobs
 
-**Reconciliation on connect.** Each declared stream is reconciled during startup rather than blindly rewritten. The adapter first asks the server for the stream; only a genuine "stream not found" rejection counts as absence and leads to a create. Any other rejection — permissions denied, JetStream disabled, a transport timeout — is reported as itself, instead of being read as a missing stream and turned into the opaque `stream name already in use` that the follow-up create would raise. When the stream already exists, the update carries **only the keys this application declared**. A limit the declaration says nothing about is never sent, so `maxMsgs`, `maxBytes` and `maxAge` set out of band survive every connect: a stream pre-provisioned by an operator keeps the limits that operator gave it. `retention`, `storage` and the replica default apply on creation only — `update` cannot change the first two, and applying a default on update would rewrite a value the application never asked about. A limit or replica count declared in `streamDefaults` counts as declared and is sent on both paths; `retention` and `storage` are creation-only whether you declare them or not, and reach the divergence guard rather than the wire.
+**Reconciliation on connect.** Each declared stream this application *manages* is reconciled during startup rather than blindly rewritten; one declared with `manage: false` is skipped entirely, probe included. The adapter first asks the server for the stream; only a genuine "stream not found" rejection counts as absence and leads to a create. Any other rejection — permissions denied, JetStream disabled, a transport timeout — is reported as itself, instead of being read as a missing stream and turned into the opaque `stream name already in use` that the follow-up create would raise. When the stream already exists, the update carries **only the keys this application declared**. A limit the declaration says nothing about is never sent, so `maxMsgs`, `maxBytes` and `maxAge` set out of band survive every connect: a stream pre-provisioned by an operator keeps the limits that operator gave it. `retention`, `storage` and the replica default apply on creation only — `update` cannot change the first two, and applying a default on update would rewrite a value the application never asked about. A limit or replica count declared in `streamDefaults` counts as declared and is sent on both paths; `retention` and `storage` are creation-only whether you declare them or not, and reach the divergence guard rather than the wire.
 
 An unchanged stream configuration performs no write at all. A changed one is updated in place, carrying every pre-existing metadata key forward.
 
@@ -1224,6 +1347,10 @@ The reconciliation stamp lives in JetStream stream metadata, so streams, like co
 - `decideStamp(metadata, desiredHash)` drives the write: `noop` → `streams.update()` is not called at all; `update` → `stampMetadata(metadata, hash, prevHash)` copies the server's existing metadata map in first, then sets `onebun.config-hash`, `onebun.prev-config-hash` and `onebun.reconciled-at`; `cycle` → `streamCycleMessage()` naming `divergingStreamFields()`
 - Every failure routes through `failStream()`, which emits `onError` before the error is thrown — `ensureAllStreams()` runs during `connect()`, before any `@OnQueueError` handler is registered, so a throw alone would reach nobody
 - `streamWriteFailureMessage()` appends the nats-server 2.10 metadata hint when the cause matches `/requires server/i`
+- `managesStream(stream)` resolves `stream.manage ?? options.manageStreams ?? true`, and the gate sits in `ensureAllStreams()` rather than in `connect()`. That placement is load-bearing: `ensureStream()` opens with a `streams.info` probe, and a probe is a broker call like any other — on a tenant-scoped broker that grants no `$JS.API.STREAM.INFO`, skipping only the write would still fail the boot. `streamDefaults.manage` needs no separate handling: the constructor's `{ ...defaults, ...stream }` spread has already folded it in, which is also why a per-stream `manage` wins over it
+- `getJsm()` builds the `JetStreamManager` on first use, not in `connect()`. `jetstreamManager()` asks the server for account info over `$JS.API.INFO`, the one privilege an adapter that reconciles nothing and subscribes to nothing never has a second use for. The eager behaviour is unchanged for anything with a managed stream, because `ensureAllStreams()` is the first caller. The in-flight promise is memoised in `jsmPending` so concurrent first uses share one build, and a rejection clears it so a failure is retried rather than replayed
+- `toDriverOptions()` in `packages/nats/src/nats-client.ts` is the single translation from `NatsConnectionOptions` to the driver's `NodeConnectionOptions`, and it is exported so the mapping can be asserted directly — `connect()` resolves the driver through a module-level dynamic import and `mock.module` is banned in this repo, so no test going through `connect()` can see the object. The literal is annotated `satisfies Record<PassthroughKey, unknown>` where `PassthroughKey = Exclude<keyof NatsConnectionOptions, 'tls' | 'driverOptions'>`, so a field added to the interface fails to compile until it is forwarded. That guard exists because this used to be an inline allow-list, which is how `inboxPrefix` came to be undeliverable while sitting in the type. It also emits ONLY the options the application set: nats.js merges with `extend(defaultOptions(), opts)`, which copies every own key unconditionally, so a present-and-undefined `maxReconnectAttempts` overwrote the driver's 10 and a present-and-undefined `reconnectTimeWait` overwrote its 2000 — after which the driver's own reconnect-delay handler computed `undefined + jitter` and scheduled every retry at `NaN` milliseconds. `driverOptions` is the deliberate exception and is spread verbatim, undefined values included, because "merged last and winning" has to mean winning
+- `describeDeclarations()` answers `'no streams at all'` for an empty set rather than an empty string, and `unboundStreamMessage()` branches on the same condition — a publish-only adapter reaches it only by subscribing, and then the useful thing to say is why the two are not symmetric, not the tie-breaking advice that assumes declarations exist
 
 </llm-only>
 

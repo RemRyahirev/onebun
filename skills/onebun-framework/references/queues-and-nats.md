@@ -78,7 +78,8 @@ streams THIS application declares, and refuses rather than guesses:
 1. Streams whose declared subjects **cover** the whole translated pattern. Exactly one wins; two or
    more throw.
 2. Otherwise streams that merely **overlap** it. Exactly one wins; two or more throw.
-3. None throws.
+3. None throws. An adapter that declares no streams at all is the degenerate case: the message says
+   that this is how a publish-only unit is configured, rather than listing an empty candidate set.
 
 There is no fallback and no broker lookup. **Measured against nats-server 2.10: a `filter_subject`
 completely unrelated to what a stream holds is ACCEPTED, stored verbatim, and its consumer sits at
@@ -92,23 +93,33 @@ differently on a later boot creates the same durable elsewhere and orphans the f
 delivery position — and streams differ in retention, limits and storage.
 
 **`publish()` is not symmetric and never resolves a stream.** It addresses a subject and lets the
-server route it, so a producer-only service needs no declaration. That asymmetry is physical, not
-stylistic. It also means a `deadLetter.queue` that no stream binds is NOT caught at startup: dead
-letters are republished through `publish()`, so it surfaces as a republish failure the first time a
-message is dead-lettered (the original is left un-terminated, so nothing is lost).
+server route it, so a producer-only service needs no declaration — `streams` omitted entirely, which
+the constructor accepts. That asymmetry is physical, not stylistic. It also means a
+`deadLetter.queue` that no stream binds is NOT caught at startup: dead letters are republished
+through `publish()`, so it surfaces as a republish failure the first time a message is dead-lettered
+(the original is left un-terminated, so nothing is lost).
 
 Consequence for configuration: every subject a service subscribes to must be bound by exactly one
 stream in that service's own `streams`. A service consuming from a stream another service owns must
-declare it with the **identical** definition, and "identical" is load-bearing — declaring a stream
-enrols the service in reconciling it:
+declare it — and then decide whether it also reconciles it. `manage` is that decision:
 
-- identical -> the config hash matches, `decideStamp` returns `noop`, nothing is written;
-- **differing -> `decideStamp` returns `update`, and the consumer REWRITES the owner's stream.**
-  A copied declaration with `maxAge: 3d` where the owner set `7d` boots fine and silently shortens
-  the owner's retention. Only two kinds of difference are refused: one that narrows the subject set
-  (`streamNarrowingMessage`) and one that changes a create-only field such as `storage` or
-  `retention` (`streamCreateOnlyMessage`). A reconcile-cycle error means something else entirely:
-  two processes writing different configs in alternation inside the cycle window.
+- **`manage: false`** — declared for resolution only. No `STREAM.INFO` probe, no create, no update,
+  and none of the guards that ride on them. This is the right answer whenever the stream belongs to
+  a platform operator, an infrastructure repository or another team: a tenant-scoped user typically
+  has no write on it, so reconciliation fails the boot rather than converging. What it costs: a
+  stream that is missing or bound to different subjects is no longer caught at `app.start()` — it
+  surfaces at the first `publish()`/`subscribe()`. `manageStreams: false` is the same switch
+  adapter-wide; a per-stream `manage` overrides it in either direction, and `streamDefaults.manage`
+  sits between them (the constructor's `{ ...defaults, ...stream }` spread folds it in).
+- **Managed (the default)** — the declaration must be **identical** to the owner's, and "identical"
+  is load-bearing, because declaring a managed stream enrols the service in reconciling it:
+  - identical -> the config hash matches, `decideStamp` returns `noop`, nothing is written;
+  - **differing -> `decideStamp` returns `update`, and the consumer REWRITES the owner's stream.**
+    A copied declaration with `maxAge: 3d` where the owner set `7d` boots fine and silently shortens
+    the owner's retention. Only two kinds of difference are refused: one that narrows the subject set
+    (`streamNarrowingMessage`) and one that changes a create-only field such as `storage` or
+    `retention` (`streamCreateOnlyMessage`). A reconcile-cycle error means something else entirely:
+    two processes writing different configs in alternation inside the cycle window.
 
 The narrowing check asks whether the declared SET still covers each subject the server holds, not
 whether any single declared subject does — `['orders.*', 'orders.*.#']` partitions a server-held
@@ -466,6 +477,33 @@ const app = new OneBunApplication(AppModule, {
 - Consumer groups via NATS queue groups
 - Pattern conversion via `toNatsSubject`: OneBun's `#` wildcard → NATS `>`, and a `{name}` parameter → NATS `*` (automatic)
 
+### Connection options (both adapters)
+
+`servers`, `name`, `token`, `user`, `pass`, `maxReconnectAttempts`, `reconnectTimeWait`, `timeout`,
+`tls`, plus two that matter on a broker this application does not own:
+
+- **`inboxPrefix`** — the subject prefix for the inboxes the client generates. A multi-tenant broker
+  grants each user SUBSCRIBE on its own inbox space (`_INBOX_<tenant>_<app>.>`) rather than the
+  global one, and the driver defaults to `_INBOX`. Every JetStream operation is request/reply over
+  the inbox — the manager's API calls, a publish's PubAck, every pull fetch — so the wrong prefix is
+  not a degraded connection but one that opens and can then do nothing at all.
+- **`driverOptions`** — anything `@nats-io/transport-node` accepts that OneBun does not name, merged
+  **last** and therefore winning over everything above. `tls: true` is translated to the driver's
+  empty options object; real TLS settings go here.
+
+The translation is `toDriverOptions()` in `packages/nats/src/nats-client.ts`, and its literal is
+annotated `satisfies Record<PassthroughKey, unknown>` so a field added to `NatsConnectionOptions`
+fails to compile until it is forwarded. That guard exists because this used to be an inline
+allow-list, which is how `inboxPrefix` came to be undeliverable while sitting in the type.
+
+It emits only the options the application actually set. nats.js merges with
+`extend(defaultOptions(), opts)`, which copies every own key unconditionally, so a
+present-and-undefined `maxReconnectAttempts` overwrites the driver's 10 and a present-and-undefined
+`reconnectTimeWait` overwrites its 2000 — the driver's reconnect-delay handler then computes
+`undefined + jitter` and schedules every retry at `NaN` milliseconds. Same rule as
+`buildStreamConfig` on the stream side, for the same reason. `driverOptions` is the deliberate
+exception: spread verbatim, undefined included, or the hatch could not un-set anything.
+
 ### JetStreamQueueAdapter (persistent, with acks)
 
 ```typescript
@@ -477,7 +515,8 @@ const app = new OneBunApplication(AppModule, {
     options: {                       // ← typed as JetStreamAdapterOptions
       servers: 'nats://localhost:4222',
 
-      // Required: define which streams handle which subjects
+      // Optional: define which streams handle which subjects. Omit for a publish-only unit;
+      // add `manage: false` to a stream whose topology someone else owns.
       streams: [
         {
           name: 'EVENTS',
@@ -517,7 +556,16 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 Key JetStream behaviors:
-- **Stream reconciliation**: on connect the adapter probes `streams.info` first, so streams are
+- **Declaring and managing are separable**: `streams` may be omitted or empty (publish-only —
+  `publish()` never resolves a stream, `subscribe()` then refuses with a message saying so), and a
+  declared stream may carry `manage: false` to stay in resolution while leaving the broker
+  untouched. `manageStreams: false` is the adapter-wide form; precedence is
+  `stream.manage ?? options.manageStreams ?? true`, with `streamDefaults.manage` already folded
+  into `stream.manage` by the constructor spread. The gate sits in `ensureAllStreams()`, not
+  `connect()`, so the `streams.info` probe is skipped too — a tenant-scoped grant usually denies
+  that read as surely as the write. `jetstreamManager()` itself is built on first use
+  (`getJsm()`), so a publish-only unit never spends `$JS.API.INFO` either
+- **Stream reconciliation** (managed streams only): on connect the adapter probes `streams.info` first, so streams are
   created when absent and reconciled only when their configuration hash changed — an unchanged
   declaration performs no `streams.update` call at all, a changed one is an update that carries
   every pre-existing metadata key forward, and a detected reconcile cycle fails startup. The update

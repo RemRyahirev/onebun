@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 441
+// NATS-SUITE-FLOOR: 487
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -53,6 +53,11 @@ function asAny(obj: unknown): AnyRecord {
  */
 function callArg(fn: unknown, call: number, index: number): AnyRecord {
   return asAny(fn).mock.calls[call][index] as AnyRecord;
+}
+
+/** The same, for the arguments that are plain strings — a stream name, a consumer name. */
+function callArgName(fn: unknown, call: number, index: number): string {
+  return asAny(fn).mock.calls[call][index] as string;
 }
 
 // ============================================================================
@@ -998,11 +1003,41 @@ describe('JetStreamQueueAdapter', () => {
       expect(multiAdapter.resolveStreamForSubject('events.created')).toBe('SPECIFIC');
     });
 
-    it('should throw if streams array is empty', () => {
-      expect(() => new JetStreamQueueAdapter({
+    // RETIRED: 'should throw if streams array is empty'. The constructor used to refuse an
+    // empty declaration list, which forced a publish-only unit to declare streams it does not
+    // own — and then the reconcile pass tried to create or update them. `publish()` never
+    // resolves a stream, so the declarations were never load-bearing for it.
+    it('accepts an empty streams array — a publish-only unit owns no declarations', () => {
+      const publishOnly = new JetStreamQueueAdapter({
         servers: 'nats://localhost:4222',
         streams: [],
-      })).toThrow('JetStreamQueueAdapter requires at least one stream definition');
+      });
+
+      expect(publishOnly.name).toBe('jetstream');
+    });
+
+    it('accepts omitted streams entirely', () => {
+      const publishOnly = new JetStreamQueueAdapter({ servers: 'nats://localhost:4222' });
+
+      expect(publishOnly.name).toBe('jetstream');
+    });
+
+    it('still refuses options that name no server, and says so', () => {
+      // The framework builds a custom adapter as `new adapterCtor(queue.options)` and `options`
+      // is optional there, so this argument really can arrive.
+      expect(() => new JetStreamQueueAdapter(
+        undefined as unknown as JetStreamAdapterOptions,
+      )).toThrow(/requires connection options naming at least `servers`/);
+    });
+
+    it('tells a publish-only adapter why subscribe() cannot do what publish() does', () => {
+      const publishOnly = new JetStreamQueueAdapter({
+        servers: 'nats://localhost:4222',
+        streams: [],
+      });
+
+      expect(() => publishOnly.resolveStreamForSubject('events.created'))
+        .toThrow(/declares no streams at all, which is how a publish-only unit is configured/);
     });
 
     it('refuses to guess a stream for an unbound subject', () => {
@@ -2742,6 +2777,297 @@ describe('ensureStream: multi-service parallel start', () => {
       .toBe(minimalHash());
     expect(callArg(shared.streams.update, 1, 1).metadata[CONFIG_STAMP_KEYS.configHash])
       .toBe(minimalHash());
+  });
+});
+
+// ============================================================================
+// Stream management: manageStreams (adapter-wide) and StreamDefinition.manage
+//
+// A declaration used to mean two things at once — "resolve subscriptions
+// against this" and "reconcile this on the broker" — and the second is not
+// this application's to do when the stream belongs to a platform operator or
+// another team. Splitting them is what lets an application run against a
+// topology declared elsewhere. Each key is asserted to gate its own subject
+// and nothing else.
+// ============================================================================
+
+describe('stream management: manageStreams and StreamDefinition.manage', () => {
+  /** Every call `ensureStream` can make, including the probe. */
+  function brokerCalls(mockJsm: AnyRecord): number[] {
+    return [
+      asAny(mockJsm.streams.info).mock.calls.length,
+      asAny(mockJsm.streams.add).mock.calls.length,
+      asAny(mockJsm.streams.update).mock.calls.length,
+    ];
+  }
+
+  /**
+   * A `streams.info` that answers for whichever stream was asked about, rather than the one
+   * fixed `TEST_STREAM` the shared default returns. These cases declare two streams by name and
+   * assert which of them was probed, so a probe answering with another stream's subjects would
+   * trip the narrowing guard before the assertion is reached.
+   */
+  function echoStreamInfo(mockJsm: AnyRecord, subjectsByName: Record<string, string[]>): void {
+    mockJsm.streams.info = mock((name: string) => Promise.resolve({
+      config: { name, subjects: subjectsByName[name] ?? [], metadata: {} },
+    }));
+  }
+
+  it('reconciles by default, with neither key set', async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter();
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(1);
+  });
+
+  it('manageStreams: false issues not one broker call, the probe included', async () => {
+    // The probe matters as much as the write: on the deployment this exists for, the tenant is
+    // granted no $JS.API.STREAM.INFO either, so skipping only the update would still fail boot.
+    const { adapter, mockJsm } = makeConnectableAdapter({ manageStreams: false });
+
+    await adapter.connect();
+
+    expect(brokerCalls(mockJsm)).toEqual([0, 0, 0]);
+  });
+
+  it('manageStreams: false still resolves the declaration for a subscription', () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      manageStreams: false,
+      streams: [{ name: 'PLATFORM', subjects: ['plat.>'] }],
+    });
+
+    expect(adapter.resolveStreamForSubject('plat.created')).toBe('PLATFORM');
+  });
+
+  it('per-stream manage: false leaves that stream alone and reconciles the others', async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [
+        { name: 'OWN', subjects: ['own.>'] },
+        { name: 'PLATFORM', subjects: ['plat.>'], manage: false },
+      ],
+    });
+    echoStreamInfo(mockJsm, { OWN: ['own.>'], PLATFORM: ['plat.>'] });
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(1);
+    expect(callArgName(mockJsm.streams.info, 0, 0)).toBe('OWN');
+  });
+
+  it('per-stream manage: true opts back in under manageStreams: false', async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      manageStreams: false,
+      streams: [
+        { name: 'OWN', subjects: ['own.>'], manage: true },
+        { name: 'PLATFORM', subjects: ['plat.>'] },
+      ],
+    });
+    echoStreamInfo(mockJsm, { OWN: ['own.>'], PLATFORM: ['plat.>'] });
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(1);
+    expect(callArgName(mockJsm.streams.info, 0, 0)).toBe('OWN');
+  });
+
+  it('streamDefaults.manage reaches every stream, and a per-stream manage still wins', async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streamDefaults: { manage: false },
+      streams: [
+        { name: 'OWN', subjects: ['own.>'], manage: true },
+        { name: 'PLATFORM', subjects: ['plat.>'] },
+      ],
+    });
+    echoStreamInfo(mockJsm, { OWN: ['own.>'], PLATFORM: ['plat.>'] });
+
+    await adapter.connect();
+
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(1);
+    expect(callArgName(mockJsm.streams.info, 0, 0)).toBe('OWN');
+  });
+
+  it('gates the stream pass only: a consumer is still created on an unmanaged stream', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      manageStreams: false,
+      streams: [{ name: 'TEST_STREAM', subjects: ['test.>'] }],
+    });
+
+    await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+
+    expect(mockJsm.consumers.add).toHaveBeenCalledTimes(1);
+    expect(callArgName(mockJsm.consumers.add, 0, 0)).toBe('TEST_STREAM');
+  });
+
+  it('builds no JetStream manager when there is nothing to reconcile', async () => {
+    // $JS.API.INFO is what `jetstreamManager()` spends, and it is the one privilege an adapter
+    // that reconciles nothing never has a second use for. Were the manager still built here,
+    // `buildJsm` would hand the real client a mock connection and this would not resolve.
+    const { adapter } = makeConnectedAdapter({ manageStreams: false });
+    const a = asAny(adapter);
+    a.jsm = null;
+    a.jsmPending = null;
+
+    await a.ensureAllStreams();
+
+    expect(a.jsm).toBeNull();
+  });
+
+  it('builds no JetStream manager for an adapter that declares nothing', async () => {
+    const { adapter } = makeConnectedAdapter({ streams: [] });
+    const a = asAny(adapter);
+    a.jsm = null;
+    a.jsmPending = null;
+
+    await a.ensureAllStreams();
+
+    expect(a.jsm).toBeNull();
+  });
+});
+
+// ============================================================================
+// The JetStream manager, built on first use
+// ============================================================================
+
+describe('getJsm: lazy, shared and not memoised on failure', () => {
+  it('builds once for concurrent first uses', async () => {
+    const { adapter } = makeConnectedAdapter();
+    const a = asAny(adapter);
+    const built = { name: 'jsm' };
+    let builds = 0;
+
+    a.jsm = null;
+    a.jsmPending = null;
+    a.buildJsm = async (): Promise<AnyRecord> => {
+      builds += 1;
+      await Promise.resolve();
+
+      return built;
+    };
+
+    const [first, second] = await Promise.all([a.getJsm(), a.getJsm()]);
+
+    expect(builds).toBe(1);
+    expect(first).toBe(built);
+    expect(second).toBe(built);
+    expect(a.jsm).toBe(built);
+  });
+
+  it('does not cache a manager whose connection was closed while it was being built', async () => {
+    // `disconnect()` clears both fields and closes the socket the manager is bound to. Caching
+    // the late arrival would hand the NEXT connect a manager wired to a connection that is gone
+    // — something `connect()` could not produce before, because it always rebuilt the manager.
+    const { adapter } = makeConnectedAdapter();
+    const a = asAny(adapter);
+    const stale = { name: 'stale-jsm' };
+    let release: (() => void) | undefined;
+
+    a.jsm = null;
+    a.jsmPending = null;
+    a.buildJsm = async (): Promise<AnyRecord> => {
+      await new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      return stale;
+    };
+
+    const inFlight = a.getJsm() as Promise<AnyRecord>;
+    await adapter.disconnect();
+    release!();
+
+    expect(await inFlight).toBe(stale);
+    expect(a.jsm).toBeNull();
+    expect(a.jsmPending).toBeNull();
+  });
+
+  it('retries after a failure instead of replaying the rejection forever', async () => {
+    const { adapter } = makeConnectedAdapter();
+    const a = asAny(adapter);
+    let builds = 0;
+
+    a.jsm = null;
+    a.jsmPending = null;
+    a.buildJsm = async (): Promise<AnyRecord> => {
+      builds += 1;
+      await Promise.resolve();
+
+      throw new Error('permissions violation for JetStream API');
+    };
+
+    await expect(a.getJsm()).rejects.toThrow('permissions violation');
+    await expect(a.getJsm()).rejects.toThrow('permissions violation');
+
+    expect(builds).toBe(2);
+  });
+
+  it('reports the failure through onError, not only by throwing', async () => {
+    // Its first caller is `ensureAllStreams()` or `subscribe()`, both awaited during boot before
+    // any @OnQueueError handler exists — a throw alone would reach nobody.
+    const { adapter } = makeConnectedAdapter();
+    const a = asAny(adapter);
+    const seen: Error[] = [];
+    adapter.on('onError', (error) => {
+      seen.push(error);
+    });
+
+    a.jsm = null;
+    a.jsmPending = null;
+    a.buildJsm = async (): Promise<AnyRecord> => {
+      await Promise.resolve();
+
+      throw new Error('permissions violation for JetStream API');
+    };
+
+    await expect(a.getJsm()).rejects.toThrow('permissions violation');
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].message).toContain('permissions violation');
+  });
+});
+
+// ============================================================================
+// Publish-only: an adapter that declares nothing at all
+// ============================================================================
+
+describe('publish-only adapter', () => {
+  it('publishes without a single declaration', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter({ streams: [] });
+
+    const id = await adapter.publish('events.created', { id: 1 });
+
+    expect(mockJs.publish).toHaveBeenCalledTimes(1);
+    expect(callArgName(mockJs.publish, 0, 0)).toBe('events.created');
+    expect(typeof id).toBe('string');
+  });
+
+  it('reports a failed publish as declaring no streams at all', async () => {
+    const { adapter, mockJs } = makeConnectedAdapter({ streams: [] });
+    mockJs.publish = mock(() => Promise.reject(new Error('jetstream is not enabled')));
+
+    let thrown: Error | undefined;
+    try {
+      await adapter.publish('events.created', { id: 1 });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown!.message).toContain('declares no streams at all');
+  });
+
+  it('refuses subscribe() and explains why publish() does not need what it needs', async () => {
+    const { adapter } = makeConnectedAdapter({ streams: [] });
+
+    await expect(adapter.subscribe('events.created', async () => undefined))
+      .rejects.toThrow(/consumers.add takes a stream NAME/);
+  });
+
+  it('refuses deleteDurableConsumer() the same way', async () => {
+    const { adapter } = makeConnectedAdapter({ streams: [] });
+
+    await expect(adapter.deleteDurableConsumer('events.created', 'workers'))
+      .rejects.toThrow(/declares no streams at all/);
   });
 });
 
