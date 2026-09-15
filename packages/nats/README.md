@@ -139,13 +139,35 @@ interface NatsConnectionOptions {
   reconnectTimeWait?: number;
   timeout?: number;
   tls?: boolean;
+  inboxPrefix?: string;        // Prefix for generated inboxes; see below
+  driverOptions?: Partial<NodeConnectionOptions>;  // Merged last into what nats.js receives
 }
 ```
+
+**`inboxPrefix` on a multi-tenant broker.** A broker that separates tenants by subject grants each
+user SUBSCRIBE on its own inbox space — `_INBOX_<tenant>_<app>.>` and nothing wider. The driver
+defaults to `_INBOX`, which such a grant does not cover, and every JetStream operation is
+request/reply over the inbox: the manager's API calls, a publish's PubAck, every pull fetch. Set
+`inboxPrefix` to the prefix the grant names, or the connection opens and can then do nothing.
+
+**`driverOptions` is the escape hatch.** The options above are the ones OneBun names itself, and it
+translates where the spellings disagree — `tls: true` becomes the driver's empty options object.
+Everything else `@nats-io/transport-node` accepts goes in `driverOptions`, which is merged last and
+therefore also overrides anything above it. Without it the named list would be a ceiling, and a
+nats.js option this package has not named yet could not be reached until the next release.
+
+An option you do not set is omitted rather than sent as `undefined`. That matters because nats.js
+merges its own defaults with `extend(defaultOptions(), opts)`, which copies every own key
+unconditionally: a present-and-undefined `maxReconnectAttempts` would overwrite the driver's `10`,
+and a present-and-undefined `reconnectTimeWait` its `2000`, after which the driver's reconnect-delay
+handler schedules every retry at `NaN` milliseconds. `driverOptions` is the deliberate exception and
+is passed through exactly as written.
 
 ### JetStreamAdapterOptions
 
 ```typescript
 interface JetStreamAdapterOptions extends NatsConnectionOptions {
+  manageStreams?: boolean;     // Reconcile declared streams on connect, default true
   streamDefaults?: {
     retention?: 'limits' | 'interest' | 'workqueue';
     storage?: 'file' | 'memory';
@@ -154,8 +176,9 @@ interface JetStreamAdapterOptions extends NatsConnectionOptions {
     maxBytes?: number;
     maxAge?: number;           // Nanoseconds
     duplicateWindow?: number;  // Nanoseconds
+    manage?: boolean;
   };
-  streams: Array<{
+  streams?: Array<{            // Omitted or empty means publish-only
     name: string;              // Stream name
     subjects: string[];        // Subjects to store
     retention?: 'limits' | 'interest' | 'workqueue';
@@ -165,6 +188,7 @@ interface JetStreamAdapterOptions extends NatsConnectionOptions {
     maxBytes?: number;
     maxAge?: number;           // Nanoseconds
     duplicateWindow?: number;  // Nanoseconds
+    manage?: boolean;          // false: declare for resolution, never touch the broker
   }>;
   consumerConfig?: {
     ackWait?: number;          // Ack timeout in NANOSECONDS, default 30s; @Subscribe({ ackTimeout }) (ms) overrides it
@@ -194,6 +218,37 @@ stream, so a declared value that diverges from the server's fails startup as wel
 `nats stream rm` that lets OneBun recreate the stream — deleting it discards every message it holds. Both checks
 run before the hash is consulted, so a stamp left behind by an out-of-band `nats stream edit` cannot wave either
 of them through. That stamp lives in stream metadata, so the adapter requires nats-server 2.10 or newer.
+
+### When the topology is declared elsewhere
+
+Declaring a stream means two things — "resolve my subscriptions against this" and "reconcile this on
+the broker" — and the second is not always this application's to do. Each half turns off on its own:
+
+```typescript
+// A unit that owns one stream and only reads from another the platform provisions.
+const worker = new JetStreamQueueAdapter({
+  servers: 'nats://localhost:4222',
+  streams: [
+    { name: 'WORKER_JOBS', subjects: ['worker.jobs.>'] },
+    { name: 'PLATFORM_EVENTS', subjects: ['platform.events.>'], manage: false },
+  ],
+});
+
+// A unit that only publishes. It declares nothing and reconciles nothing.
+const producer = new JetStreamQueueAdapter({ servers: 'nats://localhost:4222' });
+```
+
+`manage: false` skips the whole reconcile pass for that stream — the `STREAM.INFO` probe included,
+because on a tenant-scoped broker that read is denied as surely as the write. `manageStreams: false`
+is the same switch adapter-wide, and a per-stream `manage` overrides it in either direction.
+Omitting `streams` entirely is the publish-only case: `publish()` addresses a subject and lets the
+server route it, so it needs no declaration at all, while a `subscribe()` on such an adapter is
+refused with a message saying exactly that.
+
+What this costs: the narrowing guard, the create-only divergence guard and the create-if-missing
+branch all ride on the reconcile pass. An unmanaged stream that is missing or bound to different
+subjects is no longer caught at `app.start()` — it surfaces at the first `publish()` or
+`subscribe()` instead.
 
 ## License
 

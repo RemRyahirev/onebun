@@ -382,8 +382,18 @@ function updateFailureMessage(
  * The original rejection is preserved as `cause` rather than interpolated, so the misleading
  * text never reappears inside the replacement message.
  */
-/** `"NAME" (subject, subject)` for each stream, in declaration order. */
+/**
+ * `"NAME" (subject, subject)` for each stream, in declaration order.
+ *
+ * An empty declaration set is a sentence, not an empty string: every caller interpolates this
+ * after "declares", and a publish-only adapter — legal since streams became optional — otherwise
+ * produced "This application declares ." with the one fact the reader needed missing.
+ */
 function describeDeclarations(streams: ResolvedStream[]): string {
+  if (streams.length === 0) {
+    return 'no streams at all';
+  }
+
   return streams.map(stream => `"${stream.name}" (${stream.natsSubjects.join(', ')})`).join(', ');
 }
 
@@ -395,7 +405,13 @@ function describeDeclarations(streams: ResolvedStream[]): string {
  * downstream — it produces a live, empty subscription and no diagnostic anywhere.
  */
 function unboundStreamMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
-  return `No declared stream binds "${pattern}" (as NATS subject "${natsSubject}"). This application declares ${describeDeclarations(streams)}. Refusing to guess: nats-server accepts a consumer whose filter matches nothing the stream holds, so a guessed binding would produce a subscription that is alive, healthy and permanently empty — and on deleteDurableConsumer it would remove a same-named consumer from an unrelated stream. Declare a stream that binds this subject, using the identical definition its owner uses.`;
+  // A publish-only adapter reaches here only by subscribing, and then the useful thing to say is
+  // why the two are not symmetric — not the tie-breaking advice that assumes declarations exist.
+  const remedy = streams.length === 0
+    ? 'This adapter declares no streams at all, which is how a publish-only unit is configured: publish() addresses a subject and lets the server route it, so it needs no declaration. subscribe() cannot, because consumers.add takes a stream NAME. Declare the stream this subscription consumes from, using the identical definition its owner uses, and set manage: false on it if that owner is someone else.'
+    : `This application declares ${describeDeclarations(streams)}. Declare a stream that binds this subject, using the identical definition its owner uses.`;
+
+  return `No declared stream binds "${pattern}" (as NATS subject "${natsSubject}"). ${remedy} Refusing to guess: nats-server accepts a consumer whose filter matches nothing the stream holds, so a guessed binding would produce a subscription that is alive, healthy and permanently empty — and on deleteDurableConsumer it would remove a same-named consumer from an unrelated stream.`;
 }
 
 /**
@@ -414,11 +430,7 @@ function ambiguousStreamMessage(
 }
 
 function publishFailureMessage(pattern: string, natsSubject: string, streams: ResolvedStream[]): string {
-  const declared = streams.length > 0
-    ? describeDeclarations(streams)
-    : 'no streams at all';
-
-  return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${declared}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
+  return `Failed to publish OneBun pattern "${pattern}" to JetStream subject "${natsSubject}". The most common cause is that no stream on the broker binds that subject. This application declares ${describeDeclarations(streams)}. A subject must be bound by a stream before anything can be published to it, so check that the producer and the consumer declare identical stream definitions and that the stream exists on this server. The underlying rejection is attached as the cause of this error.`;
 }
 
 function streamNarrowingMessage(streamName: string, dropped: string[], configured: string[]): string {
@@ -741,23 +753,98 @@ export class JetStreamQueueAdapter implements QueueAdapter {
   private messageIdCounter = 0;
   private js: JetStreamClient | null = null;
   private jsm: JetStreamManager | null = null;
+  /** In-flight `jetstreamManager()` call, so concurrent first uses share one. */
+  private jsmPending: Promise<JetStreamManager> | null = null;
 
   // Event handlers
   private eventHandlers: Map<keyof QueueEvents, Set<(...args: unknown[]) => void>> = new Map();
 
   constructor(private readonly options: JetStreamAdapterOptions) {
-    if (!options.streams.length) {
-      throw new Error('JetStreamQueueAdapter requires at least one stream definition');
+    // Declaring no streams is legal — that is a publish-only unit — so the only thing left worth
+    // refusing here is an adapter with nowhere to connect. It is reachable: the framework builds
+    // a custom adapter as `new adapterCtor(queue.options)` and `options` is optional there, so
+    // without this the next line dies on a property read and names `streamDefaults`, which is not
+    // the problem.
+    if (options?.servers === undefined) {
+      throw new Error(
+        'JetStreamQueueAdapter requires connection options naming at least `servers`, e.g. '
+        + "{ servers: 'nats://localhost:4222' }. Pass them as queue.options alongside the adapter.",
+      );
     }
 
     this.client = new NatsClient(options);
 
     const defaults = options.streamDefaults ?? {};
-    this.resolvedStreams = options.streams.map((s) => ({
+    this.resolvedStreams = (options.streams ?? []).map((s) => ({
       ...defaults,
       ...s,
       natsSubjects: s.subjects.map((subj) => toNatsSubject(subj)),
     }));
+  }
+
+  /**
+   * Whether this adapter reconciles `stream` on the broker.
+   *
+   * Narrowest wins: the stream's own `manage` — into which the constructor has already folded
+   * `streamDefaults.manage` — then the adapter-wide `manageStreams`, then `true`. The two keys
+   * are not redundant: `manageStreams` answers "does this unit own its topology at all", while
+   * `manage` is what a unit that owns some streams and only reads from the rest needs, and a
+   * single flag at either level cannot express that.
+   */
+  private managesStream(stream: ResolvedStream): boolean {
+    return stream.manage ?? this.options.manageStreams ?? true;
+  }
+
+  /**
+   * The JetStream manager, built on first use rather than on connect.
+   *
+   * `jetstreamManager()` asks the server for account info, which needs `$JS.API.INFO`. An
+   * adapter that reconciles nothing and subscribes to nothing never calls the manager again
+   * after that — so building it eagerly made a publish-only unit require the one privilege it
+   * has no use for, on exactly the kind of tenant-scoped broker where it is not granted.
+   *
+   * The in-flight promise is memoised too, not just its result: two subscriptions racing during
+   * boot would otherwise each build a manager and each spend the round trip. A rejection clears
+   * it, so a failure is retried rather than replayed forever.
+   *
+   * A failure emits `onError` for the same reason `failStream` and `failConsumer` do: the first
+   * caller is usually `ensureAllStreams()` or `subscribe()`, both awaited during boot before any
+   * `@OnQueueError` handler exists, so a throw alone would reach nobody.
+   */
+  private async getJsm(): Promise<JetStreamManager> {
+    if (this.jsm) {
+      return this.jsm;
+    }
+
+    this.jsmPending ??= this.buildJsm();
+    const pending = this.jsmPending;
+
+    try {
+      const jsm = await pending;
+
+      // Only cache it if this build is still the current one. A `disconnect()` that ran while
+      // it was in flight cleared both fields and closed the connection the manager is bound to,
+      // so caching it here would hand the NEXT connect a manager wired to a socket that is gone
+      // — which `connect()` could not produce before, because it always rebuilt the manager.
+      if (this.jsmPending === pending) {
+        this.jsm = jsm;
+      }
+
+      return jsm;
+    } catch (error) {
+      if (this.jsmPending === pending) {
+        this.jsmPending = null;
+      }
+      this.emit('onError', error as Error);
+
+      throw error;
+    }
+  }
+
+  private async buildJsm(): Promise<JetStreamManager> {
+    const jsModule = await getJetStreamModule();
+
+    return await jsModule.jetstreamManager(this.client.getConnection());
   }
 
   // ============================================================================
@@ -775,11 +862,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       const jsModule = await getJetStreamModule();
       const nc = this.client.getConnection();
 
-      // Get JetStream context
+      // Get JetStream context. The MANAGER is deliberately not built here — see getJsm(). The
+      // reconcile pass below builds it if it has anything to reconcile, which restores the
+      // eager behaviour for every adapter that manages its own streams.
       this.js = jsModule.jetstream(nc);
-      this.jsm = await jsModule.jetstreamManager(nc);
 
-      // Create/ensure all streams
+      // Create/ensure the streams this application manages
       await this.ensureAllStreams();
 
       this.connected = true;
@@ -825,6 +913,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     this.connected = false;
     this.js = null;
     this.jsm = null;
+    this.jsmPending = null;
   }
 
   isConnected(): boolean {
@@ -1080,9 +1169,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       max_deliver: resolved.tracksDelivery ? resolved.maxDeliver : undefined,
     });
 
+    const jsm = await this.getJsm();
+
     let existing: ConsumerInfo;
     try {
-      existing = await this.jsm!.consumers.info(streamName, consumerName);
+      existing = await jsm.consumers.info(streamName, consumerName);
     } catch (error) {
       if (!isNotFoundError(error, jsModule.JetStreamApiCodes.ConsumerNotFound)) {
         this.emit('onError', error as Error);
@@ -1148,7 +1239,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
 
     try {
-      await this.jsm!.consumers.update(streamName, consumerName, {
+      await jsm.consumers.update(streamName, consumerName, {
         filter_subject: filterSubject,
         metadata: stampMetadata(metadata, desiredHash, decision.prevHash),
         ...redeliveryConfig(resolved),
@@ -1178,8 +1269,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     desiredHash: string,
     pattern: string,
   ): Promise<void> {
+    const jsm = await this.getJsm();
+
     try {
-      await this.jsm!.consumers.add(streamName, {
+      await jsm.consumers.add(streamName, {
         durable_name: isDurable ? consumerName : undefined,
         name: consumerName,
         ack_policy: resolved.ackPolicy,
@@ -1320,9 +1413,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const jsModule = await getJetStreamModule();
     const streamName = this.resolveStreamForSubject(pattern);
     const consumerName = durableConsumerName(group, toNatsSubject(pattern));
+    const jsm = await this.getJsm();
 
     try {
-      return await this.jsm!.consumers.delete(streamName, consumerName);
+      return await jsm.consumers.delete(streamName, consumerName);
     } catch (error) {
       if (isNotFoundError(error, jsModule.JetStreamApiCodes.ConsumerNotFound)) {
         return false;
@@ -1429,8 +1523,22 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     return natsSubjectsOverlap(a, b);
   }
 
+  /**
+   * Reconciles every stream this application manages, and touches no other.
+   *
+   * The gate lives here rather than in `connect()` on purpose: `ensureStream()` opens with a
+   * `streams.info` probe, and a probe is a broker call like any other — on the deployment this
+   * exists for, the tenant is granted no `$JS.API.STREAM.INFO` either, so skipping only the
+   * write would still fail the boot.
+   *
+   * @see docs:api/queue.md
+   */
   private async ensureAllStreams(): Promise<void> {
     for (const stream of this.resolvedStreams) {
+      if (!this.managesStream(stream)) {
+        continue;
+      }
+
       await this.ensureStream(stream);
     }
   }
@@ -1510,9 +1618,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const desired = this.buildStreamConfig(stream, false);
     const desiredHash = hashReconcileConfig(this.hashableStreamSubset(desired));
 
+    const jsm = await this.getJsm();
+
     let existing: StreamInfo;
     try {
-      existing = await this.jsm!.streams.info(stream.name);
+      existing = await jsm.streams.info(stream.name);
     } catch (error) {
       if (!isNotFoundError(error, jsModule.JetStreamApiCodes.StreamNotFound)) {
         this.emit('onError', error as Error);
@@ -1553,7 +1663,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
 
     try {
-      await this.jsm!.streams.update(stream.name, {
+      await jsm.streams.update(stream.name, {
         ...desired,
         metadata: stampMetadata(metadata, desiredHash, decision.prevHash),
       });
@@ -1564,8 +1674,10 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
   /** Creates the stream, stamping the hash the next connect compares against. */
   private async addStream(stream: ResolvedStream, desiredHash: string): Promise<void> {
+    const jsm = await this.getJsm();
+
     try {
-      await this.jsm!.streams.add({
+      await jsm.streams.add({
         ...this.buildStreamConfig(stream, true),
         // Restates what buildStreamConfig already set on the create path: `add` types
         // `name` as required, and a spread cannot prove that to the compiler.

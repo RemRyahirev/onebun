@@ -44,6 +44,8 @@ describe('nats-types', () => {
         reconnectTimeWait: 1000,
         timeout: 5000,
         tls: true,
+        inboxPrefix: '_INBOX_tenant_app',
+        driverOptions: { noEcho: true },
       };
 
       expect(options.name).toBe('test-client');
@@ -54,6 +56,8 @@ describe('nats-types', () => {
       expect(options.reconnectTimeWait).toBe(1000);
       expect(options.timeout).toBe(5000);
       expect(options.tls).toBe(true);
+      expect(options.inboxPrefix).toBe('_INBOX_tenant_app');
+      expect(options.driverOptions?.noEcho).toBe(true);
     });
   });
 
@@ -77,7 +81,26 @@ describe('nats-types', () => {
       };
 
       expect(options.servers).toBe('nats://localhost:4222');
-      expect(options.streams[0].name).toBe('EVENTS');
+      expect(options.streams?.[0].name).toBe('EVENTS');
+    });
+
+    it('should accept no streams at all — a publish-only unit declares none', () => {
+      const options: JetStreamAdapterOptions = {
+        servers: 'nats://localhost:4222',
+      };
+
+      expect(options.streams).toBeUndefined();
+    });
+
+    it('should accept the two stream-management keys', () => {
+      const options: JetStreamAdapterOptions = {
+        servers: 'nats://localhost:4222',
+        manageStreams: false,
+        streams: [{ name: 'OWN', subjects: ['own.>'], manage: true }],
+      };
+
+      expect(options.manageStreams).toBe(false);
+      expect(options.streams?.[0].manage).toBe(true);
     });
 
     it('should accept streams with full configuration', () => {
@@ -97,12 +120,12 @@ describe('nats-types', () => {
         ],
       };
 
-      const stream = options.streams[0];
-      expect(stream.subjects).toEqual(['events.>']);
-      expect(stream.retention).toBe('limits');
-      expect(stream.maxMsgs).toBe(1000000);
-      expect(stream.storage).toBe('file');
-      expect(stream.replicas).toBe(3);
+      const stream = options.streams?.[0];
+      expect(stream?.subjects).toEqual(['events.>']);
+      expect(stream?.retention).toBe('limits');
+      expect(stream?.maxMsgs).toBe(1000000);
+      expect(stream?.storage).toBe('file');
+      expect(stream?.replicas).toBe(3);
     });
 
     // NOTE: the former 'should accept consumer configuration' case was deleted here.

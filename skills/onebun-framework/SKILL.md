@@ -240,7 +240,7 @@ const app = new OneBunApplication(AppModule, {
     adapter: JetStreamQueueAdapter,
     options: {
       servers: config.get('nats.url'),
-      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],  // required by JetStream
+      streams: [{ name: 'EVENTS', subjects: ['events.>'] }],  // omit for a publish-only unit
     },
   },
 });
@@ -788,12 +788,26 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 Key points about JetStream:
-- `streams` is required — each stream defines which subjects it handles
-- `streamDefaults` can set shared defaults merged into every stream definition
+- `streams` is optional — each declaration says which subjects a stream handles, and is used for
+  two things: resolving a `@Subscribe` pattern to a stream name, and reconciling that stream on
+  the broker. Omit it (or pass `[]`) for a publish-only unit: `publish()` addresses a subject and
+  lets the server route it, so it needs no declaration, and a `subscribe()` on such an adapter is
+  refused with a message saying why the two are not symmetric
+- `manage: false` on a stream keeps it in resolution and takes it out of reconciliation — no probe,
+  no create, no update. That is how a stream owned by a platform operator or another team is
+  declared; a tenant-scoped user usually has no write on it and the reconcile pass would fail the
+  boot. `manageStreams: false` is the same switch adapter-wide, and a per-stream `manage` overrides
+  it in either direction. The cost: a missing or differently-bound unmanaged stream is no longer
+  caught at `app.start()`, only at the first `publish()`/`subscribe()`
+- `inboxPrefix` is required on any broker that grants the client SUBSCRIBE on its own inbox space
+  only (`_INBOX_<tenant>_<app>.>`): every JetStream operation is request/reply over the inbox, so
+  the driver's `_INBOX` default produces a connection that opens and can then do nothing at all
+- `driverOptions` carries anything nats.js accepts that OneBun does not name, merged last
+- `streamDefaults` can set shared defaults merged into every stream definition, `manage` included
 - Subject patterns: OneBun's `#` wildcard is converted to NATS `>` and a `{name}` parameter to NATS `*`
   automatically; `#` must be the final token, any other position throws
 - Consumers are durable when using consumer groups (`group` option in `@Subscribe`)
-- Streams are created when absent on connect, and reconciled only when their configuration hash changed —
+- Managed streams are created when absent on connect, and reconciled only when their configuration hash changed —
   an unchanged declaration writes nothing, undeclared keys are never sent so limits set out of band survive,
   a declaration that would stop covering a subject the stream already stores fails startup, and
   `storage`/`retention` cannot be changed in place (delete the stream to change them). The stamp lives in

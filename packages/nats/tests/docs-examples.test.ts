@@ -41,6 +41,9 @@ import {
   createNatsClient,
   toNatsSubject,
 } from '../src/index';
+// Package-internal, and deliberately not on the barrel: the docs name it only inside the
+// llm-only block, as the single translation from OneBun's options to the driver's.
+import { toDriverOptions } from '../src/nats-client';
 
 
 /**
@@ -366,6 +369,117 @@ describe('Connection options (docs/api/queue.md)', () => {
     expect(adapter.isConnected()).toBe(true);
 
     await adapter.disconnect();
+  });
+});
+
+/**
+ * @source docs:api/queue.md#inboxprefix
+ */
+describe('inboxPrefix (docs/api/queue.md)', () => {
+  it('reaches the driver under its own key', () => {
+    // From docs/api/queue.md: the multi-tenant recipe. What the page promises is that the
+    // prefix ends up in what nats.js receives — asserting it on the adapter would prove only
+    // that the object was stored, which is exactly what used to be true while the option was
+    // dropped one step later.
+    const driver = toDriverOptions({
+      servers: 'nats://nats.internal:4222',
+      user: 'acme-api',
+      pass: 'secret',
+      inboxPrefix: '_INBOX_acme_api',
+    });
+
+    expect(driver.inboxPrefix).toBe('_INBOX_acme_api');
+    expect(driver.user).toBe('acme-api');
+  });
+
+  it('is accepted by the JetStream adapter alongside stream declarations', () => {
+    const adapter = new JetStreamQueueAdapter({
+      servers: 'nats://nats.internal:4222',
+      inboxPrefix: '_INBOX_acme_api',
+      streams: [{ name: 'ACME_EVENTS', subjects: ['acme.events.>'] }],
+    });
+
+    expect(adapter.resolveStreamForSubject('acme.events.created')).toBe('ACME_EVENTS');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#driveroptions
+ */
+describe('driverOptions (docs/api/queue.md)', () => {
+  it('carries options OneBun does not name, and wins over the ones it does', () => {
+    // From docs/api/queue.md: "merged last, so it also overrides anything above it".
+    const driver = toDriverOptions({
+      servers: 'nats://localhost:4222',
+      tls: true,
+      driverOptions: {
+        noEcho: true,
+        pingInterval: 30_000,
+        tls: { caFile: '/etc/ssl/nats-ca.pem' },
+      },
+    });
+
+    expect(driver.noEcho).toBe(true);
+    expect(driver.pingInterval).toBe(30_000);
+    // The boolean `tls: true` would have produced `{}`; the driver option replaces it whole.
+    expect(driver.tls).toEqual({ caFile: '/etc/ssl/nats-ca.pem' });
+  });
+});
+
+/**
+ * @source docs:api/queue.md#stream-declarations
+ */
+describe('Separating declaration from reconciliation (docs/api/queue.md)', () => {
+  /**
+   * Enough of a JetStream manager for `ensureAllStreams()` to reach the broker through. The
+   * probe answers for whichever stream was asked about: one fixed answer would trip the
+   * subject-narrowing guard before the assertion is reached.
+   */
+  function recordingJsm(subjectsByName: Record<string, string[]>): AnyRecord {
+    return {
+      streams: {
+        info: mock((name: string) => Promise.resolve({
+          config: { name, subjects: subjectsByName[name] ?? [], metadata: {} },
+        })),
+        update: mock(() => Promise.resolve()),
+        add: mock(() => Promise.resolve()),
+      },
+    };
+  }
+
+  it('reconciles the stream this unit owns and leaves the platform one alone', async () => {
+    // From docs/api/queue.md: the `worker` example — one stream it owns, one declared with
+    // `manage: false` because the platform provisions it.
+    const worker = new JetStreamQueueAdapter({
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'WORKER_JOBS', subjects: ['worker.jobs.>'] },
+        { name: 'PLATFORM_EVENTS', subjects: ['platform.events.>'], manage: false },
+      ],
+    });
+
+    const jsm = recordingJsm({ WORKER_JOBS: ['worker.jobs.>'], PLATFORM_EVENTS: ['platform.events.>'] });
+    (worker as unknown as AnyRecord).jsm = jsm;
+    await (worker as unknown as AnyRecord).ensureAllStreams();
+
+    expect(jsm.streams.info).toHaveBeenCalledTimes(1);
+    expect((jsm.streams.info as AnyRecord).mock.calls[0][0]).toBe('WORKER_JOBS');
+
+    // Unmanaged, but still resolvable — that is the reason to keep declaring it.
+    expect(worker.resolveStreamForSubject('platform.events.created')).toBe('PLATFORM_EVENTS');
+  });
+
+  it('lets a producer declare nothing at all', async () => {
+    // From docs/api/queue.md: "Publishes into streams other units own, and declares nothing."
+    const producer = new JetStreamQueueAdapter({ servers: 'nats://localhost:4222' });
+
+    const jsm = recordingJsm({});
+    (producer as unknown as AnyRecord).jsm = jsm;
+    await (producer as unknown as AnyRecord).ensureAllStreams();
+
+    expect(jsm.streams.info).toHaveBeenCalledTimes(0);
+    expect(() => producer.resolveStreamForSubject('anything.at.all'))
+      .toThrow(/declares no streams at all/);
   });
 });
 

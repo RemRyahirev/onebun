@@ -19,6 +19,7 @@ import type { Message } from '@onebun/core';
 import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
 
 
+import { createNatsClient } from '../src/nats-client';
 import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
 
 describe('NatsQueueAdapter Integration', () => {
@@ -409,8 +410,71 @@ describe('NatsQueueAdapter Integration', () => {
       
       await adapter.publish('test.nack', { data: 1 });
       await new Promise((r) => setTimeout(r, 30));
-      
+
       expect(receivedMessage).not.toBeNull();
+    });
+  });
+
+  /**
+   * `inboxPrefix` against a real server, observed from the other end of the wire.
+   *
+   * It cannot be asserted from the client that set it — the option is consumed inside the
+   * driver — so this watches a second connection receive the request and reads the reply
+   * subject the first one generated. That subject IS the inbox, which is the whole reason the
+   * option exists: a broker that grants a tenant SUBSCRIBE on `_INBOX_<tenant>.>` and nothing
+   * wider cannot answer a client still using the driver's `_INBOX` default.
+   */
+  describe('inboxPrefix', () => {
+    const PREFIX = '_INBOX_tenant_app';
+
+    it('generates reply subjects under the configured prefix', async () => {
+      const requester = createNatsClient({ servers: natsUrl, inboxPrefix: PREFIX });
+      const responder = createNatsClient({ servers: natsUrl });
+
+      try {
+        await requester.connect();
+        await responder.connect();
+
+        let replySubject: string | undefined;
+        await responder.subscribe('inbox.echo', async (msg) => {
+          replySubject = msg.reply;
+          await responder.publish(msg.reply!, 'pong');
+        });
+
+        const response = await requester.request('inbox.echo', 'ping', { timeout: 5_000 });
+
+        expect(response.data).toBe('pong');
+        expect(replySubject).toBeDefined();
+        expect(replySubject!.startsWith(`${PREFIX}.`)).toBe(true);
+      } finally {
+        await requester.disconnect();
+        await responder.disconnect();
+      }
+    });
+
+    it('uses the driver default when no prefix is configured', async () => {
+      // The control: without this, a prefix that never reached the driver would still pass the
+      // case above if the assertion were written against a default that happened to match.
+      const requester = createNatsClient({ servers: natsUrl });
+      const responder = createNatsClient({ servers: natsUrl });
+
+      try {
+        await requester.connect();
+        await responder.connect();
+
+        let replySubject: string | undefined;
+        await responder.subscribe('inbox.default', async (msg) => {
+          replySubject = msg.reply;
+          await responder.publish(msg.reply!, 'pong');
+        });
+
+        await requester.request('inbox.default', 'ping', { timeout: 5_000 });
+
+        expect(replySubject!.startsWith('_INBOX.')).toBe(true);
+      } finally {
+        await requester.disconnect();
+        await responder.disconnect();
+      }
     });
   });
 

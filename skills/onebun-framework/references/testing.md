@@ -358,9 +358,10 @@ The strict form resolves through the same `resolveStreamForSubject()` that `subs
 must name exactly the stream the subscription bound to, or it cannot decommission what `subscribe()`
 created. It throws and lists every declared stream rather than guessing, on BOTH the no-match case and the
 two-candidates case: on a destructive call a mistyped pattern would otherwise delete a consumer on an
-unrelated stream. Only a genuine `ConsumerNotFound` yields `false`; a permissions denial is rethrown as
-itself. `tryDeleteDurableConsumer` calls it and adds nothing but the guard and the catch, so the two cannot
-drift.
+unrelated stream. That includes an adapter that declares no streams at all — the publish-only shape —
+where it throws the same way `subscribe()` does. Only a genuine `ConsumerNotFound` yields `false`; a
+permissions denial is rethrown as itself. `tryDeleteDurableConsumer` calls it and adds nothing but the
+guard and the catch, so the two cannot drift.
 That is exactly the shape that bites in an `afterEach` after a failed case, where the adapter may
 never have connected.
 

@@ -36,6 +36,11 @@ function durableNameFor(group: string, pattern: string): string {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyRecord = Record<string, any>;
 
+/** Reads a private field off an adapter, as the stamp and filter cases already do inline. */
+function asAny(obj: unknown): AnyRecord {
+  return obj as AnyRecord;
+}
+
 const CONTAINER_BOOT_MS = 120_000;
 const CASE_TIMEOUT_MS = 30_000;
 const POLL_DEADLINE_MS = 10_000;
@@ -936,5 +941,115 @@ describe('JetStreamQueueAdapter Integration', () => {
       storedFilter: 'nothing.to.do.with.this.stream',
       pending: 0,
     });
+  }, CASE_TIMEOUT_MS);
+
+  it('lets a unit that declares nothing publish into a stream someone else owns', async () => {
+    // The shape a deployed producer has: the worker owns the stream, the api/intake units only
+    // publish into it. They used to be forced to declare it — the constructor refused an empty
+    // list — and then the reconcile pass tried to create or update a stream that was not theirs.
+    const owner = makeAdapter('ITEST_OWNED', ['owned.>']);
+    await owner.connect();
+
+    const received: Array<Message<{ n: number }>> = [];
+    await owner.subscribe<{ n: number }>('owned.created', async (message) => {
+      received.push(message);
+      await message.ack();
+    }, { ackMode: 'manual', group: 'itest-owned-workers' });
+
+    const producer = new JetStreamQueueAdapter({ servers: nats.url });
+    try {
+      await producer.connect();
+      await producer.publish('owned.created', { n: 7 });
+
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].data.n).toBe(7);
+    } finally {
+      if (producer.isConnected()) {
+        await producer.disconnect();
+      }
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('leaves an unmanaged stream exactly as its owner configured it', async () => {
+    // `manage: false` declares the stream for subscription resolution and nothing else. Without
+    // it the declaration carries no OneBun stamp, `decideStamp` answers `update`, and connecting
+    // rewrites a configuration this application does not own — which on a tenant-scoped broker
+    // is a permissions failure at boot and on a permissive one is a silent overwrite.
+    const owner = makeAdapter('ITEST_FOREIGN', ['foreign.>']);
+    await owner.connect();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ownerJsm = (owner as any).jsm as AnyRecord;
+    await ownerJsm.streams.update('ITEST_FOREIGN', {
+      subjects: ['foreign.>'],
+
+      max_msgs: 4242,
+      metadata: {},
+    });
+
+    const before = await ownerJsm.streams.info('ITEST_FOREIGN');
+
+    const guest = new JetStreamQueueAdapter({
+      servers: nats.url,
+      // A declaration that WOULD change the stream if it were reconciled.
+      streams: [{
+        name: 'ITEST_FOREIGN', subjects: ['foreign.>'], maxMsgs: 1, manage: false, 
+      }],
+    });
+
+    try {
+      await guest.connect();
+
+      const after = await ownerJsm.streams.info('ITEST_FOREIGN');
+
+      expect(after.config.max_msgs).toBe(4242);
+      expect(after.config.metadata ?? {}).toEqual(before.config.metadata ?? {});
+
+      // Still resolvable: the declaration does its other job.
+      expect(guest.resolveStreamForSubject('foreign.created')).toBe('ITEST_FOREIGN');
+    } finally {
+      if (guest.isConnected()) {
+        await guest.disconnect();
+      }
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('subscribes to an unmanaged stream, building the JetStream manager on demand', async () => {
+    // The lazy-manager path end to end. Every other case here declares a MANAGED stream, so
+    // `ensureAllStreams()` builds the manager during connect() and the consumer path then finds
+    // it already there — `this.jsm!` would still work in all of them. Here nothing is managed, so
+    // connect() leaves it unbuilt and `subscribe()` is the first caller that needs one.
+    const owner = makeAdapter('ITEST_LAZY', ['lazy.>']);
+    await owner.connect();
+
+    const guest = new JetStreamQueueAdapter({
+      servers: nats.url,
+      manageStreams: false,
+      streams: [{ name: 'ITEST_LAZY', subjects: ['lazy.>'] }],
+    });
+
+    try {
+      await guest.connect();
+
+      expect(asAny(guest).jsm).toBeNull();
+
+      const received: Array<Message<{ n: number }>> = [];
+      await guest.subscribe<{ n: number }>('lazy.created', async (message) => {
+        received.push(message);
+        await message.ack();
+      }, { ackMode: 'manual', group: 'itest-lazy-workers' });
+
+      expect(asAny(guest).jsm).not.toBeNull();
+
+      await owner.publish('lazy.created', { n: 11 });
+      await pollUntil(() => received.length === 1);
+
+      expect(received[0].data.n).toBe(11);
+    } finally {
+      if (guest.isConnected()) {
+        await guest.disconnect();
+      }
+    }
   }, CASE_TIMEOUT_MS);
 });
