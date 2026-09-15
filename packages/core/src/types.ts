@@ -1014,6 +1014,14 @@ export enum ParamType {
   FILE = 'file',
   FILES = 'files',
   FORM_FIELD = 'formField',
+  /**
+   * A parameter produced by a user-supplied extractor — see `createHttpParamDecorator`.
+   *
+   * HTTP only, and carried in the route metadata like any other parameter. It is deliberately
+   * invisible to the OpenAPI generator and to the generated service client: an extractor is a
+   * view over the request, not something a caller passes in.
+   */
+  CUSTOM = 'custom',
 }
 
 /**
@@ -1065,7 +1073,22 @@ export interface ParamMetadata {
    * File upload options (only for FILE/FILES param types)
    */
   fileOptions?: FileUploadOptions & { maxCount?: number };
+  /**
+   * The function that produces the value (only for the CUSTOM param type).
+   */
+  extractor?: ParamExtractor;
 }
+
+/**
+ * Produces a handler argument from the execution context.
+ *
+ * A pure view over data the request already carries — headers, the URL, the per-request context a
+ * middleware filled in. It must not create resources or have side effects: it runs on the request
+ * path, once per decorated parameter, and nothing unwinds what it allocates.
+ *
+ * @see docs:api/decorators.md
+ */
+export type ParamExtractor = (context: HttpExecutionContext) => unknown;
 
 /**
  * Response schema metadata for validation

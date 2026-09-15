@@ -375,35 +375,46 @@ describe('Metadata System', () => {
     });
   });
 
-  describe('special behavior and filtering', () => {
-    test('should filter out basic types from constructor param types', () => {
+  describe('positional integrity', () => {
+    // These cases used to assert the opposite — that the array was FILTERED. That filtering was
+    // the defect reported as onebun-FB-18: it collapsed the array, so a parameter the container
+    // could not resolve was not reported, it was DELETED, and every later dependency slid one
+    // slot left into the wrong field. `@Optional()` and `@Inject()` are keyed by the declared
+    // parameter index, so they landed on the wrong parameter too.
+    //
+    // `toStrictEqual`, not `toEqual`, throughout: `toEqual` ignores `undefined` entries, so
+    // `[A, undefined]` and `[A]` compare equal under it — which is precisely the distinction
+    // every case here exists to make.
+
+    test('should keep basic types in their own slots rather than collapsing the array', () => {
       class TestClass {
         constructor(str: string, num: number, bool: boolean, obj: object) {}
       }
-      
-      // Set basic types as constructor parameters
+
       setConstructorParamTypes(TestClass, [String, Number, Boolean, Object]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Should filter out basic types and return undefined
-      expect(types).toBeUndefined();
+
+      // Four parameters in, four entries out. Whether any of them can be INJECTED is a separate
+      // question, answered per index by the resolver — which is the thing a filter made impossible.
+      expect(types).toStrictEqual([String, Number, Boolean, Object]);
     });
 
-    test('should filter out framework logger types', () => {
-      // SyncLogger is a framework type that should be filtered
+    test('should keep a parameter whose class is named Logger or SyncLogger', () => {
+      // These were dropped by a check on the type's NAME. It could never have hit a framework
+      // type: `Logger` and `SyncLogger` are type ALIASES in @onebun/logger, erased to `Object`,
+      // so they never reach emitted metadata under those names. It only ever hit user classes.
       class SyncLogger {}
       class Logger {}
       class ServiceA {}
-      
+
       class TestClass {
         constructor(syncLogger: SyncLogger, logger: Logger, service: ServiceA) {}
       }
-      
+
       setConstructorParamTypes(TestClass, [SyncLogger, Logger, ServiceA]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Should filter out framework logger types and return only ServiceA
-      expect(types).toEqual([ServiceA]);
+
+      expect(types).toStrictEqual([SyncLogger, Logger, ServiceA]);
     });
 
     test('should NOT filter user services with config/logger in name', () => {
@@ -423,47 +434,55 @@ describe('Metadata System', () => {
       expect(types).toEqual([ConfigService, MyLoggerService, ServiceA]);
     });
 
-    test('should handle mixed service and basic types', () => {
+    test('should NOT move a service left past a basic type — the shift onebun-FB-18 reported', () => {
       class ServiceA {}
       class ServiceB {}
-      
+
       class TestClass {
         constructor(service1: ServiceA, str: string, service2: ServiceB, num: number) {}
       }
-      
+
       setConstructorParamTypes(TestClass, [ServiceA, String, ServiceB, Number]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Should filter out basic types and return only services
-      expect(types).toEqual([ServiceA, ServiceB]);
+
+      // This is the reported defect in miniature. The old assertion here was
+      // `[ServiceA, ServiceB]` — ServiceB reported at index 1, which is `str`'s slot, so the
+      // constructed object received ServiceB where it declared a string.
+      expect(types).toStrictEqual([ServiceA, String, ServiceB, Number]);
+      expect(types?.[2]).toBe(ServiceB);
     });
 
-    test('should handle undefined types in parameter array', () => {
+    test('should keep an undefined entry as a hole in its own slot', () => {
       class ServiceA {}
-      
+
       class TestClass {
-        constructor(service: ServiceA, optionalParam?: any) {}
+        constructor(optionalParam: any, service: ServiceA) {}
       }
-      
-      setConstructorParamTypes(TestClass, [ServiceA, undefined as any]);
+
+      // The hole is FIRST here on purpose: with it last, dropping it and keeping it are
+      // indistinguishable, which is how the old assertion stayed plausible.
+      setConstructorParamTypes(TestClass, [undefined, ServiceA]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Should filter out undefined and return only ServiceA
-      expect(types).toEqual([ServiceA]);
+
+      expect(types).toStrictEqual([undefined, ServiceA]);
+      expect(types?.length).toBe(2);
+      expect(types?.[1]).toBe(ServiceA);
     });
 
-    test('should handle null types in parameter array', () => {
+    test('should normalise a null entry to a hole rather than dropping it', () => {
       class ServiceA {}
-      
+
       class TestClass {
-        constructor(service: ServiceA, nullParam: any) {}
+        constructor(nullParam: any, service: ServiceA) {}
       }
-      
-      setConstructorParamTypes(TestClass, [ServiceA, null as any]);
+
+      // `null` becomes `undefined` so the resolver has one spelling for "nothing here", and so
+      // `instanceof` is never reached with a non-constructor — which threw a raw TypeError.
+      setConstructorParamTypes(TestClass, [null as unknown as Function, ServiceA]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Should filter out null and return only ServiceA
-      expect(types).toEqual([ServiceA]);
+
+      expect(types).toStrictEqual([undefined, ServiceA]);
+      expect(types?.length).toBe(2);
     });
   });
 
@@ -485,20 +504,31 @@ describe('Metadata System', () => {
       expect(types).toBeUndefined();
     });
 
-    test('should return undefined when only excluded types present', () => {
-      // Use exact framework type names that should be filtered
-      class SyncLogger {}
-      class Logger {}
-      
+    test('should return the array even when nothing in it is injectable', () => {
+      // An all-`Object` array is what a constructor of interface-typed parameters reflects as,
+      // and it used to come back as `undefined` — indistinguishable from a class that emitted no
+      // metadata at all. That collapse is why a SINGLE interface-typed parameter correctly got
+      // `undefined` while a multi-parameter constructor shifted: with one parameter the filtered
+      // array was empty, so the whole thing read as "no metadata" (onebun-FB-18).
       class TestClass {
-        constructor(syncLogger: SyncLogger, logger: Logger) {}
+        constructor(first: object, second: object) {}
       }
-      
-      setConstructorParamTypes(TestClass, [SyncLogger, Logger]);
+
+      setConstructorParamTypes(TestClass, [Object, Object]);
       const types = getConstructorParamTypes(TestClass);
-      
-      // Both should be filtered out as framework types
-      expect(types).toBeUndefined();
+
+      expect(types).toStrictEqual([Object, Object]);
+      expect(types?.length).toBe(2);
+    });
+
+    test('should return undefined only when no metadata was emitted at all', () => {
+      class TestClass {
+        constructor(service: object) {}
+      }
+
+      setConstructorParamTypes(TestClass, []);
+
+      expect(getConstructorParamTypes(TestClass)).toBeUndefined();
     });
   });
 

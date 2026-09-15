@@ -33,7 +33,7 @@ All features below are shipped, tested, and documented. If something looks missi
 | `CanActivate` interface for HTTP | `@onebun/core` | [Guards](/api/guards) |
 | `@UseGuards()` decorator for controllers/routes | `@onebun/core` | [Guards](/api/guards) |
 | Built-in `AuthGuard` (Bearer header presence check) | `@onebun/core` | [Guards](/api/guards) |
-| Built-in `RolesGuard` (RBAC) | `@onebun/core` | [Guards](/api/guards) |
+| Built-in `RolesGuard` (role comparison over a caller-supplied `rolesExtractor`) | `@onebun/core` | [Guards](/api/guards) |
 | `createHttpGuard(fn)` factory | `@onebun/core` | [Guards](/api/guards) |
 
 ### Exception Filters

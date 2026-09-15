@@ -42,3 +42,6 @@ benchmarks/results/
 benchmarks/**/*.db
 
 press-kit/
+
+# drizzle-kit config written by generateMigrations()/pushSchema()
+drizzle.config.temp.*

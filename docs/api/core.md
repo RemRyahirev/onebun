@@ -52,7 +52,7 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 **Guards, Interceptors, and Filters**:
-- Use `@UseGuards(AuthGuard)` on a controller or route method to add authorization
+- Use `@UseGuards(SomeGuard)` on a controller or route method to decide whether a request reaches the handler. The built-in `AuthGuard` and `RolesGuard` are primitives, not an authorization scheme: one checks that an `Authorization: Bearer` header is present, the other compares a list of roles it was handed — see [Guards](./guards.md) for what you must hand it
 - Use `@UseInterceptors(LoggingInterceptor)` to wrap handler execution (logging, caching, timeouts)
 - Use `@UseFilters(myFilter)` on a controller or route method to add error handling
 - All three decorators merge with parent-level (controller + route, global + controller + route)
@@ -838,6 +838,36 @@ interface TracingOptions {
   };
 }
 ```
+
+## redactConnectionUrl
+
+Print a connection target without printing its credentials.
+
+```typescript
+import { redactConnectionUrl } from '@onebun/core';
+
+redactConnectionUrl('postgresql://app:hunter2@db:5432/orders?sslmode=require');
+// 'postgresql://app:***@db:5432/orders?sslmode=require'
+```
+
+Scheme, user, host, port, path and query survive; only the password is replaced. A URL that
+carries no password is returned unchanged, and a string with no `://` is replaced wholesale —
+there is no host in it worth preserving and no way to find its credentials, so echoing it back is
+the one thing that would leak.
+
+It is public because the guarantee has to hold in more than one package: `@onebun/drizzle` and
+the shared Redis provider both name their target in a startup error, and a hand-rolled redactor
+per package is how one of them ends up failing open. Use it anywhere your own code prints a
+connection string — a health endpoint, a startup log, an error.
+
+::: tip Why it does not parse
+Two obvious implementations fail **open** on exactly the passwords that need this most.
+`new URL()` rejects a URL whose password contains a raw `/`, so the `catch` branch prints the
+credential. A single regex that classes the password as `[^@/]*` matches nothing when the
+password holds a `/`, and stops at the first `@` when it holds an `@`. Cloud providers emit both
+characters routinely. This finds the authority by position and cuts the userinfo at its **last**
+`@`, so no character inside a password can end the match early.
+:::
 
 ## Re-exports
 

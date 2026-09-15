@@ -205,7 +205,12 @@ describe('decorators', () => {
       expect(deps).toBeUndefined();
     });
 
-    test('should skip logger and config parameters', () => {
+    test('should report an `any`-typed parameter in its own slot instead of skipping it', () => {
+      // This case was called "should skip logger and config parameters" and asserted a length of
+      // 1. The name described an intent the code could not have had: `any` erases to `Object`, so
+      // these two parameters are indistinguishable from an interface, a type alias or a broken
+      // import — nothing here knows they are a logger and a config. Skipping them SHORTENED the
+      // array, which is the defect onebun-FB-18 reported.
       @injectable()
       class TestController {
         constructor(
@@ -217,9 +222,13 @@ describe('decorators', () => {
 
       registerControllerDependencies(TestController);
       const deps = getConstructorParamTypes(TestController);
+
       expect(deps).toBeDefined();
-      expect(deps?.length).toBe(1);
+      expect(deps?.length).toBe(3);
       expect(deps?.[0]).toBe(MockService);
+      // Reported, not resolved: `Object` is what the resolver refuses to inject, per index.
+      expect(deps?.[1]).toBe(Object);
+      expect(deps?.[2]).toBe(Object);
     });
 
     test('should return undefined for class without decorator (no design:paramtypes)', () => {

@@ -136,9 +136,19 @@ Function-based guards from `createHttpGuard(fn)` have no DI by design.
 ### Built-in Guards
 
 - **`AuthGuard`** — checks `Authorization: Bearer <token>` header presence
-- **`RolesGuard`** — checks roles in `x-user-roles` header (comma-separated). It requires **ALL**
-  listed roles (`roles.every(...)`), not any of them: `new RolesGuard(['admin', 'moderator'])` admits
-  only a caller holding both. For an OR, pass a custom `rolesExtractor` or use a single role.
+- **`RolesGuard`** — compares required roles against whatever its `rolesExtractor` returns. It
+  requires **ALL** listed roles (`roles.every(...)`), not any of them:
+  `new RolesGuard(['admin', 'moderator'])` admits only a caller holding both. For an OR, pass a
+  custom `rolesExtractor` or use a single role.
+
+**`RolesGuard`'s default extractor is not an authorization decision.** With no `rolesExtractor`
+it comma-splits the `x-user-roles` request header — a value the CALLER sends and nothing verifies,
+so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` passes both built-in guards.
+Always pass a `rolesExtractor` that reads a verified identity. If an already-deployed app depends
+on the header, its middleware must OVERWRITE the header on every request (`headers.set`), never
+fill it in only when absent — an absent-only write leaves a forged value in place. The same shape
+applies on the queue side: `MessageAuthGuard` and `MessageServiceGuard` trust `metadata.authorization`
+and `metadata.serviceId`, which the publisher writes and the broker does not authenticate.
 
 Both are **HTTP-only and deny everywhere else**: each begins with
 `if (!isHttpContext(context)) return false`, because both read a request. Guards created by

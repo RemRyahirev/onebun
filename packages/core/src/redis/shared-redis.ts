@@ -11,6 +11,8 @@ import {
   Layer,
 } from 'effect';
 
+import { redactConnectionUrl } from '../redact-connection-url';
+
 import { RedisClient, type RedisClientOptions } from './redis-client';
 
 /**
@@ -44,17 +46,10 @@ export interface SharedRedisLease {
  * must never reach a log line or an error message.
  */
 function describeTarget(options: SharedRedisOptions): string {
-  let url = options.url;
-  try {
-    const parsed = new URL(options.url);
-    if (parsed.password) {
-      parsed.password = '***';
-    }
-    url = parsed.toString();
-  } catch {
-    // Not a parsable URL — print it as given rather than guess at its shape.
-  }
-
+  // This used to parse with `new URL()` and, on a throw, "print it as given rather than guess at
+  // its shape" — which printed the password. `new URL()` rejects precisely the URLs whose
+  // password contains a raw `/`, so the fallback fired on the case that mattered.
+  const url = redactConnectionUrl(options.url);
   const prefix = options.keyPrefix ? `, keyPrefix: "${options.keyPrefix}"` : '';
 
   return `${url}${prefix}`;

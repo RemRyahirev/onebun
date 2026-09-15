@@ -28,6 +28,7 @@ import type {
 
 import {
   BaseService,
+  redactConnectionUrl,
   Service,
   type OnModuleInit,
   type OnModuleDestroy,
@@ -76,13 +77,43 @@ export {
 const DEFAULT_ENV_PREFIX = 'DB';
 
 /**
- * Resolve PostgreSQL connection options to a URL.
+ * A PostgreSQL target in the form the driver takes it: a URL as supplied, or discrete fields.
+ *
+ * The two are kept apart all the way to `Bun.SQL` deliberately. Neither is ever turned into the
+ * other, so nothing the caller wrote passes through a parser that could reinterpret it.
+ */
+type PostgreSQLDriverConnection =
+  | { url: string }
+  | {
+    hostname: string;
+    port: number;
+    username: string;
+    password: string;
+    database: string;
+  };
+
+/**
+ * Resolve PostgreSQL connection options into something the driver can be handed.
  *
  * Accepts either shape and validates the one it was given. The type makes a mix a compile
  * error, but options also arrive from untyped places — a JSON config, a cast, an older
  * build — so the runtime states the same rule rather than picking a winner silently.
+ *
+ * **The discrete shape is no longer assembled into a URL.** It used to be, by interpolation:
+ * `postgresql://${user}:${password}@${host}:${port}/${database}`, with nothing percent-encoded.
+ * Measured consequences, all from an ordinary provider-generated password:
+ *
+ * - `pw@evil.example.com/pwned?x=1#` resolved to hostname `evil.example.com` and database
+ *   `pwned` — a credential field choosing which server the application talks to.
+ * - a `/` threw a bare `Invalid URL`, and `p@ss/w%x:y` threw `URI error`, so the failure
+ *   presented as a malformed configuration rather than as a password the code could not carry.
+ * - a literal `pw%20x` was silently percent-DECODED to `pw x` by the driver's own parser.
+ *
+ * Handing over the fields means no parser gets a turn. The one regression it introduces is the
+ * mirror of the last point: a caller who pre-encoded their password as a workaround (`p%40ss`)
+ * authenticated as `p@ss` before and authenticates as the literal `p%40ss` now.
  */
-function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
+function resolvePostgreSQLConnection(options: PostgreSQLConnectionOptions): PostgreSQLDriverConnection {
   const {
     connectionString, host, port, user, password, database,
   } = options as {
@@ -95,7 +126,7 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
   };
 
   const discrete = {
-    host, port, user, password, database, 
+    host, port, user, password, database,
   };
   const supplied = Object.entries(discrete).filter(([, value]) => value !== undefined);
 
@@ -108,14 +139,20 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
       );
     }
 
-    return connectionString;
+    return { url: connectionString };
   }
 
-  const missing = Object.entries(discrete)
-    .filter(([, value]) => value === undefined)
-    .map(([key]) => key);
+  // Spelled out rather than derived from `discrete` because the entries-and-filter form does not
+  // narrow: the fields stay `string | undefined` after it, which a template literal tolerates and
+  // a typed return does not.
+  if (
+    host === undefined || port === undefined || user === undefined
+    || password === undefined || database === undefined
+  ) {
+    const missing = Object.entries(discrete)
+      .filter(([, value]) => value === undefined)
+      .map(([key]) => key);
 
-  if (missing.length > 0) {
     throw new Error(
       `PostgreSQL connection options are incomplete: ${missing.join(', ')} missing. Supply all `
       + 'of host, port, user, password and database, or a single connectionString instead. A '
@@ -123,7 +160,25 @@ function resolvePostgreSQLUrl(options: PostgreSQLConnectionOptions): string {
     );
   }
 
-  return `postgresql://${user}:${password}@${host}:${port}/${database}`;
+  return {
+    hostname: host, port, username: user, password, database,
+  };
+}
+
+/**
+ * Name a PostgreSQL target without naming its credentials.
+ *
+ * The discrete shape is formatted straight from the fields with a literal `***`, so the password
+ * is never part of the string that a redactor would then have to find. Only the URL shape is
+ * handed to {@link redactConnectionUrl}, because only there is the password inside a string the
+ * caller supplied.
+ */
+function describePostgreSQLConnection(connection: PostgreSQLDriverConnection): string {
+  if ('url' in connection) {
+    return redactConnectionUrl(connection.url);
+  }
+
+  return `postgresql://${connection.username}:***@${connection.hostname}:${connection.port}/${connection.database}`;
 }
 
 /**
@@ -190,20 +245,6 @@ const DEGRADED_START_ENV_SUFFIX = 'ALLOW_DEGRADED_START';
 const DEFAULT_MIGRATIONS_FOLDER = './drizzle';
 
 /**
- * Strip the password out of a connection URL.
- *
- * The startup error names its target so an operator can tell WHICH database refused, and a
- * PostgreSQL URL carries the password in that target. A framework's own startup error is a
- * leak channel like any other, so the password never reaches the message, the log or the
- * exception — not even when the connection failed and it is "only" a diagnostic.
- */
-function redactConnectionUrl(url: string): string {
-  return url
-    .replace(/^([^:]+:\/\/[^:@/]*):[^@/]*@/, '$1:***@')
-    .replace(/([?&](?:password|pwd)=)[^&]*/gi, '$1***');
-}
-
-/**
  * Say WHY a SQLite database would not open.
  *
  * bun:sqlite reports both "the directory is not there" and "the directory is there and I
@@ -255,7 +296,7 @@ function describeTarget(connection: DatabaseConnectionOptions): string {
   }
 
   try {
-    return `PostgreSQL at ${redactConnectionUrl(resolvePostgreSQLUrl(connection.options))}`;
+    return `PostgreSQL at ${describePostgreSQLConnection(resolvePostgreSQLConnection(connection.options))}`;
   } catch {
     // The options do not describe a server at all, and the resolver's own message says
     // exactly what is missing — that message IS the failure being reported here.
@@ -1020,7 +1061,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
    * Wrap a failure that is not one of the staged ones — the file would not open, or the
    * connection options do not describe a server.
    *
-   * `openSQLite()` and `resolvePostgreSQLUrl()` already say which database and why, so the
+   * `openSQLite()` and `resolvePostgreSQLConnection()` already say which database and why, so the
    * target is prefixed only when the cause does not carry it. Repeating it reads as two
    * different failures.
    */
@@ -1303,8 +1344,9 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
     } else if (options.type === DatabaseType.POSTGRESQL) {
       const pgOptions = options.options;
 
-      // Either shape: a connectionString is used as given, discrete fields are assembled.
-      const connectionUrl = resolvePostgreSQLUrl(pgOptions);
+      // Either shape reaches the driver as it was written: a connectionString as a string,
+      // discrete fields as fields. Neither is ever rebuilt into the other.
+      const pgConnection = resolvePostgreSQLConnection(pgOptions);
 
       // Before the driver exists, because it patches prototypes the driver will use. Without
       // it every json/jsonb value written through this service is stored as a jsonb STRING —
@@ -1315,7 +1357,7 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       // Bun.SQL, through the config form rather than the bare URL: the URL alone is what made
       // every `pool.*` option a value the framework accepted and then dropped on the floor.
       this.db = drizzlePostgres({
-        connection: { url: connectionUrl, ...poolDriverOptions(pgOptions.pool) },
+        connection: { ...pgConnection, ...poolDriverOptions(pgOptions.pool) },
       });
       this.routedDb = createTransactionAwareDatabase(this.db, this.pgAmbient);
 
@@ -1325,10 +1367,9 @@ export class DrizzleService extends BaseService implements OnModuleInit, OnModul
       this.postgresClient = (this.db as any).$client as SQL | null;
 
       this.safeLog('info', 'PostgreSQL database initialized with Bun.SQL', {
-        // The discrete fields are all undefined on the connectionString shape, so the
-        // redacted URL is the only line that names the target on both. It is redacted
-        // because a log is a leak channel exactly like an error message is.
-        target: redactConnectionUrl(connectionUrl),
+        // One line that names the target on both shapes, and carries no password on either.
+        // A log is a leak channel exactly like an error message is.
+        target: describePostgreSQLConnection(pgConnection),
       });
     } else {
       const _exhaustive: never = options;

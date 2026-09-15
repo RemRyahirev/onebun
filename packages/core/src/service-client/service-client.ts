@@ -43,6 +43,17 @@ function buildRequestParams(
           query[param.name] = value;
         }
         break;
+      case ParamType.CUSTOM:
+        // An extractor is a view over the SERVER's request — there is nothing for a caller to
+        // pass, so it consumes no argument here.
+        //
+        // It does still occupy a slot in this loop, because the loop walks `sortedParams[i]`
+        // against `args[i]`. That is pre-existing: HEADER, REQUEST and RESPONSE fall into the
+        // same shape below, so a handler that declares one of them before a QUERY already reads
+        // the wrong argument. Fixing it needs a counter compacted over client-relevant types
+        // only, which is a change to how every generated call is made — see the work item.
+        break;
+
       // HEADER, REQUEST, RESPONSE are not typically used in client calls
       default:
         break;

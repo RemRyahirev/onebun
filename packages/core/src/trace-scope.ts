@@ -12,7 +12,12 @@ import {
   type Tracer,
 } from '@opentelemetry/api';
 
-import { requestContextStore, type TraceInfo } from './request-context';
+import {
+  createRequestContext,
+  inheritRequestContext,
+  requestContextStore,
+  type TraceInfo,
+} from './request-context';
 
 /**
  * The key under which the owning application's tracer rides in the OpenTelemetry context.
@@ -155,13 +160,25 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
  * way `inRootTraceScope` does for ownership, would let an application with tracing switched off
  * mint spans into a sibling application's provider — one process keeps a single OpenTelemetry
  * provider, so the ambient tracer at a boundary is not necessarily this application's. With no
- * owner this is `inRootTraceScope` byte for byte, and costs the same.
+ * owner this re-roots like `inRootTraceScope` and opens no span.
  *
- * **The request scope is entered too, and that is not redundant.** `requestContextStore` is a
- * second AsyncLocalStorage, and re-rooting the OpenTelemetry context does not touch it: a handler
- * reached from a publish inside an HTTP request keeps reading that request's stored context long
- * after it finished. Entering the scope here with this span's own identity closes that leak, and
- * keeps the store and the active span in agreement the way {@link getCurrentTraceContext} expects.
+ * **The request scope is entered on BOTH branches, and that is not redundant.**
+ * `requestContextStore` is a second AsyncLocalStorage, and re-rooting the OpenTelemetry context
+ * does not touch it.
+ *
+ * - With an owner the scope is entered with this span's own identity. That closes a leak: a
+ *   handler reached from a publish inside an HTTP request otherwise keeps reading that request's
+ *   stored context long after it finished. It also keeps the store and the active span in
+ *   agreement the way {@link getCurrentTraceContext} expects.
+ * - With no owner the scope is entered with a shallow COPY of the enclosing context
+ *   ({@link inheritRequestContext}). This branch used to enter no scope at all, so every read here
+ *   answered from the enclosing store — copying keeps every one of those reads identical while
+ *   giving the work a context of its own to WRITE into. Without it there is no per-unit-of-work
+ *   context on a queue, scheduler or WebSocket handler with tracing off, and "one decorator, three
+ *   transports" would rest on a store that only one of them has.
+ *
+ * This costs one AsyncLocalStorage frame on the no-owner branch, which it did not before. It is
+ * the price of the store existing on every transport rather than on the traced ones.
  *
  * **A failure sets the status but does not record the exception.** The HTTP boundary does exactly
  * this (`endHttpTraceSync`), and a handler that is itself `@Traced` already records the throw on
@@ -182,7 +199,12 @@ export function inEntrySpan<T>(
   options?: EntrySpanOptions,
 ): T {
   if (owner === undefined || options?.openSpan === false) {
-    return inRootTraceScope(fn, owner);
+    // Re-rooted AND given a request scope. The scope is entered OUTSIDE `inRootTraceScope` so the
+    // copy is taken from the enclosing context, before the OpenTelemetry context is re-rooted —
+    // the two stores are independent, but taking it here keeps the order obvious.
+    const inherited = inheritRequestContext();
+
+    return requestContextStore.run(inherited, (): T => inRootTraceScope(fn, owner));
   }
 
   return context.with(entryContext(owner, options?.parent), () => owner.startActiveSpan(
@@ -213,7 +235,7 @@ export function inEntrySpan<T>(
         span.end();
       };
 
-      return requestContextStore.run({ traceContext }, (): T => {
+      return requestContextStore.run(createRequestContext(traceContext), (): T => {
         try {
           const result = fn();
 

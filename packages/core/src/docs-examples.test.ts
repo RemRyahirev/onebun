@@ -3378,6 +3378,151 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   });
 });
 
+// The augmentation the Request Context page documents, declared here so the docs examples below
+// read an augmented member exactly as an application would. An application writes
+// `declare module '@onebun/core'`; inside the package the module path is the same interface.
+declare module './request-context' {
+  interface RequestContext {
+    docsTenant?: string;
+  }
+}
+
+describe('Request Context (docs/api/request-context.md)', () => {
+  /**
+   * @source docs:api/request-context.md#quick-reference-for-ai
+   */
+  it('should export the two helpers from @onebun/core and answer without a scope', async () => {
+    const core = await import('./index');
+
+    expect(typeof core.getRequestContext).toBe('function');
+    expect(typeof core.updateRequestContext).toBe('function');
+    expect(typeof core.createRequestContext).toBe('function');
+
+    // The quick reference's two rules, as one assertion each.
+    expect(core.getRequestContext()).toBeUndefined();
+    expect(core.updateRequestContext({ docsTenant: 'acme' })).toBe(false);
+  });
+
+  /**
+   * @source docs:api/request-context.md#extending-it
+   */
+  it('should type an augmented member with no cast at the read site', async () => {
+    const ctxLib = await import('./request-context');
+
+    // The documented augmentation. Spelled against the module path rather than '@onebun/core'
+    // because this test lives INSIDE the package; an application writes
+    // `declare module '@onebun/core'` and gets the same merge.
+    //
+    // The member is OPTIONAL, as the page requires: a required one would make the framework's own
+    // `createRequestContext` — which builds a context carrying only `traceContext` — an error.
+    const read = ctxLib.requestContextStore.run(ctxLib.createRequestContext(null), () => {
+      ctxLib.updateRequestContext({ docsTenant: 'acme' });
+
+      // No cast, no `as`: the member is on the interface.
+      return ctxLib.getRequestContext()?.docsTenant;
+    });
+
+    expect(read).toBe('acme');
+  });
+
+  /**
+   * @source docs:api/request-context.md#establishing-a-scope-yourself
+   */
+  it('should let code that invents its own entry point open a scope', async () => {
+    const ctxLib = await import('./request-context');
+
+    expect(ctxLib.getRequestContext()).toBeUndefined();
+
+    const inside = await ctxLib.requestContextStore.run(
+      ctxLib.createRequestContext(null),
+      async (): Promise<string | undefined> => {
+        ctxLib.updateRequestContext({ docsTenant: 'acme' });
+
+        await Promise.resolve();
+
+        // Still there after the await — that is the whole point of the store.
+        return ctxLib.getRequestContext()?.docsTenant;
+      },
+    );
+
+    expect(inside).toBe('acme');
+    // And gone again outside it.
+    expect(ctxLib.getRequestContext()).toBeUndefined();
+  });
+
+  /**
+   * @source docs:api/request-context.md#reading-and-writing
+   */
+  it('should carry a value written by a middleware down to the handler', async () => {
+    const ctxLib = await import('./request-context');
+
+    const seen = ctxLib.requestContextStore.run(ctxLib.createRequestContext(null), () => {
+      // What a middleware or guard does, once per request.
+      const written = ctxLib.updateRequestContext({ traceContext: null } as never);
+
+      // What anything below it reads — a controller, a service, a repository.
+      return { written, ctx: ctxLib.getRequestContext() };
+    });
+
+    expect(seen.written).toBe(true);
+    expect(seen.ctx).toBeDefined();
+  });
+
+  /**
+   * @source docs:api/request-context.md#reading-and-writing
+   */
+  it('should be silent outside a scope rather than throw', async () => {
+    const ctxLib = await import('./request-context');
+
+    // Documented: a guard shared between a route and a path with no scope must not fail on one
+    // of them. Both helpers answer instead of throwing, and the boolean is how a caller asks.
+    expect(ctxLib.getRequestContext()).toBeUndefined();
+    expect(ctxLib.updateRequestContext({})).toBe(false);
+  });
+
+  /**
+   * @source docs:api/request-context.md#on-every-transport
+   */
+  it('should give background work a copy: it reads what scheduled it, its writes stay put', async () => {
+    const ctxLib = await import('./request-context');
+    const { inEntrySpan } = await import('./trace-scope');
+
+    ctxLib.requestContextStore.run(ctxLib.createRequestContext(null), () => {
+      const outer = ctxLib.getRequestContext();
+
+      const innerSawOuter = inEntrySpan('queue.delivery', () => ctxLib.getRequestContext() !== outer);
+
+      // A copy, not the same object — so a write inside cannot reach back out.
+      expect(innerSawOuter).toBe(true);
+      expect(ctxLib.getRequestContext()).toBe(outer);
+    });
+  });
+});
+
+describe('redactConnectionUrl (docs/api/core.md)', () => {
+  /**
+   * @source docs:api/core.md#redactconnectionurl
+   */
+  it('should replace the password and keep scheme, user, host, port, path and query', async () => {
+    const { redactConnectionUrl } = await import('./redact-connection-url');
+
+    expect(redactConnectionUrl('postgresql://app:hunter2@db:5432/orders?sslmode=require'))
+      .toBe('postgresql://app:***@db:5432/orders?sslmode=require');
+
+    // Documented: no password means nothing to replace, and a string that is not a URL is
+    // replaced wholesale rather than echoed back.
+    expect(redactConnectionUrl('redis://cache:6379/0')).toBe('redis://cache:6379/0');
+    expect(redactConnectionUrl('app:hunter2@db:5432/orders')).toBe('<unparsable connection target>');
+
+    // Documented: the userinfo is cut at its LAST `@`, which is what the two obvious
+    // implementations get wrong.
+    expect(redactConnectionUrl('postgresql://app:pa/ss@db:5432/orders'))
+      .toBe('postgresql://app:***@db:5432/orders');
+    expect(redactConnectionUrl('postgresql://app:pa@ss@db:5432/orders'))
+      .toBe('postgresql://app:***@db:5432/orders');
+  });
+});
+
 describe('OneBunApplication (docs/api/core.md)', () => {
   /**
    * @source docs:api/core.md#onebunapplication

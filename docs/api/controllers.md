@@ -250,7 +250,8 @@ Class-level pipeline decorators are inherited: a controller that extends a base 
 @UseGuards(AuthGuard)
 class ProtectedController extends BaseController {}
 
-// inherits AuthGuard — every route below requires a Bearer token
+// inherits AuthGuard — every route below requires an `Authorization: Bearer` header
+// (presence only; AuthGuard does not validate the token)
 @Controller('/admin')
 class AdminController extends ProtectedController {
   @Get('/stats')

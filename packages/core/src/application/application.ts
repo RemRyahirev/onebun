@@ -94,7 +94,11 @@ import { RedisQueueAdapter } from '../queue/adapters/redis.adapter';
 import { getQueueHandlerNames, hasQueueDecorators } from '../queue/decorators';
 import { type RedisClient } from '../redis/redis-client';
 import { SharedRedisProvider } from '../redis/shared-redis';
-import { getCurrentTraceContext, requestContextStore } from '../request-context';
+import {
+  createRequestContext,
+  getCurrentTraceContext,
+  requestContextStore,
+} from '../request-context';
 import {
   bindClientAddress,
   createClientAddressBinding,
@@ -1391,7 +1395,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
           // client address without needing the server handle in scope.
           bindRequestClientAddress(req, server);
 
-          return await requestContextStore.run({ traceContext: null }, async () => {
+          return await requestContextStore.run(createRequestContext(null), async () => {
           // Capture outermost timestamp before any closure/ALS overhead
             const profiler = PROFILING_ENABLED ? getProfiler() : null;
             const outerStartNs = profiler ? Bun.nanoseconds() : 0;
@@ -2678,6 +2682,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
+      // Built on first use and reused by every CUSTOM parameter on the route, so a handler with
+      // three of them allocates one context rather than three. Not hoisted out of `executeHandler`
+      // and not precomputed at registration: it closes over THIS request, and this function
+      // already recomputes `sortedParams` and `needsFileData` per request anyway.
+      let customContext: HttpExecutionContextImpl | undefined;
+
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let formData: any = null;
       let jsonBody: Record<string, unknown> | null = null;
@@ -2842,8 +2852,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
             break;
           }
 
-          default:
+          case ParamType.CUSTOM: {
+            // `extractor` is always present on a CUSTOM parameter — `createHttpParamDecorator` is
+            // the only thing that writes this type — but the metadata is a plain object a caller
+            // could hand-build, so it is checked rather than asserted.
+            if (param.extractor) {
+              customContext ??= new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
+              args[param.index] = param.extractor(customContext);
+            } else {
+              args[param.index] = undefined;
+            }
+            break;
+          }
+
+          default: {
+            // Exhaustiveness: a new ParamType member makes this a compile error instead of
+            // silently assigning `undefined`, which is how every site touched by CUSTOM had to
+            // be found by grep. The value is consumed because an unused local fails lint.
+            const unhandled: never = param.type;
             args[param.index] = undefined;
+            appLogger.debug(`Unhandled parameter type ${String(unhandled)} on ${controllerName}`);
+          }
         }
 
         // Validate parameter if required

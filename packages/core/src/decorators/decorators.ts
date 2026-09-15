@@ -12,6 +12,7 @@ import {
   type FilesUploadOptions,
   HttpMethod,
   type ParamDecoratorOptions,
+  type ParamExtractor,
   type ParamMetadata,
   ParamType,
   type RouteOptions,
@@ -34,9 +35,13 @@ import {
 const META_CONTROLLERS = new Map<Function, ControllerMetadata>();
 
 /**
- * Metadata storage for automatically detected constructor parameters
+ * Metadata storage for automatically detected constructor parameters.
+ *
+ * Holds holes: `@Inject(Class)` pads the array up to its parameter index with `undefined`
+ * (see the `Inject` decorator), so entry `i` is always parameter `i` and never "the i-th
+ * parameter that had something to say".
  */
-const META_CONSTRUCTOR_PARAMS = new Map<Function, Function[]>();
+const META_CONSTRUCTOR_PARAMS = new Map<Function, (Function | undefined)[]>();
 
 /**
  * Metadata storage for optional constructor parameters.
@@ -50,10 +55,43 @@ const META_OPTIONAL_PARAMS = new Map<Function, Set<number>>();
  *
  * Deliberately a SIDE map rather than an entry in META_CONSTRUCTOR_PARAMS: the token names a
  * registration, not a type, so writing it there would force every paramtypes reader to filter
- * non-classes out of the hottest DI path. Kept apart, `getConstructorParamTypes` keeps
- * returning the complete `design:paramtypes` array and partial injection keeps working.
+ * non-classes out of the hottest DI path.
+ *
+ * Keyed by the DECLARED parameter index, which is only safe because the paramtypes array keeps
+ * its holes. It did not always: this comment used to claim `getConstructorParamTypes` "keeps
+ * returning the complete `design:paramtypes` array", while the function actually `.filter()`ed
+ * it. Against the shortened array a token bound to parameter 3 was read for whatever parameter
+ * ended up at index 3, and a token after a dropped parameter was never found at all. See
+ * onebun-FB-18.
  */
 const META_INJECT_TOKENS = new Map<Function, Map<number, symbol | string>>();
+
+/**
+ * Merge a reflected `design:paramtypes` array over the explicit one, by POSITION.
+ *
+ * A non-`undefined` explicit entry wins: `@Inject(Impl)` names a concrete class the reflected
+ * array cannot know about, because the parameter's declared type is an interface and reflection
+ * reports that as `Object`. Everywhere the explicit array says nothing — its `undefined` padding
+ * — the reflected entry is taken.
+ *
+ * This exists because overwriting used to be safe by accident. `autoDetectDependencies` returned
+ * `[]` for a constructor whose only parameter was interface-typed, so the `length > 0` guard
+ * below skipped the write and the `@Inject` metadata survived. Now that reflection reports that
+ * parameter as `Object` instead of dropping it, the guard passes — and a plain `set` would clobber
+ * `[Impl]` with `[Object]`, breaking a controller that works today.
+ */
+function mergeParamTypes(
+  explicit: (Function | undefined)[],
+  reflected: (Function | undefined)[],
+): (Function | undefined)[] {
+  const merged: (Function | undefined)[] = [];
+
+  for (let i = 0; i < Math.max(explicit.length, reflected.length); i++) {
+    merged.push(explicit[i] ?? reflected[i]);
+  }
+
+  return merged;
+}
 
 /**
  * Injectable decorator for controllers and services
@@ -73,7 +111,7 @@ export function injectable() {
  */
 export function autoDetectDependencies(
   target: Function,
-): Function[] {
+): (Function | undefined)[] {
   const designTypes = getDesignParamTypes(target);
   if (designTypes && designTypes.length > 0) {
     return designTypes;
@@ -83,7 +121,10 @@ export function autoDetectDependencies(
 }
 
 /**
- * Register dependencies for a controller automatically
+ * Register dependencies for a controller automatically.
+ *
+ * Merges rather than overwrites — see {@link mergeParamTypes} for why a plain `set` breaks
+ * `@Inject(ConcreteImpl) x: SomeInterface` on a controller.
  */
 export function registerControllerDependencies(
   target: Function,
@@ -91,23 +132,33 @@ export function registerControllerDependencies(
   const dependencies = autoDetectDependencies(target);
 
   if (dependencies.length > 0) {
-    META_CONSTRUCTOR_PARAMS.set(target, dependencies);
+    const explicit = META_CONSTRUCTOR_PARAMS.get(target);
+
+    META_CONSTRUCTOR_PARAMS.set(
+      target,
+      explicit === undefined ? dependencies : mergeParamTypes(explicit, dependencies),
+    );
   }
 }
 
 /**
- * Get constructor parameter types (automatically detected or explicitly set)
- * Priority: 1) Explicit @Inject registrations, 2) TypeScript's design:paramtypes
+ * Constructor parameter types, POSITIONALLY INTACT: entry `i` describes parameter `i`, and a
+ * parameter nothing could name is `undefined` in its own slot rather than missing.
+ *
+ * Precedence is PER INDEX, not per array. An explicit `@Inject(Class)` wins its own slot, and
+ * every slot it says nothing about falls back to TypeScript's `design:paramtypes`. Taking the
+ * explicit array whole would blank every undecorated parameter of a constructor that decorates
+ * one of them, because `@Inject` pads the array with `undefined` up to its own index.
  */
-export function getConstructorParamTypes(target: Function): Function[] | undefined {
-  // First check explicit @Inject registrations
+export function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
   const explicitDeps = META_CONSTRUCTOR_PARAMS.get(target);
-  if (explicitDeps && explicitDeps.length > 0) {
-    return explicitDeps;
+  const designTypes = getDesignParamTypes(target);
+
+  if (explicitDeps === undefined || explicitDeps.length === 0) {
+    return designTypes;
   }
 
-  // Fallback to TypeScript's design:paramtypes (automatic DI)
-  return getDesignParamTypes(target);
+  return designTypes === undefined ? explicitDeps : mergeParamTypes(explicitDeps, designTypes);
 }
 
 /**
@@ -376,9 +427,12 @@ export function Middleware(): ClassDecorator {
 }
 
 /**
- * Register dependencies manually (fallback method)
+ * Register dependencies manually (fallback method).
+ *
+ * Positional, like everything else that reads this array: pass `undefined` for a parameter you
+ * are not naming rather than leaving it out, or every later entry describes the wrong parameter.
  */
-export function registerDependencies(target: Function, dependencies: Function[]): void {
+export function registerDependencies(target: Function, dependencies: (Function | undefined)[]): void {
   META_CONSTRUCTOR_PARAMS.set(target, dependencies);
 }
 
@@ -826,6 +880,68 @@ export function UploadedFile(fieldName?: string, options?: FileUploadOptions): P
     };
 
     params.push(metadata);
+    Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey as string);
+  };
+}
+
+/**
+ * Build a parameter decorator from a function of the execution context.
+ *
+ * The typed escape hatch for "my handlers all need this one thing off the request". The extractor
+ * is a pure view over data that already exists, which is what keeps this from being a second way
+ * to do something the framework already does: `@Param`, `@Query`, `@Body` and friends stay the one
+ * way to read the parts of a request the framework understands, and this covers the parts only the
+ * application understands.
+ *
+ * Its point is per-request state a MIDDLEWARE OR GUARD PRODUCED — the authenticated user, the
+ * tenant, the decoded token — which it reads through {@link getRequestContext}. Everything an
+ * extractor could pull straight off the request is one property access from `@Req()`, so a
+ * decorator that only does that buys an import rather than an abstraction.
+ *
+ * **HTTP only, and named so.** `@UseGuards` reaches WebSocket and queue handlers; parameter
+ * decorators do not — WebSocket handlers read their own metadata key with their own `ParamType`
+ * enum, and queue handlers have no parameter machinery at all. A decorator from this factory on an
+ * `@OnMessage` or `@Subscribe` method is not an error, it is simply never read.
+ *
+ * A CUSTOM parameter carries no schema and is never required: it is not validated, it does not
+ * appear in the OpenAPI document, and the generated service client does not take it as an
+ * argument. Validate inside the extractor if you need to.
+ *
+ * @param extractor - produces the value from the execution context
+ * @returns a decorator factory — call it at the use site, as `@CurrentUser()`
+ *
+ * @see docs:api/decorators.md
+ *
+ * @example
+ * ```typescript
+ * const CurrentUser = createHttpParamDecorator((ctx) => getRequestContext()?.user);
+ *
+ * @Get('/me')
+ * me(@CurrentUser() user: AuthenticatedUser | undefined) { return user; }
+ * ```
+ *
+ * @example
+ * ```typescript
+ * // Per-use arguments need no extra machinery — close over them:
+ * const Claim = (name: string) => createHttpParamDecorator((ctx) => readClaim(ctx, name))();
+ *
+ * @Get('/tenant')
+ * tenant(@Claim('tid') tid: string) { return tid; }
+ * ```
+ */
+export function createHttpParamDecorator(extractor: ParamExtractor): () => ParameterDecorator {
+  return () => (target: object, propertyKey: string | symbol | undefined, parameterIndex: number) => {
+    const params: ParamMetadata[] =
+      Reflect.getMetadata(PARAMS_METADATA, target, propertyKey) || [];
+
+    params.push({
+      type: ParamType.CUSTOM,
+      name: '',
+      index: parameterIndex,
+      isRequired: false,
+      extractor,
+    });
+
     Reflect.defineMetadata(PARAMS_METADATA, params, target, propertyKey as string);
   };
 }

@@ -29,8 +29,6 @@
     "packages/core/src/queue/decorators.ts:getMessageGuards -> api/guards.md",
     "packages/core/src/queue/decorators.ts:getMessageGuards -> api/queue.md",
     "packages/core/src/queue/types.ts:PublishOptions -> api/queue.md",
-    "packages/core/src/request-context.ts:RequestContext -> api/trace.md",
-    "packages/core/src/request-context.ts:requestContextStore -> api/trace.md",
     "packages/core/src/security/client-address.ts:ClientAddressBinding -> api/security.md",
     "packages/core/src/security/client-address.ts:bindClientAddress -> api/security.md",
     "packages/core/src/security/client-address.ts:createClientAddressBinding -> api/security.md",

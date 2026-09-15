@@ -27,7 +27,11 @@ import {
   getInjectToken,
   registerControllerDependencies,
 } from '../decorators/decorators';
-import { buildDecoratorMetadataDiagnosticMessage, diagnoseDecoratorMetadata } from '../decorators/metadata';
+import {
+  buildDecoratorMetadataDiagnosticMessage,
+  diagnoseDecoratorMetadata,
+  isInjectableParamType,
+} from '../decorators/metadata';
 import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
 import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
@@ -828,44 +832,64 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
-      // Use getConstructorParamTypes for @Inject and TypeScript design:paramtypes metadata
+      // Use getConstructorParamTypes for @Inject and TypeScript design:paramtypes metadata.
+      // Providers keep their own copy of the resolution loop rather than calling
+      // `resolveConstructorArgs`, because only they can DEFER: a dependency this module will
+      // construct later sends the whole provider back onto the pending queue. The positional
+      // discipline is the same — `dependencies[i]`, never `push` — and for the same reason.
       const detectedDeps = getConstructorParamTypes(provider);
-      const dependencies: unknown[] = [];
+      const dependencies: unknown[] = detectedDeps === undefined
+        ? []
+        : new Array<unknown>(detectedDeps.length).fill(undefined);
       let allDependenciesResolved = true;
+      const holes: number[] = [];
+      let resolvedAfterHole = false;
 
-      if (detectedDeps && detectedDeps.length > 0) {
+      if (detectedDeps !== undefined) {
         for (let i = 0; i < detectedDeps.length; i++) {
           const depType = detectedDeps[i];
-          const dependency = this.resolveDependencyByType(depType, provider, i);
-          if (dependency) {
-            dependencies.push(dependency);
-          } else {
-            // Check if it's a service that hasn't been created yet
-            const isServiceInModule = availableServiceClasses.has(depType);
-            if (isServiceInModule && !createdServices.has(depType)) {
-              // Track unresolved dependency for error reporting
-              const deps = unresolvedDeps.get(provider.name) || [];
-              if (!deps.includes(depType.name)) {
-                deps.push(depType.name);
-                unresolvedDeps.set(provider.name, deps);
-              }
-              // This dependency will be created later, defer this service
-              allDependenciesResolved = false;
-              pendingProviders.push(provider);
-              break;
-            } else if (isOptionalParam(provider, i)) {
-              dependencies.push(undefined);
-            } else {
-              const suggestions = this.buildResolutionSuggestions(depType);
-              throw new DependencyResolutionError(provider.name, depType.name, 'service', suggestions);
-            }
+
+          if (!isInjectableParamType(depType)) {
+            holes.push(i);
+            continue;
           }
+
+          const dependency = this.resolveDependencyByType(depType, provider, i);
+          if (dependency !== undefined) {
+            dependencies[i] = dependency;
+            resolvedAfterHole = resolvedAfterHole || holes.length > 0;
+            continue;
+          }
+
+          // Check if it's a service that hasn't been created yet
+          const isServiceInModule = availableServiceClasses.has(depType);
+          if (isServiceInModule && !createdServices.has(depType)) {
+            // Track unresolved dependency for error reporting
+            const deps = unresolvedDeps.get(provider.name) || [];
+            if (!deps.includes(depType.name)) {
+              deps.push(depType.name);
+              unresolvedDeps.set(provider.name, deps);
+            }
+            // This dependency will be created later, defer this service
+            allDependenciesResolved = false;
+            pendingProviders.push(provider);
+            break;
+          }
+
+          if (isOptionalParam(provider, i)) {
+            continue;
+          }
+
+          const suggestions = this.buildResolutionSuggestions(depType);
+          throw new DependencyResolutionError(provider.name, depType.name, 'service', suggestions);
         }
       }
 
       if (!allDependenciesResolved) {
         continue;
       }
+
+      this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
 
       // Create service instance with resolved dependencies.
       // Set ambient init context so BaseService constructor can pick up logger/config,
@@ -1025,24 +1049,7 @@ export class OneBunModule implements ModuleInstance {
    */
   resolveMiddleware(classes: Function[]): Function[] {
     return classes.map((cls) => {
-      // Resolve constructor dependencies (same logic as for controllers)
-      const paramTypes = getConstructorParamTypes(cls);
-      const deps: unknown[] = [];
-
-      if (paramTypes && paramTypes.length > 0) {
-        for (let i = 0; i < paramTypes.length; i++) {
-          const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType, cls, i);
-          if (dep) {
-            deps.push(dep);
-          } else if (isOptionalParam(cls, i)) {
-            deps.push(undefined);
-          } else {
-            const suggestions = this.buildResolutionSuggestions(paramType);
-            throw new DependencyResolutionError(cls.name, paramType.name, 'middleware', suggestions);
-          }
-        }
-      }
+      const deps = this.resolveConstructorArgs(cls, 'middleware');
 
       const middlewareConstructor = cls as new (...args: unknown[]) => BaseMiddleware;
 
@@ -1109,24 +1116,7 @@ export class OneBunModule implements ModuleInstance {
         return instance.intercept.bind(instance);
       }
 
-      // Resolve constructor dependencies (same logic as for middleware)
-      const paramTypes = getConstructorParamTypes(cls);
-      const deps: unknown[] = [];
-
-      if (paramTypes && paramTypes.length > 0) {
-        for (let i = 0; i < paramTypes.length; i++) {
-          const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType, cls, i);
-          if (dep) {
-            deps.push(dep);
-          } else if (isOptionalParam(cls, i)) {
-            deps.push(undefined);
-          } else {
-            const suggestions = this.buildResolutionSuggestions(paramType);
-            throw new DependencyResolutionError(cls.name, paramType.name, 'interceptor', suggestions);
-          }
-        }
-      }
+      const deps = this.resolveConstructorArgs(cls, 'interceptor');
 
       const interceptorConstructor = cls as new (...args: unknown[]) => Interceptor;
 
@@ -1186,23 +1176,7 @@ export class OneBunModule implements ModuleInstance {
         return cached;
       }
 
-      const paramTypes = getConstructorParamTypes(filter);
-      const deps: unknown[] = [];
-
-      if (paramTypes && paramTypes.length > 0) {
-        for (let i = 0; i < paramTypes.length; i++) {
-          const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType, filter, i);
-          if (dep) {
-            deps.push(dep);
-          } else if (isOptionalParam(filter, i)) {
-            deps.push(undefined);
-          } else {
-            const suggestions = this.buildResolutionSuggestions(paramType);
-            throw new DependencyResolutionError(filter.name, paramType.name, 'filter', suggestions);
-          }
-        }
-      }
+      const deps = this.resolveConstructorArgs(filter, 'filter');
 
       const filterConstructor = filter as new (...args: unknown[]) => ExceptionFilter;
 
@@ -1280,23 +1254,7 @@ export class OneBunModule implements ModuleInstance {
       // pattern into a cross-request race that authorizes requests it must deny — measured:
       // a slow "mallory" request and a fast "admin" one overlapping made mallory pass. So
       // the lifetime stays per-request and only the wiring is hoisted.
-      const paramTypes = getConstructorParamTypes(guard);
-      const deps: unknown[] = [];
-
-      if (paramTypes && paramTypes.length > 0) {
-        for (let i = 0; i < paramTypes.length; i++) {
-          const paramType = paramTypes[i];
-          const dep = this.resolveDependencyByType(paramType, guard, i);
-          if (dep) {
-            deps.push(dep);
-          } else if (isOptionalParam(guard, i)) {
-            deps.push(undefined);
-          } else {
-            const suggestions = this.buildResolutionSuggestions(paramType);
-            throw new DependencyResolutionError(guard.name, paramType.name, 'guard', suggestions);
-          }
-        }
-      }
+      const deps = this.resolveConstructorArgs(guard, 'guard');
 
       const guardConstructor = guard as new (...args: unknown[]) => Guard;
       const logger = this.logger;
@@ -1371,26 +1329,7 @@ export class OneBunModule implements ModuleInstance {
   private createControllersWithDI(): void {
     for (const controllerClass of this.controllers) {
       // Get constructor parameter types automatically from DI system
-      const paramTypes = getConstructorParamTypes(controllerClass);
-      const dependencies: unknown[] = [];
-
-      if (paramTypes && paramTypes.length > 0) {
-        // Resolve dependencies based on registered parameter types
-        for (let i = 0; i < paramTypes.length; i++) {
-          const paramType = paramTypes[i];
-          const dependency = this.resolveDependencyByType(paramType, controllerClass, i);
-          if (dependency) {
-            dependencies.push(dependency);
-          } else if (isOptionalParam(controllerClass, i)) {
-            dependencies.push(undefined);
-          } else {
-            const suggestions = this.buildResolutionSuggestions(paramType);
-            throw new DependencyResolutionError(
-              controllerClass.name, paramType.name, 'controller', suggestions,
-            );
-          }
-        }
-      }
+      const dependencies = this.resolveConstructorArgs(controllerClass, 'controller');
 
       // Create controller with resolved dependencies.
       // Set ambient init context so the base class constructor can pick up logger/config,
@@ -1453,9 +1392,9 @@ export class OneBunModule implements ModuleInstance {
 
       this.controllerInstances.set(controllerClass, controller);
 
-      if (paramTypes && paramTypes.length > 0) {
+      if (dependencies.length > 0) {
         this.logger.debug(
-          `Controller ${controllerClass.name} created with ${paramTypes.length} injected dependencies`,
+          `Controller ${controllerClass.name} created with ${dependencies.length} injected dependencies`,
         );
       }
     }
@@ -1516,6 +1455,19 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
+    // BELOW the token block on purpose: a token names a registration and resolves without ever
+    // consulting the parameter's type, so short-circuiting here would break `@Inject(TOKEN)` on
+    // an interface-typed parameter — the one shape that needs it most.
+    //
+    // This guard is load-bearing. `design:paramtypes` used to be filtered before it got here, so
+    // `Object` never reached the `instanceof` fallback at the bottom of this method — and that
+    // fallback answers `instance instanceof Object`, which is TRUE for every service instance in
+    // the map. Un-filtering without this turns a left-shifted argument list into something worse:
+    // an interface-typed parameter silently receiving whichever service happens to be first.
+    if (!isInjectableParamType(type)) {
+      return undefined;
+    }
+
     // QueueService is registered by tag (QueueServiceTag) before setup(); resolve by tag
     if (type === QueueService) {
       const byTag = this.serviceInstances.get(
@@ -1560,6 +1512,100 @@ export class OneBunModule implements ModuleInstance {
     });
 
     return serviceInstance;
+  }
+
+  /**
+   * Resolve a constructor's arguments POSITIONALLY: argument `i` is parameter `i`, always.
+   *
+   * The five pipeline kinds — controller, middleware, interceptor, filter, guard — shared five
+   * byte-identical copies of this loop, and every one of them built its array with `push`. That
+   * was safe only for as long as `getConstructorParamTypes` never returned a hole. It does now,
+   * and a `push` against a hole is exactly the defect being fixed: the argument list gets shorter
+   * and every later dependency lands one slot to the left (onebun-FB-18). Providers keep their
+   * own loop because they also defer on a not-yet-constructed dependency.
+   *
+   * A parameter the container cannot name is `undefined` IN ITS OWN SLOT rather than a thrown
+   * error, so nothing that works today stops working: a JS default parameter applies to
+   * `undefined`, so `opts: Opts = {}` still receives its default.
+   */
+  private resolveConstructorArgs(
+    target: Function,
+    kind: 'controller' | 'middleware' | 'interceptor' | 'guard' | 'filter',
+  ): unknown[] {
+    const paramTypes = getConstructorParamTypes(target);
+
+    if (paramTypes === undefined || paramTypes.length === 0) {
+      return [];
+    }
+
+    const args: unknown[] = new Array<unknown>(paramTypes.length).fill(undefined);
+    const holes: number[] = [];
+    let resolvedAfterHole = false;
+
+    for (let i = 0; i < paramTypes.length; i++) {
+      const paramType = paramTypes[i];
+
+      if (!isInjectableParamType(paramType)) {
+        holes.push(i);
+        continue;
+      }
+
+      const dependency = this.resolveDependencyByType(paramType, target, i);
+
+      // `!== undefined`, not truthiness: a registration may legitimately resolve to `0`, `''`
+      // or `false`, and treating those as "unresolved" would throw on a value that was found.
+      if (dependency !== undefined) {
+        args[i] = dependency;
+        resolvedAfterHole = resolvedAfterHole || holes.length > 0;
+        continue;
+      }
+
+      if (isOptionalParam(target, i)) {
+        continue;
+      }
+
+      throw new DependencyResolutionError(
+        target.name, paramType.name, kind, this.buildResolutionSuggestions(paramType),
+      );
+    }
+
+    this.reportUnresolvableParams(target, holes, resolvedAfterHole);
+
+    return args;
+  }
+
+  /**
+   * Say that a constructor parameter could not be named, without claiming to know why.
+   *
+   * It cannot know. Bun's `emitDecoratorMetadata` emits every type reference as
+   * `typeof X === "undefined" ? Object : X`, so an interface, a type alias, `any`, `unknown` and
+   * a reference broken by a circular import all arrive identical — a diagnostic that guessed
+   * between them would be wrong most of the time.
+   *
+   * The warning is reserved for a hole FOLLOWED by a parameter that did resolve, because that is
+   * the configuration that used to corrupt silently: the later dependency slid into the hole's
+   * slot, every field stayed truthy, and the failure surfaced somewhere else entirely as
+   * `x.someMethod is not a function`. A trailing hole is far more often a deliberate optional.
+   */
+  private reportUnresolvableParams(target: Function, holes: number[], resolvedAfterHole: boolean): void {
+    if (holes.length === 0) {
+      return;
+    }
+
+    const positions = holes.join(', ');
+    this.logger.debug(
+      `${target.name}: constructor parameter(s) at index ${positions} name no injectable type; `
+      + 'passing undefined in place',
+    );
+
+    if (resolvedAfterHole) {
+      this.logger.warn(
+        `${target.name}: constructor parameter(s) at index ${positions} could not be resolved, and `
+        + 'a LATER parameter could. Those fields receive undefined. A parameter typed as an '
+        + 'interface has no runtime type to resolve — type it as the class, or annotate it with '
+        + '@Inject(ConcreteClass). Mark it @Optional() to silence this.',
+      );
+    }
   }
 
   /**

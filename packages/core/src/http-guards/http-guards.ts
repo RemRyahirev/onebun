@@ -188,8 +188,16 @@ export class AuthGuard implements Guard {
 }
 
 /**
- * Default roles extractor — reads comma-separated roles from the `x-user-roles` header.
- * Set this header from your auth middleware after validating the token.
+ * Fallback roles extractor — reads comma-separated roles from the `x-user-roles` header.
+ *
+ * The header arrives from the CALLER and nothing here verifies it, so on this fallback
+ * `RolesGuard` reports what a request claims rather than what it is: `curl -H 'Authorization:
+ * Bearer anything' -H 'x-user-roles: admin'` passes both built-in guards. Pass a `rolesExtractor`
+ * reading a verified identity instead — that is the supported way to use the guard.
+ *
+ * If a deployed application already depends on the header, the middleware in front of it must
+ * OVERWRITE the header on every request (`headers.set`), never fill it in only when absent: an
+ * absent-only write leaves a forged value exactly where it was.
  */
 function defaultRolesExtractor(ctx: HttpExecutionContext): string[] {
   const rolesHeader = ctx.getRequest().headers.get('x-user-roles');
@@ -199,9 +207,10 @@ function defaultRolesExtractor(ctx: HttpExecutionContext): string[] {
 
 /**
  * Guard that requires all specified roles to be present on the request.
- * By default reads roles from the `x-user-roles` header (comma-separated).
- * Provide a custom `rolesExtractor` to read roles from a different source
- * (e.g. a JWT claim decoded by a preceding auth middleware).
+ *
+ * Supply a `rolesExtractor` that reads a VERIFIED identity — a claim off a token your own code
+ * decoded. With none, roles come from the comma-separated `x-user-roles` request header, which
+ * the caller sends and nobody checks; see `defaultRolesExtractor` for what that costs.
  *
  * @see docs:api/guards.md
  *
