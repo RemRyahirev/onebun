@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.1]
+
+### Added
+
+- `@onebun/nats`: `driverOptions` on the NATS connection options — a `Partial<NodeConnectionOptions>` merged last into what the driver receives, so it also overrides the keys OneBun names itself. The named option list is no longer a ceiling: a nats.js option this package has not named yet no longer requires an `@onebun/nats` release before anyone can use it. (FB-10)
+- `@onebun/nats`: stream declaration and stream management are now separable. `StreamDefinition.manage: false` keeps a stream in subscription-to-stream resolution while taking it out of the reconcile pass entirely — no `STREAM.INFO` probe, no create, no update — which is what a stream owned by a platform operator or another team needs, where a tenant-scoped user has no write on it and reconciliation failed the boot. `JetStreamAdapterOptions.manageStreams: false` is the same switch adapter-wide; precedence is `stream.manage ?? manageStreams ?? true`, and `streamDefaults.manage` applies to every stream while a per-stream `manage` still wins. The trade-off is stated in the docs: the subject-narrowing guard, the create-only divergence guard and the create-if-missing branch all ride on the reconcile pass, so an unmanaged stream that is missing or differently bound now surfaces at the first publish/subscribe rather than at `app.start()`. (FB-10)
+
+### Changed
+
+- `@onebun/nats`: `JetStreamAdapterOptions.streams` is now optional and may be empty. The constructor used to refuse an empty list, which forced a publish-only unit to declare streams it does not own — and the reconcile pass then tried to create or update them. `publish()` never resolves a stream: it addresses a subject and lets the server route it, so a producer needs no declaration at all. `subscribe()` still does, because `consumers.add` takes a stream name, and on an adapter with no declarations it now refuses with a message that says exactly that instead of listing an empty candidate set. The removed check is replaced by one that fires on the real configuration error: options that name no `servers`. (FB-11)
+- `@onebun/nats`: the JetStream manager is now built on first use rather than during `connect()`. `jetstreamManager()` asks the server for account info over `$JS.API.INFO`, which an adapter that reconciles no stream and creates no consumer never needs again — so a publish-only unit no longer requires that privilege at boot. Nothing changes for an application that manages its own streams: the reconcile pass is the first caller, so the manager is still built during `connect()` there. (FB-11)
+
+### Fixed
+
+- `@onebun/nats`: `inboxPrefix` now reaches the driver. `NatsClient.connect()` built an explicit allow-list of options to hand `@nats-io/transport-node`, so any key it did not name was dropped on the way out — and it did not name `inboxPrefix`. On a broker that grants a tenant SUBSCRIBE on its own inbox space only (`_INBOX_<tenant>_<app>.>`), that produced a connection that opened and could then do nothing at all: every JetStream operation is request/reply over the inbox. The mapping is now a single pure function whose literal is checked for exhaustiveness at compile time, so a connection option that exists in the type can no longer fail to be forwarded. (FB-10)
+- `@onebun/nats`: a connection option the application did not set is now omitted from what the driver receives, instead of being sent as `undefined`. nats.js merges its defaults with `extend(defaultOptions(), opts)`, which copies every own key unconditionally, so the old behaviour overwrote `maxReconnectAttempts` (driver default 10) and `reconnectTimeWait` (2000) with `undefined` on every connection that did not name them — and the driver's own reconnect-delay handler then computed `undefined + jitter` and scheduled every retry at `NaN` milliseconds. Any application that left the reconnection options unset was reconnecting on a broken schedule with no attempt limit; it now gets nats.js's documented defaults. `driverOptions` is the deliberate exception and is still passed through exactly as written. (FB-10)
+
 ## 0.7.0 — 2026-09-12
 
 ### Package Versions
