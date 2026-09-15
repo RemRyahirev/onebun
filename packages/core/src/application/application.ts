@@ -279,6 +279,80 @@ interface PathRegistration {
   methods: Map<string, BunRouteHandler>;
   /** Handler declared with `@All()` — the catch-all for every verb no concrete decorator claims. */
   catchAll?: BunRouteHandler;
+  /** `Controller.handler()` for everything registered here, for the shadowing diagnostic. */
+  declaredBy: string[];
+}
+
+/**
+ * What one URL SHAPE declares, across every template that spells its parameters differently.
+ *
+ * `/thing/:alpha` and `/thing/:beta` are the same set of URLs, and Bun treats them as separate
+ * route patterns that it tries in turn. Anything decided per TEMPLATE — which verbs exist, what
+ * `Allow` should say — has to be decided per shape instead, or one template answers for URLs the
+ * other one declared.
+ */
+interface RouteShape {
+  /** Every verb declared by any template of this shape. */
+  declared: Set<string>;
+  /** Whether any template of this shape carries an `@All()`. */
+  hasCatchAll: boolean;
+  /** The one template that carries this shape's 405 fillers. */
+  fillerPathKey: string;
+  /** The templates making up this shape, in registration order. */
+  pathKeys: string[];
+}
+
+/**
+ * A route template with its parameter NAMES erased, positionally.
+ *
+ * `:alpha` and `:beta` in the same position are the same thing to every client — a parameter name
+ * is documentation. Two templates that differ only there match exactly the same URLs.
+ */
+function normalisePathShape(pathKey: string): string {
+  return pathKey.replace(/:[^/]+/g, ':');
+}
+
+/**
+ * Say at startup when two route templates differ only by the name of a parameter.
+ *
+ * The routing works either way now — every declared verb reaches its own handler — so this is a
+ * diagnostic, not a guard. It is worth having because the two decorators are individually correct
+ * and usually sit far apart, so nothing about reading either one suggests the other exists:
+ * `@Get('/artifacts/:artifactId')` and `@Patch('/artifacts/:artifactKey')` describe one endpoint
+ * whose parameter has two names, and every generated client, every OpenAPI document and every
+ * reader has to pick one.
+ *
+ * Deduplicated by the handlers involved rather than by shape, because each route is registered
+ * twice — once with a trailing slash — and one naming slip should not be reported twice.
+ */
+function reportShadowedRouteTemplates(
+  shapes: Map<string, RouteShape>,
+  registry: Map<string, PathRegistration>,
+  logger: SyncLogger,
+): void {
+  const reported = new Set<string>();
+
+  for (const shape of shapes.values()) {
+    if (shape.pathKeys.length < 2) {
+      continue;
+    }
+
+    const handlers = shape.pathKeys
+      .flatMap((pathKey) => registry.get(pathKey)?.declaredBy ?? [])
+      .sort();
+    const fingerprint = handlers.join('|');
+    if (reported.has(fingerprint)) {
+      continue;
+    }
+
+    reported.add(fingerprint);
+    logger.warn(
+      `Route templates ${shape.pathKeys.map((key) => `"${key}"`).join(' and ')} differ only by `
+      + `parameter name, so they describe the same URLs: ${handlers.join(', ')}. Each verb still `
+      + 'reaches its own handler, but the endpoint has two names for one parameter — pick one '
+      + 'spelling, or a client generated from these routes will disagree with itself.',
+    );
+  }
 }
 
 /**
@@ -1299,9 +1373,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       ): void {
         let registration = routeRegistry.get(pathKey);
         if (!registration) {
-          registration = { methods: new Map() };
+          registration = { methods: new Map(), declaredBy: [] };
           routeRegistry.set(pathKey, registration);
         }
+
+        registration.declaredBy.push(`${controllerClass.name}.${String(route.handler)}()`);
 
         if (route.method === HttpMethod.ALL) {
           registration.catchAll = handler;
@@ -2044,47 +2120,93 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // The dispatcher must always return a Response: a bare route function that returns
       // undefined does NOT fall through to `fetch`, Bun logs
       // "Expected a Response object" and serves its own welcome page.
+      // HEAD is derived from GET unless the controller declared its own. Bun does not derive it
+      // (measured on 1.3.14) and neither did route registration, so every load-balancer and
+      // uptime probe — which conventionally use HEAD — reported the service down.
+      //
+      // Ahead of the shape pass, so a derived HEAD counts as declared when `Allow` is built.
+      for (const registration of routeRegistry.values()) {
+        if (registration.catchAll) {
+          continue;
+        }
+
+        const getHandler = registration.methods.get('GET');
+        if (getHandler && !registration.methods.has('HEAD')) {
+          registration.methods.set('HEAD', async (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => {
+            const response = await getHandler(req, server);
+
+            // Same status, same headers, no body — the definition of HEAD. Running the GET
+            // handler means the middleware chain, the guards and the interceptors all ran, so
+            // the headers are the ones a GET would really have carried.
+            return new Response(null, { status: response.status, headers: response.headers });
+          });
+        }
+      }
+
+      // What each URL SHAPE declares, collapsing templates that differ only by parameter NAME.
+      const routeShapes = new Map<string, RouteShape>();
+      for (const [pathKey, registration] of routeRegistry) {
+        const shapeKey = normalisePathShape(pathKey);
+        let shape = routeShapes.get(shapeKey);
+        if (!shape) {
+          shape = {
+            declared: new Set(), hasCatchAll: false, fillerPathKey: pathKey, pathKeys: [],
+          };
+          routeShapes.set(shapeKey, shape);
+        }
+
+        shape.pathKeys.push(pathKey);
+        for (const verb of registration.methods.keys()) {
+          shape.declared.add(verb);
+        }
+        if (registration.catchAll) {
+          shape.hasCatchAll = true;
+        }
+      }
+
+      reportShadowedRouteTemplates(routeShapes, routeRegistry, this.logger);
+
       for (const [pathKey, registration] of routeRegistry) {
         const { methods, catchAll } = registration;
 
         if (!catchAll) {
-          // HEAD is derived from GET unless the controller declared its own. Bun does not derive
-          // it (measured on 1.3.14) and neither did route registration, so every load-balancer
-          // and uptime probe — which conventionally use HEAD — reported the service down.
-          const getHandler = methods.get('GET');
-          if (getHandler && !methods.has('HEAD')) {
-            methods.set('HEAD', async (req: OneBunRequest, server: ReturnType<typeof Bun.serve>) => {
-              const response = await getHandler(req, server);
-
-              // Same status, same headers, no body — the definition of HEAD. Running the GET
-              // handler means the middleware chain, the guards and the interceptors all ran, so
-              // the headers are the ones a GET would really have carried.
-              return new Response(null, { status: response.status, headers: response.headers });
-            });
-          }
-
           // A verb nobody declared on a path that DOES exist used to reach the fallback and
           // answer 404, which is the same thing an unknown path says: the developer went looking
           // for a route that was right there. Registering the remaining verbs here lets Bun do
-          // the matching — including params and wildcards — so `Allow` lists exactly what this
-          // pattern declares.
-          const allowHeader = [...methods.keys()].join(', ');
-          for (const method of METHOD_NOT_ALLOWED_VERBS) {
-            if (methods.has(method)) {
-              continue;
-            }
+          // the matching — including params and wildcards — so `Allow` lists what exists.
+          //
+          // PER SHAPE, and on exactly ONE of its templates. Filling every template independently
+          // is what made `@Get('/thing/:alpha')` answer 405 once `@Patch('/thing/:beta')` existed
+          // (onebun-FB-21): Bun tries matching patterns in turn and falls through only while the
+          // one it is looking at does not claim the verb, so a filler on the first pattern stops
+          // the search before it reaches the handler on the second. Measured — with the filler on
+          // a single template, every declared verb still reaches its own handler with its own
+          // `req.params` spelling, and the filler is reachable whichever template Bun tries first.
+          //
+          // A shape carrying an `@All()` gets no filler at all: that template is a bare function
+          // Bun routes every unclaimed verb to, so a 405 here would shadow a real catch-all.
+          const shape = routeShapes.get(normalisePathShape(pathKey));
+          const ownsFiller = shape !== undefined && !shape.hasCatchAll && shape.fillerPathKey === pathKey;
 
-            // OPTIONS stays unclaimed when `cors` is configured: the preflight short-circuit in
-            // the fallback owns it, and a 405 here would undo that fix.
-            if (method === 'OPTIONS' && corsPreflight !== undefined) {
-              continue;
-            }
+          if (ownsFiller) {
+            const allowHeader = [...shape.declared].join(', ');
+            for (const method of METHOD_NOT_ALLOWED_VERBS) {
+              if (shape.declared.has(method)) {
+                continue;
+              }
 
-            methods.set(method, async (req: OneBunRequest) => await runMiddlewareChain(
-              globalMiddleware,
-              req,
-              async () => methodNotAllowedResponse(allowHeader, app.options.httpEnvelope === true),
-            ));
+              // OPTIONS stays unclaimed when `cors` is configured: the preflight short-circuit in
+              // the fallback owns it, and a 405 here would undo that fix.
+              if (method === 'OPTIONS' && corsPreflight !== undefined) {
+                continue;
+              }
+
+              methods.set(method, async (req: OneBunRequest) => await runMiddlewareChain(
+                globalMiddleware,
+                req,
+                async () => methodNotAllowedResponse(allowHeader, app.options.httpEnvelope === true),
+              ));
+            }
           }
 
           bunRoutes[pathKey] = Object.fromEntries(methods);
