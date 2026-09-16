@@ -64,6 +64,7 @@ export default defineConfig({
             { text: 'Decorators', link: '/api/decorators' },
             { text: 'Controllers', link: '/api/controllers' },
             { text: 'Services', link: '/api/services' },
+            { text: 'Request Context', link: '/api/request-context' },
             { text: 'Validation', link: '/api/validation' },
             { text: 'Guards', link: '/api/guards' },
             { text: 'Interceptors', link: '/api/interceptors' },

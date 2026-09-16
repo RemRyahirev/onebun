@@ -250,7 +250,8 @@ Class-level pipeline decorators are inherited: a controller that extends a base 
 @UseGuards(AuthGuard)
 class ProtectedController extends BaseController {}
 
-// inherits AuthGuard — every route below requires a Bearer token
+// inherits AuthGuard — every route below requires an `Authorization: Bearer` header
+// (presence only; AuthGuard does not validate the token)
 @Controller('/admin')
 class AdminController extends ProtectedController {
   @Get('/stats')
@@ -264,6 +265,20 @@ Allowed` with an `Allow` header listing what it does declare, so a client that s
 route declares still answers 404. `HEAD` is answered from the matching `@Get` handler — same status,
 same headers, no body — unless the controller declares its own `@Head`, which wins. When `cors` is
 configured the `OPTIONS` verb is left to the CORS preflight rather than answering 405.
+
+A **parameter name is not part of the path**. `@Get('/thing/:alpha')` and `@Patch('/thing/:beta')`
+describe the same URLs, so both verbs work and `Allow` lists both — each handler still reads the
+name it declared, so the `@Patch` above reads `@Param('beta')`. The framework warns at startup when
+two templates differ only there, because the endpoint then has two names for one parameter and
+anything generated from the routes has to pick one.
+
+::: warning Upgrading from 0.7.0
+In 0.7.0 exactly this pair made the earlier verb answer **405**: the 405 filler claimed every
+undeclared verb on each template separately, so whichever template the router tried first answered
+for verbs the other one declared. A route that was declared, shipped and in daily use stopped
+existing, with no compile error and no log line. If you have templates that differ only by parameter
+name, they worked on 0.6.0, broke on 0.7.0, and work again now.
+:::
 
 **Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
 

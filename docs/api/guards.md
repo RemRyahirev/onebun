@@ -51,7 +51,7 @@ isQueueContext(ctx) // → getMessage(), getMetadata(), getPattern(), getHandler
 A guard that lands on a transport it cannot read must return `false`. Every built-in LEAF guard does exactly that, so `@UseGuards(AuthGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw. The four composites — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards`, `WsAnyGuard` — carry NO transport check of their own; they just delegate, so they deny off-transport only for as long as every child does. A hand-written child inside one will reach `getMetadata()` on an HTTP context and throw.
 
 **Built-in guards:**
-- HTTP: `AuthGuard` (checks `Authorization: Bearer <token>` presence), `RolesGuard` (comma-separated roles in `x-user-roles`; `new RolesGuard(['admin', 'user'])`)
+- HTTP: `AuthGuard` (checks `Authorization: Bearer <token>` presence), `RolesGuard` (`new RolesGuard(['admin', 'user'])`; roles come from the `rolesExtractor` argument, and with none from the comma-separated `x-user-roles` request header — a value the CALLER sends, so the default authorizes nothing on its own)
 - WebSocket: `WsAuthGuard`, `WsPermissionGuard`, `WsRoomGuard`, `WsAnyPermissionGuard`, `WsServiceGuard`
 - Queue: `MessageAuthGuard`, `MessageServiceGuard`, `MessageHeaderGuard`, `MessageTraceGuard`
 
@@ -195,7 +195,8 @@ class ResourceController extends BaseController {
   @UseGuards(AuthGuard, new RolesGuard(['admin']))
   @Delete('/:id')
   async delete(@Param('id') id: string) {
-    // only accessible with Bearer token AND admin role
+    // reached only when a Bearer header is present AND the extracted roles include 'admin'
+    // — see the RolesGuard warning below for what "extracted" must mean
   }
 }
 ```
@@ -239,9 +240,9 @@ class AdminController extends BaseController {
   @Get('/stats')
   getStats() { /* needs Bearer token only */ }
 
-  @UseGuards(new RolesGuard(['admin'])) // additionally needs 'admin' role
+  @UseGuards(new RolesGuard(['admin'])) // additionally checks for the 'admin' role
   @Delete('/user/:id')
-  deleteUser(@Param('id') id: string) { /* needs Bearer + admin role */ }
+  deleteUser(@Param('id') id: string) { /* Bearer header + extracted roles include 'admin' */ }
 }
 ```
 
@@ -373,7 +374,15 @@ It does **not** validate or decode the token. Combine with a custom guard or mid
 
 ### RolesGuard
 
-Reads a comma-separated list of roles from the `x-user-roles` request header and verifies that **all** required roles are present (AND logic).
+Verifies that **all** required roles are present (AND logic). The roles come from the `rolesExtractor` passed as the second constructor argument; with no extractor, from a comma-separated `x-user-roles` request header.
+
+::: danger The default trusts a header the caller controls
+Pass a `rolesExtractor` that reads a **verified** identity — the claims of a token your own code decoded — as in the example below. It is the second constructor argument, and it is the supported way to use this guard.
+
+Without one, `RolesGuard` falls back to the `x-user-roles` request header. That header arrives from the caller and nothing verifies it, so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` satisfies `AuthGuard` and `RolesGuard` together. On the default extractor the guard reports what the caller claims to be, not what the caller is.
+
+If an already-deployed application depends on the header, the stop-gap is a middleware that **overwrites** `x-user-roles` on every request — `headers.set(...)`, never "set it if absent", because an absent-only write leaves a forged value in place. Bun's incoming `Headers` are mutable, so this does work. It is remediation and not the supported answer: the trust decision stays in a channel the client can write, guarded only by an ordering convention nothing enforces. Attach the middleware to one controller, forget it on another, and the bypass is back with no type error.
+:::
 
 <!-- typecheck: skip -->
 ```typescript

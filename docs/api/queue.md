@@ -761,6 +761,12 @@ async handleApi(message: Message) {}
 async handleTraced(message: Message) {}
 ```
 
+::: danger These guards trust what the publisher sent
+`MessageAuthGuard` passes any message whose `metadata.authorization` is non-empty, and `MessageServiceGuard` compares `metadata.serviceId` against its allow-list. Both fields are written by the publisher and travel with the message. Neither the broker nor the framework authenticates them, so anything able to publish to the subject can set them to whatever it likes — the queue-side twin of the `x-user-roles` hazard described under [RolesGuard](/api/guards#rolesguard).
+
+They earn their keep as a filter — "this consumer only handles messages that claim to come from `payment-service`" — and as a defence-in-depth check behind a broker that already authenticates publishers per subject. They are not an authorization decision on their own. If the sender's identity has to be trusted, sign the payload and verify the signature in a guard of your own.
+:::
+
 `MessageTraceGuard` passes a message that carries `metadata.traceId`, which `publish()` fills in
 whenever the publisher was inside a trace. It therefore refuses exactly the messages sent from
 outside one — a lifecycle hook, or an application with tracing off — and a refusal is nacked and

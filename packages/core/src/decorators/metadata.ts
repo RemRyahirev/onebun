@@ -97,62 +97,13 @@ export function getMetadata(
 }
 
 /**
- * Get constructor parameter types using TypeScript's emitDecoratorMetadata
- * This works with our custom metadata system and doesn't require reflect-metadata
- *
- * @deprecated Use getConstructorParamTypes instead
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function _getLegacyConstructorParamTypes(target: Function): Function[] | undefined {
-  // Try to get design:paramtypes metadata that TypeScript emits
-  // This should work because we have emitDecoratorMetadata: true in tsconfig
-  const types = getMetadata('design:paramtypes', target);
-
-  if (!types || !Array.isArray(types)) {
-    return undefined;
-  }
-
-  // eslint-disable-next-line no-console
-  console.log(
-    `Raw design:paramtypes for ${target.name}:`,
-    types.map((t) => t?.name || 'undefined'),
-  );
-
-  // Filter out basic types and focus on service types
-  const serviceTypes = types.filter((type: any, _index: number) => {
-    // Skip undefined, Object, and basic types
-    if (!type || type === Object || type === String || type === Number || type === Boolean) {
-      // Debug: Skipping basic type
-      // console.log(`Skipping basic type at index ${index}:`, type?.name || 'undefined');
-
-      return false;
-    }
-
-    // Skip logger and config types (they have specific patterns)
-    const typeName = type.name;
-    if (
-      typeName &&
-      (typeName.toLowerCase().includes('logger') || typeName.toLowerCase().includes('config'))
-    ) {
-      // Debug: Skipping system type
-      // console.log(`Skipping system type at index ${index}:`, typeName);
-
-      return false;
-    }
-
-    // Debug: Keeping service type
-    // console.log(`Keeping service type at index ${index}:`, typeName);
-
-    return true;
-  });
-
-  return serviceTypes.length > 0 ? serviceTypes : undefined;
-}
-
-/**
  * Set constructor parameter types (used by TypeScript when emitDecoratorMetadata is enabled)
+ *
+ * Accepts holes: a parameter whose type could not be named is `undefined` in its own slot,
+ * never absent. The array is read by INDEX — `@Optional()` and `@Inject()` are keyed by the
+ * declared parameter position — so shortening it silently rebinds every later decorator.
  */
-export function setConstructorParamTypes(target: Function, types: Function[]): void {
+export function setConstructorParamTypes(target: Function, types: (Function | undefined)[]): void {
   defineMetadata('design:paramtypes', types, target);
 }
 
@@ -196,56 +147,75 @@ if (!(globalThis as any).Reflect || !(globalThis as any).Reflect.metadata) {
 }
 
 /**
- * Enhanced getConstructorParamTypes with Reflect polyfill support
+ * The constructor types that name nothing the container could ever hand over.
+ *
+ * `Object` is the interesting one and it covers far more than `{}`: Bun's `emitDecoratorMetadata`
+ * emits every type reference as `typeof X === "undefined" ? Object : X`, so an interface, a type
+ * alias, `any`, `unknown` and a reference broken by a circular import ALL arrive here as `Object`.
+ * They are indistinguishable from the array alone, which is why nothing built on this list may
+ * claim to know WHY a parameter could not be resolved.
+ *
+ * The list is deliberately not wider. `Array`, `Function`, `Symbol`, `BigInt`, `Date`, `Map` and
+ * `Set` are absent on purpose: each of them reaches the resolver, fails its `instanceof` check
+ * and raises a LOUD `DependencyResolutionError` at startup. Adding them here would convert those
+ * failures into silent `undefined` injections — the exact direction of the defect this file was
+ * changed to fix.
  */
-export function getConstructorParamTypes(target: Function): Function[] | undefined {
-  // First try the global Reflect (now with our polyfill)
-  let types: Function[] | undefined;
+const NON_INJECTABLE_PARAM_TYPES: readonly unknown[] = [Object, String, Number, Boolean];
 
+/**
+ * Whether a `design:paramtypes` entry names something the container can resolve.
+ *
+ * Deliberately NOT exported through `decorators/index.ts`: that barrel re-exports three named
+ * metadata helpers rather than the whole module, so this stays internal while `module.ts` can
+ * still import it from the file directly.
+ */
+export function isInjectableParamType(type: Function | undefined): type is Function {
+  return type !== undefined && !NON_INJECTABLE_PARAM_TYPES.includes(type);
+}
+
+/**
+ * `design:paramtypes` for a constructor, POSITIONALLY INTACT, or `undefined` when none was
+ * emitted.
+ *
+ * Entry `i` describes parameter `i`, and an entry that names nothing usable is `undefined` in
+ * its own slot. That is the whole contract, and it used to be violated: this function `.filter()`ed
+ * the array, which COLLAPSES it. An interface-typed parameter — `Object` at runtime — was not
+ * reported as unresolvable, it was DELETED, and every later parameter slid one slot left. The
+ * service then constructed successfully holding the wrong object in several fields, with nothing
+ * logged and nothing thrown (reported as onebun-FB-18; the line, as onebun-FB-19).
+ *
+ * The damage went past the arguments. `@Optional()` and `@Inject()` are keyed by the DECLARED
+ * parameter index, so against a shortened array both landed on the wrong parameter. A
+ * `@Inject(TOKEN)` sitting after a dropped entry silently fell through to plain tag resolution.
+ *
+ * Nothing is filtered here now. Deciding that `Object` cannot be resolved is the resolver's job —
+ * see {@link isInjectableParamType} — and it can only be done per index, which is precisely what
+ * a filter destroys.
+ */
+export function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
+  let types: unknown;
+
+  // The global Reflect first (our polyfill, or a real reflect-metadata if the host has one),
+  // then our own store. Either may hold the array depending on how the class was decorated.
   try {
     types = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
-    if (types && Array.isArray(types) && types.length > 0) {
-      // Filter out basic types and framework-specific types
-      // Only filter exact framework type names, not user services containing these words
-      const frameworkTypes = new Set(['SyncLogger', 'Logger', 'Object', 'String', 'Number', 'Boolean']);
-      const serviceTypes = types.filter((type: any) => {
-        if (!type || type === Object || type === String || type === Number || type === Boolean) {
-          return false;
-        }
-        const typeName = type.name;
-        if (typeName && frameworkTypes.has(typeName)) {
-          return false;
-        }
-
-        return true;
-      });
-
-      return serviceTypes.length > 0 ? serviceTypes : undefined;
-    }
   } catch {
     // Silent fallback to custom metadata
   }
 
-  // Fallback to our custom metadata
-  types = getMetadata('design:paramtypes', target);
-  if (types && Array.isArray(types)) {
-    const frameworkTypes = new Set(['SyncLogger', 'Logger', 'Object', 'String', 'Number', 'Boolean']);
-    const serviceTypes = types.filter((type: any) => {
-      if (!type || type === Object || type === String || type === Number || type === Boolean) {
-        return false;
-      }
-      const typeName = type.name;
-      if (typeName && frameworkTypes.has(typeName)) {
-        return false;
-      }
-
-      return true;
-    });
-
-    return serviceTypes.length > 0 ? serviceTypes : undefined;
+  if (!Array.isArray(types) || types.length === 0) {
+    types = getMetadata('design:paramtypes', target);
   }
 
-  return undefined;
+  if (!Array.isArray(types) || types.length === 0) {
+    return undefined;
+  }
+
+  // Normalised, not filtered: a hole keeps its position. Anything that is not a constructor —
+  // `null`, `undefined`, or junk from a hand-written `setConstructorParamTypes` — becomes one
+  // `undefined` rather than being dropped or reaching `instanceof` and throwing a raw TypeError.
+  return types.map((type) => (typeof type === 'function' ? type as Function : undefined));
 }
 
 /**

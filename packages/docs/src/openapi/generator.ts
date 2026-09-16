@@ -114,6 +114,10 @@ function routeToOperation(
     const hasFileParams = fileParams.length > 0;
 
     for (const param of route.params) {
+      // An ALLOW-LIST, not a deny-list, and deliberately so: a parameter type this generator has
+      // never heard of is omitted from the document rather than guessed at. That is what keeps
+      // `custom` — a value produced by a user extractor from the server's own request — out of
+      // the OpenAPI parameters, where it would describe something no caller can send.
       if (param.type === 'path' || param.type === 'query' || param.type === 'header') {
         const parameter: Parameter = {
           name: param.name || '',

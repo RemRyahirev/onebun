@@ -30,6 +30,7 @@ import { awaitBounded } from '../await-bounded';
 import { getControllerGuards, getControllerInterceptors } from '../decorators/decorators';
 import { getGuardBinding } from '../http-guards/guard-binding';
 import { composeInterceptors } from '../interceptors/interceptors';
+import { inheritRequestContext, requestContextStore } from '../request-context';
 import { inEntrySpan, inRootTraceScope } from '../trace-scope';
 
 import { BaseWebSocketGateway } from './ws-base-gateway';
@@ -726,17 +727,25 @@ export class WsHandler {
    * Run the owning gateway's `@OnConnect` handlers and send whatever they answer.
    */
   private async runConnectHandlers(owner: GatewayInstance, ws: ServerWebSocket<WsClientData>): Promise<void> {
-    const connectHandlers = owner.handlers.get(HandlerType.CONNECT) || [];
-    for (const handler of connectHandlers) {
-      try {
-        const result = await this.executeHandler(owner, handler, ws, undefined, {});
-        if (result && isWsHandlerResponse(result)) {
-          ws.send(this.encodeResponse(ws.data.protocol, result));
+    // A request scope, because the two paths that reach here disagree about having one. A plain
+    // WebSocket runs this from the `open` callback, already inside `inEntrySpan`; a Socket.IO
+    // client runs it from `completeSocketioConnect`, which is reached from the MESSAGE callback
+    // and branches off before the per-message `inEntrySpan` — so an `@OnConnect` handler had a
+    // context on one protocol and not the other. Entering here makes it unconditional, and the
+    // copy keeps every read on the `open` path answering exactly as it did.
+    return await requestContextStore.run(inheritRequestContext(), async (): Promise<void> => {
+      const connectHandlers = owner.handlers.get(HandlerType.CONNECT) || [];
+      for (const handler of connectHandlers) {
+        try {
+          const result = await this.executeHandler(owner, handler, ws, undefined, {});
+          if (result && isWsHandlerResponse(result)) {
+            ws.send(this.encodeResponse(ws.data.protocol, result));
+          }
+        } catch (error) {
+          this.logger.error(`Error in OnConnect handler: ${error}`);
         }
-      } catch (error) {
-        this.logger.error(`Error in OnConnect handler: ${error}`);
       }
-    }
+    });
   }
 
   /**

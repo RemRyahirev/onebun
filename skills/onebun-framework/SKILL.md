@@ -357,6 +357,41 @@ Key rules:
   before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the
   adapter) is only usable from `onApplicationInit` onwards
 
+## Request Context
+
+Services are singletons — there is **no** REQUEST or TRANSIENT scope. To carry "the current user",
+"the current tenant" or "this request's transaction", use the per-unit-of-work context. It is an
+`AsyncLocalStorage` the framework opens at every entry point: HTTP request, queue delivery,
+scheduler tick, WebSocket frame.
+
+```typescript
+import { getRequestContext, updateRequestContext } from '@onebun/core';
+
+declare module '@onebun/core' {
+  interface RequestContext {
+    user?: AuthenticatedUser;   // MUST be optional
+  }
+}
+
+updateRequestContext({ user });   // in a middleware or guard
+getRequestContext()?.user;        // anywhere below, at any depth
+```
+
+Rules:
+- **Augmented members must be optional.** `@onebun/core` ships sources, so a required member makes
+  the framework's own `createRequestContext` an error inside `node_modules`.
+- `updateRequestContext` MERGES into the stored object — that is why a write from a middleware
+  reaches the handler. It returns `false` outside a scope and never throws; `getRequestContext()`
+  returns `undefined` there. Several framework paths deliberately have no scope (CORS preflight,
+  `/metrics`, `/docs`, 404s, static assets, lifecycle hooks).
+- `traceContext` is the framework's and cannot be written.
+- Background work started through an entry span gets a COPY: it reads what scheduled it, and its
+  writes do not travel back.
+- Do **not** hang per-request state on a service field or on `this` in a pipeline element —
+  guards, middleware and interceptors are reused, and two overlapping requests clobber it.
+
+See `docs/api/request-context.md`.
+
 ## Controllers
 
 See `references/controllers.md` for the full decorator reference.
@@ -502,6 +537,9 @@ together. To say something specific to a client, throw an `HttpException` with y
 See `references/guards-filters-security.md` for full details on:
 
 - **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `AuthGuard`/`RolesGuard`
+  — both are primitives, not an authorization scheme: `AuthGuard` only checks that a Bearer header
+  is present, and `RolesGuard` with no `rolesExtractor` trusts the caller-supplied `x-user-roles`
+  header. Always pass a `rolesExtractor` reading a verified identity
 - **Exception Filters**: `ExceptionFilter`, `@UseFilters()`, `createExceptionFilter()`, `defaultExceptionFilter`
 - **Security Middleware**: `cors`, `rateLimit`, `security` options on `ApplicationOptions`
 

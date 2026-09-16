@@ -1,6 +1,124 @@
 # Changelog
 
-## [0.7.1]
+## 0.8.0 — 2026-09-16
+
+### Package Versions
+
+Every package moves together, for the same reason as the last three releases. `workspace:^` is
+rewritten to `^<version>` at publish time and a caret on a 0.x version pins the minor, so once one
+package crosses a minor, everything that depends on it must cross with it — otherwise an install
+resolves two copies of the same package. Independent per-package versions become viable again at
+1.0.
+
+`@onebun/nats` rejoins the line it left in 0.7.1: a patch is released per package, a minor is not,
+so its independent 0.7.1 is superseded by 0.8.0 along with everything else.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.7.0 | 0.8.0 |
+| `@onebun/drizzle` | 0.7.0 | 0.8.0 |
+| `@onebun/trace` | 0.7.0 | 0.8.0 |
+| `@onebun/requests` | 0.7.0 | 0.8.0 |
+| `@onebun/nats` | 0.7.1 | 0.8.0 |
+| `@onebun/logger` | 0.7.0 | 0.8.0 |
+| `@onebun/cache` | 0.7.0 | 0.8.0 |
+| `@onebun/docs` | 0.7.0 | 0.8.0 |
+| `@onebun/metrics` | 0.7.0 | 0.8.0 |
+| `@onebun/envs` | 0.7.0 | 0.8.0 |
+| `@onebun/create` | 0.7.0 | 0.8.0 |
+
+### Read This First
+
+Three entries below are breaking. Each carries its own **Migration** note where it appears; this is
+the index, grouped by what kind of surprise it is.
+
+**It may stop the application booting — and that is the fix.** A constructor parameter the container
+cannot resolve is no longer deleted from the argument list, so the dependencies after it stop
+sliding one slot to the left into the wrong fields. Two consequences to check before deploying.
+A parameter typed as an INTERFACE (or `any`, `unknown`, a type alias) now receives `undefined`
+rather than the next parameter's value — if something was accidentally working on the shifted
+object, it now sees `undefined`, and the startup log names the parameter index. And a service class
+of your own literally named `Logger` or `SyncLogger` used to be dropped by a check on the type's
+NAME: it is a real parameter now, so if it is not a registered `@Service()` the application will
+REFUSE TO START. Framework types are unaffected — those two are type aliases and never reached the
+check.
+
+**It changes what a credential means.** `@onebun/drizzle` stops assembling a PostgreSQL URL out of
+the discrete `host`/`port`/`user`/`password`/`database` fields and hands them to the driver as
+fields, because the old interpolation let a password choose the server. If you worked around that by
+pre-percent-encoding your password, stop: `p%40ss` used to authenticate as `p@ss` and is now sent
+literally. The `connectionString` shape is untouched and keeps URL semantics.
+
+**It is a compile error, and only if you reach for the metadata directly.**
+`getConstructorParamTypes` returns `(Function | undefined)[] | undefined`, so an entry can be a
+hole; `setConstructorParamTypes` and `registerDependencies` widened to match. Applications that
+never import these are unaffected.
+
+**Not breaking, but worth knowing before you upgrade.** The per-request context now exists on every
+transport rather than on HTTP alone, which costs one AsyncLocalStorage frame on the untraced entry
+path — `inEntrySpan`'s documented "costs the same" guarantee for its no-owner branch no longer
+holds. Reads are unchanged: the new scope inherits a copy of the enclosing one, so nothing that
+resolved a trace id before resolves a different one now. Separately, `ParamType` gained a `CUSTOM`
+member, which a downstream exhaustive `switch` over it will notice.
+
+### Added
+
+- `RequestContext` is now a per-unit-of-work store an application can extend, and it exists on every transport rather than on HTTP alone. Extend it by declaration merging (`declare module '@onebun/core' { interface RequestContext { user?: AuthenticatedUser } }` — augmented members must be optional), then write it with `updateRequestContext({ user })` from a middleware or guard and read it with `getRequestContext()?.user` at any depth, typed and without a cast. `updateRequestContext` merges into the stored object, which is what makes a write from a middleware visible to the handler; it returns `false` outside a scope and never throws, because several framework paths deliberately have none (CORS preflight, /metrics, /docs, 404s, static assets, lifecycle hooks). Queue deliveries, scheduler ticks and WebSocket frames now enter the scope even with tracing off — previously only a traced handler had one — and `@OnConnect` gets one on both the plain-WebSocket and the Socket.IO path. Background work receives a COPY of the context that scheduled it: it reads what that work had, and its own writes no longer reach back into it. New page: docs/api/request-context.md. `traceContext` stays the framework's and cannot be written. (WI-294)
+- `createHttpParamDecorator(extractor)` builds a custom parameter decorator from a function of the execution context — `const CurrentUser = createHttpParamDecorator(() => getRequestContext()?.user)`, used as `@CurrentUser()`. The extractor runs once per decorated parameter per request and shares one execution context per request. Per-use arguments need no extra machinery: close over them. A custom parameter carries no schema, is never required, does not appear in the OpenAPI document and is not an argument of the generated service client — an extractor is a view over the server's own request, not a caller-supplied input. HTTP only, and named for it: WebSocket handlers read a separate parameter metadata key and queue handlers have no parameter machinery, so such a decorator there is silently never read. (WI-294)
+
+### Changed
+
+- `getConstructorParamTypes` now returns `(Function | undefined)[] | undefined` instead of `Function[] | undefined`: entry `i` describes parameter `i`, and a parameter that names nothing injectable is `undefined` in its own slot rather than absent. `setConstructorParamTypes` and `registerDependencies` widened to match, so code calling `types[0].name` needs a null check. It also returns an array whose entries are all non-injectable (an all-`Object` constructor) rather than `undefined` — `undefined` now means only "no metadata was emitted at all". (BREAKING, FB-12)
+  - Migration: Only affects code that calls these metadata helpers directly — the framework's own DI needs no change, and an application that never imports them is unaffected. `getConstructorParamTypes(target)` returns `(Function | undefined)[] | undefined`, so an entry can now be `undefined`: replace `types[0].name` with `types[0]?.name`, and guard any `instanceof` against an entry before using it. `setConstructorParamTypes` and `registerDependencies` accept `(Function | undefined)[]`, which is widening — existing calls still compile — but pass `undefined` for a parameter you are not naming rather than leaving it out, or every later entry describes the wrong parameter. One behavioural difference to check for: `getConstructorParamTypes` used to return `undefined` when every reflected entry was non-injectable (a constructor whose parameters are all interfaces), and now returns the array. `undefined` means only "no metadata was emitted at all", so a `if (!types) return` guard that relied on the old spelling now falls through to a loop over entries that are all `undefined`.
+- `@onebun/drizzle` no longer assembles a PostgreSQL URL from the discrete `host`/`port`/`user`/`password`/`database` fields — they are handed to the driver as fields. The old form interpolated them into a URL with nothing percent-encoded, so a password could choose the server: a password of `pw@evil.example.com/pwned?x=1#` resolved to hostname `evil.example.com` and database `pwned` (measured). A `/` in the password threw a bare `Invalid URL` and `p@ss/w%x:y` threw `URI error`. A discrete password is now whatever bytes you wrote, with nothing to escape. The `connectionString` shape is unchanged and keeps URL semantics. (BREAKING, FB-13)
+  - Migration: Only affects applications using the five DISCRETE connection fields; `connectionString` users are unaffected. If you worked around the old behaviour by pre-percent-encoding your password (`password: 'p%40ss'` to send `p@ss`), stop — the literal is now sent as written. Put the real password in the field. The symptom if you miss it is an authentication failure, not a wrong host.
+- `inEntrySpan` now enters the request-context store on BOTH branches. Its JSDoc used to guarantee that with no `owner` it was "`inRootTraceScope` byte for byte, and costs the same"; that is no longer true — the no-owner branch now costs one additional AsyncLocalStorage frame, which is the price of the store existing on every transport instead of only on the traced ones. The context it enters with is a shallow COPY of the enclosing one, so every read that previously resolved from the enclosing store still answers identically; only writes are newly isolated. `ParamType` gained a `CUSTOM` member — code switching exhaustively over it needs a new arm. `ParamMetadata` gained an optional `extractor`, and `ParamExtractor` is exported from `@onebun/core`. (WI-294)
+
+### Fixed
+
+- Fixed silent dependency miswiring: a constructor parameter the container could not resolve was DROPPED from the argument list instead of being passed as `undefined` in its own slot, so every later parameter slid one position left. The object constructed successfully holding the wrong dependency in several fields, with nothing logged and nothing thrown — and because every field except the last stayed truthy, an `if (!this.x)` degradation guard took the working branch with the wrong object, surfacing far away as `x.someMethod is not a function`. The cause was a `.filter()` over the reflected `design:paramtypes`, which collapsed the array. Nothing is filtered now; an entry that names no injectable type is `undefined` in place, and the framework logs which parameter index it was — plus a warning when such a parameter is FOLLOWED by one that did resolve, which is the configuration that used to corrupt silently. `@Optional()` and `@Inject()` are keyed by the declared parameter index and now line up again; against the collapsed array they landed on the wrong parameter, and an `@Inject(TOKEN)` after a dropped parameter silently fell through to plain type resolution. All six consumers are covered — services, controllers, middleware, interceptors, exception filters and guards. (BREAKING, FB-12)
+  - Migration: Two ways this can change a running application. (1) A constructor parameter typed as an INTERFACE (or `any`/`unknown`/a type alias) now receives `undefined` rather than the value of the next parameter. If your code was accidentally working on the shifted value, it will now see `undefined` — type the parameter as the class, or annotate it `@Inject(ConcreteClass)`. The warning in the startup log names the parameter index. (2) A user service class literally named `Logger` or `SyncLogger` used to be dropped silently by a check on the type's NAME. It is now a real constructor parameter: if it is a registered `@Service()` the application newly receives an instance where it used to receive the next dependency, and if it is NOT registered the application will REFUSE TO START with a DependencyResolutionError. Rename the class or register it. Framework types are unaffected — `Logger` and `SyncLogger` are type aliases and never reached this check.
+- Fixed a route becoming unreachable when two templates differ only by the name of a path parameter. `@Get('/thing/:alpha')` beside `@Patch('/thing/:beta')` made the GET answer 405 while the PATCH worked — and 405 misdirects, because it says the path exists and the verb is wrong, which sends you to check the one thing that was right. Both verbs work again, each handler still reading the parameter name it declared, and the `Allow` header now lists the union of the verbs declared across every template of that shape instead of one template's. A verb no template declares still answers 405, and an `@All()` beside a differently-named template still catches everything. This was a regression introduced in 0.7.0 by the change that answers 405 instead of 404: the filler claimed every undeclared verb on each template separately, so whichever template the router tried first answered for verbs the other one declared. Applications with consistent parameter naming were never affected. The framework now also warns at startup when two templates differ only by parameter name — the routing works either way, but the endpoint has two names for one parameter, and anything generated from the routes has to pick one. (FB-14)
+- `pushSchema()` now works at all. It invoked `drizzle-kit push:sqlite` / `push:pg`, commands drizzle-kit removed — against the declared `drizzle-kit@^0.31.6` every call failed with `Unrecognized options for command 'push:pg': --config`, so the helper could not have worked for anyone on a supported version. It now invokes `push` for both dialects. Related: a failure inside these helpers is no longer replaced by an `ENOENT: unlink` from their own cleanup, so the error you see names the cause (a missing schema path, an unreachable database) instead of the temp file. Schema paths and the migrations output folder are resolved to absolute before reaching drizzle-kit, so the child process's working directory cannot change which files they name. (WI-377)
+
+### Security
+
+- Fixed a password leak in the connection target printed by `@onebun/drizzle` startup errors, its "database initialized" log line, and the shared Redis provider's conflict and connection errors. The redactor matched the password as `[^@/]*`, so a password containing `/` matched nothing and the full cleartext credential was printed; a password containing `@` was redacted only as far as the first one. The shared Redis provider had the same hole by a different route — it redacted with `new URL()`, which rejects exactly those URLs, and its `catch` printed the string as given. Both now use one `redactConnectionUrl`, exported from `@onebun/core`, which locates the authority by position and cuts the userinfo at its last `@`, so no character inside a password can end the match early. Scheme, user, host, port, path and query still survive, so an error still names which database refused. (FB-13)
+- Documented that `RolesGuard`'s default role source is a header the caller controls. With no `rolesExtractor`, the guard comma-splits the `x-user-roles` request header, which arrives from the client and which nothing verifies — so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` satisfies both built-in guards. The guards page now carries a danger admonition naming `rolesExtractor` as the supported answer, and the queue page carries the equivalent caution for `MessageAuthGuard` / `MessageServiceGuard`, which trust publisher-written message metadata the broker does not authenticate. No behaviour changed; every existing guard test stays green. A new test drives a route guarded by `RolesGuard` alone and asserts the bypass reaches the handler, so the hazard is pinned rather than described. (WI-375)
+- `pushSchema()` no longer writes the database connection string to disk. It used to interpolate the live URL — password included — into `./drizzle.config.temp.ts` in the process working directory, world-readable at 0644, removed only by a `finally` block that a `kill -9` never reaches; anything that snapshotted the directory in that window (a Docker build context, a CI artifact, a repository) captured the credential. The URL now travels to drizzle-kit through the child process's environment and the generated config reads it from there, so a file left behind by an abrupt death carries no secret. Both `pushSchema()` and `generateMigrations()` also write their config under a name unique to the call, at mode 0600 — the old fixed name meant two concurrent runs clobbered each other's config and each other's cleanup. Add `drizzle.config.temp.*` to your `.gitignore`. (WI-377)
+
+## 0.7.1 — 2026-09-15
+
+### Package Versions
+
+`@onebun/nats` moves and nothing else does. Minor releases move every package together —
+`workspace:^` is rewritten to `^<version>` at publish time and a caret on a 0.x version pins the
+minor, so a package crossing a minor drags its dependents across with it. A patch carries no such
+obligation and is released per package. `@onebun/nats` keeps its `^0.7.0` peer range on
+`@onebun/core`.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/nats` | 0.7.0 | 0.7.1 |
+
+Every other package stays at 0.7.0. This release also refreshes `bun.lock`, which had been recording
+every workspace at 0.6.0 since the 0.7.0 release.
+
+### Read This First
+
+Nothing here is breaking, and nothing outside `@onebun/nats` changes.
+
+All six entries come from two reports against one deployment: a multi-tenant NATS broker where the
+account is scoped to its own inbox space and does not own the streams it consumes.
+
+Two are the reason an application in that shape could not connect at all — `inboxPrefix` was
+silently dropped on the way to the driver, and unset connection options were forwarded as
+`undefined`, which made nats.js schedule every reconnect at `NaN` milliseconds. Two more give that
+shape a way through without waiting on this package: `driverOptions` passes any nats.js option
+straight to the driver, and `manage: false` keeps a stream resolvable while taking it out of the
+reconcile pass. The last two drop the assumption that an application declaring a JetStream adapter
+also consumes from it, so a publish-only unit declares no streams and needs no JetStream manager at
+boot.
 
 ### Added
 
@@ -9,7 +127,6 @@
 
 ### Changed
 
-- Package versions: `@onebun/nats` 0.7.0 -> 0.7.1, and nothing else moves. Minor releases move every package together — `workspace:^` is rewritten to `^<version>` at publish time and a caret on a 0.x version pins the minor, so a package crossing a minor drags its dependents across with it. Patches carry no such obligation and are released per package. Every other package stays at 0.7.0, and `@onebun/nats` keeps its `^0.7.0` peer range on `@onebun/core`. This release also refreshes `bun.lock`, which had been recording every workspace at 0.6.0 since the 0.7.0 release. (FB-10)
 - `@onebun/nats`: `JetStreamAdapterOptions.streams` is now optional and may be empty. The constructor used to refuse an empty list, which forced a publish-only unit to declare streams it does not own — and the reconcile pass then tried to create or update them. `publish()` never resolves a stream: it addresses a subject and lets the server route it, so a producer needs no declaration at all. `subscribe()` still does, because `consumers.add` takes a stream name, and on an adapter with no declarations it now refuses with a message that says exactly that instead of listing an empty candidate set. The removed check is replaced by one that fires on the real configuration error: options that name no `servers`. (FB-11)
 - `@onebun/nats`: the JetStream manager is now built on first use rather than during `connect()`. `jetstreamManager()` asks the server for account info over `$JS.API.INFO`, which an adapter that reconciles no stream and creates no consumer never needs again — so a publish-only unit no longer requires that privilege at boot. Nothing changes for an application that manages its own streams: the reconcile pass is the first caller, so the manager is still built during `connect()` there. (FB-11)
 

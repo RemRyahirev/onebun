@@ -24,6 +24,7 @@ export { Effect, Layer } from 'effect';
 // Types (excluding WebSocket types that are re-exported from ./websocket)
 export {
   HttpMethod,
+  type ParamExtractor,
   ParamType,
   type OneBunRequest,
   type OneBunResponse,
@@ -169,8 +170,21 @@ export * from './security';
 // Bootstrap Errors
 export * from './errors';
 
+// Printing a connection target without printing its credentials. Public because the guarantee
+// has to hold in more than one package: @onebun/drizzle and the shared Redis provider both name
+// their target in a startup error, and two hand-rolled redactors is how one of them fails open.
+export { redactConnectionUrl } from './redact-connection-url';
+
 // Request Context (AsyncLocalStorage)
-export { getCurrentTraceContext, requestContextStore, type RequestContext } from './request-context';
+export {
+  createRequestContext,
+  getCurrentTraceContext,
+  getRequestContext,
+  type RequestContext,
+  type RequestContextPatch,
+  requestContextStore,
+  updateRequestContext,
+} from './request-context';
 export { inEntrySpan, inRootTraceScope, runWithAppTracer } from './trace-scope';
 export type { EntrySpanOptions, EntrySpanSwitches } from './trace-scope';
 

@@ -263,7 +263,8 @@ export class QueueService {
     // Every delivery gets a span, and this is the one place that can give it to every delivery:
     // all four adapters reach a handler through here, and so does an imperative `subscribe()`
     // call that never went through `registerService`. Without a span the handler's log lines
-    // carry no trace id at all — `requestContextStore` is entered only for HTTP.
+    // carry no trace id at all — the request store is entered on every transport now, but an
+    // untraced delivery enters it with a `null` trace context, because there is no span to name.
     //
     // `this.ownerTracer` is read per message rather than captured, so naming the owner after a
     // subscription is registered still traces it.

@@ -605,6 +605,42 @@ async handleRaw(@Req() req: OneBunRequest) {
 @Res()
 ```
 
+### createHttpParamDecorator()
+
+Build your own parameter decorator from a function of the execution context.
+
+<!-- typecheck: skip -->
+```typescript
+import { createHttpParamDecorator, getRequestContext } from '@onebun/core';
+
+const CurrentUser = createHttpParamDecorator(() => getRequestContext()?.user);
+
+@Get('/me')
+me(@CurrentUser() user: AuthenticatedUser | undefined) {
+  return user;
+}
+```
+
+The extractor — a `ParamExtractor`, which is `(context: HttpExecutionContext) => unknown` — receives the same object a guard gets and returns the argument. It runs once per decorated parameter per request, and one context is built per request however many custom parameters a handler declares.
+
+**The case it exists for is per-request state a middleware or guard produced**: the authenticated user, the tenant, a decoded token. Those live in the [request context](/api/request-context), which is the only place `@Req()` cannot reach. Anything an extractor could pull straight off the request is one property access away from `@Req()`, so a decorator that only does that buys an import rather than an abstraction.
+
+Per-use arguments need no extra machinery — close over them:
+
+<!-- typecheck: skip -->
+```typescript
+const Claim = (name: string) => createHttpParamDecorator((ctx) => readClaim(ctx, name))();
+
+@Get('/tenant')
+tenant(@Claim('tid') tid: string) { return tid; }
+```
+
+::: warning HTTP only
+`@UseGuards` is the same decorator on all three transports; parameter decorators are not. A WebSocket handler reads its own metadata key with its own parameter types, and a queue handler has no parameter machinery at all — so a decorator built here on an `@OnMessage` or `@Subscribe` method is not an error, it is simply never read, and the parameter arrives `undefined`. The name says `Http` for that reason.
+:::
+
+A custom parameter carries no schema and is never required: it is not validated, it does not appear in the OpenAPI document, and the generated service client does not take it as an argument. Validate inside the extractor if you need to. The extractor must be a pure view over data the request already carries — it runs on the request path and nothing unwinds what it allocates.
+
 ## File Upload Decorators
 
 Decorators for handling file uploads via `multipart/form-data` or JSON with base64-encoded data. The framework auto-detects the content type and provides a unified `OneBunFile` object.
@@ -833,10 +869,16 @@ Explicit dependency injection for edge cases. **In most cases, automatic DI work
 ```
 
 **When to use @Inject:**
-- Interface or abstract class injection
+- A parameter typed as an **interface** — pass the CONCRETE class, never the interface itself. An interface has no runtime value, so `@Inject(SomeInterface)` does not compile, and an interface-typed parameter with no `@Inject` receives `undefined`
 - Token-based injection (custom Context.Tag)
 - Overriding automatic resolution
 - Picking WHICH [named registration](/api/drizzle#multiple-databases) a parameter gets, in a module that selected two of them
+
+An **abstract-class**-typed parameter needs no `@Inject`: DI resolves it to a registered subclass on its own, and `@Inject(AbstractClass)` is a compile error — see [Architecture](/architecture) for the exact diagnostics.
+
+::: tip An unresolvable parameter is undefined, in its own slot
+A parameter the container cannot name — an interface, `any`, `unknown`, a type alias — receives `undefined` and the framework logs which parameter index it was. It does not shift the parameters after it; those keep their own values. Before 0.7.x it did shift them, silently, which is why an interface-typed parameter with resolvable parameters after it was the worst shape this could take.
+:::
 
 **Example:**
 
@@ -849,9 +891,10 @@ export class UserController extends BaseController {
     private cacheService: CacheService,
 
     // @Inject needed only for edge cases:
-    // - When injecting by interface instead of concrete class
+    // - When the parameter is typed as an INTERFACE: name the implementation here, because
+    //   the interface itself has no runtime value for the container to look up
     // - When using custom Effect.js Context.Tag
-    @Inject(SomeAbstractService) private abstractService: SomeAbstractService,
+    @Inject(EmailNotifier) private notifier: Notifier,
   ) {
     super();
   }

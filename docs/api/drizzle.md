@@ -134,8 +134,21 @@ options: { host: 'localhost', port: 5432, user: 'postgres', password: 'secret', 
 
 Prefer the URL when the value comes from configuration. A `connectionString` is passed to
 the driver untouched, so query parameters it carries — `?sslmode=require`,
-`?application_name=…` — reach the server. Assembling the URL from discrete fields cannot
-express them.
+`?application_name=…` — reach the server. The discrete fields carry no query string, so they
+cannot express those at all.
+
+Neither shape is ever turned into the other. The discrete fields are handed to the driver as
+fields, so a password is whatever byte sequence you wrote — `@`, `/`, `%` and `:` included, with
+nothing to escape and nothing that a URL parser can reinterpret. In a `connectionString` the
+usual URL rules still apply: it is a URL, so `%40` in it means `@`.
+
+::: warning A pre-encoded discrete password now means itself
+The discrete fields used to be interpolated into a URL, which the driver then parsed — so
+`password: 'p%40ss'` authenticated as `p@ss`, and pre-encoding was a working workaround for
+passwords carrying URL-special characters. It is no longer needed and no longer correct: the
+literal `p%40ss` is now sent as written. If you pre-encoded, write the real password instead.
+Only the discrete shape changed; `connectionString` is a URL and keeps URL semantics.
+:::
 
 Options arriving from an untyped source (a JSON config, a cast) are validated at
 `initialize()` and rejected with an error naming the problem: which discrete fields
@@ -1334,8 +1347,10 @@ info: SQLite migrations applied { migrationsFolder: './drizzle', newMigrations: 
 
 <llm-only>
 **Technical details for AI agents:**
-- `generateMigrations()` creates a temporary `drizzle.config.temp.ts` file and runs `bunx drizzle-kit generate`
-- `pushSchema()` runs `bunx drizzle-kit push:sqlite` or `push:pg` depending on dialect
+- `generateMigrations()` and `pushSchema()` both write a temporary drizzle-kit config into the WORKING DIRECTORY, named `drizzle.config.temp.<pid>-<uuid>.ts`, mode 0600, removed in a `finally`. The name is unique per call so two concurrent runs cannot delete each other's config. It stays in the working directory deliberately: drizzle-kit resolves `drizzle-orm` relative to the CONFIG FILE, so a config under the OS temp directory fails with `please install required packages: 'drizzle-orm'` even in a project that has it. Add `drizzle.config.temp.*` to `.gitignore`
+- `pushSchema()` never writes the connection string into that config. The URL goes to the child process through `ONEBUN_DRIZZLE_PUSH_URL` and the generated config reads `process.env.ONEBUN_DRIZZLE_PUSH_URL`, so a config left behind by a `kill -9` carries no credential. Do not add the URL back into the file
+- `pushSchema()` runs `bunx drizzle-kit push` for both dialects. It used to run `push:sqlite` / `push:pg`, which drizzle-kit removed — against the declared `drizzle-kit@^0.31.6` those answered `Unrecognized options for command 'push:pg': --config` and the helper could not work at all
+- Schema paths (and `out`) are resolved to absolute before being written into the config, so the child process's working directory cannot change which files it names
 - `runMigrations()` uses drizzle-orm's `migrate()` function from `drizzle-orm/bun-sqlite/migrator` or `drizzle-orm/bun-sql/migrator`
 - Migration files are stored in the format: `{migrationsFolder}/NNNN_migration_name.sql` with `meta/_journal.json` for tracking
 - The journal table schema: `id INTEGER PRIMARY KEY, hash TEXT, created_at INTEGER`

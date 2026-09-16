@@ -363,6 +363,20 @@ class GuardResponseController extends BaseController {
   }
 }
 
+// Deliberately guarded by RolesGuard ALONE. Every other RolesGuard fixture here pairs it with
+// AuthGuard, so a request forging only `x-user-roles` is refused by the Bearer check and the
+// hazard the page documents stays invisible. This route has nothing else in front of it.
+@Controller('/roles-only')
+class RolesOnlyController extends BaseController {
+  @UseGuards(new RolesGuard(['admin']))
+  @Get('/admin-area')
+  adminArea() {
+    handlerHits.push('roles-only:adminArea');
+
+    return { reached: true };
+  }
+}
+
 @Module({
   controllers: [
     QuickReferenceController,
@@ -373,6 +387,7 @@ class GuardResponseController extends BaseController {
     ResourceController,
     AdminCombinedController,
     GuardResponseController,
+    RolesOnlyController,
   ],
 })
 class GuardsDocsModule {}
@@ -781,6 +796,34 @@ describe('docs/api/guards.md', () => {
       expect(guard.canActivate(makeHttpContext([['x-user-roles', 'admin, moderator, viewer']]))).toBe(true);
       expect(guard.canActivate(makeHttpContext([['x-user-roles', 'admin']]))).toBe(false);
       expect(guard.canActivate(makeHttpContext([['x-user-roles', '']]))).toBe(false);
+    });
+
+    /**
+     * Pins the hazard the "::: danger The default trusts a header the caller controls" box
+     * describes. It asserts a BYPASS, not a protection: if this test ever starts failing because
+     * the request is refused, the default extractor changed and the danger box is stale — which
+     * is the state WI-376 deliberately moves to.
+     *
+     * @source docs:api/guards.md#rolesguard
+     */
+    it('should let a caller who merely SENDS x-user-roles reach a RolesGuard-only route', async () => {
+      const forged = await call('/roles-only/admin-area', {
+        headers: headersOf(['x-user-roles', 'admin']),
+      });
+
+      expect(forged.status).toBe(HttpStatusCode.OK);
+      expect(forged.body).toEqual({ success: true, result: { reached: true } });
+      expect(forged.hits).toEqual(['roles-only:adminArea']);
+
+      // And the other half of the documented curl: AuthGuard accepts any Bearer string, so
+      // adding it in front changes nothing about who gets in.
+      expect(new AuthGuard().canActivate(makeHttpContext([['authorization', 'Bearer anything']]))).toBe(true);
+
+      // Sending nothing is still refused — the guard does compare, it just compares a claim.
+      const anonymous = await call('/roles-only/admin-area');
+
+      expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(anonymous.hits).toEqual([]);
     });
   });
 
