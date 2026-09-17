@@ -10,7 +10,9 @@
  */
 
 import {
+  afterAll,
   afterEach,
+  beforeAll,
   describe,
   expect,
   it,
@@ -39,7 +41,11 @@ import {
   RedisRateLimitStore,
   SharedRedisProvider,
 } from '@onebun/core';
-import { makeMockLoggerLayer, useFakeTimers } from '@onebun/core/testing';
+import {
+  createRedisContainer,
+  makeMockLoggerLayer,
+  type TestContainer,
+} from '@onebun/core/testing';
 
 // ============================================================================
 // Fixtures
@@ -146,36 +152,6 @@ function unservedRequest(headers: Array<[string, string]> = []): OneBunRequest {
 
 async function okHandler(): Promise<OneBunResponse> {
   return new Response('ok', { status: 200 });
-}
-
-/**
- * A `RedisClient` whose two storage calls are answered from a Map, recording the traffic
- * so a store that keeps its window in-process instead of on the wire is visible.
- * Substituted on the instance — `mock.module` would swap the client for every suite in the run.
- */
-function makeFakeRedisClient(): {
-  client: RedisClient;
-  /** `get:<key>` / `set:<key>`, in the order the store issued them. */
-  calls: string[];
-  /** Every `set` payload, as `[key, rawValue]`. */
-  writes: Array<[string, string]>;
-} {
-  const store = new Map<string, string>();
-  const calls: string[] = [];
-  const writes: Array<[string, string]> = [];
-  const client = new RedisClient({ url: 'redis://127.0.0.1:6379' });
-  client.get = async (key: string): Promise<string | null> => {
-    calls.push(`get:${key}`);
-
-    return store.get(key) ?? null;
-  };
-  client.set = async (key: string, value: string): Promise<void> => {
-    calls.push(`set:${key}`);
-    writes.push([key, value]);
-    store.set(key, value);
-  };
-
-  return { client, calls, writes };
 }
 
 // ============================================================================
@@ -575,30 +551,43 @@ describe('docs: api/security.md', () => {
     });
 
     /**
-     * @source docs:api/security.md#redis-backed-multi-instance
+     * A real Redis, not a double: the store's whole job is what the SERVER does with
+     * concurrent increments, and a fake answering from a Map re-implements the answer it is
+     * supposed to be checking. `rate-limit-redis.test.ts` pins the concurrency property
+     * itself; these two pin what the documentation page promises.
      */
-    it('shares one window across two RedisRateLimitStore instances on one client', async () => {
-      const redis = makeFakeRedisClient();
-      const keyGenerator = (req: OneBunRequest): string => req.headers.get('x-api-key') ?? 'anon';
-      // Two *independent* stores, as two deployed instances would have: nothing is shared in
-      // process, so the only way the window can be common is through the client they both use.
-      const instanceA = new RateLimitMiddleware({
-        max: 2, windowMs: 60_000, store: new RedisRateLimitStore(redis.client), keyGenerator,
-      });
-      const instanceB = new RateLimitMiddleware({
-        max: 2, windowMs: 60_000, store: new RedisRateLimitStore(redis.client), keyGenerator,
+    describe('Redis-backed (multi-instance)', () => {
+      let container: TestContainer;
+      let client: RedisClient;
+
+      beforeAll(async () => {
+        container = await createRedisContainer();
+        client = new RedisClient({ url: container.url });
+        await client.connect();
       });
 
-      const keyed = (value: string): OneBunRequest => unservedRequest([['x-api-key', value]]);
-      // Fake time so the window's deadline is decidable: it must stay where the first request
-      // put it, whichever instance extends it.
-      const timers = useFakeTimers();
+      afterAll(async () => {
+        await client.disconnect();
+        await container.stop();
+      });
 
-      try {
+      /**
+       * @source docs:api/security.md#redis-backed-multi-instance
+       */
+      it('shares one window across two RedisRateLimitStore instances on one client', async () => {
+        const keyGenerator = (req: OneBunRequest): string => req.headers.get('x-api-key') ?? 'anon';
+        // Two *independent* stores, as two deployed instances would have: nothing is shared in
+        // process, so the only way the window can be common is through the Redis they both use.
+        const instanceA = new RateLimitMiddleware({
+          max: 2, windowMs: 60_000, store: new RedisRateLimitStore(client), keyGenerator,
+        });
+        const instanceB = new RateLimitMiddleware({
+          max: 2, windowMs: 60_000, store: new RedisRateLimitStore(client), keyGenerator,
+        });
+
+        const keyed = (value: string): OneBunRequest => unservedRequest([['x-api-key', value]]);
         const onA = await instanceA.use(keyed('tenant-1'), okHandler);
-        timers.advanceTime(1_000);
         const onB = await instanceB.use(keyed('tenant-1'), okHandler);
-        timers.advanceTime(1_000);
         const backOnA = await instanceA.use(keyed('tenant-1'), okHandler);
         const otherTenant = await instanceB.use(keyed('tenant-2'), okHandler);
 
@@ -607,26 +596,46 @@ describe('docs: api/security.md', () => {
         // `max - count`, so instanceB already counted instanceA's request when it answered.
         expect(onB.headers.get('RateLimit-Remaining')).toBe('0');
         expect(backOnA.status).toBe(429);
-        // 60s window opened 2s ago: the caller is told the shared deadline, not a fresh one.
-        expect(backOnA.headers.get('RateLimit-Reset')).toBe('58');
+        // The caller is told the shared deadline, which the later requests did not push out.
+        expect(Number(backOnA.headers.get('RateLimit-Reset'))).toBeLessThanOrEqual(60);
+        expect(Number(backOnA.headers.get('RateLimit-Reset'))).toBeGreaterThan(55);
         // A separate key still has its own window.
         expect(otherTenant.status).toBe(200);
 
-        // Every increment is a read-then-write on the wire, under the store's `rl:` key.
-        expect(redis.calls).toEqual([
-          'get:rl:tenant-1', 'set:rl:tenant-1',
-          'get:rl:tenant-1', 'set:rl:tenant-1',
-          'get:rl:tenant-1', 'set:rl:tenant-1',
-          'get:rl:tenant-2', 'set:rl:tenant-2',
-        ]);
-        // The count each instance persisted is the one it read plus its own request.
-        const counts = redis.writes
-          .filter(([key]) => key === 'rl:tenant-1')
-          .map(([, value]) => (JSON.parse(value) as { count: number }).count);
-        expect(counts).toEqual([1, 2, 3]);
-      } finally {
-        timers.restore();
-      }
+        // The count lives on the wire under the store's `rl:` prefix, as a plain integer the
+        // server itself increments — not a JSON document any one instance read and rewrote.
+        expect(await client.get('rl:tenant-1')).toBe('3');
+        expect(await client.get('rl:tenant-2')).toBe('1');
+      });
+
+      /**
+       * @source docs:api/security.md#redis-backed-multi-instance
+       */
+      it('gives each application its own buckets when keyPrefix is set', async () => {
+        const keyGenerator = (): string => 'shared-caller';
+        const intake = new RateLimitMiddleware({
+          max: 1,
+          windowMs: 60_000,
+          store: new RedisRateLimitStore(client, { keyPrefix: 'intake:rl:' }),
+          keyGenerator,
+        });
+        const worker = new RateLimitMiddleware({
+          max: 1,
+          windowMs: 60_000,
+          store: new RedisRateLimitStore(client, { keyPrefix: 'worker:rl:' }),
+          keyGenerator,
+        });
+
+        const spentOnIntake = await intake.use(unservedRequest(), okHandler);
+        const refusedByIntake = await intake.use(unservedRequest(), okHandler);
+        // Same Redis, same caller, different application: its budget is untouched.
+        const stillFreeOnWorker = await worker.use(unservedRequest(), okHandler);
+
+        expect([spentOnIntake.status, refusedByIntake.status]).toEqual([200, 429]);
+        expect(stillFreeOnWorker.status).toBe(200);
+        expect(await client.get('intake:rl:shared-caller')).toBe('2');
+        expect(await client.get('worker:rl:shared-caller')).toBe('1');
+      });
     });
 
     /**

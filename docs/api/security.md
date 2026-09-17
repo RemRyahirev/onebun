@@ -52,7 +52,8 @@ every response of a matched route (errors included).
 
 **Rate limit backends:**
 - `MemoryRateLimitStore` — default, in-process only
-- `RedisRateLimitStore(redisClient)` — shared across instances
+- `RedisRateLimitStore(redisClient, { keyPrefix? })` — shared across instances, counts with a Lua
+  script so concurrent increments from different replicas cannot lose each other's updates
 
 **Security headers set by default (all helmet-equivalent):**
 Content-Security-Policy, X-Frame-Options, X-Content-Type-Options, Strict-Transport-Security,
@@ -295,6 +296,26 @@ const app = new OneBunApplication(AppModule, {
 on shutdown to give it back. This is not optional: an application's `stop()` releases nothing, so a
 hold nobody gives back keeps the socket open and the process alive. The shutdown log names what
 still holds it.
+
+The counter is an integer Redis itself increments, inside a Lua script that also arms the window's
+expiry on the first request and reads the remaining TTL back. The script is what makes the store
+worth choosing: a read-modify-write issued from the application leaves a window in which another
+replica increments the same key, both write the same value, and one request goes uncounted — an
+undercount that lets more through than `max`, silently, in exactly the multi-instance deployment
+this store exists for.
+
+Keys live under `rl:` by default. Two applications sharing one Redis share that namespace and
+therefore share buckets — one application's traffic spends the other's budget. Give each its own:
+
+```typescript
+new RedisRateLimitStore(redis, { keyPrefix: 'intake:rl:' })
+```
+
+#### RedisRateLimitStoreOptions
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `keyPrefix` | `string` | `'rl:'` | Namespace for this store's counter keys |
 
 There is one shared connection per process and therefore one configuration: a second
 `configure()` with a different target throws rather than being quietly ignored. See
