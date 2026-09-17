@@ -30,7 +30,10 @@ export type TracingOptions = NonNullable<ApplicationOptions['tracing']>;
  * Any new shared options should be added to ApplicationOptions first.
  */
 export interface BaseServiceOptions
-  extends Pick<ApplicationOptions, 'host' | 'basePath' | 'metrics' | 'tracing' | 'middleware' | 'static'> {
+  extends Pick<
+    ApplicationOptions,
+    'host' | 'basePath' | 'metrics' | 'tracing' | 'middleware' | 'static' | 'maxRequestBodySize'
+  > {
   /**
    * Add service name as prefix to all routes.
    * When true, the service name will be used as routePrefix.

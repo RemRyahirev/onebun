@@ -149,6 +149,13 @@ interface ApplicationOptions {
    */
   idleTimeout?: number;
 
+  /** Maximum request body size in bytes.
+   * Enforced by Bun on the request headers — before routing, before middleware — so an
+   * oversized body is refused with 413 and never read into the process.
+   * Absent leaves Bun's default of 128 MiB (134217728).
+   */
+  maxRequestBodySize?: number;
+
   /** Base path prefix for all routes (e.g., '/api/v1') */
   basePath?: string;
 
@@ -247,6 +254,28 @@ interface ApplicationOptions {
   security?: SecurityHeadersOptions | true;
 }
 ```
+
+#### Bounding the request body {#max-request-body-size}
+
+`maxRequestBodySize` is the only place an application can lower the transport's body limit. Bun
+refuses an oversized request on its headers — before routing, before middleware, before any
+framework code runs — and answers `413 Request Entity Too Large`:
+
+```typescript
+const app = new OneBunApplication(AppModule, {
+  maxRequestBodySize: 1024 * 1024, // 1 MiB; absent leaves Bun's 128 MiB default
+});
+```
+
+Two things it is not interchangeable with:
+
+- **A `content-length` check in middleware** runs after the transport has accepted the body, so it
+  bounds what reaches your domain layer rather than what reaches the process — and it trusts a
+  header the caller writes, which makes it a guard against accident, not against an attacker.
+- **`rateLimit`** bounds how many requests arrive. One 100 MB upload is one request.
+
+The refusal happens for unmatched paths too, since it precedes routing, and neither handlers nor
+middleware are invoked for a request that exceeds the limit.
 
 #### StaticApplicationOptions
 
@@ -622,6 +651,7 @@ interface MultiServiceApplicationOptions {
   tracing?: TracingOptions;
   middleware?: MiddlewareClass[];
   static?: StaticApplicationOptions;
+  maxRequestBodySize?: number;
 }
 
 interface ServiceConfig {
@@ -639,6 +669,8 @@ interface ServiceConfig {
   tracing?: TracingOptions;
   middleware?: MiddlewareClass[];
   static?: StaticApplicationOptions;
+  /** Body cap for this service's listener; falls back to the application-level value */
+  maxRequestBodySize?: number;
 }
 
 type ServicesMap = Record<string, ServiceConfig>;
