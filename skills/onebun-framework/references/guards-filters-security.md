@@ -373,11 +373,13 @@ rateLimit: true
 // Custom
 rateLimit: { windowMs: 15 * 60 * 1000, max: 200 }
 
-// Redis backend (multi-instance)
+// Redis backend (multi-instance) — counts with a Lua script, so replicas cannot
+// lose each other's increments. `keyPrefix` defaults to 'rl:'; set it when two
+// applications share one Redis, or they share buckets.
 import { RateLimitMiddleware, RedisRateLimitStore } from '@onebun/core';
 middleware: [RateLimitMiddleware.configure({
   max: 100, windowMs: 60_000,
-  store: new RedisRateLimitStore(redisClient),
+  store: new RedisRateLimitStore(redisClient, { keyPrefix: 'intake:rl:' }),
 })]
 
 // Custom key (e.g., by API key instead of client address)

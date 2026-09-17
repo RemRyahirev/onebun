@@ -349,7 +349,7 @@ Key rules:
   never fires
 - `this.config` is available in the constructor (after `super()`), so use it there for
   config-derived fields instead of hardcoding defaults in class properties.
-  Cost: such a service cannot be built by `createTestService` — see Testing below
+  `createTestService` supports this since 0.8.1 — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
 - `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
@@ -860,7 +860,7 @@ testcontainers, and fake timers.
 The `@onebun/core/testing` barrel value-imports it, so it is needed for *any* import from that
 subpath, including `createTestService` and `TestingModule`, not just the container helpers.
 
-### Unit testing — `createTestService` / `createTestController`
+### Unit testing — `createTestService` / `createTestController` / `createTestMiddleware`
 
 For testing services and controllers in isolation without bootstrapping the full app:
 
@@ -891,13 +891,30 @@ const { instance } = createTestController(MyController, {
 });
 ```
 
-**Neither helper can build a class that reads `this.config` or `this.logger` in its constructor.**
-Both do `new Class(...deps)` *first* and only then call `initializeService` / `initializeController`;
-neither sets the ambient init context that `OneBunModule` sets around the real DI construction. So
-during the constructor those fields are still `undefined`, and the config-in-constructor shape this
-skill prescribes above dies with `TypeError: undefined is not an object (evaluating 'this.config.get')`.
-The helpers only support classes that touch config after construction. For everything else, boot
-through `TestingModule` — that path does set the init context — and hand it the schema:
+```typescript
+import { createTestMiddleware } from '@onebun/core/testing';
+
+const { instance, logger } = createTestMiddleware(AdminAuthMiddleware, {
+  deps: [mockAuthService],
+  config: { 'admin.token': 'secret' },
+});
+
+const response = await instance.use(request, async () => new Response('ok'));
+```
+
+**Since 0.8.1 all three helpers set the ambient init context before `new`**, so a class that reads
+`this.config` or `this.logger` in its constructor — the shape this skill prescribes above — builds
+correctly. They are one builder under three names: each initialises whichever base the class extends
+(service, controller, middleware, interceptor, WebSocket gateway). A `config` option handed to a
+class that extends none of them and exposes no `initialize*` method now throws instead of being
+stored on a config the instance never receives.
+
+Before 0.8.1 the helpers constructed first and initialised afterwards, so `this.config` was
+`undefined` during the constructor (`TypeError: undefined is not an object`), and middleware had no
+helper at all — `this.config` and `this.logger` stayed undefined for the instance's whole life,
+which a defensive `try { this.config.get(…) } catch` turned into a silently passing suite.
+
+For a full boot, `TestingModule` also sets the init context — hand it the schema:
 `TestingModule.create({ ... }).setOptions({ envSchema }).compile()`. Without `envSchema` the
 constructor's `this.config.get()` throws `Configuration not initialized`, DI logs it to the silent
 test logger and drops the service, and boot fails with `DependencyResolutionError: Could not resolve

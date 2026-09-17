@@ -6,9 +6,11 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 
 ## Testing Utilities Internal Notes
 
-**Unit Testing Helpers** (`createTestService`, `createTestController`):
+**Unit Testing Helpers** (`createTestService`, `createTestController`, `createTestMiddleware`):
 - Create instances with mock logger (using `bun:test` `mock()`) and mock config
-- Call `initializeService()` / `initializeController()` internally so `this.logger` and `this.config` are available
+- Set the ambient init context BEFORE `new`, exactly as `OneBunModule` does, so `this.config` and `this.logger` are live on the line after `super()` — then call whichever fallback the instance exposes (`initializeService` / `initializeController` / `initializeMiddleware` / `initializeInterceptor` / `_initializeBase`)
+- All three helpers are the same builder under different names: any of them initialises any framework kind. The names exist so a test reads as what it builds
+- A `config` option given to a class that extends no framework base and exposes no `initialize*` method throws, rather than being stored on a config the instance never receives
 - Logger methods are `mock()` functions — assert with `.mock.calls`
 - Config returns values from the provided `config` object via `get(path)`
 - Dependencies passed via `deps` array are spread into the constructor
@@ -54,6 +56,7 @@ All testing utilities are exported from `@onebun/core/testing`:
 import {
   createTestService,
   createTestController,
+  createTestMiddleware,
   TestingModule,
   useFakeTimers,
   createMockConfig,
@@ -87,13 +90,16 @@ Running the container helpers additionally needs a Docker daemon (or a Podman so
 machine executing the tests. The rest of `@onebun/core/testing` — `createTestService`,
 `TestingModule`, `useFakeTimers`, the mock helpers — does not.
 
-## Unit Testing — `createTestService` / `createTestController`
+## Unit Testing — `createTestService` / `createTestController` / `createTestMiddleware`
 
-For isolated unit testing of services and controllers without starting an HTTP server.
+For isolated unit testing of services, controllers and middleware without starting an HTTP server.
 
 ### `createTestService`
 
-Creates a service instance with a mock logger and mock config. Calls `initializeService()` internally, so `this.logger` and `this.config` are available in the service.
+Creates a service instance with a mock logger and mock config, initialised the way the framework
+initialises one: the ambient init context is set before the constructor runs, so `this.logger` and
+`this.config` are available inside the constructor (right after `super()`) as well as in every
+method.
 
 ```typescript
 import { createTestService } from '@onebun/core/testing';
@@ -130,7 +136,7 @@ const { instance } = createTestService(UserService, {
 
 ### `createTestController`
 
-Same API as `createTestService`, but calls `initializeController()` instead.
+Same API as `createTestService`, for a controller.
 
 ```typescript
 import { createTestController } from '@onebun/core/testing';
@@ -139,6 +145,31 @@ const { instance, logger, config } = createTestController(UserController, {
   deps: [mockUserService],
 });
 ```
+
+### `createTestMiddleware`
+
+Same API again, for a `@Middleware()`. Call `use(req, next)` on the instance directly — the
+middleware sees the `config` you passed and logs to the `logger` you get back.
+
+```typescript
+import { createTestMiddleware } from '@onebun/core/testing';
+
+const { instance, logger } = createTestMiddleware(AdminAuthMiddleware, {
+  deps: [mockAuthService],
+  config: { 'admin.token': 'secret' },
+});
+
+const next = async () => new Response('ok');
+const response = await instance.use(request, next);
+```
+
+All three helpers are the same builder: each one initialises whichever framework base the class
+extends — service, controller, middleware, interceptor or WebSocket gateway. The three names exist
+so a test reads as what it builds.
+
+A `config` option handed to a class that extends none of those and exposes no `initialize*` method
+throws. Configuration that goes nowhere used to be accepted silently, which is a middleware suite
+asserting fallback behaviour while `this.config` is `undefined`.
 
 ## Integration Testing — `TestingModule`
 

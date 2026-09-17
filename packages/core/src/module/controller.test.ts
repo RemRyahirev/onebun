@@ -44,7 +44,7 @@ describe('Controller', () => {
         }
       }
 
-      const { logger } = createTestController(TestController, {
+      const { instance: controller, logger } = createTestController(TestController, {
         config: {
           'test': 'value',
           'database.host': 'localhost',
@@ -53,7 +53,28 @@ describe('Controller', () => {
       });
 
       expect(logger.child).toHaveBeenCalledWith({ className: 'TestController' });
-      expect(logger.debug).toHaveBeenCalledWith('Controller TestController initialized');
+      // The ambient init context did it, in the constructor — the same path DI takes, where
+      // `initializeController` is only the fallback and returns early. Its "initialized" debug
+      // line therefore belongs to the fallback, and is asserted where the fallback runs.
+      expect((controller as any).config.get('database.host')).toBe('localhost');
+    });
+
+    test('the fallback initializer announces itself, for an instance DI did not construct', () => {
+      class ManuallyBuiltController extends Controller {
+        testMethod() {
+          return 'test';
+        }
+      }
+
+      // No ambient context: exactly what `OneBunModule` finds for a class that implements
+      // `initializeController` without having been constructed under `setInitContext`.
+      const controller = new ManuallyBuiltController();
+      const logger = createMockLogger();
+
+      controller.initializeController(logger, createMockConfig({ 'test': 'value' }));
+
+      expect(logger.child).toHaveBeenCalledWith({ className: 'ManuallyBuiltController' });
+      expect(logger.debug).toHaveBeenCalledWith('Controller ManuallyBuiltController initialized');
     });
 
     test('should throw error when logger is not provided', () => {
@@ -117,7 +138,6 @@ describe('Controller', () => {
       const { logger } = createTestController(CustomNamedController);
 
       expect(logger.child).toHaveBeenCalledWith({ className: 'CustomNamedController' });
-      expect(logger.debug).toHaveBeenCalledWith('Controller CustomNamedController initialized');
     });
 
     test('should provide typed config access', () => {
@@ -161,7 +181,6 @@ describe('Controller', () => {
       const { logger } = createTestController(ExtendedController);
 
       expect(logger.child).toHaveBeenCalledWith({ className: 'ExtendedController' });
-      expect(logger.debug).toHaveBeenCalledWith('Controller ExtendedController initialized');
     });
 
     test('should handle complex inheritance chains', () => {
@@ -186,7 +205,6 @@ describe('Controller', () => {
       const { logger } = createTestController(Level3Controller);
 
       expect(logger.child).toHaveBeenCalledWith({ className: 'Level3Controller' });
-      expect(logger.debug).toHaveBeenCalledWith('Controller Level3Controller initialized');
     });
   });
 
@@ -208,8 +226,7 @@ describe('Controller', () => {
         }
       }
 
-      const { instance: controller, logger, config } = createTestController(TestController);
-      expect(logger.debug).toHaveBeenCalledWith('Controller TestController initialized');
+      const { instance: controller, config } = createTestController(TestController);
 
       // Second initialization — should be a no-op (already initialized)
       const newMockLogger = createMockLogger();

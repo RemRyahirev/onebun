@@ -38,8 +38,7 @@ expect(config.get('server.port')).toBe(3000);
 
 ### createTestController
 
-Same API as `createTestService`, but initializes the controller context (calls
-`initializeController` instead of `initializeService`).
+Same API as `createTestService`, for a controller.
 
 ```typescript
 import { createTestController } from '@onebun/core/testing';
@@ -51,6 +50,43 @@ const { instance, logger } = createTestController(ItemController, {
 const response = await instance.findAll('10');
 expect(response).toBeDefined();
 ```
+
+### createTestMiddleware
+
+Same API again, for a `@Middleware()`. Added in 0.8.1 — before it, a middleware built with
+`createTestService` had `this.config` and `this.logger` undefined for its whole life, and the
+`config` option went to a mock the instance never received. A middleware that reads config
+defensively (`try { this.config.get(…) } catch`) hid that completely: every read took the catch
+branch, so the suite asserted fallback behaviour and passed.
+
+```typescript
+import { createTestMiddleware } from '@onebun/core/testing';
+
+const { instance, logger } = createTestMiddleware(AdminAuthMiddleware, {
+  deps: [mockAuthService],
+  config: { 'admin.token': 'secret' },
+});
+
+const next = async () => new Response('ok');
+const response = await instance.use(request, next);
+expect(response.status).toBe(200);
+```
+
+### One builder, three names
+
+All three helpers set the ambient init context **before** `new` — the same thing `OneBunModule`
+does — and then call whichever fallback the instance exposes (`initializeService`,
+`initializeController`, `initializeMiddleware`, `initializeInterceptor`, `_initializeBase`). Two
+consequences:
+
+- A class that reads `this.config` or `this.logger` in its constructor (right after `super()`)
+  builds correctly. Before 0.8.1 it died with
+  `TypeError: undefined is not an object (evaluating 'this.config.get')`.
+- Any of the three initialises any framework kind, including interceptors and WebSocket gateways.
+  The names exist so a test reads as what it builds.
+
+A `config` option given to a class that extends no framework base and exposes no `initialize*`
+method now throws, naming the class. Configuration that goes nowhere used to be accepted silently.
 
 ### Return type: TestInstanceResult<T>
 
@@ -269,8 +305,9 @@ import {
   never to assert on them
 - The mock-instrumented sync logger is a separate, **non-exported** helper
   (`createMockableSyncLogger()` in `service-helpers.ts`), reachable only through
-  `createTestService` / `createTestController`. If you need logging assertions, build the subject
-  with one of those instead of constructing it yourself with `createMockSyncLogger()`
+  `createTestService` / `createTestController` / `createTestMiddleware`. If you need logging
+  assertions, build the subject with one of those instead of constructing it yourself with
+  `createMockSyncLogger()`
 - `createMockLogger()` — Effect-based, methods return `Effect.succeed(undefined)`
 - `makeMockLoggerLayer()` — for Effect Layer composition, used internally by TestingModule
 
@@ -324,7 +361,7 @@ describe('MyService', () => {
 | Test takes >10ms with fake timers | Fake timer mock is likely used incorrectly |
 | Not calling `close()` / `stop()` | Always clean up in `afterEach`/`afterAll` to prevent leaks |
 | Mocking fetch for integration tests | `TestingModule.inject()` uses `undici.fetch` — bypasses global mocks |
-| Manual mock loggers | Use `createTestService`/`createTestController` — mocks are built in |
+| Manual mock loggers | Use `createTestService`/`createTestController`/`createTestMiddleware` — mocks are built in |
 | `createMockSyncLogger().info.mock.calls` | That logger is plain no-ops — build the subject with `createTestService` to get an instrumented one |
 | `logger.info.mock.calls` on `TestInstanceResult` | Cast first: `(logger.info as Mock<SyncLogger['info']>).mock.calls` — the declared type has no `.mock` |
 | `expect(timers.now).toBe(1000)` | `now` is a function: `expect(timers.now()).toBe(1000)` |
