@@ -138,7 +138,13 @@ describe('ItemController', () => {
 ### Key points
 
 - `.compile()` starts a real HTTP server on **port 0** (OS picks a free port)
-- Uses `makeMockLoggerLayer()` internally — logs are silenced
+- Uses `makeMockLoggerLayer()` internally — logs are silenced. `.captureLogs()` swaps in a
+  recording layer instead and fills `app.logs` with `{ level, message, args, context }` records,
+  which is the only way to assert on a framework startup diagnostic. Without it, a boot that
+  prints nothing **because nothing can print** is indistinguishable from a boot with nothing to
+  say — `app.logs` is empty either way, which is why the capture is an explicit opt-in.
+  `setOptions({ loggerLayer })` still wins over both; `makeRecordingLoggerLayer()` is the same
+  recorder for an application constructed directly
 - `.overrideProvider(Class)` accepts `.useValue(mock)` or `.useClass(MockClass)`
 - overrideProvider() reaches services and imported modules, not only root-module controllers — the mock is seeded into every module before any provider is built, and the real provider is then not constructed at all
 - Always call `.close()` in `afterEach` to prevent port leaks
@@ -162,6 +168,7 @@ const service = app.get(ItemService);           // retrieve DI instance
 const port = app.getPort();                      // server port
 const config = app.getConfig();                  // app config
 const underlyingApp = app.getApp();              // OneBunApplication instance
+const logs = app.logs;                           // framework log records, with .captureLogs()
 ```
 
 `inject()` uses `undici.fetch` internally, which bypasses global fetch mocks — this

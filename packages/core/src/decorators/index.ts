@@ -8,6 +8,7 @@
 export {
   defineMetadata,
   getMetadata,
+  isInjectableParamType,
   Reflect,
 } from './metadata';
 

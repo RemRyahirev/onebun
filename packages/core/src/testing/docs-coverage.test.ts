@@ -12,6 +12,7 @@ import { connect } from 'node:net';
 
 import { SQL } from 'bun';
 import {
+  afterEach,
   describe,
   expect,
   it,
@@ -35,6 +36,7 @@ import {
   createRedisContainer,
   createTestService,
   makeMockLoggerLayer,
+  makeRecordingLoggerLayer,
   TestingModule,
 } from '@onebun/core/testing';
 import type { SyncLogger } from '@onebun/logger';
@@ -605,5 +607,156 @@ describe('docs/testing.md — createMockSyncLogger', () => {
 
     expect(instance.currentLogger()).toBe(logger);
     expect(Object.keys(createMockSyncLogger()).sort()).toEqual(Object.keys(logger).sort());
+  });
+});
+
+// ============================================================================
+// Capturing framework logs — docs/testing.md#capturing-framework-logs
+//
+// The harness installs a silent logger, which is right for a test that does not care and wrong
+// for one that wants to assert a diagnostic: a boot that prints nothing BECAUSE NOTHING CAN
+// PRINT reads exactly like a boot with nothing to say. 0.8.0 added a warning for the
+// constructor-parameter shape that used to corrupt silently, and it was unobservable from here.
+// ============================================================================
+
+interface CapturePort {
+  doThing(): void;
+}
+
+@Service()
+class CaptureResolvable extends BaseService {
+  value(): string {
+    return 'resolved';
+  }
+}
+
+/** Parameter 0 names nothing injectable and parameter 1 does — the corrupting shape. */
+@Service()
+class CaptureHasAHole extends BaseService {
+  constructor(readonly port: CapturePort, readonly real: CaptureResolvable) {
+    super();
+  }
+}
+
+@Controller('/capture-probe')
+class CaptureProbeController extends BaseController {
+  constructor(private readonly svc: CaptureHasAHole) {
+    super();
+  }
+
+  @Get('/')
+  hit() {
+    return { hasPort: this.svc.port !== undefined };
+  }
+}
+
+@Service()
+class CaptureCleanService extends BaseService {
+  constructor(private readonly dep: CaptureResolvable) {
+    super();
+  }
+
+  value(): string {
+    return this.dep.value();
+  }
+}
+
+describe('docs/testing.md — capturing framework logs', () => {
+  let compiled: CompiledTestingModule | null = null;
+
+  afterEach(async () => {
+    if (compiled) {
+      await compiled.close();
+      compiled = null;
+    }
+  });
+
+  /**
+   * @source docs:testing.md#capturing-framework-logs
+   */
+  it('makes the unresolvable-parameter warning observable', async () => {
+    compiled = await TestingModule
+      .create({ controllers: [CaptureProbeController], providers: [CaptureResolvable, CaptureHasAHole] })
+      .captureLogs()
+      .compile();
+
+    const warning = compiled.logs.find(
+      (record) => record.level === 'warn' && record.message.includes('could not be resolved'),
+    );
+
+    // The diagnostic 0.8.0 added, which nothing could read before: a hole FOLLOWED by a
+    // resolved parameter is the configuration that used to corrupt silently.
+    expect(warning).toBeDefined();
+    expect(warning?.message).toContain('CaptureHasAHole');
+    expect(warning?.message).toContain('index 0');
+    // Attributed, so a test can say WHICH module reported it.
+    expect(String(warning?.context.className)).toContain('OneBunModule');
+  });
+
+  /**
+   * @source docs:testing.md#capturing-framework-logs
+   */
+  it('is silent for a tree with nothing to report, and records nothing without the opt-in', async () => {
+    compiled = await TestingModule
+      .create({ providers: [CaptureResolvable, CaptureCleanService] })
+      .captureLogs()
+      .compile();
+
+    // An empty result here means "nothing to report", not "nothing could be reported" — the
+    // other half of the claim, without which the case above passes against a broken recorder.
+    expect(compiled.logs.filter((record) => record.message.includes('could not be resolved'))).toEqual([]);
+    expect(compiled.logs.length).toBeGreaterThan(0);
+
+    await compiled.close();
+    compiled = await TestingModule
+      .create({ controllers: [CaptureProbeController], providers: [CaptureResolvable, CaptureHasAHole] })
+      .compile();
+
+    // Without `captureLogs()` the silent logger is back, and `logs` is empty for that reason.
+    expect(compiled.logs).toEqual([]);
+  });
+
+  /**
+   * @source docs:testing.md#capturing-framework-logs
+   */
+  it('records the same lines for an application built directly', async () => {
+    const recorder = makeRecordingLoggerLayer();
+
+    compiled = await TestingModule
+      .create({ controllers: [CaptureProbeController], providers: [CaptureResolvable, CaptureHasAHole] })
+      .setOptions({ loggerLayer: recorder.layer })
+      .compile();
+
+    // `setOptions` is spread after the default, so an explicit layer wins — the same recorder
+    // the documentation hands to `new OneBunApplication(..., { loggerLayer })`.
+    expect(recorder.messages('warn').some((message) => message.includes('could not be resolved'))).toBe(true);
+    expect(compiled.logs).toEqual([]);
+  });
+
+  /**
+   * @source docs:testing.md#capturing-framework-logs
+   */
+  it('keeps a child logger writing to the same array, with its context merged', () => {
+    // The trap this helper removes: `createMockLogger().child()` returns the ORIGINAL object,
+    // so spreading it and overriding one method loses the override the moment the framework
+    // calls `.child()` — which it does for every module and every service.
+    const recorder = makeRecordingLoggerLayer();
+    const root = Effect.runSync(Effect.provide(LoggerService, recorder.layer));
+
+    Effect.runSync(root.info('from the root'));
+    const child = root.child({ className: 'OneBunModule:AppModule' });
+    Effect.runSync(child.warn('from the child', { detail: 1 }));
+    Effect.runSync(child.child({ requestId: 'r-1' }).error('from the grandchild'));
+
+    expect(recorder.messages()).toEqual(['from the root', 'from the child', 'from the grandchild']);
+    expect(recorder.messages('warn')).toEqual(['from the child']);
+    expect(recorder.records[0]?.context).toEqual({});
+    expect(recorder.records[1]?.context).toEqual({ className: 'OneBunModule:AppModule' });
+    // Contexts accumulate down the chain rather than replacing each other.
+    expect(recorder.records[2]?.context).toEqual({ className: 'OneBunModule:AppModule', requestId: 'r-1' });
+    expect(recorder.records[1]?.args).toEqual([{ detail: 1 }]);
+
+    recorder.clear();
+    expect(recorder.records).toEqual([]);
   });
 });

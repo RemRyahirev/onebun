@@ -339,7 +339,15 @@ export class MyService extends BaseService implements OnModuleInit, OnModuleDest
 
 Key rules:
 - Always `extends BaseService` — provides `this.logger` and `this.config`
-- Constructor injection by type — no `@Inject()` tokens needed
+- Constructor injection by type — no `@Inject()` tokens needed. **A parameter typed as an
+  INTERFACE names nothing at runtime**: Bun emits every type reference as
+  `typeof X === "undefined" ? Object : X`, so an interface, a type alias, `any`, `unknown` and a
+  circular-import-broken reference all arrive as `Object` and receive `undefined`. Type the
+  parameter as the class, or annotate it `@Inject(ConcreteClass)`. To audit an existing codebase
+  use `isInjectableParamType` — the container's own predicate — not a filter for `undefined`,
+  which finds nothing: `getConstructorParamTypes(C)?.flatMap((t, i) => isInjectableParamType(t) ? [] : [i])`.
+  The framework warns at startup when such a hole is FOLLOWED by a resolved parameter (the shape
+  that used to corrupt silently); read it from a test with `TestingModule.captureLogs()`
 - **Lifecycle interfaces are type-only exports** — import them as `type OnModuleInit`, otherwise
   TS1484 under `verbatimModuleSyntax`, which `bun create @onebun` writes into the scaffolded tsconfig
 - **`implements OnModuleInit` is a style rule, not a runtime requirement.** The framework

@@ -260,6 +260,53 @@ service that reads `this.config` only inside a method is unaffected at boot and 
 request time instead.
 :::
 
+#### `.captureLogs()` {#capturing-framework-logs}
+
+Keeps what the framework logged during boot, instead of dropping it. `module.logs` then holds
+every line:
+
+```typescript
+const module = await TestingModule
+  .create({ imports: [AppModule] })
+  .captureLogs()
+  .compile();
+
+const warnings = module.logs.filter((record) => record.level === 'warn');
+expect(warnings.map((record) => record.message)).toEqual([]);
+```
+
+Each record is a `RecordedLog` — `{ level, message, args, context }` — where `context` is the
+accumulated `child()` context. The module logger names itself
+`{ className: 'OneBunModule:AppModule' }`, so a line can be attributed to the module that reported
+it.
+
+This is how a startup diagnostic becomes something a test can assert: compiling the real
+`AppModule` through `TestingModule` and checking that no constructor parameter went unresolved, or
+that no global module was re-seeded. Without it the harness installs a silent logger, and a boot
+that prints nothing **because nothing can print** reads exactly like a boot with nothing to say.
+
+`module.logs` is empty when `captureLogs()` was not called, and that emptiness means nothing — it
+is the silent logger's output. The opt-in exists so the two cannot be confused.
+
+For an application constructed directly rather than through `TestingModule`, the same recorder is
+available on its own:
+
+```typescript
+import { makeRecordingLoggerLayer } from '@onebun/core/testing';
+
+const recorder = makeRecordingLoggerLayer();
+const app = new OneBunApplication(AppModule, { loggerLayer: recorder.layer });
+await app.start();
+
+expect(recorder.messages('warn')).toEqual([]);
+await app.stop();
+```
+
+`child()` on the recorder returns a logger writing to the same array with its context merged in.
+That is the part a hand-rolled double usually gets wrong: `createMockLogger().child()` returns the
+original object, so spreading it and overriding one method loses the override the moment the
+framework calls `.child()` — which it does for every module and every service.
+
 #### `.compile()`
 
 Starts the application on a random free port. Returns a `CompiledTestingModule`.
@@ -303,6 +350,11 @@ Returns the port the test server is listening on.
 #### `module.getConfig()`
 
 Returns the application config. Requires `envSchema` to be set via `setOptions()`.
+
+#### `module.logs`
+
+Every line the framework logged, when `.captureLogs()` asked for it — otherwise empty. See
+[`.captureLogs()`](#capturing-framework-logs).
 
 #### `module.close()`
 

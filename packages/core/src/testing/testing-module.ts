@@ -23,12 +23,14 @@ import type {
   HttpMethod,
   OneBunResponse,
 } from '../types';
+import type { RecordedLog } from './test-utils';
 import type { Context } from 'effect';
+
 
 import { Module } from '../decorators/decorators';
 import { getServiceTag } from '../module/service';
 
-import { makeMockLoggerLayer } from './test-utils';
+import { makeMockLoggerLayer, makeRecordingLoggerLayer } from './test-utils';
 
 // Re-export for convenience
 export { makeMockLoggerLayer };
@@ -78,6 +80,14 @@ export class CompiledTestingModule {
   constructor(
     private readonly app: OneBunApplication,
     private readonly port: number,
+    /**
+     * Everything the framework logged, when `captureLogs()` was called — otherwise empty.
+     *
+     * Empty is therefore ambiguous by construction, which is why it takes an explicit opt-in:
+     * a test reading `logs` without `captureLogs()` is reading the silent logger's output, and
+     * nothing here can tell that apart from a quiet boot.
+     */
+    readonly logs: readonly RecordedLog[] = [],
   ) {}
 
   /**
@@ -214,6 +224,7 @@ export class TestingModule {
     value: unknown;
   }> = [];
   private appOptions: Partial<ApplicationOptions> = {};
+  private recorder: ReturnType<typeof makeRecordingLoggerLayer> | null = null;
 
   private constructor(options: TestingModuleCreateOptions) {
     this.options = options;
@@ -237,6 +248,35 @@ export class TestingModule {
    */
   setOptions(options: Partial<ApplicationOptions>): TestingModule {
     this.appOptions = options;
+
+    return this;
+  }
+
+  /**
+   * Keep what the framework logs, instead of dropping it.
+   *
+   * The compiled module's `logs` then holds every line, so a test can assert on a startup
+   * diagnostic — the unresolvable-constructor-parameter warning, a re-seeded global module, a
+   * queue adapter disabled against its own configuration. Without this the harness installs a
+   * silent logger, and a boot that prints nothing because nothing CAN print reads exactly like
+   * a boot with nothing to say.
+   *
+   * An explicit `setOptions({ loggerLayer })` still wins — this is the form that does not
+   * require building an Effect Layer by hand.
+   *
+   * @example
+   * ```typescript
+   * const module = await TestingModule
+   *   .create({ imports: [AppModule] })
+   *   .captureLogs()
+   *   .compile();
+   *
+   * const warnings = module.logs.filter((record) => record.level === 'warn');
+   * expect(warnings.map((record) => record.message)).toEqual([]);
+   * ```
+   */
+  captureLogs(): TestingModule {
+    this.recorder = makeRecordingLoggerLayer();
 
     return this;
   }
@@ -287,10 +327,14 @@ export class TestingModule {
 
     // Create the application with:
     // - port 0 → OS picks a free port
-    // - silent logger
+    // - silent logger, or the recording one when `captureLogs()` asked for it
     // - test provider overrides injected before setup()
+    //
+    // `this.appOptions` is spread AFTER the logger, so an explicit
+    // `setOptions({ loggerLayer })` still wins over both.
+    const defaultLoggerLayer = this.recorder?.layer ?? makeMockLoggerLayer();
     const app = new OneBunApplication(_TestingAppModule, {
-      loggerLayer: makeMockLoggerLayer() as import('effect').Layer.Layer<import('@onebun/logger').Logger>,
+      loggerLayer: defaultLoggerLayer as import('effect').Layer.Layer<import('@onebun/logger').Logger>,
       port: 0,
       ...this.appOptions,
       gracefulShutdown: false,
@@ -299,6 +343,6 @@ export class TestingModule {
 
     await app.start();
 
-    return new CompiledTestingModule(app, app.getPort());
+    return new CompiledTestingModule(app, app.getPort(), this.recorder?.records ?? []);
   }
 }
