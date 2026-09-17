@@ -223,7 +223,7 @@
     },
     "packages/core": {
       "name": "@onebun/core",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "dependencies": {
         "@onebun/envs": "workspace:^",
         "@onebun/logger": "workspace:^",
@@ -323,7 +323,7 @@
     },
     "packages/nats": {
       "name": "@onebun/nats",
-      "version": "0.8.0",
+      "version": "0.8.1",
       "dependencies": {
         "@nats-io/jetstream": "^3.0.0-31",
         "@nats-io/transport-node": "^3.0.0-31",

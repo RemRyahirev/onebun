@@ -271,6 +271,30 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
   idleTimeout?: number;
 
   /**
+   * Maximum size of a request body, in bytes.
+   *
+   * Enforced by Bun before routing, before middleware, and before any framework code runs: an
+   * oversized request is answered `413 Request Entity Too Large` on its headers alone, so the
+   * body is never read into the process. That is the difference between this and a
+   * `content-length` guard in middleware, which runs after the transport has accepted the body
+   * and trusts a header the caller writes.
+   *
+   * `rateLimit` is not a substitute — it bounds how MANY requests arrive, and one 100 MB upload
+   * is one request.
+   *
+   * Absent leaves Bun's own default of 128 MiB in place.
+   *
+   * @defaultValue 134_217_728 (Bun's default, 128 MiB)
+   * @example
+   * ```typescript
+   * const app = new OneBunApplication(AppModule, {
+   *   maxRequestBodySize: 1024 * 1024, // 1 MiB
+   * });
+   * ```
+   */
+  maxRequestBodySize?: number;
+
+  /**
    * Base path prefix for all routes
    * @example '/api/v1'
    */

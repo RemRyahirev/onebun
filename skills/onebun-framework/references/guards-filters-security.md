@@ -319,6 +319,19 @@ const app = new OneBunApplication(AppModule, {
 
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
+### Bounding the request body
+
+`maxRequestBodySize` (bytes) on `ApplicationOptions` — or per service in multi-service mode — is
+the only way to lower the transport limit; absent it is Bun's 128 MiB. Bun refuses an oversized
+request on its headers with `413`, before routing and before any middleware, so the body never
+enters the process. A `content-length` check in middleware is not the same thing: it runs after the
+transport accepted the body and trusts a header the caller writes. `rateLimit` is not the same
+thing either — it bounds how many requests arrive, and one 100 MB upload is one request.
+
+```typescript
+const app = new OneBunApplication(AppModule, { maxRequestBodySize: 1024 * 1024 });
+```
+
 ### CORS
 
 **Configuring `cors` is enough.** A browser preflight is answered before routing, so no
@@ -373,11 +386,13 @@ rateLimit: true
 // Custom
 rateLimit: { windowMs: 15 * 60 * 1000, max: 200 }
 
-// Redis backend (multi-instance)
+// Redis backend (multi-instance) — counts with a Lua script, so replicas cannot
+// lose each other's increments. `keyPrefix` defaults to 'rl:'; set it when two
+// applications share one Redis, or they share buckets.
 import { RateLimitMiddleware, RedisRateLimitStore } from '@onebun/core';
 middleware: [RateLimitMiddleware.configure({
   max: 100, windowMs: 60_000,
-  store: new RedisRateLimitStore(redisClient),
+  store: new RedisRateLimitStore(redisClient, { keyPrefix: 'intake:rl:' }),
 })]
 
 // Custom key (e.g., by API key instead of client address)

@@ -353,6 +353,93 @@ export function makeMockLoggerLayer(): Layer.Layer<Logger, never, never> {
 }
 
 /**
+ * One line the framework logged, as the recording layer captured it.
+ *
+ * `context` is the accumulated `child()` context, which is how a line is attributed: the module
+ * logger names itself `{ className: 'OneBunModule:AppModule' }`, a service `{ className: 'X' }`.
+ *
+ * @see docs:testing.md
+ */
+export interface RecordedLog {
+  level: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+  message: string;
+  args: unknown[];
+  context: Record<string, unknown>;
+}
+
+/**
+ * A logger layer that keeps what the framework logged, instead of dropping it.
+ *
+ * The silent layer is the right default for a test that does not care, and the wrong one for a
+ * test that wants to assert a diagnostic — a boot that prints nothing because nothing CAN print
+ * is indistinguishable from a boot with nothing to say. The framework's startup warnings
+ * (unresolvable constructor parameters, re-seeded global modules, a queue adapter disabled
+ * against its own configuration) are only observable through a layer that records.
+ *
+ * `child()` returns a recorder writing to the SAME array with the context merged in. That is
+ * load-bearing: `createMockLogger().child()` returns the original object, so the common
+ * workaround — spreading it and overriding one method — loses the override the moment the
+ * framework calls `.child()`, which it does for every module and every service.
+ *
+ * @example Assert on a framework diagnostic
+ * ```typescript
+ * const recorder = makeRecordingLoggerLayer();
+ * const app = new OneBunApplication(AppModule, { loggerLayer: recorder.layer });
+ * await app.start();
+ *
+ * const warnings = recorder.records.filter((record) => record.level === 'warn');
+ * expect(warnings.some((w) => w.message.includes('could not be resolved'))).toBe(true);
+ * ```
+ *
+ * @see docs:testing.md
+ */
+export function makeRecordingLoggerLayer(): {
+  layer: Layer.Layer<Logger, never, never>;
+  /** Every line, in the order it was logged. */
+  records: RecordedLog[];
+  /** Messages at one level, for the common `expect(...).toContain(...)` assertion. */
+  messages(level?: RecordedLog['level']): string[];
+  /** Forget everything recorded so far. */
+  clear(): void;
+} {
+  const records: RecordedLog[] = [];
+
+  const make = (context: Record<string, unknown>): Logger => {
+    const record = (level: RecordedLog['level']) =>
+      (message: string, ...args: unknown[]): Effect.Effect<void> => {
+        records.push({
+          level, message, args, context,
+        });
+
+        return Effect.succeed(undefined);
+      };
+
+    return {
+      trace: record('trace'),
+      debug: record('debug'),
+      info: record('info'),
+      warn: record('warn'),
+      error: record('error'),
+      fatal: record('fatal'),
+      child: (childContext: Record<string, unknown>): Logger => make({ ...context, ...childContext }),
+    };
+  };
+
+  return {
+    layer: Layer.succeed(LoggerService, make({})),
+    records,
+    messages(level?: RecordedLog['level']): string[] {
+      return records
+        .filter((entry) => level === undefined || entry.level === level)
+        .map((entry) => entry.message);
+    },
+    clear(): void {
+      records.length = 0;
+    },
+  };
+}
+
+/**
  * Create a mock config for testing.
  * Returns an IConfig-compatible object with customizable values.
  * 

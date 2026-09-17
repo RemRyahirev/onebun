@@ -4933,3 +4933,117 @@ describe('tryDeleteDurableConsumer', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+// ============================================================================
+// retry.backoff / retry.delay
+//
+// Both were typed, accepted, and honoured by the memory and Redis adapters, and
+// reached nothing here: only `attempts` was read, so every redelivery gap was
+// `ack_wait` and a declared ladder was silently flat. The wait travels with the
+// nak, because the server decides when a nak'd message comes back.
+// ============================================================================
+
+describe('retry.backoff and retry.delay', () => {
+  /** Delivers one message at `deliveryCount`, fails the handler, returns the nak arguments. */
+  async function nakArgsFor(deliveryCount: number, options: AnyRecord = {}): Promise<unknown[]> {
+    const jsMsg = makeMockJsMsg({
+      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      info: { redelivered: deliveryCount > 1, deliveryCount },
+    });
+    const { adapter } = makeConnectedAdapter();
+    const consumer = makeMockConsumer([jsMsg]);
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+    await adapter.subscribe('test.topic', async () => {
+      throw new Error('handler failed');
+    }, options);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    return asAny(jsMsg.nak).mock.calls[0] as unknown[];
+  }
+
+  it('walks the exponential ladder the subscription declared', async () => {
+    // delay * 2^(n-1) for the attempt that just failed — 1000, 2000, 4000.
+    const retry = { attempts: 4, backoff: 'exponential', delay: 1000 };
+
+    expect(await nakArgsFor(1, { retry })).toEqual([1000]);
+    expect(await nakArgsFor(2, { retry })).toEqual([2000]);
+    expect(await nakArgsFor(3, { retry })).toEqual([4000]);
+  });
+
+  it('walks the linear ladder', async () => {
+    const retry = { attempts: 4, backoff: 'linear', delay: 500 };
+
+    expect(await nakArgsFor(1, { retry })).toEqual([500]);
+    expect(await nakArgsFor(3, { retry })).toEqual([1500]);
+  });
+
+  it('holds a fixed delay flat, and defaults to fixed when no strategy is named', async () => {
+    expect(await nakArgsFor(3, { retry: { attempts: 4, backoff: 'fixed', delay: 250 } })).toEqual([250]);
+    expect(await nakArgsFor(3, { retry: { attempts: 4, delay: 250 } })).toEqual([250]);
+  });
+
+  it('uses the documented 100ms base when only a strategy is named', async () => {
+    expect(await nakArgsFor(2, { retry: { attempts: 3, backoff: 'exponential' } })).toEqual([200]);
+  });
+
+  it('leaves an unconfigured subscription naking with zero — the bare NAK the client sends', async () => {
+    // `nak(millis)` tests the argument for truthiness, so `nak(0)` and `nak()` put the same
+    // `-NAK` on the wire. Asserting the zero rather than the arity keeps the intent visible.
+    expect(await nakArgsFor(1)).toEqual([0]);
+    expect(await nakArgsFor(1, { retry: { attempts: 3 } })).toEqual([100]);
+  });
+
+  it('does not touch the consumer config — the ladder is not JetStream backoff', async () => {
+    // JetStream's own `backoff` REPLACES ack_wait per delivery, so writing the ladder there
+    // would cut the handler's acknowledgement window to the base delay.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+
+    await adapter.subscribe('test.topic', async () => undefined, {
+      group: 'g',
+      ackTimeout: 30_000,
+      retry: { attempts: 3, backoff: 'exponential', delay: 1000 },
+    } as AnyRecord);
+
+    const cfg = callArg(mockJsm.consumers.add, 0, 1);
+    expect(cfg).not.toHaveProperty('backoff');
+    expect(cfg.ack_wait).toBe(30_000_000_000);
+    expect(cfg.max_deliver).toBe(3);
+  });
+
+  it('is not sent under ackMode: none, where nothing is acknowledged at all', async () => {
+    const jsMsg = makeMockJsMsg({
+      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      info: { redelivered: false, deliveryCount: 1 },
+    });
+    const { adapter } = makeConnectedAdapter();
+    const consumer = makeMockConsumer([jsMsg]);
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+    await adapter.subscribe('test.topic', async () => {
+      throw new Error('handler failed');
+    }, { ackMode: 'none', retry: { attempts: 3, backoff: 'exponential', delay: 1000 } } as AnyRecord);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    expect(jsMsg.nak).not.toHaveBeenCalled();
+  });
+
+  it('keeps manual nack(true) immediate — it is the handler itself asking, not a policy', async () => {
+    const jsMsg = makeMockJsMsg({
+      data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+      info: { redelivered: false, deliveryCount: 1 },
+    });
+    const { adapter } = makeConnectedAdapter();
+    const consumer = makeMockConsumer([jsMsg]);
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+    await adapter.subscribe('test.topic', async (message) => {
+      await message.nack(true);
+    }, { ackMode: 'manual', retry: { attempts: 3, backoff: 'exponential', delay: 1000 } } as AnyRecord);
+    await new Promise(resolve => setTimeout(resolve, 25));
+
+    // Uncapped and undelayed on every adapter: memory requeues on the next tick, and
+    // `message.attempt` is what a handler stops itself with.
+    expect(jsMsg.nak).toHaveBeenCalledWith();
+  });
+});

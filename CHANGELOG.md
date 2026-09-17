@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.8.1 — 2026-09-18
+
+### Package Versions
+
+`@onebun/core` and `@onebun/nats` move; nothing else does. A patch is released per package —
+`workspace:^` is rewritten to `^<version>` at publish time and a caret on a 0.x version pins the
+minor, so a patch drags nobody across with it. Every dependent keeps its `^0.8.0` range and resolves
+this release without a bump of its own.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.8.0 | 0.8.1 |
+| `@onebun/nats` | 0.8.0 | 0.8.1 |
+
+Every other package stays at 0.8.0.
+
+### Read This First
+
+Nothing here is breaking, and no application has to change anything to take it.
+
+All eight entries come from five reports filed against 0.8.0 by one consumer, and three of them are
+the same defect wearing different clothes: an option that type-checks, reads as if it were in force,
+and reaches nothing. `retry.backoff`/`retry.delay` were honoured by two queue adapters and dropped
+by the third. `maxRequestBodySize` did not exist, so Bun's 128 MiB default was the only answer an
+application could give. The `config` option on the testing helpers was stored on a mock the instance
+never received. None of the three failed loudly, and two of them were invisible in the common case —
+which is what makes them worth a release rather than a footnote.
+
+The rate-limit fix is the one to read if you run more than one replica: `RedisRateLimitStore`
+documented itself as atomic and was not, so it undercounted in exactly the deployment it exists for.
+Measured against a real Redis, 100 concurrent requests all read the same counter and the stored
+count ended at 1.
+
+Two entries are about being able to SEE the framework: `isInjectableParamType` is the predicate the
+container uses to decide a constructor parameter names nothing resolvable, and
+`TestingModule.captureLogs()` makes a startup diagnostic something a test can assert on rather than
+something you can only read on stdout. Both exist because 0.8.0 asked consumers to audit their own
+code and gave them no honest way to do it.
+
+### Added
+
+- `TestingModule.captureLogs()` and `makeRecordingLoggerLayer()` in `@onebun/core/testing`. The harness installs a silent logger, so a framework startup diagnostic — the unresolvable-constructor-parameter warning 0.8.0 added, a re-seeded global module, a queue adapter disabled against its own configuration — could not be observed from a test that compiles the real `AppModule`: a boot that prints nothing because nothing CAN print reads exactly like a boot with nothing to say. `captureLogs()` swaps in a recording layer and fills `module.logs` with `{ level, message, args, context }` records, where `context` is the accumulated `child()` context, so a line can be attributed to the module that reported it. `makeRecordingLoggerLayer()` is the same recorder for an application constructed directly, and its `child()` writes to the same array with the context merged — the part a hand-rolled double gets wrong, because `createMockLogger().child()` returns the original object and silently discards any override. An explicit `setOptions({ loggerLayer })` continues to win over both. (FB-15)
+- `isInjectableParamType(type)` is now exported from `@onebun/core` — the predicate the container itself uses to decide that a constructor parameter names nothing resolvable. The 0.8.0 migration note invited an audit of your own constructors, and the natural spelling of it, `types.filter((t) => t === undefined)`, reports zero holes on every application: Bun emits an interface-typed parameter as `Object`, not as a hole, so only a junk entry is `undefined`. The hand-written list a consumer would guess instead (`Object`, `Function`, `String`, `Number`, `Boolean`, `Array`) is wrong in both directions — `Function` and `Array` DO reach the resolver and raise a loud `DependencyResolutionError`, and calling them holes would hide exactly the failures that are working as intended. `docs/api/decorators.md` gained an "Auditing constructor parameters" section with the correct recipe, a note that `Reflect.getConstructorParamTypes` is the raw reader that does not merge `@Inject`, and a fix to the stale `registerDependencies` signature. (FB-15)
+- `RedisRateLimitStore` takes a second options argument, `{ keyPrefix }` (default `'rl:'`), so two applications sharing one Redis no longer share rate-limit buckets — one application's traffic used to spend the other's budget. (FB-17)
+- `createTestMiddleware(cls, { deps, config })` in `@onebun/core/testing`, symmetric with `createTestService` and `createTestController`. A middleware built with the old helpers had `this.config` and `this.logger` undefined and the `config` option went to a mock the instance never received — invisible to any middleware that reads config defensively, because every read took its catch branch. (FB-18)
+- `ApplicationOptions.maxRequestBodySize` (bytes), forwarded to `Bun.serve`. Until now nothing in `ApplicationOptions` reached it, so Bun's 128 MiB default applied to every OneBun application and a service accepting 64 KB fields had no way to say so: `rateLimit` bounds request count, and a `content-length` check in middleware runs after the transport has already accepted the body. Bun refuses an oversized request on its headers with `413` — before routing, before middleware, before the body is read. Also available per service in multi-service mode (`services.<name>.maxRequestBodySize`, falling back to the application-level value), which is where a public intake and an internal worker actually differ. Absent leaves Bun's default in place: the key is omitted from the `Bun.serve` call entirely rather than passed as `undefined`. (FB-19)
+
+### Fixed
+
+- `RedisRateLimitStore` now counts with a Lua script (`PTTL` + `INCR`, arming the expiry on the first request of a window) instead of a client-side GET-then-SET. The previous implementation lost concurrent increments — measured against a real Redis, 100 requests issued from four clients all read the same counter and the stored count ended at 1 — so the store undercounted and let more through than `max` in exactly the multi-instance deployment it exists for, while its docstring claimed it was atomic. The window's deadline no longer slides: an increment reads the remaining TTL instead of re-arming it. A counter written by an earlier release (JSON under the same key) starts a fresh window rather than failing with "value is not an integer" for the length of one window after the upgrade. (FB-17)
+- `createTestService` and `createTestController` now set the ambient init context before calling the constructor, exactly as `OneBunModule` does, so a class that reads `this.config` or `this.logger` right after `super()` — the shape the documentation prescribes — can be built by the helpers instead of failing with `TypeError: undefined is not an object`. After construction they call whichever fallback the instance exposes (`initializeService`, `initializeController`, `initializeMiddleware`, `initializeInterceptor` or `_initializeBase`), so interceptors and WebSocket gateways are initialised too. A `config` option given to a class that extends no framework base and exposes no `initialize*` method now throws instead of being accepted and dropped. (FB-18)
+- `@onebun/nats`: the JetStream adapter now honours `retry.backoff` and `retry.delay`, which were typed, accepted, honoured by the memory and Redis adapters, and reached nothing here — only `retry.attempts` was read, so every redelivery gap was `ack_wait` and a declared exponential ladder was silently flat. The wait is computed by the same `retryDelayMs` the other adapters use and travels with the nak, so the three adapters that support retry compute one ladder rather than three. The consumer's native `backoff` field is deliberately left alone: JetStream's backoff list replaces `ack_wait` per delivery, so writing the ladder there would also cut the handler's acknowledgement window to the base delay. A subscription that declares no `retry` naks exactly as before. (FB-20)
+
 ## 0.8.0 — 2026-09-16
 
 ### Package Versions

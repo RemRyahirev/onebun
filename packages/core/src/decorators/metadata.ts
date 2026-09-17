@@ -166,9 +166,23 @@ const NON_INJECTABLE_PARAM_TYPES: readonly unknown[] = [Object, String, Number, 
 /**
  * Whether a `design:paramtypes` entry names something the container can resolve.
  *
- * Deliberately NOT exported through `decorators/index.ts`: that barrel re-exports three named
- * metadata helpers rather than the whole module, so this stays internal while `module.ts` can
- * still import it from the file directly.
+ * The container's own rule, exported so an application auditing its constructors asks the
+ * framework instead of guessing. The guess is not a hypothetical: an `undefined`-only audit
+ * finds nothing, because an interface arrives as `Object` rather than as a hole — and the
+ * obvious hand-written list (`Object`, `Function`, `String`, `Number`, `Boolean`, `Array`) is
+ * wrong in both directions, since `Function` and `Array` DO reach the resolver and fail loudly
+ * there, which this predicate must not hide.
+ *
+ * ```typescript
+ * const types = getConstructorParamTypes(MyService) ?? [];
+ * const holes = types.flatMap((type, index) => (isInjectableParamType(type) ? [] : [index]));
+ * ```
+ *
+ * What it does NOT tell you is WHY — see {@link NON_INJECTABLE_PARAM_TYPES}: an interface, a
+ * type alias, `any`, `unknown` and a circular-import-broken reference are all `Object` here and
+ * cannot be told apart.
+ *
+ * @see docs:api/decorators.md
  */
 export function isInjectableParamType(type: Function | undefined): type is Function {
   return type !== undefined && !NON_INJECTABLE_PARAM_TYPES.includes(type);

@@ -877,7 +877,12 @@ Explicit dependency injection for edge cases. **In most cases, automatic DI work
 An **abstract-class**-typed parameter needs no `@Inject`: DI resolves it to a registered subclass on its own, and `@Inject(AbstractClass)` is a compile error — see [Architecture](/architecture) for the exact diagnostics.
 
 ::: tip An unresolvable parameter is undefined, in its own slot
-A parameter the container cannot name — an interface, `any`, `unknown`, a type alias — receives `undefined` and the framework logs which parameter index it was. It does not shift the parameters after it; those keep their own values. Before 0.7.x it did shift them, silently, which is why an interface-typed parameter with resolvable parameters after it was the worst shape this could take.
+A parameter the container cannot name — an interface, `any`, `unknown`, a type alias — receives `undefined` and the framework logs which parameter index it was. It does not shift the parameters after it; those keep their own values. Up to and including 0.7.x it did shift them, silently, which is why an interface-typed parameter with resolvable parameters after it was the worst shape this could take; 0.8.0 is where that stopped.
+
+This is about the ARGUMENT the constructor receives. The `design:paramtypes` entry for that same
+parameter is `Object`, not `undefined` — see
+[Auditing constructor parameters](#auditing-constructor-parameters) before writing a sweep over
+your own codebase.
 :::
 
 **Example:**
@@ -1316,8 +1321,53 @@ function getServiceTag<T>(serviceClass: new (...args: unknown[]) => T): Context.
 Manually register constructor dependencies (fallback method).
 
 ```typescript
-function registerDependencies(target: Function, dependencies: Function[]): void;
+function registerDependencies(target: Function, dependencies: (Function | undefined)[]): void;
 ```
+
+### Auditing constructor parameters {#auditing-constructor-parameters}
+
+```typescript
+function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined;
+function isInjectableParamType(type: Function | undefined): type is Function;
+```
+
+`getConstructorParamTypes` returns the array **positionally intact**: entry `i` describes
+parameter `i`. It returns `undefined` only when no metadata was emitted at all.
+
+An entry is `undefined` when the slot held something that is not a constructor. It is **not**
+`undefined` for a parameter typed as an interface: Bun's `emitDecoratorMetadata` emits every type
+reference as `typeof X === "undefined" ? Object : X`, so an interface, a type alias, `any`,
+`unknown` and a reference broken by a circular import all arrive as `Object`. An audit spelled
+`types.filter((type) => type === undefined)` therefore reports zero holes on every application
+ever written.
+
+`isInjectableParamType` is the predicate the container itself uses, exported so the audit asks the
+framework instead of guessing:
+
+```typescript
+import { getConstructorParamTypes, isInjectableParamType } from '@onebun/core';
+
+const types = getConstructorParamTypes(MyService) ?? [];
+const holes = types.flatMap((type, index) => (isInjectableParamType(type) ? [] : [index]));
+```
+
+Two things it deliberately does not do. It does not say **why** a slot is unusable — `Object`
+cannot be told apart from `any` or a circular import — and it does not treat `Function`, `Array`,
+`Symbol`, `Date`, `Map` or `Set` as holes: each of those reaches the resolver and raises a loud
+`DependencyResolutionError` at startup, and calling them holes here would convert those failures
+into silent `undefined` injections. The non-injectable set is exactly `Object`, `String`, `Number`
+and `Boolean`.
+
+A hole is only harmful when a **later** parameter resolves — that is the shape where the later
+dependency used to slide into the hole's slot. The framework warns about exactly that case at
+startup; see [capturing framework logs](/testing#capturing-framework-logs) for reading the warning
+from a test. A parameter named by `@Inject(TOKEN)` still shows as `Object` here, because the token
+lives in a side map keyed by parameter index, not in `design:paramtypes`.
+
+Use the top-level `getConstructorParamTypes`, not `Reflect.getConstructorParamTypes`. The one on
+the `Reflect` namespace is the raw metadata reader and does not merge `@Inject(ConcreteClass)`, so
+an audit written against it reports a hole for every parameter that an explicit `@Inject` already
+answered.
 
 ## Complete Example
 

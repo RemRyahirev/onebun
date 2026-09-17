@@ -118,6 +118,9 @@ export class MultiServiceOrchestrator<TServices extends ServicesMap = ServicesMa
       middleware: serviceOptions.middleware ?? appOptions.middleware,
       metrics: { ...appOptions.metrics, ...serviceOptions.metrics },
       tracing: { ...appOptions.tracing, ...serviceOptions.tracing },
+      // Per service on purpose: a public intake and an internal worker are two listeners in
+      // one process, and the whole point of the option is that they want different numbers.
+      maxRequestBodySize: serviceOptions.maxRequestBodySize ?? appOptions.maxRequestBodySize,
     };
   }
 
@@ -224,6 +227,7 @@ export class MultiServiceOrchestrator<TServices extends ServicesMap = ServicesMa
           serviceName: name,
         },
         queue: resolvedQueue,
+        maxRequestBodySize: mergedOptions.maxRequestBodySize,
         static: mergedOptions.static ?? serviceConfig.static,
         // Never on a child. Each child's handler ended in process.exit(0), so the first
         // service to finish stopping killed the process while its siblings were still

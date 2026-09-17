@@ -13,17 +13,24 @@ import {
 import { Effect } from 'effect';
 
 import type { CompiledTestingModule } from './testing-module';
+import type { OneBunRequest, OneBunResponse } from '../types';
 
 import {
   Controller,
   Get,
+  Middleware,
   Module,
   Param,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
+import { BaseMiddleware } from '../module/middleware';
 import { BaseService, Service } from '../module/service';
 
-import { createTestController, createTestService } from './service-helpers';
+import {
+  createTestController,
+  createTestMiddleware,
+  createTestService,
+} from './service-helpers';
 import {
   createMockConfig,
   createMockLogger,
@@ -88,6 +95,26 @@ class AuditController extends BaseController {
     this.logger.info('audited user', { id });
 
     return `${String(this.config.get('audit.prefix'))}:${user.name}`;
+  }
+}
+
+/** The documented middleware shape: an injected dependency, `this.config` and `this.logger`. */
+@Middleware()
+class AdminAuthMiddleware extends BaseMiddleware {
+  constructor(private readonly authService: { verify: (token: string) => boolean }) {
+    super();
+  }
+
+  async use(req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+    const token = req.headers.get('x-admin-token') ?? '';
+
+    if (token !== String(this.config.get('admin.token')) || !this.authService.verify(token)) {
+      this.logger.warn('admin request refused', { token });
+
+      return new Response('Unauthorized', { status: 401 });
+    }
+
+    return await next();
   }
 }
 
@@ -184,6 +211,59 @@ describe('docs/testing.md — createTestController', () => {
     ]);
     expect((logger.error as ReturnType<typeof mock>).mock.calls).toHaveLength(0);
     expect(logger.child({ context: 'x' })).toBe(logger);
+  });
+});
+
+// ============================================================================
+// createTestMiddleware — docs/testing.md
+// ============================================================================
+
+describe('docs/testing.md — createTestMiddleware', () => {
+  const nextOk = async (): Promise<OneBunResponse> => new Response('ok', { status: 200 });
+  const request = (token?: string): OneBunRequest => new Request('http://localhost/admin', {
+    headers: token === undefined ? undefined : new Headers([['x-admin-token', token]]),
+  }) as unknown as OneBunRequest;
+
+  /**
+   * @source docs:testing.md#createtestmiddleware
+   */
+  it('the config and logger the helper returns are the ones the middleware uses', async () => {
+    const verify = mock((_token: string) => true);
+    const { instance, logger } = createTestMiddleware(AdminAuthMiddleware, {
+      deps: [{ verify }],
+      /* eslint-disable @typescript-eslint/naming-convention */
+      config: { 'admin.token': 'secret' },
+      /* eslint-enable @typescript-eslint/naming-convention */
+    });
+
+    const allowed = await instance.use(request('secret'), nextOk);
+    const refused = await instance.use(request('wrong'), nextOk);
+
+    // `this.config.get('admin.token')` inside the middleware answers what the helper was given.
+    expect(allowed.status).toBe(200);
+    expect(refused.status).toBe(401);
+    expect(verify.mock.calls).toEqual([['secret']]);
+    // `this.logger` is the returned mock, so a test can assert what the middleware logged.
+    expect((logger.warn as ReturnType<typeof mock>).mock.calls).toEqual([
+      ['admin request refused', { token: 'wrong' }],
+    ]);
+  });
+
+  /**
+   * @source docs:testing.md#createtestmiddleware
+   */
+  it('refuses a config option the target class cannot receive', () => {
+    class NotAFrameworkClass {
+      ping(): string {
+        return 'pong';
+      }
+    }
+
+    expect(() => createTestMiddleware(NotAFrameworkClass, {
+      /* eslint-disable @typescript-eslint/naming-convention */
+      config: { 'admin.token': 'nowhere-to-go' },
+      /* eslint-enable @typescript-eslint/naming-convention */
+    })).toThrow(/was given a `config` option/);
   });
 });
 

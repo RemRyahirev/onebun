@@ -1035,6 +1035,32 @@ describe('OneBunApplication', () => {
       expect(serveCall[0].idleTimeout).toBe(0);
     });
 
+    test('should pass maxRequestBodySize to Bun.serve', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule, { maxRequestBodySize: 1024 });
+      await app.start();
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serveCall = (Bun.serve as any).mock.calls[0];
+      expect(serveCall[0].maxRequestBodySize).toBe(1024);
+    });
+
+    test('should omit maxRequestBodySize entirely when it is not configured', async () => {
+      @Module({})
+      class TestModule {}
+
+      const app = createTestApp(TestModule);
+      await app.start();
+
+      // Absent, not `undefined`: Bun's own 128 MiB default is what "unset" means, and a
+      // present-but-undefined key is indistinguishable from a deliberate zero downstream.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const serveCall = (Bun.serve as any).mock.calls[0];
+      expect('maxRequestBodySize' in serveCall[0]).toBe(false);
+    });
+
     test('should start application with config initialization', async () => {
       @Module({})
       class TestModule {}

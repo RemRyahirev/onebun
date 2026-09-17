@@ -2417,6 +2417,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         hostname: this.options.host,
         // Idle timeout (seconds) — default 120s to support SSE and long-running requests
         idleTimeout: this.options.idleTimeout ?? DEFAULT_IDLE_TIMEOUT,
+        // Body cap, enforced by Bun on the headers — before routing, before middleware, before
+        // the body is read. Left off the object entirely when unset: passing `undefined` would
+        // be indistinguishable from a deliberate zero to anything that later reads it back, and
+        // Bun's own 128 MiB default is what "unset" has always meant here.
+        ...(this.options.maxRequestBodySize === undefined
+          ? {}
+          : { maxRequestBodySize: this.options.maxRequestBodySize }),
         // WebSocket handlers
         websocket: wsHandlers,
         // Bun routes API: all endpoints are handled here

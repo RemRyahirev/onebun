@@ -67,41 +67,93 @@ export class MemoryRateLimitStore implements RateLimitStore {
 // ============================================================================
 
 /**
+ * Options for `RedisRateLimitStore`.
+ *
+ * @see docs:api/security.md
+ */
+export interface RedisRateLimitStoreOptions {
+  /**
+   * Namespace every counter key of this store lives under.
+   *
+   * Two applications pointed at one Redis share a keyspace, and with a fixed prefix they also
+   * share buckets: a caller's requests to one of them spend the other's budget. Give each
+   * application its own prefix when the Redis is shared.
+   *
+   * @defaultValue 'rl:'
+   */
+  keyPrefix?: string;
+}
+
+/**
+ * The counter update, as one indivisible server-side step.
+ *
+ * `INCR` is the whole primitive a limiter needs — it is atomic and returns the new value — but
+ * the first increment of a window must also arm the expiry, and the caller needs the deadline
+ * back. A GET-then-SET pair from the client cannot do that without a window between the two in
+ * which another replica increments the same key: both read `n`, both write `n + 1`, and one
+ * request is never counted. That loss is not an edge case for THIS store — sharing one budget
+ * across replicas is the only reason to choose it over `MemoryRateLimitStore`, so concurrent
+ * increments are its normal traffic, and the undercount lets more through than `max`.
+ *
+ * `PTTL` before the write is what makes the deadline stable: an increment must extend nothing,
+ * or a caller that keeps knocking never reaches the end of the window.
+ *
+ * The `tonumber(...) == nil` branch covers a key holding a value this script did not write —
+ * releases up to 0.8.0 stored JSON under the same prefix, and `INCR` on it would raise an error
+ * for the length of one window after an upgrade. Such a key starts a fresh window instead.
+ */
+const INCREMENT_SCRIPT = `
+local pttl = redis.call('PTTL', KEYS[1])
+local window = tonumber(ARGV[1])
+
+if pttl < 0 or tonumber(redis.call('GET', KEYS[1]) or '') == nil then
+  redis.call('SET', KEYS[1], '1', 'PX', window)
+
+  return { 1, window }
+end
+
+return { redis.call('INCR', KEYS[1]), pttl }
+`;
+
+const DEFAULT_KEY_PREFIX = 'rl:';
+
+/**
  * Redis-backed rate limit store.
- * Atomic via Lua script — safe for multi-instance deployments.
- * Requires a connected `RedisClient`.
+ *
+ * Counts with a Lua script, so the read-modify-write is one indivisible server-side step and
+ * concurrent increments from different replicas cannot lose each other's updates — which is the
+ * guarantee this store exists to provide. Requires a connected `RedisClient`.
+ *
+ * Keys are namespaced `rl:` by default; `keyPrefix` separates applications sharing one Redis.
+ *
+ * @example
+ * ```typescript
+ * new RedisRateLimitStore(redis, { keyPrefix: 'intake:rl:' })
+ * ```
  *
  * @see docs:api/security.md
  */
 export class RedisRateLimitStore implements RateLimitStore {
-  constructor(private readonly redis: RedisClient) {}
+  private readonly keyPrefix: string;
+
+  constructor(
+    private readonly redis: RedisClient,
+    options: RedisRateLimitStoreOptions = {},
+  ) {
+    this.keyPrefix = options.keyPrefix ?? DEFAULT_KEY_PREFIX;
+  }
 
   async increment(key: string, windowMs: number): Promise<{ count: number; resetAt: number }> {
-    // Use a simple get/set approach; for true atomicity a Lua script would be needed,
-    // but this is sufficient for typical rate limiting use-cases.
-    const raw = await this.redis.get(`rl:${key}`);
-    const now = Date.now();
+    // `PX 0` is an error in Redis, where a zero-length window is merely a window that has
+    // already elapsed — the memory store answers the same way, with a fresh count every call.
+    const windowPx = Math.max(1, Math.floor(windowMs));
+    const [count, remainingMs] = await this.redis.runScript<[number, number]>(
+      INCREMENT_SCRIPT,
+      [`${this.keyPrefix}${key}`],
+      [String(windowPx)],
+    );
 
-    if (raw !== null) {
-      const { count, resetAt } = JSON.parse(raw) as { count: number; resetAt: number };
-
-      if (resetAt > now) {
-        const newCount = count + 1;
-        await this.redis.set(
-          `rl:${key}`,
-          JSON.stringify({ count: newCount, resetAt }),
-          resetAt - now,
-        );
-
-        return { count: newCount, resetAt };
-      }
-    }
-
-    // Key expired or does not exist — start a new window
-    const resetAt = now + windowMs;
-    await this.redis.set(`rl:${key}`, JSON.stringify({ count: 1, resetAt }), windowMs);
-
-    return { count: 1, resetAt };
+    return { count: Number(count), resetAt: Date.now() + Number(remainingMs) };
   }
 }
 

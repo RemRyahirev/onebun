@@ -20,6 +20,7 @@ export {
   RedisRateLimitStore,
   type RateLimitOptions,
   type RateLimitStore,
+  type RedisRateLimitStoreOptions,
 } from './rate-limit-middleware';
 export {
   SecurityHeadersMiddleware,
