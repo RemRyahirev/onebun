@@ -43,6 +43,7 @@ import {
   inRootTraceScope,
   nackedError,
   resolveAckMode,
+  retryDelayMs,
   tracksDelivery,
   wasNacked,
   type NackAwareMessage,
@@ -713,7 +714,9 @@ class JetStreamSubscription implements Subscription {
  * - Scheduled jobs (via in-process scheduler)
  * - Dead letter queue support — `deadLetter.queue` must be a literal subject bound by a
  *   declared stream, and `deadLetter.maxRetries` feeds `max_deliver` behind `retry.attempts`
- * - Retry with acknowledgment
+ * - Retry with acknowledgment — `retry.attempts` becomes the consumer's `max_deliver`, and
+ *   `retry.backoff`/`retry.delay` become the delay carried by the nak, so the wait between
+ *   attempts is the same ladder the memory and Redis adapters compute
  * - Message persistence
  *
  * Not supported:
@@ -2082,7 +2085,20 @@ export class JetStreamQueueAdapter implements QueueAdapter {
             if (toDeadLetter !== undefined && (msg.info?.deliveryCount ?? 1) >= entry.resolved.maxDeliver) {
               await toDeadLetter(error as Error);
             } else {
-              msg.nak();
+              // The wait between attempts travels WITH the nak, because the server decides
+              // when a nak'd message comes back and there is nowhere else to put it. Same
+              // `retryDelayMs` the memory and Redis adapters call, so `backoff`/`delay` mean
+              // one thing across the three adapters that honour them rather than three.
+              //
+              // The consumer's own `backoff` field is deliberately not used: JetStream's
+              // backoff list REPLACES `ack_wait` per delivery, so a one-second base delay
+              // would also cut the handler's acknowledgement window to one second — it is a
+              // redelivery timescale, not a pause, and it would silently override `ackTimeout`.
+              //
+              // A subscription with no `retry` yields 0, and the client's `nak(millis)` tests
+              // the argument for truthiness: `nak(0)` puts the same bare `-NAK` on the wire
+              // that `nak()` does, so the unconfigured path is unchanged byte for byte.
+              msg.nak(retryDelayMs(entry.options?.retry, msg.info?.deliveryCount ?? 1));
             }
           }
 

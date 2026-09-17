@@ -249,6 +249,40 @@ describe('JetStreamQueueAdapter Integration', () => {
     expect(attempts).toBe(3);
   }, CASE_TIMEOUT_MS);
 
+  it('paces redeliveries with the declared backoff, not with ack_wait', async () => {
+    // The gaps are the whole claim, and only the broker produces them. `ack_wait` here is
+    // the 30-second default, so a nak carrying no delay redelivers at once and a nak whose
+    // delay were dropped would not come back inside this test at all — the two failure
+    // modes this replaces are both visible in the timings rather than in a mock's arguments.
+    const js = makeAdapter('ITEST_BACKOFF', ['backoff.>']);
+    await js.connect();
+
+    const arrivals: number[] = [];
+
+    await js.subscribe(
+      'backoff.flaky',
+      async () => {
+        arrivals.push(Date.now());
+        throw new Error('handler failed');
+      },
+      { group: 'itest-backoff', retry: { attempts: 3, backoff: 'exponential', delay: 400 } },
+    );
+
+    await js.publish('backoff.flaky', { n: 1 });
+    await pollUntil(() => arrivals.length >= 3);
+
+    const firstGap = arrivals[1]! - arrivals[0]!;
+    const secondGap = arrivals[2]! - arrivals[1]!;
+
+    // 400ms then 800ms, with room for the round trip in either direction.
+    expect(firstGap).toBeGreaterThanOrEqual(350);
+    expect(firstGap).toBeLessThan(1_000);
+    expect(secondGap).toBeGreaterThanOrEqual(750);
+    expect(secondGap).toBeLessThan(1_600);
+    // The ladder climbs: the second wait is a doubling, not a repeat of the first.
+    expect(secondGap).toBeGreaterThan(firstGap + 200);
+  }, CASE_TIMEOUT_MS);
+
   it('reconciles a changed consumer config and no-ops on an unchanged one', async () => {
     const js = makeAdapter('ITEST_RECONCILE', ['reconcile.>']);
     await js.connect();

@@ -157,12 +157,22 @@ On JetStream `prefetch` becomes the consumer's `max_ack_pending` and also caps t
 `retry.attempts` becomes `max_deliver`, and `ackTimeout` becomes `ack_wait`; all three override the
 adapter-level `consumerConfig`.
 
-On the memory and Redis adapters `retry.attempts` is the total number of deliveries under
-`ackMode: 'auto'`, defaulting to 1 — an unconfigured subscription still delivers once. `backoff`
-uses the same formulas as `@onebun/requests`: fixed `delay`, `delay * n`, `delay * 2^(n-1)`, with
-`delay` defaulting to 100 ms. Redis carries the counter in the queued envelope and parks a delayed
-retry in its `queue:delayed` sorted set, so both survive a restart; memory keeps them in process.
-Manual `nack(true)` is uncapped on every adapter — read `message.attempt` to stop yourself.
+`retry.attempts` is the total number of deliveries under `ackMode: 'auto'`, defaulting to 1 — an
+unconfigured subscription still delivers once. `backoff` uses the same formulas as
+`@onebun/requests`: fixed `delay`, `delay * n`, `delay * 2^(n-1)`, with `delay` defaulting to
+100 ms. All three fields are honoured by the memory, Redis and JetStream adapters, through one
+shared `retryDelayMs`; core NATS tracks no delivery state and honours none of them.
+
+Where the wait is held differs: memory sleeps in process, Redis parks the retry in its
+`queue:delayed` sorted set (so it survives a restart, and the counter rides in the queued
+envelope), and JetStream sends the delay with the nak so the server holds the message. On
+JetStream this means a delivery that expires at `ack_wait` instead — a handler that hangs, a
+process that dies — comes back at `ack_wait`, since nothing nak'd it. The consumer's native
+`backoff` field is deliberately not written: JetStream's backoff list REPLACES `ack_wait` per
+delivery, so a 1 s base delay there would also cut the handler's acknowledgement window to 1 s.
+
+Manual `nack(true)` is uncapped and undelayed on every adapter — it is the handler's instruction,
+not the framework's policy; read `message.attempt` to stop yourself.
 
 Under 'none' there is no redelivery and no dead-letter routing on any adapter. `retry`, `deadLetter`,
 `ack_wait`, `max_deliver` and the `attempt`/`maxAttempts`/`redelivered` fields all go inert with it;
@@ -618,7 +628,9 @@ Key JetStream behaviors:
   configured stream subjects
 - **Ack modes**: both `auto` and `manual` use `AckPolicy.Explicit` — acknowledgements are always
   tracked server-side. `ackMode` selects *who* acknowledges, never whether the server tracks
-  acknowledgements at all: `auto` acks on the handler's behalf (and `nak`s when it throws),
+  acknowledgements at all: `auto` acks on the handler's behalf (and `nak`s when it throws, with
+  `retryDelayMs(retry, deliveryCount)` as the nak's delay — 0, the bare `-NAK`, when no `retry`
+  is declared),
   `manual` leaves it to the handler's `message.ack()` / `message.nack()`. Without an explicit
   policy `ack_wait`, `max_deliver`, `max_ack_pending`, `retry` and the dead-letter queue are all
   inert and a throwing handler is never redelivered

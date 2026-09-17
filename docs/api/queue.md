@@ -286,12 +286,13 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 **Technical details for AI agents — the retry policy under `'auto'`:**
-- `resolveMaxAttempts` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory and Redis adapters call both. Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent, which is what an unconfigured subscription has always done. `attempts < 1` is raised to 1: a subscription that never fires is not a retry policy
+- `resolveMaxAttempts` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory and Redis adapters call both, and the JetStream adapter calls `retryDelayMs` (its cap is the consumer's `max_deliver`, resolved from `retry.attempts` in `resolveConsumerConfig`). Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent, which is what an unconfigured subscription has always done. `attempts < 1` is raised to 1: a subscription that never fires is not a retry policy
 - `attempts` counts TOTAL deliveries, not extra ones, matching the `attempt >= maxAttempts` comparison the documented recipe already uses. `attempt` is 1-based, `redelivered` is `attempt > 1`
 - Backoff formulas are the same three `@onebun/requests` ships: `fixed` -> `delay`, `linear` -> `delay * n`, `exponential` -> `delay * 2^(n-1)`, where `n` is the 1-based attempt that just failed. `delay` defaults to 100 ms
 - By contrast manual nack(true) is uncapped on both adapters — it is the handler's instruction, not the framework's policy, which is why `Message.attempt` has to be real: it is the only way a handler stops itself
 - Memory keeps the counter in the delivery closure and retries the ONE failing `SubscriptionEntry`, not `dispatch()`. Going back through `dispatch()` re-invoked every matching subscription, so one broken consumer re-ran its healthy neighbours
 - Redis keeps the counter in the persisted envelope (`attempt` on the JSON on the list) because a retry is a re-push and the replica that claims it next may not be the one that failed; an in-process counter would restart at 1 on every hop. A delayed retry is parked in the existing `queue:delayed` sorted set rather than awaited in a closure, so the wait survives a restart; a zero delay skips the set, which would otherwise cost a poll tick
+- JetStream keeps no counter of its own: the server's `deliveryCount` is the 1-based attempt, and the wait rides on the nak — `msg.nak(retryDelayMs(entry.options?.retry, deliveryCount))` in the consume loop's catch branch. `nak(millis)` tests its argument for truthiness, so an unconfigured subscription computes `0` and puts the same bare `-NAK` on the wire it always did. The consumer's `backoff` field is NOT written: JetStream's backoff list replaces `ack_wait` per delivery, so it would silently override `ackTimeout` with the base delay. The trade is that only a nak carries the ladder — a delivery that expires at `ack_wait` (a handler that hangs, a process that dies) returns at `ack_wait`
 - All three of `attempt`, `maxAttempts` and `redelivered` are `undefined`/`false` under `ackMode: 'none'` on both adapters — the mode tracks no delivery, so there is no attempt to number
 - Redis dead-letter cap precedence: retry.attempts ?? deadLetter.maxRetries ?? 1. `resolveMaxAttempts` takes the `deadLetter` as an optional SECOND argument and the memory adapter does not pass it — that adapter reports `supports('dead-letter-queue') === false`, so `maxRetries` there would cap a route that does not exist
 - `RedisQueueAdapter.routeToDeadLetter` republishes through the adapter's own `publish()`, so `deadLetter.queue` is a queue pattern consumable with `@Subscribe`. The `keys.deadLetter` builder and its `queue:dlq:` list are gone: nothing ever LPOPped, SCANned or subscribed to them
@@ -512,9 +513,18 @@ opt-in, so a handler with a non-idempotent side effect is never quietly upgraded
 [error-handling recipe](#error-handling-in-handlers) compares against: `message.attempt` is
 1-based, and `attempt >= maxAttempts` is the terminal delivery.
 
-Honoured by the memory, Redis and JetStream adapters. Core NATS tracks no delivery state and
-ignores it. Under `ackMode: 'none'` it goes inert on every adapter, along with `deadLetter` and
-the `attempt` / `maxAttempts` / `redelivered` fields.
+Honoured by the memory, Redis and JetStream adapters — all three fields, computed by one shared
+function, so a ladder means the same thing wherever it is declared. Core NATS tracks no delivery
+state and ignores it. Under `ackMode: 'none'` it goes inert on every adapter, along with
+`deadLetter` and the `attempt` / `maxAttempts` / `redelivered` fields.
+
+Where the wait actually happens differs, and it is worth knowing which one you are running on:
+memory sleeps in process, Redis parks the retry in its delayed sorted set, and JetStream sends the
+delay with the nak, so the server holds the message. On JetStream a delivery lost some other way —
+a handler that never returns, a process that dies — still comes back at `ack_wait`, because nothing
+nak'd it. The consumer's own `backoff` field is deliberately left alone: JetStream's backoff list
+*replaces* `ack_wait` per delivery, so writing a one-second base delay there would also cut the
+handler's acknowledgement window to one second.
 
 Retries apply to `ackMode: 'auto'`, where the framework owns the decision. Under `'manual'`,
 `nack(true)` is **uncapped** — it is your instruction, not a policy — and `message.attempt` is
@@ -1384,6 +1394,12 @@ Per-subscription options win over these defaults, field by field:
 - **`max_ack_pending`** — the rule is *prefetch overrides consumerConfig.maxAckPending*, and `100` applies when neither is set. The pull batch is the smaller of the resolved `max_ack_pending` and `prefetch` (`10` when `prefetch` is absent), so a batch can never outrun the acknowledgement window.
 - **`max_deliver`** — `retry.attempts` on `@Subscribe`, then `deadLetter.maxRetries`, override `consumerConfig.maxDeliver`, and `3` applies when none is set. `retry.attempts` stays ahead of `deadLetter.maxRetries` so every configuration that predates the dead-letter queue keeps the `max_deliver` it had.
 - **`ack_wait`** — `ackTimeout` on `@Subscribe` overrides `consumerConfig.ackWait`, and 30 seconds (`30_000_000_000` nanoseconds) applies when neither is set.
+
+`retry.backoff` and `retry.delay` reach no consumer field at all — the adapter sends the computed
+wait with the nak instead, so `ack_wait` keeps meaning "how long the handler may hold a message"
+and the backoff keeps meaning "how long before the next attempt". JetStream's native `backoff`
+conflates the two: it is a list of per-delivery `ack_wait` values, so putting the ladder there
+would shrink the acknowledgement window to the base delay.
 
 **`ackTimeout`: how long a handler may hold a message.** It is the per-subscription form of `ack_wait` — the window the server waits for an acknowledgement before it assumes the consumer died and redelivers. Mind the units: `ackTimeout` is in milliseconds, like every other duration in `@onebun/core`, while `consumerConfig.ackWait` is in nanoseconds, because it is a NATS-native value passed through untouched. The adapter converts, so `ackTimeout: 30_000` and `ackWait: 30 * 1e9` describe the same window.
 
