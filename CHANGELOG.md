@@ -1,6 +1,43 @@
 # Changelog
 
-## [0.8.1]
+## 0.8.1 — 2026-09-18
+
+### Package Versions
+
+`@onebun/core` and `@onebun/nats` move; nothing else does. A patch is released per package —
+`workspace:^` is rewritten to `^<version>` at publish time and a caret on a 0.x version pins the
+minor, so a patch drags nobody across with it. Every dependent keeps its `^0.8.0` range and resolves
+this release without a bump of its own.
+
+| Package | Previous | New |
+|---------|----------|-----|
+| `@onebun/core` | 0.8.0 | 0.8.1 |
+| `@onebun/nats` | 0.8.0 | 0.8.1 |
+
+Every other package stays at 0.8.0.
+
+### Read This First
+
+Nothing here is breaking, and no application has to change anything to take it.
+
+All eight entries come from five reports filed against 0.8.0 by one consumer, and three of them are
+the same defect wearing different clothes: an option that type-checks, reads as if it were in force,
+and reaches nothing. `retry.backoff`/`retry.delay` were honoured by two queue adapters and dropped
+by the third. `maxRequestBodySize` did not exist, so Bun's 128 MiB default was the only answer an
+application could give. The `config` option on the testing helpers was stored on a mock the instance
+never received. None of the three failed loudly, and two of them were invisible in the common case —
+which is what makes them worth a release rather than a footnote.
+
+The rate-limit fix is the one to read if you run more than one replica: `RedisRateLimitStore`
+documented itself as atomic and was not, so it undercounted in exactly the deployment it exists for.
+Measured against a real Redis, 100 concurrent requests all read the same counter and the stored
+count ended at 1.
+
+Two entries are about being able to SEE the framework: `isInjectableParamType` is the predicate the
+container uses to decide a constructor parameter names nothing resolvable, and
+`TestingModule.captureLogs()` makes a startup diagnostic something a test can assert on rather than
+something you can only read on stdout. Both exist because 0.8.0 asked consumers to audit their own
+code and gave them no honest way to do it.
 
 ### Added
 
