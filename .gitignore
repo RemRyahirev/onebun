@@ -20,6 +20,7 @@ docs/.vitepress/dist/
 CLAUDE.md
 _LAUDE.md
 .claude/
+.codex/
 .cursor/rules/
 .junie/
 .mcp.json
