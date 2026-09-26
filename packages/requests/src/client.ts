@@ -36,6 +36,52 @@ import {
 /** Methods whose body is sent, and therefore signed. */
 const BODY_CARRYING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH'];
 
+/** The statuses the client follows: the five that name a `Location` to repeat the request at. */
+const REDIRECT_STATUSES: readonly number[] = [
+  HttpStatusCode.MOVED_PERMANENTLY,
+  HttpStatusCode.FOUND,
+  HttpStatusCode.SEE_OTHER,
+  HttpStatusCode.TEMPORARY_REDIRECT,
+  HttpStatusCode.PERMANENT_REDIRECT,
+];
+
+/**
+ * How many redirects one attempt follows. The response that would be the 21st fails with
+ * `REDIRECT_ERROR` — the Fetch Standard's limit. Bun's own `fetch` allowed 127 (measured on
+ * 1.4.2), and a loop was a network error that `retryOnNetworkError` replayed: 508 requests.
+ */
+const MAX_REDIRECTS = 20;
+
+/**
+ * The only headers a redirect to ANOTHER origin carries, lower-cased. `content-type` joins them
+ * while the hop still sends a body (307/308).
+ *
+ * A safelist rather than a list of what to strip, because what to strip cannot be known: `fetch`
+ * drops only `Authorization`, `Cookie` and `Proxy-Authorization` on a cross-origin hop, while an
+ * `apikey` header can have any name, `custom` auth adds any headers its config or interceptor
+ * likes, and a credential passed through `RequestsOptions.headers` or `config.headers` is
+ * indistinguishable from any other header. Measured on 0.8.1, all of those — and
+ * `X-OneBun-Signature` — reached the other origin.
+ *
+ * What stays is what the new origin needs to answer and to join the trace.
+ */
+const CROSS_ORIGIN_HEADER_SAFELIST: readonly string[] = [
+  'user-agent',
+  'accept',
+  'accept-encoding',
+  'traceparent',
+  'x-trace-id',
+  'x-span-id',
+];
+
+/** Headers that describe a request body, lower-cased: they go when a redirect drops the body. */
+const REQUEST_BODY_HEADERS: readonly string[] = [
+  'content-type',
+  'content-encoding',
+  'content-language',
+  'content-location',
+];
+
 /**
  * Fields that mark the second argument of `get`/`delete`/`head`/`options` as a config rather than
  * query data.
@@ -246,12 +292,168 @@ const classifyTransportFailure = (
   );
 };
 
+/** The `error` name of a redirect the client could not follow. */
+const REDIRECT_ERROR = 'REDIRECT_ERROR';
+
+/** One request of a redirect chain: what is sent, and where. */
+interface RedirectHop {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | undefined;
+}
+
+/** `new URL(input, base)`, or `undefined` where the constructor throws. */
+const parseUrl = (input: string, base?: string): URL | undefined => {
+  try {
+    return new URL(input, base);
+  } catch {
+    return undefined;
+  }
+};
+
+/** The headers whose lower-cased name passes `keep`. */
+const filterHeaders = (
+  headers: Record<string, string>,
+  keep: (lowerCaseName: string) => boolean,
+): Record<string, string> =>
+  Object.fromEntries(Object.entries(headers).filter(([name]) => keep(name.toLowerCase())));
+
+/**
+ * Whether a redirect turns the request into a body-less GET — the rewrite `fetch` applies
+ * (Fetch Standard, HTTP-redirect fetch, step 12): a POST answered 301 or 302, and anything but
+ * GET or HEAD answered 303. 307 and 308 exist precisely to keep the method and the body.
+ */
+const redirectBecomesGet = (status: number, method: string): boolean => {
+  const normalized = method.toUpperCase();
+
+  if (status === HttpStatusCode.MOVED_PERMANENTLY || status === HttpStatusCode.FOUND) {
+    return normalized === HttpMethod.POST;
+  }
+
+  return status === HttpStatusCode.SEE_OTHER &&
+    normalized !== HttpMethod.GET &&
+    normalized !== HttpMethod.HEAD;
+};
+
+/**
+ * The request a redirect asks for, or a `REDIRECT_ERROR` when it cannot be followed: no
+ * `Location`, a `Location` that is not an http(s) URL, or {@link MAX_REDIRECTS} already followed.
+ * `code` is the 3xx that could not be followed.
+ *
+ * The `Location` is resolved against the URL that answered. A hop to the SAME origin (scheme, host
+ * and port) keeps every header; one to another origin keeps only
+ * {@link CROSS_ORIGIN_HEADER_SAFELIST}, plus `content-type` while the body goes along. What a hop
+ * dropped stays dropped, so a chain that comes back to the first origin does not bring the
+ * credentials back with it.
+ *
+ * An `X-OneBun-Signature` travels on a same-origin hop unchanged, and is not re-signed: it covers
+ * the original method, URL and body, so the callee rejects it for any other path — the redirect
+ * fails closed, as it did when `fetch` followed it.
+ */
+const nextRedirectHop = (
+  hop: RedirectHop,
+  response: Response,
+  redirects: number,
+  traceId?: string,
+): Effect.Effect<RedirectHop, ErrorResponse> => {
+  const location = response.headers.get('location');
+  const refuse = (reason: 'missing-location' | 'invalid-location' | 'too-many-redirects') =>
+    Effect.fail(createErrorResponse(REDIRECT_ERROR, response.status, traceId, {
+      reason,
+      status: response.status,
+      url: hop.url,
+      redirects,
+      ...(location === null ? {} : { location }),
+    }));
+
+  if (location === null) {
+    return refuse('missing-location');
+  }
+
+  const target = parseUrl(location, hop.url);
+
+  if (target === undefined || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
+    return refuse('invalid-location');
+  }
+
+  if (redirects >= MAX_REDIRECTS) {
+    return refuse('too-many-redirects');
+  }
+
+  const becomesGet = redirectBecomesGet(response.status, hop.method);
+  const body = becomesGet ? undefined : hop.body;
+  const withBodyHeaders = becomesGet
+    ? filterHeaders(hop.headers, (name) => !REQUEST_BODY_HEADERS.includes(name))
+    : hop.headers;
+  const sameOrigin = target.origin === parseUrl(hop.url)?.origin;
+  const headers = sameOrigin
+    ? withBodyHeaders
+    : filterHeaders(withBodyHeaders, (name) =>
+      CROSS_ORIGIN_HEADER_SAFELIST.includes(name) || (body !== undefined && name === 'content-type'));
+
+  return Effect.succeed({
+    url: target.href,
+    method: becomesGet ? HttpMethod.GET : hop.method,
+    headers,
+    body,
+  });
+};
+
+/**
+ * Send a request, following redirects in the client rather than in `fetch`.
+ *
+ * `fetch` follows a 3xx itself unless told otherwise, and on a hop to another origin it strips only
+ * `Authorization`, `Cookie` and `Proxy-Authorization`. Everything else went along: an `apikey`
+ * header, `custom` auth headers, `X-OneBun-Signature`, and any credential passed through
+ * `RequestsOptions.headers` or `config.headers` — a POST answered 307 re-sent its body to the other
+ * origin together with the key. So each hop is fetched with `redirect: 'manual'`, and
+ * {@link nextRedirectHop} decides what the next one carries.
+ *
+ * Every hop runs under the attempt's one `signal`, so the client-side timeout bounds the whole
+ * chain rather than each hop, and an interruption aborts whichever hop is in flight. The body of a
+ * 3xx that is followed is discarded unread.
+ */
+const fetchFollowingRedirects = (
+  hop: RedirectHop,
+  signal: AbortSignal,
+  traceId?: string,
+  redirects: number = 0,
+): Effect.Effect<Response, ErrorResponse> => pipe(
+  Effect.tryPromise({
+    try: () => fetch(hop.url, {
+      method: hop.method,
+      headers: hop.headers,
+      signal,
+      redirect: 'manual',
+      ...(hop.body === undefined ? {} : { body: hop.body }),
+    }),
+    catch: (error) => classifyTransportFailure(error, signal, traceId),
+  }),
+  Effect.flatMap((response) => {
+    if (!REDIRECT_STATUSES.includes(response.status)) {
+      return Effect.succeed(response);
+    }
+
+    return pipe(
+      Effect.sync(() => {
+        response.body?.cancel().catch(() => undefined);
+      }),
+      Effect.flatMap(() => nextRedirectHop(hop, response, redirects, traceId)),
+      Effect.flatMap((next) => fetchFollowingRedirects(next, signal, traceId, redirects + 1)),
+    );
+  }),
+);
+
 /**
  * Decide whether a failed attempt may be retried.
  *
  * The method gate comes first: a method outside the allowlist is never retried, whatever the
  * status code. Transport failures are then decided by their own flags, so `retryOn` only ever
  * matches statuses a server actually returned.
+ *
+ * A `REDIRECT_ERROR` is never retried, whatever `retryOn` lists: its `code` is the 3xx that could
+ * not be followed, and asking the same server again gets the same redirect.
  */
 const shouldRetryRequest = (
   error: unknown,
@@ -259,6 +461,10 @@ const shouldRetryRequest = (
   retryConfig: RetryConfig,
 ): boolean => {
   if (!isErrorResponse(error) || !isRetryableMethod(method, retryConfig)) {
+    return false;
+  }
+
+  if (error.error === REDIRECT_ERROR) {
     return false;
   }
 
@@ -587,11 +793,14 @@ const signOneBunIfNeeded = (
 /**
  * Execute single HTTP request attempt.
  *
- * One signal governs the whole attempt, the body included: `fetch` resolves at the headers and the
- * body is read afterwards under the same signal. It fires on the client-side timeout, and on an
- * interruption of the Effect running the attempt (`Effect.timeout`, `Effect.race`,
- * `Fiber.interrupt`). The interruption used to abandon the `fetch` without aborting it: the
- * connection stayed open, and the server went on holding it until the client's own timeout.
+ * An attempt is the whole redirect chain ({@link fetchFollowingRedirects}): the response it
+ * resolves with, and the status the metrics record, are the final hop's.
+ *
+ * One signal governs the whole attempt, every hop and the body included: `fetch` resolves at the
+ * headers and the body is read afterwards under the same signal. It fires on the client-side
+ * timeout, and on an interruption of the Effect running the attempt (`Effect.timeout`,
+ * `Effect.race`, `Fiber.interrupt`). The interruption used to abandon the `fetch` without aborting
+ * it: the connection stayed open, and the server went on holding it until the client's own timeout.
  *
  * The interruption is wired through `Effect.onInterrupt` around the whole attempt rather than
  * through the signal `Effect.tryPromise` hands to `fetch`: that signal is only live while the
@@ -613,20 +822,10 @@ const executeSingleRequest = <T, E extends string, R extends string>(
     interruption.signal,
   ]);
 
-  // Create fetch request
-  const requestInit: RequestInit = {
-    method: config.method,
-    headers,
-    signal,
-  };
-
   // One serialization, used both for the body that is sent and for the body that is signed.
   // Serializing twice would let the two diverge, and a signature over different bytes than the
   // ones on the wire is worse than no signature — it reads as protection.
   const body = serializeBody(config);
-  if (body !== undefined) {
-    requestInit.body = body;
-  }
 
   return pipe(
     // Signed HERE, inside the attempt, over the assembled request. Two reasons it cannot move
@@ -634,10 +833,16 @@ const executeSingleRequest = <T, E extends string, R extends string>(
     // needs its own timestamp and nonce — reusing one would make attempt 2 a replay of attempt 1
     // and the callee would reject it as such.
     signOneBunIfNeeded(config, mergedOptions, headers, fullUrl, body, traceId),
-    Effect.flatMap((signedHeaders) => Effect.tryPromise({
-      try: () => fetch(fullUrl, { ...requestInit, headers: signedHeaders }),
-      catch: (error) => classifyTransportFailure(error, signal, traceId),
-    })),
+    Effect.flatMap((signedHeaders) => fetchFollowingRedirects(
+      {
+        url: fullUrl,
+        method: config.method,
+        headers: signedHeaders,
+        body,
+      },
+      signal,
+      traceId,
+    )),
     Effect.flatMap((response) => {
       const responseHeaders: Record<string, string> = {};
       response.headers.forEach((value, key) => {

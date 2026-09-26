@@ -113,6 +113,22 @@ needs both or a `traceparent`.
 - **Interrupting a `*Effect` call aborts the fetch** (`Effect.timeout`, `Effect.race`, `Fiber.interrupt`),
   in either phase; the upstream sees the close at once. Up to 0.8.1 the fetch ran on until the client's own
   `timeout`. The interrupted Effect reports the interruption, not an `ErrorResponse`.
+- **Redirects are followed by the client, not by `fetch`** (`redirect: 'manual'` per hop): 301/302/303/307/308,
+  up to 20, `Location` resolved against the URL that answered. Methods change as in `fetch` (301/302 POST and
+  303 non-HEAD become a body-less GET without `Content-Type`; 307/308 keep method and body bytes). One
+  `timeout`, one abort signal and one metrics record cover the whole chain. A **same-origin** hop (scheme +
+  host + port) keeps every header, `X-OneBun-Signature` unchanged and not re-signed — so the callee rejects it
+  for another path. A hop to **any other origin** carries only `User-Agent`, `Accept`, `Accept-Encoding`,
+  `traceparent`, `X-Trace-Id`, `X-Span-Id`, plus `Content-Type` while a body goes along; `127.0.0.1` and
+  `localhost` are different origins, and a dropped header never comes back later in the chain. So no auth
+  (bearer, basic, apikey header, custom, onebun) and no header from `RequestsOptions.headers`/`config.headers`
+  reaches another origin — if it needs credentials, give it its own client. Up to 0.8.1 `fetch` followed and
+  stripped only `Authorization`/`Cookie`/`Proxy-Authorization`: the apikey header, custom auth headers, the
+  HMAC signature and caller headers leaked. A loop (21st redirect), a missing `Location` or a non-http(s) one
+  fails `REDIRECT_ERROR` with `code` = that 3xx and `details.reason`
+  `'too-many-redirects' | 'missing-location' | 'invalid-location'`; it is never retried, whatever `retryOn`
+  says (0.8.1: `FETCH_ERROR` replayed by `retryOnNetworkError` — Bun's own cap is 127 hops, so a loop cost
+  508 requests — or `HTTP_ERROR` 3xx).
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header

@@ -11,6 +11,7 @@ Package: `@onebun/requests`
 OneBun provides a unified HTTP client with:
 - Multiple authentication schemes
 - Automatic retries with configurable strategies
+- Redirects followed without taking credentials to another origin
 - Integrated tracing and metrics
 - Standardized error handling
 
@@ -570,6 +571,107 @@ const outcome = await Effect.runPromise(
 
 The interrupted Effect reports the interruption (here a `TimeoutException`), not an
 `ErrorResponse`. The Promise methods run to completion or to their own `timeout`.
+
+## Redirects
+
+The client follows `301`, `302`, `303`, `307` and `308` itself, up to **20** in one call, and
+resolves with the final response — `statusCode` is the final hop's. A relative `Location` is
+resolved against the URL that answered it. The method changes the way `fetch` changes it:
+
+| Answer | Next request |
+| --- | --- |
+| `301` or `302` to a `POST` | `GET`, without the body and without `Content-Type` |
+| `303` to anything but `GET` or `HEAD` | `GET`, without the body and without `Content-Type` |
+| `307` or `308` | the same method with the same body bytes |
+
+Any other method answered `301` or `302` keeps its method and body.
+
+The chain is one request as far as the options go. `timeout` bounds all of its hops together, not
+each one. Interrupting the Effect aborts whichever hop is in flight. A retry replays the chain from
+the original URL. The metrics sink gets one record for the chain, not one per hop, with the
+original URL and the final status.
+
+### Credentials stay with their origin {#redirect-headers}
+
+A hop to the **same origin** — same scheme, host and port — carries every header of the original
+request. A hop to **any other origin** carries only these:
+
+- `User-Agent`, `Accept` and `Accept-Encoding`
+- `traceparent`, `X-Trace-Id` and `X-Span-Id`
+- `Content-Type`, while the hop still sends a body (`307`, `308`)
+
+Every other header is dropped. That covers `Authorization` (bearer and basic), the `apikey` header,
+`custom` auth headers, `X-OneBun-Signature`, `Cookie` and `Proxy-Authorization`. It also covers
+every header set through `RequestsOptions.headers` or `config.headers`, credential or not, such as
+`Accept-Language` or `X-Request-Id`. `127.0.0.1` and `localhost` are different origins, and so
+are two ports of one host. A header a hop dropped stays dropped, even when the chain comes back
+to the first origin.
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const api = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  auth: { type: 'apikey', key: 'X-Api-Key', value: apiKey },
+});
+
+// /v1/files/42 answers 302 to https://cdn.example.net/files/42. The CDN request carries
+// User-Agent, Accept and the trace headers, never X-Api-Key.
+const file = await api.get('/v1/files/42');
+```
+
+If the other origin needs credentials, call it with a client of its own.
+
+`onebun` auth signs the original method, URL and body. A same-origin hop carries the signature as
+it was — it is not re-signed — so the callee rejects it for any other path with
+`signature-mismatch`. Call the final URL directly. An `apikey` with `location: 'query'` is part of
+the URL, so whether it reaches the next hop depends on whether the redirecting server's
+`Location` repeats it.
+
+### REDIRECT_ERROR {#redirect-error}
+
+A redirect the client cannot follow fails with `REDIRECT_ERROR`, and `code` is the `3xx` that
+could not be followed. It is never retried, whatever `retryOn` lists: asking again gets the same
+redirect.
+
+```typescript
+import { Effect } from '@onebun/core';
+
+const outcome = await Effect.runPromise(Effect.either(client.getEffect('/files/42')));
+
+if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
+  outcome.left.code;               // the 3xx that could not be followed, e.g. 302
+  outcome.left.details?.reason;    // 'too-many-redirects' | 'missing-location' | 'invalid-location'
+  outcome.left.details?.location;  // the Location header, when there was one
+  outcome.left.details?.redirects; // how many redirects this call had followed
+}
+```
+
+- `too-many-redirects` — the answer that would have been the 21st redirect
+- `missing-location` — a `301`, `302`, `303`, `307` or `308` without a `Location`
+- `invalid-location` — a `Location` that is not a URL, or not an `http:` or `https:` one
+
+Any other `3xx` is an answer, not a redirect, and its `Location` is not followed — a `304`, for
+one, resolves as a success (see [Responses without a body](#responses-without-a-body)).
+
+<llm-only>
+
+Up to 0.8.1 `fetch` followed redirects itself. On a hop to another origin it dropped only
+`Authorization`, `Cookie` and `Proxy-Authorization`, so the `apikey` header, `custom` auth
+headers, `X-OneBun-Signature` and every caller-set header reached the other origin, and a `POST`
+answered `307` re-sent its body there together with the key. The service client inherited this
+through `RequestsOptions`. Code that relied on a credential reaching a redirect target on another
+origin now gets the target's 401: call that origin with its own client.
+
+A redirect that cannot be followed failed under other names. A redirect loop, and a `Location`
+that was not an http(s) URL, were a `FETCH_ERROR` (`'network'`), which `retryOnNetworkError`
+replayed. Bun's `fetch`
+follows up to 127 redirects, so under the default config a loop cost four attempts of 127 requests
+each — 508 requests. A redirect status without a `Location` was an `HTTP_ERROR` with the 3xx as
+`code`, which `retryOn` could replay. All three are now `REDIRECT_ERROR`, sent once — a loop costs
+21 requests.
+
+</llm-only>
 
 ## Request Configuration
 

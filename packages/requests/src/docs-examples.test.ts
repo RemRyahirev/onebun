@@ -26,6 +26,7 @@ import {
   DEFAULT_RETRY_CONFIG,
   DEFAULT_RETRY_DELAY,
   HttpStatusCode,
+  type RequestMetricsData,
   setTraceContextProvider,
   TRANSPORT_FAILURE_CODE,
 } from './';
@@ -751,6 +752,217 @@ describe('Requests API Documentation Examples', () => {
         expect(aborted[0]! - startedAt).toBeLessThan(1000);
       } finally {
         server.stop(true);
+      }
+    });
+  });
+
+  describe('Redirects (docs/api/requests.md)', () => {
+    interface Arrival {
+      method: string;
+      path: string;
+      body: string;
+      headers: Headers;
+    }
+
+    /**
+     * `/go/<status>?to=<url>` answers `<status>` with that `Location` (none without `to`), `/loop`
+     * redirects to itself,
+     * `/chain/<n>` redirects `n` times and then answers 201; anything else answers 200.
+     */
+    function startRedirectServer(): { origin: string; port: number; arrivals: Arrival[]; stop(): void } {
+      const arrivals: Arrival[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          arrivals.push({
+            method: req.method, path: url.pathname, body: await req.text(), headers: req.headers, 
+          });
+          const [, route, arg] = url.pathname.split('/');
+
+          if (route === 'go') {
+            const to = url.searchParams.get('to');
+
+            return new Response(null, { status: Number(arg), headers: to === null ? {} : { location: to } });
+          }
+          if (route === 'loop') {
+            return new Response(null, { status: 302, headers: { location: '/loop' } });
+          }
+          if (route === 'chain' && Number(arg) > 0) {
+            return new Response(null, { status: 302, headers: { location: `/chain/${Number(arg) - 1}` } });
+          }
+
+          return Response.json({ at: url.pathname }, { status: route === 'chain' ? 201 : 200 });
+        },
+      });
+
+      return {
+        origin: `http://127.0.0.1:${server.port}`,
+        port: server.port!,
+        arrivals,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#redirects
+     */
+    it('should follow a redirect and change the method the way fetch does', async () => {
+      // From docs: "301 or 302 to a POST → GET, without the body and without Content-Type ...
+      // 307 or 308 → the same method with the same body bytes"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin });
+
+        const moved = await client.post('/go/302?to=%2Ftarget', { n: 1 });
+        const kept = await client.post('/go/307?to=%2Ftarget', { n: 1 });
+        // "Any other method answered 301 or 302 keeps its method and body"
+        await client.put('/go/301?to=%2Ftarget', { n: 1 });
+
+        expect(moved.success && moved.statusCode).toBe(200);
+        expect(kept.success && kept.statusCode).toBe(200);
+        const targets = server.arrivals.filter((arrival) => arrival.path === '/target');
+        expect(targets.map((arrival) => [arrival.method, arrival.body])).toEqual([
+          ['GET', ''],
+          ['POST', '{"n":1}'],
+          ['PUT', '{"n":1}'],
+        ]);
+        expect(targets[0].headers.get('content-type')).toBeNull();
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirects
+     */
+    it('should record the chain once, with the original URL and the final status', async () => {
+      // From docs: "The metrics sink gets one record for the chain, not one per hop, with the
+      // original URL and the final status"
+      const server = startRedirectServer();
+      const records: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, metricsSink: (data) => records.push(data) });
+
+        await client.get('/chain/2');
+
+        expect(server.arrivals).toHaveLength(3);
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({ url: `${server.origin}/chain/2`, statusCode: 201 });
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-headers
+     */
+    it('should take no credential to another origin, and only the safelisted headers', async () => {
+      // From docs: "/v1/files/42 answers 302 to https://cdn.example.net/files/42. The CDN request
+      // carries User-Agent, Accept and the trace headers, never X-Api-Key." — `localhost` is
+      // another origin than `127.0.0.1`, on the same socket.
+      const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const spanId = '00f067aa0ba902b7';
+      setTraceContextProvider(() => ({ traceId, spanId }));
+      const server = startRedirectServer();
+
+      try {
+        const api = createHttpClient({
+          baseUrl: server.origin,
+          auth: { type: 'apikey', key: 'X-Api-Key', value: 'secret' },
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'X-Request-Id': 'req-1', 'Accept-Language': 'en' },
+        });
+
+        await api.get('/go/302', { to: `http://localhost:${server.port}/files/42` });
+
+        const [original, cdn] = server.arrivals;
+        expect(original.headers.get('x-api-key')).toBe('secret');
+        expect(cdn.path).toBe('/files/42');
+        expect(cdn.headers.get('x-api-key')).toBeNull();
+        // "credential or not, such as Accept-Language or X-Request-Id"
+        expect(cdn.headers.get('x-request-id')).toBeNull();
+        expect(cdn.headers.get('accept-language')).toBeNull();
+        expect(cdn.headers.get('user-agent')).toBe('OneBun-Requests/1.0');
+        expect(cdn.headers.get('accept')).toBe('application/json');
+        expect(cdn.headers.get('traceparent')).toBe(`00-${traceId}-${spanId}-01`);
+        expect(cdn.headers.get('x-trace-id')).toBe(traceId);
+        expect(cdn.headers.get('x-span-id')).toBe(spanId);
+      } finally {
+        setTraceContextProvider(null);
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-headers
+     */
+    it('should carry every header to the same origin, the signature unchanged', async () => {
+      // From docs: "A hop to the same origin — same scheme, host and port — carries every header of
+      // the original request" and "A same-origin hop carries the signature as it was"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.origin,
+          auth: {
+            type: 'onebun', serviceId: 'orders-service', secretKey: 's'.repeat(40), audience: 'billing', 
+          },
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'X-Request-Id': 'req-1' },
+        });
+
+        await client.get('/go/307', { to: `${server.origin}/moved` });
+
+        const [original, moved] = server.arrivals;
+        expect(moved.path).toBe('/moved');
+        expect(Object.fromEntries(moved.headers)).toEqual(Object.fromEntries(original.headers));
+        expect(moved.headers.get('x-onebun-signature')).toStartWith('v=1;svc=orders-service;');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-error
+     */
+    it('should fail a redirect it cannot follow with REDIRECT_ERROR, sent once', async () => {
+      // From docs: "code is the 3xx that could not be followed. It is never retried, whatever
+      // retryOn lists"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, retries: { retryOn: [302] } });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/loop')));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
+          expect(outcome.left.code).toBe(302);
+          expect(outcome.left.details?.reason).toBe('too-many-redirects');
+          expect(outcome.left.details?.location).toBe('/loop');
+          expect(outcome.left.details?.redirects).toBe(20);
+        }
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('REDIRECT_ERROR');
+        // "the answer that would have been the 21st redirect": 21 requests, no retry
+        expect(server.arrivals).toHaveLength(21);
+
+        server.arrivals.length = 0;
+        const missing = await Effect.runPromise(Effect.either(client.getEffect('/go/303')));
+        const invalid = await Effect.runPromise(
+          Effect.either(client.getEffect('/go/308', { to: 'ftp://127.0.0.1/file' })),
+        );
+
+        expect(missing._tag === 'Left' && [missing.left.code, missing.left.details?.reason])
+          .toEqual([303, 'missing-location']);
+        expect(invalid._tag === 'Left' && [invalid.left.code, invalid.left.details?.reason])
+          .toEqual([308, 'invalid-location']);
+        expect(server.arrivals).toHaveLength(2);
+      } finally {
+        server.stop();
       }
     });
   });
