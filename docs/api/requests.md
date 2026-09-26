@@ -850,6 +850,52 @@ Three mistakes this section exists to prevent, all of which typecheck-clean code
 
 </llm-only>
 
+### Path parameter values {#service-client-path-values}
+
+A path parameter value fills exactly one segment of the route, and it is inserted **as is, without
+encoding**. A value that would make the request reach a different route is refused: the call rejects
+with a `TypeError` naming the controller, the method and the parameter, and no request is made. Sent,
+such a value would carry this client's credentials to that other route — `'../admin/secret'` as a
+user id used to read `GET /admin/secret`.
+
+| Refused value | What it would have done |
+|---|---|
+| `null`, `undefined` | sent the text `null` / `undefined` as the id |
+| contains `/`, `\`, `?` or `#` | ended the segment: the rest became more path, a query string or a fragment. A URL parser treats `\` like `/` |
+| `''`, `.`, `..` | an empty segment or a dot segment: `''` and `.` reached the sibling route (`GET /users/`), `..` climbed one level |
+| `%2e` for a dot: `%2e`, `%2e%2e`, `.%2E`, `%2E.` | the same as `.` and `..`: the URL parser reads `%2e` as a dot |
+| one of the above with a tab or newline inside (`'.\t.'`) or whitespace at the end (`'.. '`) | the same again: the URL parser deletes tabs and newlines, and trims the end of the URL, before it looks for dot segments |
+
+Every other value is sent unchanged, so a value that already routed correctly still does. To send a
+value that contains `/`, `?`, `#` or `\`, percent-encode it: the router decodes the segment, and the
+handler receives the original text.
+
+```typescript
+// Sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+const member = await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
+
+// Rejects with a TypeError and sends nothing:
+// UsersController.findById: path parameter "id" contains "/", which ends a path segment, ...
+await usersClient.UsersController.findById('team/alice');
+```
+
+`encodeURIComponent` leaves `.` alone, so `.` and `..` cannot be sent as a path segment at all. Pass
+such a value as a `@Query` parameter or in the `@Body`.
+
+<llm-only>
+
+- Encode a path argument that comes from user input: `findById(encodeURIComponent(input))`. Do not
+  encode it twice — the client does not encode on its own, and `%` followed by two hex digits is
+  decoded exactly once by the router.
+- A `TypeError` from a service client call means the arguments, not the network: nothing was sent,
+  and retries do not apply. Typical causes are an omitted positional argument (`undefined`) and an
+  id read from a missing field.
+- Each `:name` in the route is replaced by the `@Param('name')` argument with exactly that name, so
+  `/:idx/:id` gets both values regardless of declaration order. A `:name` with no matching `@Param`
+  stays in the URL literally.
+
+</llm-only>
+
 ## Response Format
 
 All responses follow the standard format:

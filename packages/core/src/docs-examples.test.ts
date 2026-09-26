@@ -3376,6 +3376,79 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       server.stop(true);
     }
   });
+
+  /**
+   * @source docs:api/requests.md#service-client-path-values
+   */
+  it('should deliver a percent-encoded path value decoded, and refuse the raw one before sending', async () => {
+    const received: string[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      sent.push(`${init?.method} ${new URL(String(input)).pathname}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
+
+      expect(sent).toEqual(['GET /users/team%2Falice']);
+      expect(received).toEqual(['team/alice']);
+
+      // From docs: rejects with a TypeError and sends nothing
+      const refused = await usersClient.UsersController.findById('team/alice').then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(refused).toBeInstanceOf(TypeError);
+      expect((refused as TypeError).message).toStartWith(
+        'UsersController.findById: path parameter "id" contains "/", which ends a path segment, ',
+      );
+
+      // From the table: each of these would have reached a different route, so none is sent.
+      for (const value of [null, undefined, '', '.', '..', '%2e%2e', '.%2E', 'a\\b', 'a?b', 'a#b', '.\t.', '.. ']) {
+        const error = await usersClient.UsersController.findById(value).then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+        expect(error).toBeInstanceOf(TypeError);
+      }
+
+      // `encodeURIComponent` leaves dots alone, which is why `..` has no path spelling at all.
+      expect(encodeURIComponent('..')).toBe('..');
+
+      expect(sent).toEqual(['GET /users/team%2Falice']);
+      expect(received).toEqual(['team/alice']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
 });
 
 // The augmentation the Request Context page documents, declared here so the docs examples below

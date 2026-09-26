@@ -155,6 +155,16 @@ aggregate them with `max`, not `sum`. A metric registered directly against prom-
 `register` is no longer served by any application; build them with `this.metrics.createCounter()`,
 or pass `metrics: { registry: register }` to put one application back on the global registry.
 
+**Calling another service: `createServiceClient(createServiceDefinition(UsersModule), { url })`.**
+Controllers are keyed by class name and arguments are positional, in the handler's
+`@Param`/`@Query`/`@Body` order: `client.UsersController.findById(id)`. A path argument is
+inserted into its `:param` segment **unencoded**, and a value that would change the route is
+refused with a `TypeError` before anything is sent: `null`, `undefined`, anything containing `/`,
+`\`, `?` or `#`, and `''`, `.` or `..` (also as `%2e`, or with a tab, newline or trailing space in
+it). For an id that comes from user input, pass `encodeURIComponent(input)`: the router decodes it
+once, so the handler gets the original text. `.` and `..` cannot be sent in a path at all; use a
+query parameter. See `docs/api/requests.md#service-client-path-values`.
+
 **`getApplication()` returns `OneBunApplication | undefined`** — it is a `Map.get` on the
 running-applications map, so it is `undefined` for an unknown name and before `start()` resolves.
 Always use optional chaining; `app.getApplication('users').getPort()` is a TS2532 error under
@@ -1047,6 +1057,7 @@ at least in the areas you're modifying.
 | `console.error` in bootstrap `.catch()` | Use `app.getLogger()` — framework logger is available even before `start()` resolves |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
+| `client.UsersController.findById(input)` with a raw user-supplied id | `findById(encodeURIComponent(input))`. The service client does not encode path values; one containing `/`, `?`, `#` or `\`, or reading as `''`/`.`/`..`, rejects with a `TypeError` and sends nothing, because it would reach a different route |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |
 | Adding `reflect-metadata` to a OneBun app "for DI", or ordering imports around it | Not needed: `@onebun/core` installs the complete global Reflect Metadata API itself. A library that brings its own (tsyringe, `@simplewebauthn/server`) works in any import order; if the app imports `reflect-metadata` directly, require >= 0.2.2 |
 | `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Constructor types are read OWN, never inherited: a subclass without its own constructor gets no dependencies, and startup warns `Child declares no constructor of its own ...`. Repeat `constructor(dep: Dep) { super(dep); }` and keep the decorator (an undecorated subclass emits no metadata at all). Through 0.8.1 it DID inherit when `reflect-metadata` was imported before the core — after upgrading, fix every class that warning names |
