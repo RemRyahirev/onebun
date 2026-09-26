@@ -428,9 +428,12 @@ handleAdmin(@Client() client: WsClientData) {
 }
 ```
 
-### Typed Client
+### Client
 
-Generate a type-safe WebSocket client:
+Connect to a gateway from Bun (another service, a test, a script). Gateways are reached by class
+name from the module's definition; event names are strings and payloads are `unknown` unless you
+pass a type argument, and nothing checks either against the gateway. `@onebun/core` cannot
+currently be bundled for a browser: there, use `WebSocket` or `socket.io-client`.
 
 ```typescript
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
@@ -444,12 +447,12 @@ const client = createWsClient(definition, {
 
 await client.connect();
 
-// Type-safe event emission
+// Event names and payloads are not checked against the gateway
 await client.ChatGateway.emit('chat:message', { text: 'Hello!' });
 
-// Subscribe to events
-client.ChatGateway.on('chat:message', (data) => {
-  console.log('Received:', data);
+// Subscribe to events; the type argument asserts the payload shape
+client.ChatGateway.on<{ text: string }>('chat:message', (data) => {
+  console.log('Received:', data.text);
 });
 
 client.disconnect();

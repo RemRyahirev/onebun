@@ -1533,21 +1533,21 @@ describe('Architecture (docs/architecture.md)', () => {
   /**
    * @source docs:architecture.md#service-communication
    */
-  it('should call the running service through a client generated from its module definition', async () => {
+  it('should call the running service through a client built from its module definition', async () => {
     @Controller('/users')
-    class DefinitionUsersController extends BaseController {
+    class UsersController extends BaseController {
       @Get('/:id')
-      findById(@Param('id') id: string): { id: string; name: string } {
+      findById(@Param('id') id: string) {
         return { id, name: 'Ada' };
       }
     }
 
-    @Module({ controllers: [DefinitionUsersController] })
-    class DefinitionUsersModule {}
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
 
     TypedEnv.clear();
 
-    const app = new OneBunApplication(DefinitionUsersModule, {
+    const app = new OneBunApplication(UsersModule, {
       port: 0,
       host: '127.0.0.1',
       metrics: { enabled: false },
@@ -1558,24 +1558,30 @@ describe('Architecture (docs/architecture.md)', () => {
     try {
       await app.start();
 
-      const usersServiceDefinition = createServiceDefinition(DefinitionUsersModule);
+      const UsersServiceDefinition = createServiceDefinition(UsersModule);
 
       // The controller key is the controller CLASS name, and the option is `url`.
-      expect([...usersServiceDefinition._controllers.keys()]).toEqual(['DefinitionUsersController']);
+      expect([...UsersServiceDefinition._controllers.keys()]).toEqual(['UsersController']);
 
-      const usersClient = createServiceClient(usersServiceDefinition, {
+      const usersClient = createServiceClient(UsersServiceDefinition, {
         url: app.getHttpUrl(),
       });
 
-      const response = await usersClient.DefinitionUsersController.findById('123') as {
-        success: boolean;
-        result: { success: boolean; result: { id: string; name: string } };
-      };
+      // From docs: sends GET /users/123. The key is the controller class name
+      const response = await usersClient.UsersController.findById('123');
 
-      // Two envelopes: the client wraps the transport result, and `result` is the server's own
-      // `{ success, result }` body verbatim.
+      // From docs: `response` is the HTTP client's envelope around the server's `{ success, result }`
+      // body, so the handler's value is at `response.result.result`.
       expect(response.success).toBe(true);
       expect(response.result).toEqual({ success: true, result: { id: '123', name: 'Ada' } });
+      const user = response.result.result;
+      expect(user).toEqual({ id: '123', name: 'Ada' });
+
+      // From docs: names are checked at run time only. The lowercase key the page used to show
+      // compiles (the client is `Record<string, ControllerClient>`) and throws when it is read.
+      expect(() => usersClient.users).toThrow(
+        'Controller "users" not found in service definition. Available controllers: UsersController',
+      );
     } finally {
       await app.stop();
       TypedEnv.clear();

@@ -109,7 +109,7 @@ two endpoints: [llms.txt](/llms.txt) is a link index of a few kilobytes, while
 
 | Package | Description |
 |---------|-------------|
-| `@onebun/core` | Framework core: Modules & DI, Controllers with decorator routing, Services, WebSocket Gateway (+ Socket.IO + typed client), Queue & Scheduler (in-memory, Redis, NATS, JetStream backends), HTTP Guards (`@UseGuards`, `AuthGuard`, `RolesGuard`, `createHttpGuard`), Exception Filters (`@UseFilters`, `createExceptionFilter`, `defaultExceptionFilter`), TestingModule for isolated controller/service tests (`TestingModule.create(...).overrideProvider(...).compile()`), Security Middleware (`CorsMiddleware`, `RateLimitMiddleware`, `SecurityHeadersMiddleware`), Middleware, OneBunApplication multi-service mode for microservices, Graceful Shutdown, SSE (`@Sse`, `sse()`) |
+| `@onebun/core` | Framework core: Modules & DI, Controllers with decorator routing, Services, WebSocket Gateway (+ Socket.IO + a client for Bun, untyped events), Queue & Scheduler (in-memory, Redis, NATS, JetStream backends), HTTP Guards (`@UseGuards`, `AuthGuard`, `RolesGuard`, `createHttpGuard`), Exception Filters (`@UseFilters`, `createExceptionFilter`, `defaultExceptionFilter`), TestingModule for isolated controller/service tests (`TestingModule.create(...).overrideProvider(...).compile()`), Security Middleware (`CorsMiddleware`, `RateLimitMiddleware`, `SecurityHeadersMiddleware`), Middleware, OneBunApplication multi-service mode for microservices, Graceful Shutdown, SSE (`@Sse`, `sse()`) |
 | `@onebun/docs` | Automatic OpenAPI 3.1 generation from decorators and ArkType schemas, Swagger UI, @ApiTags, @ApiOperation decorators |
 | `@onebun/drizzle` | Drizzle ORM integration: PostgreSQL + SQLite (bun:sqlite), schema-first types, CLI & programmatic migrations, auto-migrate on startup, BaseRepository pattern |
 | `@onebun/cache` | CacheModule with in-memory (TTL, max size) and Redis backends, shared Redis connection pool, batch operations (mget/mset) |
@@ -117,7 +117,7 @@ two endpoints: [llms.txt](/llms.txt) is a link index of a few kilobytes, while
 | `@onebun/logger` | Structured logging: JSON (production) and pretty (development) output, 6 log levels, child loggers with context inheritance, automatic trace context integration |
 | `@onebun/metrics` | Prometheus-compatible metrics: automatic HTTP/system/GC collection, @Timed/@Counted/@Gauged decorators, custom Counter/Gauge/Histogram, /metrics endpoint |
 | `@onebun/trace` | OpenTelemetry distributed tracing: automatic HTTP tracing, @Span decorator, configurable sampling rate, export to external collectors |
-| `@onebun/requests` | HTTP client: Bearer/API Key/Basic/HMAC auth, retry strategies (fixed/linear/exponential), typed ApiResponse, typed service clients via createServiceDefinition for inter-service communication |
+| `@onebun/requests` | HTTP client: Bearer/API Key/Basic/HMAC auth, retry strategies (fixed/linear/exponential), the `ApiResponse<T>` envelope; the transport of `createServiceClient` (exported from `@onebun/core`), whose calls are untyped |
 | `@onebun/nats` | NATS and JetStream integration for distributed queues and messaging with at-least-once delivery |
 
 ### Database Migrations (@onebun/drizzle)

@@ -59,6 +59,9 @@ import type {
   HttpGuard,
   ValidationSchema,
   ApplicationOptions,
+  ControllerClient,
+  ServiceClient,
+  ServiceDefinition,
 } from '@onebun/core';
 import { type } from '@onebun/core';
 
@@ -3511,6 +3514,167 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       server.stop(true);
     }
   });
+
+  /**
+   * @source docs:api/requests.md#service-client-typing
+   */
+  it('should check controller and method names at run time only, and resolve an untyped envelope', async () => {
+    const received: unknown[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id, name: 'Ada' };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const UsersServiceDefinition = createServiceDefinition(UsersModule);
+      const usersClient = createServiceClient(UsersServiceDefinition, {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From the table, compile time: the client is `Record<string, ControllerClient>`, the
+      // exported `ServiceClient<TDef>` is the same string index, and the result is `any`. These
+      // lines are checked by `bun run typecheck`, which covers this file.
+      type IsAny<T> = 0 extends 1 & T ? true : false;
+      const asRecord: Record<string, ControllerClient> = usersClient;
+      const asServiceClient: ServiceClient<ServiceDefinition> = usersClient;
+      const resultIsAny: IsAny<Awaited<ReturnType<ControllerClient[string]>>> = true;
+      expect(asRecord).toBe(usersClient);
+      expect(asServiceClient).toBe(usersClient);
+      expect(resultIsAny).toBe(true);
+
+      interface User {
+        id: string;
+        name: string;
+      }
+
+      // From docs: the envelope, exactly as the comment on the page shows it
+      const response = await usersClient.UsersController.findById('123');
+      expect(response).toEqual({
+        success: true,
+        result: { success: true, result: { id: '123', name: 'Ada' } },
+        statusCode: 200,
+        retryCount: 0,
+      });
+
+      // From docs: the annotation is an assertion, and the handler's value is two levels down
+      const user: User = response.result.result;
+      expect(user).toEqual({ id: '123', name: 'Ada' });
+
+      // From docs: extra arguments are dropped without an error, and a path value is sent as text
+      await usersClient.UsersController.findById('123', 'extra', 42);
+      await usersClient.UsersController.findById(42);
+      expect(received).toEqual(['123', '123', '42']);
+
+      // From the table, run time: a name the definition lacks compiles and throws when it is read
+      expect(() => usersClient.UserController).toThrow(
+        'Controller "UserController" not found in service definition. Available controllers: UsersController',
+      );
+      expect(() => usersClient.UsersController.findByld).toThrow(
+        'Method "findByld" not found in controller "UsersController"',
+      );
+      expect(received).toEqual(['123', '123', '42']);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Arguments fill every decorated parameter by position, but only path, query and body values
+   * are sent; the one run-time check on the arguments is the refusal of a missing path value.
+   *
+   * @source docs:api/requests.md#service-client-typing
+   */
+  it('should match arguments to every decorated parameter, and send only @Param, @Query and @Body values', async () => {
+    const received: unknown[][] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Header('x-tenant') tenant: string | undefined, @Param('id') id: string) {
+        received.push(['findById', tenant ?? null, id]);
+
+        return { id };
+      }
+
+      @Get('/')
+      list(@Query('page') page: string | undefined) {
+        received.push(['list', page ?? null]);
+
+        return [];
+      }
+
+      @Post('/')
+      create(@Body() body: unknown) {
+        received.push(['create', body ?? null]);
+
+        return { created: true };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: the header's position must be filled, and its value is not sent
+      await usersClient.UsersController.findById(undefined, '123');
+      await usersClient.UsersController.findById('acme', '123');
+      expect(received).toEqual([
+        ['findById', null, '123'],
+        ['findById', null, '123'],
+      ]);
+
+      // From docs: `findById('123')` puts '123' in the header's position, so `id` is undefined and
+      // the call is refused before anything is sent. So is a null path value
+      await expect(usersClient.UsersController.findById('123')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is undefined',
+      );
+      await expect(usersClient.UsersController.findById(undefined, null)).rejects.toThrow(TypeError);
+      expect(received).toHaveLength(2);
+
+      // From the table: a missing @Query or @Body argument is not sent
+      await usersClient.UsersController.list();
+      await usersClient.UsersController.create();
+      expect(received.slice(2)).toEqual([
+        ['list', null],
+        ['create', null],
+      ]);
+    } finally {
+      await app.stop();
+    }
+  });
 });
 
 // The augmentation the Request Context page documents, declared here so the docs examples below
@@ -6676,9 +6840,9 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('WebSocket Client', () => {
     /**
-     * @source docs:api/websocket.md#typed-client-native
+     * @source docs:api/websocket.md#client-from-a-definition-native
      */
-    it('should exchange messages with the gateway through the typed client', async () => {
+    it('should exchange messages with the gateway through the client built from its definition', async () => {
       @WebSocketGateway({ path: '/chat' })
       class ChatGateway extends BaseWebSocketGateway {
         @OnConnect()
@@ -6697,8 +6861,8 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
       const definition = createWsServiceDefinition(ChatModule);
 
-      // The definition is what makes the client typed: one entry per gateway, carrying the path
-      // clients connect to and the events the gateway handles
+      // The definition gives the client its gateway names: one entry per gateway, carrying the path
+      // clients connect to and the events the gateway handles. It carries no types
       expect([...definition._gateways.keys()]).toEqual(['ChatGateway']);
       expect(definition._gateways.get('ChatGateway')?.path).toBe('/chat');
       expect([...(definition._gateways.get('ChatGateway')?.events.keys() ?? [])]).toContain('chat:message');
@@ -6715,7 +6879,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       try {
         await app.start();
 
-        // From docs: Typed client (native) — connect to the gateway path
+        // From docs: Client from a definition (native) — connect to the gateway path
         const client = createWsClient(definition, {
           url: `ws://127.0.0.1:${app.getPort()}/chat`,
           protocol: 'native',

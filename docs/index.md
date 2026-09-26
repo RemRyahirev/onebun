@@ -1,6 +1,6 @@
 ---
 layout: home
-description: "A complete, batteries-included TypeScript backend framework for Bun.js. NestJS-style architecture, full ecosystem: WebSocket, Drizzle, queues, cache, metrics, tracing, ArkType validation, typed clients."
+description: "A complete, batteries-included TypeScript backend framework for Bun.js. NestJS-style architecture, full ecosystem: WebSocket, Drizzle, queues, cache, metrics, tracing, ArkType validation, inter-service clients."
 
 hero:
   name: OneBun Framework
@@ -32,7 +32,7 @@ features:
     details: NestJS-inspired module system with decorators, controllers, and services. Familiar patterns, modern implementation.
   - icon: 🔌
     title: WebSocket Gateway
-    details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and type-safe clients.
+    details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and guards.
   - icon: 🧪
     title: Battle-Tested
     details: Comprehensive test suite with high coverage — verified on every commit
@@ -41,7 +41,7 @@ features:
 
 **A complete, batteries-included TypeScript backend framework for Bun.js.**
 
-OneBun brings NestJS-style architecture — modules, dependency injection, decorators — to the Bun.js runtime, with a full ecosystem of built-in packages: WebSocket (+ Socket.IO + typed client), microservices with single-image deployment, database integration (Drizzle ORM), message queues (Redis, NATS, JetStream), caching, Prometheus metrics, OpenTelemetry tracing, ArkType validation with auto-generated OpenAPI documentation, and typed inter-service HTTP clients.
+OneBun brings NestJS-style architecture — modules, dependency injection, decorators — to the Bun.js runtime, with a full ecosystem of built-in packages: WebSocket (+ Socket.IO), microservices with single-image deployment, database integration (Drizzle ORM), message queues (Redis, NATS, JetStream), caching, Prometheus metrics, OpenTelemetry tracing, ArkType validation with auto-generated OpenAPI documentation, and inter-service HTTP clients.
 
 One framework. One runtime. Everything you need for production backend services.
 

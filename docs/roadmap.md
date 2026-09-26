@@ -90,7 +90,7 @@ All features below are shipped, tested, and documented. If something looks missi
 | Redis / in-memory caching | `@onebun/cache` | [Cache](/api/cache) |
 | Prometheus metrics + system metrics | `@onebun/metrics` | [Metrics](/api/metrics) |
 | OpenTelemetry tracing | `@onebun/trace` | [Tracing](/api/trace) |
-| Typed HTTP client with auth schemes | `@onebun/requests` | [HTTP Client](/api/requests) |
+| HTTP client with auth schemes and retries | `@onebun/requests` | [HTTP Client](/api/requests) |
 | Drizzle ORM integration | `@onebun/drizzle` | [Drizzle](/api/drizzle) |
 
 ---

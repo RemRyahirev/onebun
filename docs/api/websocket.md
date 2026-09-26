@@ -120,9 +120,11 @@ Default mode. Clients connect to the gateway path (e.g. `ws://host:port/ws`). Me
 - **Client → Server**: `{ "event": "eventName", "data": payload, "ack"?: number }`
 - **Server → Client**: same shape; `ack` used for request-response.
 
-### Typed client (native)
+### Client from a definition (native)
 
-Use `createWsClient` with `protocol: 'native'` (or omit; it is the default). Connect to the gateway path.
+Use `createWsClient` with a definition from `createWsServiceDefinition` and `protocol: 'native'` (or
+omit it; it is the default). Connect to the gateway path. Gateways are reached by class name; event
+names and payloads are not checked, see [What the WebSocket clients check](#ws-client-typing).
 
 ```typescript
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
@@ -143,7 +145,7 @@ client.disconnect();
 
 ### Standalone client (no definition)
 
-When you do not want to depend on backend modules (e.g. frontend in a monorepo), use `createNativeWsClient`. Same message format and API (emit, send, on, off), but no gateway proxies and no `createWsServiceDefinition`.
+When you do not want to import the backend module (a script, a test, another service), use `createNativeWsClient`. Same message format and API (emit, send, on, off), but no gateway proxies and no `createWsServiceDefinition`. It runs in Bun, not in a browser: see [Browser clients](#browser-clients).
 
 ```typescript
 import { createNativeWsClient } from '@onebun/core';
@@ -169,6 +171,110 @@ client.send('typing', {});
 
 client.disconnect();
 ```
+
+### What the WebSocket clients check {#ws-client-typing}
+
+Neither client type-checks events. `WsGatewayClient` (`client.AppGateway`) and `NativeWsClient` take
+the event name as a `string` and the payload as `unknown`, and nothing ties either to the gateway's
+handlers:
+
+- The type argument of `emit<T>()` and `on<T>()` is an assertion about the payload. Without one, the
+  payload is `unknown`.
+- What `emit()` resolves depends on the protocol. Over the native protocol it is the `data` of the
+  handler's `{ event, data }` reply; over Socket.IO it is the whole `{ event, data }`. The same call
+  therefore needs a different type argument: `emit<PongPayload>('ping', {})` natively,
+  `emit<{ event: string; data: PongPayload }>('ping', {})` over Socket.IO.
+- A renamed or misspelled event compiles. An `emit` that no handler answers rejects with
+  `Request timeout` after `timeout` (default 5000 ms). An `on` for it never fires.
+- The definition (`WsServiceDefinition`) gives `createWsClient` its gateway names, looked up at run
+  time. The client's type, `TypedWsClient`, is a string index despite its name: any name compiles,
+  and a name the definition lacks reads as `undefined`, so `client.AppGatewy.emit(...)` throws a
+  `TypeError`.
+
+```typescript
+import {
+  BaseWebSocketGateway,
+  createWsClient,
+  createWsServiceDefinition,
+  Module,
+  OnMessage,
+  WebSocketGateway,
+} from '@onebun/core';
+
+// The server's gateway, running in an application that listens on port 3000
+@WebSocketGateway({ path: '/ws' })
+class AppGateway extends BaseWebSocketGateway {
+  @OnMessage('ping')
+  ping() {
+    return { event: 'pong', data: { at: Date.now() } };
+  }
+}
+
+@Module({ controllers: [AppGateway] })
+class AppModule {}
+
+// Declared by the client: nothing derives it from `ping()` above
+interface PongPayload {
+  at: number;
+}
+
+const client = createWsClient(createWsServiceDefinition(AppModule), {
+  url: 'ws://localhost:3000/ws',
+});
+await client.connect();
+
+// The type argument is what you expect the handler to reply with; nothing checks it
+const reply = await client.AppGateway.emit<PongPayload>('ping', {});
+console.log(reply.at);
+
+// Compiles, and rejects with `Request timeout`: no handler answers 'pnig'
+await client.AppGateway.emit('pnig', {});
+
+// Compiles, and throws a TypeError: the definition has no `AppGatewy`, so it reads as `undefined`
+client.AppGatewy.emit('ping', {});
+```
+
+### Browser clients {#browser-clients}
+
+`createNativeWsClient` and `createWsClient` cannot currently be bundled for the browser from
+`@onebun/core`. The package root also exports the server, and a browser build stops on the Node
+builtins that the metrics dependency requires:
+`Browser build cannot require() Node.js builtin: "cluster"`, then the same for `"v8"`. Use these
+clients from Bun: other services, tests, scripts.
+
+In a browser, use the built-in `WebSocket` with the native message format, or enable Socket.IO and
+use `socket.io-client` ([Using socket.io-client](#using-socket-io-client)). A browser cannot set an
+`Authorization` header on a WebSocket, so pass the token as `?token=`:
+
+```typescript
+const socket = new WebSocket('ws://localhost:3000/ws?token=user-jwt');
+
+socket.addEventListener('open', () => {
+  // `ack` asks the server to send the handler's reply back with the same id
+  socket.send(JSON.stringify({ event: 'ping', data: {}, ack: 1 }));
+});
+
+socket.addEventListener('message', (message) => {
+  const { event, data, ack } = JSON.parse(message.data);
+  console.log(event, data, ack); // ack is 1 on the reply to the message above
+});
+```
+
+<llm-only>
+
+- Do not recommend `createNativeWsClient` or `createWsClient` for a frontend bundle. `import { … }
+  from '@onebun/core'` pulls the whole server graph (prom-client, envs, trace), and `bun build
+  --target browser` fails on `cluster` and `v8`. The docs used to recommend it "for frontend in a
+  monorepo"; that was wrong.
+- The WebSocket clients are not type-checked against the gateway. Earlier docs said the client was
+  generated from the gateway decorators and that a changed server event broke the client's build.
+  Neither is true: `createWsClient` reads gateway names at run time, and event names and payloads
+  are untyped.
+- All gateway clients of one `createWsClient` share its single connection to `url`. The server
+  chooses the gateway from that connection (its path, or the Socket.IO namespace), not from the name
+  used on the client.
+
+</llm-only>
 
 ## Socket.IO
 
@@ -209,9 +315,11 @@ socket.emit('ping', {}, (ack) => console.log('Pong', ack));
 socket.disconnect();
 ```
 
-### Typed client (Socket.IO)
+### Client from a definition (Socket.IO) {#client-from-a-definition-socket-io}
 
-Use `createWsClient` with `protocol: 'socketio'` and a URL that includes the Socket.IO path.
+Use `createWsClient` with `protocol: 'socketio'` and a URL that includes the Socket.IO path. The API
+is the native client's, with one difference: `emit()` resolves the handler's whole
+`{ event, data }` reply, not only its `data` (see [What the WebSocket clients check](#ws-client-typing)).
 
 ```typescript
 const client = createWsClient(definition, {

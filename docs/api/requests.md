@@ -794,7 +794,10 @@ export class ExternalApiService extends BaseService {
 
 ## Service Client (Inter-service Communication)
 
-For type-safe inter-service communication:
+`createServiceClient()` calls another OneBun service over HTTP by controller and method name. It is
+exported from `@onebun/core` and uses this package's HTTP client as its transport. The routes come
+from the callee's module; the types do not: arguments and results are untyped. See
+[What the client checks](#service-client-typing).
 
 `createServiceDefinition()` takes the **module class** of the service being called and reflects its
 endpoints out of the decorator metadata already on its controllers. There is no literal to
@@ -826,12 +829,14 @@ const usersClient = createServiceClient(UsersServiceDefinition, {
 ```
 
 Controllers are reached by their **class name**, and handler arguments are passed **positionally**, in
-the order the handler declares its `@Param`/`@Body`/`@Query` parameters:
+the order the handler declares its decorated parameters (see
+[What the client checks](#service-client-typing) for the ones the client does not send):
 
 ```typescript
-const users = await usersClient.UsersController.findAll();
-const user = await usersClient.UsersController.findById('123');
-const newUser = await usersClient.UsersController.create({ name: 'John' });
+// Each call resolves `any`: the response envelope, not the handler's value (see below)
+const all = await usersClient.UsersController.findAll();
+const found = await usersClient.UsersController.findById('123');
+const created = await usersClient.UsersController.create({ name: 'John' });
 ```
 
 <llm-only>
@@ -847,6 +852,66 @@ Three mistakes this section exists to prevent, all of which typecheck-clean code
 - `client.users.findById({ id: '123' })` — the proxy keys controllers by `controller.name`
   (`UsersController`), and `buildRequestParams` consumes `args[i]` positionally, so a wrapper object is
   stringified into the URL rather than destructured.
+
+</llm-only>
+
+### What the client checks {#service-client-typing}
+
+The client routes by name and checks the names. It does not check types.
+
+| | At compile time | At run time |
+|---|---|---|
+| Controller name | not checked: `createServiceClient()` returns `Record<string, ControllerClient>` | reading a name the definition lacks throws, and the error lists the controllers there are |
+| Method name | not checked: every name of a `ControllerClient` is a method | reading a name the controller lacks throws |
+| Path parameter values | not checked | a value that would change the route is refused before anything is sent, see [Path parameter values](#service-client-path-values) |
+| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | not checked, except that a path parameter left out (`undefined`) or `null` is refused like any other route-changing value. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
+| Result | `any` | not checked against the handler's return type |
+
+Arguments are matched by position to **every** decorated parameter of the handler, in the order it
+declares them, and the client sends only the `@Param`, `@Query` and `@Body` values. Any other
+decorated parameter (`@Header`, `@Cookie`, `@Req`, a custom extractor, a file or form field) still
+takes a position, and whatever is passed there is dropped without an error. For
+`findById(@Header('x-tenant') tenant: string, @Param('id') id: string)` the call is
+`findById(undefined, '123')`: `findById('123')` puts `'123'` in the header's position, and rejects
+with a `TypeError` because `id` is `undefined`. Extra arguments are dropped too, and a path value
+is sent as text: `findById(42)` requests `/users/42`.
+
+The promise resolves the HTTP client's success envelope, and its `result` is the server's own
+`{ success, result }` body. The value the handler returned is therefore at `response.result.result`.
+A 4xx or 5xx response rejects the promise instead, as described in
+[A failed request rejects](#a-failed-request-rejects).
+
+```typescript
+interface User {
+  id: string;
+  name: string;
+}
+
+const response = await usersClient.UsersController.findById('123');
+// { success: true, result: { success: true, result: { id: '123', name: 'Ada' } }, statusCode: 200, retryCount: 0 }
+
+// The annotation is an assertion: nothing compares it with what the handler returns
+const user: User = response.result.result;
+```
+
+Keep the expected types next to the call, as above: the client has no way to derive them from the
+callee's handlers.
+
+<llm-only>
+
+- There are no typed service clients in OneBun. `ServiceClient<TDef>` and `ControllerClient` are
+  string-indexed, and `ServiceDefinition['_controllers']` is `Map<string, ControllerDefinition>`,
+  so even `ServiceClient<typeof definition>` accepts every controller name. Do not describe the
+  client as type-safe, and do not claim a misspelled method or a wrong argument fails to compile.
+- Earlier docs advertised this client as typed and type-safe. It never was: the names come from the
+  module at run time, and nothing supplies argument or result types.
+- `usersClient.users.findById(...)` (a lowercase key) compiles and then throws
+  `Controller "users" not found in service definition`. The key is the controller class name.
+- `const user = await client.UsersController.findById(id)` compiles and gives the envelope, not the
+  entity: read `.result.result`. A 409 or 401 from the callee rejects; the status and details are
+  inside the rejection (see "Reading the ErrorResponse").
+- The service client, like everything else exported from `@onebun/core`, cannot currently be bundled
+  for a browser.
 
 </llm-only>
 

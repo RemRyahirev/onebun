@@ -251,12 +251,24 @@ function createControllerProxy(
 }
 
 /**
- * Create a typed HTTP client for a service based on its definition.
- * The client provides type-safe access to service endpoints through controller.method() pattern.
+ * Create an HTTP client for a service from its definition. Endpoints are reached as
+ * `client.<ControllerClassName>.<handlerName>(...args)`.
+ *
+ * What is checked, and where:
+ * - Controller and method names, at run time only: reading one the definition does not have
+ *   throws. The return type is `Record<string, ControllerClient>`, so any name compiles.
+ * - Nothing checks the types of the arguments or the result. Each method is
+ *   `(...args: any[]) => Promise<any>`. Arguments are matched by position to every decorated
+ *   parameter of the handler, but only the `@Param`, `@Query` and `@Body` values are sent: an
+ *   argument in the position of a `@Header`, `@Req` or any other parameter is dropped, and so are
+ *   extra arguments. Path values are sent as text, and a missing one is refused (see below).
+ * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
+ *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
+ *   or 5xx response rejects.
  *
  * @param definition - Service definition created by createServiceDefinition()
  * @param options - Client options including URL, timeout, retries, etc.
- * @returns Typed service client
+ * @returns The client, keyed by controller class name
  *
  * @example
  * ```typescript
@@ -271,8 +283,8 @@ function createControllerProxy(
  *   retries: { max: 3, delay: 100, backoff: 'exponential' },
  * });
  *
- * // Type-safe call to users controller's getById method
- * const result = await usersClient.UsersController.getById('123');
+ * // Calls GET /users/:id on UsersController.getById. `response` is `any`.
+ * const response = await usersClient.UsersController.getById('123');
  * ```
  *
  * A path parameter value that would change the route is refused with a `TypeError` before any

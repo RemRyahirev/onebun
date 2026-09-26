@@ -12,9 +12,9 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 
 **Framework Scope**: OneBun is a batteries-included backend framework.
 It is NOT a minimal router — it provides the full stack:
-DI, REST, WebSocket (Socket.IO + typed client), database (Drizzle ORM),
+DI, REST, WebSocket (Socket.IO + a client for Bun), database (Drizzle ORM),
 cache (memory + Redis), queues (memory/Redis/NATS/JetStream), scheduler,
-Prometheus metrics, OpenTelemetry tracing, typed HTTP clients with inter-service
+Prometheus metrics, OpenTelemetry tracing, HTTP clients with inter-service
 HMAC auth, auto-generated OpenAPI docs, ArkType validation (schema = types = docs),
 microservice orchestration (OneBunApplication multi-service mode), and graceful shutdown.
 
@@ -28,7 +28,7 @@ microservice orchestration (OneBunApplication multi-service mode), and graceful 
 * @onebun/logger - structured logging (JSON/pretty), child loggers, trace context
 * @onebun/metrics - Prometheus metrics, @Timed/@Counted/@Gauged, auto HTTP/system metrics
 * @onebun/trace - OpenTelemetry, @Span decorator, configurable sampling/export
-* @onebun/requests - HTTP client with retries, auth schemes, typed inter-service clients
+* @onebun/requests - HTTP client with retries and auth schemes; transport of the inter-service clients
 * @onebun/nats - NATS/JetStream queue backends
 
 **Key Patterns**:
@@ -430,12 +430,12 @@ You've built a basic OneBun application. Here's what else the framework offers:
 - **[Database](/api/drizzle)** — Drizzle ORM with PostgreSQL/SQLite, schema-first types, auto-migrations
 - **[Caching](/api/cache)** — In-memory and Redis with DI integration
 - **[Queue & Scheduler](/api/queue)** — Background jobs with in-memory, Redis, NATS, JetStream backends
-- **[WebSocket](/api/websocket)** — Real-time communication with Socket.IO support and typed clients
+- **[WebSocket](/api/websocket)** — Real-time communication with Socket.IO support and a client for Bun
 
 ### Production Readiness
 - **[Metrics](/api/metrics)** — Prometheus-compatible: auto HTTP/system metrics, @Timed/@Counted/@Gauged decorators
 - **[Tracing](/api/trace)** — OpenTelemetry with @Span decorator, trace context in logs
-- **[HTTP Client](/api/requests)** — Typed clients with retries, auth schemes, inter-service HMAC
+- **[HTTP Client](/api/requests)** — HTTP client with retries, auth schemes, inter-service HMAC and service clients
 
 ### Scale to Microservices
 - **[Multi-Service](/examples/multi-service)** — Run multiple services from one codebase with OneBunApplication

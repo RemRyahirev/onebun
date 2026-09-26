@@ -656,12 +656,54 @@ const multiApp = new OneBunApplication({
 
 ### Service Communication
 
+One service calls another through a client built from the callee's module. The definition reflects
+the routes out of the controllers' decorator metadata, and the client reaches each endpoint as
+`client.<ControllerClassName>.<handlerName>(...)`:
+
 ```typescript
-// Generate typed client from service definition
+import {
+  BaseController,
+  Controller,
+  createServiceClient,
+  createServiceDefinition,
+  Get,
+  Module,
+  Param,
+} from '@onebun/core';
+
+@Controller('/users')
+class UsersController extends BaseController {
+  @Get('/:id')
+  findById(@Param('id') id: string) {
+    return { id, name: 'Ada' };
+  }
+}
+
+@Module({ controllers: [UsersController] })
+class UsersModule {}
+
+const UsersServiceDefinition = createServiceDefinition(UsersModule);
+
 const usersClient = createServiceClient(UsersServiceDefinition, {
-  baseUrl: 'http://localhost:3001',
+  url: 'http://localhost:3001',
 });
 
-// Call with full type safety
-const user = await usersClient.users.findById('123');
+// Sends GET /users/123. The key is the controller class name
+const response = await usersClient.UsersController.findById('123');
+
+// `response` is `any`: the HTTP client's envelope around the server's `{ success, result }` body
+const user = response.result.result;
 ```
+
+The client checks controller and method names at run time: a name the definition lacks throws when
+it is read. It does not check types. Any name compiles, arguments are `any[]`, and the result is
+`any`. See [What the client checks](/api/requests#service-client-typing).
+
+<llm-only>
+
+- The option is `url`, not `baseUrl` (`ServiceClientOptions` omits `baseUrl`), and controllers are
+  keyed by class name: `usersClient.users` throws `Controller "users" not found in service definition`.
+- This snippet used to show both mistakes, under a comment promising type safety. It passed the docs
+  typecheck only because it imported nothing, and unresolved names are not reported.
+
+</llm-only>

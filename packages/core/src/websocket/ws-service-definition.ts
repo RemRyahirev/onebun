@@ -1,7 +1,7 @@
 /**
  * WebSocket Service Definition
  *
- * Collects metadata from WebSocket gateways for generating typed clients.
+ * Collects metadata from WebSocket gateways, so a client can reach them by gateway name.
  */
 
 import type { WsHandlerType, WsParamMetadata } from './ws.types';
@@ -42,7 +42,9 @@ export interface WsGatewayDefinition {
 
 /**
  * Service definition containing all WebSocket gateways and events.
- * Used for generating typed WebSocket clients.
+ * `createWsClient` reads the gateway names from it. It carries metadata, not types.
+ *
+ * @see docs:api/websocket.md
  */
 export interface WsServiceDefinition<TModule = unknown> {
   /** Reference to the module class */

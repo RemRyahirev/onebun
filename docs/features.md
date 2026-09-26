@@ -23,12 +23,12 @@ production-grade backend services.
 ### WebSocket
 - WebSocket Gateway with @WebSocketGateway, @OnMessage decorators
 - Socket.IO adapter support (rooms, namespaces, broadcasting)
-- Auto-generated typed WebSocket client for frontend integration
+- WebSocket client for Bun (createWsClient, createNativeWsClient): event names and payloads are untyped, and @onebun/core cannot currently be bundled for a browser
 
 ### Microservices
 - OneBunApplication multi-service mode: run multiple services from single codebase/image
 - Dev: all services in one process. Prod: ONEBUN_SERVICES=name selects services
-- Typed inter-service HTTP clients with createServiceDefinition/createServiceClient
+- Inter-service HTTP clients with createServiceDefinition/createServiceClient: routes reflected from the callee's module, controller and method names checked at run time, arguments and results untyped (`any`)
 - HMAC authentication for service-to-service communication
 
 ### Validation (ArkType)
@@ -63,7 +63,7 @@ production-grade backend services.
 ### HTTP Client (@onebun/requests)
 - createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential, idempotent methods only by default — POST/PATCH must opt in via retries.methods)
 - Typed `ApiResponse<T>` with success/error discrimination
-- Typed service clients for inter-service communication
+- Transport of the inter-service clients (createServiceClient, untyped arguments and results)
 
 ### Observability
 - **Prometheus Metrics** (@onebun/metrics): auto HTTP/system/GC metrics, @Timed, @Counted, @Gauged, custom counters/gauges/histograms
@@ -86,7 +86,7 @@ production-grade backend services.
 | @onebun/logger | Structured logging, JSON/pretty, child loggers, trace context |
 | @onebun/metrics | Prometheus metrics, auto HTTP/system metrics, @Timed, @Counted, @Gauged |
 | @onebun/trace | OpenTelemetry, @Span decorator, configurable sampling/export |
-| @onebun/requests | HTTP client, auth schemes, retries, typed service clients |
+| @onebun/requests | HTTP client, auth schemes, retries; transport of the inter-service clients |
 | @onebun/nats | NATS + JetStream integration for queues |
 
 ---
@@ -109,7 +109,7 @@ It provides everything needed to build production-grade TypeScript services
 - **Built-in Prometheus metrics and OpenTelemetry tracing** — no community packages needed
 - **Redis / in-memory caching** with decorator-driven TTL
 - **Typed environment variables** with validation and defaults
-- **WebSocket support** — Socket.IO protocol, rooms, guards, typed clients
+- **WebSocket support** — Socket.IO protocol, rooms, guards, and a client for Bun
 - **Queue system** — `@Cron`, `@Interval`, `@Timeout` and `@Subscribe` decorators
 - **Drizzle ORM integration** — database access with migrations
 - **NATS / JetStream** — message bus for microservices
@@ -175,10 +175,13 @@ Built on Bun's native WebSocket support for maximum performance.
 Optional Socket.IO adapter for browser compatibility,
 rooms and broadcasting.
 
-### Typed WebSocket Client
-Auto-generated typed client for type-safe frontend ↔ backend
-WebSocket communication.
-→ [API Reference](/api/websocket)
+### WebSocket Client
+`createWsClient` (gateways found by name from your module's definition) and
+`createNativeWsClient` (no definition) speak the native and Socket.IO protocols, with
+reconnection and acknowledgements. Event names and payloads are not type-checked. The clients
+run in Bun; `@onebun/core` cannot currently be bundled for a browser, which uses `WebSocket` or
+`socket.io-client` instead.
+→ [API Reference](/api/websocket#ws-client-typing)
 
 ## Microservices (@onebun/core)
 
@@ -189,7 +192,7 @@ Run multiple services from a single codebase and Docker image:
 - **Flexible**: any combination via environment variables
 
 ### Inter-Service Communication
-Typed HTTP clients with `createServiceDefinition` + `createServiceClient`.
+HTTP clients built from the callee's module with `createServiceDefinition` + `createServiceClient`.
 HMAC authentication for service-to-service calls.
 
 ### Kubernetes-Ready
@@ -277,10 +280,11 @@ Full-featured HTTP client with:
   POST and PATCH must opt in via `retries.methods`. See the [defaults table](/api/requests#defaults).
 - **Typed responses**: `ApiResponse<T>` with success/error discrimination
 
-### Typed Service Clients
-`createServiceDefinition()` + `createServiceClient()` for
-type-safe inter-service REST communication without code generation.
-→ [API Reference](/api/requests)
+### Service Clients
+`createServiceDefinition()` + `createServiceClient()` call another OneBun service by
+controller and method name, with the routes reflected from its module at run time. The names
+are checked when they are read; arguments and results are untyped (`any`).
+→ [API Reference](/api/requests#service-client-typing)
 
 ## Observability
 

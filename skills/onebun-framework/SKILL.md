@@ -156,8 +156,11 @@ aggregate them with `max`, not `sum`. A metric registered directly against prom-
 or pass `metrics: { registry: register }` to put one application back on the global registry.
 
 **Calling another service: `createServiceClient(createServiceDefinition(UsersModule), { url })`.**
-Controllers are keyed by class name and arguments are positional, in the handler's
-`@Param`/`@Query`/`@Body` order: `client.UsersController.findById(id)`. A path argument is
+Controllers are keyed by class name and arguments are positional, one per decorated parameter of
+the handler in declaration order: `client.UsersController.findById(id)`. Only `@Param`, `@Query`
+and `@Body` values are sent; a `@Header`, `@Cookie`, `@Req` or custom-extractor parameter still
+takes a position, so `findById(@Header('x-tenant') t, @Param('id') id)` is called as
+`findById(undefined, id)`, and the value in that position is dropped. A path argument is
 inserted into its `:param` segment **unencoded**, and a value that would change the route is
 refused with a `TypeError` before anything is sent: `null`, `undefined`, anything containing `/`,
 `\`, `?` or `#`, and `''`, `.` or `..` (also as `%2e`, or with a tab, newline or trailing space in
@@ -168,6 +171,23 @@ The client is a plain value: an `async` factory may return it, and `await`, `JSO
 `String` accept it (`then`, `toJSON` and symbol keys read as `undefined`). Test for a controller
 or method with `'UsersController' in client`: reading a name the definition lacks throws (a
 missing controller's error lists the available ones). See `docs/api/requests.md#service-client-as-value`.
+**The service client is not type-safe.** Names are checked at run time only; the client is
+`Record<string, ControllerClient>` and every method is `(...args: any[]) => Promise<any>`, so a
+misspelled name, a wrong argument or an extra one compiles (extra ones are dropped). The call
+resolves the HTTP client's envelope around the server's `{ success, result }` body: the handler's
+value is `response.result.result`. Annotate the expected type at the call site; nothing checks it.
+See `docs/api/requests.md#service-client-typing`.
+
+**WebSocket clients: untyped, and Bun-only.** `createWsClient(createWsServiceDefinition(Module), { url })`
+reaches gateways by class name (a missing one reads as `undefined`); `createNativeWsClient({ url })`
+needs no definition. Event names are strings and payloads `unknown`: pass `emit<T>()` / `on<T>()`
+for a shape, which is an assertion. `emit` resolves the reply's `data` over the native protocol but
+the whole `{ event, data }` over Socket.IO, so the type argument differs per protocol. An event no
+handler answers makes `emit` reject with `Request timeout`. Neither client can currently be bundled
+for a browser from `@onebun/core` (`bun build --target browser` fails on `cluster`/`v8` via
+prom-client): in a browser use
+`new WebSocket('ws://host/path?token=…')` with `{ event, data, ack }` JSON frames, or
+`socket.io-client`. See `docs/api/websocket.md#ws-client-typing` and `#browser-clients`.
 
 **`getApplication()` returns `OneBunApplication | undefined`** — it is a `Map.get` on the
 running-applications map, so it is `undefined` for an unknown name and before `start()` resolves.
@@ -1062,6 +1082,8 @@ at least in the areas you're modifying.
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
 | `client.UsersController.findById(input)` with a raw user-supplied id | `findById(encodeURIComponent(input))`. The service client does not encode path values; one containing `/`, `?`, `#` or `\`, or reading as `''`/`.`/`..`, rejects with a `TypeError` and sends nothing, because it would reach a different route |
+| Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
+| `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |
 | Adding `reflect-metadata` to a OneBun app "for DI", or ordering imports around it | Not needed: `@onebun/core` installs the complete global Reflect Metadata API itself. A library that brings its own (tsyringe, `@simplewebauthn/server`) works in any import order; if the app imports `reflect-metadata` directly, require >= 0.2.2 |
 | `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Constructor types are read OWN, never inherited: a subclass without its own constructor gets no dependencies, and startup warns `Child declares no constructor of its own ...`. Repeat `constructor(dep: Dep) { super(dep); }` and keep the decorator (an undecorated subclass emits no metadata at all). Through 0.8.1 it DID inherit when `reflect-metadata` was imported before the core — after upgrading, fix every class that warning names |

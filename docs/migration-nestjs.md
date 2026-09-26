@@ -41,7 +41,7 @@ NestJS's strength is its ecosystem, but that ecosystem means pulling in separate
 | **Scheduled jobs** | `@nestjs/schedule` (in-memory cron only) | Built into `@onebun/nats` — in-memory, Redis, or JetStream. Same decorator, three backends |
 | **Metrics** | `prom-client` + custom middleware or community package | `@onebun/metrics` — auto HTTP/system metrics, `@Timed()`, `@Counted()`, `@Gauged()`, `/metrics` endpoint |
 | **Tracing** | OpenTelemetry SDK + manual instrumentation | `@onebun/trace` — auto HTTP tracing, `@Span()`, `@TraceAll()`, configurable sampling |
-| **Typed HTTP clients** | Axios wrappers without type safety, or gRPC with code generation | `@onebun/requests` — `createServiceDefinition()` + `createServiceClient()`, typed, no codegen |
+| **Inter-service HTTP calls** | Hand-written Axios/`HttpService` wrappers per service | `createServiceDefinition()` + `createServiceClient()` from `@onebun/core` — routes reflected from the callee's module, auth and retries from `@onebun/requests`. Arguments and results are untyped ([what is checked](/api/requests#service-client-typing)) |
 | **Environment config** | `@nestjs/config` + manual validation (Joi/Zod) | `@onebun/envs` — schema-based, validated at startup, sensitive value masking in logs |
 
 ### Shared Redis connection pool
@@ -60,9 +60,9 @@ In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages?
 
 NestJS can technically run multiple services from one codebase, but wiring that up for local development (running some services together, others separately) is manual and fragile. OneBun's `OneBunApplication` multi-service mode lets you run all services in a single process during development and split them via `ONEBUN_SERVICES` env var in production — same code, same Docker image, no glue scripts.
 
-### Type-safe WebSocket clients
+### A WebSocket client in the framework
 
-In NestJS, the WebSocket client is a hope-based contract — you emit event names as strings and pray they match the server. OneBun generates a **typed client SDK** from your gateway decorators. If the server event changes, the client won't compile.
+NestJS leaves the client side of a gateway to `socket.io-client` or a hand-rolled `WebSocket` wrapper. OneBun ships one: `createWsClient()` finds gateways by class name from your module's definition, and `createNativeWsClient()` needs no definition at all. Both speak the native and Socket.IO protocols, with reconnection and acknowledgements. Event names are still strings and payloads are `unknown`, so a renamed server event is not a compile error. The clients run in Bun (other services, tests, scripts); `@onebun/core` cannot currently be bundled for a browser. See [WebSocket clients](/api/websocket#ws-client-typing).
 
 ## What is Unique to OneBun
 
@@ -75,8 +75,8 @@ These features are built into the framework -- no community packages needed:
 - **ArkType validation** -- one schema = TypeScript type + runtime validation + OpenAPI 3.1 spec
 - **Multi-service architecture** -- run all services in a single process during development, split by `ONEBUN_SERVICES` env var in production. Same code, same Docker image — no glue scripts or docker-compose hacks for local dev
 - **WebSocket guards and queue guards** -- one `@UseGuards` covers HTTP routes, WebSocket messages and queue handlers, with dependency injection on all three. `@UseWsGuards` and `@UseMessageGuards` remain for guards that only make sense on one transport
-- **Typed inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()` with Bearer/ApiKey/Basic auth, no code generation (HMAC auth planned)
-- **Auto-generated typed WebSocket client** -- type-safe frontend SDK generated from gateway decorators
+- **Inter-service HTTP clients** -- `createServiceDefinition()` + `createServiceClient()`: routes reflected from the callee's module, with Bearer/ApiKey/Basic/OneBun HMAC auth and retries. Controller and method names are checked at run time; arguments and results are untyped
+- **WebSocket client** -- `createWsClient()` / `createNativeWsClient()` for Bun: native and Socket.IO protocols, reconnection, acknowledgements. Event names and payloads are untyped
 - **SSE (Server-Sent Events)** -- `@Sse()` decorator with heartbeat, per-route timeout, auto-abort on disconnect; `this.sse()` for programmatic streaming
 - **Static file serving with SPA fallback** -- serve frontend build from the same host/port as the API, with `fallbackFile` for client-side routing
 - **OTLP log export** -- structured logs sent to OpenTelemetry Collector alongside console output, batch-based with configurable flush

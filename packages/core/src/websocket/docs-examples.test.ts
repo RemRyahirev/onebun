@@ -54,6 +54,8 @@ import { TypedEnv } from '@onebun/envs';
 
 const HOST = '127.0.0.1';
 const CLIENT_TIMEOUT_MS = 2000;
+/** Short, because the typing test waits it out once on purpose for an event nobody answers. */
+const UNANSWERED_EMIT_TIMEOUT_MS = 150;
 const WAIT_TIMEOUT_MS = 3000;
 const POLL_INTERVAL_MS = 5;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -530,13 +532,15 @@ describe('docs/api/websocket.md', () => {
   });
 
   /**
-   * The typed client with `protocol: 'socketio'` reaches the same gateway through the Socket.IO
-   * endpoint, and `auth.token` still travels with the upgrade.
+   * The definition client with `protocol: 'socketio'` reaches the same gateway through the
+   * Socket.IO endpoint, and `auth.token` still travels with the upgrade. Its `emit()` resolves the
+   * handler's whole `{ event, data }` reply, where the native client resolves only `data`.
    *
-   * @source docs:api/websocket.md#typed-client-socketio
-   * @source docs:examples/websocket-chat.md#option-d-typed-client-with-socketio
+   * @source docs:api/websocket.md#client-from-a-definition-socket-io
+   * @source docs:api/websocket.md#ws-client-typing
+   * @source docs:examples/websocket-chat.md#option-d-client-from-the-definition-with-socket-io
    */
-  it('drives the gateway through the typed client over Socket.IO', async () => {
+  it('drives the gateway through the definition client over Socket.IO', async () => {
     @WebSocketGateway({ path: '/ws' })
     class TypedSioGateway extends BaseWebSocketGateway {
       @OnConnect()
@@ -588,6 +592,117 @@ describe('docs/api/websocket.md', () => {
 
       client.disconnect();
       expect(client.isConnected()).toBe(false);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Neither client type-checks events: the type argument of `emit<T>()` is an assertion, an event
+   * no handler answers compiles and times out, and a gateway name the definition lacks compiles and
+   * reads as `undefined`.
+   *
+   * @source docs:api/websocket.md#ws-client-typing
+   */
+  it('checks gateway names at run time only, and leaves event names and payloads unchecked', async () => {
+    // From docs
+    @WebSocketGateway({ path: '/ws' })
+    class AppGateway extends BaseWebSocketGateway {
+      @OnMessage('ping')
+      ping() {
+        return { event: 'pong', data: { at: Date.now() } };
+      }
+    }
+
+    @Module({ controllers: [AppGateway] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    try {
+      // From docs, with no `protocol`: the default is the native one, whose `emit()` resolves `data`
+      const client = createWsClient(createWsServiceDefinition(AppModule), {
+        url: wsUrl(app, '/ws'),
+        timeout: UNANSWERED_EMIT_TIMEOUT_MS,
+      });
+      await client.connect();
+
+      interface PongPayload {
+        at: number;
+      }
+
+      // From docs: the type argument is what you expect the handler to reply with
+      const reply = await client.AppGateway.emit<PongPayload>('ping', {});
+      expect(reply.at).toBeNumber();
+
+      // From docs: compiles, and rejects with `Request timeout`: no handler answers 'pnig'
+      await expect(client.AppGateway.emit('pnig', {})).rejects.toThrow('Request timeout');
+
+      // From docs: a misspelled gateway name compiles, reads as `undefined`, and the call on it
+      // throws a TypeError
+      expect(client.AppGatewy).toBeUndefined();
+      expect(() => client.AppGatewy.emit('ping', {})).toThrow(TypeError);
+
+      client.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * The browser recipe, run on Bun's `WebSocket`, which has the browser's API: the token as
+   * `?token=`, native `{ event, data, ack }` frames, and the reply carrying the same `ack`.
+   *
+   * @source docs:api/websocket.md#browser-clients
+   */
+  it('answers a bare WebSocket speaking the native frames, with the token from ?token=', async () => {
+    @WebSocketGateway({ path: '/ws' })
+    class BrowserGateway extends BaseWebSocketGateway {
+      @OnMessage('ping')
+      ping(@Client() client: WsClientData) {
+        return { event: 'pong', data: { token: client.auth?.token ?? null } };
+      }
+    }
+
+    @Module({ controllers: [BrowserGateway] })
+    class BrowserModule {}
+
+    const app = new OneBunApplication(BrowserModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    try {
+      const frames: JsonRecord[] = [];
+
+      // From docs
+      const socket = new WebSocket(`${wsUrl(app, '/ws')}?token=user-jwt`);
+
+      socket.addEventListener('open', () => {
+        socket.send(JSON.stringify({ event: 'ping', data: {}, ack: 1 }));
+      });
+
+      socket.addEventListener('message', (message) => {
+        frames.push(JSON.parse(String(message.data)) as JsonRecord);
+      });
+
+      // The handler's reply comes back on the same `ack` id, and the token reached `client.auth`
+      expect(await waitUntil(() => frames.find((frame) => frame.ack === 1), 'ack 1')).toEqual({
+        event: 'pong',
+        data: { token: 'user-jwt' },
+        ack: 1,
+      });
+
+      socket.close();
     } finally {
       await app.stop();
     }
@@ -907,15 +1022,15 @@ describe('docs/examples/websocket-chat.md', () => {
   });
 
   /**
-   * The gateway handlers of Step 1, driven by the typed client of Option A: joining returns the
-   * room's history and members, others are told about the join while the joiner is not, and a
+   * The gateway handlers of Step 1, driven by the definition client of Option A: joining returns
+   * the room's history and members, others are told about the join while the joiner is not, and a
    * message is both acknowledged to its sender and broadcast to the room.
    *
    * @source docs:examples/websocket-chat.md#step-1-create-the-gateway
    * @source docs:examples/websocket-chat.md#step-4-register-the-gateway-in-the-module
-   * @source docs:examples/websocket-chat.md#option-a-typed-client-native-websocket-with-definition
+   * @source docs:examples/websocket-chat.md#option-a-client-from-the-definition-native-websocket
    */
-  it('joins, broadcasts and acknowledges chat messages through the typed client', async () => {
+  it('joins, broadcasts and acknowledges chat messages through the definition client', async () => {
     // eslint-disable-next-line @typescript-eslint/naming-convention -- classes held in consts
     const { ChatGateway, ChatModule } = createChatFixture();
 

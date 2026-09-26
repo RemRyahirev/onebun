@@ -96,7 +96,7 @@ extra packages, no duplication.
 - **Built-in Prometheus metrics and OpenTelemetry tracing** — no community packages needed
 - **Redis / in-memory caching** with decorator-driven TTL
 - **Typed environment variables** with validation and defaults
-- **WebSocket support** — Socket.IO protocol, rooms, guards, typed clients
+- **WebSocket support** — Socket.IO protocol, rooms, guards, and a client for Bun
 - **Queue system** — `@Cron`, `@Interval`, `@Timeout` and `@Subscribe` decorators
 - **Drizzle ORM integration** — database access with migrations
 - **NATS / JetStream** — message bus for microservices
