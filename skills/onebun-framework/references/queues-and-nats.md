@@ -566,7 +566,8 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 `COMMANDS` above is a workqueue, and a subscription on it must look like this — a `group` is
-required, and every replica with the same group and pattern shares one durable and splits the work:
+required, and every replica with the same group and pattern shares one durable and splits the work
+(the replicas may all start at once):
 
 ```typescript
 @Controller('/commands')
@@ -689,6 +690,12 @@ Key JetStream behaviors:
   differing one is an update that carries every pre-existing metadata key forward, and a detected
   reconcile cycle — the desired hash was applied moments ago and has already been replaced, so two
   processes are writing different configurations — fails startup rather than flapping
+- **Replicas may boot at the same moment**: when N replicas of one `(group, pattern)` all miss the
+  probe and all create, the server refuses every create but the first with 10148 "consumer already
+  exists" (each payload carries its own `onebun.reconciled-at`). The adapter treats that as "a peer
+  created it first" and re-runs the existing-consumer path once — ack-policy check, then the stamp — so
+  the late replica starts instead of failing. Streams do the same on 10058 "stream name already in
+  use". A second refusal surfaces as a create failure. No staggered rollout is needed
 - **Startup fails loudly, never silently** when a consumer cannot be reused: a `consumers.info`
   rejection is treated as absence only when it carries the numeric `ConsumerNotFound` code (10014)
   and is otherwise rethrown as itself, an ephemeral subscription refuses to hijack a consumer whose

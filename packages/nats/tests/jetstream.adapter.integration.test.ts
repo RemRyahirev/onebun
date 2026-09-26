@@ -1198,9 +1198,9 @@ describe('JetStreamQueueAdapter Integration', () => {
     }, CASE_TIMEOUT_MS);
 
     it('splits the tasks between replicas of one group, each exactly once', async () => {
-      // Sequential on purpose: two replicas creating the consumer at the same instant race on
-      // the create (10148), which is a separate defect with its own fix. This case is about the
-      // workqueue sharing one durable between replicas, not about that race.
+      // Sequential on purpose: this case is about the workqueue sharing one durable between
+      // replicas. Replicas that start at the same instant race on the create (10148); that race
+      // has its own cases under "replicas booting at the same time".
       const streamName = 'ITEST_WQ_REPLICAS';
       const group = 'itest-wq-replicas';
       const total = 20;
@@ -1313,5 +1313,74 @@ describe('JetStreamQueueAdapter Integration', () => {
       // And a limits stream keeps both after the ack.
       expect(await storedMessages(producer, streamName)).toBe(2);
     }, CASE_TIMEOUT_MS);
+  });
+
+  describe('replicas booting at the same time', () => {
+    // The race is timing-dependent: two released 0.8.1 adapters lost it in about 3 rounds of 10.
+    // Every round runs on a stream no earlier round touched, so each one starts from absence and
+    // both replicas miss the probe before either creates.
+    const ROUNDS = 10;
+    const REPLICAS = 2;
+    const opened: JetStreamQueueAdapter[] = [];
+
+    afterEach(async () => {
+      for (const created of opened.splice(0)) {
+        if (created.isConnected()) {
+          await created.disconnect();
+        }
+      }
+    });
+
+    async function consumerNames(observer: JetStreamQueueAdapter, streamName: string): Promise<string[]> {
+      const names: string[] = [];
+      for await (const info of await (asAny(observer).jsm as AnyRecord).consumers.list(streamName)) {
+        names.push(info.name);
+      }
+
+      return names;
+    }
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      it(`starts every replica of one (group, pattern) on a ${retention} stream, round after round`, async () => {
+        const group = `itest-race-${retention}`;
+        const rejections: string[] = [];
+
+        for (let round = 0; round < ROUNDS; round += 1) {
+          const streamName = `ITEST_RACE_${retention.toUpperCase()}_${round}`;
+          const pattern = `race${retention}${round}.run`;
+          const replicas = Array.from({ length: REPLICAS }, () => {
+            const created = new JetStreamQueueAdapter({
+              servers: nats.url,
+              streams: [{ name: streamName, subjects: [`race${retention}${round}.>`], retention }],
+            });
+            opened.push(created);
+
+            return created;
+          });
+
+          // Connected at once as well: a first rollout finds no stream either, and the stream
+          // create races the same way, refused with 10058 "stream name already in use".
+          await Promise.all(replicas.map(async (replica) => await replica.connect()));
+
+          const results = await Promise.allSettled(replicas.map(async (replica) =>
+            await replica.subscribe(pattern, async () => undefined, { group })));
+
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              rejections.push(`round ${round}: ${(result.reason as Error).message}`);
+            }
+          }
+
+          // One durable, shared by both: the replica that lost the create adopted its peer's consumer.
+          expect(await consumerNames(replicas[0], streamName)).toEqual([durableNameFor(group, pattern)]);
+
+          for (const replica of replicas) {
+            await replica.disconnect();
+          }
+        }
+
+        expect(rejections).toEqual([]);
+      }, CASE_TIMEOUT_MS);
+    }
   });
 });

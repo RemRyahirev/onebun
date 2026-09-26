@@ -98,6 +98,22 @@ const CONSUMER_WQ_NOT_DELIVER_ALL_CODE = 10101;
  * filter of any other consumer on that stream — checked stream-wide, on create and on update.
  */
 const CONSUMER_WQ_NOT_UNIQUE_CODE = 10100;
+/**
+ * nats-server's refusal of a create whose consumer name is taken by a consumer with a different
+ * configuration. The client's `JetStreamApiCodes` does not name it either.
+ *
+ * Between replicas of one `(group, pattern)` it means a peer created the consumer first: both probed
+ * before either created, and the two create payloads never match, because each stamps its own
+ * `reconciled-at`. An identical create would have been idempotent; this one is a conflict.
+ */
+const CONSUMER_ALREADY_EXISTS_CODE = 10148;
+/**
+ * The same refusal one level up: "stream name already in use with a different configuration".
+ * Replicas that declare one stream the server does not have yet race on its create exactly as
+ * they race on a consumer's, and for the same reason — the stamps differ. `JetStreamApiCodes`
+ * does not name it either.
+ */
+const STREAM_NAME_IN_USE_CODE = 10058;
 
 /** A value that may appear in a hashed stream subset. */
 type HashableStreamValue = string | number | readonly string[] | undefined;
@@ -1282,6 +1298,11 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * strength of an unclassified error is how a permissions problem turns into a
    * "consumer not found" three lines later.
    *
+   * Replicas of one `(group, pattern)` that boot together all see absence, and all but one create
+   * is refused as "already exists". That refusal re-enters this method once, with
+   * `afterPeerCreate` set, and the late replica reconciles against its peer's consumer the way a
+   * sequential boot would. The flag is what bounds it: a second refusal surfaces, it never loops.
+   *
    * @see docs:api/queue.md
    */
   private async ensureConsumer(
@@ -1292,6 +1313,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     filterSubject: string,
     resolved: ResolvedConsumerConfig,
     pattern: string,
+    afterPeerCreate = false,
   ): Promise<void> {
     // The same predicate `subscribe()` stores on the entry, so the two cannot disagree.
     const isDurable = Boolean(group);
@@ -1313,7 +1335,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         throw error;
       }
 
-      await this.addConsumer(
+      const created = await this.addConsumer(
         streamName,
         consumerName,
         group,
@@ -1321,7 +1343,24 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         resolved,
         desiredHash,
         pattern,
+        !afterPeerCreate,
       );
+
+      if (!created) {
+        // A peer created the consumer between this probe and this create. What it wrote goes
+        // through the same checks as any consumer found on the first probe: identity, the ack
+        // policy, then the stamp, which is a noop when the peer runs this same configuration.
+        await this.ensureConsumer(
+          jsModule,
+          streamName,
+          consumerName,
+          group,
+          filterSubject,
+          resolved,
+          pattern,
+          true,
+        );
+      }
 
       return;
     }
@@ -1393,7 +1432,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
   }
 
-  /** Creates the consumer, stamping the hash that the next boot compares against. */
+  /**
+   * Creates the consumer, stamping the hash that the next boot compares against.
+   *
+   * Resolves `true` once the consumer is created. Resolves `false`, reporting nothing, only when
+   * `yieldToPeer` is set and the server refuses the create as "consumer already exists": a peer
+   * created it after this process probed, and the caller reconciles against the peer's consumer.
+   * Every other rejection, and that one once `yieldToPeer` is spent, fails the subscription.
+   */
   private async addConsumer(
     streamName: string,
     consumerName: string,
@@ -1402,7 +1448,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     resolved: ResolvedConsumerConfig,
     desiredHash: string,
     pattern: string,
-  ): Promise<void> {
+    yieldToPeer: boolean,
+  ): Promise<boolean> {
     const jsm = await this.getJsm();
 
     try {
@@ -1416,6 +1463,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         ...redeliveryConfig(resolved),
       });
     } catch (cause) {
+      // Classified by numeric code, like every other rejection here. Neither `onError` nor the
+      // throw: the replica that lost the create has not failed, it was only second.
+      if (yieldToPeer && hasApiErrorCode(cause, CONSUMER_ALREADY_EXISTS_CODE)) {
+        return false;
+      }
+
       throw this.failConsumer(
         addFailureMessage(
           consumerName,
@@ -1429,6 +1482,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         cause,
       );
     }
+
+    return true;
   }
 
   /**
@@ -1797,9 +1852,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * divergence guard runs next, for the same reason the consumer path checks its ack policy
    * before its hash: a matching hash must never mask a field that cannot be updated.
    *
+   * A create refused because a peer created the stream first re-enters once with
+   * `afterPeerCreate` set, exactly as `ensureConsumer()` does, and a second refusal surfaces.
+   *
    * @see docs:api/queue.md
    */
-  private async ensureStream(stream: ResolvedStream): Promise<void> {
+  private async ensureStream(stream: ResolvedStream, afterPeerCreate = false): Promise<void> {
     const jsModule = await getJetStreamModule();
     const desired = this.buildStreamConfig(stream, false);
     const desiredHash = hashReconcileConfig(this.hashableStreamSubset(desired));
@@ -1815,7 +1873,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         throw error;
       }
 
-      await this.addStream(stream, desiredHash);
+      const created = await this.addStream(stream, desiredHash, !afterPeerCreate);
+
+      if (!created) {
+        // The peer's stream meets the same guards as one found on the first probe: coverage,
+        // the create-only fields, then the stamp.
+        await this.ensureStream(stream, true);
+      }
 
       return;
     }
@@ -1858,8 +1922,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
   }
 
-  /** Creates the stream, stamping the hash the next connect compares against. */
-  private async addStream(stream: ResolvedStream, desiredHash: string): Promise<void> {
+  /**
+   * Creates the stream, stamping the hash the next connect compares against.
+   *
+   * Resolves `false`, reporting nothing, only when `yieldToPeer` is set and the server refuses the
+   * create because the name is in use: a peer created the stream after this process probed. The
+   * same contract as `addConsumer()`.
+   */
+  private async addStream(stream: ResolvedStream, desiredHash: string, yieldToPeer: boolean): Promise<boolean> {
     const jsm = await this.getJsm();
 
     try {
@@ -1871,8 +1941,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         metadata: stampMetadata(undefined, desiredHash),
       });
     } catch (cause) {
+      if (yieldToPeer && hasApiErrorCode(cause, STREAM_NAME_IN_USE_CODE)) {
+        return false;
+      }
+
       throw this.failStream(streamWriteFailureMessage(stream.name, 'create', cause), cause);
     }
+
+    return true;
   }
 
   /** Builds a stream error, emitting it before it is thrown. */

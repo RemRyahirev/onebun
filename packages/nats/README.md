@@ -219,6 +219,12 @@ stream, so a declared value that diverges from the server's fails startup as wel
 run before the hash is consulted, so a stamp left behind by an out-of-band `nats stream edit` cannot wave either
 of them through. That stamp lives in stream metadata, so the adapter requires nats-server 2.10 or newer.
 
+Replicas of one service can boot at the same moment. When they all find the stream, or a subscription's durable
+consumer, missing and all create it, the broker refuses every create but the first ("stream name already in
+use", "consumer already exists") because each carries its own reconciliation timestamp. The adapter reads that
+refusal as "a peer created it first": it reconciles against the peer's resource, once, with the same checks as
+any resource found on the first probe, and does not fail the boot.
+
 ### Work-queue streams
 
 `retention` also decides how every consumer on the stream is created. On a stream declared
@@ -238,7 +244,8 @@ async run(message: Message<{ id: string }>) {
 
 A workqueue allows one consumer per subject, and the adapter enforces the rules that follow at `subscribe()`:
 
-- **`group` is required.** Replicas with the same group and pattern share one durable and split the tasks.
+- **`group` is required.** Replicas with the same group and pattern share one durable and split the tasks,
+  and they may all start at once.
   A group-less subscription is refused.
 - **`ackMode: 'none'` is refused.** A task leaves the stream only by being acknowledged.
 - **Partial-token parameters are refused.** `jobs.v{version}` filters `jobs.*`, and a delivered `jobs.x` the

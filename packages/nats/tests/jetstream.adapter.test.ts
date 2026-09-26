@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 535
+// NATS-SUITE-FLOOR: 547
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -2218,6 +2218,205 @@ describe('ensureConsumer: migration and error classification', () => {
 });
 
 // ============================================================================
+// Replicas of one (group, pattern) booting at the same time
+//
+// Both probe before either creates, so both see absence and both create. The two
+// payloads never match — each stamps its own reconciled-at — so the server accepts
+// the first and refuses the other with 10148 "consumer already exists". The late
+// replica must reconcile against its peer's consumer, once, not fail start().
+// ============================================================================
+
+describe('ensureConsumer: replicas creating the same consumer at once', () => {
+  /** nats-server's "consumer already exists". `JetStreamApiCodes` does not name it. */
+  const CONSUMER_ALREADY_EXISTS_CODE = 10_148;
+
+  /** The hash the adapter computes for the harness defaults — what a peer running this code stamps. */
+  const peerHash = hashReconcileConfig({
+    ack_wait: 30_000_000_000,
+    filter_subject: 'test.topic',
+    max_ack_pending: 100,
+    max_deliver: 3,
+  });
+
+  function consumerAlreadyExists(): AnyRecord {
+    return makeApiError(CONSUMER_ALREADY_EXISTS_CODE, 'consumer already exists');
+  }
+
+  /** A create the server refuses the first time only: the peer's create landed first. */
+  function refuseFirstCreate(mockJsm: AnyRecord): void {
+    let creates = 0;
+    mockJsm.consumers.add = mock(() => {
+      creates += 1;
+
+      return creates === 1 ? Promise.reject(consumerAlreadyExists()) : Promise.resolve();
+    });
+  }
+
+  /** The probe misses, and every later probe finds what the peer created — the race as a replica sees it. */
+  function peerCreatesAfterProbe(mockJsm: AnyRecord, config: Partial<AnyRecord> = {}): void {
+    seedConsumerInfo(mockJsm, config);
+    const found = mockJsm.consumers.info as () => Promise<AnyRecord>;
+    let probes = 0;
+    mockJsm.consumers.info = mock(() => {
+      probes += 1;
+
+      return probes === 1
+        ? Promise.reject(makeApiError(CONSUMER_NOT_FOUND_CODE, 'consumer not found'))
+        : found();
+    });
+  }
+
+  function collectErrors(adapter: JetStreamQueueAdapter): Error[] {
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => {
+      errors.push(error);
+    });
+
+    return errors;
+  }
+
+  it('re-reads the consumer after a create refused as existing, and starts without onError', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm, { metadata: { [CONFIG_STAMP_KEYS.configHash]: peerHash } });
+    const errors = collectErrors(adapter);
+
+    const subscription = await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+
+    expect(subscription.isActive).toBe(true);
+    expect(errors).toEqual([]);
+    expect(mockJsm.consumers.add).toHaveBeenCalledTimes(1);
+    // The second probe is the re-entry: it reads the consumer the peer created.
+    expect(mockJsm.consumers.info).toHaveBeenCalledTimes(2);
+    expect(callArgName(mockJsm.consumers.info, 1, 1)).toBe(callArg(mockJsm.consumers.add, 0, 1).name);
+    // The peer runs the same configuration, so the stamp matches and nothing is rewritten.
+    expect(mockJsm.consumers.update).not.toHaveBeenCalled();
+  });
+
+  it('does the same on a workqueue stream', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['test.>'], retention: 'workqueue' }],
+    });
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm, {
+      deliver_policy: realJetStream.DeliverPolicy.All,
+      metadata: { [CONFIG_STAMP_KEYS.configHash]: peerHash },
+    });
+    const errors = collectErrors(adapter);
+
+    const subscription = await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+
+    expect(subscription.isActive).toBe(true);
+    expect(errors).toEqual([]);
+    expect(mockJsm.consumers.info).toHaveBeenCalledTimes(2);
+  });
+
+  it("reconciles a peer's differing configuration like any consumer found on the first probe", async () => {
+    // A rolling deploy can race an old replica against a new one. The late one updates in place,
+    // exactly what it would have done had it booted a second later.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    const theirs = 'e'.repeat(32);
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm, { max_ack_pending: 7, metadata: { [CONFIG_STAMP_KEYS.configHash]: theirs } });
+    const errors = collectErrors(adapter);
+
+    await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+
+    expect(errors).toEqual([]);
+    expect(mockJsm.consumers.update).toHaveBeenCalledTimes(1);
+
+    const metadata = callArg(mockJsm.consumers.update, 0, 2).metadata;
+    expect(metadata[CONFIG_STAMP_KEYS.configHash]).toBe(peerHash);
+    expect(metadata[CONFIG_STAMP_KEYS.prevConfigHash]).toBe(theirs);
+  });
+
+  it("checks the peer's ack policy, which cannot be reconciled in place", async () => {
+    // The re-entry runs the whole existing-consumer path, not just the stamp.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm, {
+      ack_policy: realJetStream.AckPolicy.None,
+      metadata: { [CONFIG_STAMP_KEYS.configHash]: peerHash },
+    });
+    const errors = collectErrors(adapter);
+
+    let thrown: Error | undefined;
+    try {
+      await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown!.message).toContain('nats consumer rm');
+    expect(errors).toEqual([thrown!]);
+    expect(mockJsm.consumers.update).not.toHaveBeenCalled();
+  });
+
+  it('does not adopt a taken name for an ephemeral subscription', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm);
+
+    await expect(adapter.subscribe('test.topic', async () => undefined)).rejects.toThrow(/group/);
+    expect(mockJsm.consumers.update).not.toHaveBeenCalled();
+  });
+
+  it('yields once: a create refused on every attempt fails after the second, and never loops', async () => {
+    // The probe keeps missing — the consumer is deleted as fast as it is made, say. The re-entry
+    // probes and creates once more; the second refusal is reported like any other create failure.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    mockJsm.consumers.add = mock(() => Promise.reject(consumerAlreadyExists()));
+    const errors = collectErrors(adapter);
+
+    let thrown: Error | undefined;
+    try {
+      await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown!.message).toContain('Failed to create JetStream consumer');
+    expect((thrown!.cause as AnyRecord).code).toBe(CONSUMER_ALREADY_EXISTS_CODE);
+    expect(mockJsm.consumers.add).toHaveBeenCalledTimes(2);
+    expect(mockJsm.consumers.info).toHaveBeenCalledTimes(2);
+    // Reported once, for the surfaced failure only: the first refusal was not a failure.
+    expect(errors).toEqual([thrown!]);
+  });
+
+  it('adopts a vanished consumer that a peer re-created first', async () => {
+    // The same race, later: a consumer deleted out of band is noticed by every replica at once.
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    const first = makeMockConsumer([], [
+      { type: 'consumer_deleted', code: 404, description: 'consumer deleted' },
+    ]);
+    const second = makeMockConsumer();
+    let handedOut = 0;
+    asAny(adapter).js.consumers.get = mock(() => {
+      handedOut += 1;
+
+      return Promise.resolve(handedOut === 1 ? first : second);
+    });
+    const errors = collectErrors(adapter);
+
+    await adapter.subscribe('test.topic', async () => undefined, { group: 'test-group' });
+
+    // The consumer vanished and a peer re-created it between this replica's probe and its create.
+    refuseFirstCreate(mockJsm);
+    peerCreatesAfterProbe(mockJsm, { metadata: { [CONFIG_STAMP_KEYS.configHash]: peerHash } });
+
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+    }
+
+    // The deletion itself is reported; the lost create race is not.
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('consumer_deleted');
+    expect(mockJsm.consumers.add).toHaveBeenCalledTimes(1);
+    expect(asAny(adapter).subscriptions[0].consumer).toBe(second);
+  });
+});
+
+// ============================================================================
 // publish(): reporting the real cause when no stream binds the subject
 //
 // The server answers an unbound subject with `jetstream is not enabled`, which
@@ -2777,6 +2976,91 @@ describe('ensureStream: multi-service parallel start', () => {
       .toBe(minimalHash());
     expect(callArg(shared.streams.update, 1, 1).metadata[CONFIG_STAMP_KEYS.configHash])
       .toBe(minimalHash());
+  });
+
+  // A stream neither child finds: both create it, the payloads differ by their reconciled-at
+  // stamps, and the server refuses the second with 10058 "stream name already in use".
+
+  /** nats-server's "stream name already in use with a different configuration". Not in `JetStreamApiCodes`. */
+  const STREAM_NAME_IN_USE_CODE = 10_058;
+
+  /** The probe misses, and every later probe finds the stream the peer created. */
+  function peerCreatesStreamAfterProbe(mockJsm: AnyRecord, config: Partial<AnyRecord> = {}): void {
+    let probes = 0;
+    mockJsm.streams.info = mock(() => {
+      probes += 1;
+
+      return probes === 1
+        ? Promise.reject(makeApiError(STREAM_NOT_FOUND_CODE, 'stream not found'))
+        : Promise.resolve(streamInfoPresent(config));
+    });
+  }
+
+  function refuseFirstStreamCreate(mockJsm: AnyRecord): void {
+    let creates = 0;
+    mockJsm.streams.add = mock(() => {
+      creates += 1;
+
+      return creates === 1
+        ? Promise.reject(makeApiError(STREAM_NAME_IN_USE_CODE, 'stream name already in use with a different configuration'))
+        : Promise.resolve();
+    });
+  }
+
+  it("adopts the peer's stream after a create refused as a name in use, without onError", async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter();
+    refuseFirstStreamCreate(mockJsm);
+    peerCreatesStreamAfterProbe(mockJsm, { metadata: { [CONFIG_STAMP_KEYS.configHash]: minimalHash() } });
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => {
+      errors.push(error);
+    });
+
+    await adapter.connect();
+
+    expect(adapter.isConnected()).toBe(true);
+    expect(errors).toEqual([]);
+    expect(mockJsm.streams.add).toHaveBeenCalledTimes(1);
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(2);
+    expect(mockJsm.streams.update).not.toHaveBeenCalled();
+  });
+
+  it("runs the peer's stream through the same guards as one found on the first probe", async () => {
+    // The declaration says workqueue, the peer made a limits stream: a create-only field that
+    // differs fails the boot here exactly as it would have a second later.
+    const { adapter, mockJsm } = makeConnectableAdapter({
+      streams: [{ name: 'TEST_STREAM', subjects: ['test.>'], retention: 'workqueue' }],
+    });
+    refuseFirstStreamCreate(mockJsm);
+    peerCreatesStreamAfterProbe(mockJsm, { retention: 'limits' });
+
+    await expect(adapter.connect()).rejects.toThrow(/retention/);
+    expect(mockJsm.streams.update).not.toHaveBeenCalled();
+  });
+
+  it('yields once: a stream create refused on every attempt fails after the second', async () => {
+    const { adapter, mockJsm } = makeConnectableAdapter();
+    mockJsm.streams.info = mock(() => Promise.reject(makeApiError(STREAM_NOT_FOUND_CODE, 'stream not found')));
+    mockJsm.streams.add = mock(() => Promise.reject(
+      makeApiError(STREAM_NAME_IN_USE_CODE, 'stream name already in use with a different configuration'),
+    ));
+    const errors: Error[] = [];
+    adapter.on('onError', (error: Error) => {
+      errors.push(error);
+    });
+
+    let thrown: Error | undefined;
+    try {
+      await adapter.connect();
+    } catch (error) {
+      thrown = error as Error;
+    }
+
+    expect(thrown!.message).toContain('Failed to create JetStream stream "TEST_STREAM"');
+    expect((thrown!.cause as AnyRecord).code).toBe(STREAM_NAME_IN_USE_CODE);
+    expect(mockJsm.streams.add).toHaveBeenCalledTimes(2);
+    expect(mockJsm.streams.info).toHaveBeenCalledTimes(2);
+    expect(errors).toEqual([thrown!]);
   });
 });
 

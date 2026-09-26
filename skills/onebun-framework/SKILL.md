@@ -877,6 +877,8 @@ Key points about JetStream:
   a declaration that would stop covering a subject the stream already stores fails startup, and
   `storage`/`retention` cannot be changed in place (delete the stream to change them). The stamp lives in
   stream metadata, so this needs nats-server 2.10+; every failure emits `onError` as well as throwing
+- Replicas may all boot at once: a create that loses to a peer's (10058 for a stream, 10148 for a
+  consumer) is reconciled against the peer's resource once instead of failing startup — no staggered rollout
 
 ## Testing
 
