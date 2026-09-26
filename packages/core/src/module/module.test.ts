@@ -3523,4 +3523,205 @@ describe('OneBunModule', () => {
       expect(warnings).toEqual([]);
     });
   });
+
+  /**
+   * DI reads a class's OWN constructor types, never its parent's (FB-23), so a subclass that
+   * declares no constructor is built without its parent's dependencies. It boots, and with
+   * reflect-metadata imported before the core 0.8.1 borrowed the parent's types instead — so the
+   * warning is what stops that difference from surfacing only as a 500 at request time.
+   */
+  describe('a class that declares no constructor under a parent with dependencies', () => {
+    const { clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry } = require('./module');
+    const { BaseService: BaseServiceClass } = require('./service');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    @Service()
+    class Mailer {
+      send(): string {
+        return 'sent';
+      }
+    }
+
+    @Service()
+    class Notifier {
+      constructor(readonly mailer: Mailer) {}
+    }
+
+    const inheritedWarnings = (recorder: ReturnType<typeof makeRecordingLoggerLayer>, name: string): string[] =>
+      recorder.messages('warn').filter((message) => message.startsWith(`${name} declares no constructor`));
+
+    test('a @Service() subclass gets none of them, and the module says so once', () => {
+      @Service()
+      class WelcomeNotifier extends Notifier {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer, Notifier, WelcomeNotifier] })
+      class NotifierModule {}
+
+      const module = new OneBunModule(NotifierModule, recorder.layer);
+      const warnings = inheritedWarnings(recorder, 'WelcomeNotifier');
+
+      expect(module.getServiceByClass(WelcomeNotifier)!.mailer).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('The constructor it inherits from Notifier takes (Mailer)');
+      expect(warnings[0]).toContain('Declare the constructor in WelcomeNotifier');
+    });
+
+    test('a subclass that declares its constructor, or whose parents take nothing, is not reported', () => {
+      @Service()
+      class RedeclaredNotifier extends Notifier {
+        // Not useless: declaring it is what makes Bun emit this class's own design:paramtypes.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      // `constructor()` is a declaration too: Bun records `[]` for it, not nothing.
+      @Service()
+      class SelfSufficientNotifier extends Notifier {
+        constructor() {
+          super(new Mailer());
+        }
+      }
+
+      @Service()
+      class LoudMailer extends Mailer {}
+
+      @Service()
+      class PlainService extends BaseServiceClass {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({
+        providers: [Mailer, Notifier, RedeclaredNotifier, SelfSufficientNotifier, LoudMailer, PlainService],
+      })
+      class DeclaringModule {}
+
+      const module = new OneBunModule(DeclaringModule, recorder.layer);
+
+      expect(module.getServiceByClass(RedeclaredNotifier)!.mailer).toBe(module.getServiceByClass(Mailer)!);
+      expect(module.getServiceByClass(SelfSufficientNotifier)!.mailer).toBeInstanceOf(Mailer);
+      expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
+    });
+
+    test('a @Controller() subclass is reported through the controller wrapper', async () => {
+      @CtrlDeco('/notify')
+      class NotifyController extends CtrlBase {
+        constructor(readonly mailer: Mailer) {
+          super();
+        }
+      }
+
+      @CtrlDeco('/welcome')
+      class WelcomeController extends NotifyController {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer], controllers: [NotifyController, WelcomeController] })
+      class ControllerModule {}
+
+      const module = new OneBunModule(ControllerModule, recorder.layer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const welcome = module.getControllerInstance(WelcomeController) as WelcomeController;
+      const warnings = inheritedWarnings(recorder, 'WelcomeController');
+
+      expect((module.getControllerInstance(NotifyController) as NotifyController).mailer).toBeInstanceOf(Mailer);
+      expect(welcome.mailer).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('The constructor it inherits from NotifyController takes (Mailer)');
+      expect(inheritedWarnings(recorder, 'NotifyController')).toEqual([]);
+    });
+
+    @Service()
+    class MailingGuard {
+      constructor(readonly mailer: Mailer) {}
+
+      canActivate(): boolean {
+        return this.mailer instanceof Mailer;
+      }
+    }
+
+    test('a guard is reported once however many routes name it', () => {
+      class InheritingGuard extends MailingGuard {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      (module as any).resolveGuards([InheritingGuard]);
+      (module as any).resolveGuards([InheritingGuard]);
+
+      expect(inheritedWarnings(recorder, 'InheritingGuard')).toHaveLength(1);
+      expect(inheritedWarnings(recorder, 'InheritingGuard')[0]).toContain('inherits from MailingGuard takes (Mailer)');
+    });
+
+    /**
+     * Undecorated, so Bun emits no types for its own parameters. It is never handed its parent's
+     * — that is the positional defect own-only reading avoids — but with reflect-metadata imported
+     * before the core 0.8.1 did hand them over, and a subclass whose parameters match its parent's
+     * worked there. It now denies every request, so it is reported too, with the other fix.
+     */
+    test('an undecorated guard that declares its own parameters is told to take a decorator, once', () => {
+      class AuditLog {}
+
+      class StrictGuard extends MailingGuard {
+        // Not useless: it is the shape under test — parameters of its own, and no decorator.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      class AuditingGuard extends MailingGuard {
+        constructor(readonly audit: AuditLog) {
+          super(new Mailer());
+        }
+      }
+
+      @Service()
+      class DecoratedStrictGuard extends MailingGuard {
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      (module as any).resolveGuards([StrictGuard, AuditingGuard]);
+      const [strict, decorated] = (module as any).resolveGuards([StrictGuard, DecoratedStrictGuard]);
+
+      const declaredWarnings = (name: string): string[] => recorder.messages('warn')
+        .filter((message) => message.startsWith(`${name} declares a constructor with parameters`));
+
+      expect(strict.canActivate({})).toBe(false);
+      expect(decorated.canActivate({})).toBe(true);
+      expect(declaredWarnings('StrictGuard')).toHaveLength(1);
+      expect(declaredWarnings('StrictGuard')[0]).toContain('those of MailingGuard (Mailer) are not used');
+      expect(declaredWarnings('StrictGuard')[0]).toContain('Add @Service() to StrictGuard');
+      expect(declaredWarnings('AuditingGuard')).toHaveLength(1);
+      expect(declaredWarnings('DecoratedStrictGuard')).toEqual([]);
+      expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
+    });
+  });
 });

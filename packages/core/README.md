@@ -273,6 +273,8 @@ The `@Service` decorator automatically creates a Context tag for the service and
 
 OneBun includes a lightweight metadata system that powers its decorators and dependency injection. Unlike many TypeScript frameworks, OneBun doesn't rely on external dependencies like reflect-metadata, making it more lightweight and easier to use in client applications.
 
+Importing `@onebun/core` installs a complete Reflect Metadata API on the global `Reflect` (unless one is already there), which is where Bun's `emitDecoratorMetadata` output is recorded. Libraries that bring their own `reflect-metadata` — tsyringe, `@simplewebauthn/server` — work alongside it in any import order; if your application imports `reflect-metadata` itself, use 0.2.2 or later. See [Reflect Metadata and Other Libraries](https://onebun.dev/api/decorators#reflect-metadata-interop).
+
 The metadata system provides:
 
 - Storage for controller route definitions

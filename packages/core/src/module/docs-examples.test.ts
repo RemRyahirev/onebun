@@ -966,16 +966,25 @@ describe('Architecture (docs/architecture.md)', () => {
       constructor(public mailer: AutoDetectMailer) {}
     }
 
+    // A decorated subclass without a constructor of its own: the walk finds the parent's array,
+    // the OWN read the snippet shows (and DI uses) does not.
+    @Service()
+    class InheritingNotifier extends AutoDetectNotifier {}
+
     const globalReflect = globalThis.Reflect as unknown as {
-      getMetadata?(key: string, target: object): unknown;
+      getMetadata(key: string, target: object): unknown;
+      getOwnMetadata(key: string, target: object): unknown;
     };
-    expect(globalReflect.getMetadata?.('design:paramtypes', AutoDetectNotifier))
+    expect(globalReflect.getOwnMetadata('design:paramtypes', AutoDetectNotifier))
       .toEqual([AutoDetectMailer]);
-    expect(globalReflect.getMetadata?.('design:paramtypes', UndecoratedNotifier)).toBeUndefined();
+    expect(globalReflect.getOwnMetadata('design:paramtypes', UndecoratedNotifier)).toBeUndefined();
+    expect(globalReflect.getMetadata('design:paramtypes', InheritingNotifier)).toEqual([AutoDetectMailer]);
+    expect(globalReflect.getOwnMetadata('design:paramtypes', InheritingNotifier)).toBeUndefined();
 
     // What the framework actually resolves from that metadata.
     expect(getConstructorParamTypes(AutoDetectNotifier)).toEqual([AutoDetectMailer]);
     expect(getConstructorParamTypes(UndecoratedNotifier)).toBeUndefined();
+    expect(getConstructorParamTypes(InheritingNotifier)).toBeUndefined();
 
     @Module({ providers: [AutoDetectMailer, AutoDetectNotifier] })
     class AutoDetectModule {}

@@ -121,7 +121,14 @@ parameter types left to fail on (next paragraph).
 **The guard class must carry a decorator** — `@Service()` is the usual one. TypeScript emits the
 `design:paramtypes` metadata DI reads only for classes with at least one decorator, so an
 undecorated guard with constructor parameters receives `undefined` for every one of them and
-nothing fails at startup either: there are no parameter types left to fail on.
+nothing fails at startup either: there are no parameter types left to fail on. That holds for an
+undecorated guard that EXTENDS a decorated base guard too: DI reads a class's OWN
+`design:paramtypes`, never its parent's, so the subclass does not receive the base's dependencies
+by position. Decorate the subclass and declare its constructor to have it injected. Startup warns
+about such a subclass (`<Guard> declares a constructor with parameters, but no types were emitted
+...`). Through 0.8.1, with `reflect-metadata` imported before the core, it DID receive the base's
+types by position, so one whose parameters matched the base's worked there and gets nothing since
+0.8.2: add `@Service()` to it.
 
 **An INSTANCE passed to `@UseGuards` is shared, a CLASS is not.** `@UseGuards(new SomeGuard(...))`
 hands over one object built at decoration time, and that single object serves every concurrent

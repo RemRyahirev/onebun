@@ -47,7 +47,9 @@ The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry 
 12. Trace span ended
 
 **Module Metadata Storage**:
-- Custom WeakMap-based metadata system (polyfill in `packages/core/src/decorators/metadata.ts`)
+- Custom WeakMap-based metadata system in `packages/core/src/decorators/metadata.ts`, two layers: a module-private store for the framework's own keys, and the GLOBAL Reflect Metadata API
+- The global polyfill is a complete Reflect Metadata API (all nine functions, per-property keys, prototype walk) plus reflect-metadata's provider registry under `Symbol.for('@reflect-metadata:registry')`. It is installed only when no implementation is there; one already present (reflect-metadata imported first, an older copy of core) is kept as is. A reflect-metadata 0.2.x loaded LATER by a third-party library (tsyringe, `@simplewebauthn/server`) registers its store in that registry and keeps reading what was decorated before it; a later 0.1.x fills nothing. No dependency on reflect-metadata
+- DI reads OWN `design:paramtypes` (`getOwnMetadata`, no prototype walk) in `getConstructorParamTypes`, `diagnoseDecoratorMetadata` and the `@Controller` wrapper copy. A class that declares no constructor (`length === 0` and no own `design:paramtypes` array; an explicit `constructor()` records `[]`) under an ancestor that takes dependencies is built without them, and the module logs a warning once per class naming the ancestor and its types. So is an UNDECORATED class that declares constructor parameters under such an ancestor (`length > 0`, no types emitted, e.g. a guard subclass): it gets its own warning telling it to add `@Service()`, and is never handed the ancestor's types
 - `META_CONTROLLERS` Map — controller metadata (routes, path, middleware, guards)
 - `META_CONSTRUCTOR_PARAMS` Map — explicit constructor dependencies (@Inject, @Service)
 - String keys via `defineMetadata()`: `onebun:params`, `onebun:middleware`, `onebun:http_guards`, `onebun:controller_http_guards`, `onebun:interceptors`, `onebun:controller_interceptors`, `onebun:exception_filters`, `onebun:controller_exception_filters`, `onebun:responseSchemas`, `onebun:sse`
@@ -125,8 +127,9 @@ export class UserModule {}
 The framework uses TypeScript metadata to detect dependencies:
 
 ```typescript
-// Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true)
-const designTypes = Reflect.getMetadata('design:paramtypes', target);
+// Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true),
+// the class's OWN entry — a subclass never borrows its parent's
+const designTypes = Reflect.getOwnMetadata('design:paramtypes', target);
 
 // Fallback: Custom metadata storage (WeakMap-based, in decorators/metadata.ts)
 // Populated by @Service(), @Inject(), and other decorators via META_CONSTRUCTOR_PARAMS Map
@@ -134,6 +137,14 @@ const designTypes = Reflect.getMetadata('design:paramtypes', target);
 // Note: Classes MUST have a decorator (@Service, @Controller, etc.) for
 // design:paramtypes to be emitted. Without a decorator, DI will not work.
 ```
+
+Bun emits that metadata through the global `Reflect.metadata`, so `@onebun/core` installs a complete
+Reflect Metadata API on the global `Reflect` — all nine functions of the proposal, with per-member
+keys and the prototype walk — unless an implementation is already there. It interoperates with a
+`reflect-metadata` loaded later by a third-party library (tsyringe, `@simplewebauthn/server`): a
+0.2.x copy registers its own store in the provider registry the core publishes and still reads
+everything decorated before it loaded, and a 0.1.x copy finds nothing to fill in. Any import order
+works; see [Reflect Metadata and Other Libraries](/api/decorators#reflect-metadata-interop).
 
 ### Automatic DI (Recommended)
 

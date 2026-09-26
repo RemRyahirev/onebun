@@ -122,6 +122,12 @@ export class UserService extends BaseService {
 }
 ```
 
+**Reflect metadata** ([details](#reflect-metadata-interop)):
+- Importing `@onebun/core` installs the complete global Reflect Metadata API (nine functions, per-member keys, prototype walk) unless one is already there; the core has NO dependency on `reflect-metadata`
+- `reflect-metadata` (or a library that imports it: tsyringe, `@simplewebauthn/server`) may be imported before OR after the core; a later 0.2.x joins the registry the core publishes (`Symbol.for('@reflect-metadata:registry')`) and keeps earlier metadata. Recommend `reflect-metadata` >= 0.2.2 to apps that import it
+- DI reads OWN `design:paramtypes` only: a subclass without its own constructor gets no dependencies, an undecorated subclass with its own constructor gets none either — repeat the constructor and keep a decorator
+- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages: `<Class> declares no constructor of its own ...` (fix: declare the constructor) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`). Through 0.8.1, with `reflect-metadata` imported BEFORE the core, both borrowed the parent's types (the second by position, which worked when its parameters matched the parent's); since 0.8.2 neither does in any import order
+
 </llm-only>
 
 # Decorators API
@@ -1379,6 +1385,88 @@ Use the top-level `getConstructorParamTypes`, not `Reflect.getConstructorParamTy
 the `Reflect` namespace is the raw metadata reader and does not merge `@Inject(ConcreteClass)`, so
 an audit written against it reports a hole for every parameter that an explicit `@Inject` already
 answered.
+
+## Reflect Metadata and Other Libraries {#reflect-metadata-interop}
+
+Bun records constructor and member types (`design:paramtypes`, `design:type`) through the
+**global** `Reflect.metadata`, so importing `@onebun/core` installs the Reflect Metadata API on the
+global `Reflect`: all nine functions — `metadata`, `defineMetadata`, `hasMetadata`,
+`hasOwnMetadata`, `getMetadata`, `getOwnMetadata`, `getMetadataKeys`, `getOwnMetadataKeys` and
+`deleteMetadata` — with per-member storage and the proposal's prototype walk. The core does not
+depend on `reflect-metadata` and does not need it.
+
+The same global is shared with every other library that uses it: tsyringe, class-transformer,
+inversify, and anything that imports `reflect-metadata` on its own (`@simplewebauthn/server` does,
+through tsyringe). **Any import order works**:
+
+- **`reflect-metadata` imported before the core** — the core finds a complete implementation and
+  uses it as it is.
+- **`reflect-metadata` imported after the core** — a 0.2.x copy joins the provider registry the core
+  publishes, so everything decorated before it arrived is still read back; a 0.1.x copy finds
+  nothing missing and changes nothing.
+
+If your application imports `reflect-metadata` itself, use **0.2.2 or later**. 0.2.1 loses member
+metadata of classes decorated before it loaded whenever it has to adopt an older implementation
+that has no registry (a 0.1.x copy loaded earlier, for example).
+
+Constructor types are read **own**, never inherited. A decorated subclass that declares no
+constructor of its own has no `design:paramtypes` of its own, so it is built with no dependencies,
+and the module logs a warning at startup that names the class, the parent and the types it did not
+get. Declare the constructor again to have them injected:
+
+```typescript
+import { BaseService, getConstructorParamTypes, Service } from '@onebun/core';
+
+@Service()
+export class Clock extends BaseService {}
+
+@Service()
+export class Scheduler extends BaseService {
+  constructor(protected readonly clock: Clock) {
+    super();
+  }
+}
+
+// No constructor of its own: nothing is injected, `this.clock` is undefined,
+// and startup warns "NightlyScheduler declares no constructor of its own ..."
+@Service()
+export class NightlyScheduler extends Scheduler {}
+
+// The constructor declared again: `clock` is injected
+@Service()
+export class HourlyScheduler extends Scheduler {
+  constructor(clock: Clock) {
+    super(clock);
+  }
+}
+
+getConstructorParamTypes(Scheduler);        // [Clock]
+getConstructorParamTypes(NightlyScheduler); // undefined
+getConstructorParamTypes(HourlyScheduler);  // [Clock]
+```
+
+The parent's types are not borrowed because a subclass may take different parameters: a guard
+without a decorator that extends a decorated base guard and declares `constructor(audit: AuditLog)`
+would otherwise receive the base's first dependency in its `audit` slot. An undecorated class emits
+no metadata at all, so it is built with no dependencies — add a decorator (`@Service()`) to have its
+own constructor injected. When such a class declares constructor parameters and extends a class
+that takes dependencies, startup warns about it too:
+`<Class> declares a constructor with parameters, but no types were emitted for them ...`.
+
+**Upgrading from 0.8.1 with `reflect-metadata` imported first.** Through 0.8.1 the core read
+constructor types through whatever `getMetadata` was on the global `Reflect`. When
+`reflect-metadata` (or a library that imports it, such as `@simplewebauthn/server`) was imported
+BEFORE the core, that `getMetadata` walked the prototype chain, so a subclass with no constructor
+types of its own borrowed its parent's. Since 0.8.2 none does, in either import order. The app still
+boots, so look for the two startup warnings above:
+
+- `<Class> declares no constructor of its own ...` — a decorated subclass without a constructor
+  used to inherit its parent's dependencies. Declare the constructor in it and pass them to
+  `super(...)`.
+- `<Class> declares a constructor with parameters, but no types were emitted ...` — an undecorated
+  guard, interceptor, filter or middleware that extends a decorated class and declares its own
+  constructor used to receive the parent's types in that import order, by position, which worked
+  when its parameters matched the parent's. It now receives none. Add `@Service()` to it.
 
 ## Complete Example
 

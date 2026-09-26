@@ -65,6 +65,7 @@ import {
   createMockLogger,
   makeMockLoggerLayer,
 } from '../testing';
+import { makeRecordingLoggerLayer } from '../testing/test-utils';
 
 const okStatus = 200;
 const createdStatus = 201;
@@ -1005,6 +1006,84 @@ describe('Utility functions (docs/api/decorators.md)', () => {
 
     // The registered class is what arrived — not the decoy that also satisfies `Object`.
     expect(scheduler.nextTick()).toBe(43);
+  });
+});
+
+describe('Reflect Metadata and Other Libraries (docs/api/decorators.md)', () => {
+  /**
+   * @source docs:api/decorators.md#reflect-metadata-interop
+   */
+  it('installs the nine global functions and keeps per-member types apart', () => {
+    const reflect = globalThis.Reflect as unknown as Record<string, (...args: unknown[]) => unknown>;
+    const nine = [
+      'metadata',
+      'defineMetadata',
+      'hasMetadata',
+      'hasOwnMetadata',
+      'getMetadata',
+      'getOwnMetadata',
+      'getMetadataKeys',
+      'getOwnMetadataKeys',
+      'deleteMetadata',
+    ];
+
+    const tag = (_target: object, _member: string): void => undefined;
+    class Profile {
+      @tag name!: string;
+      @tag age!: number;
+    }
+
+    expect(nine.filter((name) => typeof reflect[name] === 'function')).toEqual(nine);
+    expect(reflect.getMetadata('design:type', Profile.prototype, 'name')).toBe(String);
+    expect(reflect.getMetadata('design:type', Profile.prototype, 'age')).toBe(Number);
+  });
+
+  /**
+   * @source docs:api/decorators.md#reflect-metadata-interop
+   */
+  it('reads constructor types own: a subclass is injected only when it declares the constructor again', () => {
+    @Service()
+    class Clock extends BaseService {}
+
+    @Service()
+    class Scheduler extends BaseService {
+      constructor(readonly clock: Clock) {
+        super();
+      }
+    }
+
+    @Service()
+    class NightlyScheduler extends Scheduler {}
+
+    @Service()
+    class HourlyScheduler extends Scheduler {
+      // Not useless: declaring it is what makes Bun emit this class's own design:paramtypes.
+      // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+      constructor(clock: Clock) {
+        super(clock);
+      }
+    }
+
+    expect(getConstructorParamTypes(Scheduler)).toEqual([Clock]);
+    expect(getConstructorParamTypes(NightlyScheduler)).toBeUndefined();
+    expect(getConstructorParamTypes(HourlyScheduler)).toEqual([Clock]);
+
+    @Module({ providers: [Clock, Scheduler, NightlyScheduler, HourlyScheduler] })
+    class SchedulingModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const module = createModule(SchedulingModule, {}, recorder.layer);
+    const clock = module.getServiceByClass(Clock) as Clock;
+
+    expect((module.getServiceByClass(Scheduler) as Scheduler).clock).toBe(clock);
+    expect((module.getServiceByClass(NightlyScheduler) as NightlyScheduler).clock).toBeUndefined();
+    expect((module.getServiceByClass(HourlyScheduler) as HourlyScheduler).clock).toBe(clock);
+
+    // From docs: the module says so at startup, naming the class, its parent and the types.
+    const warnings = recorder.messages('warn').filter((message) => message.includes('declares no constructor'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toStartWith('NightlyScheduler declares no constructor of its own');
+    expect(warnings[0]).toContain('inherits from Scheduler takes (Clock)');
   });
 });
 

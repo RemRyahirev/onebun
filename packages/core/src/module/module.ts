@@ -30,6 +30,8 @@ import {
 import {
   buildDecoratorMetadataDiagnosticMessage,
   diagnoseDecoratorMetadata,
+  getMetadata,
+  getOwnGlobalMetadata,
   isInjectableParamType,
 } from '../decorators/metadata';
 import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
@@ -258,6 +260,59 @@ function findStalledCycle(waits: ReadonlyMap<Function, Function>): Function[] | 
   return undefined;
 }
 
+/** A parent whose constructor dependencies a class with no constructor types of its own does not get. */
+interface InheritedConstructorDependencies {
+  /** The nearest ancestor DI would inject. */
+  readonly ancestor: Function;
+  /** Its constructor types, as `getConstructorParamTypes` reports them. */
+  readonly types: readonly (Function | undefined)[];
+  /**
+   * The class declares a constructor WITH parameters of its own (`length > 0`), yet no types were
+   * emitted for them — it carries no decorator. Otherwise it declares no constructor at all and
+   * runs the one it inherits.
+   */
+  readonly declaresParameters: boolean;
+}
+
+/**
+ * The nearest ancestor whose constructor DI would inject, for a class DI finds no constructor
+ * types for — or `undefined`.
+ *
+ * DI reads a class's OWN constructor types, never its parent's, so such a class is built with no
+ * arguments. It boots, and fails at the first call that uses a dependency. Two shapes get here:
+ * - it declares no constructor, so the one it inherits hands its parent `undefined` for each;
+ * - it declares a constructor with parameters but carries no decorator, so TypeScript emitted no
+ *   types for them and each parameter is `undefined` (typically a guard, interceptor, filter or
+ *   middleware that extends a decorated base).
+ * With `reflect-metadata` imported before the core, 0.8.1 borrowed the parent's types for both
+ * through its walking `getMetadata`, so these are also the shapes whose behaviour that upgrade
+ * changed. The second one is still never HANDED the parent's types — that is the positional
+ * defect own-only reading exists to avoid — it is only reported.
+ *
+ * "No constructor types" means no own `design:paramtypes` array at all (Bun records `[]` for an
+ * explicit `constructor()` on a decorated class) and no explicit `@Inject` types. Callers pass
+ * only a class `getConstructorParamTypes` found nothing for.
+ */
+function findInheritedConstructorDependencies(target: Function): InheritedConstructorDependencies | undefined {
+  const declaresOwnTypes = Array.isArray(getOwnGlobalMetadata('design:paramtypes', target))
+    || Array.isArray(getMetadata('design:paramtypes', target))
+    || getConstructorParamTypes(target) !== undefined;
+  if (declaresOwnTypes) {
+    return undefined;
+  }
+
+  let ancestor: unknown = Object.getPrototypeOf(target);
+  while (typeof ancestor === 'function' && ancestor !== Function.prototype) {
+    const types = getConstructorParamTypes(ancestor);
+    if (types !== undefined) {
+      return { ancestor, types, declaresParameters: target.length > 0 };
+    }
+    ancestor = Object.getPrototypeOf(ancestor);
+  }
+
+  return undefined;
+}
+
 /**
  * OneBun Module implementation
  */
@@ -397,6 +452,12 @@ export class OneBunModule implements ModuleInstance {
 
   /** Guard classes already reported as carrying a lifecycle hook that cannot run. */
   private readonly guardHookReported = new Set<Function>();
+
+  /**
+   * Classes already reported as having no constructor types of their own under a parent that takes
+   * dependencies. A guard or middleware class is resolved once per route that names it.
+   */
+  private readonly inheritedDependenciesReported = new Set<Function>();
 
   /**
    * Global modules this module constructed in the pre-pass, so the import loop can merge
@@ -983,6 +1044,9 @@ export class OneBunModule implements ModuleInstance {
       deferralsSinceProgress = 0;
 
       this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
+      if (detectedDeps === undefined) {
+        this.reportInheritedConstructorDependencies(provider);
+      }
 
       // Create service instance with resolved dependencies.
       // Set ambient init context so BaseService constructor can pick up logger/config,
@@ -1712,6 +1776,8 @@ export class OneBunModule implements ModuleInstance {
     const paramTypes = getConstructorParamTypes(target);
 
     if (paramTypes === undefined || paramTypes.length === 0) {
+      this.reportInheritedConstructorDependencies(target);
+
       return [];
     }
 
@@ -1783,6 +1849,48 @@ export class OneBunModule implements ModuleInstance {
         + '@Inject(ConcreteClass). Mark it @Optional() to silence this.',
       );
     }
+  }
+
+  /**
+   * Say, once per class, that a class with no constructor types of its own is built without the
+   * constructor dependencies its parent takes.
+   *
+   * Nothing else would: the class boots, every such field is `undefined`, and the failure shows up
+   * at the first request that uses one — as a 500 or a 403, far from its cause. Called only for a
+   * class DI found no constructor types for; see {@link findInheritedConstructorDependencies} for
+   * the two shapes that are reported.
+   */
+  private reportInheritedConstructorDependencies(target: Function): void {
+    if (this.inheritedDependenciesReported.has(target)) {
+      return;
+    }
+    this.inheritedDependenciesReported.add(target);
+
+    const inherited = findInheritedConstructorDependencies(target);
+    if (inherited === undefined) {
+      return;
+    }
+
+    const names = inherited.types.map((type) => type?.name ?? 'unresolvable').join(', ');
+    if (inherited.declaresParameters) {
+      this.logger.warn(
+        `${target.name} declares a constructor with parameters, but no types were emitted for them, so `
+        + 'it is built with no constructor arguments and each parameter receives undefined. TypeScript '
+        + 'emits constructor types only for a class that carries a decorator, and DI never borrows a '
+        + `parent's: those of ${inherited.ancestor.name} (${names}) are not used. Add @Service() to `
+        + `${target.name} to have its constructor injected.`,
+      );
+
+      return;
+    }
+
+    this.logger.warn(
+      `${target.name} declares no constructor of its own, so it is built with no constructor `
+      + 'dependencies: DI reads a class\'s OWN constructor types, never its parent\'s. The constructor '
+      + `it inherits from ${inherited.ancestor.name} takes (${names}), and each of them receives `
+      + `undefined. Declare the constructor in ${target.name} with those parameters and pass them to `
+      + 'super(...) to have them injected.',
+    );
   }
 
   /**
