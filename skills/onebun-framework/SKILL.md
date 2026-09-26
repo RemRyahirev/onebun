@@ -303,6 +303,21 @@ wherever the service is needed.
 **Import order is not semantic.** A `@Global()` module's services reach every module regardless
 of where it sits in an `imports` array, and whether or not the importing module lists it at all.
 
+**Provider order is not semantic either** (since 0.8.2). Each provider is built after the
+same-module providers it injects, however `providers` lists them, so there is no need to sort the
+array. That includes a parameter typed as an abstract class: it waits until a provider extending it
+is built (with two such providers, the one constructed first is injected). The exception is an
+`@Optional()` abstract-typed parameter, which does not wait: list its implementation first, or it
+gets `undefined` and a warning. A real cycle throws `CircularDependencyError` whose `chain` names
+only the cycle — break it by extracting a third service, there is no `forwardRef`. A provider
+waiting on a same-module provider that was never constructed (no `@Service()` visible to this copy
+of `@onebun/core`, or its constructor threw — see `Failed to create service <Name>` in the log)
+throws `DependencyResolutionError` naming that dependency; an `@Optional()` parameter gets
+`undefined` and a warning instead. Through 0.8.1, four or more providers listed consumer-first
+could fail with a `CircularDependencyError` whose chain was no cycle (`C <-> D`), and a provider
+with an abstract-typed parameter listed before the implementation failed at once;
+dependencies-first was the workaround, and on 0.8.1 it still is.
+
 ## Services
 
 ```typescript

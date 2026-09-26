@@ -949,6 +949,17 @@ Marks a constructor parameter as optional for dependency injection. When the dep
 - Feature-gated dependencies (e.g., caching that may not be configured)
 - Graceful degradation when an optional module is not imported
 
+A dependency listed in the module's own `providers` that was never constructed — its constructor
+threw, or this copy of `@onebun/core` sees no `@Service()` on it — counts as not available too: the
+parameter receives `undefined`, and a warning names the dependency and why it has no instance.
+Before 0.8.2 that failed the boot instead.
+
+An `@Optional()` parameter typed as an **abstract class** does not wait for its implementation the
+way every other parameter does: it receives the subclass only if that is already built when its
+consumer is constructed, and `undefined` with a warning otherwise. List the implementation, and
+what it injects, before the consumer. Waiting would turn an implementation that injects its
+consumer back — which boots, with `undefined` — into a `CircularDependencyError`.
+
 **Example:**
 
 ```typescript

@@ -66,7 +66,7 @@ import { type } from '@onebun/core';
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
 import { MessageExecutionContextImpl } from './queue/guards';
-import { makeMockLoggerLayer } from './testing';
+import { makeMockLoggerLayer, makeRecordingLoggerLayer } from './testing';
 
 import {
   All,
@@ -9522,6 +9522,219 @@ describe('Dependency Resolution Errors (docs/api/services.md)', () => {
 });
 
 /**
+ * @source docs:api/services.md#circular-dependencies
+ */
+describe('Circular Dependencies (docs/api/services.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+
+  const bootError = (moduleClass: Function): Error => {
+    try {
+      new OneBunModule(moduleClass, mockLoggerLayer);
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected the module to fail');
+  };
+
+  it('constructs providers listed consumer-first, dependencies first', () => {
+    // From docs: providers: [UserService, UserRepository, Database]
+    const constructed: string[] = [];
+
+    @Service()
+    class Database extends BaseService {
+      constructor() {
+        super();
+        constructed.push('Database');
+      }
+    }
+
+    @Service()
+    class UserRepository extends BaseService {
+      constructor(readonly database: Database) {
+        super();
+        constructed.push('UserRepository');
+      }
+    }
+
+    @Service()
+    class UserService extends BaseService {
+      constructor(readonly repository: UserRepository) {
+        super();
+        constructed.push('UserService');
+      }
+    }
+
+    @Module({
+      providers: [UserService, UserRepository, Database],
+    })
+    class UserModule {}
+
+    const module = new OneBunModule(UserModule, mockLoggerLayer);
+
+    expect(constructed).toEqual(['Database', 'UserRepository', 'UserService']);
+    expect(module.getServiceByClass(UserService)!.repository.database).toBe(module.getServiceByClass(Database)!);
+  });
+
+  it('reports a real cycle with a chain that names only the cycle', () => {
+    // From docs: "Dependency chain: ServiceA -> ServiceB -> ServiceA",
+    // "Unresolved services: ServiceA, ServiceB"
+    @Service()
+    class ServiceA extends BaseService {}
+
+    @Service()
+    class ServiceB extends BaseService {}
+
+    registerDependencies(ServiceA, [ServiceB]);
+    registerDependencies(ServiceB, [ServiceA]);
+
+    @Module({ providers: [ServiceA, ServiceB] })
+    class AppModule {}
+
+    const error = bootError(AppModule);
+
+    expect(error).toBeInstanceOf(CircularDependencyError);
+    expect(error.message).toBe(
+      'Circular dependency detected in module AppModule!\n' +
+        'Dependency chain: ServiceA -> ServiceB -> ServiceA\n' +
+        'Unresolved services: ServiceA, ServiceB',
+    );
+  });
+
+  it('keeps a provider that only waits on the cycle out of the chain', () => {
+    // From docs: "`X` in `X -> Y -> Z -> Y` is listed among the unresolved services, not in the chain"
+    @Service()
+    class X extends BaseService {}
+
+    @Service()
+    class Y extends BaseService {}
+
+    @Service()
+    class Z extends BaseService {}
+
+    registerDependencies(X, [Y]);
+    registerDependencies(Y, [Z]);
+    registerDependencies(Z, [Y]);
+
+    @Module({ providers: [X, Y, Z] })
+    class TailModule {}
+
+    const error = bootError(TailModule) as CircularDependencyError;
+
+    expect(error).toBeInstanceOf(CircularDependencyError);
+    expect(error.chain).toBe('Y -> Z -> Y');
+    expect(error.unresolvedServices).toContain('X');
+  });
+
+  it('reports a provider that was never constructed as DependencyResolutionError, not as a cycle', () => {
+    // From docs: "Could not resolve dependency UserRepository for service UserService."
+    @Service()
+    class UserRepository extends BaseService {
+      constructor() {
+        super();
+        throw new Error('Database not initialized. Call initialize() first.');
+      }
+    }
+
+    @Service()
+    class UserService extends BaseService {
+      constructor(readonly repository: UserRepository) {
+        super();
+      }
+    }
+
+    @Module({ providers: [UserService, UserRepository] })
+    class UserModule {}
+
+    const error = bootError(UserModule);
+
+    expect(error).toBeInstanceOf(DependencyResolutionError);
+    expect(error.message).toBe(
+      'Could not resolve dependency UserRepository for service UserService.\n' +
+        '  - UserRepository is listed in the providers of UserModule, but was never constructed: ' +
+        'creating it threw, and the error was logged as "Failed to create service UserRepository".',
+    );
+  });
+
+  /**
+   * @source docs:api/services.md#circular-dependencies
+   * @source docs:architecture.md#explicit-injection-edge-cases
+   */
+  it('boots a consumer of an abstract-typed parameter listed before the implementation and its dependency', () => {
+    // From docs: "the consumer waits until a provider of its module that extends the type is built,
+    // so it may be listed before that implementation and before the implementation's own dependencies"
+    abstract class PaymentGateway extends BaseService {
+      abstract charge(amount: number): string;
+    }
+
+    @Service()
+    class GatewayConfig extends BaseService {
+      readonly currency = 'EUR';
+    }
+
+    @Service()
+    class StripeGateway extends PaymentGateway {
+      constructor(readonly gatewayConfig: GatewayConfig) {
+        super();
+      }
+
+      charge(amount: number): string {
+        return `${amount} ${this.gatewayConfig.currency}`;
+      }
+    }
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(readonly gateway: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, StripeGateway, GatewayConfig] })
+    class CheckoutModule {}
+
+    const module = new OneBunModule(CheckoutModule, mockLoggerLayer);
+    const checkout = module.getServiceByClass(CheckoutService)!;
+
+    expect(checkout.gateway).toBe(module.getServiceByClass(StripeGateway)!);
+    expect(checkout.gateway.charge(5)).toBe('5 EUR');
+  });
+
+  it('names the never-constructed implementation of an abstract-typed parameter', () => {
+    // From docs: "the dependency named is the parameter's type, and the hint names the provider
+    // extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`"
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class StripeGateway extends PaymentGateway {
+      constructor() {
+        super();
+        throw new Error('STRIPE_KEY is not set');
+      }
+    }
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(readonly gateway: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, StripeGateway] })
+    class CheckoutModule {}
+
+    const error = bootError(CheckoutModule);
+
+    expect(error).toBeInstanceOf(DependencyResolutionError);
+    expect(error.message).toBe(
+      'Could not resolve dependency PaymentGateway for service CheckoutService.\n' +
+        '  - StripeGateway (it extends PaymentGateway) is listed in the providers of CheckoutModule, ' +
+        'but was never constructed: creating it threw, and the error was logged as ' +
+        '"Failed to create service StripeGateway".',
+    );
+  });
+});
+
+/**
  * @source docs:api/decorators.md#optional
  */
 describe('@Optional() decorator (docs/api/decorators.md)', () => {
@@ -9588,6 +9801,100 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     expect(withEmail.emailService).toBeInstanceOf(EmailService);
     expect(withEmail.notify('u-2', 'hello')).toBe('emailed');
     expect(withEmail.emailService!.sent).toEqual(['u-2:hello']);
+  });
+
+  it('injects undefined, with a warning, for a listed provider that was never constructed', () => {
+    // From docs: "A dependency listed in the module's own `providers` that was never constructed
+    // [...] counts as not available too: the parameter receives `undefined`, and a warning names
+    // the dependency and why it has no instance."
+    @Service()
+    class EmailService extends BaseService {
+      constructor() {
+        super();
+        throw new Error('SMTP_URL is not set');
+      }
+    }
+
+    @Service()
+    class NotificationService extends BaseService {
+      constructor(@Optional() readonly emailService?: EmailService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [NotificationService, EmailService] })
+    class NotifModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const mod = new OneBunModule(NotifModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+
+    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Failed to create service EmailService');
+  });
+
+  it('does not wait for the implementation of an abstract-typed parameter', () => {
+    // From docs: "it receives the subclass only if that is already built when its consumer is
+    // constructed, and `undefined` with a warning otherwise"
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class StripeGateway extends PaymentGateway {}
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(@Optional() readonly gateway?: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [StripeGateway, CheckoutService] })
+    class ImplementationFirstModule {}
+
+    const implementationFirst = new OneBunModule(ImplementationFirstModule, mockLoggerLayer);
+    expect(implementationFirst.getServiceByClass(CheckoutService)!.gateway)
+      .toBe(implementationFirst.getServiceByClass(StripeGateway)!);
+
+    @Module({ providers: [CheckoutService, StripeGateway] })
+    class ConsumerFirstModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const consumerFirst = new OneBunModule(ConsumerFirstModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('CheckoutService'));
+
+    expect(consumerFirst.getServiceByClass(CheckoutService)!.gateway).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('StripeGateway, which extends it, is not built yet');
+  });
+
+  it('boots an implementation that injects its optional consumer back, with undefined', () => {
+    // From docs: "Waiting would turn an implementation that injects its consumer back — which
+    // boots, with `undefined` — into a `CircularDependencyError`."
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(@Optional() readonly gateway?: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Service()
+    class CallbackGateway extends PaymentGateway {
+      constructor(readonly checkout: CheckoutService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, CallbackGateway] })
+    class CallbackModule {}
+
+    const mod = new OneBunModule(CallbackModule, mockLoggerLayer);
+    const checkout = mod.getServiceByClass(CheckoutService)!;
+
+    expect(checkout.gateway).toBeUndefined();
+    expect(mod.getServiceByClass(CallbackGateway)!.checkout).toBe(checkout);
   });
 });
 

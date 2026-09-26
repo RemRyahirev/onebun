@@ -154,14 +154,74 @@ Matching is by class **identity**, not by name: a same-named class in a package 
 
 ### Circular Dependencies
 
-Circular dependencies (A → B → A) are detected and throw `CircularDependencyError` with the full chain:
+The order of `providers` does not matter. Each provider is constructed after the providers of its
+own module that it injects, whatever order the array lists them in — a consumer may come first:
+
+```typescript
+import { BaseService, Module, Service } from '@onebun/core';
+
+@Service()
+export class Database extends BaseService {}
+
+@Service()
+export class UserRepository extends BaseService {
+  constructor(private database: Database) {
+    super();
+  }
+}
+
+@Service()
+export class UserService extends BaseService {
+  constructor(private repository: UserRepository) {
+    super();
+  }
+}
+
+@Module({
+  // Consumers first: Database is still constructed first, then UserRepository, then UserService
+  providers: [UserService, UserRepository, Database],
+})
+export class UserModule {}
+```
+
+A parameter typed as an abstract or base class, which DI resolves to a registered subclass (see
+[Architecture](/architecture#explicit-injection-edge-cases)), follows the same rule: the consumer
+waits until a provider of its module that extends the type is built, so it may be listed before
+that implementation and before the implementation's own dependencies. The one exception is an
+`@Optional()` parameter of that kind: it does not wait, so list the implementation first — see
+[@Optional()](/api/decorators#optional).
+
+A graph that already booted is constructed in the same order as before, so `onModuleInit` order
+does not move either. Before 0.8.2, four or more providers listed consumer-first could fail with a
+`CircularDependencyError` whose chain was not a cycle (`C <-> D`), and a consumer listed before the
+implementation of its abstract-typed parameter failed with `DependencyResolutionError`. Listing
+dependencies first was the workaround, and it still works.
+
+A real cycle (A → B → A) is detected and throws `CircularDependencyError`. The chain names only the
+cycle: a provider that merely waits on it — `X` in `X -> Y -> Z -> Y` — is listed among the
+unresolved services, not in the chain.
 
 ```
 CircularDependencyError: Circular dependency detected in module AppModule!
 Dependency chain: ServiceA -> ServiceB -> ServiceA
+Unresolved services: ServiceA, ServiceB
 ```
 
 Restructure your code to break the cycle — e.g., extract the shared logic into a third service.
+
+A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
+with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of
+`@onebun/core` sees no `@Service()` on it (it is undecorated, or decorated by a second copy of the
+framework), or creating it threw — the original error is logged as `Failed to create service <Name>`:
+
+```
+DependencyResolutionError: Could not resolve dependency UserRepository for service UserService.
+  - UserRepository is listed in the providers of UserModule, but was never constructed: creating it threw, and the error was logged as "Failed to create service UserRepository".
+```
+
+For an abstract-typed parameter the dependency named is the parameter's type, and the hint names the
+provider extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`. An
+`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional).
 
 ### Optional Dependencies
 

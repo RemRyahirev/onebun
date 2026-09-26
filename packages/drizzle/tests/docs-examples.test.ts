@@ -2255,7 +2255,9 @@ describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
 
   it('fails the boot when it carries @Service() and something injects it', async () => {
     // From docs: registering a repository as a provider makes app.start() reject with a
-    // CircularDependencyError naming the CONSUMER, not the repository.
+    // DependencyResolutionError naming the repository as the dependency its consumer could not
+    // get, because constructing it threw. Before 0.8.2 this was a CircularDependencyError that
+    // named only the consumer, although there is no cycle.
     @ServiceDecorator()
     class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
       constructor(db: DrizzleServiceCtor) {
@@ -2294,8 +2296,9 @@ describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
     const failure = await app.start().then(() => null, (error: unknown) => error as Error);
     await app.stop().catch(() => undefined);
 
-    expect(String(failure)).toContain('CircularDependencyError');
-    expect(String(failure)).toContain('Consumer');
+    expect(failure?.name).toBe('DependencyResolutionError');
+    expect(String(failure)).toContain('Could not resolve dependency ProviderRepository for service Consumer');
+    expect(String(failure)).toContain('Failed to create service ProviderRepository');
   });
 });
 

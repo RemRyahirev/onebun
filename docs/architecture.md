@@ -8,7 +8,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 
 **DI Resolution Order**:
 1. Module imports resolved first (depth-first)
-2. Providers instantiated in dependency order (dependencies first)
+2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core, or creating it threw). A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all (as through 0.8.1 — waiting would turn an implementation that injects its consumer back into a cycle). It gets `undefined`, with a warning, when a provider of the module could have filled it
 3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
@@ -88,7 +88,7 @@ OneBunApplication
 1. **Service Registration**: `@Service()` decorator registers class with Effect.js Context tag
 2. **Module Assembly**: `@Module()` collects controllers and providers
 3. **Dependency Resolution**: Framework analyzes constructor parameters
-4. **Instance Creation**: Services created in dependency order, then controllers
+4. **Instance Creation**: Services created in dependency order — the order of `providers` does not matter — then controllers
 
 ### DI Resolution Flow
 
@@ -179,8 +179,12 @@ export class UserController extends BaseController {
 - **An abstract-class-typed parameter needs no `@Inject` at all.** DI resolves it to a
   registered subclass automatically (`instance instanceof type`), while `@Inject(AbstractClass)`
   is `error TS2345` — an abstract constructor is not assignable to `new (...args: any[]) => T`.
-  This works only when exactly one subclass is registered; with two, the first one listed in
-  `providers` wins silently.
+  The consumer may be listed before the subclass, and before the subclass's own dependencies: it
+  waits until the subclass is built. An `@Optional()` parameter does not wait — it gets
+  `undefined`, with a warning, unless the subclass is already built — so list the subclass before
+  that consumer. This works only when exactly one subclass is registered; with two, whichever is
+  constructed first wins silently — the first one listed in `providers`, unless it waits for a
+  dependency listed after it.
 - **There is no `{ provide, useClass }` binding form.** An object provider throws
   `OneBunInvalidProviderError` at startup; substitute implementations with
   `TestingModule.overrideProvider()`.

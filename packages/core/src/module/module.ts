@@ -201,6 +201,63 @@ export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, 
   return new Map(processDefaultScope.services);
 }
 
+/** Why a provider left the resolution queue without an instance. */
+type NeverConstructedReason = 'undecorated' | 'constructor-threw';
+
+/** What a deferred provider waits for. */
+interface ProviderWait {
+  /** The provider of the same module that has to be built first. */
+  readonly provider: Function;
+  /** The declared parameter type: `provider` itself, or an abstract or base class it extends. */
+  readonly parameterType: Function;
+}
+
+/**
+ * Whether instances of `candidate` pass `instanceof type` — the test by which a parameter typed
+ * as an abstract or base class resolves to a built subclass (see `resolveDependencyByType`).
+ */
+function constructsInstanceOf(candidate: Function, type: Function): boolean {
+  const typePrototype: unknown = type.prototype;
+
+  // `instanceof` throws on a right-hand side without an object prototype, e.g. an arrow function.
+  return typeof typePrototype === 'object' && typePrototype !== null && candidate.prototype instanceof type;
+}
+
+/**
+ * The cycle among the providers a stalled resolution loop left pending, if there is one.
+ *
+ * `waits` maps each pending provider to the one in-module class it waits for, so walking it from
+ * any provider either returns to a provider already on the walk — a cycle, returned closed and
+ * WITHOUT the walk's lead-in (`X -> Y -> Z -> Y` yields `[Y, Z, Y]`) — or reaches a class that is
+ * not pending at all.
+ */
+function findStalledCycle(waits: ReadonlyMap<Function, Function>): Function[] | undefined {
+  // Walks from these reached a class outside `waits`, so no cycle is reachable from them.
+  const leadsOut = new Set<Function>();
+
+  for (const start of waits.keys()) {
+    const walk: Function[] = [];
+    const positionOnWalk = new Map<Function, number>();
+    let current: Function | undefined = start;
+
+    while (current !== undefined && waits.has(current) && !leadsOut.has(current)) {
+      const seenAt = positionOnWalk.get(current);
+      if (seenAt !== undefined) {
+        return [...walk.slice(seenAt), current];
+      }
+      positionOnWalk.set(current, walk.length);
+      walk.push(current);
+      current = waits.get(current);
+    }
+
+    for (const provider of walk) {
+      leadsOut.add(provider);
+    }
+  }
+
+  return undefined;
+}
+
 /**
  * OneBun Module implementation
  */
@@ -803,24 +860,52 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
-    // Create services in dependency order
-    const pendingProviders = [...metadata.providers.filter((p) => typeof p === 'function')];
+    // Create services in dependency order: a FIFO queue, where a provider whose in-module
+    // dependency is not built yet goes back to the TAIL. That discipline is what fixes the
+    // construction order — and with it the onModuleInit order — so it must not change.
+    const listedProviders = metadata.providers.filter((p): p is Function => typeof p === 'function');
+    const pendingProviders = [...listedProviders];
     const createdServices = new Set<Function>();
-    // Names, not classes: this one only ever feeds message text and buildDependencyChain.
-    const unresolvedDeps = new Map<string, string[]>(); // Track unresolved dependencies for error reporting
-    let iterations = 0;
-    const maxIterations = pendingProviders.length * 2; // Prevent infinite loops
-
-    while (pendingProviders.length > 0 && iterations < maxIterations) {
-      iterations++;
-      const provider = pendingProviders.shift();
-      if (!provider || typeof provider !== 'function') {
-        continue;
+    // The in-module provider each deferred provider waited for on its LATEST attempt. The created
+    // set only grows, so a dependency once passed never blocks again: when the loop stalls, this
+    // is exactly what every leftover provider is still waiting for.
+    const blockedOn = new Map<Function, ProviderWait>();
+    // Providers that left the queue without an instance, and why. A consumer stalled on one of
+    // them is told that, rather than being reported as part of a cycle that does not exist.
+    const neverConstructed = new Map<Function, NeverConstructedReason>();
+    // The provider of this module that a parameter of type `depType` must wait for, now that
+    // nothing resolves it, or `undefined` when no provider of this module can. That is `depType`
+    // itself when this module can resolve the class. A parameter typed as an abstract or base
+    // class resolves by `instanceof` to whichever subclass is built first, so otherwise it is the
+    // first listed provider extending `depType` that is still to be built — or, failing that, one
+    // that left the queue without an instance, so that a stall can say why. The consumer never
+    // counts: a class is not injected into itself. Without this second branch a consumer listed
+    // before the only implementation of its abstract-typed parameter failed at once.
+    const providerToWaitFor = (depType: Function, consumer: Function): Function | undefined => {
+      if (availableServiceClasses.has(depType)) {
+        return createdServices.has(depType) ? undefined : depType;
       }
+      const unbuilt = listedProviders.filter((candidate) => candidate !== consumer &&
+        !createdServices.has(candidate) && constructsInstanceOf(candidate, depType));
+
+      return unbuilt.find((candidate) => !neverConstructed.has(candidate)) ?? unbuilt[0];
+    };
+    // Deferrals since a provider last left the queue. Resolution reads only state that changes
+    // when a provider leaves it, so once every provider still pending has been retried without
+    // that happening, no further pass can differ: that stall is the loop's only stop. It used
+    // to be a budget of `2 * providers.length` attempts, but a graph listed consumer-first needs
+    // up to N(N+1)/2 — a chain of four in reverse order already ran out and reported a "cycle".
+    let deferralsSinceProgress = 0;
+
+    while (pendingProviders.length > 0 && deferralsSinceProgress < pendingProviders.length) {
+      // The loop condition guarantees an element.
+      const provider = pendingProviders.shift()!;
 
       const serviceMetadata = getServiceMetadata(provider);
       if (!serviceMetadata) {
         this.logger.debug(`Provider ${provider.name} does not have @Service decorator, skipping`);
+        neverConstructed.set(provider, 'undecorated');
+        deferralsSinceProgress = 0;
         continue;
       }
 
@@ -828,6 +913,7 @@ export class OneBunModule implements ModuleInstance {
       // constructor (and its dependencies') for an instance nothing would ever receive.
       if (this.scope.overrides.has(serviceMetadata.tag as Context.Tag<unknown, unknown>)) {
         createdServices.add(provider);
+        deferralsSinceProgress = 0;
         this.logger.debug(`Provider ${provider.name} replaced by a test override, not constructed`);
         continue;
       }
@@ -861,22 +947,27 @@ export class OneBunModule implements ModuleInstance {
             continue;
           }
 
-          // Check if it's a service that hasn't been created yet
-          const isServiceInModule = availableServiceClasses.has(depType);
-          if (isServiceInModule && !createdServices.has(depType)) {
-            // Track unresolved dependency for error reporting
-            const deps = unresolvedDeps.get(provider.name) || [];
-            if (!deps.includes(depType.name)) {
-              deps.push(depType.name);
-              unresolvedDeps.set(provider.name, deps);
-            }
-            // This dependency will be created later, defer this service
+          // A provider of this module that may still be built: defer this one to the tail. A
+          // required parameter waits even for one that already left the queue without an
+          // instance, so that the stall can say why it is missing. An @Optional() parameter waits
+          // only for its own class, and only while that is still pending. Typed as an abstract or
+          // base class it does not wait at all, as before 0.8.2: a provider its implementation
+          // injects back boots today only because it does not.
+          const waitFor = providerToWaitFor(depType, provider);
+          const isOptional = isOptionalParam(provider, i);
+          const reason = waitFor === undefined ? undefined : neverConstructed.get(waitFor);
+          if (waitFor !== undefined && (!isOptional || (waitFor === depType && reason === undefined))) {
+            blockedOn.set(provider, { provider: waitFor, parameterType: depType });
             allDependenciesResolved = false;
             pendingProviders.push(provider);
+            deferralsSinceProgress++;
             break;
           }
 
-          if (isOptionalParam(provider, i)) {
+          if (isOptional) {
+            if (waitFor !== undefined) {
+              this.logger.warn(this.describeOptionalLeftUndefined(provider, i, depType, waitFor, reason));
+            }
             continue;
           }
 
@@ -888,6 +979,8 @@ export class OneBunModule implements ModuleInstance {
       if (!allDependenciesResolved) {
         continue;
       }
+      // Leaving the queue is progress whether or not the constructor below succeeds.
+      deferralsSinceProgress = 0;
 
       this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
 
@@ -962,33 +1055,117 @@ export class OneBunModule implements ModuleInstance {
           throw error;
         }
         this.logger.error(`Failed to create service ${provider.name}: ${error}`);
+        neverConstructed.set(provider, 'constructor-threw');
       }
     }
 
-    // Only report circular dependency if there are still unresolved services
-    const unresolvedServices = pendingProviders
-      .filter((p) => typeof p === 'function')
-      .map((p) => p.name);
+    if (pendingProviders.length > 0) {
+      throw this.stalledProvidersError(pendingProviders, blockedOn, neverConstructed);
+    }
+  }
 
-    if (iterations >= maxIterations && unresolvedServices.length > 0) {
-      const details = unresolvedServices
-        .map((serviceName) => {
-          const deps = unresolvedDeps.get(serviceName) || [];
+  /**
+   * The error for providers still pending when the resolution loop stalled.
+   *
+   * Every one of them was deferred during the final, fruitless pass, so each waits for exactly
+   * one in-module provider. Following those waits either closes a cycle — the one case reported
+   * as `CircularDependencyError`, naming only the cycle — or leaves the pending set at a provider
+   * that left the queue without an instance, which is reported as the dependency that could not
+   * be resolved, with the reason it was never constructed.
+   */
+  private stalledProvidersError(
+    pending: readonly Function[],
+    blockedOn: ReadonlyMap<Function, ProviderWait>,
+    neverConstructed: ReadonlyMap<Function, NeverConstructedReason>,
+  ): CircularDependencyError | DependencyResolutionError {
+    // Deferred during the final pass (see above), so every pending provider has an entry.
+    const waitOf = (provider: Function): ProviderWait => blockedOn.get(provider)!;
+    const waits = new Map(pending.map((provider) => [provider, waitOf(provider).provider]));
+    const cycle = findStalledCycle(waits);
 
-          return `  - ${serviceName} -> needs: [${deps.join(', ')}]`;
+    if (cycle !== undefined) {
+      const chain = cycle.map((provider) => provider.name).join(' -> ');
+      const unresolvedServices = pending.map((provider) => provider.name);
+      const details = pending
+        .map((provider) => {
+          const wait = waitOf(provider);
+          const needs = wait.provider === wait.parameterType
+            ? wait.provider.name
+            : `${wait.parameterType.name} (${wait.provider.name})`;
+
+          return `  - ${provider.name} -> needs: [${needs}]`;
         })
         .join('\n');
-
-      const dependencyChain = this.buildDependencyChain(unresolvedDeps, unresolvedServices);
-
-      const errorMessage =
+      this.logger.error(
         `Circular dependency detected in module ${this.moduleClass.name}!\n` +
-        `Unresolved services:\n${details}\n` +
-        `Dependency chain: ${dependencyChain}`;
+          `Unresolved services:\n${details}\n` +
+          `Dependency chain: ${chain}`,
+      );
 
-      this.logger.error(errorMessage);
-      throw new CircularDependencyError(this.moduleClass.name, dependencyChain, unresolvedServices);
+      return new CircularDependencyError(this.moduleClass.name, chain, unresolvedServices);
     }
+
+    // No cycle, so walking the waits from any provider leaves the pending set: some provider
+    // waits for one that is neither pending nor constructed.
+    const consumer = pending.find((provider) => !waits.has(waitOf(provider).provider))!;
+    const { provider: dependency, parameterType } = waitOf(consumer);
+
+    return new DependencyResolutionError(
+      consumer.name,
+      parameterType.name,
+      'service',
+      [this.describeNeverConstructed(dependency, parameterType, neverConstructed.get(dependency))],
+    );
+  }
+
+  /**
+   * Why a provider listed in this module's `providers` has no instance, for the consumer that
+   * waited for it — as `parameterType`, which is the provider itself or a class it extends.
+   */
+  private describeNeverConstructed(
+    dependency: Function,
+    parameterType: Function,
+    reason: NeverConstructedReason | undefined,
+  ): string {
+    const subject = dependency === parameterType
+      ? dependency.name
+      : `${dependency.name} (it extends ${parameterType.name})`;
+    const listed = `${subject} is listed in the providers of ${this.moduleClass.name}, but was never constructed`;
+
+    switch (reason) {
+      case 'undecorated':
+        return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
+          'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
+          '@onebun/core — deduplicate the dependency.';
+      case 'constructor-threw':
+        return `${listed}: creating it threw, and the error was logged as ` +
+          `"Failed to create service ${dependency.name}".`;
+      default:
+        return `${listed}: either it is not @Service()-decorated for this copy of @onebun/core, ` +
+          'or its constructor threw (see the error log).';
+    }
+  }
+
+  /**
+   * The warning for an `@Optional()` parameter left `undefined` although a provider of this
+   * module could have filled it: that provider was never constructed, or it extends the
+   * parameter's abstract type and is not built yet — which an optional parameter does not wait for.
+   */
+  private describeOptionalLeftUndefined(
+    consumer: Function,
+    index: number,
+    parameterType: Function,
+    provider: Function,
+    reason: NeverConstructedReason | undefined,
+  ): string {
+    const head = `${consumer.name} gets undefined for its @Optional() parameter #${index} (${parameterType.name}): `;
+    if (reason !== undefined) {
+      return head + this.describeNeverConstructed(provider, parameterType, reason);
+    }
+
+    return head + `${provider.name}, which extends it, is not built yet, and an @Optional() parameter typed ` +
+      `as an abstract or base class does not wait for one. List ${provider.name}, and what it injects, ` +
+      `before ${consumer.name}.`;
   }
 
   /**
@@ -1606,52 +1783,6 @@ export class OneBunModule implements ModuleInstance {
         + '@Inject(ConcreteClass). Mark it @Optional() to silence this.',
       );
     }
-  }
-
-  /**
-   * Build a human-readable dependency chain for circular dependency error reporting
-   * Traverses the dependency graph to find and display the cycle
-   */
-  private buildDependencyChain(
-    unresolvedDeps: Map<string, string[]>,
-    unresolvedServices: string[],
-  ): string {
-    // Find cycle by traversing dependencies
-    const visited = new Set<string>();
-    const chain: string[] = [];
-
-    const findCycle = (service: string): boolean => {
-      if (visited.has(service)) {
-        chain.push(service);
-
-        return true;
-      }
-      visited.add(service);
-      chain.push(service);
-
-      const deps = unresolvedDeps.get(service) || [];
-      for (const dep of deps) {
-        if (unresolvedServices.includes(dep)) {
-          if (findCycle(dep)) {
-            return true;
-          }
-        }
-      }
-      chain.pop();
-
-      return false;
-    };
-
-    for (const service of unresolvedServices) {
-      visited.clear();
-      chain.length = 0;
-      if (findCycle(service)) {
-        return chain.join(' -> ');
-      }
-    }
-
-    // If no cycle found, just show all unresolved services
-    return unresolvedServices.join(' <-> ');
   }
 
   /**

@@ -990,9 +990,10 @@ projection.
 **A repository is not a provider.** `BaseRepository` resolves the database in its constructor,
 and every provider is constructed before `DrizzleService` has opened one — so a repository
 carrying `@Service()` fails to construct with `Database not initialized. Call initialize()
-first.` If anything injects it, `app.start()` then rejects with a `CircularDependencyError`
-naming the CONSUMER, not the repository; if nothing does, the application boots with the
-repository silently absent from DI. Construct it after the database is up instead — lazily on
+first.` If anything injects it, `app.start()` then rejects with a `DependencyResolutionError`
+naming the repository as the dependency its consumer could not get, because constructing it
+threw — the original error is in the log as `Failed to create service <Repository>`. If nothing
+injects it, the application boots with the repository silently absent from DI. Construct it after the database is up instead — lazily on
 first use, or in `onApplicationInit()` — from a service that holds `DrizzleService`.
 
 ```typescript

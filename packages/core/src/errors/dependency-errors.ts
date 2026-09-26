@@ -13,6 +13,10 @@ export class OneBunBootstrapError extends Error {
  * Includes diagnostic suggestions: which module has the provider,
  * whether it's exported, and whether the module is imported.
  *
+ * Also thrown when a provider waits for a provider of its own module that was never
+ * constructed — no `@Service()` visible to this copy of the framework, or creating it threw.
+ * That is not a cycle, so it is not reported as a `CircularDependencyError`.
+ *
  * @see docs:api/services.md
  */
 export class DependencyResolutionError extends OneBunBootstrapError {
@@ -35,7 +39,9 @@ export class DependencyResolutionError extends OneBunBootstrapError {
 /**
  * Thrown when a circular dependency is detected during module initialization.
  * The framework does not support circular dependencies — bootstrap will fail
- * with a clear error message showing the dependency chain.
+ * with a clear error message showing the dependency chain. `chain` names only the
+ * cycle itself; a provider that merely waits on it is listed in `unresolvedServices`.
+ * The order of a module's `providers` never produces this error.
  *
  * @see docs:api/services.md
  */
