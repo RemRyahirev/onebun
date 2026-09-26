@@ -189,31 +189,60 @@ const mergeRequestsOptions = (options: RequestsOptions): RequestsOptions => ({
   retries: resolveRetryConfig(options.retries),
 });
 
+/** The `error` name each transport failure kind is reported under. */
+const TRANSPORT_FAILURE_ERRORS: Record<TransportFailureKind, string> = {
+  timeout: 'TIMEOUT_ERROR',
+  abort: 'ABORT_ERROR',
+  network: 'FETCH_ERROR',
+};
+
 /**
- * Classify a failure that happened before any HTTP response existed.
- *
- * `AbortSignal.timeout` rejects with a `TimeoutError`, an explicit abort with an `AbortError`,
- * and everything else (connection refused, DNS, TLS) is a network failure. None of them are a
- * server 500, so none of them carry an HTTP status code.
+ * Which transport failure an error is: `AbortSignal.timeout` rejects with a `TimeoutError`, an
+ * explicit abort with an `AbortError`, and everything else (connection refused, DNS, TLS, a reset
+ * connection) is a network failure.
  */
-const classifyTransportFailure = (error: unknown, traceId?: string): ErrorResponse => {
+const transportFailureKindOf = (error: unknown): TransportFailureKind => {
   const name = error instanceof Error ? error.name : '';
-  let kind: TransportFailureKind = 'network';
-  let code = 'FETCH_ERROR';
 
   if (name === 'TimeoutError') {
-    kind = 'timeout';
-    code = 'TIMEOUT_ERROR';
-  } else if (name === 'AbortError') {
-    kind = 'abort';
-    code = 'ABORT_ERROR';
+    return 'timeout';
   }
 
+  return name === 'AbortError' ? 'abort' : 'network';
+};
+
+/**
+ * Classify a failure that happened before the response was complete.
+ *
+ * None of them are a server 500, so none of them carry an HTTP status code: `code` is
+ * {@link TRANSPORT_FAILURE_CODE} and `getTransportFailureKind` reads the kind back.
+ *
+ * Once the attempt's signal has fired, its reason decides between a timeout and an abort, not
+ * whatever `fetch` or the body reader rejected with — the signal is the one that knows which of
+ * the two it was.
+ *
+ * `receivedStatus` is set when the failure hit while the body was being read: the status line had
+ * arrived and is kept in `details.statusCode`, with `details.phase: 'body'`. It used to be the
+ * `code` of a `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR` instead, so a 500 whose body stalled
+ * was retried by `retryOn` as a server 500 and `retryOnTimeout: false` never saw it.
+ */
+const classifyTransportFailure = (
+  error: unknown,
+  signal: AbortSignal,
+  traceId?: string,
+  receivedStatus?: number,
+): ErrorResponse => {
+  const kind = transportFailureKindOf(signal.aborted ? signal.reason : error);
+
   return createErrorResponse(
-    code,
+    TRANSPORT_FAILURE_ERRORS[kind],
     TRANSPORT_FAILURE_CODE,
     traceId,
-    { details: error, transport: kind },
+    {
+      details: error,
+      transport: kind,
+      ...(receivedStatus === undefined ? {} : { statusCode: receivedStatus, phase: 'body' }),
+    },
   );
 };
 
@@ -424,26 +453,45 @@ const buildHeaders = (
 };
 
 /**
+ * Read the body of a response whose status line and headers have arrived.
+ *
+ * `fetch` resolves at the headers; the body streams in afterwards under the same signal, so the
+ * client-side timeout — or an interruption of the attempt — can fire here too. Such a failure is a
+ * transport failure like one before the headers, and is classified as one: `TIMEOUT_ERROR`, code
+ * `0`, retried only under `retryOnTimeout`. It used to be reported as `readFailure` (a
+ * `RESPONSE_READ_ERROR` or `RESPONSE_PARSE_ERROR`) with the status as its code — a stalled 200
+ * looked like a malformed body, and a stalled 500 was replayed by `retryOn` as if the server had
+ * answered 500 in full.
+ *
+ * Any other read failure keeps `readFailure` and the status.
+ */
+const readBodyText = (
+  response: Response,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+): Effect.Effect<string, ErrorResponse> =>
+  Effect.tryPromise({
+    try: () => response.text(),
+    catch: (error) =>
+      signal.aborted || transportFailureKindOf(error) !== 'network'
+        ? classifyTransportFailure(error, signal, traceId, response.status)
+        : createErrorResponse(readFailure, response.status, traceId, { details: error }),
+  });
+
+/**
  * Parse response data based on content type
  */
 const parseResponseData = <T>(
   response: Response,
+  signal: AbortSignal,
   traceId?: string,
 ): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     return pipe(
-      Effect.tryPromise({
-        try: () => response.text(),
-        catch: (error) =>
-          createErrorResponse(
-            'RESPONSE_PARSE_ERROR',
-            response.status,
-            traceId,
-            { details: error },
-          ),
-      }),
+      readBodyText(response, signal, 'RESPONSE_PARSE_ERROR', traceId),
       Effect.flatMap((text) => {
         if (!text) {
           return Effect.fail(
@@ -482,16 +530,7 @@ const parseResponseData = <T>(
       }),
     );
   } else {
-    return Effect.tryPromise({
-      try: () => response.text() as Promise<T>,
-      catch: (error) =>
-        createErrorResponse(
-          'RESPONSE_READ_ERROR',
-          response.status,
-          traceId,
-          { details: error },
-        ),
-    });
+    return readBodyText(response, signal, 'RESPONSE_READ_ERROR', traceId) as Effect.Effect<T, ErrorResponse>;
   }
 };
 
@@ -546,7 +585,19 @@ const signOneBunIfNeeded = (
 };
 
 /**
- * Execute single HTTP request attempt
+ * Execute single HTTP request attempt.
+ *
+ * One signal governs the whole attempt, the body included: `fetch` resolves at the headers and the
+ * body is read afterwards under the same signal. It fires on the client-side timeout, and on an
+ * interruption of the Effect running the attempt (`Effect.timeout`, `Effect.race`,
+ * `Fiber.interrupt`). The interruption used to abandon the `fetch` without aborting it: the
+ * connection stayed open, and the server went on holding it until the client's own timeout.
+ *
+ * The interruption is wired through `Effect.onInterrupt` around the whole attempt rather than
+ * through the signal `Effect.tryPromise` hands to `fetch`: that signal is only live while the
+ * `fetch` promise is pending, so an interruption during the body read would not reach it.
+ *
+ * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
   config: RequestConfig,
@@ -554,14 +605,19 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   headers: Record<string, string>,
   fullUrl: string,
   traceId?: string,
-): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => {
+): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => Effect.suspend(() => {
   const requestStartTime = Date.now();
+  const interruption = new AbortController();
+  const signal = AbortSignal.any([
+    AbortSignal.timeout(config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS),
+    interruption.signal,
+  ]);
 
   // Create fetch request
   const requestInit: RequestInit = {
     method: config.method,
     headers,
-    signal: AbortSignal.timeout(config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS),
+    signal,
   };
 
   // One serialization, used both for the body that is sent and for the body that is signed.
@@ -580,7 +636,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
     signOneBunIfNeeded(config, mergedOptions, headers, fullUrl, body, traceId),
     Effect.flatMap((signedHeaders) => Effect.tryPromise({
       try: () => fetch(fullUrl, { ...requestInit, headers: signedHeaders }),
-      catch: (error) => classifyTransportFailure(error, traceId),
+      catch: (error) => classifyTransportFailure(error, signal, traceId),
     })),
     Effect.flatMap((response) => {
       const responseHeaders: Record<string, string> = {};
@@ -592,7 +648,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
       // `ApiResponse<void>`, and an empty string would claim a body that was never there.
       const readBody: Effect.Effect<T, ErrorResponse> = hasNoContent(config.method, response.status)
         ? Effect.succeed(undefined as T)
-        : parseResponseData<T>(response, traceId);
+        : parseResponseData<T>(response, signal, traceId);
 
       return pipe(
         readBody,
@@ -618,11 +674,12 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         }),
       );
     }),
+    Effect.onInterrupt(() => Effect.sync(() => interruption.abort())),
     Effect.catchAll((error) => {
       return Effect.succeed(error);
     }),
   );
-};
+});
 
 /**
  * Execute request with retry logic

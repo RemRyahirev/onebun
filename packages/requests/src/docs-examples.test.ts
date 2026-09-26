@@ -57,6 +57,51 @@ const jsonStatus = (code: number, body: unknown = { ok: code < 400 }): Response 
     headers: new Headers([['content-type', 'application/json']]),
   });
 
+/**
+ * Answers every request with `status` and one chunk of body, then stalls; records the paths it
+ * was asked for and the ones whose body stream the client cancelled.
+ */
+function startStallingServer(
+  status = 200,
+): { baseUrl: string; paths: string[]; cancelled: string[]; stop(): void } {
+  const paths: string[] = [];
+  const cancelled: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      paths.push(path);
+
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"rows":['));
+          },
+          cancel() {
+            cancelled.push(path);
+          },
+        }),
+        { status, headers: new Headers([['content-type', 'application/json']]) },
+      );
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    paths,
+    cancelled,
+    stop: () => server.stop(true),
+  };
+}
+
+/** Wait until `condition` holds or `withinMs` passes; the caller asserts on what it observed. */
+async function waitFor(condition: () => boolean, withinMs: number): Promise<void> {
+  const deadline = performance.now() + withinMs;
+  while (!condition() && performance.now() < deadline) {
+    await Bun.sleep(5);
+  }
+}
+
 interface EchoedCall {
   method: string;
   path: string;
@@ -613,6 +658,101 @@ describe('Requests API Documentation Examples', () => {
         server.stop(true);
       }
     });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should report a body that outlives the timeout as TIMEOUT_ERROR with the status that arrived', async () => {
+      // From docs: "Whichever part it catches, the call fails with TIMEOUT_ERROR and code: 0. When
+      // the headers had already arrived, details.phase is 'body' and details.statusCode is the
+      // status they carried" — and "The upstream sees the connection close when the timeout fires"
+      const server = startStallingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        const outcome = await Effect.runPromise(
+          Effect.either(client.getEffect('/reports/export', { timeout: 100 })),
+        );
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(getTransportFailureKind(outcome.left)).toBe('timeout');
+          expect(outcome.left.error).toBe('TIMEOUT_ERROR');
+          expect(outcome.left.code).toBe(0);
+          expect(outcome.left.details?.phase).toBe('body');
+          expect(outcome.left.details?.statusCode).toBe(200);
+        }
+
+        await waitFor(() => server.cancelled.length > 0, 500);
+        expect(server.cancelled).toEqual(['/reports/export']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should leave a stalled 500 to retryOnTimeout, not to retryOn', async () => {
+      // From docs: "A 500 whose body stalls is therefore a timeout, not a 500: ... retryOnTimeout —
+      // off by default — decides whether it is replayed"
+      const server = startStallingServer(500);
+
+      try {
+        const byDefault = createHttpClient({ baseUrl: server.baseUrl, timeout: 100 });
+        const outcome = await Effect.runPromise(Effect.either(byDefault.getEffect('/reports')));
+
+        expect(server.paths).toEqual(['/reports']);
+        expect(outcome._tag === 'Left' && outcome.left.details?.statusCode).toBe(500);
+
+        server.paths.length = 0;
+        const optedIn = createHttpClient({
+          baseUrl: server.baseUrl,
+          timeout: 100,
+          retries: { max: 1, delay: 1, retryOnTimeout: true },
+        });
+        await Effect.runPromise(Effect.either(optedIn.getEffect('/reports')));
+
+        expect(server.paths).toEqual(['/reports', '/reports']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should abort the fetch when the Effect is interrupted', async () => {
+      // From docs: "Aborted after 2 s, although the client's own timeout is 10 s" — scaled down
+      const aborted: number[] = [];
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          req.signal.addEventListener('abort', () => aborted.push(performance.now()));
+
+          return new Promise<Response>(() => undefined);
+        },
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, timeout: 10000 });
+        const startedAt = performance.now();
+
+        const outcome = await Effect.runPromise(
+          Effect.either(Effect.timeout(client.getEffect('/reports'), '100 millis')),
+        );
+        await waitFor(() => aborted.length > 0, 500);
+
+        // The interruption, not an ErrorResponse
+        expect(outcome._tag === 'Left' && Cause.isTimeoutException(outcome.left)).toBe(true);
+        expect(aborted.length).toBe(1);
+        expect(aborted[0]! - startedAt).toBeLessThan(1000);
+      } finally {
+        server.stop(true);
+      }
+    });
   });
 
   describe('Request Configuration (docs/api/requests.md)', () => {
@@ -844,7 +984,7 @@ describe('Requests API Documentation Examples', () => {
      * @source docs:api/requests.md#retry-configuration
      */
     it('should retry a request that never reached the server, keeping code 0', async () => {
-      // From docs: "retryOnNetworkError: true — connection refused / DNS / TLS" is a default,
+      // From docs: "retryOnNetworkError: true — Refused / DNS / TLS / reset" is a default,
       // and the failure "is never reported as a server 500"
       const dead = startCountingServer(() => jsonStatus(200));
       const { baseUrl } = dead;
@@ -861,6 +1001,49 @@ describe('Requests API Documentation Examples', () => {
         expect(outcome.left.code).toBe(TRANSPORT_FAILURE_CODE);
         expect(outcome.left.error).toBe('FETCH_ERROR');
         expect(getTransportFailureKind(outcome.left)).toBe('network');
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should report a reset after the request was sent as the same network failure', async () => {
+      // From docs: "a connection reset after the request was sent is reported the same way
+      // (FETCH_ERROR), and that request may have been processed. retryOnNetworkError replays both"
+      let received = 0;
+      const listener = Bun.listen({
+        hostname: '127.0.0.1',
+        port: 0,
+        socket: {
+          data(socket, chunk) {
+            // The request arrived whole; the connection closes without an answer
+            if (chunk.toString().startsWith('GET /reports')) {
+              received++;
+              socket.end();
+            }
+          },
+        },
+      });
+
+      try {
+        const client = createHttpClient({
+          baseUrl: `http://127.0.0.1:${listener.port}`,
+          retries: { max: 1, delay: 1 },
+        });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/reports')));
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('FETCH_ERROR');
+          expect(getTransportFailureKind(outcome.left)).toBe('network');
+          expect(outcome.left.retryCount).toBe(1);
+        }
+        // Both attempts reached the server
+        expect(received).toBe(2);
+      } finally {
+        listener.stop(true);
       }
     });
 

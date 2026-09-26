@@ -104,6 +104,17 @@ needs both or a `traceparent`.
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
   whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
   `RESPONSE_PARSE_ERROR` against every JSON endpoint (Bun keeps `application/json` on the HEAD answer).
+- **`timeout` covers the body, not just the headers.** A body that stalls past it fails `TIMEOUT_ERROR`,
+  `code: 0`, `getTransportFailureKind(e) === 'timeout'`, with the status that arrived in
+  `details.statusCode` and `details.phase: 'body'`. So a stalled 5xx follows `retryOnTimeout` (off by
+  default), not `retryOn`; a 5xx that arrives whole, even with an unparsable body, still follows `retryOn`.
+  Up to 0.8.1 it was `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR` with the status as `code`. Detect a slow
+  upstream by the transport kind, never by those names.
+- **Interrupting a `*Effect` call aborts the fetch** (`Effect.timeout`, `Effect.race`, `Fiber.interrupt`),
+  in either phase; the upstream sees the close at once. Up to 0.8.1 the fetch ran on until the client's own
+  `timeout`. The interrupted Effect reports the interruption, not an `ErrorResponse`.
+- `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
+  lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header
   names, so the two services share one trace in the backend as well as one trace id in the logs. The one
   remaining gap is the callee's log `spanId` — see the Span Nesting section.

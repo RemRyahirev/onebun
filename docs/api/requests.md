@@ -300,8 +300,8 @@ With no `retries` at all, a client uses:
 | `factor` | `2` | Multiplier for exponential backoff |
 | `retryOn` | `[408, 429, 500, 502, 503, 504]` | Status codes a **server returned** |
 | `methods` | `['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']` | Methods allowed to be replayed |
-| `retryOnNetworkError` | `true` | Connection refused / DNS / TLS — the request never arrived |
-| `retryOnTimeout` | `false` | The client-side timeout fired |
+| `retryOnNetworkError` | `true` | Refused / DNS / TLS / reset — no response arrived |
+| `retryOnTimeout` | `false` | The client-side timeout fired, before the headers or during the body |
 
 **POST and PATCH are not retried unless you ask for it.** Replaying them creates a second
 order, a second charge, a second message. The default list is the idempotent set of
@@ -312,6 +312,17 @@ reached the server and been processed, so re-sending it duplicates the effect ju
 replay would. A transport failure carries `code: 0` (`TRANSPORT_FAILURE_CODE`) and the error
 name `TIMEOUT_ERROR`, `ABORT_ERROR` or `FETCH_ERROR` — it is never reported as a server 500,
 so `retryOn` stays a pure list of status codes.
+
+The timeout covers the body too, so a `500` whose body stalls until the timeout is a
+`TIMEOUT_ERROR`: `retryOnTimeout` decides whether it is replayed, and `retryOn` never sees it.
+A `500` that arrives whole is a server answer and follows `retryOn`, even when its body does not
+parse. See [Timeouts and interruption](#timeouts-and-interruption).
+
+A network failure is not always a request the server never saw. A refused connection or a failed
+DNS lookup is; a connection **reset after the request was sent** is reported the same way
+(`FETCH_ERROR`), and that request may have been processed. `retryOnNetworkError` replays both for
+the methods in `methods`, which is safe for the idempotent defaults and one more reason to keep
+POST and PATCH out unless the endpoint dedupes.
 
 ### Overriding
 
@@ -350,10 +361,10 @@ const client = createHttpClient({
     // Methods allowed to be replayed
     methods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'],
 
-    // Retry when the request never reached the server
+    // Retry when the connection failed before a response arrived
     retryOnNetworkError: true,
 
-    // Retry when the client-side timeout fired
+    // Retry when the client-side timeout fired, before the headers or during the body
     retryOnTimeout: false,
 
     // Callback on retry
@@ -505,6 +516,61 @@ export class UserService extends BaseService {
 }
 ```
 
+### Timeouts and interruption
+
+`timeout` bounds the whole response, **body included**. `fetch` resolves as soon as the status
+line and headers arrive, and the body is read afterwards under the same deadline. Whichever part
+it catches, the call fails with `TIMEOUT_ERROR` and `code: 0`. When the headers had already
+arrived, `details.phase` is `'body'` and `details.statusCode` is the status they carried:
+
+```typescript
+import { Effect } from '@onebun/core';
+import { getTransportFailureKind } from '@onebun/requests';
+
+const outcome = await Effect.runPromise(
+  Effect.either(client.getEffect('/reports/export', { timeout: 5000 })),
+);
+
+if (outcome._tag === 'Left' && getTransportFailureKind(outcome.left) === 'timeout') {
+  outcome.left.error;               // 'TIMEOUT_ERROR'
+  outcome.left.code;                // 0
+  outcome.left.details?.phase;      // 'body' once the headers had arrived
+  outcome.left.details?.statusCode; // the status that arrived, e.g. 200 or 500
+}
+```
+
+The upstream sees the connection close when the timeout fires, in either phase.
+
+A `500` whose body stalls is therefore a timeout, not a `500`: the status arrived, the response did
+not, and `retryOnTimeout` — off by default — decides whether it is replayed.
+
+<llm-only>
+
+Up to 0.8.1 a timeout during the body read was reported as `RESPONSE_READ_ERROR` (text body) or
+`RESPONSE_PARSE_ERROR` (JSON body) with the status as `code`. A stalled 200 looked like a malformed
+body, and a stalled 500 was replayed by `retryOn` as a server 500 regardless of
+`retryOnTimeout: false`. Code that matched those names to detect a slow upstream should match
+`getTransportFailureKind(e) === 'timeout'` instead; `details.statusCode` keeps the status.
+
+</llm-only>
+
+**Interrupting the Effect aborts the request.** `Effect.timeout`, `Effect.race` or
+`Fiber.interrupt` around any `*Effect` method cancels the `fetch` itself — before the headers or
+in the middle of the body — so the upstream sees the connection close at once, not at the
+client's own `timeout`:
+
+```typescript
+import { Effect } from '@onebun/core';
+
+// Aborted after 2 s, although the client's own timeout is 10 s
+const outcome = await Effect.runPromise(
+  Effect.either(Effect.timeout(client.getEffect('/reports'), '2 seconds')),
+);
+```
+
+The interrupted Effect reports the interruption (here a `TimeoutException`), not an
+`ErrorResponse`. The Promise methods run to completion or to their own `timeout`.
+
 ## Request Configuration
 
 Every per-request config argument is a `Partial<RequestConfig>` — `method` and `url` come from the
@@ -513,7 +579,7 @@ method you call and the path you pass, so only these fields are yours to set:
 <!-- typecheck: skip -->
 ```typescript
 {
-  /** Request timeout in milliseconds */
+  /** Request timeout in milliseconds — covers the body as well as the headers */
   timeout?: number;
 
   /** Custom headers */
@@ -738,7 +804,7 @@ interface ErrorResponse<E extends string = string, R extends string = string>
 interface OneBunError<E extends string = string, R extends string = string> {
   /** Machine-readable error name, e.g. 'HTTP_ERROR' or 'TIMEOUT_ERROR' */
   error: E;
-  /** HTTP status, or `0` (`TRANSPORT_FAILURE_CODE`) when the request never arrived */
+  /** HTTP status, or `0` (`TRANSPORT_FAILURE_CODE`) when no complete response arrived */
   code: number;
   traceId?: string;
   /** Request context: url, method, duration, response headers, raw body */

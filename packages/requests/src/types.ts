@@ -445,11 +445,15 @@ export interface OneBunAuthConfig {
 }
 
 /**
- * Kind of failure that happened before any HTTP response existed.
+ * Kind of failure that happened before the response was complete.
  *
- * - `timeout` — the client-side timeout fired; the server may still have processed the request
- * - `abort` — the request was aborted deliberately
- * - `network` — connection refused, DNS failure, TLS failure: the request never arrived
+ * - `timeout` — the client-side timeout fired, before the headers arrived or while the body was
+ *   being read; the server may still have processed the request. A timeout during the body read
+ *   keeps the status that did arrive in `details.statusCode`, with `details.phase: 'body'`.
+ * - `abort` — the request was aborted deliberately rather than by the timeout
+ * - `network` — the connection failed before a response arrived: refused, DNS, TLS, or reset. A
+ *   refused connection or a failed lookup proves the server never saw the request; a reset after
+ *   the request was sent (`ECONNRESET`) does not — that request may have been processed.
  *
  * @see docs:api/requests.md
  */
@@ -469,7 +473,9 @@ export const TRANSPORT_FAILURE_CODE = 0;
 /**
  * Read the transport failure kind off a response, if it is one.
  *
- * Returns `undefined` for every response that came back from a server, including 5xx.
+ * Returns `undefined` for every response that came back from a server complete, including 5xx. A
+ * response whose body timed out did not: it is a `'timeout'`, and the status that arrived is in
+ * `details.statusCode`.
  *
  * @see docs:api/requests.md
  */
@@ -496,8 +502,9 @@ export interface RetryConfig {
   backoff: 'linear' | 'exponential' | 'fixed';
   factor?: number;
   /**
-   * HTTP status codes that trigger a retry. Only statuses that a server actually returned are
-   * matched here — transport failures are governed by `retryOnNetworkError`/`retryOnTimeout`.
+   * HTTP status codes that trigger a retry. Only statuses of responses that actually arrived are
+   * matched here — transport failures are governed by `retryOnNetworkError`/`retryOnTimeout`,
+   * and that includes a 5xx whose body stalled until the timeout.
    */
   retryOn?: number[];
   /**
@@ -506,11 +513,16 @@ export interface RetryConfig {
    * them can duplicate a charge, an order or a message.
    */
   methods?: string[];
-  /** Retry when the request never reached the server (connection refused, DNS, TLS). */
+  /**
+   * Retry when the connection failed before a response arrived (refused, DNS, TLS, reset). A
+   * reset after the request was sent does not prove the server skipped it, which is one more
+   * reason POST and PATCH stay off {@link methods} unless an endpoint is safe to call twice.
+   */
   retryOnNetworkError?: boolean;
   /**
-   * Retry when the client-side timeout fired. Off by default: the server may have processed
-   * the request already, so a retry duplicates it even for an idempotent method.
+   * Retry when the client-side timeout fired — before the headers arrived or while the body was
+   * being read. Off by default: the server may have processed the request already, so a retry
+   * duplicates it even for an idempotent method.
    */
   retryOnTimeout?: boolean;
   onRetry?: (error: ErrorResponse, attempt: number) => void | Promise<void>;
