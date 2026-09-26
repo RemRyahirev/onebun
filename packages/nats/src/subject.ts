@@ -6,14 +6,19 @@
  * `#` where NATS spells it `>`, and OneBun's named parameters (`orders.{id}`) have
  * no NATS equivalent at all.
  *
- * Translation only ever widens. A named parameter becomes `*`, so the broker
- * delivers a superset of what the subscription asked for; the in-process matcher
- * built from the original pattern then narrows it back and extracts the parameter
- * values. That makes the matcher check load-bearing rather than redundant.
+ * Translation never narrows, and it widens exactly when a parameter covers only part
+ * of a token. A named parameter becomes `*`: for a whole-token `{id}` that is the same
+ * set of subjects, but `v{id}` or `{a}-{b}` becomes a `*` that also matches `x`, so the
+ * broker delivers a superset of what the subscription asked for. The in-process matcher
+ * built from the original pattern narrows it back and extracts the parameter values,
+ * which makes the matcher check load-bearing rather than redundant.
  */
 
 /** A token carrying a named parameter — `{id}`, `v{id}`, `{a}-{b}`. */
 const PARAMETER_TOKEN = /\{[^.}]*\}/;
+
+/** A token that IS one named parameter and nothing else — `{id}`, never `v{id}`. */
+const WHOLE_TOKEN_PARAMETER = /^\{[^.}]*\}$/;
 
 /**
  * Translates a OneBun queue pattern into a NATS subject.
@@ -52,6 +57,29 @@ export function toNatsSubject(pattern: string): string {
       return PARAMETER_TOKEN.test(token) ? '*' : token;
     })
     .join('.');
+}
+
+/**
+ * Whether `toNatsSubject(pattern)` names subjects the pattern itself does not match.
+ *
+ * True exactly when some token carries a parameter without being one: `jobs.v{version}`
+ * translates to `jobs.*`, which also delivers `jobs.x`, while `jobs.{version}` translates
+ * to the same one-token `*` the in-process matcher applies. Wildcards never widen — `*` is
+ * shared verbatim, and a trailing `#` matches everything `>` does.
+ *
+ * It matters wherever a delivered-but-unmatched message is not harmless. The consume loop
+ * acknowledges such a message so it cannot wedge the consumer, and on a workqueue stream
+ * that acknowledgement deletes it.
+ *
+ * @param pattern - A OneBun queue pattern.
+ * @returns `true` when the translated subject is strictly wider than the pattern.
+ *
+ * @see docs:api/queue.md
+ */
+export function widensOnTranslation(pattern: string): boolean {
+  return pattern
+    .split('.')
+    .some(token => PARAMETER_TOKEN.test(token) && !WHOLE_TOKEN_PARAMETER.test(token));
 }
 
 function nonFinalWildcardMessage(pattern: string): string {

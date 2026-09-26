@@ -1,4 +1,4 @@
-// NATS-SUITE-FLOOR: 487
+// NATS-SUITE-FLOOR: 535
 //
 // `bun test packages/nats` must report 0 fail and at least this many passing
 // cases. Every downstream item in the JetStream epic adds cases and raises the
@@ -5045,5 +5045,330 @@ describe('retry.backoff and retry.delay', () => {
     // Uncapped and undelayed on every adapter: memory requeues on the next tick, and
     // `message.attempt` is what a handler stops itself with.
     expect(jsMsg.nak).toHaveBeenCalledWith();
+  });
+});
+
+// ============================================================================
+// Workqueue streams (FB-30)
+//
+// `subscribe()` hard-coded `deliver_policy: new`, and nats-server refuses every other
+// policy than `all` on a workqueue stream (10101), so no `@Subscribe` could start on one.
+// The policy now follows the declared retention of the stream the pattern resolves to,
+// and the shapes a workqueue forbids or turns lossy are refused before any server call.
+// The mock harness emulates none of the server's rules — the integration file is where
+// they are proven; these cases pin what the adapter sends and what it says.
+// ============================================================================
+
+/** `JSConsumerWQConsumerNotDeliverAllErr`. */
+const WQ_NOT_DELIVER_ALL_CODE = 10101;
+/** `JSConsumerWQConsumerNotUniqueErr`. */
+const WQ_NOT_UNIQUE_CODE = 10100;
+
+const JOBS_WORKQUEUE = { name: 'JOBS', subjects: ['jobs.>'], retention: 'workqueue' as const };
+
+/** Lets the fire-and-forget status watcher run to completion; all its awaits are microtasks. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    await Promise.resolve();
+  }
+}
+
+/** Subscribes and hands back what reached the wire, or the rejection. */
+async function attemptSubscribe(
+  adapter: JetStreamQueueAdapter,
+  pattern: string,
+  options: AnyRecord,
+): Promise<Error | undefined> {
+  try {
+    await adapter.subscribe(pattern, async () => undefined, options);
+
+    return undefined;
+  } catch (error) {
+    return error as Error;
+  }
+}
+
+describe('workqueue streams: deliver_policy follows the declared retention', () => {
+  async function deliverPolicyFor(
+    overrides: Partial<JetStreamAdapterOptions>,
+    pattern = 'jobs.run',
+  ): Promise<unknown> {
+    const { adapter, mockJsm } = makeConnectedAdapter(overrides);
+    await adapter.subscribe(pattern, async () => undefined, { group: 'workers' });
+
+    return callArg(mockJsm.consumers.add, 0, 1).deliver_policy;
+  }
+
+  it("creates the consumer deliver-all on a stream declared retention: 'workqueue'", async () => {
+    expect(await deliverPolicyFor({ streams: [JOBS_WORKQUEUE] })).toBe(realJetStream.DeliverPolicy.All);
+  });
+
+  it('reads a workqueue retention inherited from streamDefaults', async () => {
+    expect(await deliverPolicyFor({
+      streamDefaults: { retention: 'workqueue' },
+      streams: [{ name: 'JOBS', subjects: ['jobs.>'] }],
+    })).toBe(realJetStream.DeliverPolicy.All);
+  });
+
+  it('keeps deliver_policy new on limits, interest and an undeclared retention', async () => {
+    for (const retention of ['limits', 'interest', undefined] as const) {
+      expect(await deliverPolicyFor({
+        streams: [{ name: 'JOBS', subjects: ['jobs.>'], retention }],
+      })).toBe(realJetStream.DeliverPolicy.New);
+    }
+  });
+
+  it('lets a per-stream limits override a workqueue streamDefaults', async () => {
+    expect(await deliverPolicyFor({
+      streamDefaults: { retention: 'workqueue' },
+      streams: [{ name: 'JOBS', subjects: ['jobs.>'], retention: 'limits' }],
+    })).toBe(realJetStream.DeliverPolicy.New);
+  });
+
+  it('decides per stream, from the one the pattern resolves to', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [JOBS_WORKQUEUE, { name: 'EVENTS', subjects: ['events.>'], retention: 'limits' }],
+    });
+
+    await adapter.subscribe('events.created', async () => undefined, { group: 'audit' });
+    await adapter.subscribe('jobs.run', async () => undefined, { group: 'workers' });
+
+    expect(callArgName(mockJsm.consumers.add, 0, 0)).toBe('EVENTS');
+    expect(callArg(mockJsm.consumers.add, 0, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.New);
+    expect(callArgName(mockJsm.consumers.add, 1, 0)).toBe('JOBS');
+    expect(callArg(mockJsm.consumers.add, 1, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+  });
+
+  it('subscribes a whole-token parameter pattern, deliver-all, with the one-token filter', async () => {
+    // The positive half of the partial-token refusal: `{id}` translates exactly, so the
+    // PARAMETER_TOKEN check must not over-refuse it.
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+
+    const subscription = await adapter.subscribe('jobs.{id}', async () => undefined, { group: 'workers' });
+    const payload = callArg(mockJsm.consumers.add, 0, 1);
+
+    expect(subscription.isActive).toBe(true);
+    expect(payload.deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+    expect(payload.filter_subject).toBe('jobs.*');
+    expect(payload.ack_policy).toBe(realJetStream.AckPolicy.Explicit);
+  });
+
+  it('keeps deliver_policy out of the reconcile hash and off the update path', async () => {
+    // Create-only, exactly as on a limits stream: a workqueue consumer and a limits consumer
+    // with the same knobs stamp the same hash, and reconciling one never sends the policy.
+    const onWorkQueue = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    const onLimits = makeConnectedAdapter({ streams: [{ name: 'JOBS', subjects: ['jobs.>'] }] });
+
+    await onWorkQueue.adapter.subscribe('jobs.run', async () => undefined, { group: 'workers' });
+    await onLimits.adapter.subscribe('jobs.run', async () => undefined, { group: 'workers' });
+
+    expect(callArg(onWorkQueue.mockJsm.consumers.add, 0, 1).metadata[CONFIG_STAMP_KEYS.configHash])
+      .toBe(callArg(onLimits.mockJsm.consumers.add, 0, 1).metadata[CONFIG_STAMP_KEYS.configHash]);
+
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    seedConsumerInfo(mockJsm, {
+      filter_subject: 'jobs.run',
+      deliver_policy: realJetStream.DeliverPolicy.All,
+      metadata: { [CONFIG_STAMP_KEYS.configHash]: 'f'.repeat(32) },
+    });
+
+    await adapter.subscribe('jobs.run', async () => undefined, { group: 'workers' });
+
+    expect('deliver_policy' in callArg(mockJsm.consumers.update, 0, 2)).toBe(false);
+  });
+});
+
+describe('workqueue streams: shapes refused at subscribe()', () => {
+  const refused: Array<{ label: string; pattern: string; options: AnyRecord; says: RegExp }> = [
+    {
+      label: 'a subscription without a group', pattern: 'jobs.run', options: {}, says: /without a group/,
+    },
+    {
+      label: "ackMode 'none'", pattern: 'jobs.run', options: { group: 'workers', ackMode: 'none' }, says: /ackMode 'none'/,
+    },
+    {
+      label: 'a partial-token parameter pattern', pattern: 'jobs.v{version}', options: { group: 'workers' }, says: /partial-token/,
+    },
+  ];
+
+  for (const {
+    label, pattern, options, says, 
+  } of refused) {
+    it(`refuses ${label} before any server call, and emits onError`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+      const seen: Error[] = [];
+      adapter.on('onError', (error: Error) => {
+        seen.push(error);
+      });
+
+      const thrown = await attemptSubscribe(adapter, pattern, options);
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toMatch(says);
+      expect(thrown!.message).toContain(`"${pattern}"`);
+      expect(thrown!.message).toContain('"JOBS"');
+      expect(thrown!.message).toContain("retention: 'workqueue'");
+      // Before the probe, not only before the create: nothing reached the server.
+      expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(0);
+      expect(asAny(mockJsm.consumers.info).mock.calls.length).toBe(0);
+      expect(seen).toContain(thrown!);
+    });
+
+    it(`still accepts ${label} on a limits stream`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter({
+        streams: [{ name: 'JOBS', subjects: ['jobs.>'], retention: 'limits' }],
+      });
+
+      expect(await attemptSubscribe(adapter, pattern, options)).toBeUndefined();
+      expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(1);
+    });
+  }
+
+  it('names the widened filter a partial-token pattern would have used', async () => {
+    const { adapter } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.v{version}', { group: 'workers' });
+
+    expect(thrown!.message).toContain('"jobs.*"');
+  });
+});
+
+describe('workqueue streams: server rejections name the fix', () => {
+  it('turns "not deliver all" into the missing retention declaration', async () => {
+    // The server holds a workqueue this declaration does not name: the policy followed the
+    // declaration, so the fix is the declaration.
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [{ name: 'JOBS', subjects: ['jobs.>'] }] });
+    const cause = makeApiError(WQ_NOT_DELIVER_ALL_CODE, 'consumer must be deliver all on workqueue stream');
+    mockJsm.consumers.add = mock(() => Promise.reject(cause));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toContain('"JOBS"');
+    expect(thrown!.message).toContain("retention: 'workqueue'");
+    expect(thrown!.message).toContain('declares no retention');
+    expect(thrown!.message).toContain('consumer must be deliver all on workqueue stream');
+    expect(thrown!.cause).toBe(cause);
+  });
+
+  it('quotes the retention the application does declare, when it declares one', async () => {
+    // Reachable on an unmanaged stream: a managed one with a diverging retention fails connect().
+    const { adapter, mockJsm } = makeConnectedAdapter({
+      streams: [{
+        name: 'JOBS', subjects: ['jobs.>'], retention: 'limits', manage: false,
+      }],
+    });
+    mockJsm.consumers.add = mock(() => Promise.reject(makeApiError(WQ_NOT_DELIVER_ALL_CODE, 'not deliver all')));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toContain("retention: 'limits'");
+    expect(thrown!.message).toContain("retention: 'workqueue'");
+  });
+
+  it('names the overlapping subscription in this application on a create', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    await adapter.subscribe('jobs.*', async () => undefined, { group: 'dispatchers' });
+
+    const cause = makeApiError(WQ_NOT_UNIQUE_CODE, 'filtered consumer not unique on workqueue stream');
+    mockJsm.consumers.add = mock(() => Promise.reject(cause));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toContain('"jobs.run"');
+    expect(thrown!.message).toContain('group "workers"');
+    expect(thrown!.message).toContain('"jobs.*" (group "dispatchers")');
+    expect(thrown!.message).toContain('one consumer per subject');
+    expect(thrown!.message).not.toContain('deleteDurableConsumer');
+    expect(thrown!.cause).toBe(cause);
+  });
+
+  it('points at a stale durable when nothing in this application overlaps', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    // Same stream, disjoint subject: not the culprit, and must not be named as one.
+    await adapter.subscribe('jobs.report', async () => undefined, { group: 'workers' });
+
+    const cause = makeApiError(WQ_NOT_UNIQUE_CODE, 'filtered consumer not unique on workqueue stream');
+    mockJsm.consumers.add = mock(() => Promise.reject(cause));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toContain('"jobs.run"');
+    expect(thrown!.message).toContain('group "workers"');
+    expect(thrown!.message).toContain('deleteDurableConsumer');
+    expect(thrown!.message).toContain('nats consumer rm JOBS');
+    expect(thrown!.message).toContain('loses no tasks');
+    expect(thrown!.message).not.toContain('jobs.report');
+    expect(thrown!.cause).toBe(cause);
+  });
+
+  it('maps the same rejection on the update path, instead of advising a recreate that would fail too', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    seedConsumerInfo(mockJsm, {
+      filter_subject: 'jobs.run',
+      metadata: { [CONFIG_STAMP_KEYS.configHash]: 'f'.repeat(32) },
+    });
+    const cause = makeApiError(WQ_NOT_UNIQUE_CODE, 'filtered consumer not unique on workqueue stream');
+    mockJsm.consumers.update = mock(() => Promise.reject(cause));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toMatch(/^Failed to update JetStream consumer/);
+    expect(thrown!.message).toContain('"jobs.run"');
+    expect(thrown!.message).toContain('group "workers"');
+    expect(thrown!.message).toContain('deleteDurableConsumer');
+    expect(thrown!.message).not.toContain('Delete it and let OneBun recreate it');
+    expect(thrown!.cause).toBe(cause);
+  });
+
+  it('names the overlapping subscription on the update path as well', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    await adapter.subscribe('jobs.>', async () => undefined, { group: 'catch-all' });
+
+    seedConsumerInfo(mockJsm, {
+      filter_subject: 'jobs.run',
+      metadata: { [CONFIG_STAMP_KEYS.configHash]: 'f'.repeat(32) },
+    });
+    mockJsm.consumers.update = mock(() => Promise.reject(makeApiError(WQ_NOT_UNIQUE_CODE, 'not unique')));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).toContain('"jobs.>" (group "catch-all")');
+    expect(thrown!.message).toContain('group "workers"');
+  });
+
+  it('leaves an unrelated rejection with the generic message', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    mockJsm.consumers.add = mock(() => Promise.reject(makeApiError(10_026, 'maximum consumers limit reached')));
+
+    const thrown = await attemptSubscribe(adapter, 'jobs.run', { group: 'workers' });
+
+    expect(thrown!.message).not.toContain('one consumer per subject');
+    expect(thrown!.message).not.toContain("retention: 'workqueue'");
+  });
+});
+
+describe('workqueue streams: a vanished consumer comes back deliver-all', () => {
+  it('re-creates the consumer with deliver_policy all after consumer_deleted', async () => {
+    // Re-created with `new`, the consumer would be refused by the server — the recovery the
+    // vanished-consumer watcher exists for would fail on exactly this stream.
+    const { adapter, mockJsm } = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+    const first = makeMockConsumer([], [
+      { type: 'consumer_deleted', code: 404, description: 'consumer deleted' },
+    ]);
+    const second = makeMockConsumer();
+    let handedOut = 0;
+
+    asAny(adapter).js.consumers.get = mock(() => {
+      handedOut += 1;
+
+      return Promise.resolve(handedOut === 1 ? first : second);
+    });
+
+    await adapter.subscribe('jobs.run', async () => undefined, { group: 'workers' });
+    await flushMicrotasks();
+
+    expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(2);
+    expect(callArg(mockJsm.consumers.add, 0, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+    expect(callArg(mockJsm.consumers.add, 1, 1).deliver_policy).toBe(realJetStream.DeliverPolicy.All);
   });
 });

@@ -868,6 +868,10 @@ Key points about JetStream:
 - Subject patterns: OneBun's `#` wildcard is converted to NATS `>` and a `{name}` parameter to NATS `*`
   automatically; `#` must be the final token, any other position throws
 - Consumers are durable when using consumer groups (`group` option in `@Subscribe`)
+- `retention: 'workqueue'` makes every consumer on that stream `deliver_policy: all` (derived, there is
+  no option) and brings the workqueue rules: `group` required, `ackMode: 'none'` refused, partial-token
+  parameters like `jobs.v{version}` refused, one consumer per subject stream-wide, and `deadLetter`
+  strongly recommended because an exhausted task stays stored — see `references/queues-and-nats.md`
 - Managed streams are created when absent on connect, and reconciled only when their configuration hash changed —
   an unchanged declaration writes nothing, undeclared keys are never sent so limits set out of band survive,
   a declaration that would stop covering a subject the stream already stores fails startup, and

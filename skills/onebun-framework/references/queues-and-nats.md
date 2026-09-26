@@ -565,7 +565,43 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
+`COMMANDS` above is a workqueue, and a subscription on it must look like this — a `group` is
+required, and every replica with the same group and pattern shares one durable and splits the work:
+
+```typescript
+@Controller('/commands')
+class CommandWorker extends BaseController {
+  @Subscribe('commands.run', { group: 'command-workers', ackMode: 'manual' })
+  async run(message: Message<RunCommand>) {
+    await this.execute(message.data);
+    await message.ack();   // on a workqueue the ack DELETES the command
+  }
+}
+```
+
 Key JetStream behaviors:
+- **Workqueue streams** (`retention: 'workqueue'`, on the stream or via `streamDefaults`): the
+  declared retention decides the consumer's `deliver_policy` — `all` on a workqueue (the only policy
+  nats-server accepts there, 10101 otherwise), `new` for every other retention. There is NO
+  `deliverPolicy` option; do not look for one. So a command published before any worker subscribed
+  is delivered, as is everything published while workers were down, and an ack deletes it. The
+  workqueue rules, refused at `subscribe()` with `onError` before any server call:
+  `group` is required (no group-less/ephemeral subscription); `ackMode: 'none'` is refused (the
+  server rejects ack_policy none with 10084); a partial-token parameter pattern such as
+  `jobs.v{version}` is refused (its filter `jobs.*` would deliver `jobs.x`, and the adapter's
+  ack of the unmatched message deletes it on a workqueue) — `jobs.{version}` is fine.
+  **One consumer per subject, stream-wide**: a second group or an overlapping pattern on the same
+  subject is rejected by the server (10100); the error names the overlapping subscription in this
+  app, or else points at a stale durable from a renamed group / changed pattern —
+  `deleteDurableConsumer(oldPattern, oldGroup)` or `nats consumer rm` removes it without losing tasks
+  (they live in the stream). Keep a dead-letter subject in its OWN stream, or a subscription reading
+  it overlaps the workers. **Always configure `deadLetter` on a workqueue**: a task that exhausts
+  `max_deliver` is NOT deleted — it stays stored, counts against `maxMsgs`/`maxBytes`, and returns
+  only when the consumer is recreated (a `consumerConfig`/`retry.attempts` change does not bring it
+  back). `term()` — dead letters, unparseable/foreign payloads, `nack(false)` — deletes on a
+  workqueue. Declare the owner's exact retention: a server-side workqueue declared without
+  `retention: 'workqueue'` fails the subscription with an error saying so, and a `manage: false`
+  declaration is trusted, not checked
 - **Declaring and managing are separable**: `streams` may be omitted or empty (publish-only —
   `publish()` never resolves a stream, `subscribe()` then refuses with a message saying so), and a
   declared stream may carry `manage: false` to stay in resolution while leaving the broker
@@ -610,15 +646,18 @@ Key JetStream behaviors:
 - **Poison messages**: a payload that fails to parse, or valid JSON that is not a OneBun envelope, is `term()`ed and reported to `@OnQueueError` — never acked, never retried, never handed to the handler as `undefined`. Consume-loop errors reach `@OnQueueError` too rather than being swallowed.
 - **Consumer lifecycle**: framework-generated ephemerals (no `group`) are deleted on `unsubscribe()` and `disconnect()`; `group` durables are never deleted implicitly, because `QueueService.stop()` unsubscribes on every graceful shutdown and a durable exists to survive restarts. Delete one deliberately with `nats consumer rm <stream> <consumer>`.
 - **A `group` is a PERMANENT server resource on JetStream — never template it per run or per deploy.** The durable is named `${group}--${filterSubject}--${digest}`, so a group built from a build number, pod name or timestamp leaves a new orphaned consumer behind every deploy, each holding its own position and `max_ack_pending` budget. Name the ROLE. Note the same option means something else on `NatsQueueAdapter`: there it is a stateless NATS queue group that dies with its members.
-- **Decommission a durable in code with `deleteDurableConsumer(pattern, group)`** — not on the `QueueAdapter` interface (only JetStream has durables), so it needs `queueService.getAdapter() as JetStreamQueueAdapter`. Returns `true` when one was removed and `false` when there was none, so it is safe to call twice; rethrows a permissions denial rather than reporting it as already gone; and resolves the stream through the SAME `resolveStreamForSubject` that `subscribe()` uses — it must, or it could not decommission what `subscribe()` created. Re-subscribing afterwards creates a fresh durable with `deliver_policy: new`, so the old position is gone for good.
+- **Decommission a durable in code with `deleteDurableConsumer(pattern, group)`** — not on the `QueueAdapter` interface (only JetStream has durables), so it needs `queueService.getAdapter() as JetStreamQueueAdapter`. Returns `true` when one was removed and `false` when there was none, so it is safe to call twice; rethrows a permissions denial rather than reporting it as already gone; and resolves the stream through the SAME `resolveStreamForSubject` that `subscribe()` uses — it must, or it could not decommission what `subscribe()` created. Re-subscribing afterwards creates a fresh durable with `deliver_policy: new`, so the old position is gone for good — except on a workqueue stream, where the fresh durable is `deliver_policy: all` and receives every task still stored.
 - **In teardown use `tryDeleteDurableConsumer(pattern, group)`** — same call, never throws. Not-connected is a quiet `false`; anything else is `false` plus an `onError` event. The strict form throws on an adapter that never connected and on an unbound or ambiguous pattern, and a throw inside `afterEach` REPLACES the assertion failure in the output.
 - **Ephemeral consumers** send no `durable_name` and are named `consumer-<uuid>` from
   `crypto.randomUUID()`, not from a timestamp two subscriptions created in the same millisecond
   would share and then fight over.
-  Group-less subscriptions are ephemeral: deliver_policy new, deleted on unsubscribe/disconnect.
-  Creation always sets `deliver_policy` explicitly to `new` rather than leaning on the server
-  default, so on a stream that retains messages a freshly created consumer starts at the moment it
-  subscribes instead of replaying the backlog; no `inactive_threshold` is sent. `ack_policy`,
+  Group-less subscriptions are ephemeral: deliver_policy new, deleted on unsubscribe/disconnect
+  (and refused outright on a workqueue stream).
+  Creation always sets `deliver_policy` explicitly rather than leaning on the server default, and
+  derives it from the resolved stream's declared retention: `new` for limits, interest or none
+  declared, so on a stream that retains messages a freshly created consumer starts at the moment it
+  subscribes instead of replaying the backlog; `all` for `retention: 'workqueue'`, the only policy
+  a workqueue accepts. No `inactive_threshold` is sent. `ack_policy`,
   `deliver_policy`, `durable_name` and `name` are
   immutable on an existing consumer and are creation-only here — the update path sends only
   `ack_wait`, `filter_subject`, `max_ack_pending`, `max_deliver` and `metadata`. Identity is not
@@ -656,7 +695,7 @@ Key JetStream behaviors:
   name is already taken (pass `group` for a stable durable name), and an existing consumer whose
   `ack_policy` is not explicit is rejected with `nats consumer rm <stream> <consumer>` — that field
   cannot be changed in place. Every such failure emits `onError` in addition to throwing
-- **Consume loop auto-restarts** if a subscription dies, and a *deleted consumer* is now detected through `messages.status()` and re-created automatically — `@OnQueueError` fires when it happens. Messages published while the consumer was gone are NOT redelivered: deleting a consumer destroys its position. `heartbeats_missed` and `stream_not_found` are reported but deliberately not repaired.
+- **Consume loop auto-restarts** if a subscription dies, and a *deleted consumer* is now detected through `messages.status()` and re-created automatically — `@OnQueueError` fires when it happens. Messages published while the consumer was gone are NOT redelivered: deleting a consumer destroys its position. (On a workqueue stream they are: the re-created consumer is deliver-all and receives every task still stored, exhausted ones included.) `heartbeats_missed` and `stream_not_found` are reported but deliberately not repaired.
 - **Graceful shutdown awaits in-flight handlers**: `unsubscribe()` and `disconnect()` do not
   resolve until the handler each subscription is currently executing has returned, bounded by a
   fixed **30s** drain timeout equal to the default `ackWait` (not configurable). An ack published

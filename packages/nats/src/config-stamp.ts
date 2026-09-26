@@ -167,19 +167,21 @@ export function decideStamp(
 }
 
 /**
- * Classifies a rejection as "the resource does not exist".
+ * Whether a rejection carries the numeric JetStream API error code `code`.
  *
- * The API code is a parameter so this module stays free of client imports and needs
- * no module mock to unit-test. The property is read by plain access rather than
+ * The code is a parameter so this module stays free of client imports and needs no
+ * module mock to unit-test — and because several of the codes the adapter classifies
+ * (the workqueue consumer rules among them) are not named by the client's
+ * `JetStreamApiCodes` at all. The property is read by plain access rather than
  * `Object.hasOwn`: the client exposes `code` as a prototype getter over a private
  * field, so own-property checks, spreading and JSON round-trips all lose it.
  *
  * @param err - The rejection value.
- * @param code - The numeric API code that means "not found".
+ * @param code - The numeric API code to test for.
  *
  * @see docs:api/queue.md
  */
-export function isNotFoundError(err: unknown, code: number): boolean {
+export function hasApiErrorCode(err: unknown, code: number): boolean {
   if (typeof err !== 'object' || err === null) {
     return false;
   }
@@ -187,6 +189,21 @@ export function isNotFoundError(err: unknown, code: number): boolean {
   const candidate = (err as { code?: unknown }).code;
 
   return typeof candidate === 'number' && candidate === code;
+}
+
+/**
+ * Classifies a rejection as "the resource does not exist".
+ *
+ * `hasApiErrorCode` under the name its call sites mean: absence is the one classification
+ * that turns a failed probe into a create, so it reads as its own question.
+ *
+ * @param err - The rejection value.
+ * @param code - The numeric API code that means "not found".
+ *
+ * @see docs:api/queue.md
+ */
+export function isNotFoundError(err: unknown, code: number): boolean {
+  return hasApiErrorCode(err, code);
 }
 
 /** Whether a stamp timestamp falls inside the cycle window. Unreadable counts as inside. */

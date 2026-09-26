@@ -561,7 +561,9 @@ Everything that depends on the broker tracking delivery state goes inert with it
 A handler that throws still emits `onMessageFailed`, so failures remain observable — the
 message itself is simply not retried. `message.ack()` and `message.nack()` become no-ops.
 
-Per adapter: JetStream creates the consumer with `ack_policy: none`; Redis skips both the
+Per adapter: JetStream creates the consumer with `ack_policy: none` — and refuses the mode at
+`subscribe()` on a [work-queue stream](#work-queue-streams), where a task leaves the stream only
+by being acknowledged; Redis skips both the
 requeue and the dead-letter branch; the in-memory adapter suppresses `nack(true)`, which
 would otherwise resurrect a message in the one mode that promises a single delivery; and
 `NatsQueueAdapter` gains nothing, because core NATS never had an acknowledgement protocol —
@@ -571,7 +573,7 @@ would otherwise resurrect a message in the one mode that promises a single deliv
 
 **Technical details for AI agents — ackMode 'none':**
 - One resolver, not a negation per adapter: `resolveAckMode`, `acknowledgesAutomatically` and `tracksDelivery` live in `packages/core/src/queue/ack-mode.ts` and are exported from `@onebun/core`. `acknowledgesAutomatically` is true for `'auto'` only; `'manual'` and `'none'` both answer false, for opposite reasons. `tracksDelivery` is false for `'none'` only. Every adapter reads these instead of testing the raw option, so a fourth union member cannot fall into the auto branch silently
-- JetStream sets ack_policy: none and omits ack_wait, max_deliver and max_ack_pending from the payload entirely — spread from `redeliveryConfig(resolved)`, so the keys are ABSENT rather than present-and-undefined. They are also excluded from the reconcile hash and from `divergingFields()`: the server accepts them and ignores them, so recording them would stamp a redelivery policy that cannot occur
+- JetStream sets ack_policy: none and omits ack_wait, max_deliver and max_ack_pending from the payload entirely — spread from `redeliveryConfig(resolved)`, so the keys are ABSENT rather than present-and-undefined. They are also excluded from the reconcile hash and from `divergingFields()`: the server accepts them and ignores them, so recording them would stamp a redelivery policy that cannot occur. On a stream declared `retention: 'workqueue'` JetStream refuses `'none'` in `subscribe()` through `workQueueRefusal()` instead, before any consumer call — nats-server rejects `ack_policy: none` on a workqueue with 10084
 - Redis skips dead-letter routing and the requeue together — `onNack` returns early when `tracksDelivery()` is false, before either branch
 - memory suppresses requeue: `nack(true)` no longer re-dispatches under `'none'`, because that is the one mode promising a single delivery
 - NatsQueueAdapter is already a no-op on this axis: core NATS has no acknowledgement protocol, so nothing on the wire varies with the mode. It resolves the mode once onto the subscription entry so the choice is named in one place
@@ -1430,7 +1432,7 @@ The policy is fixed when the consumer is created and cannot be changed in place,
 
 **A consumer that vanishes.** If the consumer is deleted server-side — by an operator, by an ephemeral timing out, or by a stream being recreated — the client does not fail. It retries internally forever, so the subscription simply stops receiving while `isConnected()` keeps reporting healthy. The adapter now watches the consumer's notification channel: a deleted or missing consumer emits `@OnQueueError` and is re-created automatically from the same configuration the subscription was built with, and delivery resumes without a restart.
 
-One consequence is unavoidable and worth planning for: deleting a consumer destroys its position on the server, so messages published while it was gone are not delivered to the re-created one. They remain in the stream, subject to its retention, but this subscription will not see them. Nothing the client does can recover a position the server no longer has.
+One consequence is unavoidable and worth planning for: deleting a consumer destroys its position on the server, so messages published while it was gone are not delivered to the re-created one. They remain in the stream, subject to its retention, but this subscription will not see them. Nothing the client does can recover a position the server no longer has. A [work-queue stream](#work-queue-streams) is the exception: its consumers are deliver-all, so the re-created one receives every task still stored — those published while it was gone, and any that had exhausted their deliveries.
 
 `heartbeats_missed` and `stream_not_found` are reported to `@OnQueueError` as well but are deliberately not repaired: a missing stream is an operator problem, and re-creating a consumer against a stream that does not exist cannot help.
 
@@ -1440,22 +1442,22 @@ Errors from the consume loop itself — a vanished consumer, a broken connection
 
 **Consumer identity.** A subscription that declares a `group` gets a durable consumer named `${group}--${filterSubject}--${digest}`: the group and the subject with every character outside `[-\w]` — the `.`, `*` and `>` a subject is made of among them — replaced by an underscore, followed by a short digest of the raw pair. The digest is not decoration. Sanitisation is lossy: `orders.*` and `orders.>` both reduce to `orders__`, as do `orders.new` and `orders_new`, and `--` is itself legal inside a group name — without the digest those pairs would share one consumer. A durable is therefore per (group, pattern), not per group. Two handlers sharing a group but filtering different subjects are two consumers, each fed by its own subject; naming both after the group alone made the second silently take the first's consumer over, so one subject received everything and the other received nothing. The same pattern in the same group still resolves to a single durable, which is exactly what lets several instances of a service share the work — load balancing is unchanged.
 
-A subscription without a `group` is ephemeral. It is named after a freshly generated identifier no concurrent subscription can produce, it is never shared with another handler or another process, and it receives only messages published *after* the subscription starts: whatever the stream already holds is not replayed to it. A durable behaves the same way the first time it is created, and afterwards resumes where it left off — a consumer's name, its durability and its delivery policy are fixed when it is created, and reconciliation never rewrites them.
+A subscription without a `group` is ephemeral. It is named after a freshly generated identifier no concurrent subscription can produce, it is never shared with another handler or another process, and it receives only messages published *after* the subscription starts: whatever the stream already holds is not replayed to it. A durable behaves the same way the first time it is created, and afterwards resumes where it left off — a consumer's name, its durability and its delivery policy are fixed when it is created, and reconciliation never rewrites them. On a stream declared `retention: 'workqueue'` neither holds: a `group` is required there, and the durable receives everything the stream holds — see [Work-queue streams](#work-queue-streams).
 
 <llm-only>
 
 **Technical details for AI agents — consumer identity:**
-- Consumer identity is derived per (group, pattern) in `subscribe()` (`packages/nats/src/jetstream.adapter.ts`): with a group the name is the sanitised group, `--`, the sanitised filter subject (the pattern with `#` rewritten to `>`); without one it is `consumer-${crypto.randomUUID()}`. `isDurable` is `Boolean(options?.group)` and is threaded into `ensureConsumer()`/`addConsumer()`
+- Consumer identity is derived per (group, pattern) in `subscribe()` (`packages/nats/src/jetstream.adapter.ts`): with a group the name is the sanitised group, `--`, the sanitised filter subject (the pattern with `#` rewritten to `>`); without one it is `consumer-${crypto.randomUUID()}`. The `group` itself is threaded into `ensureConsumer()`/`addConsumer()`, which derive durability as `Boolean(group)` — the same predicate `subscribe()` stores on `entry.durable`
 - Consumer names are sanitised with [^-\w] -> _ before they reach consumers.add, then suffixed with a 12-hex digest of the raw (group, subject) pair because that sanitisation is lossy — `sanitizeConsumerName()`, applied to the group and the filter subject separately, because the client's `validName` accepts neither subject separators nor wildcards
 - The old scheme was the bare group name, so a second subscription in the same group with a different pattern resolved to the SAME consumer and overwrote its `filter_subject`; the old ephemeral name was `consumer-${Date.now()}`, so two group-less subscriptions created inside one millisecond collided. A residual collision is not silent: the ephemeral branch of `ensureConsumer()` fails startup rather than adopting a consumer someone else owns
-- Group-less means ephemeral: deliver_policy new, deleted on unsubscribe/disconnect, while durables are never implicitly deleted — `addConsumer()` sends `durable_name: isDurable ? consumerName : undefined` with `name` always set, and sends no `inactive_threshold`, leaving the server's own default to decide how long an idle ephemeral lingers
-- `deliver_policy` is explicit, not left to the server: `subscribe()` passes `jsModule.DeliverPolicy.New` into `resolveConsumerConfig(ackPolicy, deliverPolicy, options, consumerConfig)`, so a consumer created against a stream that retains messages starts at the subscription instead of replaying the backlog once
+- Group-less means ephemeral: deliver_policy new, deleted on unsubscribe/disconnect, while durables are never implicitly deleted — `addConsumer()` sends `durable_name: group ? consumerName : undefined` with `name` always set, and sends no `inactive_threshold`, leaving the server's own default to decide how long an idle ephemeral lingers. On a workqueue stream a group-less subscription is refused before any of this (see workqueue streams)
+- `deliver_policy` is explicit, not left to the server, and derived from the declared retention of the resolved stream: `subscribe()` passes `jsModule.DeliverPolicy.All` into `resolveConsumerConfig(ackPolicy, deliverPolicy, options, consumerConfig)` when that stream declares `retention: 'workqueue'` (the only policy nats-server accepts there, 10101 otherwise), and `jsModule.DeliverPolicy.New` for every other retention — so a consumer created against a stream that retains messages starts at the subscription instead of replaying the backlog once
 - ack_policy, deliver_policy, durable_name and name are immutable on an existing consumer, so they are creation-only: only `addConsumer()` sends them, and the `consumers.update()` call in `ensureConsumer()` sends `ack_wait`, `filter_subject`, `max_ack_pending`, `max_deliver` and `metadata` — nothing else
 - Consumer metadata is owned solely by the config-hash stamp in ensureConsumer(); identity is not part of the hashed subset, so two subscriptions differing only in `group` carry different durable names and the same config hash
 
 </llm-only>
 
-**Reconciliation on subscribe.** Each `@Subscribe` reconciles its consumer during startup rather than blindly creating one. The adapter first asks the server for the consumer; only a genuine "consumer not found" rejection counts as absence and leads to a create. Any other rejection — permissions denied, JetStream disabled, a transport timeout — is reported as itself instead of being mistaken for a missing consumer. When the consumer already exists, the adapter compares its stored configuration against the desired one, and **an unchanged consumer configuration performs no update at all**. A changed configuration is rewritten in place, carrying every pre-existing metadata key forward. Startup fails loudly, and `onError` fires, when the existing consumer cannot be reconciled safely: a subscription without a `group` whose generated name is already taken, a consumer whose acknowledgement policy is not explicit, or a consumer that two processes are rewriting with different configurations in a reconcile cycle.
+**Reconciliation on subscribe.** Each `@Subscribe` reconciles its consumer during startup rather than blindly creating one. The adapter first asks the server for the consumer; only a genuine "consumer not found" rejection counts as absence and leads to a create. Any other rejection — permissions denied, JetStream disabled, a transport timeout — is reported as itself instead of being mistaken for a missing consumer. When the consumer already exists, the adapter compares its stored configuration against the desired one, and **an unchanged consumer configuration performs no update at all**. A changed configuration is rewritten in place, carrying every pre-existing metadata key forward. Startup fails loudly, and `onError` fires, when the existing consumer cannot be reconciled safely: a subscription without a `group` whose generated name is already taken, a consumer whose acknowledgement policy is not explicit, or a consumer that two processes are rewriting with different configurations in a reconcile cycle. On a [work-queue stream](#work-queue-streams) it also fails, before asking the server anything, for the three shapes a workqueue cannot hold.
 
 The reconciliation stamp lives in JetStream consumer metadata, which requires nats-server 2.10 or newer.
 
@@ -1486,7 +1488,7 @@ nats consumer rm <STREAM> <CONSUMER>
 **Technical details for AI agents:**
 - Wire values are resolved once per subscription by `resolveConsumerConfig(ackPolicy, deliverPolicy, options, consumerConfig)` in `packages/nats/src/jetstream.adapter.ts` — the single source of truth. `maxAckPending = options?.prefetch ?? consumerConfig?.maxAckPending ?? 100`; `maxDeliver = options?.retry?.attempts ?? options?.deadLetter?.maxRetries ?? consumerConfig?.maxDeliver ?? 3`; `ackWait = options?.ackTimeout !== undefined ? options.ackTimeout * 1_000_000 : consumerConfig?.ackWait ?? 30_000_000_000`; `consumeBatch = Math.min(maxAckPending, options?.prefetch ?? 10)`
 - `consumerConfig.maxAckPending` was declared but read nowhere before this change — it is now wired through `resolveConsumerConfig()`
-- `ackPolicy` is `AckPolicy.Explicit` for `ackMode: 'auto'` and `'manual'`, and `AckPolicy.None` for `'none'`, resolved at the single site `resolveAckMode(options) === 'none' ? AckPolicy.None : AckPolicy.Explicit` in `subscribe()`. It arrives at `resolveConsumerConfig()` as a parameter, together with `deliverPolicy`, so the function stays synchronous and needs no access to the dynamically imported client module. Previously any mode other than `'manual'` produced `ack_policy: none`, under which the server tracks no acknowledgements and every ack-dependent feature is inert
+- `ackPolicy` is `AckPolicy.Explicit` for `ackMode: 'auto'` and `'manual'`, and `AckPolicy.None` for `'none'`, resolved at the single site `resolveAckMode(options) === 'none' ? AckPolicy.None : AckPolicy.Explicit` in `subscribe()`. It arrives at `resolveConsumerConfig()` as a parameter, together with `deliverPolicy`, so the function stays synchronous and needs no access to the dynamically imported client module. Previously any mode other than `'manual'` produced `ack_policy: none`, under which the server tracks no acknowledgements and every ack-dependent feature is inert. On a stream declared `retention: 'workqueue'` the `'none'` branch is never reached: `workQueueRefusal()` refuses the subscription first, because nats-server rejects `ack_policy: none` there (10084)
 - `ensureConsumer()` compares the stored `ack_policy` against `resolved.ackPolicy`, NOT against `Explicit` outright. Asserting Explicit rejected on the second boot the very consumer a `'none'` subscription had created on the first — permanently, because `ack_policy` is create-only and the recreated one is `none` again
 - `Message.nack(true)` calls `jsMsg.nak()` with NO argument — `nak(millis?: number)` takes a delay, and passing anything non-numeric reaches the wire as a null delay, which is a plain nak. `nack(false)` and the bare `nack()` call `jsMsg.term()`. `term(reason?)` accepts a reason string only on nats-server 2.11+, so the adapter deliberately calls it bare
 - `ensureConsumer()` is probe-first: it calls `jsm.consumers.info(stream, consumer)` before anything else, never a blind `consumers.add()` inside a bare `catch {}`
@@ -1503,6 +1505,122 @@ nats consumer rm <STREAM> <CONSUMER>
 - `drainHandlers(entries)` awaits those promises through `awaitBounded(Promise.allSettled(pending), HANDLER_DRAIN_TIMEOUT_MS)` (30000 ms, deliberately equal to the default `ack_wait`), then clears `inFlight` on every entry so a later release does not restart the wait. `awaitBounded` clears its own timer on settle — a pending 30s timer would keep the process alive past the shutdown that created it
 - `releaseSubscription(entry)` drains AFTER clearing `running` and the restart timer but BEFORE closing the pull handle and deleting an ephemeral, so the handler can still acknowledge over a live connection
 - `disconnect()` clears `running` on every entry, then drains once, then runs the releases under a separate `RELEASE_TIMEOUT_MS` (5000 ms) bound: 30s belongs to the application's handler, 5s to the network teardown that follows it. `client.disconnect()` is called only after both
+
+</llm-only>
+
+#### Work-queue streams {#work-queue-streams}
+
+A stream declared `retention: 'workqueue'` — on the stream itself or through `streamDefaults` — is a
+task queue: each message goes to exactly one consumer, and acknowledging it deletes it. nats-server
+enforces that shape with consumer rules of its own. OneBun derives what it can from the declaration,
+so there is no extra option to set:
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  Module,
+  OneBunApplication,
+  Subscribe,
+  type Message,
+} from '@onebun/core';
+import { JetStreamQueueAdapter } from '@onebun/nats';
+
+@Controller('/tasks')
+class TaskWorker extends BaseController {
+  @Subscribe('tasks.run', { group: 'workers', ackMode: 'manual' })
+  async run(message: Message<{ id: string }>): Promise<void> {
+    // ... do the work ...
+    await message.ack(); // on a workqueue, this deletes the task
+  }
+}
+
+@Module({ controllers: [TaskWorker] })
+class WorkerModule {}
+
+const worker = new OneBunApplication(WorkerModule, {
+  queue: {
+    adapter: JetStreamQueueAdapter,
+    options: {
+      servers: 'nats://localhost:4222',
+      streams: [
+        { name: 'TASKS', subjects: ['tasks.>'], retention: 'workqueue' },
+      ],
+    },
+  },
+});
+
+// Receives every task TASKS already holds — including those published before any worker
+// ever subscribed — and then the new ones.
+await worker.start();
+```
+
+What the declaration changes, and what it requires:
+
+- **`deliver_policy: all`.** Every consumer on the stream is created deliver-all, the only policy
+  nats-server accepts on a workqueue. A task published before the first worker subscribed is
+  delivered, and so is everything published while the workers were down. There is nothing to
+  "replay": an acknowledged task no longer exists. Limits and interest streams keep
+  `deliver_policy: new`, exactly as described under [consumer identity](#jetstreamqueueadapter).
+- **A `group` is required.** A workqueue allows one consumer per subject, so the group-less
+  contract — a consumer of its own in every process, never shared — cannot exist there: the second
+  replica would be refused, and so would a restart within seconds of a crash, while the dead
+  process's consumer still holds the subject. `subscribe()` refuses a group-less subscription
+  instead. Replicas with the same `group` and pattern share one durable and split the tasks.
+- **`ackMode: 'none'` is refused.** A workqueue removes a task only when it is acknowledged, so the
+  server requires explicit acknowledgements there. `'auto'` and `'manual'` both work.
+- **One consumer per subject, stream-wide.** A second group on the same subject, or an overlapping
+  pattern in any group, is rejected by the server. That includes a dead-letter subject kept in the
+  same stream: a subscription reading `tasks.failed` overlaps a worker on `tasks.*`, and whichever
+  starts second is refused. Give dead letters a stream of their own. The startup error names the
+  overlapping subscription when it is in this
+  application. When it is not, the other consumer is most often a durable an earlier deployment
+  left behind after its group was renamed or its pattern changed. Remove it with
+  [`deleteDurableConsumer(oldPattern, oldGroup)`](#consumer-lifecycle-jetstream) or
+  `nats consumer rm`. On a workqueue that loses no tasks: they live in the stream, not in the
+  consumer, and the next consumer, being deliver-all, receives them.
+- **Partial-token parameter patterns are refused.** `jobs.v{version}` filters `jobs.*` on the wire,
+  and the adapter acknowledges a delivered message the pattern does not match, such as `jobs.x`,
+  so it cannot wedge the consumer. On a workqueue that acknowledgement deletes the task, silently.
+  `subscribe()` refuses such a pattern there. A whole-token parameter (`jobs.{version}`) translates
+  exactly and is fine; check the value in the handler.
+- **Exhausted tasks stay stored.** A task whose handler fails `max_deliver` times is not deleted.
+  It stays in the stream, keeps counting against `maxMsgs` and `maxBytes`, and is never delivered
+  to that consumer again. Raising `retry.attempts` or `consumerConfig.maxDeliver` updates the
+  consumer in place and does **not** bring it back. Only a recreated consumer receives it — one you
+  deleted, or one OneBun re-creates after it [vanished](#jetstreamqueueadapter) — and then together
+  with every other stranded task at once. Configure `deadLetter`: on the last attempt the task is
+  republished to the dead-letter subject and the original is terminated, which on a workqueue
+  deletes it.
+- **`term()` deletes.** A payload that does not parse, or one that is not a OneBun envelope, is
+  terminated (see *Messages the adapter cannot read* above). On a workqueue that removes it from the
+  stream for good, leaving the `@OnQueueError` event as the only trace. The same goes for
+  `nack(false)` without a dead-letter queue. A producer that does not publish OneBun envelopes
+  therefore should not share a workqueue subject with a OneBun worker.
+- **Declare the owner's exact retention.** The declaration is trusted, never probed. For a managed
+  stream a declared retention that differs from the server's fails `app.start()`. A
+  `manage: false` stream is not checked: declaring `workqueue` for a stream that is really
+  `limits` makes a new durable deliver-all, and it replays the stream once. Declaring nothing, or
+  `limits`, for a stream that really is a workqueue fails the subscription. The error says to
+  declare `retention: 'workqueue'`.
+
+An `interest` stream is not a workqueue: it keeps `deliver_policy: new` and none of the rules above,
+but it discards a message published while no consumer exists at all, so a service whose consumers
+are all down loses what is published meanwhile.
+
+<llm-only>
+
+**Technical details for AI agents — workqueue streams:**
+- `subscribe()` in `packages/nats/src/jetstream.adapter.ts` resolves the stream FIRST, through the private `resolveDeclaredStream(pattern)`, which returns the whole `ResolvedStream`. The public `resolveStreamForSubject(subject)` is `resolveDeclaredStream(subject).name`, so there is still exactly one resolver, used by `subscribe()` and `deleteDurableConsumer()` alike. The constructor's `{ ...streamDefaults, ...stream }` spread has already folded a `streamDefaults.retention` in, which is also why a per-stream `retention: 'limits'` overrides a workqueue default
+- `stream.retention === 'workqueue'` selects `jsModule.DeliverPolicy.All` as the `deliverPolicy` argument of `resolveConsumerConfig()`; anything else, `undefined` included, selects `DeliverPolicy.New`. That is the only site in the package that picks a deliver policy. The result lives on `entry.resolved`, so `recreateConsumer()` rebuilds a vanished consumer deliver-all too. `deliver_policy` stays creation-only: it is not in the `hashReconcileConfig` subset and never reaches `consumers.update()`, so a workqueue consumer and a limits consumer with the same knobs stamp the same hash
+- There is no typed `deliverPolicy` option, deliberately: the declared retention already determines the only value the server accepts, and `all` on a limits stream is exactly the replay `deliver_policy: new` exists to prevent. There is no server probe of the retention either — it needs `$JS.API.STREAM.INFO`, which a `manage: false` tenant is typically denied
+- On a workqueue, `workQueueRefusal(pattern, filterSubject, streamName, options)` — a pure function beside `validateDeadLetterQueue` — returns a refusal for `!options.group` (the same predicate as `entry.durable`), for `resolveAckMode(options) === 'none'`, and for `widensOnTranslation(pattern)`; `subscribe()` throws it through `failConsumer()`, so `onError` fires and neither `consumers.info` nor `consumers.add` is called. The server's own answers would be 10100 for a second ephemeral on the subject, 10084 for `ack_policy: none` (the same code on nats-server 2.10, 2.11 and 2.14) and nothing at all for the widened pattern, whose strays the consume loop's unmatched-message `msg.ack()` would delete
+- `widensOnTranslation(pattern)` lives in `packages/nats/src/subject.ts` beside `toNatsSubject()`: true when some token contains a `{…}` parameter without being exactly one (`/^\{[^.}]*\}$/`). `*` and a trailing `#` never widen — the in-process matcher reads `{id}` and `*` as one non-empty token, and a trailing `#` as everything `>` delivers
+- Server rejections are classified by numeric code through `hasApiErrorCode(err, code)` in `packages/nats/src/config-stamp.ts`; `isNotFoundError` is the same predicate under the name its call sites mean. The client's `JetStreamApiCodes` names neither workqueue code, so the adapter declares `CONSUMER_WQ_NOT_DELIVER_ALL_CODE` (10101) and `CONSUMER_WQ_NOT_UNIQUE_CODE` (10100). `workQueueRemedy()` turns 10101 into `undeclaredWorkQueueRemedy()` (declare `retention: 'workqueue'`, quoting the retention declared today) and 10100 into `workQueueNotUniqueRemedy()`, on both `addConsumer()` and the `consumers.update()` path. `error.cause` is the original rejection
+- The 10100 remedy scans `this.subscriptions` for entries on the same stream whose `filterSubject` `natsSubjectsOverlap()`s this one and whose `consumerName` differs (a replica of the same `(group, pattern)` is not a collision). A hit is named with its pattern and group; no hit yields the stale-durable advice with `deleteDurableConsumer(oldPattern, oldGroup)` and `nats consumer rm`. There is no separate pre-flight overlap check: it could not see other processes, and within one process the server's answer is already deterministic. On the update path the remedy replaces the usual delete-and-recreate advice, because a recreate would be refused the same way
+- `ensureConsumer()` and `addConsumer()` take the subscription's `group` (not a precomputed `isDurable`), so the remedy can name it; durability is `Boolean(group)` there, the same predicate `subscribe()` stores on `entry.durable`
+- Known server behaviour the code deliberately does not "fix": a task that exhausts `max_deliver` stays stored with the consumer's `num_pending` at 0, and a `consumers.update()` raising `max_deliver` does not resurrect it — only a delete-and-add does. Terminating on the last delivery instead would delete failed tasks, so the documented answer is `deadLetter`, whose `routeToDeadLetter()` terms the original only after the republish succeeded
+- The rules in one place, as a user meets them on a stream declared `retention: 'workqueue'`: consumers are `deliver_policy: all`; `group` is required; `ackMode: 'none'` is refused; one consumer per subject stream-wide (10100), which includes a subscription reading a dead-letter subject kept in the same stream — dead letters belong in a stream of their own; partial-token parameter patterns are refused; an exhausted task stays stored, keeps counting against `max_msgs`/`max_bytes`, and returns only when the consumer is recreated — a `consumerConfig` or `retry.attempts` change does not bring it back, and a recreate (including the vanished-consumer path) hands out every stranded task at once; `term()` deletes on a workqueue, so poison payloads and foreign envelopes (`poisonMessageError`, `foreignEnvelopeError`) and a `nack(false)` without a dead-letter queue remove the task for good; `deadLetter` is the recommended companion of every workqueue subscription; and the declared retention must be the owner's exact one — a managed stream's divergence fails `connect()` through `divergingCreateOnlyFields()`, a `manage: false` one is trusted unchecked, and an undeclared server-side workqueue fails the subscription with 10101 mapped to "declare `retention: 'workqueue'`"
 
 </llm-only>
 
@@ -1561,7 +1679,7 @@ afterEach(async () => {
 
 It never throws. Not connected is a quiet `false` — nothing was attempted, so reporting it would make every clean teardown noisy. Anything else that goes wrong, including a permissions denial or an unbound pattern, is a `false` plus an `onError` event: swallowed for the caller, not for a listener. It calls the strict form, so the two cannot drift.
 
-Subscribing again with the same `(pattern, group)` after a delete creates a fresh durable under the same name. Fresh means fresh: a new consumer carries `deliver_policy: new`, so it starts from the moment it is created and does not replay what the stream still holds. Deleting a durable therefore discards its position permanently — that is the cost, and it is why `unsubscribe()` never does it for you.
+Subscribing again with the same `(pattern, group)` after a delete creates a fresh durable under the same name. Fresh means fresh — except on a work-queue stream: on a limits or interest stream a new consumer carries `deliver_policy: new`, so it starts from the moment it is created and does not replay what the stream still holds, while on a stream declared `retention: 'workqueue'` it carries `deliver_policy: all` and receives every task still stored, because there a task lives in the stream rather than in the consumer (see [Work-queue streams](#work-queue-streams)). Deleting a durable on a limits or interest stream therefore discards its position permanently — that is the cost, and it is why `unsubscribe()` never does it for you.
 
 <llm-only>
 
@@ -1614,7 +1732,7 @@ async inspectFailures(message: Message<OrderData>) {
 
 The stream requirement is on you, and is **not** checked at startup: dead letters are republished through `publish()`, which addresses a subject and lets the server route it rather than resolving a stream. An unbound dead-letter subject therefore surfaces the first time a message is actually dead-lettered, as a republish failure — the original is deliberately left un-terminated at that point, so it is redelivered rather than lost. The `agent_dlq` stream in the [JetStreamQueueAdapter](#jetstreamqueueadapter) example above is the shape to copy — the dead-letter subject needs a stream just like any other.
 
-**What happens to the original.** `term()` removes it under `retention: 'workqueue'` and `'interest'`. Under the default `retention: 'limits'` the payload stays in the source stream until retention evicts it — terminating only stops redelivery. Either way the dead-letter copy is a normal stored message with its own retention, so it survives independently of the original.
+**What happens to the original.** `term()` removes it under `retention: 'workqueue'` and `'interest'`. Under the default `retention: 'limits'` the payload stays in the source stream until retention evicts it — terminating only stops redelivery. Either way the dead-letter copy is a normal stored message with its own retention, so it survives independently of the original. On a [work-queue stream](#work-queue-streams) that removal is what you want: without a dead-letter queue a task that exhausts its deliveries is not deleted, it stays stored and undelivered.
 
 ::: warning Redis behaves differently for now
 The Redis adapter routes dead letters to `queue:dlq:${pattern}` and ignores both `deadLetter.queue` and `deadLetter.maxRetries` — it treats `deadLetter` as an on/off flag. Aligning it with the semantics above is tracked separately.

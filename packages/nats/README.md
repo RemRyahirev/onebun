@@ -181,7 +181,7 @@ interface JetStreamAdapterOptions extends NatsConnectionOptions {
   streams?: Array<{            // Omitted or empty means publish-only
     name: string;              // Stream name
     subjects: string[];        // Subjects to store
-    retention?: 'limits' | 'interest' | 'workqueue';
+    retention?: 'limits' | 'interest' | 'workqueue';  // 'workqueue': consumers deliver-all, group required
     storage?: 'file' | 'memory';
     replicas?: number;
     maxMsgs?: number;
@@ -218,6 +218,43 @@ stream, so a declared value that diverges from the server's fails startup as wel
 `nats stream rm` that lets OneBun recreate the stream — deleting it discards every message it holds. Both checks
 run before the hash is consulted, so a stamp left behind by an out-of-band `nats stream edit` cannot wave either
 of them through. That stamp lives in stream metadata, so the adapter requires nats-server 2.10 or newer.
+
+### Work-queue streams
+
+`retention` also decides how every consumer on the stream is created. On a stream declared
+`retention: 'workqueue'` (directly or through `streamDefaults`) consumers are created with
+`deliver_policy: all`, the only policy nats-server accepts there. A task published before the first worker
+subscribed is delivered, and so is everything published while the workers were down; acknowledging a task
+deletes it. Every other retention keeps `deliver_policy: new`. There is no option to set.
+
+```typescript
+streams: [{ name: 'TASKS', subjects: ['tasks.>'], retention: 'workqueue' }],
+
+@Subscribe('tasks.run', { group: 'workers', ackMode: 'manual' })
+async run(message: Message<{ id: string }>) {
+  await message.ack(); // deletes the task
+}
+```
+
+A workqueue allows one consumer per subject, and the adapter enforces the rules that follow at `subscribe()`:
+
+- **`group` is required.** Replicas with the same group and pattern share one durable and split the tasks.
+  A group-less subscription is refused.
+- **`ackMode: 'none'` is refused.** A task leaves the stream only by being acknowledged.
+- **Partial-token parameters are refused.** `jobs.v{version}` filters `jobs.*`, and a delivered `jobs.x` the
+  pattern does not match would be acknowledged, which on a workqueue deletes it. Use `jobs.{version}`.
+- **A second group or an overlapping pattern on the same subject** is refused by the server. The error names
+  the overlapping subscription when it is in this application. When it is not, it points at a durable left
+  behind by an earlier deployment: remove it with `deleteDurableConsumer(oldPattern, oldGroup)` or
+  `nats consumer rm`. No task is lost, because tasks live in the stream. Keep dead letters in a stream of their
+  own.
+- **Configure `deadLetter`.** A task that exhausts `max_deliver` is not deleted: it stays stored, counts against
+  the stream's limits, and comes back only when the consumer is recreated. Raising `maxDeliver` does not
+  bring it back. `term()`, used for dead letters, for unparseable payloads and for `nack(false)`, deletes on a
+  workqueue.
+- **Declare the owner's exact retention.** A server-side workqueue declared without `retention: 'workqueue'`
+  fails the subscription with an error that says so. For a `manage: false` stream the declaration is not
+  checked against the server.
 
 ### When the topology is declared elsewhere
 

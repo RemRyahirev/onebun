@@ -16,6 +16,7 @@ import {
   CONFIG_CYCLE_WINDOW_MS,
   CONFIG_STAMP_KEYS,
   decideStamp,
+  hasApiErrorCode,
   hashReconcileConfig,
   isNotFoundError,
   stampMetadata,
@@ -221,5 +222,27 @@ describe('isNotFoundError', () => {
 
     expect(Object.hasOwn(error, 'code')).toBe(false);
     expect(isNotFoundError(error, CONSUMER_NOT_FOUND)).toBe(true);
+  });
+});
+
+describe('hasApiErrorCode', () => {
+  /** nats-server's workqueue "not deliver all" code, which the client does not name. */
+  const WQ_NOT_DELIVER_ALL = 10101;
+
+  it('matches a code the client module does not name', () => {
+    expect(hasApiErrorCode({ code: WQ_NOT_DELIVER_ALL }, WQ_NOT_DELIVER_ALL)).toBe(true);
+  });
+
+  it('does not match a different code, a codeless error or a non-object', () => {
+    expect(hasApiErrorCode({ code: CONSUMER_NOT_FOUND }, WQ_NOT_DELIVER_ALL)).toBe(false);
+    expect(hasApiErrorCode(new Error('consumer must be deliver all'), WQ_NOT_DELIVER_ALL)).toBe(false);
+    expect(hasApiErrorCode(null, WQ_NOT_DELIVER_ALL)).toBe(false);
+    expect(hasApiErrorCode({ code: '10101' }, WQ_NOT_DELIVER_ALL)).toBe(false);
+  });
+
+  it('is the predicate isNotFoundError asks, under a narrower name', () => {
+    for (const candidate of [{ code: CONSUMER_NOT_FOUND }, { code: STREAM_NOT_FOUND }, undefined, 'x']) {
+      expect(isNotFoundError(candidate, CONSUMER_NOT_FOUND)).toBe(hasApiErrorCode(candidate, CONSUMER_NOT_FOUND));
+    }
   });
 });
