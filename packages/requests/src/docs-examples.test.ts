@@ -227,7 +227,8 @@ describe('Requests API Documentation Examples', () => {
      * @source docs:api/requests.md#get
      */
     it('should read an object carrying headers as config, not as query', async () => {
-      // From docs: "an object carrying `headers`, `timeout`, `auth` or `method` is read as config"
+      // From docs: "an object carrying `method`, `headers`, `timeout`, `auth`, `tracing` or `metrics`
+      // is read as per-request config"
       const server = startEchoServer();
 
       try {
@@ -257,6 +258,71 @@ describe('Requests API Documentation Examples', () => {
         await client.get('/users', { page: 1, limit: 10 }, { timeout: 5000 });
 
         expect(server.calls[0]?.path).toBe('/users?page=1&limit=10');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should honour a config given third when the query is undefined', async () => {
+      // From docs: "a third argument makes the second one the query, even `undefined`"
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 2, delay: 1 } });
+
+        await expect(client.get('/users', undefined, { retries: { max: 0 } })).rejects.toThrow(/"code":503/);
+
+        // One arrival: the per-request `retries: { max: 0 }` reached the request. Dropped, the
+        // client's own `max: 2` would have sent three.
+        expect(server.methods).toEqual(['GET']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should resolve delete, head and options by the same rule as get', async () => {
+      // From docs: "`delete`, `head` and `options` take the same three arguments and resolve
+      // them by the same rule"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.delete('/d', { tracing: false });
+        await client.head('/h', { metrics: false });
+        await client.options('/o', { tracing: false });
+        await client.delete('/d', { reason: 'expired' });
+
+        expect(server.calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+          'DELETE /d',
+          'HEAD /h',
+          'OPTIONS /o',
+          'DELETE /d?reason=expired',
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should send a key outside the six config names as query data', async () => {
+      // From docs: "`client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.get('/login', { redirect: '/home' });
+
+        expect(server.calls[0]?.path).toBe('/login?redirect=%2Fhome');
       } finally {
         server.stop();
       }
@@ -498,27 +564,89 @@ describe('Requests API Documentation Examples', () => {
         server.stop();
       }
     });
+
+    /**
+     * @source docs:api/requests.md#responses-without-a-body
+     */
+    it('should resolve HEAD, 204 and 304 answers without reading a body', async () => {
+      // From docs: "An answer to `HEAD`, and every `204 No Content` and `304 Not Modified`, has no
+      // content by definition ... A `304` resolves as a success"
+      const etag = '"v1"';
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          if (req.method === 'DELETE') {
+            // A 204 that keeps its JSON content type — it used to reach the JSON parser
+            return new Response(null, { status: 204, headers: { 'content-type': 'application/json' } });
+          }
+          if (req.headers.get('if-none-match') === etag) {
+            return new Response(null, { status: 304, headers: { etag, 'content-type': 'application/json' } });
+          }
+
+          // Answers HEAD as well: Bun drops the body and keeps `content-type: application/json`
+          return Response.json({ id: '123' }, { headers: { etag } });
+        },
+      });
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, retries: { max: 0 } });
+
+        const head = await client.head('/users/123');
+        expect(head).toMatchObject({ success: true, statusCode: 200 });
+        expect(head.success && head.result).toBeUndefined();
+
+        const removed = await client.delete('/users/123');
+        expect(removed).toMatchObject({ success: true, statusCode: 204 });
+        expect(removed.success && removed.result).toBeUndefined();
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const response = await client.get<{ id: string }>('/users/123', undefined, { headers: { 'If-None-Match': etag } });
+        expect(response).toMatchObject({ success: true, statusCode: 304 });
+        expect(response.success && response.result).toBeUndefined();
+
+        // A request without the condition still gets, and parses, the body
+        const fresh = await client.get<{ id: string }>('/users/123');
+        expect(fresh.success && fresh.result).toEqual({ id: '123' });
+      } finally {
+        server.stop(true);
+      }
+    });
   });
 
   describe('Request Configuration (docs/api/requests.md)', () => {
     /**
      * @source docs:api/requests.md#request-configuration
      */
-    it('should drop the third argument of get when the second is undefined', async () => {
-      // From docs (warning): "get, delete, head and options drop the third argument
-      // when the second is undefined"
+    it('should apply a config given third whatever the second argument is', async () => {
+      // From docs: "`client.get('/x', undefined, { headers: { … } })` sends the headers. That holds
+      // for all seven methods". It used to be a warning: get, delete, head and options dropped the
+      // third argument when the second was `undefined`, and this test pinned the drop.
       const server = startEchoServer();
 
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const config = { headers: { 'x-a': '1' } };
 
-        /* eslint-disable @typescript-eslint/naming-convention */
-        await client.get('/users', undefined, { headers: { 'X-Request-ID': 'rid-1' } });
-        await client.post('/users', undefined, { headers: { 'X-Request-ID': 'rid-2' } });
-        /* eslint-enable @typescript-eslint/naming-convention */
+        await client.get('/g', undefined, config);
+        await client.delete('/d', undefined, config);
+        await client.head('/h', undefined, config);
+        await client.options('/o', undefined, config);
+        await client.post('/p', undefined, config);
+        await client.put('/u', undefined, config);
+        await client.patch('/pa', undefined, config);
 
-        expect(server.calls[0]?.headers.get('x-request-id')).toBeNull();
-        expect(server.calls[1]?.headers.get('x-request-id')).toBe('rid-2');
+        expect(server.calls.map((call) => `${call.method} ${call.path} ${call.headers.get('x-a')}`)).toEqual([
+          'GET /g 1',
+          'DELETE /d 1',
+          'HEAD /h 1',
+          'OPTIONS /o 1',
+          'POST /p 1',
+          'PUT /u 1',
+          'PATCH /pa 1',
+        ]);
       } finally {
         server.stop();
       }

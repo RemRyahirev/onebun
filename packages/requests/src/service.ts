@@ -5,7 +5,11 @@ import {
   pipe,
 } from 'effect';
 
-import { executeRequest, HttpClient } from './client.js';
+import {
+  executeRequest,
+  HttpClient,
+  resolveQueryOverload,
+} from './client.js';
 import {
   type ApiResponse,
   DEFAULT_REQUESTS_OPTIONS,
@@ -22,6 +26,10 @@ import {
 
 /**
  * RequestsService interface for dependency injection
+ *
+ * Every method returns the response's `result` alone, so an answer that has no content — any
+ * answer to HEAD, a 204 or a 304 — resolves with `undefined`, and a 304 cannot be told from a 204
+ * here. Use `HttpClient`, whose `SuccessResponse` carries `statusCode`, for conditional requests.
  *
  * @see docs:api/requests.md
  */
@@ -222,43 +230,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<T, OneBunBaseError> {
-    let finalConfig: RequestConfig;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.GET,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.GET, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.GET, url, queryOrConfig, config));
   }
 
   postEffect<T = unknown, D = unknown>(
@@ -305,43 +277,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<T, OneBunBaseError> {
-    let finalConfig: RequestConfig;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.DELETE,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.DELETE, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.DELETE, url, queryOrConfig, config));
   }
 
   headEffect<Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -349,43 +285,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<void, OneBunBaseError> {
-    let finalConfig: RequestConfig;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.HEAD,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.HEAD, url };
-    }
-
-    return this.requestEffect<void>(finalConfig);
+    return this.requestEffect<void>(resolveQueryOverload(HttpMethod.HEAD, url, queryOrConfig, config));
   }
 
   optionsEffect<T = unknown, Q extends Record<string, unknown> = Record<string, unknown>>(
@@ -393,43 +293,7 @@ class RequestsServiceImpl implements RequestsService {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<T, OneBunBaseError> {
-    let finalConfig: RequestConfig;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.OPTIONS,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.OPTIONS, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.OPTIONS, url, queryOrConfig, config));
   }
 
   updateConfigEffect(newConfig: Partial<RequestsOptions>): Effect.Effect<void> {

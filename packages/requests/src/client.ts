@@ -37,17 +37,24 @@ import {
 const BODY_CARRYING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH'];
 
 /**
- * Fields that mark the second argument of `get`/`delete` as a config rather than query data.
+ * Fields that mark the second argument of `get`/`delete`/`head`/`options` as a config rather than
+ * query data.
  *
  * The overload is ambiguous by construction — both arms take a plain object — so this list is the
  * whole of the decision. It used to name four fields, which left `tracing` on the wrong side:
  * `client.get(url, { tracing: false })` was read as query data and went out as `?tracing=false`,
- * with the header it was meant to suppress still attached.
+ * with the header it was meant to suppress still attached. `get` was then given this list while
+ * `delete`, `head` and `options` kept their own inline copy of the old four, so the same call on
+ * those three still sent `?tracing=false`. {@link resolveQueryOverload} is now the only reader.
  *
  * `retries` and `query` are deliberately NOT here. `query` is documented as producing a literal
  * `?query=[object Object]` — the page warns against wrapping the query in a key and a test pins
  * it — and a `?retries=3` is a plausible query param in a way that `?tracing=` is not. Both still
  * need the three-argument form, as does any caller whose query really contains one of these names.
+ *
+ * Adding a name moves every query record that uses it to the config side, so a new config key
+ * does not join by default. `client.get('/login', { redirect: '/home' })` is query data, and a
+ * test pins it.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -57,6 +64,76 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'tracing',
   'metrics',
 ];
+
+/**
+ * Resolve the `(url, queryOrConfig?, config?)` shape shared by `get`, `delete`, `head` and
+ * `options` into one request config.
+ *
+ * - A third argument makes the second one query data, whatever it holds — `undefined` included.
+ *   Each method used to take the three-argument arm only when the SECOND argument was truthy, so
+ *   `get(url, undefined, { headers })` fell through to a bare request and the config was dropped.
+ * - With two arguments, a plain object carrying any of {@link REQUEST_CONFIG_MARKERS} is config
+ *   and any other plain object is query data.
+ *
+ * Shared by `HttpClient` and the `RequestsService` layer, so the rule cannot drift between them
+ * or between the four methods again.
+ *
+ * @internal
+ */
+export const resolveQueryOverload = (
+  method: HttpMethod,
+  url: string,
+  queryOrConfig: object | undefined,
+  config: Partial<RequestConfig> | undefined,
+): RequestConfig => {
+  if (config !== undefined) {
+    return {
+      method,
+      url,
+      ...(queryOrConfig === undefined || queryOrConfig === null
+        ? {}
+        : { query: queryOrConfig as Record<string, unknown> }),
+      ...config,
+    };
+  }
+
+  if (typeof queryOrConfig !== 'object' || queryOrConfig === null || Array.isArray(queryOrConfig)) {
+    return { method, url };
+  }
+
+  if (REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig)) {
+    return { method, url, ...(queryOrConfig as Partial<RequestConfig>) };
+  }
+
+  return { method, url, query: queryOrConfig as Record<string, unknown> };
+};
+
+/**
+ * Whether a response carries no content by definition (RFC 9110 §6.4.1): every answer to HEAD,
+ * and every 204 No Content and 304 Not Modified.
+ *
+ * Their body is not read. It used to be, and the content type decided how: a HEAD to any JSON
+ * endpoint (`Response.json` sets the header on HEAD too) and a 204 or 304 that kept its
+ * `content-type: application/json` all went to the JSON parser, which rejected the empty text with
+ * `RESPONSE_PARSE_ERROR` — so `client.head()` failed against every JSON endpoint there is.
+ *
+ * Case-insensitive on the method, as `fetch` is: `req('head', url)` reaches the wire as HEAD.
+ */
+const hasNoContent = (method: string, status: number): boolean =>
+  method.toUpperCase() === HttpMethod.HEAD ||
+  status === HttpStatusCode.NO_CONTENT ||
+  status === HttpStatusCode.NOT_MODIFIED;
+
+/**
+ * Whether an upstream status resolves as a success.
+ *
+ * 304 Not Modified is one. A server sends it only in answer to a conditional request
+ * (`If-None-Match`, `If-Modified-Since`), so it is the outcome the caller asked about — "your copy
+ * is current" — not a failure to recover from. It used to fall outside the range and reject.
+ */
+const isSuccessStatus = (status: number): boolean =>
+  (status >= HttpStatusCode.OK && status < HttpStatusCode.MOVED_PERMANENTLY) ||
+  status === HttpStatusCode.NOT_MODIFIED;
 
 /**
  * Build full URL from base URL and request URL
@@ -511,15 +588,18 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         responseHeaders[key.toLowerCase()] = value;
       });
 
+      // `undefined` rather than `''` for a response that has no content: `head()` is typed
+      // `ApiResponse<void>`, and an empty string would claim a body that was never there.
+      const readBody: Effect.Effect<T, ErrorResponse> = hasNoContent(config.method, response.status)
+        ? Effect.succeed(undefined as T)
+        : parseResponseData<T>(response, traceId);
+
       return pipe(
-        parseResponseData<T>(response, traceId),
+        readBody,
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
-          const success =
-            response.status >= HttpStatusCode.OK &&
-            response.status < HttpStatusCode.MOVED_PERMANENTLY;
 
-          if (success) {
+          if (isSuccessStatus(response.status)) {
             return createSuccessResponse(responseData, traceId, response.status);
           }
 
@@ -635,6 +715,25 @@ const executeWithRetry = <T, E extends string, R extends string>(
 };
 
 /**
+ * The config with its method filled in: `GET` when the caller left it `undefined`.
+ *
+ * `RequestConfig.method` is required, but a spread puts an explicit `undefined` back over the
+ * default: `client.request({ url, method: undefined })` overrides the `GET` that
+ * `HttpClient.requestEffect` sets, and `client.get(url, { method: undefined })` does the same
+ * through {@link resolveQueryOverload}. Both type-check while `exactOptionalPropertyTypes` is off.
+ * `fetch` sends such a request as GET, but the client's own string operations on the method threw
+ * a TypeError: HEAD detection on every answer, the retry allowlist on every failure. Thrown there,
+ * it is a defect rather than a failure — it passed every `catchAll`, so the caller got no
+ * `ErrorResponse` and no metrics were recorded, after the request had already gone out. With
+ * `onebun` auth the signer threw on it first, so a signed request was never sent at all.
+ *
+ * Done here, once, because {@link executeRequest} is the one path every caller takes — `HttpClient`
+ * and the `RequestsService` layer alike.
+ */
+const withDefaultMethod = (config: RequestConfig): RequestConfig =>
+  config.method === undefined ? { ...config, method: HttpMethod.GET } : config;
+
+/**
  * Execute HTTP request with full configuration
  */
 export const executeRequest = <
@@ -642,9 +741,10 @@ export const executeRequest = <
   E extends string = string,
   R extends string = string,
 >(
-  config: RequestConfig,
+  requestConfig: RequestConfig,
   requestOptions: RequestsOptions = {},
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
+  const config = withDefaultMethod(requestConfig);
   const mergedOptions = mergeRequestsOptions(requestOptions);
   // Resolved once, before the first attempt: a retry belongs to the same trace as the attempt it
   // replaces, and re-reading the ambient context per attempt would let a slow retry pick up
@@ -715,44 +815,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads: either query data as second param, or config as second param
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      // queryOrConfig is query data, config is request config
-      finalConfig = {
-        method: HttpMethod.GET,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      // Check if it's a RequestConfig (has method, url, etc.) or query data
-      const hasConfigFields = REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig);
-      if (hasConfigFields) {
-        // It's config
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        // It's query data
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.GET, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.GET, url, queryOrConfig, config));
   }
 
   /**
@@ -867,44 +930,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.DELETE,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.DELETE, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.DELETE, url, queryOrConfig, config));
   }
 
   /**
@@ -931,44 +957,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<void>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.HEAD,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.HEAD, url };
-    }
-
-    return this.requestEffect<void>(finalConfig);
+    return this.requestEffect<void>(resolveQueryOverload(HttpMethod.HEAD, url, queryOrConfig, config));
   }
 
   /**
@@ -995,44 +984,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.OPTIONS,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.OPTIONS, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.OPTIONS, url, queryOrConfig, config));
   }
 
   /**

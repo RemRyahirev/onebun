@@ -340,11 +340,21 @@ describe('RequestsService', () => {
     });
 
     test('should handle HEAD with different parameter combinations', async () => {
+      // A HEAD answer has no content, so its body is never read: the result is `undefined` even
+      // though the stubbed fetch attaches a JSON body. This used to assert `toBeDefined()`, which
+      // held only because the stub served HEAD a body no real server sends — against a real JSON
+      // endpoint the same call rejected with RESPONSE_PARSE_ERROR.
       const result1 = await service.head('/users/1');
-      expect(result1).toBeDefined();
+      expect(result1).toBeUndefined();
 
       const result2 = await service.head('/users/1', { timeout: 3000 });
-      expect(result2).toBeDefined();
+      expect(result2).toBeUndefined();
+
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+      const methods = fetchMock.mock.calls.map((call) => (call[1] as RequestInit).method);
+      expect(methods).toEqual(['HEAD', 'HEAD']);
+      // `{ timeout }` is config, not query data
+      expect(fetchMock.mock.calls[1]?.[0]).toBe('https://test-api.com/users/1');
     });
 
     test('should handle OPTIONS with different parameter combinations', async () => {
@@ -353,6 +363,53 @@ describe('RequestsService', () => {
 
       const result2 = await service.options('/users', { timeout: 3000 });
       expect(result2).toBeDefined();
+    });
+
+    test('should resolve get/delete/head/options arguments by the same rule as HttpClient', async () => {
+      // The service kept its own copy of the old four-name marker list in all four methods — even
+      // `get` — so `{ tracing: false }` went out as `?tracing=false`, and a config given third
+      // after an `undefined` query was dropped. It now calls the client's resolver.
+      await service.get('/g', { tracing: false });
+      await service.delete('/d', { metrics: false });
+      await service.head('/h', { tracing: false });
+      await service.options('/o', { metrics: false });
+      await service.get('/q', { redirect: '/home' });
+      await service.delete('/u', undefined, { headers: { 'x-a': '1' } });
+
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+      const sent: { url: string; method: string | undefined; xa: string | undefined }[] = fetchMock.mock.calls.map((call) => ({
+        url: call[0] as string,
+        method: (call[1] as RequestInit).method,
+        xa: ((call[1] as RequestInit).headers as Record<string, string>)['x-a'],
+      }));
+
+      expect(sent).toEqual([
+        { url: 'https://test-api.com/g', method: 'GET', xa: undefined },
+        { url: 'https://test-api.com/d', method: 'DELETE', xa: undefined },
+        { url: 'https://test-api.com/h', method: 'HEAD', xa: undefined },
+        { url: 'https://test-api.com/o', method: 'OPTIONS', xa: undefined },
+        { url: 'https://test-api.com/q?redirect=%2Fhome', method: 'GET', xa: undefined },
+        { url: 'https://test-api.com/u', method: 'DELETE', xa: '1' },
+      ]);
+    });
+
+    test('should send GET and resolve when the config sets method to undefined', async () => {
+      // The resolver spreads the config last, so `{ method: undefined }` replaced GET and the
+      // client died on `method.toUpperCase()` with a TypeError defect after the request went out.
+      const result = await service.get('/g', { method: undefined });
+
+      expect(result).toEqual({ success: true, data: 'test data' });
+      const fetchMock = globalThis.fetch as unknown as ReturnType<typeof mock>;
+      expect((fetchMock.mock.calls[0]?.[1] as RequestInit).method).toBe('GET');
+    });
+
+    test('should resolve a 304 with undefined, as it does a 204', async () => {
+      // The service returns `result` alone, and a 304 has none. Up to 0.8.1 it rejected with an
+      // InternalServerError (code 500) that did not say 304 either; `HttpClient` is the API that
+      // exposes `statusCode` for a caller that has to tell the two apart.
+      globalThis.fetch = mock(async () => new Response(null, { status: 304 })) as unknown as typeof fetch;
+
+      expect(await service.get('/cached', undefined, { headers: { 'If-None-Match': '"v1"' } })).toBeUndefined();
     });
   });
 
@@ -421,9 +478,11 @@ describe('RequestsService', () => {
     });
 
     test('should handle headEffect', async () => {
+      // A HEAD answer has no content: the body the stub attaches is not read.
       const effect = service.headEffect('/users/1');
       const result = await Effect.runPromise(effect);
-      expect(result).toBeDefined();
+      expect(result).toBeUndefined();
+      expect(globalThis.fetch).toHaveBeenCalledTimes(1);
     });
 
     test('should handle optionsEffect', async () => {

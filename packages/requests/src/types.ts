@@ -63,9 +63,10 @@ export interface SuccessResponse<T = unknown> {
    * The HTTP status the upstream actually returned.
    *
    * Present on responses the HTTP client produced; absent when a handler's return value was
-   * wrapped by the framework, which has no upstream. Every 2xx is a success, and they are not
-   * interchangeable — 201 Created, 202 Accepted and 204 No Content each mean something a caller
-   * may need to branch on, and the metric label is derived from this rather than assumed.
+   * wrapped by the framework, which has no upstream. Every 2xx is a success, and so is a
+   * 304 Not Modified, and they are not interchangeable — 201 Created, 202 Accepted, 204 No Content
+   * and 304 each mean something a caller may need to branch on, and the metric label is derived
+   * from this rather than assumed. For 204, 304 and any answer to HEAD, `result` is `undefined`.
    */
   statusCode?: number;
 }

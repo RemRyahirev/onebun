@@ -93,10 +93,17 @@ needs both or a `traceparent`.
   register your own or nothing propagates. It used to be `globalThis.__onebunCurrentTraceContext`, which
   nothing ever assigned — so every outgoing call went out untraced, silently, and one global cell would
   have been the wrong shape anyway with concurrent requests.
-- `client.get(url, { tracing: false })` now reaches the config arm of the `get` overload. The markers are
-  `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`; `retries` and `query` are deliberately excluded
-  (`{ query: ... }` is documented as producing a literal `?query=[object Object]`), so those still need the
-  three-argument form `get(url, query, config)`.
+- `client.get(url, { tracing: false })` reaches the config arm of the overload, and so do `delete`, `head`
+  and `options` — the four share one resolver (`resolveQueryOverload` in `client.ts`, also used by the
+  `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
+  `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
+  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`; `retries`, `query` and `redirect` are
+  deliberately excluded (`get('/login', { redirect: '/home' })` is query data), so a config holding only
+  those takes the three-argument form. A third argument always makes the second the query, `undefined`
+  included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped).
+- **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
+  whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
+  `RESPONSE_PARSE_ERROR` against every JSON endpoint (Bun keeps `application/json` on the HEAD answer).
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header
   names, so the two services share one trace in the backend as well as one trace id in the logs. The one
   remaining gap is the callee's log `spanId` — see the Span Nesting section.

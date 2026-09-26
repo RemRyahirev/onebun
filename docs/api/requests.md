@@ -41,15 +41,24 @@ const response = await client.get('/users');
 const response = await client.get('/users', { page: 1, limit: 10 });
 // GET /users?page=1&limit=10
 
-// With custom headers — an object carrying `headers`, `timeout`, `auth` or `method`
-// is read as per-request config instead of as query
+// With custom headers — an object carrying `method`, `headers`, `timeout`, `auth`,
+// `tracing` or `metrics` is read as per-request config instead of as query
 const response = await client.get('/users', {
   headers: { 'X-Custom-Header': 'value' },
 });
 
 // Both at once: query second, config third
 const response = await client.get('/users', { page: 1, limit: 10 }, { timeout: 5000 });
+
+// Config with no query — a third argument makes the second one the query, even `undefined`
+const response = await client.get('/users', undefined, { retries: { max: 0 } });
 ```
+
+`delete`, `head` and `options` take the same three arguments and resolve them by the same rule.
+With two arguments, only the six names above make the object config: every other key is query
+data, so `client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`.
+`retries` and `query` are deliberately not on the list, so a config that sets only those takes the
+three-argument form, as in the last call above.
 
 ::: warning Do not wrap the query in a key
 `client.get('/users', { params: { page: 1 } })` — and `{ query: { page: 1 } }` just the same —
@@ -531,12 +540,9 @@ method you call and the path you pass, so only these fields are yours to set:
 `query` and `data` are what the client reads off a config object, but the way to set them is
 positional — `client.get(url, query, config)` and `client.post(url, data, config)`.
 
-::: warning `get`, `delete`, `head` and `options` drop the third argument when the second is `undefined`
-`client.get('/x', undefined, { headers: { … } })` sends a bare `GET /x` with no headers, because
-these methods only look at the third argument once the second one is present. Either pass the
-query record, or move the config into the second argument — an object carrying `headers`,
-`timeout`, `auth` or `method` is recognised as config. `post`, `put` and `patch` are not affected.
-:::
+The third argument is always the config, whatever the second one holds:
+`client.get('/x', undefined, { headers: { … } })` sends the headers. That holds for all seven
+methods — `get`, `delete`, `head`, `options`, `post`, `put` and `patch`.
 
 ## HTTP Status Codes
 
@@ -689,6 +695,34 @@ interface SuccessResponse<T> {
   traceId?: string;
   /** Retries spent before this response was produced; `0` means one request */
   retryCount?: number;
+  /** The HTTP status the upstream returned: 200, 201, 204, 304, ... */
+  statusCode?: number;
+}
+```
+
+### Responses without a body
+
+An answer to `HEAD`, and every `204 No Content` and `304 Not Modified`, has no content by
+definition, so the client does not read a body for them: `result` is `undefined` and `statusCode`
+says which one arrived. The `content-type` does not matter — `Response.json()` keeps
+`application/json` on its answer to `HEAD`, and a `204` may carry it too.
+
+A `304` resolves as a success. A server sends one only in answer to a conditional request
+(`If-None-Match`, `If-Modified-Since`), so it is the outcome you asked about — your copy is
+current — and not a failure:
+
+```typescript
+const head = await client.head('/users/123');
+// { success: true, result: undefined, statusCode: 200 }
+
+const removed = await client.delete('/users/123');
+// a 204 No Content: { success: true, result: undefined, statusCode: 204 }
+
+const response = await client.get<User>('/users/123', undefined, {
+  headers: { 'If-None-Match': etag },
+});
+if (response.success && response.statusCode === 304) {
+  // keep the copy you already have
 }
 ```
 
