@@ -3449,6 +3449,68 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       await app.stop();
     }
   });
+
+  /**
+   * @source docs:api/requests.md#service-client-as-value
+   */
+  it('should resolve an async factory to the client, answer `in`, and still throw on a missing name', async () => {
+    const seen: string[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        seen.push(`${request.method} ${new URL(request.url).pathname}`);
+
+        return Response.json({ success: true, result: { id: '123' } });
+      },
+    });
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const UsersServiceDefinition = createServiceDefinition(UsersModule);
+
+    try {
+      // From docs: an async factory resolves to the client itself. Its `then` used to throw
+      // 'Controller "then" not found', so this await rejected.
+      async function connectUsers(url: string) {
+        return createServiceClient(UsersServiceDefinition, { url });
+      }
+
+      const usersClient = await connectUsers(`http://127.0.0.1:${server.port}`);
+      await usersClient.UsersController.findById('123');
+
+      expect(seen).toEqual(['GET /users/123']);
+
+      expect('UsersController' in usersClient).toBe(true);
+      expect('findById' in usersClient.UsersController).toBe(true);
+      expect('OrdersController' in usersClient).toBe(false);
+
+      // From docs: JSON.stringify, String and string templates accept it
+      expect(JSON.stringify(usersClient)).toBe('{}');
+      expect(String(usersClient)).toBe('[object Object]');
+      expect(`${usersClient.UsersController}`).toBe('[object Object]');
+
+      // From docs: a name the definition does not have throws where it is read
+      expect(() => usersClient.OrdersController).toThrow(
+        'Controller "OrdersController" not found in service definition. Available controllers: UsersController',
+      );
+      expect(() => usersClient.UsersController.remove).toThrow(
+        'Method "remove" not found in controller "UsersController"',
+      );
+      expect(seen).toEqual(['GET /users/123']);
+    } finally {
+      server.stop(true);
+    }
+  });
 });
 
 // The augmentation the Request Context page documents, declared here so the docs examples below

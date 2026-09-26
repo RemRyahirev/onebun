@@ -164,6 +164,10 @@ refused with a `TypeError` before anything is sent: `null`, `undefined`, anythin
 it). For an id that comes from user input, pass `encodeURIComponent(input)`: the router decodes it
 once, so the handler gets the original text. `.` and `..` cannot be sent in a path at all; use a
 query parameter. See `docs/api/requests.md#service-client-path-values`.
+The client is a plain value: an `async` factory may return it, and `await`, `JSON.stringify` and
+`String` accept it (`then`, `toJSON` and symbol keys read as `undefined`). Test for a controller
+or method with `'UsersController' in client`: reading a name the definition lacks throws (a
+missing controller's error lists the available ones). See `docs/api/requests.md#service-client-as-value`.
 
 **`getApplication()` returns `OneBunApplication | undefined`** — it is a `Map.get` on the
 running-applications map, so it is `undefined` for an unknown name and before `start()` resolves.

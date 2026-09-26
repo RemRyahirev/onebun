@@ -176,34 +176,78 @@ function buildRequestParams(
 }
 
 /**
+ * Property names that JavaScript itself reads from any object it is handed, not names a caller
+ * wrote: `then` when a promise settles with the object (so `await client`, `Promise.resolve(client)`
+ * and an `async` factory that returns the client), and `toJSON` when `JSON.stringify` serializes it.
+ */
+const PROBED_NAMES: ReadonlySet<string> = new Set(['then', 'toJSON']);
+
+/**
+ * A proxy that reads like a plain object holding `build(entry)` under each name of `entries`,
+ * except that reading any other string name throws `notFound(name)`: a misspelled controller or
+ * method fails where it is written, not later as `undefined is not a function`.
+ *
+ * The throw is kept away from reads the caller never wrote, which a plain object answers without
+ * one:
+ * - `then`, `toJSON` and every symbol key (`Symbol.toPrimitive`, `Symbol.iterator`, inspection
+ *   hooks) read as `undefined`. A `then` that throws makes every promise that settles with the
+ *   proxy reject, which is how an async factory returning the client used to fail;
+ * - the members every object inherits from `Object.prototype` (`toString`, `valueOf`,
+ *   `constructor`, `hasOwnProperty`, ...) read as inherited, which is what `String(client)` needs.
+ *
+ * A declared name wins over both, as an own property of a plain object would.
+ *
+ * `in` answers the same way `get` does: true for a declared name or an inherited member, false for
+ * anything else, including `then`.
+ */
+function createNameProxy<TEntry, TValue>(
+  entries: ReadonlyMap<string, TEntry>,
+  build: (entry: TEntry) => TValue,
+  notFound: (name: string) => Error,
+): Record<string, TValue> {
+  return new Proxy<Record<string, TValue>>({}, {
+    get(target, key, receiver) {
+      const entry = typeof key === 'string' ? entries.get(key) : undefined;
+      if (entry !== undefined) {
+        return build(entry);
+      }
+      if (typeof key === 'symbol' || PROBED_NAMES.has(key)) {
+        return undefined;
+      }
+      if (Reflect.has(target, key)) {
+        return Reflect.get(target, key, receiver);
+      }
+
+      throw notFound(key);
+    },
+    has(target, key) {
+      return (typeof key === 'string' && entries.has(key)) || Reflect.has(target, key);
+    },
+  });
+}
+
+/**
  * Create a proxy for controller methods
  */
 function createControllerProxy(
   controllerDef: ControllerDefinition,
   httpClient: HttpClient,
 ): ControllerClient {
-  return new Proxy({} as ControllerClient, {
-    get(_, methodName: string) {
-      const endpoint = controllerDef.methods.get(methodName);
-      if (!endpoint) {
-        throw new Error(
-          `Method "${methodName}" not found in controller "${controllerDef.name}"`,
-        );
-      }
+  return createNameProxy(
+    controllerDef.methods,
+    (endpoint) => async (...args: unknown[]) => {
+      const { url, body, query } = buildRequestParams(endpoint, args);
 
-      return async (...args: unknown[]) => {
-        const { url, body, query } = buildRequestParams(endpoint, args);
-
-        return await httpClient.request({
-          // Cast to RequestsHttpMethod to handle enum type difference between @onebun/core and @onebun/requests
-          method: endpoint.httpMethod as unknown as RequestsHttpMethod,
-          url,
-          data: body,
-          query,
-        });
-      };
+      return await httpClient.request({
+        // Cast to RequestsHttpMethod to handle enum type difference between @onebun/core and @onebun/requests
+        method: endpoint.httpMethod as unknown as RequestsHttpMethod,
+        url,
+        data: body,
+        query,
+      });
     },
-  });
+    (methodName) => new Error(`Method "${methodName}" not found in controller "${controllerDef.name}"`),
+  );
 }
 
 /**
@@ -235,6 +279,11 @@ function createControllerProxy(
  * request is made: `null`, `undefined`, a value containing `/`, `?`, `#` or `\`, and a value the
  * URL parser reads as `''`, `.` or `..` (including `%2e` spellings).
  *
+ * The client and each `client.<Controller>` behave as plain values: they can be awaited and
+ * returned from an `async` factory (`then` reads as `undefined`), serialized, converted to a
+ * string, and tested with `in` (`'UsersController' in client`). Reading a controller or method name
+ * the definition does not have throws.
+ *
  * @see docs:api/requests.md
  */
 export function createServiceClient<TDef extends ServiceDefinition>(
@@ -254,20 +303,14 @@ export function createServiceClient<TDef extends ServiceDefinition>(
     ...httpOptions,
   });
 
-  // Create a proxy that provides access to controllers
-  return new Proxy({} as Record<string, ControllerClient>, {
-    get(_, controllerName: string) {
-      const controllerDef = definition._controllers.get(controllerName);
-      if (!controllerDef) {
-        throw new Error(
-          `Controller "${controllerName}" not found in service definition. ` +
-          `Available controllers: ${Array.from(definition._controllers.keys()).join(', ')}`,
-        );
-      }
-
-      return createControllerProxy(controllerDef, httpClient);
-    },
-  });
+  return createNameProxy(
+    definition._controllers,
+    (controllerDef) => createControllerProxy(controllerDef, httpClient),
+    (controllerName) => new Error(
+      `Controller "${controllerName}" not found in service definition. ` +
+      `Available controllers: ${Array.from(definition._controllers.keys()).join(', ')}`,
+    ),
+  );
 }
 
 /**

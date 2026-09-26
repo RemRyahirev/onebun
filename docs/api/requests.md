@@ -896,6 +896,55 @@ such a value as a `@Query` parameter or in the `@Body`.
 
 </llm-only>
 
+### The client as a value {#service-client-as-value}
+
+The client and each `client.<Controller>` are ordinary values. An `async` factory can build and
+return the client, a promise can resolve to it, and `JSON.stringify`, `String` and string templates
+accept it. `in` tells whether the service definition has a controller, or a controller has a method:
+
+```typescript
+import { createServiceClient, createServiceDefinition } from '@onebun/core';
+
+import { UsersModule } from './users/users.module';
+
+const UsersServiceDefinition = createServiceDefinition(UsersModule);
+
+// An async factory resolves to the client itself
+async function connectUsers(url: string) {
+  return createServiceClient(UsersServiceDefinition, { url });
+}
+
+const usersClient = await connectUsers('http://users:3001');
+const user = await usersClient.UsersController.findById('123');
+
+const hasUsers = 'UsersController' in usersClient; // true
+const hasFindById = 'findById' in usersClient.UsersController; // true
+const hasOrders = 'OrdersController' in usersClient; // false
+```
+
+Reading a controller or method that the definition does not have still throws, at the line that
+reads it. A missing controller gives
+`Controller "OrdersController" not found in service definition. Available controllers: UsersController`,
+which lists the controllers there are. A missing method gives
+`Method "remove" not found in controller "UsersController"`.
+
+<llm-only>
+
+- The names JavaScript reads on its own read as `undefined` at both levels: `then`, `toJSON` and
+  every symbol key. Before the fix, `then` threw, so `await Promise.resolve(client)` and any `async`
+  function returning the client rejected with `Controller "then" not found`. `JSON.stringify(client)`
+  also threw on `toJSON`. The `Object.prototype` members (`toString`, `valueOf`, `constructor`, ...)
+  read as they do on a plain object.
+- `'Name' in client` is the check that does not throw. Reading `client.Name` to probe for a
+  controller throws when it is missing.
+- A handler that is itself named `then` or `toJSON` wins over the rule above, as an own property
+  of a plain object would. Its controller client then becomes a thenable, so do not name a handler
+  `then`.
+- The client has no own enumerable keys: `Object.keys(client)` is `[]` and `JSON.stringify(client)`
+  is `'{}'`. List controllers with `[...definition._controllers.keys()]`.
+
+</llm-only>
+
 ## Response Format
 
 All responses follow the standard format:

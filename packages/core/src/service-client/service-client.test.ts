@@ -415,6 +415,137 @@ describe('path parameter values', () => {
   });
 });
 
+/*
+ * The client as a value (onebun-FB-32).
+ *
+ * Both proxy levels used to throw for every name that was not a controller or a method, including
+ * the ones JavaScript reads on its own: `then` when a promise settles with the value, `toJSON` in
+ * JSON.stringify, `Symbol.toPrimitive` in String(). So an async factory returning the client
+ * rejected with 'Controller "then" not found'.
+ */
+describe('the client as a value', () => {
+  const options = { url: 'http://localhost:3001' };
+
+  test('await Promise.resolve(client) resolves to the client itself', async () => {
+    const client = createServiceClient(usersDefinition, options);
+
+    expect(await Promise.resolve(client)).toBe(client);
+  });
+
+  test('an async factory that returns the client resolves, and the resolved client still calls', async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = mock(() => Promise.resolve(Response.json({ success: true, result: {} })));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      const client = await (async () => createServiceClient(usersDefinition, options))();
+      await client.UsersController.getById('7');
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(String((fetchSpy.mock.calls[0] as unknown[])[0])).toBe('http://localhost:3001/users/7');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test('a controller client resolves as well', async () => {
+    const controller = createServiceClient(usersDefinition, options).UsersController;
+
+    expect(await Promise.resolve(controller)).toBe(controller);
+  });
+
+  test('then and toJSON read as undefined at both levels', () => {
+    const client = createServiceClient(usersDefinition, options);
+    const controller = client.UsersController;
+
+    expect(client.then).toBeUndefined();
+    expect(client.toJSON).toBeUndefined();
+    expect(controller.then).toBeUndefined();
+    expect(controller.toJSON).toBeUndefined();
+  });
+
+  test('symbol keys read as undefined at both levels', () => {
+    const client = createServiceClient(usersDefinition, options);
+    const controller = client.UsersController;
+
+    for (const symbol of [Symbol.toPrimitive, Symbol.iterator, Symbol.asyncIterator, Symbol.toStringTag]) {
+      expect(Reflect.get(client, symbol)).toBeUndefined();
+      expect(Reflect.get(controller, symbol)).toBeUndefined();
+    }
+  });
+
+  test('JSON.stringify, String and a template literal do not throw', () => {
+    const client = createServiceClient(usersDefinition, options);
+    const controller = client.UsersController;
+
+    expect(JSON.stringify(client)).toBe('{}');
+    expect(JSON.stringify(controller)).toBe('{}');
+    expect(JSON.stringify({ client })).toBe('{"client":{}}');
+    expect(String(client)).toBe('[object Object]');
+    expect(String(controller)).toBe('[object Object]');
+    expect(`${client}`).toBe('[object Object]');
+    expect(Bun.inspect(client)).toBe('{}');
+  });
+
+  test('inherited Object.prototype members read as on a plain object', () => {
+    const client = createServiceClient(usersDefinition, options);
+
+    expect(client.constructor).toBe(Object);
+    expect(client.hasOwnProperty('UsersController')).toBe(false);
+    expect(Object.getPrototypeOf(client)).toBe(Object.prototype);
+  });
+
+  test('`in` is true for declared names and false for the rest', () => {
+    const client = createServiceClient(usersDefinition, options);
+    const controller = client.UsersController;
+
+    expect('UsersController' in client).toBe(true);
+    expect('Nope' in client).toBe(false);
+    expect('then' in client).toBe(false);
+    expect('toJSON' in client).toBe(false);
+    expect(Symbol.iterator in client).toBe(false);
+
+    expect('getById' in controller).toBe(true);
+    expect('nope' in controller).toBe(false);
+    expect('then' in controller).toBe(false);
+  });
+
+  test('an unknown controller or method name still throws its error', () => {
+    const client = createServiceClient(usersDefinition, options);
+
+    expect(() => client.Nope).toThrow(
+      'Controller "Nope" not found in service definition. Available controllers: UsersController',
+    );
+    expect(() => client.UsersController.nope).toThrow('Method "nope" not found in controller "UsersController"');
+  });
+
+  test('a declared name wins over an inherited member of the same name', async () => {
+    @Controller('/labels')
+    class LabelsController {
+      @Get('/as-text')
+      toString() {
+        return 'label';
+      }
+    }
+
+    @Module({ controllers: [LabelsController] })
+    class LabelsModule {}
+
+    const originalFetch = globalThis.fetch;
+    const fetchSpy = mock(() => Promise.resolve(Response.json({ success: true, result: 'label' })));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+
+    try {
+      const controller = createServiceClient(createServiceDefinition(LabelsModule), options).LabelsController;
+      await controller.toString();
+
+      expect(String((fetchSpy.mock.calls[0] as unknown[])[0])).toBe('http://localhost:3001/labels/as-text');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe('getServiceUrl', () => {
   test('should call getServiceUrl on app instance', () => {
     const mockApp = {
