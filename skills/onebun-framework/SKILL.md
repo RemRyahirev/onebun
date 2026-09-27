@@ -735,6 +735,7 @@ Schema conventions:
 - IDs: ULID as `text('id').primaryKey()`
 - Money: integer in cents, never float
 - JSON columns: `text('col', { mode: 'json' }).$type<MyType>()`
+- A JSON value in raw SQL: on PostgreSQL `jsonbParam(v)` / `jsonParam(v)` from `@onebun/drizzle/pg` (never `${JSON.stringify(v)}::jsonb`, never a raw array); on SQLite `json(${JSON.stringify(v)})` — see `references/drizzle.md`
 - Type exports: `typeof myTable.$inferSelect` and `.$inferInsert`
 
 CLI:

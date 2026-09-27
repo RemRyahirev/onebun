@@ -494,22 +494,53 @@ The same holds for `sql.placeholder()`: a json column
 round-trips through .prepare() on both .values() and .set(),
 and an explicit `null` binds SQL NULL rather than the JSON text `null`.
 
-**Raw SQL bypasses it.** The fix lives in the column encoders, so `db.execute(sql`...`)` and the raw
-`$client` do not get it — there you must cast as $n::text::jsonb yourself, and hand it a
-pre-stringified value:
+**Raw SQL: use `jsonbParam()` / `jsonParam()` from `@onebun/drizzle/pg`.** The fix lives in the
+column encoders, so a value interpolated into ``db.execute(sql`...`)`` never reaches it. The helpers
+render `$n::text::jsonb` (`$n::text::json`) with `JSON.stringify(value)` bound as ONE text
+parameter — correct for objects, arrays (`[]` and one-element ones too), strings, numbers,
+booleans and `null`, in any expression:
 
 <!-- typecheck: skip -->
 ```typescript
-// WRONG — stores a jsonb string
-await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+import { sql } from '@onebun/drizzle';
+import { jsonbParam, jsonParam } from '@onebun/drizzle/pg';
 
-// RIGHT
-await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+await db.execute(sql`INSERT INTO events (payload) VALUES (${jsonbParam(payload)})`);
+await db.execute(sql`
+  UPDATE events SET payload = jsonb_set(payload, '{tags}', ${jsonbParam(['beta'])})
+  WHERE payload @> ${jsonbParam({ kind: 'signup' })}
+`);
+
+// prepared: pass a placeholder to the helper and the raw value to execute()
+const byPayload = db.select({ id: events.id }).from(events)
+  .where(sql`${events.payload} @> ${jsonbParam(sql.placeholder('match'))}`)
+  .prepare('events_by_payload');
+await byPayload.execute({ match: { kind: 'signup' } });
 ```
 
-On the Bun SQL driver a plain ::jsonb cast is a verified no-op — measured against
-`postgres:16-alpine`, `$1::jsonb` on a pre-stringified value still stores `jsonb_typeof='string'`.
-Only the double cast forces the parameter to be inferred as text and bound verbatim.
+- `null` is JSON `null` (`IS NULL` is false) — write `NULL` for SQL NULL.
+- `undefined`, functions, symbols, BigInt, circular values and drizzle objects throw a `TypeError`
+  naming the helper, also when handed to `execute()` for a placeholder. A drizzle object nested
+  inside the value is refused too: `jsonbParam({ kind: sql.placeholder('k') })` throws — the
+  placeholder must be the whole value.
+- `jsonParam()` for `json` targets (`json` column, `json_typeof`); `jsonb` operators like `@>`
+  reject `json`.
+- ORM column writes (`.values({ payload })`) do not need the helper — they already go through the
+  column encoder.
+- Exported from `@onebun/drizzle/pg` only, never from the root: the SQL is PostgreSQL's.
+
+Do not hand-roll it. Measured on `postgres:16`: `${JSON.stringify(v)}::jsonb` always stores a jsonb
+string (Bun JSON-encodes it again); a raw `${['x']}` renders `($1)` and stores the ELEMENT
+(`"x"`; `[null]` → SQL NULL); `${['x','y']}` fails with `type record`, `${[]}` with a syntax error;
+`${42}`/`${true}` fail with `type integer`/`boolean`; `${null}` is SQL NULL. A raw `${object}`
+does store an object — it is the only raw form that works, and only for objects. On the raw Bun
+`$client` there is no helper: write `$1::text::jsonb` and pass `JSON.stringify(value)`.
+
+**SQLite raw SQL has no helper** — use `json(${JSON.stringify(value)})` inside JSON functions;
+without `json(...)` the text is stored as a JSON string inside `json_set()`/`json_object()`.
+Raw values: arrays expand; booleans bind as `1`/`0`; and **a plain object as the FIRST parameter
+silently binds NULL for EVERY positional parameter** of the statement (bun:sqlite named-binding
+mode) — on the default `DB_TYPE`, with no error.
 
 **Rows written by OneBun ≤ 0.5.0 are double-encoded** and are not migrated automatically. Repair
 them *before* deploying, because the read path no longer compensates:

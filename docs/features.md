@@ -44,6 +44,7 @@ production-grade backend services.
 ### Database (@onebun/drizzle)
 - Drizzle ORM with PostgreSQL and SQLite (bun:sqlite) support
 - Schema-first approach with full type inference from schema
+- `json`/`jsonb` stored as values, not JSON strings — through the ORM, and in raw PostgreSQL SQL via `jsonbParam()`/`jsonParam()` from `@onebun/drizzle/pg`
 - CLI migrations (onebun-drizzle generate/push/studio)
 - Auto-migrate on startup (enabled by default)
 - Configured means required: an unreachable database or a failing migration rejects `app.start()` with `DrizzleStartupError` (stage `open`/`connect`/`migrate`); opt out via `allowDegradedStart: true` in `forRoot()`, or `DB_ALLOW_DEGRADED_START=true` on the environment path

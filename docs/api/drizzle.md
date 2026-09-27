@@ -493,21 +493,118 @@ await insert.execute({ payload: null });   // SQL NULL, not the JSON text `null`
 One prepared statement can be executed any number of times with different payloads; the cast is
 added to its text once.
 
-#### Raw SQL bypasses this
+#### JSON values in raw SQL
 
-The fix lives in the column encoders, so anything that does not go through a column does not get
-it — ``db.execute(sql`...`)`` and the raw `$client`:
+The fix above lives in the column encoders, so a value interpolated straight into
+``db.execute(sql`...`)`` never reaches it. For raw SQL, `@onebun/drizzle/pg` exports
+`jsonbParam()` and `jsonParam()`:
 
 ```typescript
-// WRONG — stores a jsonb string
-await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
+import { sql } from '@onebun/drizzle';
+import { jsonbParam, jsonParam } from '@onebun/drizzle/pg';
 
-// RIGHT — the double cast is what forces the value to be bound verbatim
-await db.execute(sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`);
+const payload = { kind: 'signup', tags: ['beta'] };
+
+await db.execute(sql`INSERT INTO events (payload) VALUES (${jsonbParam(payload)})`);
+
+await db.execute(sql`
+  UPDATE events SET payload = jsonb_set(payload, '{tags}', ${jsonbParam(['beta', 'early'])})
+  WHERE payload @> ${jsonbParam({ kind: 'signup' })}
+`);
+
+// a `json` column (or json_typeof, json_build_object) takes jsonParam
+await db.execute(sql`INSERT INTO events (raw) VALUES (${jsonParam({ source: 'import' })})`);
 ```
 
-A plain `::jsonb` is **not** enough — measured against `postgres:16-alpine`, `$1::jsonb` on a
-pre-stringified value still stores `jsonb_typeof='string'`. Only `::text::jsonb` works.
+Each renders `$n::text::jsonb` (`jsonParam`: `$n::text::json`) with `JSON.stringify(value)` bound
+as **one** text parameter, which the server parses. That is correct for every shape — objects,
+arrays (`[]` and one-element arrays included), strings, numbers, booleans — in any expression:
+`@>`, `->`, `jsonb_set`, `jsonb_build_object`, `INSERT` and `UPDATE` values. Neither needs column
+metadata or `DrizzleService`.
+
+- **`null` is JSON `null`**: `jsonb_typeof` answers `'null'` and `IS NULL` is false. For SQL NULL,
+  write `NULL`.
+- `JSON.stringify` rules apply: a `Date` becomes its ISO string, a nested `undefined` is dropped,
+  `NaN` becomes `null`. `jsonb` normalizes key order and whitespace.
+- `undefined`, a function, a symbol, a `BigInt`, a circular structure and drizzle objects (an
+  `sql` fragment, a column, a placeholder) throw a `TypeError` naming the helper, instead of
+  binding nothing or a drizzle object's internals. A drizzle object nested anywhere inside the
+  value is refused too: a placeholder must be the whole value, not a field of it.
+- `jsonParam()` is for `json` targets: a `json` column, `json_typeof`, `json_build_object`.
+  `jsonb` operators such as `@>` do not accept `json`, and `json` functions do not accept `jsonb`.
+- **ORM column writes keep the column path.** `db.insert(events).values({ payload })` already goes
+  through the column encoder; the helpers are for raw SQL and for expressions that are not a column.
+
+They live in `@onebun/drizzle/pg`, not in `@onebun/drizzle`, because the SQL they render is
+PostgreSQL's. SQLite has its own rule — see [JSON in raw SQL on SQLite](#json-in-raw-sql-on-sqlite).
+
+##### Prepared raw SQL
+
+Pass `sql.placeholder()` instead of a value, and the value to `execute()`. It is serialized and
+checked the same way when the statement runs, and the cast is added once:
+
+```typescript
+import { sql } from '@onebun/drizzle';
+import { jsonbParam } from '@onebun/drizzle/pg';
+
+const byPayload = db.select({ id: events.id })
+  .from(events)
+  .where(sql`${events.payload} @> ${jsonbParam(sql.placeholder('match'))}`)
+  .prepare('events_by_payload');
+
+await byPayload.execute({ match: { kind: 'signup' } });
+await byPayload.execute({ match: { tags: ['beta'] } });
+```
+
+`null` handed to `execute()` here is JSON `null`, as it is for `jsonbParam(null)` — unlike a
+placeholder on a json **column** ([above](#prepared-statements-and-placeholders)), which binds SQL
+NULL.
+
+##### Without the helper
+
+Measured against `postgres:16` through `DrizzleService`, every hand-written form is wrong for some
+shape:
+
+| Raw form | What the server gets |
+|---|---|
+| `${payload}`, an object | an object — correct, but for objects only |
+| `${['x']}` | drizzle renders a one-element array as `($1)` and binds its **element**: the jsonb string `"x"`. `[{ a: 1 }]` stores the object without the array, `[null]` stores SQL NULL |
+| `${['x', 'y']}` | fails: `expression is of type record` |
+| `${[]}` | fails: `syntax error at or near ")"` |
+| `${42}`, `${true}` | fails: `expression is of type integer` (`boolean`) |
+| `${null}` | SQL NULL, not JSON `null` |
+| `${JSON.stringify(v)}::jsonb` | **always a jsonb string**: Bun JSON-encodes a parameter it infers as jsonb, so the text is encoded twice |
+| `${JSON.stringify(v)}::text::jsonb` | correct — the double cast makes Bun bind the parameter as text. This is what `jsonbParam()` renders |
+
+The raw Bun client, `$client`, has no helper: there, write `$1::text::jsonb` yourself and pass
+`JSON.stringify(value)`.
+
+#### JSON in raw SQL on SQLite
+
+SQLite has no helper, because nothing there is driver-specific: `json(?)` is SQLite's own way to
+mark a text parameter as JSON. Write `json(${JSON.stringify(value)})`:
+
+```typescript
+import { sql } from '@onebun/drizzle';
+
+await db.run(sql`
+  UPDATE events SET payload = json_set(payload, '$.tags', json(${JSON.stringify(['beta'])}))
+  WHERE id = ${1}
+`);
+```
+
+Without `json(...)`, the same JSON text inside `json_set()`, `json_object()` or `json_array()` is
+stored as a JSON **string** — SQLite's own double encoding. Raw values fail in their own ways:
+
+- A top-level array expands into a parameter list, as on PostgreSQL.
+- **A plain object as the first parameter silently binds NULL for every positional parameter** of
+  the statement: bun:sqlite reads it as a map of named parameters. With `obj` a plain object,
+  ``sql`INSERT INTO t (data, n) VALUES (${obj}, ${5})` `` stores NULL in **both** columns and
+  reports no error — on the default `DB_TYPE`. An object in any other position fails with
+  `Binding expected string, TypedArray, boolean, number, bigint or null`.
+- `true` and `false` are bound as `1` and `0`, so `json_type` answers `'integer'`.
+
+A `text('col', { mode: 'json' })` column written through the ORM is not affected.
 
 ### Repairing double-encoded JSON
 
@@ -540,6 +637,14 @@ unrepaired row reads back as the **string** it is on disk, while `createSelectSc
 - `fillPlaceholders` also has no null guard, unlike the value path, so the encoder returns `null` for `null` to keep SQL NULL on both paths
 - The `placeholderMode` window is safe only because it contains no `await`: `execute` awaits nothing before `tracer.startActiveSpan`, that helper invokes its callback synchronously, and `fillPlaceholders` is its first statement. The wrapper therefore captures the delegated promise INSIDE the `try` and lets the caller await it AFTER the `finally` — `return await original.call(...)` inside the try would hold the flag across the whole round trip and silently re-corrupt a concurrent non-placeholder write
 - `packages/drizzle/tests/drizzle-orm-shape.test.ts` pins every one of those structural assumptions and fails naming the fix file; `package.json` declares `^0.44.7`, a caret, so a minor bump can land without a code change
+
+**Technical details for AI agents — `jsonbParam()` / `jsonParam()`:**
+- Defined in `packages/drizzle/src/pg-json-param.ts`, exported from `@onebun/drizzle/pg` ONLY — never from the package root, whose API is dialect-neutral. Pure SQL building: no patch, no dependency on `applyBunSqlJsonEncodingFix()` or on `DrizzleService`, so they work with a bare `drizzle-orm/bun-sql` instance too
+- The value path returns `` sql`${JSON.stringify(value)}::text::jsonb` `` through `castJsonText(text, cast)`, the SAME internal builder the patched `PgJsonb`/`PgJson` encoders call — so `jsonbParam(v)` and a column-encoded value render byte-identical SQL and params (unit-tested for the whole shape matrix). One exception, by design: a `Param(null, jsonbColumn)` binds SQL NULL because drizzle skips the encoder for `null`, while `jsonbParam(null)` binds the JSON text `null`
+- A `sql.placeholder()` argument becomes `new Param(placeholder, { mapToDriverValue: toJsonText })` followed by the cast. `fillPlaceholders` calls that encoder with the raw `execute()` value, so `null` there is JSON null too. The encoder is a plain object, so `jsonCastFor()` in the prepared-statement rewrite answers `undefined` and the `$n` is not cast a second time; the `placeholderMode` flag does not affect it either
+- `toJsonText` throws a `TypeError` whose message starts with the helper's name for any `isSQLWrapper()` value (SQL, Param, Placeholder, column, table, subquery — a placeholder would otherwise serialize to `{"name":"p"}` and be stored silently), at the top level and, through a `JSON.stringify` replacer, nested at any depth (drizzle objects have no `toJSON`, so the replacer sees them; the message names the key), for `JSON.stringify(...) === undefined` (undefined, function, symbol, a `toJSON` returning undefined), and re-throws JSON.stringify's own `TypeError` (BigInt, circular) with the helper named and the original as `cause`. A non-TypeError thrown by a user `toJSON()` propagates unchanged. The same checks run inside the placeholder encoder at `execute()` time
+- Why the obvious alternatives fail is pinned in `pg-json-integration.test.ts` ("the raw forms jsonbParam() replaces"): drizzle expands a JS array chunk into `($1, $2)` (`sql.js` `Array.isArray(chunk)` branch), so a one-element array binds its element; Bun binds a JS number/boolean as int4/bool; `sql.param(v)` without an encoder stops the array expansion but otherwise binds exactly like `${v}` (numbers and booleans still fail, `null` is still SQL NULL)
+- No SQLite helper exists on purpose: `json(?)` is plain SQLite subtype semantics. The bun:sqlite trap documented above — a plain object as the FIRST positional parameter switches the statement to named-binding mode and binds NULL for every `?` — comes from `Statement.all/run(obj, ...)` treating a leading object as the named-parameter map
 
 </llm-only>
 

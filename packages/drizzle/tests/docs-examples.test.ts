@@ -26,6 +26,7 @@ import {
   afterEach,
 } from 'bun:test';
 import { drizzle as drizzleBunSql } from 'drizzle-orm/bun-sql';
+import { PgDialect } from 'drizzle-orm/pg-core';
 
 // Import from @onebun/drizzle re-exports (not drizzle-orm directly)
 import type { PostgreSQLConnectionOptions } from '../src/types';
@@ -60,6 +61,8 @@ import {
 import {
   json,
   jsonb,
+  jsonbParam,
+  jsonParam,
   pgTable,
   text as pgText,
   integer as pgInteger,
@@ -2572,6 +2575,9 @@ describe('JSON and JSONB columns (docs)', () => {
     raw: json('raw'),
   });
 
+  /** Renders a fragment the way the PostgreSQL driver would send it. */
+  const dialect = new PgDialect();
+
   /** A stub Bun SQL client: records what it was asked to run, answers no rows. */
   function stubClient(): { client: unknown; calls: Array<{ query: string; params: unknown[] }> } {
     const calls: Array<{ query: string; params: unknown[] }> = [];
@@ -2636,26 +2642,145 @@ describe('JSON and JSONB columns (docs)', () => {
   });
 
   /**
-   * @source docs:api/drizzle.md#raw-sql-bypasses-this
+   * @source docs:api/drizzle.md#json-values-in-raw-sql
    */
-  it('should require an explicit double cast on raw SQL, which bypasses the column encoder', async () => {
-    // From docs: "The fix lives in the column encoders, so anything that does not go through a
-    // column does not get it"
+  it('should bind a raw-SQL JSON value as one text parameter cast ::text::jsonb', async () => {
+    // From docs: "Each renders $n::text::jsonb (jsonParam: $n::text::json) with
+    // JSON.stringify(value) bound as one text parameter". What the server stores for it is
+    // measured against a real PostgreSQL in pg-json-integration.test.ts.
     const { client, calls } = stubClient();
     const db = drizzleBunSql({ client: client as never });
     const payload = { kind: 'signup', tags: ['beta'] };
 
-    // WRONG — stores a jsonb string: no cast, and Bun JSON-encodes the object it is handed.
-    await db.execute(sql`INSERT INTO events (payload) VALUES (${payload})`);
-    expect(calls[0].query).not.toContain('::text::jsonb');
-    expect(calls[0].params).toEqual([payload]);
+    await db.execute(sql`INSERT INTO events (payload) VALUES (${jsonbParam(payload)})`);
 
-    // RIGHT — the double cast is what forces the value to be bound verbatim.
-    await db.execute(
-      sql`INSERT INTO events (payload) VALUES (${JSON.stringify(payload)}::text::jsonb)`,
-    );
-    expect(calls[1].query).toContain('$1::text::jsonb');
-    expect(calls[1].params).toEqual(['{"kind":"signup","tags":["beta"]}']);
+    await db.execute(sql`
+      UPDATE events SET payload = jsonb_set(payload, '{tags}', ${jsonbParam(['beta', 'early'])})
+      WHERE payload @> ${jsonbParam({ kind: 'signup' })}
+    `);
+
+    await db.execute(sql`INSERT INTO events (raw) VALUES (${jsonParam({ source: 'import' })})`);
+
+    expect(calls[0]).toEqual({
+      query: 'INSERT INTO events (payload) VALUES ($1::text::jsonb)',
+      params: ['{"kind":"signup","tags":["beta"]}'],
+    });
+    expect(calls[1].query).toContain('jsonb_set(payload, \'{tags}\', $1::text::jsonb)');
+    expect(calls[1].query).toContain('WHERE payload @> $2::text::jsonb');
+    expect(calls[1].params).toEqual(['["beta","early"]', '{"kind":"signup"}']);
+    expect(calls[2]).toEqual({
+      query: 'INSERT INTO events (raw) VALUES ($1::text::json)',
+      params: ['{"source":"import"}'],
+    });
+
+    // From docs: "null is JSON null", and the helpers refuse what has no JSON representation.
+    expect(dialect.sqlToQuery(sql`${jsonbParam(null)}`).params).toEqual(['null']);
+    expect(() => jsonbParam(undefined)).toThrow(TypeError);
+    expect(() => jsonbParam(sql`1`)).toThrow(/jsonbParam\(\)/);
+    // From docs: "A drizzle object nested anywhere inside the value is refused too".
+    expect(() => jsonbParam({ kind: sql.placeholder('k') })).toThrow(/A placeholder must be the whole value/);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#prepared-raw-sql
+   */
+  it('should bind a placeholder through jsonbParam() at execute() time, cast once', async () => {
+    // From docs: "Pass sql.placeholder() instead of a value, and the value to execute()"
+    const { client, calls } = stubClient();
+    const db = drizzleBunSql({ client: client as never });
+
+    const byPayload = db.select({ id: events.id })
+      .from(events)
+      .where(sql`${events.payload} @> ${jsonbParam(sql.placeholder('match'))}`)
+      .prepare('events_by_payload');
+
+    await byPayload.execute({ match: { kind: 'signup' } });
+    await byPayload.execute({ match: { tags: ['beta'] } });
+    // From docs: "null handed to execute() here is JSON null, as it is for jsonbParam(null)"
+    await byPayload.execute({ match: null });
+
+    for (const call of calls) {
+      expect(call.query).toContain('"events"."payload" @> $1::text::jsonb');
+      expect(call.query.match(/::text::jsonb/g)).toHaveLength(1);
+    }
+    expect(calls.map(call => call.params)).toEqual([['{"kind":"signup"}'], ['{"tags":["beta"]}'], ['null']]);
+  });
+
+  /**
+   * @source docs:api/drizzle.md#without-the-helper
+   */
+  it('should show why the raw forms fail: arrays expand and values are bound as they are', () => {
+    // From docs: "drizzle renders a one-element array as ($1) and binds its element". The
+    // on-disk result of every row of that table is pinned in pg-json-integration.test.ts.
+    const payload = { kind: 'signup', tags: ['beta'] };
+
+    expect(dialect.sqlToQuery(sql`VALUES (${['x']})`)).toMatchObject({ sql: 'VALUES (($1))', params: ['x'] });
+    expect(dialect.sqlToQuery(sql`VALUES (${['x', 'y']})`)).toMatchObject({ sql: 'VALUES (($1, $2))', params: ['x', 'y'] });
+    expect(dialect.sqlToQuery(sql`VALUES (${[]})`).sql).toBe('VALUES (())');
+    // The object is handed to Bun as it is — which is why it, and only it, happens to work.
+    expect(dialect.sqlToQuery(sql`VALUES (${payload})`)).toMatchObject({ sql: 'VALUES ($1)', params: [payload] });
+    // Pre-stringified with a single cast: a text value Bun then JSON-encodes again.
+    expect(dialect.sqlToQuery(sql`VALUES (${JSON.stringify(payload)}::jsonb)`).sql).toBe('VALUES ($1::jsonb)');
+  });
+
+  /**
+   * @source docs:api/drizzle.md#json-in-raw-sql-on-sqlite
+   */
+  it('should keep JSON a value inside SQLite JSON functions only through json(...)', async () => {
+    // A real in-memory SQLite, the default DB_TYPE — every claim of the section is measured here.
+    const { createTestService } = require('@onebun/core/testing');
+    // The require() is untyped, so the instance is typed here: db.all<T>() needs a typed db.
+    const { instance } = createTestService(DrizzleServiceCtor) as { instance: InstanceType<typeof DrizzleServiceCtor> };
+    await instance.initialize({ type: DatabaseType.SQLITE, options: { url: ':memory:' } });
+    const db = instance.getSQLiteDatabase();
+
+    try {
+      db.run(sql`CREATE TABLE events (id INTEGER PRIMARY KEY, payload TEXT)`);
+      db.run(sql`CREATE TABLE t (data TEXT, n INTEGER)`);
+      db.run(sql`INSERT INTO events (id, payload) VALUES (1, '{"kind":"signup"}'), (2, '{"kind":"signup"}')`);
+
+      // From docs: the snippet, verbatim.
+      await db.run(sql`
+        UPDATE events SET payload = json_set(payload, '$.tags', json(${JSON.stringify(['beta'])}))
+        WHERE id = ${1}
+      `);
+      // The same JSON text without json(...): stored as a JSON string.
+      await db.run(sql`
+        UPDATE events SET payload = json_set(payload, '$.tags', ${JSON.stringify(['beta'])})
+        WHERE id = ${2}
+      `);
+
+      const types = db.all<{ id: number; ty: string }>(
+        sql`SELECT id, json_type(payload, '$.tags') AS ty FROM events ORDER BY id`,
+      );
+      expect(types).toEqual([{ id: 1, ty: 'array' }, { id: 2, ty: 'text' }]);
+
+      // From docs: "A plain object as the first parameter silently binds NULL for every
+      // positional parameter", with no error.
+      const obj = { a: 1 };
+      db.run(sql`INSERT INTO t (data, n) VALUES (${obj}, ${5})`);
+      expect(db.all(sql`SELECT data, n FROM t`)).toEqual([{ data: null, n: null }]);
+
+      // From docs: "An object in any other position fails". drizzle wraps the driver's error,
+      // so the reason is the cause.
+      let failure: unknown;
+      try {
+        db.run(sql`INSERT INTO t (n, data) VALUES (${5}, ${obj})`);
+      } catch (error) {
+        failure = error;
+      }
+      expect(((failure as Error).cause as Error).message)
+        .toMatch(/Binding expected string, TypedArray, boolean, number, bigint or null/);
+
+      // From docs: "true and false are bound as 1 and 0, so json_type answers 'integer'".
+      const bools = db.all<{ raw: string; wrapped: string }>(sql`
+        SELECT json_type(json_set('{}', '$.k', ${true}), '$.k') AS raw,
+               json_type(json_set('{}', '$.k', json(${JSON.stringify(true)})), '$.k') AS wrapped
+      `);
+      expect(bools).toEqual([{ raw: 'integer', wrapped: 'true' }]);
+    } finally {
+      await instance.close();
+    }
   });
 
   /**

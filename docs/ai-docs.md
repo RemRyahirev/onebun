@@ -126,6 +126,7 @@ The Drizzle package provides database schema management:
 
 **Schema imports:**
 - PostgreSQL: `import { pgTable, text, integer, ... } from '@onebun/drizzle/pg'`
+- JSON values in raw PostgreSQL SQL: `import { jsonbParam, jsonParam } from '@onebun/drizzle/pg'` — renders `$n::text::jsonb` / `$n::text::json` with one text parameter
 - SQLite: `import { sqliteTable, text, integer, ... } from '@onebun/drizzle/sqlite'`
 - Common operators: `import { eq, and, sql, count, defineConfig, ... } from '@onebun/drizzle'`
 

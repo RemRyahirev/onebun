@@ -2,7 +2,6 @@ import {
   is,
   Param,
   Placeholder,
-  sql,
   SQL,
 } from 'drizzle-orm';
 import { BunSQLPreparedQuery } from 'drizzle-orm/bun-sql';
@@ -11,6 +10,13 @@ import {
   PgJson,
   PgJsonb,
 } from 'drizzle-orm/pg-core';
+
+import {
+  castJsonText,
+  JSON_TEXT_CAST,
+  JSONB_TEXT_CAST,
+  type JsonTextCast,
+} from './pg-json-param';
 
 /**
  * Stop `json`/`jsonb` values being stored as JSON *strings* on the Bun SQL PostgreSQL path.
@@ -151,13 +157,13 @@ export function readRewriteCount(): number {
  * `jsonb('a').array()` encodes through `PgArray`, not `PgJsonb`, so an array column answers
  * `undefined` here and keeps the array path untouched.
  */
-function jsonCastFor(encoder: unknown): string | undefined {
+function jsonCastFor(encoder: unknown): JsonTextCast | undefined {
   if (is(encoder, PgJsonb)) {
-    return '::text::jsonb';
+    return JSONB_TEXT_CAST;
   }
 
   if (is(encoder, PgJson)) {
-    return '::text::json';
+    return JSON_TEXT_CAST;
   }
 
   return undefined;
@@ -245,8 +251,8 @@ export function applyBunSqlJsonEncodingFix(): void {
   } as typeof PgArray.prototype.mapToDriverValue;
 
   for (const [columnClass, cast] of [
-    [PgJsonb, '::text::jsonb'],
-    [PgJson, '::text::json'],
+    [PgJsonb, JSONB_TEXT_CAST],
+    [PgJson, JSON_TEXT_CAST],
   ] as const) {
     columnClass.prototype.mapToDriverValue = function encodeJson(this: unknown, value: unknown): unknown {
       // Inside `jsonb[]`, or filling a prepared statement's placeholders: a plain string, because
@@ -256,7 +262,9 @@ export function applyBunSqlJsonEncodingFix(): void {
         return value === null ? null : JSON.stringify(value);
       }
 
-      return sql`${JSON.stringify(value)}${sql.raw(cast)}`;
+      // The same builder `jsonbParam()`/`jsonParam()` use, so the column value path and the
+      // raw-SQL helpers render byte-identical SQL.
+      return castJsonText(JSON.stringify(value), cast);
     } as typeof columnClass.prototype.mapToDriverValue;
 
     // Identity: Bun has already decoded the column. Re-parsing a string here is what would

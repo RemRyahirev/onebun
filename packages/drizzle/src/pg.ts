@@ -1,17 +1,25 @@
 /**
- * PostgreSQL schema builders re-exported from drizzle-orm/pg-core
+ * PostgreSQL schema builders re-exported from drizzle-orm/pg-core, plus the PostgreSQL-only
+ * JSON value helpers for raw SQL.
  *
  * Usage:
  * ```typescript
  * import { pgTable, text, integer, timestamp, uuid } from '@onebun/drizzle/pg';
+ * import { jsonbParam, jsonParam } from '@onebun/drizzle/pg';
  * ```
  *
- * A bare re-export: this package adds no column types of its own. The one behaviour it does add
- * on the PostgreSQL path is the `json`/`jsonb` encoding fix, which lives in the encoders rather
- * than in a column type so it covers `drizzle-orm/pg-core` imports too.
+ * The builders are a bare re-export: this package adds no column types of its own. The
+ * `json`/`jsonb` encoding fix lives in the encoders rather than in a column type so it covers
+ * `drizzle-orm/pg-core` imports too.
+ *
+ * `jsonbParam()`/`jsonParam()` are the one thing this subpath adds. They live here, not in the
+ * package root, because the SQL they render (`$n::text::jsonb`) is PostgreSQL-specific.
  *
  * @see docs:api/drizzle.md
  */
+
+// JSON values for raw SQL, without column metadata
+export { jsonbParam, jsonParam } from './pg-json-param';
 
 // Table and schema builders
 export {
