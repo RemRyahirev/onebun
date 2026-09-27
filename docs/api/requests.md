@@ -1025,8 +1025,73 @@ interface SuccessResponse<T> {
   retryCount?: number;
   /** The HTTP status the upstream returned: 200, 201, 204, 304, ... */
   statusCode?: number;
+  /** The headers the upstream answered with, names lower-cased. Not enumerable */
+  headers?: Record<string, string>;
 }
 ```
+
+`headers` holds the upstream's response headers on every success the client produced: an `etag`,
+a `location`, a rate-limit header. Names are lower-cased. A header sent more than once is joined
+with `, `, as `Headers.get()` joins it, and `set-cookie` is joined the same way. After a redirect,
+they are the final hop's headers. An error's `details.headers` is collected as it always was: there,
+a `set-cookie` sent more than once keeps only its last value.
+
+```typescript
+const head = await client.head('/files/report.pdf');
+
+if (head.success) {
+  head.headers?.etag;               // '"v7"'
+  head.headers?.['content-length']; // '52431'
+}
+
+const created = await client.post('/files', { name: 'report.pdf' });
+
+if (created.success) {
+  const location = created.headers?.location; // '/files/42'
+}
+```
+
+`headers` is **not enumerable**. `JSON.stringify`, `Object.keys`, a spread (`{ ...response }`) and
+`structuredClone` skip it. `response.headers` and `'headers' in response` work as usual. Because of
+this, a controller that returns the envelope as it is does not send the upstream's `set-cookie`,
+`server` or any other header on to its own caller. That holds on every route. To pass a header on,
+set it on a `Response` you return (see
+[Custom Response Headers](./controllers.md#custom-response-headers)). A success the framework
+builds around a handler's return value has no `headers`.
+
+Bun's own inspector does list a non-enumerable property. `console.log(response)`, `Bun.inspect`
+and a `toMatchSnapshot()` snapshot all show `headers`, with the upstream's `set-cookie` and `date`.
+To log or snapshot an envelope, use `{ ...response }` or the fields you need.
+
+<llm-only>
+
+- `headers` is attached with `Object.defineProperty(..., { enumerable: false })`. Reading it is
+  ordinary; copying the envelope is not: `{ ...response, extra }`, `Object.assign({}, response)`,
+  `structuredClone` and a JSON round trip all lose it. Take `response.headers` out before copying.
+- It is deliberately invisible to serialization. Do not "fix" that by spreading it back in
+  (`{ ...response, headers: response.headers }`): the result is enumerable, and a controller
+  returning it sends the upstream's `set-cookie` to its caller in the body.
+- `toEqual`/`toStrictEqual` ignore it, so an assertion on the envelope's shape does not change;
+  assert `response.headers?.['x-name']` directly.
+- `Bun.inspect`, `console.log` and bun:test's `toMatchSnapshot` DO show it, `set-cookie` and `date`
+  included (`node:util`'s `inspect` does not). A snapshot of a raw envelope therefore changes on
+  upgrade and on every run, because `date` changes. A snapshot or a log of the envelope should use
+  `{ ...response }` or pick the fields it needs.
+- `content-length` and `content-encoding` describe the bytes on the wire. `fetch` decompresses the
+  body, so for a gzip answer `result` is the decoded body while `content-length` is the compressed
+  size.
+- `set-cookie` values are joined with `, `, and a cookie's own `Expires=Wed, 21 Oct ...` contains a
+  comma, so the joined string cannot be split back reliably.
+- `RequestsService` methods return `result` alone, so they have no headers. Use `HttpClient` (or the
+  service client, which returns the `HttpClient` envelope) when a header matters.
+- An `HTTP_ERROR`'s `details.headers` is NOT the same record: it is enumerable, and there a repeated
+  `set-cookie` keeps only its last value. `client.req()` throws a `OneBunBaseError`, and one a
+  controller does not catch is serialized by the default exception filter into the body it sends
+  that controller's caller, the upstream's headers and the request URL included. Catch it and throw
+  your own error when those must not reach your caller.
+- Up to 0.8.2 a success had no `headers`.
+
+</llm-only>
 
 ### Responses without a body
 

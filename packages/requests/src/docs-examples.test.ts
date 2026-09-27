@@ -612,6 +612,59 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
+     * @source docs:api/requests.md#success-response
+     */
+    it('should carry the upstream headers on a success, out of reach of serialization', async () => {
+      // From docs: "`headers` holds the upstream's response headers on every success the client
+      // produced ... `headers` is **not enumerable**. `JSON.stringify`, `Object.keys`, a spread
+      // (`{ ...response }`) and `structuredClone` skip it."
+      const report = JSON.stringify({ pages: 3 });
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          if (req.method === 'POST') {
+            return Response.json({ id: 42 }, { status: 201, headers: { Location: '/files/42' } });
+          }
+
+          // Answers HEAD as well: Bun drops the body and keeps the etag and the content-length
+          return new Response(report, {
+            headers: { 'content-type': 'application/json', ETag: '"v7"', 'Set-Cookie': 'session=upstream' },
+          });
+        },
+      });
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, retries: { max: 0 } });
+
+        const head = await client.head('/files/report.pdf');
+
+        expect(head.success).toBe(true);
+        if (head.success) {
+          expect(head.headers?.etag).toBe('"v7"');
+          expect(head.headers?.['content-length']).toBe(String(report.length));
+          // Present, and invisible to every serialization
+          expect('headers' in head).toBe(true);
+          expect(Object.keys(head)).not.toContain('headers');
+          expect(JSON.stringify(head)).not.toContain('session=upstream');
+          expect({ ...head }).not.toHaveProperty('headers');
+          expect(structuredClone(head)).not.toHaveProperty('headers');
+        }
+
+        const created = await client.post('/files', { name: 'report.pdf' });
+
+        expect(created).toMatchObject({ success: true, statusCode: 201 });
+        if (created.success) {
+          const location = created.headers?.location;
+          expect(location).toBe('/files/42');
+        }
+      } finally {
+        server.stop(true);
+      }
+    });
+
+    /**
      * @source docs:api/requests.md#responses-without-a-body
      */
     it('should resolve HEAD, 204 and 304 answers without reading a body', async () => {

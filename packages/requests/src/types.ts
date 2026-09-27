@@ -52,6 +52,8 @@ export interface OneBunError<E extends string = string, R extends string = strin
 
 /**
  * Successful API response
+ *
+ * @see docs:api/requests.md
  */
 export interface SuccessResponse<T = unknown> {
   success: true;
@@ -72,6 +74,19 @@ export interface SuccessResponse<T = unknown> {
    * from this rather than assumed. For 204, 304 and any answer to HEAD, `result` is `undefined`.
    */
   statusCode?: number;
+  /**
+   * The headers the upstream answered with — after redirects, the final hop's.
+   *
+   * Names are lower-cased, and a header sent more than once is joined with `, `, as
+   * `Headers.get()` joins it (`set-cookie` included). Present on responses the HTTP client
+   * produced, absent when a handler's return value was wrapped by the framework.
+   *
+   * NOT enumerable: `JSON.stringify`, `Object.keys`, a spread and `structuredClone` all skip it,
+   * while `response.headers` and `'headers' in response` work as usual. A controller that returns
+   * the envelope as it is would otherwise forward the upstream's `set-cookie`, `server` and every
+   * other header to its own caller, in the body. To pass one on, set it on a `Response` yourself.
+   */
+  headers?: Record<string, string>;
 }
 
 /**
@@ -300,6 +315,9 @@ export class GatewayTimeoutError<
 
 /**
  * Helper function to create success response
+ *
+ * It never sets `headers`: the framework wraps a handler's return value with it, and that value
+ * has no upstream. The HTTP client attaches the upstream's headers to the envelopes it produces.
  */
 export function createSuccessResponse<T>(
   result: T,

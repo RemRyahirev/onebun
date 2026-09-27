@@ -182,6 +182,75 @@ const isSuccessStatus = (status: number): boolean =>
   status === HttpStatusCode.NOT_MODIFIED;
 
 /**
+ * A success's headers as a record: names lower-cased, as `Headers` iterates them, and a header
+ * sent more than once joined with `, `, as `Headers.get()` joins it.
+ *
+ * `set-cookie` is joined as well. `Headers.forEach` hands every `set-cookie` over on its own, so
+ * assigning them one after another, as {@link collectErrorHeaders} does, keeps only the last
+ * cookie. `Object.fromEntries` also keeps a header named `__proto__` as an own property, where an
+ * assignment goes to the prototype setter and is lost.
+ */
+const collectResponseHeaders = (headers: Headers): Record<string, string> =>
+  Object.fromEntries([...new Set(headers.keys())].map((name) => [name, headers.get(name) ?? '']));
+
+/**
+ * An error answer's headers, for `details.headers`: collected by assignment, so a `set-cookie`
+ * sent more than once keeps only its last value there and a header named `__proto__` is lost.
+ *
+ * Deliberately not {@link collectResponseHeaders}. `details.headers` is enumerable, and the error
+ * `req()` throws carries it: a controller that does not catch that error lets the default exception
+ * filter serialize it into the body it sends its own caller, the upstream's headers and the request
+ * URL included. Joining every `set-cookie` here would forward all of the upstream's cookies on that
+ * path instead of one. The exposure belongs to the thrown path and is to be closed there, not
+ * widened here first.
+ */
+const collectErrorHeaders = (headers: Headers): Record<string, string> => {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key.toLowerCase()] = value;
+  });
+
+  return record;
+};
+
+/**
+ * `response` with the upstream's headers attached as its `headers` property — NOT enumerable.
+ *
+ * Core serializes whatever a handler returns, on both dispatch arms: the full arm sends an object
+ * with a `success` key as it is, the fast arm wraps it into `result`. A controller that returned a
+ * client envelope unchanged would therefore send the upstream's `set-cookie`, `server` and every
+ * other header to its own caller, in the body. `JSON.stringify` skips a non-enumerable property,
+ * so this one place covers both arms, a nested envelope and any other JSON payload, where
+ * stripping the headers in core would need every serializer there to know about them.
+ */
+const withUpstreamHeaders = <S extends SuccessResponse<unknown>>(
+  response: S,
+  headers: Record<string, string>,
+): S => Object.defineProperty(response, 'headers', {
+  value: headers,
+  enumerable: false,
+  writable: true,
+  configurable: true,
+});
+
+/**
+ * `response` with `retryCount` set. Not a bare spread for a success: a spread copies only the
+ * enumerable properties, so it would drop the `headers` {@link withUpstreamHeaders} attached.
+ */
+const withRetryCount = <T, E extends string, R extends string>(
+  response: ApiResponse<T, E, R>,
+  retryCount: number,
+): ApiResponse<T, E, R> => {
+  if (!response.success) {
+    return { ...response, retryCount };
+  }
+
+  const counted: SuccessResponse<T> = { ...response, retryCount };
+
+  return response.headers === undefined ? counted : withUpstreamHeaders(counted, response.headers);
+};
+
+/**
  * Build full URL from base URL and request URL
  */
 const buildUrl = (
@@ -844,11 +913,6 @@ const executeSingleRequest = <T, E extends string, R extends string>(
       traceId,
     )),
     Effect.flatMap((response) => {
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key.toLowerCase()] = value;
-      });
-
       // `undefined` rather than `''` for a response that has no content: `head()` is typed
       // `ApiResponse<void>`, and an empty string would claim a body that was never there.
       const readBody: Effect.Effect<T, ErrorResponse> = hasNoContent(config.method, response.status)
@@ -861,7 +925,10 @@ const executeSingleRequest = <T, E extends string, R extends string>(
           const duration = Date.now() - requestStartTime;
 
           if (isSuccessStatus(response.status)) {
-            return createSuccessResponse(responseData, traceId, response.status);
+            return withUpstreamHeaders(
+              createSuccessResponse(responseData, traceId, response.status),
+              collectResponseHeaders(response.headers),
+            );
           }
 
           return createErrorResponse(
@@ -869,7 +936,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
             response.status,
             traceId,
             {
-              headers: responseHeaders,
+              headers: collectErrorHeaders(response.headers),
               details: responseData,
               duration,
               url: fullUrl,
@@ -901,7 +968,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
 
   return pipe(
     executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, traceId),
-    Effect.map((result) => ({ ...result, retryCount: attemptNumber - 1 })),
+    Effect.map((result) => withRetryCount(result, attemptNumber - 1)),
     Effect.flatMap((result) => {
       const duration = Date.now() - requestStartTime;
       // Record metrics if enabled

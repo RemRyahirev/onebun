@@ -104,6 +104,20 @@ needs both or a `traceparent`.
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
   whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
   `RESPONSE_PARSE_ERROR` against every JSON endpoint (Bun keeps `application/json` on the HEAD answer).
+- **Success headers**: `SuccessResponse.headers` is the upstream's response headers (final hop after
+  redirects), names lower-cased, a repeated header joined with `, ` as `Headers.get()` does — `set-cookie`
+  too, so it cannot be split back reliably. Read `head.headers?.etag`, `created.headers?.location`. It is
+  **non-enumerable**: `JSON.stringify`, `Object.keys`, a spread and `structuredClone` skip it, so a controller
+  returning the client envelope verbatim does NOT forward upstream `set-cookie`/`server` in its body (either
+  dispatch arm). The flip side: `{ ...response }` loses it — read it before copying, and never spread it back
+  in to "keep" it (that makes it serializable again). `toEqual` ignores it; assert the header directly.
+  `Bun.inspect`, `console.log` and `toMatchSnapshot` DO show it (`set-cookie`, `date`): log or snapshot
+  `{ ...response }` or the fields you need. `RequestsService` returns `result` only (no headers);
+  `HttpClient` and the service client carry them. Up to 0.8.2 a success had no headers at all.
+- **An `HTTP_ERROR`'s `details.headers` is a different record**: enumerable, and a repeated `set-cookie` keeps
+  only its last value. `client.req()` throws a `OneBunBaseError`; uncaught in a controller, the default
+  exception filter serializes it into the caller's body, the upstream's headers and the request URL included.
+  Catch it and throw your own error when those must not reach the caller.
 - **`timeout` covers the body, not just the headers.** A body that stalls past it fails `TIMEOUT_ERROR`,
   `code: 0`, `getTransportFailureKind(e) === 'timeout'`, with the status that arrived in
   `details.statusCode` and `details.phase: 'body'`. So a stalled 5xx follows `retryOnTimeout` (off by
