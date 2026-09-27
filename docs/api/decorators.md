@@ -967,10 +967,13 @@ Marks a constructor parameter as optional for dependency injection. When the dep
 - Feature-gated dependencies (e.g., caching that may not be configured)
 - Graceful degradation when an optional module is not imported
 
-A dependency listed in the module's own `providers` that was never constructed — its constructor
-threw, or this copy of `@onebun/core` sees no `@Service()` on it — counts as not available too: the
-parameter receives `undefined`, a warning names the dependency and why it has no instance, and
-the boot goes on.
+A dependency listed in the module's own `providers` that this copy of `@onebun/core` sees no
+`@Service()` on counts as not available too: the parameter receives `undefined`, a warning names
+the dependency and why it has no instance, and the boot goes on.
+
+A provider whose constructor throws is different: that fails the boot with a
+`ServiceConstructionError`, `@Optional()` or not — see
+[When a Constructor Throws](/api/services#when-a-constructor-throws).
 
 An `@Optional()` parameter typed as an **abstract class** does not wait for its implementation the
 way every other parameter does: it receives the subclass only if that is already built when its

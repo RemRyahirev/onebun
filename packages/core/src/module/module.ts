@@ -38,6 +38,7 @@ import {
   CircularDependencyError,
   DependencyResolutionError,
   OneBunBootstrapError,
+  ServiceConstructionError,
 } from '../errors/dependency-errors';
 import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
@@ -208,8 +209,11 @@ export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, 
   return new Map(processDefaultScope.services);
 }
 
-/** Why a provider left the resolution queue without an instance. */
-type NeverConstructedReason = 'undecorated' | 'constructor-threw';
+/**
+ * Why a provider left the resolution queue without an instance. A constructor that throws is not
+ * one of them: that ends the boot at the throw, with a `ServiceConstructionError`.
+ */
+type NeverConstructedReason = 'undecorated';
 
 /** What a deferred provider waits for. */
 interface ProviderWait {
@@ -217,6 +221,17 @@ interface ProviderWait {
   readonly provider: Function;
   /** The declared parameter type: `provider` itself, or an abstract or base class it extends. */
   readonly parameterType: Function;
+}
+
+/**
+ * Whether an error a provider's constructor threw is one the framework raised for its own reasons
+ * and that already names what is wrong, so it propagates unwrapped: a `OneBunBootstrapError`
+ * (`DependencyResolutionError`, `CircularDependencyError`, ...) or a registration or configuration
+ * error, whose `name` starts with `OneBun` — the rule through 0.8.x, which the name check keeps
+ * for such an error from a second copy of `@onebun/core` as well, where `instanceof` fails.
+ */
+function isFrameworkBootstrapError(error: unknown): boolean {
+  return error instanceof OneBunBootstrapError || (error instanceof Error && error.name.startsWith('OneBun'));
 }
 
 /**
@@ -1161,7 +1176,7 @@ export class OneBunModule implements ModuleInstance {
       if (!allDependenciesResolved) {
         continue;
       }
-      // Leaving the queue is progress whether or not the constructor below succeeds.
+      // Leaving the queue is progress; a constructor below that throws ends the boot instead.
       deferralsSinceProgress = 0;
 
       for (const warning of optionalLeftUndefined) {
@@ -1238,12 +1253,16 @@ export class OneBunModule implements ModuleInstance {
         if (diMark) {
           getProfiler()!.end(diMark);
         }
-        // Re-throw bootstrap errors (DI resolution, circular deps) so they propagate
-        if (error instanceof Error && error.name.startsWith('OneBun')) {
+        // A framework bootstrap error already names what is wrong, so it propagates as it is.
+        if (isFrameworkBootstrapError(error)) {
           throw error;
         }
-        this.logger.error(`Failed to create service ${provider.name}: ${error}`);
-        neverConstructed.set(provider, 'constructor-threw');
+        // Anything else is the provider's own failure, and it ends the boot here — whether or not
+        // anything injects the provider. It used to be logged and the provider dropped: a consumer
+        // then failed with a DependencyResolutionError about a dependency that IS registered (under
+        // TestingModule's silent logger, with no trace of the real error), an @Optional() consumer
+        // got undefined, and with no consumer the application booted without the service.
+        throw new ServiceConstructionError(provider.name, this.moduleClass.name, error);
       }
     }
 
@@ -1320,18 +1339,15 @@ export class OneBunModule implements ModuleInstance {
       : `${dependency.name} (it extends ${parameterType.name})`;
     const listed = `${subject} is listed in the providers of ${this.moduleClass.name}, but was never constructed`;
 
-    switch (reason) {
-      case 'undecorated':
-        return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
-          'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
-          '@onebun/core — deduplicate the dependency.';
-      case 'constructor-threw':
-        return `${listed}: creating it threw, and the error was logged as ` +
-          `"Failed to create service ${dependency.name}".`;
-      default:
-        return `${listed}: either it is not @Service()-decorated for this copy of @onebun/core, ` +
-          'or its constructor threw (see the error log).';
+    if (reason === 'undecorated') {
+      return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
+        'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
+        '@onebun/core — deduplicate the dependency.';
     }
+
+    // Not reached while skipping an undecorated provider is the only way to leave the queue
+    // without an instance: a constructor that throws ends the boot with a ServiceConstructionError.
+    return `${listed}: this copy of @onebun/core built no instance of it.`;
   }
 
   /**

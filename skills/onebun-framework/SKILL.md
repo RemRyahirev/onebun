@@ -130,7 +130,10 @@ instance whose `loggerLayer` / processors / registry the next attempt shares.
 To retry, a NEW `OneBunApplication` per attempt is simplest; `start()` again on the same instance
 boots too (it rebuilds what the rollback closed and reuses what you passed in), and a `stop()` after
 that retry really stops it. Destroy hooks run on a failed boot too, even where
-`onModuleInit` never ran: release what exists (`this.pool?.end()`).
+`onModuleInit` never ran: release what exists (`this.pool?.end()`). Not when the boot fails while
+providers are still being constructed (a constructor throws, a provider dependency is missing or
+circular): the rollback runs no destroy hook then, so a provider built before the failure keeps what
+its constructor opened — open connections and timers in `onModuleInit`, never in a constructor.
 
 A `stop()` called while `start()` is still booting (a supervisor giving up, a test's teardown) waits
 for the boot to settle, then does what a `stop()` right after it would: the full sequence after a boot
@@ -427,9 +430,21 @@ is built (with two such providers, the one constructed first is injected). The e
 gets `undefined` and a warning. A real cycle throws `CircularDependencyError` whose `chain` names
 only the cycle — break it by extracting a third service, there is no `forwardRef`. A provider
 waiting on a same-module provider that was never constructed (no `@Service()` visible to this copy
-of `@onebun/core`, or its constructor threw — see `Failed to create service <Name>` in the log)
-throws `DependencyResolutionError` naming that dependency; an `@Optional()` parameter gets
-`undefined` and a warning instead.
+of `@onebun/core`) throws `DependencyResolutionError` naming that dependency; an `@Optional()`
+parameter gets `undefined` and a warning instead.
+
+**A constructor that throws fails the boot at the throw** (since 0.9.0), with
+`ServiceConstructionError: Failed to create service <Name> in module <Module>: <Type>: <message>` —
+`cause` is the thrown value unchanged, `stack` is its frames, and `serviceName`/`moduleName` are
+fields. That holds whatever injects the provider, `@Optional()` and nothing at all included, and
+under `TestingModule`'s silent logger too (it is the rejection, not a log line). A throw from the
+framework's step right after the constructor (an `initializeService()` the provider defines, applying
+`tracing.traceAll`) is reported the same way. A framework error thrown from a constructor
+(`DependencyResolutionError`, a `OneBun*`-named one) is not wrapped.
+Through 0.8.x the error was only logged and the provider dropped, so it surfaced as a
+`DependencyResolutionError` on the consumer (0.8.1 same-module: `CircularDependencyError`), as
+`undefined` for an `@Optional()` one (0.8.2), or not at all — an app that booted that way now fails
+`start()`: fix the constructor or drop the provider.
 
 ## Services
 
@@ -1061,9 +1076,12 @@ class that extends none of them and exposes no `initialize*` method throws, nami
 
 For a full boot, `TestingModule` also sets the init context — hand it the schema:
 `TestingModule.create({ ... }).setOptions({ envSchema }).compile()`. Without `envSchema` the
-constructor's `this.config.get()` throws `Configuration not initialized`, DI logs it to the silent
-test logger and drops the service, and boot fails with `DependencyResolutionError: Could not resolve
-dependency <Service> for controller <Ctrl>` — the message names DI, the cause is the missing schema.
+constructor's `this.config.get()` throws `Configuration not initialized`, and `compile()` rejects
+with `ServiceConstructionError: Failed to create service <Service> in module _TestingAppModule:
+Error: Configuration not initialized. ...` (the stub's error as `cause`), consumer or not. Through
+0.8.x DI logged it to the silent test logger and dropped the service, so the boot failed with a
+misleading `DependencyResolutionError: Could not resolve dependency <Service> for controller <Ctrl>`,
+or not at all when nothing injected the service.
 
 ### Integration testing — `TestingModule`
 

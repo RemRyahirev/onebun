@@ -2480,52 +2480,65 @@ describe('BaseRepository as the page writes it (docs/api/drizzle.md)', () => {
     expect((await users.byEmail('ada@example.com'))?.name).toBe('Ada');
   });
 
-  it('fails the boot when it carries @Service() and something injects it', async () => {
+  it('fails the boot when it carries @Service(), whether or not anything injects it', async () => {
     // From docs: registering a repository as a provider makes app.start() reject with a
-    // DependencyResolutionError naming the repository as the dependency its consumer could not
-    // get, because constructing it threw. Before 0.8.2 this was a CircularDependencyError that
-    // named only the consumer, although there is no cycle.
-    @ServiceDecorator()
-    class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
-      constructor(db: DrizzleServiceCtor) {
-        super(db, docRepoUsers);
+    // ServiceConstructionError naming the repository, with 'Database not initialized' as its cause —
+    // whether or not anything injects it. Up to 0.8.x an injected one surfaced as a
+    // DependencyResolutionError on its consumer (0.8.1: a CircularDependencyError), and one that
+    // nothing injected let the application boot without it.
+    const bootFailure = async (injected: boolean): Promise<Error | null> => {
+      @ServiceDecorator()
+      class ProviderRepository extends BaseRepository<typeof docRepoUsers> {
+        constructor(db: DrizzleServiceCtor) {
+          super(db, docRepoUsers);
+        }
       }
+
+      @ServiceDecorator()
+      class Consumer extends BaseService {
+        constructor(private repository: ProviderRepository) {
+          super();
+        }
+
+        async count(): Promise<number> {
+          return await this.repository.count();
+        }
+      }
+
+      @Module({
+        imports: [
+          DrizzleModule.forRoot({
+            connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
+            autoMigrate: false,
+          }),
+        ],
+        providers: injected ? [ProviderRepository, Consumer] : [ProviderRepository],
+      })
+      class AppModule {}
+
+      const app = new OneBunApplication(AppModule, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+      });
+
+      const failure = await app.start().then(() => null, (error: unknown) => error as Error);
+      await app.stop().catch(() => undefined);
+      DrizzleModule.clearOptions();
+
+      return failure;
+    };
+
+    for (const injected of [true, false]) {
+      const failure = await bootFailure(injected);
+
+      expect(failure?.name).toBe('ServiceConstructionError');
+      expect(String(failure)).toBe(
+        'ServiceConstructionError: Failed to create service ProviderRepository in module AppModule: ' +
+          'Error: Database not initialized. Call initialize() first.',
+      );
+      expect((failure?.cause as Error).message).toBe('Database not initialized. Call initialize() first.');
     }
-
-    @ServiceDecorator()
-    class Consumer extends BaseService {
-      constructor(private repository: ProviderRepository) {
-        super();
-      }
-
-      async count(): Promise<number> {
-        return await this.repository.count();
-      }
-    }
-
-    @Module({
-      imports: [
-        DrizzleModule.forRoot({
-          connection: { type: DatabaseType.SQLITE, options: { url: ':memory:' } },
-          autoMigrate: false,
-        }),
-      ],
-      providers: [ProviderRepository, Consumer],
-    })
-    class AppModule {}
-
-    const app = new OneBunApplication(AppModule, {
-      port: 0,
-      metrics: { enabled: false },
-      gracefulShutdown: false,
-    });
-
-    const failure = await app.start().then(() => null, (error: unknown) => error as Error);
-    await app.stop().catch(() => undefined);
-
-    expect(failure?.name).toBe('DependencyResolutionError');
-    expect(String(failure)).toContain('Could not resolve dependency ProviderRepository for service Consumer');
-    expect(String(failure)).toContain('Failed to create service ProviderRepository');
   });
 });
 

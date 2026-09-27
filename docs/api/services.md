@@ -211,17 +211,103 @@ Restructure your code to break the cycle — e.g., extract the shared logic into
 
 A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
 with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of
-`@onebun/core` sees no `@Service()` on it (it is undecorated, or decorated by a second copy of the
-framework), or creating it threw — the original error is logged as `Failed to create service <Name>`:
+`@onebun/core` sees no `@Service()` on it — it is undecorated, or decorated by a second copy of the
+framework:
 
 ```
 DependencyResolutionError: Could not resolve dependency UserRepository for service UserService.
-  - UserRepository is listed in the providers of UserModule, but was never constructed: creating it threw, and the error was logged as "Failed to create service UserRepository".
+  - UserRepository is listed in the providers of UserModule, but was never constructed: this copy of @onebun/core sees no @Service() on it, so it was skipped. Decorate it with @Service(). If it already is, the application resolves two copies of @onebun/core — deduplicate the dependency.
 ```
 
 For an abstract-typed parameter the dependency named is the parameter's type, and the hint names the
 provider extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`. An
-`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional).
+`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional). A provider
+whose constructor throws is not reported this way at all — see
+[When a Constructor Throws](#when-a-constructor-throws).
+
+### When a Constructor Throws
+
+A provider whose constructor throws ends the boot at the throw, with a `ServiceConstructionError`
+that names the service and its module, followed by the constructor's own error:
+
+```
+ServiceConstructionError: Failed to create service PaymentService in module BillingModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions.
+```
+
+```typescript
+import { BaseService, Module, OneBunApplication, Service, ServiceConstructionError } from '@onebun/core';
+
+@Service()
+export class PaymentService extends BaseService {
+  private readonly apiKey: string;
+
+  constructor() {
+    super();
+    // Throws when the application was created without envSchema
+    this.apiKey = this.config.get('payments.apiKey');
+  }
+}
+
+@Module({ providers: [PaymentService] })
+export class BillingModule {}
+
+const app = new OneBunApplication(BillingModule, { port: 0 });
+
+try {
+  await app.start();
+} catch (error) {
+  if (error instanceof ServiceConstructionError) {
+    error.serviceName; // 'PaymentService'
+    error.moduleName;  // 'BillingModule'
+    error.cause;       // the Error the constructor threw, unchanged
+  }
+}
+```
+
+- `cause` is the thrown value itself, so `error.cause instanceof YourError` holds and its fields are
+  there.
+- `stack` holds the frames of the original throw, so the first one points at the constructor line
+  that threw rather than at the framework.
+- It fails the same way whether a consumer is in the same module, in a module that imports this
+  one, a controller, an `@Optional()` parameter, or nothing at all.
+- `TestingModule` included: its logger is silent, but the error is the rejection of `compile()`,
+  not a log line.
+- A throw from what the framework runs on the new instance right after the constructor is
+  reported the same way: the `initializeService()` it calls on a provider that defines one, or
+  wrapping its methods for `tracing.traceAll`.
+
+An error the framework raises for its own reasons — a `OneBunBootstrapError` such as
+`DependencyResolutionError`, or an error whose `name` starts with `OneBun` — is not wrapped: it
+already names what is wrong.
+
+The boot fails while the module tree is still being built, before the application holds it, so
+the rollback of the failed `start()` runs no destroy hook. A provider constructed before the throw,
+in this module or in one it imports, does not get its `onModuleDestroy`, and whatever its
+constructor opened stays open: a timer or a connection keeps the process alive after a caught
+rejection. Open resources in `onModuleInit`, which runs only once every provider is built.
+
+The most common trigger is `this.config.get()` in a constructor of an application created without
+`envSchema`: the configuration is then a stub whose every `get()` throws. See
+[Accessing Configuration](#accessing-configuration).
+
+::: warning Changed in 0.9.0
+Up to 0.8.x the error was logged as `Failed to create service <Name>` and the service was dropped.
+What surfaced was a failure elsewhere, and the real error was only in the log — under
+`TestingModule`, the silent logger, where it never showed:
+
+- a consumer in another module, or a controller, failed with `DependencyResolutionError: Could not
+  resolve dependency <Name>`, although the dependency is decorated and listed;
+- a consumer in the same module failed with a `CircularDependencyError` through 0.8.1, and from
+  0.8.2 with a `DependencyResolutionError` whose hint pointed at the log;
+- from 0.8.2, an `@Optional()` consumer got `undefined`, with a warning;
+- with no consumer, the application booted without the service.
+
+**Migration:** an application that booted with a provider whose constructor throws — nothing
+injects it, or only an `@Optional()` parameter — now fails `start()`. Fix what the constructor
+throws on (for `Configuration not initialized`, pass `envSchema`), or remove the provider from
+`providers`. Code that caught `DependencyResolutionError` to detect a failing constructor should
+catch `ServiceConstructionError` and read `cause`.
+:::
 
 ### Optional Dependencies
 
@@ -517,6 +603,11 @@ export class DatabaseService extends BaseService {
   }
 }
 ```
+
+`this.config` is live only when the application passes `envSchema`. Without it, every `get()`
+throws `Configuration not initialized. Provide envSchema in ApplicationOptions.` — from a
+constructor, that fails the boot with a `ServiceConstructionError` naming the service (see
+[When a Constructor Throws](#when-a-constructor-throws)).
 
 ## Service with Tracing
 

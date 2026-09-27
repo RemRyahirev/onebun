@@ -192,6 +192,7 @@ import {
   CircularDependencyError,
   DependencyResolutionError,
   OneBunBootstrapError,
+  ServiceConstructionError,
   registerModule,
   resetRegistrations,
   createHttpClient,
@@ -10894,13 +10895,7 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
 
   it('reports a provider that was never constructed as DependencyResolutionError, not as a cycle', () => {
     // From docs: "Could not resolve dependency UserRepository for service UserService."
-    @Service()
-    class UserRepository extends BaseService {
-      constructor() {
-        super();
-        throw new Error('Database not initialized. Call initialize() first.');
-      }
-    }
+    class UserRepository extends BaseService {}
 
     @Service()
     class UserService extends BaseService {
@@ -10908,6 +10903,9 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
         super();
       }
     }
+
+    // An undecorated class records no constructor types, so its consumer's are registered by hand.
+    registerDependencies(UserService, [UserRepository]);
 
     @Module({ providers: [UserService, UserRepository] })
     class UserModule {}
@@ -10918,7 +10916,8 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     expect(error.message).toBe(
       'Could not resolve dependency UserRepository for service UserService.\n' +
         '  - UserRepository is listed in the providers of UserModule, but was never constructed: ' +
-        'creating it threw, and the error was logged as "Failed to create service UserRepository".',
+        'this copy of @onebun/core sees no @Service() on it, so it was skipped. Decorate it with @Service(). ' +
+        'If it already is, the application resolves two copies of @onebun/core — deduplicate the dependency.',
     );
   });
 
@@ -10971,13 +10970,7 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     // extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`"
     abstract class PaymentGateway extends BaseService {}
 
-    @Service()
-    class StripeGateway extends PaymentGateway {
-      constructor() {
-        super();
-        throw new Error('STRIPE_KEY is not set');
-      }
-    }
+    class StripeGateway extends PaymentGateway {}
 
     @Service()
     class CheckoutService extends BaseService {
@@ -10992,12 +10985,211 @@ describe('Circular Dependencies (docs/api/services.md)', () => {
     const error = bootError(CheckoutModule);
 
     expect(error).toBeInstanceOf(DependencyResolutionError);
-    expect(error.message).toBe(
+    expect(error.message).toStartWith(
       'Could not resolve dependency PaymentGateway for service CheckoutService.\n' +
         '  - StripeGateway (it extends PaymentGateway) is listed in the providers of CheckoutModule, ' +
-        'but was never constructed: creating it threw, and the error was logged as ' +
-        '"Failed to create service StripeGateway".',
+        'but was never constructed: this copy of @onebun/core sees no @Service() on it',
     );
+  });
+});
+
+/**
+ * @source docs:api/services.md#when-a-constructor-throws
+ */
+describe('When a Constructor Throws (docs/api/services.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+  const NOT_INITIALIZED = 'Configuration not initialized. Provide envSchema in ApplicationOptions.';
+
+  it('fails app.start() with ServiceConstructionError naming the service, its module and the cause', async () => {
+    // From docs: the PaymentService / BillingModule example, started without envSchema.
+    @Service()
+    class PaymentService extends BaseService {
+      readonly apiKey: unknown;
+
+      constructor() {
+        super();
+        this.apiKey = this.config.get('payments.apiKey');
+      }
+    }
+
+    @Module({ providers: [PaymentService] })
+    class BillingModule {}
+
+    const app = new OneBunApplication(BillingModule, {
+      port: 0,
+      loggerLayer: mockLoggerLayer,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+
+    let caught: unknown;
+    try {
+      await app.start();
+    } catch (error) {
+      caught = error;
+    } finally {
+      await app.stop().catch(() => undefined);
+    }
+
+    expect(caught).toBeInstanceOf(ServiceConstructionError);
+    const error = caught as ServiceConstructionError;
+    // From docs: "ServiceConstructionError: Failed to create service PaymentService in module
+    // BillingModule: Error: Configuration not initialized. Provide envSchema in ApplicationOptions."
+    expect(String(error)).toBe(
+      `ServiceConstructionError: Failed to create service PaymentService in module BillingModule: Error: ${NOT_INITIALIZED}`,
+    );
+    expect(error.serviceName).toBe('PaymentService');
+    expect(error.moduleName).toBe('BillingModule');
+    expect(error.cause).toBeInstanceOf(Error);
+    expect((error.cause as Error).message).toBe(NOT_INITIALIZED);
+  });
+
+  it('keeps the thrown value as cause, with its class and fields, and its stack frames', () => {
+    // From docs: "`cause` is the thrown value itself, so `error.cause instanceof YourError` holds and
+    // its fields are there" / "`stack` holds the frames of the original throw"
+    class MissingSecretError extends Error {
+      override name = 'MissingSecretError';
+
+      constructor(readonly variable: string) {
+        super(`${variable} is not set`);
+      }
+    }
+
+    @Service()
+    class PaymentService extends BaseService {
+      constructor() {
+        super();
+        throw new MissingSecretError('STRIPE_KEY');
+      }
+    }
+
+    @Module({ providers: [PaymentService] })
+    class BillingModule {}
+
+    let caught: unknown;
+    try {
+      new OneBunModule(BillingModule, mockLoggerLayer);
+    } catch (error) {
+      caught = error;
+    }
+
+    const error = caught as ServiceConstructionError;
+    const frames = (stack: string | undefined): string[] => (stack ?? '').split('\n').filter((line) => /^\s+at /.test(line));
+
+    expect(error).toBeInstanceOf(ServiceConstructionError);
+    expect(error.message).toBe('Failed to create service PaymentService in module BillingModule: MissingSecretError: STRIPE_KEY is not set');
+    expect(error.cause).toBeInstanceOf(MissingSecretError);
+    expect((error.cause as MissingSecretError).variable).toBe('STRIPE_KEY');
+    expect(frames(error.stack)).toEqual(frames((error.cause as Error).stack));
+    expect(frames(error.stack)[0]).toContain('PaymentService');
+  });
+
+  it('fails the same way for a consumer in an importing module, a controller, an @Optional() parameter, or none', () => {
+    // From docs: "It fails the same way whether a consumer is in the same module, in a module that
+    // imports this one, a controller, an `@Optional()` parameter, or nothing at all."
+    const shapes: Array<(broken: Function) => Function> = [
+      (broken) => {
+        @Service()
+        class SameModuleConsumer extends BaseService {}
+        registerDependencies(SameModuleConsumer, [broken]);
+
+        @Module({ providers: [SameModuleConsumer, broken] })
+        class SameModule {}
+
+        return SameModule;
+      },
+      (broken) => {
+        @Module({ providers: [broken], exports: [broken] })
+        class InnerModule {}
+
+        @Service()
+        class ImportingConsumer extends BaseService {}
+        registerDependencies(ImportingConsumer, [broken]);
+
+        @Module({ imports: [InnerModule], providers: [ImportingConsumer] })
+        class OuterModule {}
+
+        return OuterModule;
+      },
+      (broken) => {
+        @Controller('/billing')
+        class BillingController extends BaseController {}
+        registerDependencies(BillingController, [broken]);
+
+        @Module({ controllers: [BillingController], providers: [broken] })
+        class ControllerModule {}
+
+        return ControllerModule;
+      },
+      (broken) => {
+        @Service()
+        class OptionalConsumer extends BaseService {}
+        registerDependencies(OptionalConsumer, [broken]);
+        Optional()(OptionalConsumer, undefined, 0);
+
+        @Module({ providers: [OptionalConsumer, broken] })
+        class OptionalModule {}
+
+        return OptionalModule;
+      },
+      (broken) => {
+        @Module({ providers: [broken] })
+        class NoConsumerModule {}
+
+        return NoConsumerModule;
+      },
+    ];
+
+    for (const shape of shapes) {
+      @Service()
+      class PaymentService extends BaseService {
+        constructor() {
+          super();
+          throw new Error('STRIPE_KEY is not set');
+        }
+      }
+
+      let caught: unknown;
+      try {
+        new OneBunModule(shape(PaymentService), mockLoggerLayer);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(ServiceConstructionError);
+      expect((caught as ServiceConstructionError).serviceName).toBe('PaymentService');
+      expect(((caught as Error).cause as Error).message).toBe('STRIPE_KEY is not set');
+    }
+  });
+
+  it('does not wrap an error the framework raises for its own reasons', () => {
+    // From docs: "An error the framework raises for its own reasons — a `OneBunBootstrapError` such
+    // as `DependencyResolutionError`, or an error whose `name` starts with `OneBun` — is not wrapped"
+    const resolutionError = new DependencyResolutionError('ReportingClient', 'HttpTransport', 'service', []);
+    const namedError = new Error('ReportingModule was selected as ANALYTICS but never configured.');
+    namedError.name = 'OneBunUnconfiguredRegistrationError';
+
+    for (const thrown of [resolutionError, namedError]) {
+      @Service()
+      class ReportingService extends BaseService {
+        constructor() {
+          super();
+          throw thrown;
+        }
+      }
+
+      @Module({ providers: [ReportingService] })
+      class ReportingModule {}
+
+      let caught: unknown;
+      try {
+        new OneBunModule(ReportingModule, mockLoggerLayer);
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBe(thrown);
+    }
   });
 });
 
@@ -11071,9 +11263,37 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
   });
 
   it('injects undefined, with a warning, for a listed provider that was never constructed', () => {
-    // From docs: "A dependency listed in the module's own `providers` that was never constructed
-    // [...] counts as not available too: the parameter receives `undefined`, and a warning names
-    // the dependency and why it has no instance."
+    // From docs: "A dependency listed in the module's own `providers` that this copy of
+    // `@onebun/core` sees no `@Service()` on counts as not available too: the parameter receives
+    // `undefined`, and a warning names the dependency and why it has no instance."
+    class EmailService extends BaseService {}
+
+    @Service()
+    class NotificationService extends BaseService {
+      constructor(readonly emailService?: EmailService) {
+        super();
+      }
+    }
+
+    // An undecorated class records no constructor types, so its consumer's are registered by hand.
+    registerDependencies(NotificationService, [EmailService]);
+    Optional()(NotificationService, undefined, 0);
+
+    @Module({ providers: [NotificationService, EmailService] })
+    class NotifModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const mod = new OneBunModule(NotifModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+
+    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('EmailService is listed in the providers of NotifModule, but was never constructed');
+  });
+
+  it('does not keep a provider whose constructor throws from failing the boot', () => {
+    // From docs: "A provider whose constructor throws is different: that fails the boot with a
+    // `ServiceConstructionError`, `@Optional()` or not."
     @Service()
     class EmailService extends BaseService {
       constructor() {
@@ -11092,13 +11312,16 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     @Module({ providers: [NotificationService, EmailService] })
     class NotifModule {}
 
-    const recorder = makeRecordingLoggerLayer();
-    const mod = new OneBunModule(NotifModule, recorder.layer);
-    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+    let caught: unknown;
+    try {
+      new OneBunModule(NotifModule, mockLoggerLayer);
+    } catch (error) {
+      caught = error;
+    }
 
-    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
-    expect(warnings).toHaveLength(1);
-    expect(warnings[0]).toContain('Failed to create service EmailService');
+    expect(caught).toBeInstanceOf(ServiceConstructionError);
+    expect((caught as ServiceConstructionError).serviceName).toBe('EmailService');
+    expect(((caught as Error).cause as Error).message).toBe('SMTP_URL is not set');
   });
 
   it('does not wait for the implementation of an abstract-typed parameter', () => {

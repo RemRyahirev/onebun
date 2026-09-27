@@ -34,6 +34,7 @@ import {
   Get,
   Module,
 } from '../decorators/decorators';
+import { ServiceConstructionError } from '../errors/dependency-errors';
 import { Controller as BaseController } from '../module/controller';
 import { BaseService, Service } from '../module/service';
 import { Subscribe } from '../queue/decorators';
@@ -831,5 +832,56 @@ describe('a start() that rejects rolls back what it started (FB-30)', () => {
     expect(destroyed).toEqual([]);
     expect(recording.messages()).toContain('Failed start rolled back');
     expect(recording.messages('error').filter((message) => message.includes('failed step'))).toEqual([]);
+  });
+
+  test('a provider constructor that throws gets no destroy hook to anything built before it — as documented, until the rollback can reach them', async () => {
+    // The throw happens inside OneBunModule.create(), before the application holds the module tree,
+    // so neither the rollback nor a later stop() has anything to call onModuleDestroy on. core.md
+    // (When start() fails) and services.md (When a Constructor Throws) tell users so; when the
+    // rollback learns to reach these providers, this test and those sentences change together.
+    const built: string[] = [];
+
+    @Service()
+    class BuiltFirst extends BaseService implements OnModuleDestroy {
+      constructor() {
+        super();
+        built.push('BuiltFirst');
+      }
+
+      async onModuleDestroy(): Promise<void> {
+        destroyed.push('BuiltFirst');
+      }
+    }
+
+    const constructorError = new Error('constructor exploded');
+
+    @Service()
+    class ThrowsInConstructor extends BaseService {
+      constructor() {
+        super();
+        throw constructorError;
+      }
+    }
+
+    @Module({ providers: [BuiltFirst, ThrowsInConstructor] })
+    class ConstructionFailureModule {}
+
+    const recording = makeRecordingLoggerLayer();
+    const app = new OneBunApplication(ConstructionFailureModule, {
+      port: 0,
+      gracefulShutdown: false,
+      loggerLayer: recording.layer,
+    });
+
+    const error = await startRejection(app);
+
+    expect(error).toBeInstanceOf(ServiceConstructionError);
+    expect((error as ServiceConstructionError).cause).toBe(constructorError);
+    expect(built).toEqual(['BuiltFirst']);
+    expect(recording.messages()).toContain('Failed start rolled back');
+    expect(destroyed).toEqual([]);
+
+    await app.stop();
+    expect(destroyed).toEqual([]);
   });
 });

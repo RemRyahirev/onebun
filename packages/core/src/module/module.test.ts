@@ -32,7 +32,11 @@ import {
   Module,
   Optional,
 } from '../decorators/decorators';
-import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
+import {
+  CircularDependencyError,
+  DependencyResolutionError,
+  ServiceConstructionError,
+} from '../errors/dependency-errors';
 import {
   createMockLogger,
   makeMockLoggerLayer,
@@ -753,11 +757,17 @@ describe('OneBunModule', () => {
       }
     });
 
-    test('a same-module dependency whose constructor threw is named, not reported as a cycle', () => {
+    test('a same-module dependency whose constructor throws ends the boot with ITS error, in either order (WI-326 b1)', () => {
+      // 0.8.1: CircularDependencyError 'Dependency chain: NeedsExploding'. 0.8.2: a
+      // DependencyResolutionError naming the dependency, with the real error only in the log.
+      class DatabaseUrlMissing extends Error {
+        override name = 'DatabaseUrlMissing';
+      }
+
       @Service()
       class ExplodingDependency {
         constructor() {
-          throw new Error('db url not set');
+          throw new DatabaseUrlMissing('db url not set');
         }
       }
 
@@ -769,12 +779,189 @@ describe('OneBunModule', () => {
       for (const providers of [[ExplodingDependency, NeedsExploding], [NeedsExploding, ExplodingDependency]]) {
         const error = bootError(() => bootProviders(providers));
 
-        expect(error.name).not.toBe('CircularDependencyError');
-        expect(error).toBeInstanceOf(DependencyResolutionError);
-        expect((error as DependencyResolutionError).targetName).toBe('NeedsExploding');
-        expect((error as DependencyResolutionError).dependencyName).toBe('ExplodingDependency');
-        expect(error.message).toContain('Failed to create service ExplodingDependency');
+        expect(error).toBeInstanceOf(ServiceConstructionError);
+        expect(error.name).toBe('ServiceConstructionError');
+        expect(error.message).toBe(
+          'Failed to create service ExplodingDependency in module OrderModule: DatabaseUrlMissing: db url not set',
+        );
+        expect((error as ServiceConstructionError).serviceName).toBe('ExplodingDependency');
+        expect((error as ServiceConstructionError).moduleName).toBe('OrderModule');
+        expect(error.cause).toBeInstanceOf(DatabaseUrlMissing);
+        expect((error.cause as Error).message).toBe('db url not set');
       }
+    });
+
+    test('the error carries the constructor\'s stack: its frames start at the line that threw', () => {
+      @Service()
+      class ThrowsHere {
+        constructor() {
+          throw new TypeError('bad input');
+        }
+      }
+
+      const error = bootError(() => bootProviders([ThrowsHere]));
+      const cause = error.cause as Error;
+      const frames = (stack: string | undefined): string[] => (stack ?? '').split('\n').filter((line) => /^\s+at /.test(line));
+
+      expect(error.stack!.split('\n')[0]).toBe(
+        'ServiceConstructionError: Failed to create service ThrowsHere in module OrderModule: TypeError: bad input',
+      );
+      expect(frames(cause.stack).length).toBeGreaterThan(0);
+      expect(frames(error.stack)).toEqual(frames(cause.stack));
+      expect(frames(error.stack)[0]).toContain('ThrowsHere');
+      expect(frames(error.stack)[0]).toContain('module.test.ts');
+    });
+
+    test('a provider whose constructor throws fails the boot with no consumer at all, at the throw (WI-326 b2)', () => {
+      // 0.8.x: the error was logged and the application booted without the service.
+      const constructed: string[] = [];
+
+      @Service()
+      class Before {
+        constructor() {
+          constructed.push('Before');
+        }
+      }
+
+      @Service()
+      class NobodyInjectsMe {
+        constructor() {
+          throw new RangeError('PORT out of range');
+        }
+      }
+
+      @Service()
+      class After {
+        constructor() {
+          constructed.push('After');
+        }
+      }
+
+      const error = bootError(() => bootProviders([Before, NobodyInjectsMe, After]));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(error.message).toContain('NobodyInjectsMe');
+      expect(error.message).toContain('RangeError: PORT out of range');
+      expect(error.cause).toBeInstanceOf(RangeError);
+      expect(constructed).toEqual(['Before']);
+    });
+
+    test('a thrown non-Error is the cause as it is, and heads the message as a string', () => {
+      @Service()
+      class ThrowsAString {
+        constructor() {
+          throw 'SMTP_URL is not set';
+        }
+      }
+
+      const error = bootError(() => bootProviders([ThrowsAString]));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(error.message).toBe('Failed to create service ThrowsAString in module OrderModule: SMTP_URL is not set');
+      expect(error.cause).toBe('SMTP_URL is not set');
+    });
+
+    test('a throw from initializeService(), which the framework calls right after the constructor, is reported the same way', () => {
+      // 0.8.x swallowed it like a constructor's throw, and the application booted without the service.
+      const initError = new Error('initializeService failed');
+
+      @Service()
+      class ManualInit {
+        initializeService(): void {
+          throw initError;
+        }
+      }
+
+      const error = bootError(() => bootProviders([ManualInit]));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(error.message).toBe('Failed to create service ManualInit in module OrderModule: Error: initializeService failed');
+      expect(error.cause).toBe(initError);
+    });
+
+    test('a framework error thrown from a constructor propagates unwrapped', () => {
+      const registrationError = new Error('DrizzleModule was selected as ANALYTICS but never configured.');
+      registrationError.name = 'OneBunUnconfiguredRegistrationError';
+      const resolutionError = new DependencyResolutionError('Inner', 'Missing', 'service', []);
+
+      for (const thrown of [registrationError, resolutionError]) {
+        @Service()
+        class RethrowsFrameworkError {
+          constructor() {
+            throw thrown;
+          }
+        }
+
+        expect(bootError(() => bootProviders([RethrowsFrameworkError]))).toBe(thrown);
+      }
+    });
+
+    test('a genuinely missing dependency is still a DependencyResolutionError, not a ServiceConstructionError', () => {
+      class NeverListed {}
+
+      @Service()
+      class NeedsUnlisted {}
+
+      registerDependencies(NeedsUnlisted, [NeverListed]);
+      Service()(NeverListed);
+
+      const error = bootError(() => bootProviders([NeedsUnlisted]));
+
+      expect(error).toBeInstanceOf(DependencyResolutionError);
+      expect(error).not.toBeInstanceOf(ServiceConstructionError);
+      expect((error as DependencyResolutionError).dependencyName).toBe('NeverListed');
+      expect(error.cause).toBeUndefined();
+    });
+
+    test('a throwing provider in an imported module fails the boot there, not as its importer\'s dependency (WI-326 b3)', () => {
+      @Service()
+      class ExportedButBroken {
+        constructor() {
+          throw new Error('inner module misconfigured');
+        }
+      }
+
+      @Module({ providers: [ExportedButBroken], exports: [ExportedButBroken] })
+      class BrokenInnerModule {}
+
+      @Service()
+      class ImportingConsumer {
+        constructor(readonly inner: ExportedButBroken) {}
+      }
+
+      @Module({ imports: [BrokenInnerModule], providers: [ImportingConsumer] })
+      class ImportingModule {}
+
+      const error = bootError(() => new OneBunModule(ImportingModule, mockLoggerLayer));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect((error as ServiceConstructionError).serviceName).toBe('ExportedButBroken');
+      expect((error as ServiceConstructionError).moduleName).toBe('BrokenInnerModule');
+      expect((error.cause as Error).message).toBe('inner module misconfigured');
+    });
+
+    test('a throwing provider that only a controller injects fails the boot before any controller is built (WI-326 b4)', () => {
+      @Service()
+      class ControllerOnlyDependency {
+        constructor() {
+          throw new Error('API_KEY is not set');
+        }
+      }
+
+      @CtrlDeco('/b4')
+      class B4Controller extends CtrlBase {
+        constructor(readonly dependency: ControllerOnlyDependency) {
+          super();
+        }
+      }
+
+      @Module({ controllers: [B4Controller], providers: [ControllerOnlyDependency] })
+      class B4Module {}
+
+      const error = bootError(() => new OneBunModule(B4Module, mockLoggerLayer));
+
+      expect(error).toBeInstanceOf(ServiceConstructionError);
+      expect(error.message).toBe('Failed to create service ControllerOnlyDependency in module B4Module: Error: API_KEY is not set');
     });
 
     /**
@@ -854,7 +1041,7 @@ describe('OneBunModule', () => {
         expect(winners).toEqual(['AdyenGateway', 'AdyenGateway', 'PaypalGateway', 'PaypalGateway']);
       });
 
-      test('an implementation whose constructor threw is named, as the implementation of the parameter type', () => {
+      test('an implementation whose constructor throws ends the boot with its own error, in either order', () => {
         @Service()
         class BrokenGateway extends PaymentGateway {
           constructor() {
@@ -870,11 +1057,10 @@ describe('OneBunModule', () => {
         for (const providers of [[BrokenGateway, CheckoutService], [CheckoutService, BrokenGateway]]) {
           const error = bootError(() => bootProviders(providers));
 
-          expect(error).toBeInstanceOf(DependencyResolutionError);
-          expect((error as DependencyResolutionError).targetName).toBe('CheckoutService');
-          expect((error as DependencyResolutionError).dependencyName).toBe('PaymentGateway');
-          expect(error.message).toContain('BrokenGateway (it extends PaymentGateway)');
-          expect(error.message).toContain('Failed to create service BrokenGateway');
+          expect(error).toBeInstanceOf(ServiceConstructionError);
+          expect((error as ServiceConstructionError).serviceName).toBe('BrokenGateway');
+          expect(error.message).toBe('Failed to create service BrokenGateway in module OrderModule: Error: no api key');
+          expect((error.cause as Error).message).toBe('no api key');
         }
       });
 
@@ -1016,26 +1202,16 @@ describe('OneBunModule', () => {
     });
 
     test('an @Optional() same-module dependency that was never constructed is undefined, with a warning', () => {
-      @Service()
-      class FailingDependency {
-        constructor() {
-          throw new Error('db url not set');
-        }
-      }
-
       class UndecoratedDependency {}
 
       @Service()
       class TolerantConsumer {
-        constructor(
-          @Optional() readonly failing?: FailingDependency,
-          @Optional() readonly undecorated?: UndecoratedDependency,
-        ) {}
+        constructor(@Optional() readonly undecorated?: UndecoratedDependency) {}
       }
 
       for (const providers of [
-        [FailingDependency, UndecoratedDependency, TolerantConsumer],
-        [TolerantConsumer, FailingDependency, UndecoratedDependency],
+        [UndecoratedDependency, TolerantConsumer],
+        [TolerantConsumer, UndecoratedDependency],
       ]) {
         const recorder = makeRecordingLoggerLayer();
 
@@ -1046,15 +1222,13 @@ describe('OneBunModule', () => {
         const warnings = recorder.messages('warn').filter((message) => message.includes('TolerantConsumer'));
 
         expect(consumer).toBeInstanceOf(TolerantConsumer);
-        expect(consumer!.failing).toBeUndefined();
         expect(consumer!.undecorated).toBeUndefined();
-        expect(warnings).toHaveLength(2);
-        expect(warnings[0]).toContain('Failed to create service FailingDependency');
-        expect(warnings[1]).toContain('UndecoratedDependency is listed in the providers of TolerantModule');
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain('UndecoratedDependency is listed in the providers of TolerantModule');
       }
     });
 
-    test('a consumer deferred after its @Optional() parameter was left undefined is warned about once, not per attempt', () => {
+    test('an @Optional() consumer does not keep a throwing dependency from failing the boot (0.8.2: undefined + a warning)', () => {
       @Service()
       class FailingDependency {
         constructor() {
@@ -1063,31 +1237,48 @@ describe('OneBunModule', () => {
       }
 
       @Service()
+      class TolerantConsumer {
+        constructor(@Optional() readonly failing?: FailingDependency) {}
+      }
+
+      for (const providers of [[FailingDependency, TolerantConsumer], [TolerantConsumer, FailingDependency]]) {
+        const error = bootError(() => bootProviders(providers));
+
+        expect(error).toBeInstanceOf(ServiceConstructionError);
+        expect((error as ServiceConstructionError).serviceName).toBe('FailingDependency');
+        expect((error.cause as Error).message).toBe('db url not set');
+      }
+    });
+
+    test('a consumer deferred after its @Optional() parameter was left undefined is warned about once, not per attempt', () => {
+      class UndecoratedDependency {}
+
+      @Service()
       class LaterDependency {}
 
       @Service()
       class RetriedConsumer {
         constructor(
-          @Optional() readonly failing: FailingDependency | undefined,
+          @Optional() readonly undecorated: UndecoratedDependency | undefined,
           readonly later: LaterDependency,
         ) {}
       }
 
       const recorder = makeRecordingLoggerLayer();
 
-      // RetriedConsumer reaches `failing` on both of its attempts: the first one defers on LaterDependency.
-      @Module({ providers: [FailingDependency, RetriedConsumer, LaterDependency] })
+      // RetriedConsumer reaches `undecorated` on both of its attempts: the first one defers on LaterDependency.
+      @Module({ providers: [UndecoratedDependency, RetriedConsumer, LaterDependency] })
       class RetriedModule {}
 
       const module = new OneBunModule(RetriedModule, recorder.layer);
       const consumer = module.getServiceByClass(RetriedConsumer)!;
       const warnings = recorder.messages('warn').filter((message) => message.includes('RetriedConsumer'));
 
-      expect(consumer.failing).toBeUndefined();
+      expect(consumer.undecorated).toBeUndefined();
       expect(consumer.later).toBe(module.getServiceByClass(LaterDependency)!);
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toStartWith('RetriedConsumer gets undefined for its @Optional() parameter #0 (FailingDependency)');
-      expect(warnings[0]).toContain('Failed to create service FailingDependency');
+      expect(warnings[0]).toStartWith('RetriedConsumer gets undefined for its @Optional() parameter #0 (UndecoratedDependency)');
+      expect(warnings[0]).toContain('UndecoratedDependency is listed in the providers of RetriedModule');
     });
   });
 
