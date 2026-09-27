@@ -25,7 +25,10 @@ decorated class; without it the class is constructed with NO arguments, silently
 through it 500s with no hint (a decorator on a method does not count).
 
 All four are **inherited** by a subclass controller (base entries first, then the subclass's own).
-Routes are not — a `@Get` on a base class is a 404 under the subclass.
+Routes are not — a `@Get` on a base class is a 404 under the subclass. Constructor dependencies are
+(0.9.0): a `@Controller()` subclass that declares no constructor runs the base's and is injected
+with its dependencies, `@Inject`/`@Optional()` included, when the base that declares it is
+decorated and so is every class in between. One that declares its own constructor gets only its own.
 
 ### Method-level (HTTP verbs)
 - `@Get('/path')` — GET handler

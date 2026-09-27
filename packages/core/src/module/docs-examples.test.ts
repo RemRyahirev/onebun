@@ -966,8 +966,9 @@ describe('Architecture (docs/architecture.md)', () => {
       constructor(public mailer: AutoDetectMailer) {}
     }
 
-    // A decorated subclass without a constructor of its own: the walk finds the parent's array,
-    // the OWN read the snippet shows (and DI uses) does not.
+    // A decorated subclass without a constructor of its own: the walk finds the parent's array, the
+    // OWN read the snippet shows does not — DI reads the OWN array of the class whose constructor
+    // runs, which for this one is the parent's.
     @Service()
     class InheritingNotifier extends AutoDetectNotifier {}
 
@@ -984,13 +985,15 @@ describe('Architecture (docs/architecture.md)', () => {
     // What the framework actually resolves from that metadata.
     expect(getConstructorParamTypes(AutoDetectNotifier)).toEqual([AutoDetectMailer]);
     expect(getConstructorParamTypes(UndecoratedNotifier)).toBeUndefined();
-    expect(getConstructorParamTypes(InheritingNotifier)).toBeUndefined();
+    expect(getConstructorParamTypes(InheritingNotifier)).toEqual([AutoDetectMailer]);
 
-    @Module({ providers: [AutoDetectMailer, AutoDetectNotifier] })
+    @Module({ providers: [AutoDetectMailer, AutoDetectNotifier, InheritingNotifier] })
     class AutoDetectModule {}
 
     const { module } = await bootModule(AutoDetectModule);
     expect(module.getServiceByClass(AutoDetectNotifier)!.mailer)
+      .toBe(module.getServiceByClass(AutoDetectMailer)!);
+    expect(module.getServiceByClass(InheritingNotifier)!.mailer)
       .toBe(module.getServiceByClass(AutoDetectMailer)!);
   });
 

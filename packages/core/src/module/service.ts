@@ -12,6 +12,8 @@ import type { Span } from '@opentelemetry/api';
 
 import type { SyncLogger } from '@onebun/logger';
 
+import { markDecoratedClass } from '../decorators/metadata';
+
 import { getRegistrationOptions } from './registration';
 
 /**
@@ -29,8 +31,12 @@ const META_SERVICES = new Map<
  * immediately after super() in the constructor (via ambient init context),
  * as well as through the initializeService fallback method.
  *
+ * A decorated class that declares no constructor of its own is injected with the dependencies of
+ * the constructor it inherits — its types, `@Inject` and `@Optional()` entries together.
+ *
  * @param tag - Optional Effect Context tag for the service
  * @see docs:api/services.md
+ * @see docs:api/decorators.md
  */
 export function Service<T>(tag?: Context.Tag<T, T>) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -43,6 +49,9 @@ export function Service<T>(tag?: Context.Tag<T, T>) {
       tag: serviceTag as Context.Tag<unknown, unknown>,
       impl: target as new () => unknown,
     });
+    // Decorated, so a constructor it declares has emitted types: none of its own means it declares
+    // none and is injected with the dependencies of the constructor it inherits.
+    markDecoratedClass(target);
 
     return target;
   };

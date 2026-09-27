@@ -342,6 +342,8 @@ anything generated from the routes has to pick one.
 
 **Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
 
+**Constructor dependencies are inherited** by a `@Controller()` subclass that declares no constructor: it runs the base's constructor and is injected with its dependencies, `@Inject` and `@Optional()` included, when the base declaring that constructor is decorated (a `@Controller()` or a `@Service()`) and so is every class in between. A subclass that declares its own constructor gets its own parameters only. See [Inherited Constructors](/api/decorators#inherited-constructors).
+
 ## Lifecycle Hooks
 
 Controllers support the same lifecycle hooks as services (`OnModuleInit`, `OnApplicationInit`, `OnModuleDestroy`, `BeforeApplicationDestroy`, `OnApplicationDestroy`). See [Services API — Lifecycle Hooks](/api/services#lifecycle-hooks) for the full reference and execution order.

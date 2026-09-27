@@ -126,8 +126,9 @@ export class UserService extends BaseService {
 **Reflect metadata** ([details](#reflect-metadata-interop)):
 - Importing `@onebun/core` installs the complete global Reflect Metadata API (nine functions, per-member keys, prototype walk) unless one is already there; the core has NO dependency on `reflect-metadata`
 - `reflect-metadata` (or a library that imports it: tsyringe, `@simplewebauthn/server`) may be imported before OR after the core; a later 0.2.x joins the registry the core publishes (`Symbol.for('@reflect-metadata:registry')`) and keeps earlier metadata. Recommend `reflect-metadata` >= 0.2.2 to apps that import it
-- DI reads OWN `design:paramtypes` only: a subclass without its own constructor gets no dependencies, an undecorated subclass with its own constructor gets none either — repeat the constructor and keep a decorator
-- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages, each naming the decorator for the class's kind (`@Middleware()` for middleware, `@Controller()` or `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise): `<Class> declares no constructor of its own ...` (fix: declare the constructor, and give the class a decorator if it has none) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`, or `@Middleware()` to middleware). An undecorated class whose own constructor takes no parameters records nothing either, so it cannot be told from one with no constructor and gets the first message, worded for both (`... (or, without a decorator, one whose parameter types were not recorded) ...`); it is harmless when that constructor passes the parent's dependencies itself. Neither shape borrows the parent's types — not even by position — in any import order, `reflect-metadata` imported BEFORE the core included
+- DI reads each class's OWN `design:paramtypes` (never the global prototype walk) and decides constructor inheritance itself ([details](#inherited-constructors)): a DECORATED class that declares no constructor is injected with the dependencies of the constructor it inherits — types, `@Inject(Class)`, `@Inject(TOKEN)` and `@Optional()` all from the nearest ancestor that declares it, through any number of decorated classes that declare none. A class that declares its own constructor never inherits, decorated or not. An undecorated class never inherits (its declared constructor records nothing, so it cannot be told from none), and neither does a class with an undecorated class between it and that ancestor. The answer is the same in any import order of `reflect-metadata`, imported BEFORE the core included
+- Every parameter of an inherited constructor is resolved like one the subclass declares, so ANY one that cannot be resolved fails `app.start()` / `TestingModule.compile()` for the SUBCLASS. Each error says the parameter is inherited, starting `<Class> declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from <Parent> (<Types>)`: no module provides it → `DependencyResolutionError` (first suggestion; fix: provide it, mark it `@Optional()` in the parent, or declare a constructor in the subclass that does not take it); it injects the subclass back → `CircularDependencyError` (the note is in `notes`, printed after the services; fix: a constructor in the subclass that does not take it, or break the cycle elsewhere); the subclass's module selects two registrations of its type → `OneBunAmbiguousRegistrationError` (fix: `@Inject(TOKEN)` on it in the parent); a parent's `@Inject(TOKEN)` the subclass's module did not select → `OneBunUnselectedRegistrationError` naming the subclass (fix: `forFeature(TOKEN)` in that module's imports). One shape boots with a surprise: a parent's `@Optional()` parameter typed as the parent itself (`Node(@Optional() next?: Node)` + `@Service() class Leaf extends Node {}`) gets `undefined` plus a warning, and `Leaf` gets the `Node`; `constructor() { super(); }` in `Leaf` gives `Node` the `Leaf` instead. A self-typed parameter waits for a subclass that declares its own constructor
+- The module logs a startup warning for a class that gets no constructor types although an ancestor takes dependencies — services, controllers, guards, middleware, interceptors, filters — naming the decorator for the kind (`@Middleware()` for middleware, `@Controller()` or `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise): `<Class> declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded) ...` for an undecorated class (fix: give it a decorator — that alone makes it inherit; harmless when its own `constructor()` supplies the parent's dependencies itself), `<Class> declares a constructor with parameters, but no types were emitted ...` for an undecorated class with parameters (fix: add the decorator), and `<Class> declares no constructor of its own, but it is built with no constructor arguments: <Mid>, which it extends, carries no decorator ...` / `<Class> declares no constructor of its own and runs the one it inherits from <Mid>, which declares parameters ...` for a decorated class stopped by an undecorated class in between (fix: decorate `<Mid>`, or declare the constructor in `<Class>`)
 
 </llm-only>
 
@@ -1003,6 +1004,143 @@ export class NotificationService extends BaseService {
 }
 ```
 
+### Inherited Constructors {#inherited-constructors}
+
+A decorated class that declares no constructor runs the one it inherits, and DI injects it with
+that constructor's dependencies. Everything the constructor declares comes along — the parameter
+types, `@Inject(Class)`, an `@Inject(TOKEN)` selection and `@Optional()` — from the nearest ancestor
+that declares the constructor:
+
+```typescript
+import {
+  BaseService,
+  getConstructorParamTypes,
+  Optional,
+  Service,
+} from '@onebun/core';
+
+@Service()
+export class Clock extends BaseService {}
+
+@Service()
+export class ReportSink extends BaseService {}
+
+@Service()
+export class Scheduler extends BaseService {
+  constructor(
+    protected readonly clock: Clock,
+    @Optional() protected readonly reports?: ReportSink,
+  ) {
+    super();
+  }
+}
+
+// No constructor of its own: it runs Scheduler's, so `clock` is injected
+// and `reports` stays optional
+@Service()
+export class NightlyScheduler extends Scheduler {}
+
+// A constructor of its own: it gets its own parameters, never Scheduler's
+@Service()
+export class ManualScheduler extends Scheduler {
+  constructor() {
+    super(new Clock());
+  }
+}
+
+getConstructorParamTypes(NightlyScheduler); // [Clock, ReportSink]
+getConstructorParamTypes(ManualScheduler);  // undefined: it takes nothing
+```
+
+The rules, the same for services, controllers, gateways, middleware, guards, interceptors and
+filters:
+
+- **Only a decorated class inherits.** TypeScript emits constructor types for a class with a
+  decorator whenever it declares a constructor — `[]` for one that takes nothing — so a decorated
+  class with none of its own declares no constructor. An undecorated class records nothing either
+  way: `class G extends Base {}` and `class G extends Base { constructor(opts = {}) { ... } }` look
+  the same, and handing the second one its parent's dependencies would put them in the wrong
+  parameters. An undecorated subclass is built with no constructor arguments; give it the
+  decorator of its kind — `@Service()`, `@Middleware()` for middleware, `@Controller()` for a
+  controller.
+- **A class that declares its own constructor never inherits**, decorated or not. It gets its own
+  parameters and passes the parent's to `super(...)` itself.
+- **Every class in between is decorated too.** `@Service() class Leaf extends Base {}`, where
+  `Base` is an undecorated class that extends the one declaring the constructor, inherits nothing:
+  DI cannot tell whether `Base` declares a constructor of its own. Decorate `Base` as well, or
+  declare the constructor in `Leaf`.
+
+`getConstructorParamTypes`, `isOptionalParam` and `getInjectToken` answer with the inherited
+metadata, so an [audit](#auditing-constructor-parameters) sees what DI injects.
+
+A parameter of the inherited constructor is resolved like one the subclass declared, so the boot
+fails for the subclass in every way it would fail for the parent. The subclass never names the
+parameter, so each of these errors says it comes from the inherited constructor, starting with
+`NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Scheduler (Clock, ReportSink)`:
+
+- **No module provides it**: `DependencyResolutionError` for the subclass. The first suggestion
+  goes on `Provide Clock, mark that parameter @Optional() in Scheduler, or declare a constructor in
+  NightlyScheduler that does not take it.`
+- **It injects the subclass back**: `CircularDependencyError`. The chain names the subclass as if
+  it asked for the dependency itself; the error's `notes`, printed after the unresolved services,
+  go on `that is where it needs <Type>. Declare a constructor in <Class> that does not take it to
+  break the cycle.` An `@Optional()` parameter typed as the parent's own class,
+  `Node(@Optional() next?: Node)` with `@Service() class Leaf extends Node {}`, fails nothing:
+  `Node` is built first and gets `undefined`, with a warning ending `Declare a constructor in Leaf
+  that does not take Node to have it injected here.`, and `Leaf` gets the `Node`.
+- **The subclass's module selects two registrations of its type**:
+  `OneBunAmbiguousRegistrationError`, ending `Name the registration there with @Inject(TOKEN), or
+  declare a constructor in <Class> that does not take it.`
+- **The parent names a registration with `@Inject(TOKEN)` that the subclass's module did not
+  select**: `OneBunUnselectedRegistrationError` naming the subclass, ending `..., and that is where
+  the token comes from. Select it in this module, or declare a constructor in <Class> that does not
+  take it.`
+
+A class that gets no constructor arguments although an ancestor takes dependencies is named at
+startup, once, with the fix for its shape:
+
+- `<Class> declares no constructor of its own (or, without a decorator, one whose parameter types
+  were not recorded) ...` — an undecorated class. Give it a decorator: that alone makes a class
+  without a constructor inherit. The warning is worded for both shapes because an undecorated
+  `constructor() { super(new Dep()); }` looks the same; for that one it is harmless.
+- `<Class> declares a constructor with parameters, but no types were emitted ...` — an undecorated
+  class with constructor parameters. Add the decorator.
+- `<Class> declares no constructor of its own, but it is built with no constructor arguments: <Base>,
+  which it extends, carries no decorator ...`, or `... runs the one it inherits from <Base>, which
+  declares parameters ...` — a decorated class stopped by an undecorated class in between. Decorate
+  `<Base>`, or declare the constructor in `<Class>`.
+
+::: warning Upgrading to 0.9.0
+Before 0.9.0 a class that declared no constructor got no constructor arguments, decorated or not
+(since 0.8.2 with a startup warning, `<Class> declares no constructor of its own ...`; for 0.8.1
+see [below](#reflect-metadata-interop)). Since 0.9.0 a decorated one is injected, which changes two
+things at boot:
+
+- A parameter of the inherited constructor that cannot be resolved now fails `app.start()` and
+  `TestingModule.compile()` for the subclass, where the subclass used to boot with the field
+  `undefined`. Each error says the parameter is inherited ([above](#inherited-constructors)):
+  - no module provides it — `DependencyResolutionError`: provide it, or mark the parameter
+    `@Optional()` in the parent;
+  - it injects the subclass back — `CircularDependencyError`: break the cycle;
+  - the subclass's module selects two registrations of its type —
+    `OneBunAmbiguousRegistrationError`: name one with `@Inject(TOKEN)` in the parent;
+  - the parent's `@Inject(TOKEN)` names a registration the subclass's module did not select —
+    `OneBunUnselectedRegistrationError`: add `forFeature(TOKEN)` to that module's imports.
+
+  In every case, declaring a constructor in the subclass that does not take the parameter builds
+  it as before.
+- A subclass that relied on such a field being `undefined` — to skip work when it is absent — now
+  receives the instance. Declare the constructor in the subclass to keep it out.
+- A parent whose `@Optional()` parameter is typed as its own class, `Node(@Optional() next?: Node)`
+  with `@Service() class Leaf extends Node {}`, no longer receives the `Leaf` there: the `Leaf` now
+  takes that parameter too and receives the `Node`, so `Node` is built first and gets `undefined`,
+  with a warning. Declare the constructor in `Leaf` (`constructor() { super(); }`) to give `Node`
+  the `Leaf` again.
+
+Apart from such a parent, a class that declares its own constructor, and every undecorated class,
+is built exactly as before.
+:::
+
 ## Middleware Decorators
 
 ### @Middleware()
@@ -1433,66 +1571,25 @@ If your application imports `reflect-metadata` itself, use **0.2.2 or later**. 0
 metadata of classes decorated before it loaded whenever it has to adopt an older implementation
 that has no registry (a 0.1.x copy loaded earlier, for example).
 
-Constructor types are read **own**, never inherited. A decorated subclass that declares no
-constructor of its own has no `design:paramtypes` of its own, so it is built with no dependencies,
-and the module logs a warning at startup that names the class, the parent and the types it did not
-get. Declare the constructor again to have them injected:
-
-```typescript
-import { BaseService, getConstructorParamTypes, Service } from '@onebun/core';
-
-@Service()
-export class Clock extends BaseService {}
-
-@Service()
-export class Scheduler extends BaseService {
-  constructor(protected readonly clock: Clock) {
-    super();
-  }
-}
-
-// No constructor of its own: nothing is injected, `this.clock` is undefined,
-// and startup warns "NightlyScheduler declares no constructor of its own ..."
-@Service()
-export class NightlyScheduler extends Scheduler {}
-
-// The constructor declared again: `clock` is injected
-@Service()
-export class HourlyScheduler extends Scheduler {
-  constructor(clock: Clock) {
-    super(clock);
-  }
-}
-
-getConstructorParamTypes(Scheduler);        // [Clock]
-getConstructorParamTypes(NightlyScheduler); // undefined
-getConstructorParamTypes(HourlyScheduler);  // [Clock]
-```
-
-The parent's types are not borrowed because a subclass may take different parameters: a guard
-without a decorator that extends a decorated base guard and declares `constructor(audit: AuditLog)`
-would otherwise receive the base's first dependency in its `audit` slot. An undecorated class emits
-no metadata at all, so it is built with no dependencies — add a decorator (`@Service()`, or
-`@Middleware()` for middleware) to have its own constructor injected. When such a class declares
-constructor parameters and extends a class that takes dependencies, startup warns about it too:
-`<Class> declares a constructor with parameters, but no types were emitted for them ...`. One whose
-constructor takes no parameters — `constructor() { super(new TokenStore()); }` — records nothing
-either, so it cannot be told from a class that declares none: it gets the first warning, worded for
-both (`<Class> declares no constructor of its own (or, without a decorator, one whose parameter types
-were not recorded) ...`), which is harmless when that constructor passes the parent's dependencies
-itself.
+DI reads each class's **own** constructor types from the global `Reflect` (`getOwnMetadata`), never
+through its prototype walk, and decides constructor inheritance itself, per class — see
+[Inherited Constructors](#inherited-constructors). The walk answers with the parent's array whether
+or not the subclass declares a constructor of its own: a guard without a decorator that extends a
+decorated base guard and declares `constructor(audit: AuditLog)` would receive the base's first
+dependency in its `audit` slot. Deciding per class also gives every import order the same answer,
+whichever implementation owns the global.
 
 **The import order of `reflect-metadata` does not change this.** The core reads constructor types
-with `getOwnMetadata`, never with the prototype-walking `getMetadata`, so a subclass with no
-constructor types of its own gets none of its parent's even when `reflect-metadata` (or a library
-that imports it, such as `@simplewebauthn/server`) is imported BEFORE the core. The app still boots,
-so the two startup warnings above are how to find each class this affects:
+with `getOwnMetadata` and decides inheritance itself, so every import order gives the same answer,
+also when `reflect-metadata` (or a library that imports it, such as `@simplewebauthn/server`) is
+imported BEFORE the core: a decorated subclass that declares no constructor inherits, together with
+the parent's `@Inject` and `@Optional()`, and the two other shapes get nothing. The app still boots,
+so the startup warnings are how to find each class this affects:
 
-- `<Class> declares no constructor of its own ...` — a subclass without a constructor gets none of
-  its parent's dependencies, whether it is decorated or an undecorated guard, interceptor, filter
-  or middleware. Declare the constructor in it and pass them to `super(...)`. An undecorated one
-  needs a decorator as well — `@Service()`, or `@Middleware()` for middleware — or the constructor
-  it declares records no types either and the next warning takes over.
+- `<Class> declares no constructor of its own (or, without a decorator, ...) ...` — an undecorated
+  guard, interceptor, filter or middleware without a constructor gets none of its parent's
+  dependencies. Give it a decorator — `@Service()`, or `@Middleware()` for middleware — and it
+  inherits them.
 - `<Class> declares a constructor with parameters, but no types were emitted ...` — an undecorated
   guard, interceptor, filter or middleware that extends a decorated class and declares its own
   constructor receives no types at all, not even the parent's by position. Add `@Service()` to it,

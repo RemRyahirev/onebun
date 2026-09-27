@@ -112,6 +112,30 @@ export function setConstructorParamTypes(target: Function, types: (Function | un
   defineMetadata('design:paramtypes', types, target);
 }
 
+/**
+ * Classes a OneBun class decorator was applied to: `@Service()`, `@Controller()` (the original class
+ * and its wrapper), `@Middleware()`, `@WebSocketGateway()`.
+ *
+ * TypeScript emits `design:paramtypes` for a decorated class whenever it declares a constructor —
+ * `[]` for a `constructor()` that takes nothing — and never for one that declares none. So for a
+ * class in this set, and only for one, "no constructor metadata of its own" means "declares no
+ * constructor, and runs the one it inherits". An undecorated class records nothing either way.
+ *
+ * A WeakSet rather than a marker on the class: a static property is inherited, and an undecorated
+ * subclass of a decorated class must not count as decorated.
+ */
+const decoratedClassRegistry = new WeakSet<Function>();
+
+/** Record that a OneBun class decorator was applied to `target`. */
+export function markDecoratedClass(target: Function): void {
+  decoratedClassRegistry.add(target);
+}
+
+/** Whether a OneBun class decorator was applied to `target` itself (not to an ancestor). */
+export function isDecoratedClass(target: Function): boolean {
+  return decoratedClassRegistry.has(target);
+}
+
 /* -------------------------------------------------------------------------------------------------
  * The global Reflect Metadata API
  *
@@ -554,9 +578,10 @@ installGlobalReflectMetadata();
 
 /**
  * `key` as the target's OWN metadata on the global `Reflect`, or `undefined`. Never walks the
- * prototype chain: a class that declares no constructor of its own has no `design:paramtypes` of
- * its own, and handing it its parent's would inject by position into a constructor that may take
- * different parameters.
+ * prototype chain: an undecorated class that declares a constructor has no `design:paramtypes` of
+ * its own either, and handing it its parent's would inject by position into a constructor that may
+ * take different parameters. Constructor inheritance is decided per class, with all four sources
+ * of constructor metadata together — see `traceConstructorMetadata` in decorators.ts.
  *
  * A global with no `getOwnMetadata` is a partial one installed before this module (an older copy
  * of it); its `getMetadata` never walked, so it is the own read there. A throwing implementation
@@ -653,7 +678,8 @@ export function isInjectableParamType(type: Function | undefined): type is Funct
 export function getConstructorParamTypes(target: Function): (Function | undefined)[] | undefined {
   // The global Reflect first (our API, or a reflect-metadata the host loaded), then our own store.
   // Either may hold the array depending on how the class was decorated. OWN metadata only, in
-  // both: see getOwnGlobalMetadata for why a subclass must not borrow its parent's array.
+  // both: this is the raw per-class reader. Which class's array applies to a subclass that
+  // inherits its constructor is decided in decorators.ts, together with @Inject and @Optional.
   let types = getOwnGlobalMetadata('design:paramtypes', target);
 
   if (!Array.isArray(types) || types.length === 0) {

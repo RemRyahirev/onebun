@@ -71,7 +71,7 @@ export class CounterService extends BaseService {
 
 ### Service with Dependencies
 
-Dependencies are automatically injected via constructor. Logger and config are available immediately after `super()`:
+Dependencies are automatically injected via constructor. Logger and config are available immediately after `super()`. A `@Service()` subclass that declares no constructor of its own is injected with the dependencies of the constructor it inherits — see [Inherited Constructors](/api/decorators#inherited-constructors):
 
 ```typescript
 import { Service, BaseService } from '@onebun/core';
@@ -149,6 +149,7 @@ The error message searches all registered modules and reports:
 - Whether the dependency exists but is not exported from its module
 - Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
 - Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
+- Whether it is a parameter of a constructor the class INHERITS: a `@Service()` class that declares no constructor is injected with the dependencies of its parent's (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the first suggestion says so and names the parent — `NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Scheduler (Clock, ReportSink). ...`. Since 0.9.0; such a class used to boot with the field `undefined`
 
 Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it does not suppress the "decorate it with `@Service()` and list it in a module's providers" advice, which prints whenever nothing else matched.
 
@@ -208,6 +209,13 @@ Unresolved services: ServiceA, ServiceB
 ```
 
 Restructure your code to break the cycle — e.g., extract the shared logic into a third service.
+
+A class in the chain that declares no constructor is injected with the parameters of the one it
+inherits (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the chain names
+it for a dependency it never mentions. The error then carries a note for it in `notes`, printed
+after the unresolved services: `- UserRepo declares no constructor of its own, so it is injected
+with the parameters of the constructor it inherits from RepoBase (EventBus): that is where it needs
+EventBus (EventBusImpl). ...`. Since 0.9.0.
 
 A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
 with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of

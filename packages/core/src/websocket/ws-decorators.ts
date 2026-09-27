@@ -20,7 +20,7 @@ import {
   INTERCEPTORS_METADATA,
   registerPipelineReapplyHook,
 } from '../decorators/decorators';
-import { Reflect } from '../decorators/metadata';
+import { markDecoratedClass, Reflect } from '../decorators/metadata';
 
 import { WsHandlerType, WsParamType } from './ws.types';
 
@@ -75,6 +75,8 @@ export function WebSocketGateway(options?: WebSocketGatewayOptions) {
 
     META_GATEWAYS.set(target, metadata);
     Reflect.defineMetadata(WS_GATEWAY_METADATA, metadata, target);
+    // A gateway is constructed by DI like a controller: see markDecoratedClass.
+    markDecoratedClass(target);
 
     return target;
   };

@@ -45,7 +45,12 @@ export class DependencyResolutionError extends OneBunBootstrapError {
  * cycle itself; a provider that merely waits on it is listed in `unresolvedServices`.
  * An acyclic graph never produces this error, whatever the order of its `providers`.
  *
+ * `notes` explains a link of the chain the classes do not show: a decorated class in the chain
+ * that declares no constructor is injected with the parameters of the constructor it inherits, so
+ * its dependency is named by its parent. Each note is listed after the services, one per line.
+ *
  * @see docs:api/services.md
+ * @see docs:api/decorators.md
  */
 export class CircularDependencyError extends OneBunBootstrapError {
   override name = 'CircularDependencyError';
@@ -54,11 +59,13 @@ export class CircularDependencyError extends OneBunBootstrapError {
     public readonly moduleName: string,
     public readonly chain: string,
     public readonly unresolvedServices: string[],
+    public readonly notes: string[] = [],
   ) {
     super(
       `Circular dependency detected in module ${moduleName}!\n` +
         `Dependency chain: ${chain}\n` +
-        `Unresolved services: ${unresolvedServices.join(', ')}`,
+        `Unresolved services: ${unresolvedServices.join(', ')}` +
+        notes.map((note) => `\n  - ${note}`).join(''),
     );
   }
 }

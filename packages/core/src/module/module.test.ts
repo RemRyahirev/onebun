@@ -3789,10 +3789,10 @@ describe('OneBunModule', () => {
   });
 
   /**
-   * DI reads a class's OWN constructor types, never its parent's (FB-23), so a subclass that
-   * declares no constructor is built without its parent's dependencies. It boots, and with
-   * reflect-metadata imported before the core 0.8.1 borrowed the parent's types instead — so the
-   * warning is what stops that difference from surfacing only as a 500 at request time.
+   * A DECORATED class that declares no constructor is injected with the dependencies of the one it
+   * inherits (WI-407; constructor-inheritance.test.ts covers the four metadata sources). An
+   * undecorated class is not: without a decorator nothing tells a constructor it declares from none.
+   * Such a class boots and fails only at request time, so the warning is what names it.
    */
   describe('a class that declares no constructor under a parent with dependencies', () => {
     const { clearGlobalModules } = require('../decorators/decorators');
@@ -3824,7 +3824,7 @@ describe('OneBunModule', () => {
     const inheritedWarnings = (recorder: ReturnType<typeof makeRecordingLoggerLayer>, name: string): string[] =>
       recorder.messages('warn').filter((message) => message.startsWith(`${name} declares no constructor`));
 
-    test('a @Service() subclass gets none of them, and the module says so once', () => {
+    test('a @Service() subclass is injected with them, and nothing is reported', () => {
       @Service()
       class WelcomeNotifier extends Notifier {}
 
@@ -3834,13 +3834,9 @@ describe('OneBunModule', () => {
       class NotifierModule {}
 
       const module = new OneBunModule(NotifierModule, recorder.layer);
-      const warnings = inheritedWarnings(recorder, 'WelcomeNotifier');
 
-      expect(module.getServiceByClass(WelcomeNotifier)!.mailer).toBeUndefined();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('If it inherits the constructor of Notifier, which takes (Mailer)');
-      expect(warnings[0]).toContain('declare the constructor in WelcomeNotifier with those parameters');
-      expect(warnings[0]).toEndWith('give WelcomeNotifier a decorator (@Service()) if it has none.');
+      expect(module.getServiceByClass(WelcomeNotifier)!.mailer).toBe(module.getServiceByClass(Mailer)!);
+      expect(inheritedWarnings(recorder, 'WelcomeNotifier')).toEqual([]);
     });
 
     test('a subclass that declares its constructor, or whose parents take nothing, is not reported', () => {
@@ -3881,7 +3877,7 @@ describe('OneBunModule', () => {
       expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
     });
 
-    test('a @Controller() subclass is reported through the controller wrapper', async () => {
+    test('a @Controller() subclass is injected through the controller wrapper, and nothing is reported', async () => {
       @CtrlDeco('/notify')
       class NotifyController extends CtrlBase {
         constructor(readonly mailer: Mailer) {
@@ -3905,10 +3901,8 @@ describe('OneBunModule', () => {
       const warnings = inheritedWarnings(recorder, 'WelcomeController');
 
       expect((module.getControllerInstance(NotifyController) as NotifyController).mailer).toBeInstanceOf(Mailer);
-      expect(welcome.mailer).toBeUndefined();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('If it inherits the constructor of NotifyController, which takes (Mailer)');
-      expect(warnings[0]).toContain('a decorator (@Controller()) if it has none');
+      expect(welcome.mailer).toBeInstanceOf(Mailer);
+      expect(warnings).toEqual([]);
       expect(inheritedWarnings(recorder, 'NotifyController')).toEqual([]);
     });
 
@@ -3935,9 +3929,10 @@ describe('OneBunModule', () => {
 
       expect(inheritedWarnings(recorder, 'InheritingGuard')).toHaveLength(1);
       expect(inheritedWarnings(recorder, 'InheritingGuard')[0]).toContain('constructor of MailingGuard, which takes (Mailer)');
-      // Undecorated as well: declaring the constructor alone would still leave its types unrecorded.
+      // Undecorated: the decorator alone is the fix, since a decorated class that declares no
+      // constructor is injected with the dependencies of the one it inherits.
       expect(inheritedWarnings(recorder, 'InheritingGuard')[0])
-        .toContain('pass them to super(...), and give InheritingGuard a decorator (@Service()) if it has none');
+        .toEndWith('Give InheritingGuard a decorator (@Service()) to have them injected.');
     });
 
     /**
@@ -4060,7 +4055,7 @@ describe('OneBunModule', () => {
       expect(declaredWarnings).toHaveLength(1);
       expect(declaredWarnings[0]).toEndWith('Add @Middleware() to StrictMiddleware to have its constructor injected.');
       expect(inheriting).toHaveLength(1);
-      expect(inheriting[0]).toEndWith('give InheritingMiddleware a decorator (@Middleware()) if it has none.');
+      expect(inheriting[0]).toEndWith('Give InheritingMiddleware a decorator (@Middleware()) to have them injected.');
       expect(recorder.messages('warn').filter((message) => message.includes('@Service()'))).toEqual([]);
     });
   });

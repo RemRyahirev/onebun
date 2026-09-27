@@ -75,10 +75,10 @@ const HEALTHY = {
   early: ['EarlyDep'],
   late: ['EarlyDep'],
   parent: ['EarlyDep'],
-  child: null,
+  child: ['EarlyDep'],
   earlyProps: ['String', 'Number'],
   lateProps: ['String', 'Number'],
-  injected: { early: true, late: true },
+  injected: { early: true, late: true, child: true },
   http: 200,
   body: { success: true, result: { resolved: true } },
 };
@@ -131,16 +131,18 @@ describe('reflect-metadata loaded before @onebun/core', () => {
   });
 });
 
-describe('constructor types are read OWN, in every order', () => {
+describe('constructor types are read OWN, and inherited per class, in every order', () => {
   it('a decorated subclass without a constructor gets the same answer with 0.2.x before and after core', () => {
     const before = scenario('rm02,core,early');
     const after = scenario('core,early,token,rm02');
 
-    // A walk would hand Child its parent's [EarlyDep] when reflect-metadata came first and
-    // nothing when core did; own-only answers "none" both ways. Inheriting constructor
-    // dependencies is a separate change (WI-407).
-    expect(before.child).toBeNull();
-    expect(after.child).toBeNull();
+    // A global prototype walk would hand Child its parent's [EarlyDep] only when reflect-metadata
+    // came first. DI reads OWN metadata and decides inheritance itself (WI-407): a decorated class
+    // that declares no constructor gets its parent's, whichever implementation owns the global.
+    expect(before.child).toEqual(['EarlyDep']);
+    expect(after.child).toEqual(['EarlyDep']);
+    expect(before.injected).toMatchObject({ child: true });
+    expect(after.injected).toMatchObject({ child: true });
     expect(before.parent).toEqual(['EarlyDep']);
     expect(after.parent).toEqual(['EarlyDep']);
   });
@@ -292,7 +294,7 @@ describe('the global Reflect Metadata API core installs', () => {
     expect(typeof registry.setProvider).toBe('function');
   });
 
-  it('leaves DI reading own paramtypes: a decorated subclass without a constructor gets none', () => {
+  it('leaves DI reading own paramtypes: only a decorated subclass without a constructor gets its parent\'s', () => {
     @Service()
     class Dependency {}
 
@@ -304,9 +306,15 @@ describe('the global Reflect Metadata API core installs', () => {
     @Service()
     class ChildService extends ParentService {}
 
+    // Undecorated, so nothing tells whether it declares a constructor: the global walk answers the
+    // parent's array, DI does not use it.
+    class UndecoratedChild extends ParentService {}
+
     expect(getConstructorParamTypes(ParentService)).toEqual([Dependency]);
-    expect(globalReflect.getMetadata('design:paramtypes', ChildService)).toEqual([Dependency]);
-    expect(getConstructorParamTypes(ChildService)).toBeUndefined();
+    expect(globalReflect.getOwnMetadata('design:paramtypes', ChildService)).toBeUndefined();
+    expect(getConstructorParamTypes(ChildService)).toEqual([Dependency]);
+    expect(globalReflect.getMetadata('design:paramtypes', UndecoratedChild)).toEqual([Dependency]);
+    expect(getConstructorParamTypes(UndecoratedChild)).toBeUndefined();
   });
 });
 

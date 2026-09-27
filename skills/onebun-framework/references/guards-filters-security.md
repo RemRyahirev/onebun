@@ -187,12 +187,14 @@ parameter types left to fail on (next paragraph).
 `design:paramtypes` metadata DI reads only for classes with at least one decorator, so an
 undecorated guard with constructor parameters receives `undefined` for every one of them and
 nothing fails at startup either: there are no parameter types left to fail on. That holds for an
-undecorated guard that EXTENDS a decorated base guard too: DI reads a class's OWN
-`design:paramtypes`, never its parent's, so the subclass does not receive the base's dependencies
-by position — whatever the import order of `reflect-metadata`, and even when its parameters match
-the base's. Decorate the subclass and declare its constructor to have it injected. Startup warns
-about such a subclass (`<Guard> declares a constructor with parameters, but no types were emitted
-...`): add `@Service()` to it.
+undecorated guard that EXTENDS a decorated base guard too: without a decorator nothing tells a
+constructor it declares from none, so DI never hands it the base's dependencies — by position into
+parameters that may differ — whatever the import order of `reflect-metadata`, and even when its
+parameters match the base's. Decorate the subclass: one that declares no constructor is then
+injected with the base guard's constructor dependencies, `@Inject` and `@Optional()` included
+(since 0.9.0), and one that declares its own gets its own parameters. Startup warns about an
+undecorated subclass (`<Guard> declares a constructor with parameters, but no types were emitted
+...`, or `<Guard> declares no constructor of its own ...`): add `@Service()` to it.
 
 **An INSTANCE passed to `@UseGuards` is shared, a CLASS is not.** `@UseGuards(new SomeGuard(...))`
 hands over one object built at decoration time, and that single object serves every concurrent

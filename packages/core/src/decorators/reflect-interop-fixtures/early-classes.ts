@@ -48,6 +48,10 @@ export class Parent extends BaseService {
   }
 }
 
-/** Declares no constructor, so it has no `design:paramtypes` of its own — only its parent does. */
+/**
+ * Declares no constructor, so it has no `design:paramtypes` of its own — only its parent does. It is
+ * decorated, so DI knows it runs the inherited constructor and injects the parent's dependencies:
+ * read through the parent's OWN metadata, which answers the same in every import order.
+ */
 @Service()
 export class Child extends Parent {}
