@@ -17,6 +17,8 @@ import {
   Runtime,
 } from 'effect';
 
+import { runPinnedRequest } from './connect-address-fixtures/fixture-protocol';
+
 import {
   calculateRetryDelay,
   createHttpClient,
@@ -378,6 +380,31 @@ describe('Requests API Documentation Examples', () => {
         await client.get('/login', { redirect: '/home' });
 
         expect(server.calls[0]?.path).toBe('/login?redirect=%2Fhome');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should keep a record with a config name query data only as the second of three arguments', async () => {
+      // From docs (warning): "A record someone else wrote goes second of three"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        const query = { q: 'shoes', tracing: 'x', url: '/admin' };
+
+        await client.get('/search', query);
+        await client.get('/search', query, undefined);
+        await client.get('/search', query, {});
+
+        expect(server.calls.map((call) => call.path)).toEqual([
+          '/admin',
+          '/admin',
+          '/search?q=shoes&tracing=x&url=%2Fadmin',
+        ]);
       } finally {
         server.stop();
       }
@@ -1675,6 +1702,195 @@ describe('Requests API Documentation Examples', () => {
       } finally {
         proxy.stop(true);
         storage.stop();
+      }
+    });
+  });
+
+  describe('Connecting to a validated address (docs/api/requests.md)', () => {
+    /**
+     * On 127.0.0.1. `/redirect?to=<url>` answers 302 with that `Location`; anything else answers
+     * 200 with the `Host` it got. Records each request's `Host` and path.
+     */
+    function startAddressServer(): { port: number; arrivals: { host: string | null; path: string }[]; stop(): void } {
+      const arrivals: { host: string | null; path: string }[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          arrivals.push({ host: req.headers.get('host'), path: url.pathname });
+
+          return url.pathname === '/redirect'
+            ? new Response(null, { status: 302, headers: { location: url.searchParams.get('to') ?? '' } })
+            : Response.json({ host: req.headers.get('host') });
+        },
+      });
+
+      return { port: server.port!, arrivals, stop: () => server.stop(true) };
+    }
+
+    /**
+     * @source docs:api/requests.md#connect-address
+     */
+    it('should connect to the validated address, with the host name in Host', async () => {
+      // From docs: "Pass the IP address you validated, and the request connects to that address
+      // without a lookup" — the snippet with `lookup` answering for a name that resolves nowhere,
+      // so reaching the server at all proves no lookup of it was made
+      const server = startAddressServer();
+      const answers = new Map([['preview.test', '127.0.0.1'], ['internal.test', '10.0.0.5']]);
+      const lookup = async (hostname: string) => await Promise.resolve({ address: answers.get(hostname) ?? '' });
+      const isAllowedAddress = (address: string) => address === '127.0.0.1';
+
+      try {
+        const client = createHttpClient({ timeout: 5000 });
+
+        async function fetchPreview(url: string) {
+          const { address } = await lookup(new URL(url).hostname);
+
+          if (!isAllowedAddress(address)) {
+            throw new Error(`${url} resolves to an address this service may not call`);
+          }
+
+          return await client.get(url, undefined, { connectAddress: address });
+        }
+
+        const preview = await fetchPreview(`http://preview.test:${server.port}/page`);
+
+        // "Host is the URL's host, with its port when that is not the scheme's default"
+        expect(preview.success && preview.result).toEqual({ host: `preview.test:${server.port}` });
+        expect(server.arrivals).toEqual([{ host: `preview.test:${server.port}`, path: '/page' }]);
+
+        await expect(fetchPreview(`http://internal.test:${server.port}/admin`)).rejects.toThrow('may not call');
+        expect(server.arrivals).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-redirects
+     */
+    it('should follow a redirect to the same host and refuse one to another host', async () => {
+      // From docs: "A redirect to another host fails with REDIRECT_ERROR, details.reason:
+      // 'other-host', before that host is contacted ... an IP literal in the Location included"
+      const a = startAddressServer();
+      const b = startAddressServer();
+
+      try {
+        const client = createHttpClient();
+        const via = (location: string) =>
+          `http://a.test:${a.port}/redirect?to=${encodeURIComponent(location)}`;
+
+        const same = await client.get(via(`http://a.test:${b.port}/moved`), undefined, { connectAddress: '127.0.0.1' });
+        expect(same.success && same.result).toEqual({ host: `a.test:${b.port}` });
+
+        b.arrivals.length = 0;
+        const other = await Effect.runPromise(Effect.either(
+          client.getEffect(via(`http://127.0.0.1:${b.port}/x`), undefined, { connectAddress: '127.0.0.1' }),
+        ));
+        expect(other._tag === 'Left' && [other.left.error, other.left.code, other.left.details?.reason])
+          .toEqual(['REDIRECT_ERROR', 302, 'other-host']);
+        expect(b.arrivals).toHaveLength(0);
+      } finally {
+        a.stop();
+        b.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-refused
+     */
+    it('should refuse a value that is not an IP address before sending anything', async () => {
+      // From docs: "Anything else fails with REQUEST_CONFIG_ERROR before anything is sent" and
+      // "It is never retried and no metrics are recorded"
+      const originalFetch = globalThis.fetch;
+      const sent: string[] = [];
+      globalThis.fetch = ((input: string) => {
+        sent.push(input);
+
+        return Promise.resolve(Response.json({}));
+      }) as unknown as typeof fetch;
+      const metrics: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({ metricsSink: (data) => metrics.push(data) });
+
+        const outcome = await Effect.runPromise(Effect.either(
+          client.getEffect('https://a.example.com/x', undefined, { connectAddress: 'a.example.com' }),
+        ));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left' && outcome.left.error === 'REQUEST_CONFIG_ERROR') {
+          expect(outcome.left.code).toBe(500);
+          expect(outcome.left.details?.option).toBe('connectAddress');
+          expect(outcome.left.details?.reason).toBe('not-an-ip');
+          expect(outcome.left.details?.value).toBe('a.example.com');
+        }
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('REQUEST_CONFIG_ERROR');
+
+        // "`not-an-http-url` — the URL is not an http: or https: one, or is not absolute"
+        const relative = await Effect.runPromise(Effect.either(
+          client.getEffect('/x', undefined, { connectAddress: '127.0.0.1' }),
+        ));
+        expect(relative._tag === 'Left' && relative.left.details?.reason).toBe('not-an-http-url');
+
+        // "only undefined means no connectAddress"
+        const empty = await Effect.runPromise(Effect.either(
+          client.getEffect('https://a.example.com/x', undefined, { connectAddress: '' }),
+        ));
+        expect(empty._tag === 'Left' && empty.left.details?.reason).toBe('not-an-ip');
+
+        expect(sent).toHaveLength(0);
+        expect(metrics).toHaveLength(0);
+
+        // "client.get(url, { connectAddress }) is config, not query data"
+        await client.get('https://a.example.com/x', { connectAddress: '127.0.0.1' });
+        expect(sent).toEqual(['https://127.0.0.1/x']);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-proxy
+     */
+    it('should hand an HTTPS proxy a CONNECT to the address, and match NO_PROXY against it', async () => {
+      // From docs: "the proxy receives CONNECT <address>:<port>, the IP literal, never the host
+      // name" and "NO_PROXY is matched against the address, not the host name". `fetch` reads the
+      // proxy variables from the environment, so each request runs in a fresh process.
+      const connects: string[] = [];
+      const proxy = Bun.listen({
+        hostname: '127.0.0.1',
+        port: 0,
+        socket: {
+          data(socket, chunk) {
+            connects.push(chunk.toString().split('\r\n')[0]);
+            socket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n');
+          },
+        },
+      });
+      // A port nothing listens on: where a request that skips the proxy goes, and is refused
+      const closed = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data: () => undefined } });
+      const closedPort = closed.port;
+      closed.stop(true);
+      const viaProxy = (env: Record<string, string>) =>
+        runPinnedRequest(`https://a.test:${closedPort}/x`, '127.0.0.1', { env, killAfterMs: 20_000 });
+
+      try {
+        const proxyUrl = `http://127.0.0.1:${proxy.port}`;
+         
+        const runs = [
+          await viaProxy({ HTTPS_PROXY: proxyUrl }),
+          await viaProxy({ HTTPS_PROXY: proxyUrl, NO_PROXY: 'a.test' }),
+          await viaProxy({ HTTPS_PROXY: proxyUrl, NO_PROXY: '127.0.0.1' }),
+        ];
+         
+
+        expect(runs.map((run) => run.result?.success), runs.map((run) => run.output).join('\n')).toEqual([false, false, false]);
+        // The first two went through the proxy, as CONNECT to the address; the third did not
+        expect(connects).toEqual([`CONNECT 127.0.0.1:${closedPort} HTTP/1.1`, `CONNECT 127.0.0.1:${closedPort} HTTP/1.1`]);
+      } finally {
+        proxy.stop(true);
       }
     });
   });

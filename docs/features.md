@@ -67,6 +67,7 @@ production-grade backend services.
 - Optional `maxResponseBytes`: a cap on the decoded response body, checked while it is read, error statuses included
 - Redirect policy `'follow' | 'error' | 'manual'`, on the client or per request; no credential follows a redirect to another origin
 - `responseType: 'bytes' | 'stream'`: binary bodies as a `Uint8Array`, or a `ReadableStream` that resolves at the headers, with `timeout` bounding each wait on the upstream
+- `connectAddress`: connect to an IP address the application validated, with `Host`, TLS SNI and the certificate check kept on the URL's host name (DNS-rebinding defence)
 - Transport of the inter-service clients (createServiceClient, untyped arguments and results)
 
 ### Observability
@@ -294,6 +295,10 @@ Full-featured HTTP client with:
   `responseType: 'stream'` resolves at the headers with a `ReadableStream`, so a server-sent event
   stream or a long download is read as it arrives (see
   [Response types](/api/requests#response-types))
+- **Validated addresses**: `connectAddress` connects a request to an IP address the application
+  looked up and checked itself, so a second lookup cannot answer differently; `Host`, the TLS SNI
+  and the certificate check keep the URL's host name (see
+  [Connecting to a validated address](/api/requests#connect-address))
 
 ### Service Clients
 `createServiceDefinition()` + `createServiceClient()` call another OneBun service by

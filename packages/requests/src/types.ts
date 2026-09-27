@@ -630,6 +630,21 @@ export interface RequestConfig {
    * A config marker: `client.get('/events', { responseType: 'stream' })` is config, not query data.
    */
   responseType?: ResponseType;
+  /**
+   * The IP address this request connects to, in place of a lookup of the URL's host name: an
+   * address the caller resolved and validated itself, so that a second lookup cannot answer
+   * differently (DNS rebinding).
+   *
+   * Only the connection changes. The `Host` header, the TLS SNI and the certificate check keep the
+   * URL's host name, and so do signing, tracing, metrics, logs and errors. A value `isIP` from
+   * `node:net` rejects fails `REQUEST_CONFIG_ERROR` before anything is sent. A redirect to another
+   * host fails `REDIRECT_ERROR` with `reason: 'other-host'`; a redirect to the same host, and a
+   * retry, connect to the same address. A `custom` auth interceptor may set or replace it; a
+   * config the interceptor returns without one keeps the caller's.
+   *
+   * A config marker: `client.get(url, { connectAddress })` is config, not query data.
+   */
+  connectAddress?: string;
 }
 
 /**

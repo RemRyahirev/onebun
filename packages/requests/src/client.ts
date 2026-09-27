@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 import { Effect, pipe } from 'effect';
 
 import { applyAuth, isSigningAuth } from './auth.js';
@@ -117,7 +119,9 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  * query parameter that, and a cap that went out as `?maxResponseBytes=1048576` would leave the
  * body it was meant to bound unbounded. `responseType` joined for the same reason: sent as
  * `?responseType=stream`, it would leave a caller waiting for a stream with a string that arrives
- * only once the whole body has.
+ * only once the whole body has. `connectAddress` joined because the other side fails open: sent as
+ * `?connectAddress=203.0.113.7`, the request would go wherever DNS says the host is — the lookup
+ * the address was validated to replace.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -128,6 +132,7 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'metrics',
   'maxResponseBytes',
   'responseType',
+  'connectAddress',
 ];
 
 /**
@@ -451,6 +456,149 @@ const parseUrl = (input: string, base?: string): URL | undefined => {
   }
 };
 
+/** The `error` name of a request the client refuses to send as configured. */
+const REQUEST_CONFIG_ERROR = 'REQUEST_CONFIG_ERROR';
+
+/** What `isIP` from `node:net` returns for an IPv6 address. */
+const IPV6 = 6;
+
+/**
+ * `connectAddress` as a URL names a host — an IPv4 address as it is, an IPv6 address in brackets
+ * and in its canonical form — or `undefined` when it is not an IP address a URL can name.
+ *
+ * `isIP` alone is not enough. It accepts an IPv6 address with a zone (`fe80::1%eth0`), which a URL
+ * cannot hold, and the `URL` hostname setter ignores a value it cannot hold without a word: the
+ * request would have gone to the host name after all, through the lookup `connectAddress` exists
+ * to replace. So the address is parsed as a URL host here, where a failure can be refused, and
+ * what comes out is a host the setter always takes.
+ *
+ * `isIP` is also what keeps the dialled address the validated one: it refuses every IPv4 form but
+ * four decimal parts, where a URL would read `010.0.0.1` as octal (`8.0.0.1`) and `127.1` as
+ * `127.0.0.1`.
+ */
+const connectHostOf = (address: unknown): string | undefined => {
+  if (typeof address !== 'string') {
+    return undefined;
+  }
+
+  const version = isIP(address);
+
+  if (version === 0) {
+    return undefined;
+  }
+
+  return parseUrl(`http://${version === IPV6 ? `[${address}]` : address}/`)?.hostname;
+};
+
+/** The `REQUEST_CONFIG_ERROR` for a `connectAddress` the client refuses. */
+const connectAddressError = (
+  reason: 'not-an-ip' | 'not-an-http-url',
+  address: unknown,
+  url: string,
+  traceId?: string,
+): ErrorResponse => createErrorResponse(
+  REQUEST_CONFIG_ERROR,
+  HttpStatusCode.INTERNAL_SERVER_ERROR,
+  traceId,
+  markTransportDetails({
+    option: 'connectAddress',
+    reason,
+    value: address,
+    url,
+  }, ['url']),
+);
+
+/**
+ * The host every hop of the request connects to — `connectAddress` as a URL names it — or
+ * `undefined` when the request has no `connectAddress` and connects wherever its URL says.
+ *
+ * Checked once, before the first attempt and before anything is sent: a value that is not an IP
+ * address, and a URL that is not http(s), fail `REQUEST_CONFIG_ERROR`, which is never retried and
+ * records no metrics — no request was made. `undefined` is the only value that means "none"; an
+ * empty string or a `null` is refused rather than read as none, since reading it so would send the
+ * request through the lookup the caller meant to skip.
+ */
+const connectHostFor = (
+  config: RequestConfig,
+  fullUrl: string,
+  traceId?: string,
+): Effect.Effect<string | undefined, ErrorResponse> => {
+  const address: unknown = config.connectAddress;
+
+  if (address === undefined) {
+    return Effect.succeed(undefined);
+  }
+
+  const host = connectHostOf(address);
+
+  if (host === undefined) {
+    return Effect.fail(connectAddressError('not-an-ip', address, fullUrl, traceId));
+  }
+
+  const protocol = parseUrl(fullUrl)?.protocol;
+
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    return Effect.fail(connectAddressError('not-an-http-url', address, fullUrl, traceId));
+  }
+
+  return Effect.succeed(host);
+};
+
+/**
+ * The config auth produced, with the caller's `connectAddress` put back when auth left none.
+ *
+ * A `custom` auth interceptor returns the whole config, and one that builds a fresh object —
+ * `({ method, url, headers })` — instead of spreading the one it got drops every key it does not
+ * name. For `connectAddress` that fails open without a word: the request goes to the host name,
+ * through the lookup the address was validated to replace. So an interceptor may set
+ * `connectAddress` or replace the caller's, but a config it returns without one — the key left out,
+ * or `undefined` — keeps the caller's.
+ */
+const keepCallerConnectAddress = (authConfig: RequestConfig, callerConfig: RequestConfig): RequestConfig =>
+  authConfig.connectAddress === undefined && callerConfig.connectAddress !== undefined
+    ? { ...authConfig, connectAddress: callerConfig.connectAddress }
+    : authConfig;
+
+/** What `fetch` is given for one hop: where it connects, what it sends, and the TLS name. */
+interface Dial {
+  url: string;
+  headers: Record<string, string>;
+  tls?: { serverName: string };
+}
+
+/**
+ * The `fetch` target for `hop`: the hop's own URL, or — under `connectAddress` — the same URL with
+ * `connectHost` in place of its host, so `fetch` connects there without a lookup.
+ *
+ * What the server sees stays what it would see without `connectAddress`: the `Host` header is the
+ * hop URL's `host` (with its port, when it is not the scheme's default), and over TLS the SNI is the
+ * hop URL's host name, against which the certificate is verified (`tls.serverName`) — without it,
+ * `fetch` verifies against the IP and sends no SNI. A `Host` header the caller set is sent as it
+ * is, as it would be without `connectAddress`; adding a second one in another letter case would
+ * send both, joined.
+ *
+ * `fetch` keys its pooled TLS connections by `serverName`, so a connection opened for one name is
+ * never reused for another (measured on Bun 1.4.2).
+ */
+const dialFor = (hop: RedirectHop, connectHost: string | undefined): Dial => {
+  if (connectHost === undefined) {
+    return { url: hop.url, headers: hop.headers };
+  }
+
+  const target = new URL(hop.url);
+  const { host, hostname, protocol } = target;
+  // A host `connectHostOf` produced, which the setter always takes
+  target.hostname = connectHost;
+  const setsHost = Object.keys(hop.headers).some((name) => name.toLowerCase() === 'host');
+
+  return {
+    url: target.href,
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    headers: setsHost ? hop.headers : { ...hop.headers, Host: host },
+    ...(protocol === 'https:' ? { tls: { serverName: hostname.replace(/^\[(.*)\]$/, '$1') } } : {}),
+  };
+};
+
 /** The headers whose lower-cased name passes `keep`. */
 const filterHeaders = (
   headers: Record<string, string>,
@@ -476,7 +624,12 @@ const redirectBecomesGet = (status: number, method: string): boolean => {
 };
 
 /** Why a redirect was not followed: the `details.reason` of its `REDIRECT_ERROR`. */
-type RedirectRefusal = 'refused-by-policy' | 'missing-location' | 'invalid-location' | 'too-many-redirects';
+type RedirectRefusal =
+  | 'refused-by-policy'
+  | 'missing-location'
+  | 'invalid-location'
+  | 'other-host'
+  | 'too-many-redirects';
 
 /**
  * The `REDIRECT_ERROR` for a redirect that is not followed. `code` is its 3xx, `details.url` the
@@ -502,8 +655,14 @@ const redirectError = (
 
 /**
  * The request a redirect asks for, or a `REDIRECT_ERROR` when it cannot be followed: no
- * `Location`, a `Location` that is not an http(s) URL, or {@link MAX_REDIRECTS} already followed.
- * `code` is the 3xx that could not be followed.
+ * `Location`, a `Location` that is not an http(s) URL, a `Location` on another host under
+ * `connectAddress` (`pinned`), or {@link MAX_REDIRECTS} already followed. `code` is the 3xx that
+ * could not be followed.
+ *
+ * `connectAddress` is an address the caller validated for ONE host name. Another host — a name, or
+ * an IP literal, which needs no lookup but was not validated either — would be connected to
+ * through a lookup or at an address nobody checked, so a hop there is refused before it is made. A
+ * hop to the same host name, on any port or scheme, connects to the same address.
  *
  * The `Location` is resolved against the URL that answered. A hop to the SAME origin (scheme, host
  * and port) keeps every header; one to another origin keeps only
@@ -519,6 +678,7 @@ const nextRedirectHop = (
   hop: RedirectHop,
   response: Response,
   redirects: number,
+  pinned: boolean,
   traceId?: string,
 ): Effect.Effect<RedirectHop, ErrorResponse> => {
   const location = response.headers.get('location');
@@ -532,6 +692,10 @@ const nextRedirectHop = (
 
   if (target === undefined || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
     return refuse('invalid-location');
+  }
+
+  if (pinned && target.hostname !== parseUrl(hop.url)?.hostname) {
+    return refuse('other-host');
   }
 
   if (redirects >= MAX_REDIRECTS) {
@@ -580,6 +744,11 @@ interface RedirectChain {
    * never signs anything for another origin.
    */
   resign?: (hop: RedirectHop) => Effect.Effect<RedirectHop, ErrorResponse>;
+  /**
+   * Under `connectAddress`, the host every hop connects to, as a URL names it
+   * ({@link connectHostFor}); a hop to another host name is refused.
+   */
+  connectHost?: string;
   traceId?: string;
 }
 
@@ -604,6 +773,9 @@ interface RedirectChain {
  *
  * `decompress: false` — set for a request under `maxResponseBytes` — hands the final body over as
  * it came off the wire, for the client to decode and count ({@link readCappedBody}).
+ *
+ * Under `connectAddress` each hop is dialled at that address ({@link dialFor}); the hop itself —
+ * what is signed, followed and reported — keeps the URL's host name.
  */
 const fetchFollowingRedirects = (
   hop: RedirectHop,
@@ -611,14 +783,19 @@ const fetchFollowingRedirects = (
   redirects: number = 0,
 ): Effect.Effect<Response, ErrorResponse> => pipe(
   Effect.tryPromise({
-    try: () => fetch(hop.url, {
-      method: hop.method,
-      headers: hop.headers,
-      signal: chain.signal,
-      redirect: 'manual',
-      ...(chain.decompress ? {} : { decompress: false }),
-      ...(hop.body === undefined ? {} : { body: hop.body }),
-    }),
+    try() {
+      const dial = dialFor(hop, chain.connectHost);
+
+      return fetch(dial.url, {
+        method: hop.method,
+        headers: dial.headers,
+        signal: chain.signal,
+        redirect: 'manual',
+        ...(dial.tls === undefined ? {} : { tls: dial.tls }),
+        ...(chain.decompress ? {} : { decompress: false }),
+        ...(hop.body === undefined ? {} : { body: hop.body }),
+      });
+    },
     catch: (error) => classifyTransportFailure(error, chain.signal, chain.traceId),
   }),
   Effect.flatMap((response) => {
@@ -632,7 +809,7 @@ const fetchFollowingRedirects = (
       }),
       Effect.flatMap(() => (chain.policy === 'error'
         ? Effect.fail(redirectError(hop, response, redirects, 'refused-by-policy', chain.traceId))
-        : nextRedirectHop(hop, response, redirects, chain.traceId))),
+        : nextRedirectHop(hop, response, redirects, chain.connectHost !== undefined, chain.traceId))),
       Effect.flatMap((next) => (chain.resign !== undefined && carriesSignature(next)
         ? chain.resign(next)
         : Effect.succeed(next))),
@@ -1283,6 +1460,10 @@ const resignerFor = (
  * the stream is handed over, which restarts it for each read. The attempt ends at the headers, so
  * nothing read from the stream is ever retried, and the metrics record the time to the headers.
  *
+ * `connectHost` is the validated `connectAddress` ({@link connectHostFor}): every hop of every
+ * attempt connects there, and `fullUrl` — the URL signed, logged, recorded and reported — keeps the
+ * host name.
+ *
  * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
@@ -1290,6 +1471,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
+  connectHost: string | undefined,
   traceId?: string,
 ): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => Effect.suspend(() => {
   const requestStartTime = Date.now();
@@ -1328,6 +1510,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
       decompress: limit === undefined,
       policy,
       resign: resignerFor(signingAuth, traceId),
+      connectHost,
       traceId,
     })),
     Effect.flatMap((response) => {
@@ -1402,13 +1585,14 @@ const executeWithRetry = <T, E extends string, R extends string>(
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
+  connectHost: string | undefined,
   traceId?: string,
   attemptNumber: number = 1,
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const requestStartTime = Date.now();
 
   return pipe(
-    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, traceId),
+    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, connectHost, traceId),
     Effect.map((result) => withRetryCount(result, attemptNumber - 1)),
     Effect.flatMap((result) => {
       const duration = Date.now() - requestStartTime;
@@ -1472,6 +1656,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
               mergedOptions,
               headers,
               fullUrl,
+              connectHost,
               traceId,
               attemptNumber + 1,
             ),
@@ -1524,6 +1709,7 @@ export const executeRequest = <
 
   return pipe(
     applyAuthIfNeeded(config, mergedOptions, traceId),
+    Effect.map((authConfig) => keepCallerConnectAddress(authConfig, config)),
     Effect.map((finalConfig) => {
       // The URL is built AFTER auth, from the config auth produced. It used to be built one line
       // before, so `apikey` with `location: 'query'` added its key to a `config.query` the URL had
@@ -1533,9 +1719,14 @@ export const executeRequest = <
 
       return { finalConfig, headers, fullUrl };
     }),
-    Effect.flatMap(({ finalConfig, headers, fullUrl }) =>
-      executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, traceId),
-    ),
+    // `connectAddress` is checked against the config auth produced — a `custom` auth interceptor
+    // may set or replace it ({@link keepCallerConnectAddress}) — and before the first attempt, so a
+    // refused one sends nothing and is not retried.
+    Effect.flatMap(({ finalConfig, headers, fullUrl }) => pipe(
+      connectHostFor(finalConfig, fullUrl, traceId),
+      Effect.flatMap((connectHost) =>
+        executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, connectHost, traceId)),
+    )),
   );
 };
 

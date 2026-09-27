@@ -132,6 +132,18 @@ describe('the error records the client registers', () => {
     });
   });
 
+  it('REQUEST_CONFIG_ERROR: leaves out url; keeps option, reason and the refused value', async () => {
+    const failure = await failureOf(client.getEffect('/moved', { token: 'URL-SECRET' }, { connectAddress: 'a.test' }));
+
+    expect(failure.details?.url).toBe(`${origin}/moved?token=URL-SECRET`);
+    expect(forCaller(failure)).toEqual({
+      success: false,
+      error: 'REQUEST_CONFIG_ERROR',
+      code: 500,
+      details: { option: 'connectAddress', reason: 'not-an-ip', value: 'a.test' },
+    });
+  });
+
   it('FETCH_ERROR: leaves out the raw error, which names the request URL; keeps the transport kind', async () => {
     const closed = Bun.serve({ port: 0, fetch: () => new Response('') });
     const closedOrigin = `http://127.0.0.1:${closed.port}`;

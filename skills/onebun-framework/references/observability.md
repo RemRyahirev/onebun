@@ -97,11 +97,15 @@ needs both or a `traceparent`.
   and `options` — the four share one resolver (`resolveQueryOverload` in `client.ts`, also used by the
   `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
   `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
-  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`/`responseType`; `retries`, `query` and
+  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`/`responseType`/`connectAddress`; `retries`, `query` and
   `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data, even though
   `redirect` is also the redirect-policy config key), so a config holding only those takes the
   three-argument form: `get(url, undefined, { redirect: 'error' })`. A third argument always makes the second the query, `undefined`
-  included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped).
+  included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped). One marker makes the WHOLE
+  record config, so a record whose keys the app did not choose (built from an incoming query string) must never be
+  the second of two arguments: `{ q, tracing: 'x', url: '/admin' }` changes the path (the host, without `baseUrl`),
+  `{ q, connectAddress: '10.0.0.5' }` picks the dialled IP. Use `get(url, query, {})`; a third argument that is
+  `undefined` is still the two-argument form.
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
   whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
   `RESPONSE_PARSE_ERROR` against every JSON endpoint (Bun keeps `application/json` on the HEAD answer).
@@ -145,7 +149,8 @@ needs both or a `traceparent`.
   stripped only `Authorization`/`Cookie`/`Proxy-Authorization`: the apikey header, custom auth headers, the
   HMAC signature and caller headers leaked. A loop (21st redirect), a missing `Location` or a non-http(s) one
   fails `REDIRECT_ERROR` with `code` = that 3xx and `details.reason`
-  `'too-many-redirects' | 'missing-location' | 'invalid-location'`; it is never retried, whatever `retryOn`
+  `'too-many-redirects' | 'missing-location' | 'invalid-location'` (plus `'other-host'` under `connectAddress`,
+  and `'refused-by-policy'` under `redirect: 'error'`); it is never retried, whatever `retryOn`
   says (0.8.1: `FETCH_ERROR` replayed by `retryOnNetworkError` — Bun's own cap is 127 hops, so a loop cost
   508 requests — or `HTTP_ERROR` 3xx). No signature is ever made for another origin, nor for a hop back on
   the first origin after one.
@@ -203,6 +208,23 @@ needs both or a `traceparent`.
   re-armed in stretches of at most 2^31 - 1 ms (`setTimeout` fires a longer delay after 1 ms), so any `timeout`
   `AbortSignal.timeout` takes (up to 2^53 - 1) works under `'stream'` too. Up to 0.8.3 every body was text, and
   nothing resolved before the body ended.
+- **`connectAddress: '<ip>'`** (per request only, a config marker) connects to an address the app resolved and
+  validated itself (SSRF / DNS-rebinding defence), with no lookup: `fetch` gets the URL with the IP as its host
+  (IPv6 bracketed, canonical), `Host` = the URL's `host[:port]` (a caller-set `Host` is sent as is), and over
+  HTTPS `tls.serverName` = the URL's host name, so SNI is the name and the certificate is verified against the
+  NAME, not the IP (a server without a cert for the name fails `FETCH_ERROR`, `ERR_TLS_CERT_ALTNAME_INVALID`).
+  Signing, metrics, retry logs and error details keep the name URL; only a transport failure's raw
+  `details.details` names the IP. Retries and same-host redirects (any port or scheme) reuse the address; a
+  redirect to any other host — IP literals included — fails `REDIRECT_ERROR` `reason: 'other-host'` before it
+  is contacted (follow it with `redirect: 'manual'` + your own validation + its own `connectAddress`). The value
+  must pass `node:net` `isIP` AND parse as a URL host: a host name, `'[::1]'`, `'fe80::1%eth0'` (a zone the
+  `URL` hostname setter would silently ignore, dialling the name), `'010.0.0.1'`, `''`, `null` fail
+  `REQUEST_CONFIG_ERROR`, `code: 500`, `details { option: 'connectAddress', reason: 'not-an-ip' | 'not-an-http-url',
+  value, url }` before anything is sent — no retry, no metrics; only `undefined` means none. Proxies see the IP:
+  `HTTPS_PROXY` gets `CONNECT <ip>:<port>`, `NO_PROXY` is matched against the IP (an entry naming the host does
+  not exempt it). A `custom` auth interceptor may set or replace it, not remove it: a config it returns without
+  one (rebuilt as `{ method, url, headers }`, or `connectAddress: undefined`) keeps the caller's. Allow/deny
+  policy and the lookup stay in the app; the service client has no per-call config, so use `HttpClient`. Up to 0.8.3 the only way was a `fetch` of your own with `Host` + `tls.serverName`.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header

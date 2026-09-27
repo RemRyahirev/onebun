@@ -45,7 +45,8 @@ const response = await client.get('/users', { page: 1, limit: 10 });
 // GET /users?page=1&limit=10
 
 // With custom headers — an object carrying `method`, `headers`, `timeout`, `auth`, `tracing`,
-// `metrics`, `maxResponseBytes` or `responseType` is read as per-request config instead of as query
+// `metrics`, `maxResponseBytes`, `responseType` or `connectAddress` is read as per-request config
+// instead of as query
 const response = await client.get('/users', {
   headers: { 'X-Custom-Header': 'value' },
 });
@@ -58,10 +59,21 @@ const response = await client.get('/users', undefined, { retries: { max: 0 } });
 ```
 
 `delete`, `head` and `options` take the same three arguments and resolve them by the same rule.
-With two arguments, only the eight names above make the object config: every other key is query
+With two arguments, only the nine names above make the object config: every other key is query
 data, so `client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`.
 `retries`, `query` and `redirect` are deliberately not on the list, so a config that sets only
 those takes the three-argument form, as in the last call above.
+
+::: warning A record someone else wrote goes second of three
+One of the nine names makes the whole record config, every other key included, and `url`,
+`method` and `connectAddress` are config keys. So never pass a record whose keys you did not
+choose — one built from an incoming request's query string, say — as the second of two arguments.
+`{ q: 'shoes', tracing: 'x', url: '/admin' }` would call another path (another host, on a client
+without `baseUrl`), and `{ q: 'shoes', connectAddress: '10.0.0.5' }` would pick the address the
+request connects to; `q` is dropped either way. `client.get('/search', query, {})` keeps the record
+query data whatever it holds. A third argument that is `undefined` does not count: it is the
+two-argument form.
+:::
 
 ::: warning Do not wrap the query in a key
 `client.get('/users', { params: { page: 1 } })` — and `{ query: { page: 1 } }` just the same —
@@ -536,6 +548,7 @@ your application, not to its caller.
 |-------|-------------------------------|
 | `HTTP_ERROR` | `details.headers` (the upstream's `set-cookie` among them), `details.url` with its query, `details.details` (the upstream's body) |
 | `REDIRECT_ERROR` | `details.url`, `details.location` |
+| `REQUEST_CONFIG_ERROR` | `details.url` |
 | `TIMEOUT_ERROR`, `ABORT_ERROR`, `FETCH_ERROR` | `details.details`, the raw error: Bun's connection error names the request URL |
 | `RESPONSE_PARSE_ERROR`, `RESPONSE_READ_ERROR`, `RESPONSE_DECODE_ERROR` | `details.details`: the upstream's body, or the raw error |
 
@@ -877,7 +890,7 @@ const outcome = await Effect.runPromise(Effect.either(client.getEffect('/files/4
 if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
   outcome.left.code;               // the 3xx that was not followed, e.g. 302
   outcome.left.details?.reason;    // 'too-many-redirects' | 'missing-location' | 'invalid-location'
-                                   // | 'refused-by-policy'
+                                   // | 'refused-by-policy' | 'other-host'
   outcome.left.details?.location;  // the Location header, when there was one
   outcome.left.details?.redirects; // how many redirects this call had followed
 }
@@ -888,6 +901,7 @@ if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
 - `invalid-location` — a `Location` that is not a URL, or not an `http:` or `https:` one
 - `refused-by-policy` — any of the five under `redirect: 'error'`, with or without a `Location`;
   `redirects` is `0`
+- `other-host` — under [`connectAddress`](#connect-address), a `Location` on another host
 
 Any other `3xx` is an answer, not a redirect, and its `Location` is not followed, under every
 policy — a `304`, for one, resolves as a success (see
@@ -1276,6 +1290,135 @@ the coding, and those two describe the compressed bytes.
 
 </llm-only>
 
+## Connecting to a validated address {#connect-address}
+
+A request to a host name makes `fetch` look the name up. An application that checks where a URL
+points before calling it — to refuse private and internal addresses when it fetches a URL a user
+supplied, say — checks one lookup, and then `fetch` makes a second one. The two can answer
+differently: that is DNS rebinding, and the check guarded nothing. `connectAddress` closes the gap.
+Pass the IP address you validated, and the request connects to that address without a lookup:
+
+```typescript
+import { lookup } from 'node:dns/promises';
+
+import { createHttpClient } from '@onebun/core';
+
+const client = createHttpClient({ timeout: 5000 });
+
+export async function fetchPreview(url: string) {
+  const { address } = await lookup(new URL(url).hostname);
+
+  // Your own policy: private ranges, loopback, link-local, metadata endpoints...
+  if (!isAllowedAddress(address)) {
+    throw new Error(`${url} resolves to an address this service may not call`);
+  }
+
+  return await client.get(url, undefined, { connectAddress: address });
+}
+```
+
+Only the connection changes. The server sees the request it would see without `connectAddress`:
+
+- **`Host`** is the URL's host, with its port when that is not the scheme's default
+  (`a.example.com:8443`). A `Host` header you set yourself is sent as it is.
+- **Over HTTPS, the TLS SNI is the URL's host name, and the certificate is verified against that
+  name**, not against the address. A server at the address that cannot show a certificate for the
+  name fails the request with `FETCH_ERROR` (`ERR_TLS_CERT_ALTNAME_INVALID` in `details.details`).
+- **Signing, metrics, retry logs and error details** use the URL with its host name. Only a
+  transport failure's `details.details` — the raw error of `fetch` — names the address it
+  connected to.
+- **Retries** connect to the same address.
+
+The framework checks only that the value is an IP address. Which addresses are allowed is your
+application's policy, and so is the lookup.
+
+### Redirects under connectAddress {#connect-address-redirects}
+
+A redirect to the **same host name**, on any port and either scheme, connects to the same address.
+A redirect to **another host** fails with [`REDIRECT_ERROR`](#redirect-error),
+`details.reason: 'other-host'`, before that host is contacted. The address was validated for one
+host name, and another host is one nobody has checked — an IP literal in the `Location` included.
+To follow such a redirect, take it with `redirect: 'manual'`, validate its host and call it with a
+`connectAddress` of its own.
+
+### Values that are refused {#connect-address-refused}
+
+`connectAddress` is an IPv4 address in four decimal parts, or an IPv6 address without brackets and
+without a zone — what `isIP` from `node:net` accepts, and what `dns.lookup` returns. Anything else
+fails with `REQUEST_CONFIG_ERROR` before anything is sent:
+
+```typescript
+import { Effect } from '@onebun/core';
+
+const outcome = await Effect.runPromise(Effect.either(
+  client.getEffect('https://a.example.com/x', undefined, { connectAddress: 'a.example.com' }),
+));
+
+if (outcome._tag === 'Left' && outcome.left.error === 'REQUEST_CONFIG_ERROR') {
+  outcome.left.code;             // 500
+  outcome.left.details?.option;  // 'connectAddress'
+  outcome.left.details?.reason;  // 'not-an-ip' | 'not-an-http-url'
+  outcome.left.details?.value;   // 'a.example.com'
+}
+```
+
+- `not-an-ip` — a host name, `'[::1]'`, `'fe80::1%eth0'`, `'010.0.0.1'`, `'127.1'`, an empty string,
+  `null`: only `undefined` means "no `connectAddress`"
+- `not-an-http-url` — the URL is not an `http:` or `https:` one, or is not absolute
+
+It is never retried and no metrics are recorded: no request was made. `connectAddress` is one of
+the config markers, so `client.get(url, { connectAddress })` is config, not query data.
+
+### Proxies {#connect-address-proxy}
+
+`fetch` reads `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` from the environment, and it sees the
+URL with the address in it:
+
+- **`HTTPS_PROXY`**: the proxy receives `CONNECT <address>:<port>`, the IP literal, never the host
+  name. Nothing is looked up, but the traffic goes through the proxy, and the SNI inside the tunnel
+  is the host name.
+- **`HTTP_PROXY`**, for an `http:` URL: the request line names the address
+  (`GET http://<address>:<port>/path`) and `Host` the name. Where the proxy connects is up to the
+  proxy.
+- **`NO_PROXY` is matched against the address**, not the host name. An entry naming the host does
+  not exempt the request; an entry naming the address does.
+
+<llm-only>
+
+- Up to 0.8.3 there was no `connectAddress`. The workaround was a `fetch` of your own:
+  `fetch('https://<ip>/…', { headers: { Host: name }, tls: { serverName: name } })`, which is what
+  the client now does for every hop.
+- Per request only; `RequestsOptions` has no `connectAddress`. A lookup answer is valid for the
+  call it was made for, and a client-wide address would outlive it. The service client has no
+  per-call config, so it cannot pin an address; use `HttpClient` for such a call.
+- `connectAddress` joined the config markers of the two-argument `get`/`delete`/`head`/`options`
+  form, as `maxResponseBytes` and `responseType` did: sent as `?connectAddress=203.0.113.7`, the
+  request would go wherever DNS points, which fails open. In the two-argument form the whole record
+  is config, so its other keys stop being query data too. A query that really has a
+  `connectAddress` parameter takes the three-argument form.
+- `isIP` accepts an IPv6 zone (`fe80::1%eth0`), but a URL cannot hold one, and the `URL` hostname
+  setter ignores a value it cannot hold without an error, so the request would have gone to the
+  host name. The client parses the address as a URL host first and refuses what does not parse.
+  `isIP` refuses the IPv4 forms a URL would read differently: `010.0.0.1` would be `8.0.0.1`.
+- An IPv6 address is sent in its canonical form: `2001:DB8:0:0:0:0:0:1` becomes `[2001:db8::1]`,
+  `::ffff:127.0.0.1` becomes `[::ffff:7f00:1]`.
+- `fetch` pools TLS connections per `serverName` (measured on Bun 1.4.2): a connection opened for
+  one host name is never reused for another at the same address.
+- A URL whose host is itself an IP literal: `tls.serverName` is that IP, so `fetch` sends no SNI
+  and verifies the certificate against the URL's IP, whichever address it connects to.
+- `REQUEST_CONFIG_ERROR` has `code: 500`, so `OneBunBaseError.fromErrorResponse`, `req()` and the
+  `RequestsService` Effect API turn it into an `InternalServerError`. `details.url` is a transport
+  detail, left out of the body the default exception filter sends.
+- A `custom` auth interceptor that sets `connectAddress` is checked the same way: the value is
+  read from the config auth produced. An interceptor may set `connectAddress` or replace the
+  caller's, but not remove it: a config it returns without one — rebuilt as
+  `{ method, url, headers }` instead of spreading the config it got, or with
+  `connectAddress: undefined` — keeps the caller's, so the request never falls back to the lookup.
+  Any other per-request key such a config leaves out (`maxResponseBytes`, `timeout`, ...) falls
+  back to the client's setting, so spread the config you are given.
+
+</llm-only>
+
 ## Request Configuration
 
 Every per-request config argument is a `Partial<RequestConfig>` — `method` and `url` come from the
@@ -1314,6 +1457,9 @@ method you call and the path you pass, so only these fields are yours to set:
 
   /** What a success's `result` is: parsed JSON or text, a Uint8Array, or a ReadableStream */
   responseType?: 'auto' | 'bytes' | 'stream';
+
+  /** The IP address to connect to instead of looking the URL's host name up */
+  connectAddress?: string;
 }
 ```
 
