@@ -73,7 +73,9 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
  * encoding can send as a single segment (`undefined`, `null`, `''`, `.`, `..`) is refused. The
  * arguments are the handler's `@Param`, `@Query` and `@Body` parameters in declaration order; a
  * parameter the client does not send (`@Header`, `@Req`, a custom extractor, ...) takes none, and
- * extra arguments are dropped. The method name itself is checked at run time: reading one the
+ * extra arguments are dropped. A `@Query` array is sent as `name[]` keys and arrives as an array;
+ * the `@Body` value of a `POST`, `PUT` or `PATCH` is sent as JSON, so a string or a falsy value
+ * arrives as it was passed. The method name itself is checked at run time: reading one the
  * controller does not have throws.
  *
  * @see docs:api/requests.md

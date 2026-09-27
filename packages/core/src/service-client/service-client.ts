@@ -7,7 +7,11 @@ import type {
 
 import { HttpClient, type HttpMethod as RequestsHttpMethod } from '@onebun/requests';
 
-import { ParamType, type ParamMetadata } from '../types';
+import {
+  HttpMethod,
+  ParamType,
+  type ParamMetadata,
+} from '../types';
 
 /**
  * A `:name` token in a route template, in the router's own grammar: the name runs from the colon
@@ -25,6 +29,12 @@ const PATH_TOKEN = /:([^/]+)/g;
  * segments.
  */
 const ROUTE_CHANGING_SEGMENTS: ReadonlySet<string> = new Set(['', '.', '..']);
+
+/**
+ * The methods whose body the HTTP client sends: `POST`, `PUT` and `PATCH`, the same list it keeps
+ * itself. With any other method it drops the body unsent.
+ */
+const BODY_CARRYING_METHODS: ReadonlySet<HttpMethod> = new Set([HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH]);
 
 /**
  * The text that replaces one `:name` token: the value percent-encoded with `encodeURIComponent`,
@@ -98,14 +108,86 @@ function clientParams(endpoint: EndpointMetadata): ClientParam[] {
 }
 
 /**
- * Build request parameters from endpoint metadata and arguments
+ * The query string of a call, `?` included, or `''` when it sends no query value.
+ *
+ * Built here rather than handed to the HTTP client as a record, because that client appends
+ * `String(value)` once per key: `['a', 'b']` went out as `tags=a%2Cb` and the handler received
+ * `'a,b'`. An array is sent as one `name[]` key per element instead, which the server's query
+ * parser reads back as an array. The `[]` suffix is what keeps a one-element array an array: a
+ * repeated key alone gives an array only from the second value on, so `['a']` would arrive as `'a'`.
+ *
+ * Every other value is sent as the HTTP client sends it, one key with `String(value)`. `null` and
+ * `undefined` are not sent, and neither are the `null` and `undefined` elements of an array, so an
+ * empty array sends nothing and the handler receives `undefined`. Values are encoded with
+ * `URLSearchParams`, as the HTTP client encodes them, so a single value goes out exactly as before.
+ */
+function queryStringFor(query: ReadonlyMap<string, unknown>): string {
+  const search = new URLSearchParams();
+
+  for (const [name, value] of query) {
+    if (Array.isArray(value)) {
+      for (const element of value) {
+        if (element !== undefined && element !== null) {
+          search.append(`${name}[]`, String(element));
+        }
+      }
+    } else if (value !== undefined && value !== null) {
+      search.append(name, String(value));
+    }
+  }
+
+  const text = search.toString();
+
+  return text === '' ? '' : `?${text}`;
+}
+
+/**
+ * The bytes of a call's body: the `@Body` value as JSON, or `undefined` when it sends none.
+ *
+ * Serialized here, because the HTTP client sends a string as it is and skips a falsy value: through
+ * 0.8 `'hello'` went out as the bare text `hello`, which the server's `req.json()` cannot parse, so
+ * the handler received `undefined`, and `0`, `false`, `''` and `null` sent no body at all. As JSON,
+ * every one of them reaches `@Body()` as it was passed. The text is handed on as a string, so the
+ * HTTP client sends (and signs) exactly these bytes, under its default
+ * `Content-Type: application/json`. A `custom` auth interceptor therefore sees this text as
+ * `config.data`, not the value (through 0.8 it saw the value).
+ *
+ * `undefined` sends no body, and so does any value `JSON.stringify` has no text for (a function, a
+ * symbol). A value it throws on, a BigInt or a cyclic object, is refused with a `TypeError` naming
+ * the call before any request is made.
+ *
+ * Called only for a method in {@link BODY_CARRYING_METHODS}, the ones whose body is sent.
+ */
+function jsonBodyFor(endpoint: EndpointMetadata, value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  try {
+    // Typed `string`, but it is `undefined` for a function or a symbol.
+    const json: string | undefined = JSON.stringify(value);
+
+    return json;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+
+    throw new TypeError(
+      `${endpoint.controller}.${endpoint.method}: the @Body value cannot be sent as JSON (${reason}). Nothing was sent.`,
+      { cause: error },
+    );
+  }
+}
+
+/**
+ * The URL and the body of one call: path values encoded into the route template, the query string
+ * appended to it, and the body serialized as JSON. Every refusal happens here, before any request.
  */
 function buildRequestParams(
   endpoint: EndpointMetadata,
   args: unknown[],
-): { url: string; body?: unknown; query?: Record<string, unknown> } {
+): { url: string; body?: string } {
   let body: unknown;
-  let query: Record<string, unknown> | undefined;
+  const query = new Map<string, unknown>();
   const pathValues = new Map<string, unknown>();
 
   // Arguments past the last client parameter are dropped.
@@ -122,9 +204,8 @@ function buildRequestParams(
         body = value;
         break;
       case ParamType.QUERY:
-        query = query || {};
         if (param.name) {
-          query[param.name] = value;
+          query.set(param.name, value);
         }
         break;
     }
@@ -133,12 +214,18 @@ function buildRequestParams(
   // One pass over the template with a function replacer: each token is replaced by exact name,
   // and the returned text is inserted as is (a string replacement would expand `$&` and `$1`).
   // A token with no @Param behind it is left as it was.
-  const url = endpoint.path.replace(
+  const path = endpoint.path.replace(
     PATH_TOKEN,
     (token: string, name: string) => (pathValues.has(name) ? pathSegmentFor(endpoint, name, pathValues.get(name)) : token),
   );
 
-  return { url, body, query };
+  // A GET, DELETE, HEAD, OPTIONS or ALL call sends no body, whatever it is handed, so it is handed
+  // none. The value is not serialized: one JSON cannot represent (a BigInt) must not fail a call
+  // that never sends it, as it did not through 0.8. And a `custom` auth interceptor sees
+  // `config.data` as `undefined`, which is what is sent.
+  const sent = BODY_CARRYING_METHODS.has(endpoint.httpMethod) ? jsonBodyFor(endpoint, body) : undefined;
+
+  return { url: `${path}${queryStringFor(query)}`, body: sent };
 }
 
 /**
@@ -202,14 +289,17 @@ function createControllerProxy(
   return createNameProxy(
     controllerDef.methods,
     (endpoint) => async (...args: unknown[]) => {
-      const { url, body, query } = buildRequestParams(endpoint, args);
+      const { url, body } = buildRequestParams(endpoint, args);
 
+      // The query string is already in `url` and the body is JSON text, so the HTTP client sends
+      // both as they are. It only appends a query key of its own (an API key in query mode). A
+      // `custom` auth interceptor sees exactly these: the call's query in `config.url`, not in
+      // `config.query`, and the text in `config.data`.
       return await httpClient.request({
         // Cast to RequestsHttpMethod to handle enum type difference between @onebun/core and @onebun/requests
         method: endpoint.httpMethod as unknown as RequestsHttpMethod,
         url,
         data: body,
-        query,
       });
     },
     (methodName) => new Error(`Method "${methodName}" not found in controller "${controllerDef.name}"`),
@@ -228,8 +318,8 @@ function createControllerProxy(
  *   `@Body` parameters, one each, in the order the handler declares them. A `@Header`, `@Cookie`,
  *   `@Req`, custom-extractor, file or form-field parameter takes no argument, wherever it is
  *   declared (through 0.8 it took one and dropped it, shifting every later argument). Extra
- *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused (see
- *   below).
+ *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused;
+ *   a query array arrives as an array, and the body as JSON (see below).
  * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
  *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
  *   or 5xx response rejects.
@@ -260,6 +350,17 @@ function createControllerProxy(
  * not encode it yourself: `encodeURIComponent('a/b')` passed here arrives as `'a%2Fb'`. A value no
  * encoding can send as one segment is refused with a `TypeError` before any request is made:
  * `null`, `undefined`, `''`, `.`, `..`, and a string with an unpaired UTF-16 surrogate.
+ *
+ * A `@Query` array is sent as one `name[]=element` key per element, so the handler receives an
+ * array, a one-element one included (through 0.8 `['a', 'b']` arrived as `'a,b'`). An empty array,
+ * `null` and `undefined` send no value. On a `POST`, `PUT` or `PATCH` endpoint the `@Body` value is
+ * always sent as JSON, so a string, `0`, `false`, `''` and `null` reach the handler as they were
+ * passed (through 0.8 a string was sent as bare text and the falsy ones sent no body); `undefined`
+ * sends no body, and a value `JSON.stringify` throws on is refused with a `TypeError` before any
+ * request is made. With any other method no body is sent, and the value is neither serialized nor
+ * checked. A `custom` auth interceptor sees what is sent: the query string in `config.url`, and in
+ * `config.data` the JSON text of the body, or `undefined` (through 0.8 it saw the query record in
+ * `config.query` and the `@Body` value in `config.data`).
  *
  * The client and each `client.<Controller>` behave as plain values: they can be awaited and
  * returned from an `async` factory (`then` reads as `undefined`), serialized, converted to a

@@ -707,6 +707,351 @@ describe('argument mapping', () => {
 });
 
 /*
+ * Query and body values against a real server (onebun-FB-32, WI-401).
+ *
+ * Through 0.8 the client handed both to the HTTP client as they were. Its query builder appends
+ * `String(value)` once per key, so `['a', 'b']` went out as `tags=a%2Cb` and the handler received
+ * `'a,b'`. Its body serializer sends a string as it is and skips a falsy value, so `'hello'` went
+ * out as the bare text `hello` (the server's `req.json()` failed and the handler received
+ * `undefined`), and `0`, `false`, `''` and `null` sent no body at all.
+ */
+describe('query and body values', () => {
+  /** What a handler records for a parameter that received `undefined`. */
+  const ABSENT = '<absent>';
+  const received: unknown[] = [];
+
+  @Controller('/values')
+  class Values extends BaseController {
+    @Get('/tags')
+    tags(@Query('tags') tags?: unknown, @Query('q') q?: unknown) {
+      received.push({ tags: tags === undefined ? ABSENT : tags, q: q === undefined ? ABSENT : q });
+
+      return {};
+    }
+
+    @Post('/echo')
+    echo(@Body() body: unknown) {
+      received.push({ body: body === undefined ? ABSENT : body, type: typeof body });
+
+      return {};
+    }
+
+    @Put('/both/:id')
+    both(@Param('id') id: string, @Query('tags') tags: unknown, @Body() body: unknown) {
+      received.push({ id, tags, body });
+
+      return {};
+    }
+
+    @Get('/peek')
+    peek(@Body() body: unknown) {
+      received.push({ body: body === undefined ? ABSENT : body });
+
+      return {};
+    }
+  }
+
+  @Module({ controllers: [Values] })
+  class ValuesModule {}
+
+  const definition = createServiceDefinition(ValuesModule);
+
+  let app: OneBunApplication;
+  let client: ReturnType<typeof createServiceClient>;
+  let originalFetch: typeof fetch;
+  let fetchSpy: Mock<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>;
+
+  beforeAll(async () => {
+    app = new OneBunApplication(ValuesModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+    client = createServiceClient(definition, {
+      url: `http://127.0.0.1:${app.getPort()}`,
+      retries: { max: 0, delay: 0 },
+    });
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  beforeEach(() => {
+    received.length = 0;
+    originalFetch = globalThis.fetch;
+    const realFetch = originalFetch;
+    fetchSpy = mock(async (input: string | URL | Request, init?: RequestInit) => await realFetch(input, init));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** What went over the wire: method, path with query string, and body. */
+  const wire = (): string[] => fetchSpy.mock.calls.map(([input, init]) => {
+    const url = new URL(String(input));
+
+    return `${init?.method} ${url.pathname}${url.search} ${init?.body ?? '-'}`;
+  });
+
+  const rejectionOf = async (call: Promise<unknown>): Promise<Error> => {
+    const outcome = await call.then(() => undefined, (error: unknown) => error);
+    expect(outcome).toBeInstanceOf(Error);
+
+    return outcome as Error;
+  };
+
+  test('an array reaches @Query as the same array', async () => {
+    await client.Values.tags(['a', 'b']);
+
+    // 0.8: `GET /values/tags?tags=a%2Cb`, and the handler received 'a,b'.
+    expect(wire()).toEqual(['GET /values/tags?tags%5B%5D=a&tags%5B%5D=b -']);
+    expect(received).toEqual([{ tags: ['a', 'b'], q: ABSENT }]);
+  });
+
+  test('a one-element array stays an array: each element is sent under `name[]`', async () => {
+    await client.Values.tags(['a']);
+
+    // Sent as a plain repeated `tags=a`, it would arrive as the string 'a'.
+    expect(wire()).toEqual(['GET /values/tags?tags%5B%5D=a -']);
+    expect(received).toEqual([{ tags: ['a'], q: ABSENT }]);
+  });
+
+  test('elements with URL syntax in them arrive unchanged', async () => {
+    const tags = ['a,b', 'c&tags=d', 'e f', '100%', 'x#y', 'é'];
+    await client.Values.tags(tags);
+
+    expect(received).toEqual([{ tags, q: ABSENT }]);
+  });
+
+  test('an empty array sends no value, like undefined', async () => {
+    await client.Values.tags([]);
+
+    expect(wire()).toEqual(['GET /values/tags -']);
+    expect(received).toEqual([{ tags: ABSENT, q: ABSENT }]);
+  });
+
+  test('null and undefined elements are left out, and the others are sent as text', async () => {
+    await client.Values.tags(['a', null, undefined, 1, true]);
+
+    expect(received).toEqual([{ tags: ['a', '1', 'true'], q: ABSENT }]);
+  });
+
+  test('a single value is sent as before: one key, as text', async () => {
+    await client.Values.tags('a,b', 'hello world');
+    await client.Values.tags(42, false);
+    await client.Values.tags(null, undefined);
+
+    expect(wire()).toEqual([
+      'GET /values/tags?tags=a%2Cb&q=hello+world -',
+      'GET /values/tags?tags=42&q=false -',
+      'GET /values/tags -',
+    ]);
+    expect(received).toEqual([
+      { tags: 'a,b', q: 'hello world' },
+      { tags: '42', q: 'false' },
+      { tags: ABSENT, q: ABSENT },
+    ]);
+  });
+
+  test.each([
+    ['a string', 'hello', '"hello"'],
+    ['text that is itself JSON', '{"x":1}', '"{\\"x\\":1}"'],
+    ['0', 0, '0'],
+    ['false', false, 'false'],
+    ['the empty string', '', '""'],
+    ['null', null, 'null'],
+    ['an object', { x: 1, nested: { y: [1, 'a'] } }, '{"x":1,"nested":{"y":[1,"a"]}}'],
+    ['an array', [1, 'a', null], '[1,"a",null]'],
+    ['a number', 1.5, '1.5'],
+  ])('%s reaches @Body unchanged, sent as JSON', async (_label, value, json) => {
+    await client.Values.echo(value);
+
+    // 0.8: a string was sent as it was, and 0, false, '' and null sent no body at all.
+    expect(wire()).toEqual([`POST /values/echo ${json}`]);
+    expect(received).toEqual([{ body: value, type: typeof value }]);
+  });
+
+  test('the body is sent with Content-Type application/json', async () => {
+    await client.Values.echo('hello');
+
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(new Headers(init?.headers).get('content-type')).toBe('application/json');
+  });
+
+  test('undefined sends no body', async () => {
+    await client.Values.echo(undefined);
+    await client.Values.echo();
+
+    expect(wire()).toEqual(['POST /values/echo -', 'POST /values/echo -']);
+    expect(received).toEqual([{ body: ABSENT, type: 'undefined' }, { body: ABSENT, type: 'undefined' }]);
+  });
+
+  test('path, array query and primitive body in one call each arrive unchanged', async () => {
+    await client.Values.both('7', ['a'], 'hello');
+
+    expect(wire()).toEqual(['PUT /values/both/7?tags%5B%5D=a "hello"']);
+    expect(received).toEqual([{ id: '7', tags: ['a'], body: 'hello' }]);
+  });
+
+  test.each([
+    ['a BigInt', (): unknown => 10n],
+    ['a cyclic object', (): unknown => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+
+      return cyclic;
+    }],
+  ])('%s as the body is refused with a TypeError naming the call, and nothing is sent', async (_label, make) => {
+    const error = await rejectionOf(client.Values.echo(make()));
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error.message).toStartWith('Values.echo: the @Body value cannot be sent as JSON');
+    expect(error.message).toEndWith('Nothing was sent.');
+    expect(error.cause).toBeInstanceOf(TypeError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a BigInt', (): unknown => 10n],
+    ['a cyclic object', (): unknown => {
+      const cyclic: Record<string, unknown> = {};
+      cyclic.self = cyclic;
+
+      return cyclic;
+    }],
+    ['a string', (): unknown => 'hello'],
+  ])('%s as the @Body of a GET is not serialized: no body is sent, and the call succeeds', async (_label, make) => {
+    await client.Values.peek(make());
+
+    // The HTTP client sends no body with a GET, so a value JSON cannot represent must not fail it.
+    expect(wire()).toEqual(['GET /values/peek -']);
+    expect(received).toEqual([{ body: ABSENT }]);
+  });
+
+  test('a custom auth interceptor sees what is sent: the query in config.url, the body as JSON text', async () => {
+    const seen: unknown[] = [];
+    const intercepted = createServiceClient(definition, {
+      url: `http://127.0.0.1:${app.getPort()}`,
+      retries: { max: 0, delay: 0 },
+      auth: {
+        type: 'custom',
+        interceptor(config) {
+          seen.push({
+            method: config.method, url: config.url, query: config.query, data: config.data,
+          });
+
+          return config;
+        },
+      },
+    });
+
+    await intercepted.Values.both('7', ['a'], { name: 'Ada' });
+    await intercepted.Values.echo('hello');
+    await intercepted.Values.echo(undefined);
+    await intercepted.Values.peek({ unsent: true });
+
+    // 0.8: config.query was { tags: ['a'] }, and config.data was the @Body value, sent or not.
+    expect(seen).toEqual([
+      {
+        method: 'PUT', url: '/values/both/7?tags%5B%5D=a', query: undefined, data: '{"name":"Ada"}',
+      },
+      {
+        method: 'POST', url: '/values/echo', query: undefined, data: '"hello"',
+      },
+      {
+        method: 'POST', url: '/values/echo', query: undefined, data: undefined,
+      },
+      {
+        method: 'GET', url: '/values/peek', query: undefined, data: undefined,
+      },
+    ]);
+    // config.data is byte for byte the body that went over the wire.
+    expect(wire()).toEqual([
+      'PUT /values/both/7?tags%5B%5D=a {"name":"Ada"}',
+      'POST /values/echo "hello"',
+      'POST /values/echo -',
+      'GET /values/peek -',
+    ]);
+  });
+
+  test('an interceptor that changes the body parses the JSON text and stringifies the result', async () => {
+    const withTenant = (spread: boolean) => createServiceClient(definition, {
+      url: `http://127.0.0.1:${app.getPort()}`,
+      retries: { max: 0, delay: 0 },
+      auth: {
+        type: 'custom',
+        interceptor(config) {
+          if (spread) {
+            // The 0.8 pattern: config.data is a string now, so its characters become keys.
+            return { ...config, data: { ...(config.data as Record<string, unknown>), tenantId: 'acme' } };
+          }
+          if (typeof config.data !== 'string') {
+            return config;
+          }
+
+          return { ...config, data: JSON.stringify({ ...JSON.parse(config.data), tenantId: 'acme' }) };
+        },
+      },
+    });
+
+    await withTenant(false).Values.echo({ name: 'Ada' });
+    await withTenant(true).Values.echo({ name: 'Ada' });
+
+    expect(received[0]).toEqual({ body: { name: 'Ada', tenantId: 'acme' }, type: 'object' });
+    const spread = (received[1] as { body: Record<string, unknown> }).body;
+    expect([spread['0'], spread['1'], spread.tenantId, spread.name]).toEqual(['{', '"', 'acme', undefined]);
+  });
+
+  test('an API key in query mode is appended after the array query', async () => {
+    fetchSpy.mockImplementation(async () => Response.json({ success: true, result: {} }));
+    const keyed = createServiceClient(definition, {
+      url: 'http://127.0.0.1:1',
+      retries: { max: 0, delay: 0 },
+      auth: {
+        type: 'apikey', key: 'api_key', value: 'k', location: 'query',
+      },
+    });
+
+    await keyed.Values.tags(['a', 'b'], 'x');
+
+    expect(wire()).toEqual(['GET /values/tags?tags%5B%5D=a&tags%5B%5D=b&q=x&api_key=k -']);
+  });
+
+  test('a signed call with an array query and a string body verifies on the callee', async () => {
+    const verified: Array<{ valid: boolean; search: string; body: string }> = [];
+    const signed = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const body = await request.text();
+        const result = await Effect.runPromise(verifyOneBunRequest(
+          {
+            method: request.method, url: request.url, headers: request.headers, body,
+          },
+          { secret: 'shared-secret', audience: false, nonceStore: false },
+        ));
+        verified.push({ valid: result.valid, search: new URL(request.url).search, body });
+
+        return Response.json({ success: true, result: {} });
+      },
+    });
+
+    try {
+      const signingClient = createServiceClient(definition, {
+        url: `http://127.0.0.1:${signed.port}`,
+        retries: { max: 0, delay: 0 },
+        auth: { type: 'onebun', serviceId: 'orders-service', secretKey: 'shared-secret' },
+      });
+
+      await signingClient.Values.both('7', ['a', 'b c'], '');
+
+      expect(verified).toEqual([{ valid: true, search: '?tags%5B%5D=a&tags%5B%5D=b+c', body: '""' }]);
+    } finally {
+      signed.stop(true);
+    }
+  });
+});
+
+/*
  * The client as a value (onebun-FB-32).
  *
  * Both proxy levels used to throw for every name that was not a controller or a method, including

@@ -208,6 +208,19 @@ because no encoding can send them as one segment: `null`, `undefined`, `''`, `.`
 with an unpaired surrogate; send such a value as a query parameter or in the body. On the callee,
 read the value through `@Param`: the raw request path carries it encoded (`@` as `%40`, `:` as
 `%3A`). See `docs/api/requests.md#service-client-path-values`.
+Since 0.9 **query and body values arrive as passed**: a `@Query` array is sent as one `name[]` key per
+element and the handler receives an array, a one-element one included (`[]`, `null`, `undefined`
+send nothing); on `POST`/`PUT`/`PATCH` the `@Body` value is always sent as JSON, so a string, `0`,
+`false`, `''` and `null` reach `@Body()` unchanged and only `undefined` sends no body (other methods
+send no body and do not serialize it). Pass values, never `JSON.stringify(dto)` (it arrives as a
+string) or `tags.join(',')` (it arrives as one string). A BigInt or cyclic body of a
+`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. When upgrading from 0.8: a handler
+that split `'a,b'` now receives an array (type it `string | string[]` while 0.8 callers remain, and
+widen a `type('string')` query schema, which answers the array with a 400), callers that serialized
+the body themselves must pass the value, and a `custom` auth `interceptor` sees `config.data` as the
+JSON text that is sent (a string, or `undefined` with no body), not the value: sign it as it is, or
+`JSON.parse` it, change it and `JSON.stringify` it again; the query is in `config.url`, not
+`config.query`. See `docs/api/requests.md#service-client-query-body`.
 The client is a plain value: an `async` factory may return it, and `await`, `JSON.stringify` and
 `String` accept it (`then`, `toJSON` and symbol keys read as `undefined`). Test for a controller
 or method with `'UsersController' in client`: reading a name the definition lacks throws (a
@@ -1141,6 +1154,8 @@ at least in the areas you're modifying.
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
 | `client.UsersController.findById(undefined, id)` for `findById(@Header('x-tenant') t, @Param('id') id)` | `findById(id)`. Since 0.9 only `@Param`, `@Query` and `@Body` take arguments; the placeholder is read as `id` and refused. A non-null one (`findById('acme', id)`) is sent as `id`, so the call reaches `/users/acme` with no error; with a `@Query`/`@Body` first it is sent as that value. A token or tenant id goes in the client's `headers`/`auth` option |
 | `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. Since 0.9 the service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'` instead of `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
+| `client.UsersController.create(JSON.stringify(dto))`, or `findByTags(tags.join(','))` with a handler that splits `'a,b'` | `create(dto)` and `findByTags(tags)`. Since 0.9 the service client serializes every `@Body` value as JSON itself (a pre-serialized body arrives as a string) and sends a query array as `tags[]` keys, so the handler receives the array. Strings, `0`, `false`, `''` and `null` are valid bodies and arrive unchanged |
+| A service client `auth: { type: 'custom', interceptor: (c) => ({ ...c, data: { ...c.data, tenantId } }) }` | Since 0.9 `c.data` is the JSON text that is sent, not the value, so the spread sends the string's characters as keys. `if (typeof c.data === 'string') data = JSON.stringify({ ...JSON.parse(c.data), tenantId })`; sign `c.data` as it is, never `JSON.stringify(c.data)` |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |

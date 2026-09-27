@@ -3943,6 +3943,337 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       await app.stop();
     }
   });
+
+  /**
+   * Through 0.8 `['news', 'tech']` went out as `tags=news%2Ctech`, `'Hello'` as the bare text
+   * `Hello` (so `@Body()` read `undefined`), and `false` sent no body.
+   *
+   * @source docs:api/requests.md#service-client-query-body
+   */
+  it('should deliver a query array as an array and every body value as it was passed', async () => {
+    const received: unknown[] = [];
+
+    @Controller('/posts')
+    class PostsController extends BaseController {
+      @Get('/')
+      findByTags(@Query('tags') tags?: string[]) {
+        received.push({ tags });
+
+        return { tags };
+      }
+
+      @Put('/:id/title')
+      rename(@Param('id') id: string, @Body() title: string) {
+        received.push({ id, title });
+
+        return { id, title };
+      }
+
+      @Put('/:id/pinned')
+      setPinned(@Param('id') id: string, @Body() pinned: boolean) {
+        received.push({ id, pinned });
+
+        return { id, pinned };
+      }
+    }
+
+    @Module({ controllers: [PostsController] })
+    class PostsModule {}
+
+    const app = new OneBunApplication(PostsModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const wire: string[] = [];
+    const contentTypes: Array<string | null> = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      wire.push(`${init?.method} ${url.pathname}${url.search} ${init?.body ?? '-'}`);
+      contentTypes.push(new Headers(init?.headers).get('content-type'));
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const postsClient = createServiceClient(createServiceDefinition(PostsModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: the four calls of the snippet
+      await postsClient.PostsController.findByTags(['news', 'tech']);
+      await postsClient.PostsController.findByTags(['news']);
+      await postsClient.PostsController.rename('42', 'Hello');
+      await postsClient.PostsController.setPinned('42', false);
+
+      expect(wire).toEqual([
+        'GET /posts/?tags%5B%5D=news&tags%5B%5D=tech -',
+        'GET /posts/?tags%5B%5D=news -',
+        'PUT /posts/42/title "Hello"',
+        'PUT /posts/42/pinned false',
+      ]);
+      expect(received).toEqual([
+        { tags: ['news', 'tech'] },
+        { tags: ['news'] },
+        { id: '42', title: 'Hello' },
+        { id: '42', pinned: false },
+      ]);
+      expect(contentTypes.every((contentType) => contentType === 'application/json')).toBe(true);
+
+      // From the table: a single value is one key and arrives as text; [], null and undefined send nothing
+      wire.length = 0;
+      received.length = 0;
+      for (const tags of ['news', 42, true, [], null, undefined]) {
+        await postsClient.PostsController.findByTags(tags);
+      }
+      expect(wire).toEqual([
+        'GET /posts/?tags=news -',
+        'GET /posts/?tags=42 -',
+        'GET /posts/?tags=true -',
+        'GET /posts/ -',
+        'GET /posts/ -',
+        'GET /posts/ -',
+      ]);
+      expect(received).toEqual([
+        { tags: 'news' },
+        { tags: '42' },
+        { tags: 'true' },
+        { tags: undefined },
+        { tags: undefined },
+        { tags: undefined },
+      ]);
+
+      // From the table: 0, false, '' and null arrive as the same value, undefined sends no body
+      wire.length = 0;
+      received.length = 0;
+      for (const title of [0, '', null, { text: 'Hi' }, undefined]) {
+        await postsClient.PostsController.rename('42', title);
+      }
+      expect(wire).toEqual([
+        'PUT /posts/42/title 0',
+        'PUT /posts/42/title ""',
+        'PUT /posts/42/title null',
+        'PUT /posts/42/title {"text":"Hi"}',
+        'PUT /posts/42/title -',
+      ]);
+      expect(received).toEqual([
+        { id: '42', title: 0 },
+        { id: '42', title: '' },
+        { id: '42', title: null },
+        { id: '42', title: { text: 'Hi' } },
+        { id: '42', title: undefined },
+      ]);
+
+      // From the table: a BigInt body is refused with a TypeError naming the call, and nothing is sent
+      wire.length = 0;
+      await expect(postsClient.PostsController.rename('42', 10n)).rejects.toThrow(
+        'PostsController.rename: the @Body value cannot be sent as JSON',
+      );
+      expect(wire).toEqual([]);
+
+      // From the prose: array elements are sent as text, null and undefined ones are left out,
+      // and an object in the query goes out as [object Object]
+      received.length = 0;
+      await postsClient.PostsController.findByTags(['news', null, undefined, 7]);
+      await postsClient.PostsController.findByTags({ tag: 'news' });
+      expect(received).toEqual([{ tags: ['news', '7'] }, { tags: '[object Object]' }]);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-query-body-upgrade
+   */
+  it('should let a handler accept both 0.8 and 0.9 callers, and deliver a pre-serialized body as a string', async () => {
+    @Controller('/posts')
+    class PostsController extends BaseController {
+      @Get('/')
+      findByTags(@Query('tags') tags?: string | string[]) {
+        // From docs: an array from a 0.9 caller, the joined text from a caller still on 0.8
+        const list = Array.isArray(tags) ? tags : (tags?.split(',') ?? []);
+
+        return { tags: list };
+      }
+
+      @Get('/strict')
+      strict(@Query('tags', type('string')) tags?: string) {
+        return { tags };
+      }
+
+      @Get('/widened')
+      widened(@Query('tags', type('string | string[]')) tags?: string | string[]) {
+        return { tags };
+      }
+    }
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Post('/')
+      create(@Body() body: unknown) {
+        return { body };
+      }
+    }
+
+    @Module({ controllers: [PostsController, UsersController] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const url = `http://127.0.0.1:${app.getPort()}`;
+      const client = createServiceClient(createServiceDefinition(AppModule), { url, retries: { max: 0, delay: 0 } });
+
+      // From docs: the tolerant handler, called by a 0.9 client and by a 0.8 caller's wire format
+      const fromNewCaller = await client.PostsController.findByTags(['news', 'tech']);
+      expect(fromNewCaller.result.result).toEqual({ tags: ['news', 'tech'] });
+
+      const fromOldCaller = (await (await fetch(`${url}/posts?tags=news%2Ctech`)).json()) as { result: unknown };
+      expect(fromOldCaller.result).toEqual({ tags: ['news', 'tech'] });
+
+      // From docs: a string-only schema answers the array with a 400; the widened one takes both
+      await expect(client.PostsController.strict(['news'])).rejects.toThrow('Parameter tags validation failed');
+      const widened = await client.PostsController.widened(['news']);
+      expect(widened.result.result).toEqual({ tags: ['news'] });
+      const widenedText = await client.PostsController.widened('news');
+      expect(widenedText.result.result).toEqual({ tags: 'news' });
+
+      // From docs, "Before": serialized by the caller, so @Body() receives the JSON text as a string
+      const before = await client.UsersController.create(JSON.stringify({ name: 'Ada' }));
+      expect(before.result.result).toEqual({ body: '{"name":"Ada"}' });
+
+      // From docs, "After": the value
+      const after = await client.UsersController.create({ name: 'Ada' });
+      expect(after.result.result).toEqual({ body: { name: 'Ada' } });
+
+      // From docs: code that reads the raw request sees `tags[]` keys and a quoted string body
+      const raw: unknown[] = [];
+      const rawServer = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          const { searchParams } = new URL(request.url);
+          raw.push({ plain: searchParams.getAll('tags'), bracketed: searchParams.getAll('tags[]'), text: await request.text() });
+
+          return Response.json({ success: true, result: {} });
+        },
+      });
+
+      try {
+        const rawClient = createServiceClient(createServiceDefinition(AppModule), {
+          url: `http://127.0.0.1:${rawServer.port}`,
+        });
+        await rawClient.PostsController.findByTags(['news', 'tech']);
+        await rawClient.UsersController.create('Hello');
+
+        expect(raw).toEqual([
+          { plain: [], bracketed: ['news', 'tech'], text: '' },
+          { plain: [], bracketed: [], text: '"Hello"' },
+        ]);
+      } finally {
+        rawServer.stop(true);
+      }
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Through 0.8 the interceptor received the `@Body` value in `config.data` and the query record in
+   * `config.query`.
+   *
+   * @source docs:api/requests.md#service-client-query-body-upgrade
+   */
+  it('should hand a custom auth interceptor the JSON text that is sent, which it parses to change the body', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Post('/')
+      create(@Body() body: unknown) {
+        return { body };
+      }
+
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const usersDefinition = createServiceDefinition(UsersModule);
+    const received: Array<{ path: string; text: string; digest: string | null; expected: string }> = [];
+    const users = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const text = await request.text();
+        received.push({
+          path: new URL(request.url).pathname,
+          text,
+          digest: request.headers.get('x-body-sha256'),
+          expected: new Bun.CryptoHasher('sha256').update(text).digest('hex'),
+        });
+
+        return Response.json({ success: true, result: {} });
+      },
+    });
+
+    try {
+      const seen: unknown[] = [];
+      // From docs: the interceptor, with a probe recording what it is handed
+      const usersClient = createServiceClient(usersDefinition, {
+        url: `http://127.0.0.1:${users.port}`,
+        retries: { max: 0, delay: 0 },
+        auth: {
+          type: 'custom',
+          interceptor(config) {
+            seen.push(config.data);
+            if (typeof config.data !== 'string') {
+              return config;
+            }
+            const data = JSON.stringify({ ...JSON.parse(config.data), tenantId: 'acme' });
+            const digest = new Bun.CryptoHasher('sha256').update(data).digest('hex');
+
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            return { ...config, data, headers: { ...config.headers, 'x-body-sha256': digest } };
+          },
+        },
+      });
+
+      await usersClient.UsersController.create({ name: 'Ada' });
+      await usersClient.UsersController.findById('42');
+
+      // config.data is the JSON text, not the value, and undefined when no body is sent
+      expect(seen).toEqual(['{"name":"Ada"}', undefined]);
+
+      // The changed body is sent, and the digest covers exactly the bytes that arrive
+      const [created, found] = received;
+      expect(JSON.parse(created.text)).toEqual({ name: 'Ada', tenantId: 'acme' });
+      expect(created.digest).toBe(created.expected);
+      expect(found).toEqual({
+        path: '/users/42', text: '', digest: null, expected: found.expected,
+      });
+
+      // From docs: JSON.stringify(config.data) serializes it a second time, so it is not what is sent
+      expect(JSON.stringify(seen[0])).not.toBe('{"name":"Ada"}');
+    } finally {
+      users.stop(true);
+    }
+  });
 });
 
 describe('An uncaught client error and your caller (docs/api/requests.md)', () => {

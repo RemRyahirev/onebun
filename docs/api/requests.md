@@ -1755,6 +1755,7 @@ The client routes by name and checks the names. It does not check types.
 | Method name | not checked: every name of a `ControllerClient` is a method | reading a name the controller lacks throws |
 | Path parameter values | not checked | each value is percent-encoded, so it stays in its segment. `null`, `undefined`, `''`, `.` and `..`, which no encoding can send, are refused before anything is sent, see [Path parameter values](#service-client-path-values) |
 | Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | one per `@Param`, `@Query` and `@Body` parameter, see [Arguments](#service-client-arguments). Not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
+| Query and body values | not checked | a `@Query` array arrives as an array, and the `@Body` value of a `POST`, `PUT` or `PATCH` is sent as JSON, so a string, `0`, `false`, `''` and `null` arrive as passed. A body `JSON.stringify` throws on is refused before anything is sent, see [Query and body values](#service-client-query-body) |
 | Result | `any` | not checked against the handler's return type |
 
 The promise resolves the HTTP client's success envelope, and its `result` is the server's own
@@ -1985,16 +1986,209 @@ a proxy rule, sees the encoded form.
 - On the callee, read a path value through `@Param`, which decodes it. The raw request path carries
   the encoded text: `'user@example.com'` appears as `user%40example.com` in
   `new URL(req.url).pathname`.
-- Query values are encoded by the HTTP client as well (`URLSearchParams`), and bodies are JSON, so no
-  service client argument needs caller-side encoding.
+- Query values are encoded by the client as well (`URLSearchParams`), and bodies are sent as JSON,
+  so no service client argument needs caller-side encoding or `JSON.stringify` (see
+  [Query and body values](#service-client-query-body)).
 - A `TypeError` from a service client call means the arguments, not the network: nothing was sent,
   and retries do not apply. The causes are `null`/`undefined` (typically an omitted positional
-  argument or an id read from a missing field), `''`, `.`, `..`, and an unpaired surrogate.
+  argument or an id read from a missing field), `''`, `.`, `..`, and an unpaired surrogate in a path
+  value, and a `@Body` value of a `POST`, `PUT` or `PATCH` that `JSON.stringify` throws on (a BigInt,
+  a cyclic object).
 - Each `:name` in the route is replaced by the `@Param('name')` argument with exactly that name, so
   `/:idx/:id` gets both values regardless of declaration order. A `:name` with no matching `@Param`
   stays in the URL literally.
 - The HMAC signature (`auth: { type: 'onebun' }`) covers the encoded path, which is what both ends
   read from the URL, so encoding does not break signing.
+
+</llm-only>
+
+### Query and body values {#service-client-query-body}
+
+The handler receives each `@Query` and `@Body` value as it was passed, arrays and falsy values
+included. A `@Query` array is sent as one `name[]` key per element, which the callee's query parser
+reads back as an array, even with a single element. The `@Body` value of a `POST`, `PUT` or `PATCH`
+is always sent as JSON, with `Content-Type: application/json`:
+
+```typescript
+import {
+  BaseController,
+  Body,
+  Controller,
+  createServiceClient,
+  createServiceDefinition,
+  Get,
+  Module,
+  Param,
+  Put,
+  Query,
+} from '@onebun/core';
+
+@Controller('/posts')
+class PostsController extends BaseController {
+  @Get('/')
+  findByTags(@Query('tags') tags?: string[]) {
+    return { tags };
+  }
+
+  @Put('/:id/title')
+  rename(@Param('id') id: string, @Body() title: string) {
+    return { id, title };
+  }
+
+  @Put('/:id/pinned')
+  setPinned(@Param('id') id: string, @Body() pinned: boolean) {
+    return { id, pinned };
+  }
+}
+
+@Module({ controllers: [PostsController] })
+class PostsModule {}
+
+const postsClient = createServiceClient(createServiceDefinition(PostsModule), {
+  url: 'http://posts:3002',
+});
+
+// Sent as GET /posts/?tags%5B%5D=news&tags%5B%5D=tech; the handler receives ['news', 'tech']
+await postsClient.PostsController.findByTags(['news', 'tech']);
+
+// Sent as GET /posts/?tags%5B%5D=news; the handler receives ['news'], still an array
+await postsClient.PostsController.findByTags(['news']);
+
+// The body is "Hello"; the handler receives 'Hello'
+await postsClient.PostsController.rename('42', 'Hello');
+
+// The body is false; the handler receives false
+await postsClient.PostsController.setPinned('42', false);
+```
+
+| Argument | Sent as | The handler receives |
+|---|---|---|
+| `@Query` `'news'`, `42`, `true` | one key: `tags=news`, `tags=42`, `tags=true` | the text: `'news'`, `'42'`, `'true'` |
+| `@Query` `['news', 'tech']` | `tags[]=news&tags[]=tech`, encoded as `tags%5B%5D=...` | `['news', 'tech']` |
+| `@Query` `['news']` | `tags[]=news` | `['news']` |
+| `@Query` `[]`, `null`, `undefined` | nothing | `undefined` |
+| `@Body` `'Hello'` | `"Hello"` | `'Hello'` |
+| `@Body` `0`, `false`, `''`, `null` | `0`, `false`, `""`, `null` | the same value |
+| `@Body` a plain object, an array, a number | its JSON | an equal value |
+| `@Body` `undefined` | no body | `undefined` |
+| `@Body` a BigInt, a cyclic object | nothing: the call rejects with a `TypeError` naming the controller and the method | |
+| `@Body` any value, on a `GET`, `DELETE`, `HEAD` or `OPTIONS` endpoint | no body | `undefined` |
+
+The elements of a query array are sent as text, and its `null` and `undefined` elements are left
+out. Any other query value is sent as `String(value)`, so an object goes out as `[object Object]`:
+send structured data in the `@Body`. A `@Body` value that `JSON.stringify` has no text for, such as
+a function, sends no body, as `undefined` does. The HTTP client sends a body only with `POST`, `PUT`
+and `PATCH`, so a `@Body` of a `GET` or `DELETE` handler is not sent. It is not serialized either: a
+BigInt there does not fail the call.
+
+#### Upgrading from 0.8 {#service-client-query-body-upgrade}
+
+Through 0.8 the client handed both values to the HTTP client as they were. That client joins an
+array into one key, `tags=news%2Ctech`, so the handler received `'news,tech'`. It also sends a string
+body as bare text, which the callee cannot parse as JSON, so `@Body()` received `undefined`, and it
+skips a falsy body, so `0`, `false`, `''` and `null` sent no body and `@Body()` received `undefined`
+as well.
+
+A handler that split the joined text receives an array from 0.9. Callers on 0.8 keep sending the
+text until they are upgraded, so accept both until then:
+
+```typescript
+import { BaseController, Controller, Get, Query } from '@onebun/core';
+
+@Controller('/posts')
+class PostsController extends BaseController {
+  // Before: @Query('tags') tags?: string, split with tags.split(',')
+  @Get('/')
+  findByTags(@Query('tags') tags?: string | string[]) {
+    // An array from a 0.9 caller, the joined text from a caller still on 0.8
+    const list = Array.isArray(tags) ? tags : (tags?.split(',') ?? []);
+
+    return { tags: list };
+  }
+}
+```
+
+A `@Query('tags', schema)` whose schema accepts only a string, such as `type('string')`, answers the
+array with a 400. Widen it to `type('string[]')`, or `type('string | string[]')` while 0.8 callers
+remain.
+
+A caller that serialized the body itself now sends it serialized twice, and the handler receives the
+JSON text as a string. Pass the value:
+
+```typescript
+// Before: serialized by the caller. From 0.9 the body is "{\"name\":\"Ada\"}",
+// and @Body() receives the string '{"name":"Ada"}'
+await usersClient.UsersController.create(JSON.stringify({ name: 'Ada' }));
+
+// After: the value. The body is {"name":"Ada"}, and @Body() receives the object
+await usersClient.UsersController.create({ name: 'Ada' });
+```
+
+A handler that relied on `undefined` for a falsy body now receives the value itself: `false`, `0`,
+`''` or `null`. Code on the callee that reads the raw request instead of `@Param`, `@Query` and
+`@Body` sees the new wire format: the query keys of an array end in `[]`
+(`url.searchParams.getAll('tags[]')`), and a string body arrives in quotes (`await req.text()` gives
+`"Hello"`).
+
+Calls that pass a single query value, and a body that is an object, an array, a non-zero number or
+`true`, go out exactly as before. A BigInt or cyclic body of a `POST`, `PUT` or `PATCH`, which
+through 0.8 rejected with an Effect `FiberFailure` around the error of `JSON.stringify`, now rejects
+with a `TypeError` whose message names the call, and whose `cause` is that error. With the other
+methods the body is not sent, so it is not serialized either, and such a value still does not fail
+the call.
+
+A `custom` auth interceptor (`auth: { type: 'custom', interceptor }`) on a service client sees the
+request as it will be sent. `config.data` is the JSON text of the body, a string such as
+`'{"name":"Ada"}'`, not the `@Body` value, and `undefined` when no body is sent, which includes every
+`GET` and `DELETE`. The call's query is already in `config.url`, not in `config.query`. A signature
+over the body covers `config.data` as it is: `JSON.stringify(config.data)` would serialize it a
+second time. An interceptor that changes the body parses the text and stringifies the result:
+
+```typescript
+import { createServiceClient } from '@onebun/core';
+
+const usersClient = createServiceClient(usersDefinition, {
+  url: 'http://users:3001',
+  auth: {
+    type: 'custom',
+    interceptor: (config) => {
+      // Before: { ...config, data: { ...config.data, tenantId: 'acme' } }. From 0.9 config.data
+      // is a string, so that spread would send its characters as keys "0", "1", ...
+      if (typeof config.data !== 'string') {
+        return config;
+      }
+      const data = JSON.stringify({ ...JSON.parse(config.data), tenantId: 'acme' });
+      const digest = new Bun.CryptoHasher('sha256').update(data).digest('hex');
+
+      return { ...config, data, headers: { ...config.headers, 'x-body-sha256': digest } };
+    },
+  },
+});
+```
+
+<llm-only>
+
+- Pass query arrays as arrays: `findByTags(['a', 'b'])`, never `['a', 'b'].join(',')` — the handler
+  receives exactly the argument, and a joined string arrives as one string. A one-element array
+  arrives as a one-element array, an empty array as `undefined`.
+- Pass the body as a value, never `JSON.stringify(value)`: the client serializes it, so a
+  pre-serialized body arrives as a string. Strings, `0`, `false`, `''` and `null` are valid bodies
+  and arrive unchanged; only `undefined` sends none.
+- Type a handler's array query as `string[]` (or `string | string[]` while callers on 0.8 remain):
+  from a service client call it is an array. Plain HTTP clients that send `?tags=a` without `[]`
+  still produce a string, so a public endpoint should keep accepting both.
+- The service client builds the query string itself and hands the HTTP client a finished URL with
+  no `query` record. An API key in query mode is still appended after it; a `custom` auth
+  interceptor sees the query in `config.url`, not in `config.query`.
+- A `custom` auth interceptor on a service client sees `config.data` as the JSON text that will be
+  sent (a string), not the `@Body` value, and `undefined` when no body is sent (`GET`, `DELETE`,
+  `HEAD`, `OPTIONS`, or an `undefined` body). Sign that string as it is; to change the body,
+  `JSON.parse` it, change it and `JSON.stringify` it again. Never spread `config.data` or
+  `JSON.stringify` it a second time.
+- `@Body` values are serialized only for `POST`, `PUT` and `PATCH`, the methods that send a body; on
+  other methods the value is dropped unchecked, so a BigInt there does not reject.
+- The HMAC signature (`auth: { type: 'onebun' }`) covers the query string and the exact JSON bytes
+  that are sent.
 
 </llm-only>
 
