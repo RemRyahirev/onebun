@@ -133,6 +133,19 @@ boots too (it rebuilds what the rollback closed and reuses what you passed in), 
 that retry really stops it. Destroy hooks run on a failed boot too, even where
 `onModuleInit` never ran: release what exists (`this.pool?.end()`).
 
+A `stop()` called while `start()` is still booting (a supervisor giving up, a test's teardown) waits
+for the boot to settle, then does what a `stop()` right after it would: the full sequence after a boot
+that resolved — the queue connection and listener the boot opened after the `stop()` included — or the
+post-rollback close after one that failed. `start()` still resolves, or rejects with its own error; the
+destroy hooks run once, after `onModuleInit`. The wait counts toward `shutdownTimeout`; a boot that
+outlives it is stopped when it settles. (Older versions ran the sequence beside the boot, and whatever
+the boot acquired afterwards stayed open for good.) Against a boot that never settles, `stop()` resolves
+only after the whole `shutdownTimeout` (15 s by default — give a test's application a shorter one) and
+releases only the metrics sampler; a queue the boot already connected stays open, so end the process
+yourself (`process.exit`) once you have given up on it. To abort a boot from inside, throw from the hook
+— never `await app.stop()` in `onModuleInit` / `onApplicationInit`: it waits for its own boot and sits
+out the whole `shutdownTimeout`.
+
 ### Multi-Service Mode
 
 `OneBunApplication` also supports running multiple services from a single process via

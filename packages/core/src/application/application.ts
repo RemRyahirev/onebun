@@ -657,6 +657,32 @@ interface ShutdownRequest {
    * is done with this application, and every `stop()` has always closed those as well.
    */
   afterRollback?: boolean;
+  /**
+   * What is left of `shutdownTimeout`, when part of it went on waiting for a boot to settle (see
+   * `stopWhenBootSettles`). The deadline and the drain's share of it are cut from this instead,
+   * so that stop() as a whole stays inside the one budget.
+   */
+  budgetMs?: number;
+}
+
+/**
+ * A `start()` that has not settled yet, and the `stop()` queued behind it.
+ *
+ * A stop() used to run its sequence beside a boot still in `onModuleInit`: it released what
+ * existed at that moment — nothing, mostly — and resolved, and the boot then connected the queue,
+ * started the sampler and opened the listener after the terminal latch was taken, so nothing
+ * ever released them and the process never exited.
+ */
+interface BootInFlight {
+  /** Settles when the boot does, including its rollback; never rejects. */
+  settled: Promise<void>;
+  /** The `stop()` waiting for it, shared by every `stop()` and signal that arrives meanwhile. */
+  stop: Promise<ShutdownOutcome> | null;
+}
+
+/** For a promise whose outcome is only waited on, not read. */
+function settleQuietly(): void {
+  // Nothing to do: the settling is the point.
 }
 
 /**
@@ -747,6 +773,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * log transports, that another application has taken up since.
    */
   private closeAfterRollbackPromise: Promise<ShutdownOutcome> | null = null;
+  /**
+   * The `start()` that is still booting, if one is. While it is set, `stop()` waits for it
+   * instead of running beside it.
+   */
+  private bootInFlight: BootInFlight | null = null;
   /**
    * A `start()` resolved and nothing has shut the application down since.
    *
@@ -1229,23 +1260,60 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * In multi-service mode each service rolls back its own failed start; services that did
    * start keep running.
    *
+   * A `stop()` called while this is still booting does not run beside the boot: it waits for the
+   * boot to settle, then stops what the boot started — see `stop()`. This resolves, or rejects
+   * with the boot's own error, as it would have without that `stop()`.
+   *
    * @throws The error that stopped the boot, as `start()` caught it (see above for `onModuleInit`)
    */
   async start(): Promise<void> {
-    if (this.multiServiceMode) {
-      await this.orchestrator!.startAll();
+    // In place BEFORE the boot is called: its synchronous prefix already runs hooks — Effect runs
+    // `setup()` eagerly, so an `onModuleInit` with no await before it is reached from inside the
+    // call below — and a stop() from there must find the boot in flight too.
+    let markSettled: () => void = settleQuietly;
+    const inFlight: BootInFlight = {
+      settled: new Promise<void>((resolve) => {
+        markSettled = resolve;
+      }),
+      stop: null,
+    };
+    this.bootInFlight = inFlight;
 
-      // ONE handler for the whole process. The children are built with
-      // `gracefulShutdown: false`, so nothing below this line can call `process.exit`
-      // while a sibling is still running its destroy hooks — the parent exits after
-      // `stopAll()` has stopped every service.
-      if (this.options.gracefulShutdown !== false) {
-        this.enableGracefulShutdown();
+    const boot = this.multiServiceMode ? this.startServices() : this.boot();
+    // Cleared before `settled` resolves, so a queued stop() finds no boot in flight when it runs,
+    // whatever order the continuations of this await and of that one take.
+    void boot.then(settleQuietly, settleQuietly).then(() => {
+      if (this.bootInFlight === inFlight) {
+        this.bootInFlight = null;
       }
+      markSettled();
+    });
 
-      return;
+    await inFlight.settled;
+
+    return await boot;
+  }
+
+  /** The multi-service `start()`: every service's own boot, then the one signal handler. */
+  private async startServices(): Promise<void> {
+    await this.orchestrator!.startAll();
+
+    // ONE handler for the whole process. The children are built with
+    // `gracefulShutdown: false`, so nothing below this line can call `process.exit`
+    // while a sibling is still running its destroy hooks — the parent exits after
+    // `stopAll()` has stopped every service.
+    if (this.options.gracefulShutdown !== false) {
+      this.enableGracefulShutdown();
     }
+  }
 
+  /**
+   * The single-service `start()`: the boot itself, and the rollback when it fails.
+   *
+   * Only `start()` calls it, so a `stop()` arriving meanwhile is queued behind it rather than
+   * run beside it.
+   */
+  private async boot(): Promise<void> {
     // A retry after a failed start. Its rollback is over by now — start() awaited it before
     // rejecting — and from here on a stop() must stop THIS boot rather than await that rollback.
     // What the constructor built and the rollback released is built again, so the retry boots
@@ -1261,7 +1329,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       }
     }
     const wasRunning = this.running;
-    const stopBeforeStart = this.shutdownPromise;
 
     // Default exception filter respects httpEnvelope option
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
@@ -2737,7 +2804,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         error instanceof Error ? error : new Error(String(error)),
       );
       if (!wasRunning) {
-        await this.rollBackFailedStart(stopBeforeStart);
+        await this.rollBackFailedStart();
       }
       throw error;
     }
@@ -3324,6 +3391,14 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * what the rollback left open for a retry — a `loggerLayer`, `tracing.spanProcessors` and
    * `metrics.registry` passed in — as every `stop()` does.
    *
+   * Called while `start()` is still booting, it waits for the boot to settle and then does what
+   * it would have done called right after: stops what a boot that resolved started, or — after a
+   * boot that failed and rolled itself back — closes what that rollback left open. The wait
+   * counts toward `shutdownTimeout`. A boot still running when the budget is spent is no longer
+   * waited for: its system-metrics sampler is stopped then, and the rest as soon as it settles.
+   * Do not await this from the boot's own `onModuleInit` or `onApplicationInit` — it waits for
+   * that boot, so the hook sits out the whole budget. Throw from the hook to abort the boot.
+   *
    * @param options - Shutdown options
    */
   async stop(options?: {
@@ -3363,15 +3438,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * the error that stopped the boot — a cleanup failure standing in for it would send the
    * operator after the wrong problem.
    *
-   * @param stopBeforeStart - The shutdown latch as the failed `start()` found it
+   * Always its own sequence, even when a `stop()` was called during the boot: that `stop()` is
+   * queued behind the boot (`stopWhenBootSettles`), so nothing else is tearing it down. It used
+   * to run beside the boot instead, and this awaited it — which released only what existed when
+   * that `stop()` began, not the queue connection a boot still in `onModuleInit` went on to open.
    */
-  private async rollBackFailedStart(
-    stopBeforeStart: Promise<ShutdownOutcome> | null,
-  ): Promise<void> {
-    // A stop() that began while this start() was still booting is already tearing it down; a
-    // second sequence beside it would run the destroy hooks twice.
-    const stopDuringStart = this.shutdownPromise !== stopBeforeStart ? this.shutdownPromise : null;
-    const rollback = (stopDuringStart ?? this.executeShutdown({ rollback: true })).catch(
+  private async rollBackFailedStart(): Promise<void> {
+    const rollback = this.executeShutdown({ rollback: true }).catch(
       (rollbackError: unknown): ShutdownOutcome => {
         // Unreachable while every step is guarded and the sequence is raced against its
         // deadline; kept so a future unguarded step cannot replace the boot error with its own.
@@ -3385,9 +3458,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         };
       },
     );
-    if (!stopDuringStart) {
-      this.rollbackPromise = rollback;
-    }
+    this.rollbackPromise = rollback;
     await rollback;
   }
 
@@ -3483,11 +3554,18 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * awaits that same promise and its outcome. After a failed start with no `start()` since,
    * the rollback already ran the sequence: the first caller awaits that instead, then closes the
    * telemetry the rollback left open for a retry, and every caller after it awaits that same
-   * outcome. The terminal latch stays clear so a retry can still be stopped.
+   * outcome. The terminal latch stays clear so a retry can still be stopped. While a `start()` is
+   * still booting, every caller awaits the one stop queued behind that boot.
    */
   private async runShutdown(
     options?: ShutdownRequest,
   ): Promise<ShutdownOutcome> {
+    const booting = this.bootInFlight;
+    if (booting) {
+      booting.stop ??= this.stopWhenBootSettles(booting.settled, options);
+
+      return await booting.stop;
+    }
     if (!this.shutdownPromise && this.rollbackPromise) {
       this.closeAfterRollbackPromise ??= this.closeAfterRollback(this.rollbackPromise, options);
 
@@ -3522,6 +3600,77 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
+   * A `stop()` called while `start()` is still booting: wait for the boot to settle, then stop as
+   * a `stop()` called right after it would.
+   *
+   * Run beside the boot, as it used to be, the sequence released what existed when it began and
+   * took the terminal latch; the boot then went on to connect the queue, start the sampler and
+   * open the listener, and nothing was left that would ever release them (measured: the queue
+   * connection still live and the process killed at 12 s). It also ran the destroy hooks of
+   * services whose `onModuleInit` was still running. Waiting keeps the order every hook expects —
+   * init, then destroy — and lets the ordinary paths do the work: a boot that resolved is stopped
+   * by the full sequence, and one that failed has rolled itself back, so what is left is the
+   * close that follows a rollback.
+   *
+   * The wait comes out of the same `shutdownTimeout` as the sequence, which gets what is left of
+   * it. A boot still running when the budget is spent is no longer waited for — the outcome says
+   * the deadline expired, so the signal path exits with 1 — but the stop stays chained to the
+   * boot and runs, with a budget of its own, when it settles.
+   *
+   * Only the system-metrics sampler is released at that deadline. It is started before
+   * `onModuleInit`, nothing in the boot depends on it, and it holds the event loop on its own: left
+   * running, a boot that never settles kept the process alive after `stop()` gave up on it, where
+   * the stop that ran beside the boot had let it exit (measured: killed at 5 s, against an exit in
+   * 0.1 s). The stop chained to the boot clears it again, which is a no-op.
+   */
+  private async stopWhenBootSettles(
+    settled: Promise<void>,
+    options?: ShutdownRequest,
+  ): Promise<ShutdownOutcome> {
+    const budgetMs = options?.budgetMs ?? this.resolveShutdownTimeout();
+    const waitStartedAt = performance.now();
+    this.logger.info('stop() called while start() is still booting: stopping once the boot settles');
+
+    let stoppedWaiting = false;
+    const deadline = createDeadline(budgetMs);
+    const stopped = settled.then(async () => {
+      const remainingMs = budgetMs - (performance.now() - waitStartedAt);
+      // Nobody is waiting on a stop whose caller already gave up: it gets a budget of its own
+      const { budgetMs: _spent, ...request } = options ?? {};
+
+      return await this.runShutdown(
+        stoppedWaiting || remainingMs <= 0 ? request : { ...request, budgetMs: remainingMs },
+      );
+    });
+
+    const waited = await Promise.race([settled.then(() => 'settled' as const), deadline.expired]);
+    deadline.cancel();
+    if (waited === 'settled') {
+      return await stopped;
+    }
+
+    stoppedWaiting = true;
+    const phase = 'waiting for start() to finish booting';
+    this.logger.error(
+      `Shutdown timed out after ${budgetMs}ms while ${phase}; the application stops when the boot settles`,
+    );
+
+    const outcome: ShutdownOutcome = {
+      timedOut: true, phase, forceClosed: 0, failures: [],
+    };
+    if (this.metricsService?.stopSystemMetricsCollection) {
+      await this.runShutdownStep(outcome, 'stopping system metrics collection', async () => {
+        this.metricsService!.stopSystemMetricsCollection!();
+        this.logger.info('System metrics collection stopped');
+      });
+      // The step names itself while it runs; what timed out is still the wait
+      outcome.phase = phase;
+    }
+
+    return outcome;
+  }
+
+  /**
    * Run the shutdown sequence against a hard deadline.
    *
    * The sequence is raced, not cancelled: a hook that never returns cannot be interrupted
@@ -3531,7 +3680,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   private async executeShutdown(
     options?: ShutdownRequest,
   ): Promise<ShutdownOutcome> {
-    const budgetMs = this.resolveShutdownTimeout();
+    const budgetMs = options?.budgetMs ?? this.resolveShutdownTimeout();
     const outcome: ShutdownOutcome = {
       timedOut: false, phase: null, forceClosed: 0, failures: [], 
     };
@@ -3677,7 +3826,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       });
     }
 
-    const drainBudgetMs = Math.floor(this.resolveShutdownTimeout() * DRAIN_BUDGET_RATIO);
+    const drainBudgetMs = Math.floor((options?.budgetMs ?? this.resolveShutdownTimeout()) * DRAIN_BUDGET_RATIO);
     await this.runShutdownStep(outcome, 'draining in-flight HTTP requests', async () => {
       outcome.forceClosed = await this.drainHttpServer(drainBudgetMs);
     });
@@ -4306,10 +4455,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
     const shutdown = (signal: string): void => {
       // The latch, not a local flag: `stop()` called by application code before the
-      // signal arrived must silence the handler just as a first signal does.
-      if (this.shutdownPromise) {
+      // signal arrived must silence the handler just as a first signal does. So must a stop()
+      // queued behind a `start()` that is still booting.
+      const pending = this.shutdownPromise ?? this.bootInFlight?.stop ?? null;
+      if (pending) {
         this.logger.warn(`Already shutting down, ignoring ${signal}`);
-        scheduleExit(this.shutdownPromise);
+        scheduleExit(pending);
 
         return;
       }

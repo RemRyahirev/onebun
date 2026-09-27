@@ -482,6 +482,14 @@ against an unreachable collector is logged as `Shutdown step "flushing traces" f
 run, `shutdownLogger()` among them. A summary line names every phase that failed. `app.stop()` resolves
 either way — it never throws.
 
+Called while `start()` is still booting, `app.stop()` first waits for the boot to settle (logged as
+`stop() called while start() is still booting: stopping once the boot settles`), then runs this sequence
+over everything the boot acquired. The wait comes out of the same `shutdownTimeout`; if it eats the whole
+budget, `stop()` resolves with `Shutdown timed out after <n>ms while waiting for start() to finish booting`
+(signal path: exit 1) and the application stops once the boot settles. The system-metrics sampler is the
+one thing stopped at that point (`System metrics collection stopped`): left running, it alone kept alive
+a process whose boot never settles.
+
 This changed: the sequence used to be a chain of bare awaits, so the first rejection abandoned everything
 after it and the only trace was one `Shutdown sequence failed` line. The step most likely to reject is the
 one whose collector is going down with the pod, which made it the common case rather than an edge one.
