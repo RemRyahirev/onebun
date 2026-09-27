@@ -238,6 +238,12 @@ export class UserController extends BaseController {
 }
 ```
 
+The schema describes the value the handler returns, which the framework sends as the `result` of
+`{ success: true, result }` (see [One envelope rule](./controllers.md#one-envelope-rule)). The
+generated document currently publishes it as the whole response body, without that envelope: a
+client generated from `/openapi.json` finds the payload that schema describes in the body's
+`result`.
+
 ## ArkType to OpenAPI Schema
 
 ArkType schemas passed to `@Body(schema)` or `@ApiResponse(code, { schema })` are automatically converted to OpenAPI-compatible JSON Schema. This means one schema definition serves as TypeScript type, runtime validation, and OpenAPI documentation — no separate declarations to keep in sync.

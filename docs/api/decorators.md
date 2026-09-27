@@ -1133,11 +1133,20 @@ export class UserController extends BaseController {
 }
 ```
 
-The schema is **enforced**, not merely documented: a body that violates it never reaches the
+The schema is **enforced**, not merely documented: a value that violates it never reaches the
 client. The request answers HTTP 500 with the default filter's fixed
 `{ success: false, error: 'Internal Server Error', code: 500 }` — a response that does not match
 its own declared schema is a server-side contract bug, and the violation detail quotes the
 offending value, so it goes to the application log rather than to the caller.
+
+The schema describes the value the handler returns, and that value is what gets validated. The
+framework then wraps it like any other return value, so the body on the wire is
+`{ success: true, result: <the validated value> }` — see
+[One envelope rule](./controllers.md#one-envelope-rule). Declare the shape of your data, not the
+envelope: a schema for `{ success, result }` would reject every value a handler returns bare, and
+returning the envelope yourself to satisfy it gets it wrapped a second time. In the generated
+OpenAPI document the same schema currently stands for the whole response body, without the
+envelope around it.
 
 ## Documentation Decorators
 

@@ -1783,9 +1783,15 @@ export function clearGlobalModules(): void {
 
 /**
  * Response schema decorator for API documentation and validation
+ *
+ * The schema describes the value the handler returns, and that value is what gets validated. The
+ * framework wraps it afterwards like any other return value, so the body on the wire is
+ * `{ success: true, result: <value> }`: declare the data, not the envelope.
+ *
  * @param statusCode - HTTP status code (e.g., 200, 201, 404)
  * @param options - Response schema options
  * @see docs:api/decorators.md
+ * @see docs:api/controllers.md
  * @example
  * ```typescript
  * @Get('/users')

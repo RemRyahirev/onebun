@@ -549,7 +549,9 @@ export class ItemController extends BaseController {
 **Important rules:**
 - **Leading slash is optional** in `@Controller()` and route decorators. `@Controller('users')`
   equals `@Controller('/users')`, `@Get(':id')` equals `@Get('/:id')`. NestJS-style paths work as-is.
-- Return plain data from controller methods — auto-wrapped to `{ success: true, result: data }`
+- Return plain data from controller methods — auto-wrapped to `{ success: true, result: data }`.
+  Every non-`Response` value is wrapped on every route, including one with its own `success` key
+  (0.9.0+); a custom body needs `Response.json(body, { status })` — `this.json()` wraps too
 - Throw `HttpException` for errors — auto-converted to `{ success: false, error: message, code: statusCode }`
 - Use `OneBunRequest` (not `Request`) with `@Req()` decorator
 - ArkType schema `infer` types should be exported from the validation file as named types,

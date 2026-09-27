@@ -83,11 +83,11 @@ The leading slash in `@Controller()` and route decorators is optional. `@Control
 `@Controller('/')` and `@Controller()` are equivalent, and a route on either mounts at the root: `@Controller('/') + @Get('/health')` serves `GET /health`. `joinRoutePath` collapses runs of separators wherever the prefix, the controller path and the route path meet, so no combination of them can produce a path that matches nothing — and the OpenAPI generator uses the same helper, so a route is documented at the path it serves.
 :::
 
-The framework automatically wraps plain return values into `{ success: true, result: <data> }`. For errors, throw `HttpException` — the exception filter converts it to `{ success: false, error: <message>, code: <statusCode> }` with the matching HTTP status code.
+The framework wraps every value a handler returns into `{ success: true, result: <data> }`; only a returned `Response` is sent as it is. For errors, throw `HttpException` — the exception filter converts it to `{ success: false, error: <message>, code: <statusCode> }` with the matching HTTP status code.
 
 ## Response Formats
 
-**Success** (auto-wrapped from plain return values):
+**Success** (every returned value that is not a `Response`):
 
 ```json
 {
@@ -110,6 +110,72 @@ Error handling does not depend on whether a handler declares parameter decorator
 handler written `async findAll()` and one written `async findAll(@Query('q') q?: string)`
 produce identical responses for the same throw — same status, same content type, same
 envelope. See [Exception Filters](./exception-filters.md#what-filters-cover).
+
+### One envelope rule {#one-envelope-rule}
+
+Whatever a handler returns becomes the `result`, including a value that has a `success` key of
+its own. The rule is the same on every route: a handler with no parameter decorators and one with
+`@Query()`, `@Param()`, `@Body()` or an `@ApiResponse()` send the same bytes for the same value. A
+`Response` is the one thing sent exactly as the handler built it.
+
+```typescript
+import { BaseController, Controller, Get, Query } from '@onebun/core';
+
+@Controller('/payments')
+export class PaymentController extends BaseController {
+  // A domain value that happens to carry `success` is data like any other
+  @Get('/last')
+  last() {
+    return { success: false, error: 'CARD_DECLINED', code: 7 };
+    // → 200 {"success":true,"result":{"success":false,"error":"CARD_DECLINED","code":7}}
+  }
+
+  // A decorated parameter does not change the envelope
+  @Get('/search')
+  search(@Query('q') _q?: string) {
+    return { success: false, error: 'CARD_DECLINED', code: 7 };
+    // → the same 200 body, byte for byte
+  }
+
+  // To send a body of your own shape, return a Response
+  @Get('/legacy')
+  legacy() {
+    return Response.json({ success: false, error: 'CARD_DECLINED', code: 7 });
+    // → 200 {"success":false,"error":"CARD_DECLINED","code":7}
+  }
+}
+```
+
+`this.success(value, status)` and its alias `this.json(value, status)` return a `Response`, but one
+that already holds the envelope: `value` becomes its `result`, exactly as a plain return would, and
+only the status is yours to choose. They cannot send a body of your own shape; `Response.json(body,
+{ status })` can. For a failure, throw an `HttpException` or an error class such as `NotFoundError`.
+
+A schema declared with `@ApiResponse(status, { schema })` validates the value the handler returns,
+before it is wrapped. It describes the `result`, not the envelope around it — see
+[@ApiResponse()](./decorators.md#apiresponse).
+
+::: warning Upgrading from 0.8.x
+Through 0.8.x a route with at least one parameter decorator or any `@ApiResponse()` — with or
+without a `schema`, a `description` alone was enough — sent a returned object that had a `success`
+key as it was, while a route with neither wrapped it. From 0.9.0 every route wraps it. A handler
+that returns an envelope, one it built itself or one an HTTP client handed it, now sends it inside
+`result`, with status 200:
+
+- `return { success: true, result: user }`, written to avoid a double wrap, now answers
+  `{ success: true, result: { success: true, result: user } }`. Return `user`.
+- `return { success: false, error, code }`, written to report a failure, is now a success whose
+  `result` is that object. Throw an `HttpException` (or `NotFoundError`, `ConflictError`, …)
+  instead, so the status and the error envelope come from the exception filter.
+- `return await this.api.get(...)`, relaying an `HttpClient` success envelope as it is, now
+  answers `{ success: true, result: { success: true, result, statusCode, retryCount } }`.
+  Return `response.result`: callers then find at `result` what they found there before, and only
+  the top-level `statusCode` and `retryCount` are no longer sent.
+- To keep sending a body you build yourself, return `Response.json(body, { status })`. Returning
+  `this.json(body)` is not the same: it wraps `body` like a plain return.
+:::
+
+<!-- llm-only: One success-envelope rule on every route: a handler's return value that is not a Response is sent as JSON {"success":true,"result":<value>} (result omitted when the value is undefined), with status 200 or the status of the matching @ApiResponse schema. This includes values that have their own `success` key — {success:false,error,code} returned by a handler is a 200 success whose result is that object. The rule is identical on the fast dispatch arm (no decorated params, no @ApiResponse at all) and on the full arm (executeHandler; any decorated param or any @ApiResponse, including a description-only one without a schema). A returned Response (Response.json, new Response, this.text, this.sse) is sent untouched; this.success(v)/this.json(v) are Responses that already contain {success:true,result:v}. Custom envelope → return Response.json(body, { status }). Failure → throw HttpException or an OneBunBaseError subclass. Through 0.8.x the full arm passed through any object with a `success` key; that was removed in 0.9.0 (breaking). A relayed HttpClient success envelope ({success:true,result,statusCode,retryCount}) returned as is is now nested under `result` on every route; return response.result to keep callers' `result` unchanged. An @ApiResponse schema validates the handler's value, i.e. the `result`, not the wire body. -->
 
 ## Response Methods (Alternative)
 
@@ -184,7 +250,9 @@ async findOne(@Param('id') id: string) {
 
 ### json()
 
-Alias for `success()`. Creates JSON response.
+Alias for `success()`. Creates a JSON response whose body is `{ success: true, result: data }`,
+the same envelope a plain return gets. To send JSON of your own shape, return
+`Response.json(body, { status })` — see [One envelope rule](#one-envelope-rule).
 
 <!-- typecheck: skip -->
 ```typescript

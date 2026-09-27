@@ -88,6 +88,15 @@ at a time, or take `@Req()` and validate `new URL(req.url).searchParams` yoursel
 ## Response Patterns
 
 Return plain data from controller methods — the framework auto-wraps it to `{ success: true, result: data }`.
+The rule has one exception, a returned `Response`, and it is the same on every route: a value with its
+own `success` key is wrapped too, whether or not the handler has parameter decorators or an
+`@ApiResponse` of any kind, a description-only one included (from 0.9.0; through 0.8.x such routes
+sent a `success`-keyed object raw). Never return a hand-built `{ success, result }` or
+`{ success: false, error, code }` — it lands inside `result` with HTTP 200. The same goes for an
+`HttpClient` success envelope relayed as is: return `response.result`, not `response`.
+`this.success(v)`/`this.json(v)` wrap `v` as well; for a body of your own shape return
+`Response.json(body, { status })`. An `@ApiResponse` schema validates the handler's value (the
+`result`), not the envelope.
 For errors, throw `HttpException` — auto-converted to
 `{ success: false, error: message, code: statusCode, details: {} }`. `details` is always present
 (it defaults to `{}`), so a client that does `'details' in body` to detect a rich error is wrong.

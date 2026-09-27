@@ -2,10 +2,10 @@
  * A controller that returns an `@onebun/requests` success envelope as it is.
  *
  * The envelope carries the upstream's response headers (`SuccessResponse.headers`). The framework
- * serializes whatever a handler returns — the full arm sends an object with a `success` key as it
- * is, the fast arm wraps it into `result` — so an enumerable `headers` would have sent the
- * upstream's `set-cookie`, `server` and every other header to this controller's own caller, in the
- * body. The property is non-enumerable; this pins that no dispatch arm serializes it.
+ * serializes whatever a handler returns into the `result` of its own envelope, on every dispatch
+ * arm — so an enumerable `headers` would have sent the upstream's `set-cookie`, `server` and every
+ * other header to this controller's own caller, in the body. The property is non-enumerable; this
+ * pins that no dispatch arm serializes it.
  */
 
 import { type as arktype } from 'arktype';
@@ -55,10 +55,18 @@ class RelayController extends BaseController {
     return await relay();
   }
 
-  /** One decorated parameter: the full arm, which sends a `success`-keyed object as it is. */
+  /** One decorated parameter: the full arm, which wraps the value the same way. */
   @Get('/query')
   async withQuery(@Query('q') _q?: string): Promise<ApiResponse<typeof UPSTREAM_BODY>> {
     return await relay();
+  }
+
+  /** The 0.9.0 migration for a relaying route: return the client envelope's `result`. */
+  @Get('/query-result')
+  async withQueryResult(@Query('q') _q?: string): Promise<typeof UPSTREAM_BODY | undefined> {
+    const response = await relay();
+
+    return response.success ? response.result : undefined;
   }
 
   /** A declared schema: the full arm, which copies the value before validating it. */
@@ -145,13 +153,25 @@ describe('a controller returning a client success envelope verbatim', () => {
     expect(body).not.toContain('x-probe');
     expect(body).not.toContain('upstream-session');
     expect(body).not.toContain('"headers"');
-    // The full arm sends a `success`-keyed value as it is
+    // The full arm wraps the returned envelope into its own too, exactly as the fast arm does
     expect(envelope).toEqual({
       success: true,
-      result: UPSTREAM_BODY,
-      statusCode: 200,
-      retryCount: 0,
+      result: {
+        success: true,
+        result: UPSTREAM_BODY,
+        statusCode: 200,
+        retryCount: 0,
+      },
     });
+  });
+
+  test('keeps the relayed payload at `result` when the handler returns response.result', async () => {
+    const { status, envelope } = await fetchRelay('/query-result?q=1');
+
+    expect(status).toBe(200);
+    // Through 0.8.x this route sent the client envelope raw, so callers read UPSTREAM_BODY at
+    // `result`; returning response.result keeps it there, without statusCode and retryCount
+    expect(envelope).toEqual({ success: true, result: UPSTREAM_BODY });
   });
 
   test('should not serialize the upstream headers on a route with a declared response schema', async () => {

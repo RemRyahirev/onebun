@@ -533,6 +533,30 @@ function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Respons
 }
 
 /**
+ * The response for a value a handler returned that is not a `Response`: the value, whatever it
+ * is, as the `result` of `{ success: true, result }`.
+ *
+ * This is the one success-envelope rule, and both dispatch arms call it so they cannot drift
+ * apart again. They had: the fast arm wrapped every value, while `executeHandler` sent any object
+ * with a `success` key as it was. The same return value therefore had two wire forms, and which
+ * one a caller saw depended only on whether the route had a decorated parameter or an
+ * `@ApiResponse` (a description-only one included). A domain object shaped
+ * `{ success: false, error, code }` answered 200 went out raw on the full arm, where every client
+ * reading the envelope took it for a failed request — the service client rejected it as a 500. A
+ * body the handler wants sent exactly as it built it is a `Response`, and that is the only thing
+ * passed through.
+ */
+function successEnvelopeResponse(result: unknown, status: number): Response {
+  return new Response(JSON.stringify(createSuccessResponse(result)), {
+    status,
+    headers: {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      'Content-Type': 'application/json',
+    },
+  });
+}
+
+/**
  * Report handler parameters that carry no param decorator.
  *
  * What such a parameter receives depends on which dispatch arm the route lands in, and nothing
@@ -1794,15 +1818,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
                         return result;
                       }
 
-                      const successResponse = createSuccessResponse(result);
-
-                      return new Response(JSON.stringify(successResponse), {
-                        status: HttpStatusCode.OK,
-                        headers: {
-                        // eslint-disable-next-line @typescript-eslint/naming-convention
-                          'Content-Type': 'application/json',
-                        },
-                      });
+                      return successEnvelopeResponse(result, HttpStatusCode.OK);
                     }
                   }
                   : (): Promise<Response> => executeHandler(
@@ -3301,44 +3317,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
-      // If the result is already in standardized format, return it as JSON
-      if (
-        typeof validatedResult === 'object' &&
-        validatedResult !== null &&
-        'success' in validatedResult
-      ) {
-        let serMark: ProfileMark | undefined;
-        if (profiler) {
-          serMark = profiler.start('framework', 'response:serialize');
-        }
-        const resp = new Response(JSON.stringify(validatedResult), {
-          status: responseStatusCode,
-          headers: {
-            // eslint-disable-next-line @typescript-eslint/naming-convention
-            'Content-Type': 'application/json',
-          },
-        });
-        if (serMark) {
-          profiler!.end(serMark);
-        }
-
-        return resp;
-      }
-
-      // Otherwise, wrap in standardized success response
+      // Every value that is not a Response is wrapped, the same way the fast arm wraps it. An
+      // object with a `success` key used to be sent as it was here, and only here — see
+      // successEnvelopeResponse. A declared response schema validated the value above, so it
+      // describes the `result` inside the envelope, not the envelope.
       let serializeMark: ProfileMark | undefined;
       if (profiler) {
         serializeMark = profiler.start('framework', 'response:serialize');
       }
-      const successResponse = createSuccessResponse(validatedResult);
-
-      const resp = new Response(JSON.stringify(successResponse), {
-        status: responseStatusCode,
-        headers: {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          'Content-Type': 'application/json',
-        },
-      });
+      const resp = successEnvelopeResponse(validatedResult, responseStatusCode);
       if (serializeMark) {
         profiler!.end(serializeMark);
       }
