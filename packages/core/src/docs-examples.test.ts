@@ -3390,7 +3390,94 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   /**
    * @source docs:api/requests.md#service-client-path-values
    */
-  it('should deliver a percent-encoded path value decoded, and refuse the raw one before sending', async () => {
+  it('should encode every path value so the handler receives it unchanged, and refuse the ones no encoding can send', async () => {
+    const received: string[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id };
+      }
+    }
+
+    @Controller('/admin')
+    class AdminController extends BaseController {
+      @Get('/secret')
+      secret() {
+        received.push('AdminController.secret');
+
+        return { secret: 'S3CR3T' };
+      }
+    }
+
+    @Module({ controllers: [UsersController, AdminController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      sent.push(`${init?.method} ${new URL(String(input)).pathname}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      await usersClient.UsersController.findById('team/alice');
+
+      // From docs: sent as GET /users/100%25; the handler receives '100%'
+      await usersClient.UsersController.findById('100%');
+
+      // From docs: a value naming another route is one segment of the declared one
+      await usersClient.UsersController.findById('../admin/secret');
+
+      // From docs: text that only looks encoded is data too
+      await usersClient.UsersController.findById('%2e%2e');
+
+      expect(sent).toEqual([
+        'GET /users/team%2Falice',
+        'GET /users/100%25',
+        'GET /users/..%2Fadmin%2Fsecret',
+        'GET /users/%252e%252e',
+      ]);
+      expect(received).toEqual(['team/alice', '100%', '../admin/secret', '%2e%2e']);
+
+      // From the table: each of these is refused with a TypeError naming the call, and nothing is sent.
+      for (const value of [null, undefined, '', '.', '..', '\uD800']) {
+        const error = await usersClient.UsersController.findById(value).then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+        expect(error).toBeInstanceOf(TypeError);
+        expect((error as TypeError).message).toStartWith('UsersController.findById: path parameter "id" ');
+      }
+
+      // From the table: `encodeURIComponent` leaves dots alone, which is why `.` and `..` have no path spelling.
+      expect(encodeURIComponent('..')).toBe('..');
+
+      expect(sent).toHaveLength(4);
+      expect(received).toEqual(['team/alice', '100%', '../admin/secret', '%2e%2e']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-path-values-upgrade
+   */
+  it('should deliver a value the caller encoded first still encoded, and the raw value decoded', async () => {
     const received: string[] = [];
 
     @Controller('/users')
@@ -3422,38 +3509,28 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      // From docs, before: encoded by the caller, so it is encoded twice
       await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
 
-      expect(sent).toEqual(['GET /users/team%2Falice']);
-      expect(received).toEqual(['team/alice']);
+      // From docs, after: the raw value
+      await usersClient.UsersController.findById('team/alice');
 
-      // From docs: rejects with a TypeError and sends nothing
-      const refused = await usersClient.UsersController.findById('team/alice').then(
-        () => undefined,
-        (error: unknown) => error,
-      );
+      expect(sent).toEqual(['GET /users/team%252Falice', 'GET /users/team%2Falice']);
+      expect(received).toEqual(['team%2Falice', 'team/alice']);
 
-      expect(refused).toBeInstanceOf(TypeError);
-      expect((refused as TypeError).message).toStartWith(
-        'UsersController.findById: path parameter "id" contains "/", which ends a path segment, ',
-      );
-
-      // From the table: each of these would have reached a different route, so none is sent.
-      for (const value of [null, undefined, '', '.', '..', '%2e%2e', '.%2E', 'a\\b', 'a?b', 'a#b', '.\t.', '.. ']) {
-        const error = await usersClient.UsersController.findById(value).then(
-          () => undefined,
-          (thrown: unknown) => thrown,
-        );
-
-        expect(error).toBeInstanceOf(TypeError);
+      // From docs: values 0.8.2 refused are sent as data now
+      const refusedIn082 = ['a/b', 'a\\b', 'a?b', 'a#b', '%2e', '%2e%2e', '.%2E', '%2E.', '.\t.', '.\n.', '.. '];
+      for (const value of refusedIn082) {
+        await usersClient.UsersController.findById(value);
       }
 
-      // `encodeURIComponent` leaves dots alone, which is why `..` has no path spelling at all.
-      expect(encodeURIComponent('..')).toBe('..');
+      expect(received.slice(2)).toEqual(refusedIn082);
 
-      expect(sent).toEqual(['GET /users/team%2Falice']);
-      expect(received).toEqual(['team/alice']);
+      // From docs: the request path changes for a value the handler receives as before
+      await usersClient.UsersController.findById('user@example.com');
+
+      expect(sent.at(-1)).toBe('GET /users/user%40example.com');
+      expect(received.at(-1)).toBe('user@example.com');
     } finally {
       globalThis.fetch = originalFetch;
       await app.stop();

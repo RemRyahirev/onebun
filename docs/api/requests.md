@@ -1752,8 +1752,8 @@ The client routes by name and checks the names. It does not check types.
 |---|---|---|
 | Controller name | not checked: `createServiceClient()` returns `Record<string, ControllerClient>` | reading a name the definition lacks throws, and the error lists the controllers there are |
 | Method name | not checked: every name of a `ControllerClient` is a method | reading a name the controller lacks throws |
-| Path parameter values | not checked | a value that would change the route is refused before anything is sent, see [Path parameter values](#service-client-path-values) |
-| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | not checked, except that a path parameter left out (`undefined`) or `null` is refused like any other route-changing value. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
+| Path parameter values | not checked | each value is percent-encoded, so it stays in its segment. `null`, `undefined`, `''`, `.` and `..`, which no encoding can send, are refused before anything is sent, see [Path parameter values](#service-client-path-values) |
+| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
 | Result | `any` | not checked against the handler's return type |
 
 Arguments are matched by position to **every** decorated parameter of the handler, in the order it
@@ -1763,7 +1763,7 @@ takes a position, and whatever is passed there is dropped without an error. For
 `findById(@Header('x-tenant') tenant: string, @Param('id') id: string)` the call is
 `findById(undefined, '123')`: `findById('123')` puts `'123'` in the header's position, and rejects
 with a `TypeError` because `id` is `undefined`. Extra arguments are dropped too, and a path value
-is sent as text: `findById(42)` requests `/users/42`.
+is sent as its text, percent-encoded: `findById(42)` requests `/users/42`.
 
 The promise resolves the HTTP client's success envelope, and its `result` is the server's own
 `{ success, result }` body. The value the handler returned is therefore at `response.result.result`.
@@ -1806,47 +1806,82 @@ callee's handlers.
 
 ### Path parameter values {#service-client-path-values}
 
-A path parameter value fills exactly one segment of the route, and it is inserted **as is, without
-encoding**. A value that would make the request reach a different route is refused: the call rejects
-with a `TypeError` naming the controller, the method and the parameter, and no request is made. Sent,
-such a value would carry this client's credentials to that other route — `'../admin/secret'` as a
-user id would read `GET /admin/secret`.
-
-| Refused value | What it would do if sent |
-|---|---|
-| `null`, `undefined` | send the text `null` / `undefined` as the id |
-| contains `/`, `\`, `?` or `#` | end the segment: the rest becomes more path, a query string or a fragment. A URL parser treats `\` like `/` |
-| `''`, `.`, `..` | make an empty segment or a dot segment: `''` and `.` reach the sibling route (`GET /users/`), `..` climbs one level |
-| `%2e` for a dot: `%2e`, `%2e%2e`, `.%2E`, `%2E.` | the same as `.` and `..`: the URL parser reads `%2e` as a dot |
-| one of the above with a tab or newline inside (`'.\t.'`) or whitespace at the end (`'.. '`) | the same again: the URL parser deletes tabs and newlines, and trims the end of the URL, before it looks for dot segments |
-
-Every other value is sent unchanged. To send a
-value that contains `/`, `?`, `#` or `\`, percent-encode it: the router decodes the segment, and the
-handler receives the original text.
+A path parameter value fills exactly one segment of the route. The client converts it to text and
+percent-encodes it with `encodeURIComponent`, and the router decodes the segment exactly once, so the
+handler's `@Param` receives the value as it was passed: `/`, `\`, `?`, `#`, `%` and whitespace
+included. Pass the raw value, and do not encode it yourself.
 
 ```typescript
 // Sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
-const member = await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
+const member = await usersClient.UsersController.findById('team/alice');
 
-// Rejects with a TypeError and sends nothing:
-// UsersController.findById: path parameter "id" contains "/", which ends a path segment, ...
+// Sent as GET /users/100%25; the handler receives '100%'
+const discount = await usersClient.UsersController.findById('100%');
+```
+
+Nothing in a value can move the request to a different route. `'../admin/secret'` as a user id is
+sent as `GET /users/..%2Fadmin%2Fsecret` and reaches `findById` with exactly that text; it never
+reads `GET /admin/secret` with this client's credentials. Text that only looks encoded is data too:
+`'%2e%2e'` is sent as `%252e%252e` and the handler receives `'%2e%2e'`.
+
+A value that no encoding can send as one segment is refused: the call rejects with a `TypeError`
+naming the controller, the method and the parameter, and no request is made.
+
+| Refused value | Why |
+|---|---|
+| `null`, `undefined` | there is no value; it would be sent as the text `null` / `undefined` |
+| `''` | an empty segment: the request would reach the sibling route (`GET /users/`) |
+| `.`, `..` | dot segments: `.` would reach the sibling route and `..` would climb one level. `encodeURIComponent` leaves `.` alone, and a URL parser reads `%2E` as a dot as well, so every spelling of them is resolved as a dot segment |
+| a string with an unpaired UTF-16 surrogate, such as `'\uD800'` | it has no percent-encoding: `encodeURIComponent` throws on it, and a URL parser would replace it with U+FFFD |
+
+Send such a value as a `@Query` parameter or in the `@Body`.
+
+#### Values the caller has already encoded {#service-client-path-values-upgrade}
+
+The client encodes every value, so a value the caller has already percent-encoded is encoded a
+second time, and the handler receives the encoded text. Pass the raw value, without
+`encodeURIComponent`:
+
+```typescript
+// Before: encoded by the caller. From 0.9 this sends GET /users/team%252Falice,
+// and the handler receives 'team%2Falice'
+await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
+
+// After: the raw value. Sent as GET /users/team%2Falice; the handler receives 'team/alice'
 await usersClient.UsersController.findById('team/alice');
 ```
 
-`encodeURIComponent` leaves `.` alone, so `.` and `..` cannot be sent as a path segment at all. Pass
-such a value as a `@Query` parameter or in the `@Body`.
+Values 0.8.2 refused and 0.9 sends as data: anything containing `/`, `\`, `?` or `#`, the `%2e`
+spellings of a dot (`%2e`, `%2e%2e`, `.%2E`, `%2E.`), and dots with a tab, a newline or trailing
+whitespace (`'.\t.'`, `'.. '`). A `TypeError` from a service client call now means one of the values
+in the table above.
+
+The request path changes as well, even for values the handler receives exactly as before.
+`encodeURIComponent` also escapes characters that 0.8 sent as they were, among them `@`, `:`, `$`,
+`&`, `=`, `+`, `,` and `;`: `'user@example.com'` went out as `/users/user@example.com` and now goes
+out as `/users/user%40example.com`. `@Param('id')` receives `'user@example.com'` either way. Only
+code on the callee that reads the raw path from the request URL, such as a middleware, a log line or
+a proxy rule, sees the encoded form.
 
 <llm-only>
 
-- Encode a path argument that comes from user input: `findById(encodeURIComponent(input))`. Do not
-  encode it twice — the client does not encode on its own, and `%` followed by two hex digits is
-  decoded exactly once by the router.
+- Pass path arguments raw: `findById(input)`. Never wrap them in `encodeURIComponent` — the client
+  encodes every path value, so a caller-encoded `'a%2Fb'` reaches the handler as `'a%2Fb'`, not
+  `'a/b'`. Code written for 0.8 that encodes path arguments must drop the call when it moves to 0.9;
+  typecheck cannot catch it, because both spellings are strings.
+- On the callee, read a path value through `@Param`, which decodes it. The raw request path carries
+  the encoded text: `'user@example.com'` appears as `user%40example.com` in
+  `new URL(req.url).pathname`.
+- Query values are encoded by the HTTP client as well (`URLSearchParams`), and bodies are JSON, so no
+  service client argument needs caller-side encoding.
 - A `TypeError` from a service client call means the arguments, not the network: nothing was sent,
-  and retries do not apply. Typical causes are an omitted positional argument (`undefined`) and an
-  id read from a missing field.
+  and retries do not apply. The causes are `null`/`undefined` (typically an omitted positional
+  argument or an id read from a missing field), `''`, `.`, `..`, and an unpaired surrogate.
 - Each `:name` in the route is replaced by the `@Param('name')` argument with exactly that name, so
   `/:idx/:id` gets both values regardless of declaration order. A `:name` with no matching `@Param`
   stays in the URL literally.
+- The HMAC signature (`auth: { type: 'onebun' }`) covers the encoded path, which is what both ends
+  read from the URL, so encoding does not break signing.
 
 </llm-only>
 

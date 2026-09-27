@@ -19,69 +19,29 @@ import { ParamType } from '../types';
 const PATH_TOKEN = /:([^/]+)/g;
 
 /**
- * Characters that end a path segment when a WHATWG URL parser reads an `http(s)` URL. The
- * backslash is on the list because special schemes treat it exactly like `/`.
+ * Values that change the route however they are sent: an empty segment, "this directory" and "the
+ * parent directory". `encodeURIComponent` leaves `.` as it is, and spelling a dot as `%2E` does not
+ * help either, because a WHATWG URL parser reads `%2e` in any case as a dot when it resolves dot
+ * segments.
  */
-const SEGMENT_TERMINATORS = ['/', '\\', '?', '#'] as const;
-
-/** ASCII tab and newline: a WHATWG URL parser deletes them wherever they occur. */
-const URL_STRIPPED_ANYWHERE = /[\t\n\r]/g;
+const ROUTE_CHANGING_SEGMENTS: ReadonlySet<string> = new Set(['', '.', '..']);
 
 /**
- * The highest code unit a WHATWG URL parser trims from both ends of the URL: U+0020, space. The C0
- * controls (U+0000 to U+001F) are everything below it.
- */
-const URL_TRIMMED_MAX_CODE_UNIT = 0x20;
-
-/** Segments a URL parser treats as "this directory" and "the parent directory", or an empty one. */
-const ROUTE_CHANGING_SEGMENTS = new Set(['', '.', '..']);
-
-/**
- * `text` without its trailing C0 controls and spaces.
+ * The text that replaces one `:name` token: the value percent-encoded with `encodeURIComponent`,
+ * or a `TypeError` for a value that cannot be sent as that one segment.
  *
- * A scan from the end rather than an end-anchored regex over the same range: a backtracking engine
- * retries that pattern from every position of a run that does not reach the end, so 100 000 spaces
- * followed by `x` took seconds. `trimEnd()` is no substitute either: it keeps most C0 controls
- * (U+0000, U+0001, ...) and trims Unicode spaces such as U+00A0 that the parser keeps.
- */
-function trimUrlEnd(text: string): string {
-  let end = text.length;
-  while (end > 0 && text.charCodeAt(end - 1) <= URL_TRIMMED_MAX_CODE_UNIT) {
-    end--;
-  }
-
-  return text.slice(0, end);
-}
-
-/**
- * The segment a URL parser will actually see for `text`, for the dot-segment check.
+ * Encoding is what keeps the value inside its segment. `/`, `\`, `?`, `#` and `%` in it are sent as
+ * `%2F`, `%5C`, `%3F`, `%23` and `%25`, so the router matches the declared route and decodes the
+ * segment exactly once: the handler receives the value as it was passed. That includes text that
+ * looks encoded already. `'%2e%2e'` is sent as `%252e%252e` and arrives as `'%2e%2e'`, never as
+ * `..`, and a value the caller encoded first arrives still encoded.
  *
- * Before it looks for `.` and `..` the parser deletes every ASCII tab and newline anywhere in the
- * URL, and trims C0 controls and spaces from the end of the URL, which is where this segment sits
- * when the call has no query. So `'.\t.'` and `'.. '` arrive as `..`. It also accepts `%2e` for
- * a dot in any case and in any position, which decoding covers. A value that is not valid
- * percent-encoding is checked as written: it cannot decode to a dot segment.
- *
- * `text` is caller input of any length, so every step here is linear in it.
- */
-function effectivePathSegment(text: string): string {
-  const parsed = trimUrlEnd(text.replace(URL_STRIPPED_ANYWHERE, ''));
-
-  try {
-    return decodeURIComponent(parsed);
-  } catch {
-    return parsed;
-  }
-}
-
-/**
- * The text that replaces one `:name` token, or a `TypeError` for a value that would make the
- * request reach a different route than the one the endpoint declares.
- *
- * The value is sent unencoded, so a caller who percent-encodes it first gets exactly what they
- * encoded. What is refused: an unencoded `/`, `?`, `#` or `\` ends the segment, and `..`, `.` or an
- * empty segment moves the path up a level or onto a sibling route. The request would carry this
- * client's credentials to that route. The refusal happens before any request is made.
+ * The refusals happen before any request is made:
+ * - `null` and `undefined`, which would be sent as the text `null` / `undefined`;
+ * - `''`, `.` and `..`, which no encoding can send (see {@link ROUTE_CHANGING_SEGMENTS}). The request
+ *   would reach the sibling or the parent route, carrying this client's credentials there;
+ * - a string with an unpaired UTF-16 surrogate, which has no UTF-8 encoding. Sent as is, the URL
+ *   parser would replace it with U+FFFD, so the handler would receive a different value.
  */
 function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown): string {
   const route = `${endpoint.httpMethod} ${endpoint.path}`;
@@ -94,21 +54,20 @@ function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown
   }
 
   const text = String(value);
-  const terminator = SEGMENT_TERMINATORS.find((character) => text.includes(character));
-  if (terminator !== undefined) {
+  if (ROUTE_CHANGING_SEGMENTS.has(text)) {
+    const reading = text === '' ? 'is empty' : `is the dot segment "${text}"`;
     throw refuse(
-      `contains ${JSON.stringify(terminator)}, which ends a path segment, so the request would reach a ` +
-      `different route than ${route}. Percent-encode the value (encodeURIComponent) to send it as data`,
+      `${reading}, which would take the request to a different route than ${route} however it is encoded. ` +
+      'Send such a value as a @Query parameter or in the @Body',
     );
   }
 
-  const segment = effectivePathSegment(text);
-  if (ROUTE_CHANGING_SEGMENTS.has(segment)) {
-    const reading = segment === '' ? 'is empty' : `is read by the URL parser as the dot segment "${segment}"`;
-    throw refuse(`${reading}, so the request would reach a different route than ${route}`);
+  try {
+    return encodeURIComponent(text);
+  } catch {
+    // `encodeURIComponent` throws a URIError only for an unpaired surrogate.
+    throw refuse('contains an unpaired UTF-16 surrogate, which has no percent-encoding');
   }
-
-  return text;
 }
 
 /**
@@ -260,7 +219,7 @@ function createControllerProxy(
  *   `(...args: any[]) => Promise<any>`. Arguments are matched by position to every decorated
  *   parameter of the handler, but only the `@Param`, `@Query` and `@Body` values are sent: an
  *   argument in the position of a `@Header`, `@Req` or any other parameter is dropped, and so are
- *   extra arguments. Path values are sent as text, and a missing one is refused (see below).
+ *   extra arguments. Path values are sent as encoded text, and a missing one is refused (see below).
  * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
  *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
  *   or 5xx response rejects.
@@ -286,9 +245,11 @@ function createControllerProxy(
  * const response = await usersClient.UsersController.getById('123');
  * ```
  *
- * A path parameter value that would change the route is refused with a `TypeError` before any
- * request is made: `null`, `undefined`, a value containing `/`, `?`, `#` or `\`, and a value the
- * URL parser reads as `''`, `.` or `..` (including `%2e` spellings).
+ * Each path parameter value is converted to text and percent-encoded with `encodeURIComponent`,
+ * so the handler's `@Param` receives exactly the value passed here, `/`, `?`, `#`, `%` and all. Do
+ * not encode it yourself: `encodeURIComponent('a/b')` passed here arrives as `'a%2Fb'`. A value no
+ * encoding can send as one segment is refused with a `TypeError` before any request is made:
+ * `null`, `undefined`, `''`, `.`, `..`, and a string with an unpaired UTF-16 surrogate.
  *
  * The client and each `client.<Controller>` behave as plain values: they can be awaited and
  * returned from an `async` factory (`then` reads as `undefined`), serialized, converted to a

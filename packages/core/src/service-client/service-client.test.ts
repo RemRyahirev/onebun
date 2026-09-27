@@ -9,6 +9,9 @@ import {
   afterAll,
   type Mock,
 } from 'bun:test';
+import { Effect } from 'effect';
+
+import { verifyOneBunRequest } from '@onebun/requests';
 
 import { OneBunApplication } from '../application/application';
 import {
@@ -195,8 +198,9 @@ describe('createServiceClient', () => {
  *
  * The value used to be pasted into the template unencoded with `String.prototype.replace`, so
  * `'../admin/secret'` made `Items.detail` read `Admin.secret`, and `'../admin/purge?'` made a POST
- * land on `Admin.purge`, with whatever auth the client carries. The server's own view is what
- * matters here, so every handler records what it was called with.
+ * land on `Admin.purge`, with whatever auth the client carries. 0.8.2 refused such values; since
+ * 0.9.0 the client percent-encodes every value, so they reach the declared handler as data. The
+ * server's own view is what matters here, so every handler records what it was called with.
  */
 describe('path parameter values', () => {
   const hits: string[] = [];
@@ -296,40 +300,81 @@ describe('path parameter values', () => {
   };
 
   test.each([
-    ['../admin/secret'],
-    ['..'],
-    ['.'],
-    [''],
-    ['%2e%2e'],
-    ['.%2E'],
-    ['%2E.'],
-    ['%2e'],
-    ['a\\..\\admin'],
-    ['\\'],
-    ['x/y'],
-    ['x?y'],
-    ['x#y'],
-    // A URL parser deletes tabs and newlines and trims trailing whitespace BEFORE it looks for dot
-    // segments, so these arrive as `..` and would climb a level just the same.
-    ['.\t.'],
-    ['.\n%2e'],
-    ['.. '],
-    // The check reads the text that would be sent, not the argument's type.
-    [['../admin/secret']],
-    [null],
-    [undefined],
-  ])('refuses %p before any request, naming the call and the parameter', async (value) => {
+    ['folder/route?revision=other#section', 'folder/route?revision=other#section'],
+    ['100%', '100%'],
+    ['a b', 'a b'],
+    ['$&x', '$&x'],
+    ['a\\b', 'a\\b'],
+    // Each of these reached another route in 0.8.1 and was refused in 0.8.2. Encoded, every one
+    // of them is one segment of the declared route.
+    ['../admin/secret', '../admin/secret'],
+    ['a\\..\\admin', 'a\\..\\admin'],
+    ['x/y', 'x/y'],
+    ['x?y', 'x?y'],
+    ['x#y', 'x#y'],
+    // `%` is encoded too, so a URL parser never sees `%2e`: these arrive as the text they are.
+    ['%2e%2e', '%2e%2e'],
+    ['.%2E', '.%2E'],
+    ['%2E.', '%2E.'],
+    ['%2e', '%2e'],
+    // Tabs, newlines and spaces are encoded, so the parser has nothing to delete or trim.
+    ['.\t.', '.\t.'],
+    ['.\n%2e', '.\n%2e'],
+    ['.. ', '.. '],
+    ['...', '...'],
+    ['user@example.com', 'user@example.com'],
+    ['é 😀', 'é 😀'],
+    ['123', '123'],
+    // The value is sent as its text, whatever its type.
+    [42, '42'],
+    [['../admin/secret'], '../admin/secret'],
+  ])('sends %p encoded, and the handler of the declared route receives it unchanged', async (value, received) => {
+    await client.Items.detail(value);
+
+    expect(wirePaths()).toEqual([`/items/${encodeURIComponent(received)}`]);
+    expect(hits).toEqual([`Items.detail ${JSON.stringify(received)}`]);
+  });
+
+  test('delivers a value the caller encoded first still encoded, because the client encodes it again', async () => {
+    // Through 0.8.2 the client sent values as they were, so callers encoded them and the handler
+    // received 'a/b'. Now the '%' is encoded too.
+    await client.Items.detail('a%2Fb');
+    await client.Items.detail(encodeURIComponent('folder/route?revision=other#section'));
+
+    expect(wirePaths()).toEqual(['/items/a%252Fb', '/items/folder%252Froute%253Frevision%253Dother%2523section']);
+    expect(hits).toEqual([
+      `Items.detail ${JSON.stringify('a%2Fb')}`,
+      `Items.detail ${JSON.stringify('folder%2Froute%3Frevision%3Dother%23section')}`,
+    ]);
+  });
+
+  test('sends a POST whose value names another controller to the declared route, as data', async () => {
+    await client.Items.comment('../admin/purge?', { text: 'hi' });
+
+    expect(wirePaths()).toEqual(['/items/..%2Fadmin%2Fpurge%3F/comment']);
+    expect(hits).toEqual([`Items.comment ${JSON.stringify('../admin/purge?')}`]);
+  });
+
+  test.each([
+    ['..', 'is the dot segment ".."'],
+    ['.', 'is the dot segment "."'],
+    ['', 'is empty'],
+    [null, 'is null'],
+    [undefined, 'is undefined'],
+    // An unpaired surrogate has no UTF-8 encoding. Sent as is, the URL parser replaced it with U+FFFD.
+    ['a\uD800b', 'contains an unpaired UTF-16 surrogate'],
+  ])('refuses %p before any request, naming the call and the parameter', async (value, problem) => {
     const error = await rejectionOf(client.Items.detail(value));
 
     expect(error).toBeInstanceOf(TypeError);
-    expect(error.message).toContain('Items.detail');
-    expect(error.message).toContain('"id"');
+    expect(error.message).toStartWith(`Items.detail: path parameter "id" ${problem}`);
+    expect(error.message).toEndWith('Nothing was sent.');
     expect(fetchSpy).toHaveBeenCalledTimes(0);
     expect(hits).toEqual([]);
   });
 
-  test('refuses a POST that would land on another controller', async () => {
-    const error = await rejectionOf(client.Items.comment('../admin/purge?', { text: 'hi' }));
+  test('refuses a dot segment in a POST before any request', async () => {
+    const error = await rejectionOf(client.Items.comment('..', { text: 'hi' }));
 
     expect(error).toBeInstanceOf(TypeError);
     expect(error.message).toContain('Items.comment');
@@ -346,49 +391,62 @@ describe('path parameter values', () => {
     expect(hits).toEqual(['Pairs.pair id=D idx=I']);
   });
 
-  test('inserts the value literally, without $-pattern expansion', async () => {
-    await client.Items.detail('$&x');
+  test('encodes each value of a multi-parameter route on its own', async () => {
+    await client.Pairs.pair('a/b', 'c?d');
 
-    expect(hits).toEqual([`Items.detail ${JSON.stringify('$&x')}`]);
+    expect(wirePaths()).toEqual(['/pairs/c%3Fd/a%2Fb']);
+    expect(hits).toEqual(['Pairs.pair id=a/b idx=c?d']);
   });
 
-  test('leaves a value the caller already percent-encoded exactly as it was', async () => {
-    const raw = 'folder/route?revision=other#section';
+  test('signs the encoded path, and the callee verifies it from the URL it received', async () => {
+    const value = 'a/b?c#d %2e 100% é';
+    const verified: Array<{ valid: boolean; path: string }> = [];
+    const signed = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const result = await Effect.runPromise(verifyOneBunRequest(
+          {
+            method: request.method, url: request.url, headers: request.headers, body: await request.text(),
+          },
+          { secret: 'shared-secret', audience: false, nonceStore: false },
+        ));
+        verified.push({ valid: result.valid, path: new URL(request.url).pathname });
 
-    await client.Items.detail(encodeURIComponent(raw));
+        return Response.json({ success: true, result: {} });
+      },
+    });
 
-    expect(wirePaths()).toEqual([`/items/${encodeURIComponent(raw)}`]);
-    expect(hits).toEqual([`Items.detail ${JSON.stringify(raw)}`]);
-  });
+    try {
+      const signingClient = createServiceClient(createServiceDefinition(ApiModule), {
+        url: `http://127.0.0.1:${signed.port}`,
+        retries: { max: 0, delay: 0 },
+        auth: { type: 'onebun', serviceId: 'orders-service', secretKey: 'shared-secret' },
+      });
 
-  test.each([
-    ['123', '123'],
-    [42, '42'],
-    ['...', '...'],
-    ['a b', 'a b'],
-    ['user@example.com', 'user@example.com'],
-  ])('still sends %p, which stays on the declared route', async (value, received) => {
-    await client.Items.detail(value);
+      await signingClient.Items.detail(value);
 
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(hits).toEqual([`Items.detail ${JSON.stringify(received)}`]);
+      expect(verified).toEqual([{ valid: true, path: `/items/${encodeURIComponent(value)}` }]);
+    } finally {
+      signed.stop(true);
+    }
   });
 
   /*
-   * The dot-segment check trims trailing C0 controls and spaces from the value. The first cut did
-   * that with an end-anchored regex, which a backtracking engine retries from every position of a
-   * run that does not reach the end: 100 000 spaces before an `x` held the event loop for about
-   * 4 s before the request went out, and the cost grows with the square of the length. The value
-   * is caller input, so the check has to stay linear. The fetch stub answers without the server,
-   * so only the client's own work is timed; the budget is far above linear and far below 4 s.
+   * 0.8.2 trimmed trailing C0 controls and spaces from the value for its dot-segment check. The
+   * first cut did that with an end-anchored regex, which a backtracking engine retries from every
+   * position of a run that does not reach the end: 100 000 spaces before an `x` held the event loop
+   * for about 4 s. The value is still caller input, so building the path has to stay linear. The
+   * fetch stub answers without the server, so only the client's own work is timed; the budget is
+   * far above linear and far below 4 s.
    */
   const LONG_RUN = 100_000;
-  const CHECK_BUDGET_MS = 100;
+  const BUILD_BUDGET_MS = 100;
 
   test.each([
-    ['spaces', ' '],
-    ['C0 controls', String.fromCharCode(1)],
-  ])('checks a value with a long run of %s before its end in linear time, then sends it', async (_label, character) => {
+    ['spaces before its end', `${' '.repeat(LONG_RUN)}x`],
+    ['C0 controls before its end', `${String.fromCharCode(1).repeat(LONG_RUN)}x`],
+    ['spaces after a dot segment', `..${' '.repeat(LONG_RUN)}`],
+  ])('encodes a value with a long run of %s in linear time, then sends it', async (_label, value) => {
     let reachedFetchAt = Number.NaN;
     fetchSpy.mockImplementation(async () => {
       reachedFetchAt = performance.now();
@@ -397,21 +455,11 @@ describe('path parameter values', () => {
     });
 
     const calledAt = performance.now();
-    await client.Items.detail(`${character.repeat(LONG_RUN)}x`);
+    await client.Items.detail(value);
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(reachedFetchAt - calledAt).toBeLessThan(CHECK_BUDGET_MS);
-  });
-
-  test('still refuses a dot segment followed by a long trailing run, in linear time', async () => {
-    const calledAt = performance.now();
-    const error = await rejectionOf(client.Items.detail(`..${' '.repeat(LONG_RUN)}`));
-
-    expect(performance.now() - calledAt).toBeLessThan(CHECK_BUDGET_MS);
-    expect(error).toBeInstanceOf(TypeError);
-    expect(error.message).toContain('"id"');
-    expect(fetchSpy).toHaveBeenCalledTimes(0);
-    expect(hits).toEqual([]);
+    expect(reachedFetchAt - calledAt).toBeLessThan(BUILD_BUDGET_MS);
+    expect(wirePaths()).toEqual([`/items/${encodeURIComponent(value)}`]);
   });
 });
 

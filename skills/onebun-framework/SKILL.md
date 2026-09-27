@@ -192,13 +192,16 @@ Controllers are keyed by class name and arguments are positional, one per decora
 the handler in declaration order: `client.UsersController.findById(id)`. Only `@Param`, `@Query`
 and `@Body` values are sent; a `@Header`, `@Cookie`, `@Req` or custom-extractor parameter still
 takes a position, so `findById(@Header('x-tenant') t, @Param('id') id)` is called as
-`findById(undefined, id)`, and the value in that position is dropped. A path argument is
-inserted into its `:param` segment **unencoded**, and a value that would change the route is
-refused with a `TypeError` before anything is sent: `null`, `undefined`, anything containing `/`,
-`\`, `?` or `#`, and `''`, `.` or `..` (also as `%2e`, or with a tab, newline or trailing space in
-it). For an id that comes from user input, pass `encodeURIComponent(input)`: the router decodes it
-once, so the handler gets the original text. `.` and `..` cannot be sent in a path at all; use a
-query parameter. See `docs/api/requests.md#service-client-path-values`.
+`findById(undefined, id)`, and the value in that position is dropped. Since 0.9 the client
+**percent-encodes every path argument itself** (`encodeURIComponent`), and the router decodes it
+once, so the handler receives exactly what was passed, `/`, `?`, `#`, `\` and `%` included: pass
+user input raw, `findById(input)`, and never encode it yourself — a caller-encoded `'a%2Fb'`
+arrives as `'a%2Fb'`. When upgrading from 0.8, remove every `encodeURIComponent` around service
+client arguments (typecheck cannot find them). Refused with a `TypeError` before anything is sent,
+because no encoding can send them as one segment: `null`, `undefined`, `''`, `.`, `..` and a string
+with an unpaired surrogate; send such a value as a query parameter or in the body. On the callee,
+read the value through `@Param`: the raw request path carries it encoded (`@` as `%40`, `:` as
+`%3A`). See `docs/api/requests.md#service-client-path-values`.
 The client is a plain value: an `async` factory may return it, and `await`, `JSON.stringify` and
 `String` accept it (`then`, `toJSON` and symbol keys read as `undefined`). Test for a controller
 or method with `'UsersController' in client`: reading a name the definition lacks throws (a
@@ -1130,7 +1133,7 @@ at least in the areas you're modifying.
 | `await app.stop()` "to clean up" in the catch of a failed `start()`, and no exit | The failed `start()` already released everything, so that `stop()` runs no step again and only closes what you passed in (log transports, `spanProcessors`, `metrics.registry`) — end the bootstrap catch with `process.exit(1)`. To retry instead, build a new `OneBunApplication` per attempt (calling `start()` again on the same instance also works) |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
-| `client.UsersController.findById(input)` with a raw user-supplied id | `findById(encodeURIComponent(input))`. The service client does not encode path values; one containing `/`, `?`, `#` or `\`, or reading as `''`/`.`/`..`, rejects with a `TypeError` and sends nothing, because it would reach a different route |
+| `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. Since 0.9 the service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'` instead of `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |

@@ -69,7 +69,8 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
  *
  * Every method is `(...args: any[]) => Promise<any>`. Nothing checks the order or types of the
  * arguments against the handler, and the resolved value is not typed by the handler's return type.
- * At run time only a missing (`undefined`) or `null` path parameter value is refused; extra
+ * At run time only the path parameter values are checked: each is percent-encoded, and one that no
+ * encoding can send as a single segment (`undefined`, `null`, `''`, `.`, `..`) is refused. Extra
  * arguments, and those in the position of a parameter the client does not send, are dropped. The
  * method name itself is checked at run time: reading one the controller does not have throws.
  *
