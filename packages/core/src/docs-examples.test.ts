@@ -3682,19 +3682,19 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   });
 
   /**
-   * Arguments fill every decorated parameter by position, but only path, query and body values
-   * are sent; the one run-time check on the arguments is the refusal of a missing path value.
+   * The table's run-time column for arguments: the one check is the refusal of a missing path
+   * value, and a missing @Query or @Body argument is left out of the request.
    *
    * @source docs:api/requests.md#service-client-typing
    */
-  it('should match arguments to every decorated parameter, and send only @Param, @Query and @Body values', async () => {
+  it('should refuse a missing path value, and leave out a missing @Query or @Body argument', async () => {
     const received: unknown[][] = [];
 
     @Controller('/users')
     class UsersController extends BaseController {
       @Get('/:id')
-      findById(@Header('x-tenant') tenant: string | undefined, @Param('id') id: string) {
-        received.push(['findById', tenant ?? null, id]);
+      findById(@Param('id') id: string) {
+        received.push(['findById', id]);
 
         return { id };
       }
@@ -3732,30 +3732,214 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs: the header's position must be filled, and its value is not sent
-      await usersClient.UsersController.findById(undefined, '123');
-      await usersClient.UsersController.findById('acme', '123');
-      expect(received).toEqual([
-        ['findById', null, '123'],
-        ['findById', null, '123'],
-      ]);
-
-      // From docs: `findById('123')` puts '123' in the header's position, so `id` is undefined and
-      // the call is refused before anything is sent. So is a null path value
-      await expect(usersClient.UsersController.findById('123')).rejects.toThrow(
+      // From the table: a path parameter left out, or null, is refused before anything is sent
+      await expect(usersClient.UsersController.findById()).rejects.toThrow(
         'UsersController.findById: path parameter "id" is undefined',
       );
-      await expect(usersClient.UsersController.findById(undefined, null)).rejects.toThrow(TypeError);
-      expect(received).toHaveLength(2);
+      await expect(usersClient.UsersController.findById(null)).rejects.toThrow(TypeError);
+      expect(received).toEqual([]);
 
       // From the table: a missing @Query or @Body argument is not sent
       await usersClient.UsersController.list();
       await usersClient.UsersController.create();
-      expect(received.slice(2)).toEqual([
+      expect(received).toEqual([
         ['list', null],
         ['create', null],
       ]);
     } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Only @Param, @Query and @Body take arguments, in declaration order. Through 0.8 the @Header
+   * below took the first argument and dropped it, so `findById('123', 'name')` was refused.
+   *
+   * @source docs:api/requests.md#service-client-arguments
+   */
+  it('should take one argument per @Param, @Query and @Body parameter, and none for a @Header', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(
+        @Header('x-tenant') tenant: string | null,
+        @Param('id') id: string,
+        @Query('fields') fields?: string,
+      ) {
+        return { id, tenant, fields };
+      }
+
+      // Not in the snippet: the prose's last sentence, a parameter with no decorator.
+      @Get('/:id/raw')
+      raw(@Param('id') id: string, _undecorated: unknown, @Query('fields') fields?: string) {
+        return { id, fields };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      sent.push(`${init?.method} ${url.pathname}${url.search}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sends GET /users/123?fields=name, and the header takes no argument
+      const response = await usersClient.UsersController.findById('123', 'name');
+      expect(sent).toEqual(['GET /users/123?fields=name']);
+      expect(response.result.result).toEqual({ id: '123', tenant: null, fields: 'name' });
+
+      // From docs: a missing @Query argument is not sent, extra arguments are dropped, and a path
+      // value is sent as its text
+      await usersClient.UsersController.findById('123');
+      await usersClient.UsersController.findById('123', 'name', 'extra', 42);
+      await usersClient.UsersController.findById(42);
+      expect(sent.slice(1)).toEqual([
+        'GET /users/123',
+        'GET /users/123?fields=name',
+        'GET /users/42',
+      ]);
+
+      // From docs: a parameter with no decorator takes no argument either
+      await usersClient.UsersController.raw('7', 'name');
+      expect(sent.slice(4)).toEqual(['GET /users/7/raw?fields=name']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-arguments-upgrade
+   */
+  it('should read a 0.8 placeholder as the first client argument, and list the endpoints whose calls change', async () => {
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(
+        @Header('x-tenant') tenant: string | null,
+        @Param('id') id: string,
+        @Query('fields') fields?: string,
+      ) {
+        return { id, tenant, fields };
+      }
+
+      @Get('/')
+      list(@Header('x-tenant') tenant: string | null, @Query('page') page?: string) {
+        return { tenant, page };
+      }
+
+      // The header comes after the last client parameter: called exactly as before.
+      @Post('/')
+      create(@Body() body: unknown, @Header('x-tenant') tenant: string | null) {
+        return { body, tenant };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const wire: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      wire.push(`${init?.method} ${url.pathname}${url.search}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs, "Before": the placeholder is now the path value, so the call is refused
+      await expect(usersClient.UsersController.findById(undefined, '123', 'name')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is undefined',
+      );
+      // From docs: a `null` placeholder in front of a @Param is refused the same way
+      await expect(usersClient.UsersController.findById(null, '123', 'name')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is null',
+      );
+      expect(wire).toEqual([]);
+
+      // From docs, "After"
+      await usersClient.UsersController.findById('123', 'name');
+      expect(wire).toEqual(['GET /users/123?fields=name']);
+
+      // From docs: a placeholder that is not `undefined` moves every value one parameter later,
+      // and the last one is dropped. No error
+      await usersClient.UsersController.findById('acme', '123', 'name');
+      expect(wire.slice(1)).toEqual(['GET /users/acme?fields=123']);
+
+      // From docs: for a @Query, `undefined` sends no value, any other placeholder is sent as it
+      await usersClient.UsersController.list(undefined, '2');
+      await usersClient.UsersController.list('acme', '2');
+      expect(wire.slice(2)).toEqual(['GET /users/', 'GET /users/?page=acme']);
+
+      // From docs: the listing
+      const sent = new Set<ParamType>([ParamType.PATH, ParamType.QUERY, ParamType.BODY]);
+
+      const changed = createServiceDefinition(UsersModule)._endpoints
+        .filter(({ params = [] }) => {
+          const lastSent = Math.max(-1, ...params.filter((param) => sent.has(param.type)).map((param) => param.index));
+
+          return params.some((param) => !sent.has(param.type) && param.index < lastSent);
+        })
+        .map(({ controller, method }) => `${controller}.${method}`);
+
+      // `create` has its header after the body, so it is not listed
+      expect(changed.sort()).toEqual(['UsersController.findById', 'UsersController.list']);
+
+      // ... and it is called exactly as before
+      await usersClient.UsersController.create({ name: 'Ada' });
+      expect(wire.slice(4)).toEqual(['POST /users/']);
+
+      // From docs: a real value in the header's place, dropped through 0.8, now goes into the URL
+      const leaked = await usersClient.UsersController.list('Bearer secret-token');
+      expect(wire.slice(5)).toEqual(['GET /users/?page=Bearer+secret-token']);
+      expect(leaked.result.result).toEqual({ tenant: null, page: 'Bearer secret-token' });
+
+      // ... send it through the client's `headers` option instead
+      const tenantClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'x-tenant': 'acme' },
+      });
+      const scoped = await tenantClient.UsersController.list();
+      expect(wire.slice(6)).toEqual(['GET /users/']);
+      expect(scoped.result.result).toEqual({ tenant: 'acme' });
+    } finally {
+      globalThis.fetch = originalFetch;
       await app.stop();
     }
   });

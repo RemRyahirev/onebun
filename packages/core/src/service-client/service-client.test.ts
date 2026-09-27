@@ -16,12 +16,21 @@ import { verifyOneBunRequest } from '@onebun/requests';
 import { OneBunApplication } from '../application/application';
 import {
   Controller,
+  Cookie,
+  createHttpParamDecorator,
+  FormField,
   Get,
+  Header,
   Module,
   Param,
   Post,
+  Put,
   Body,
   Query,
+  Req,
+  Res,
+  UploadedFile,
+  UploadedFiles,
 } from '../decorators/decorators';
 import { Controller as BaseController } from '../module/controller';
 import { makeMockLoggerLayer } from '../testing/test-utils';
@@ -460,6 +469,240 @@ describe('path parameter values', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(reachedFetchAt - calledAt).toBeLessThan(BUILD_BUDGET_MS);
     expect(wirePaths()).toEqual([`/items/${encodeURIComponent(value)}`]);
+  });
+});
+
+/*
+ * Which arguments a generated call takes (onebun-FB-32, WI-379).
+ *
+ * Through 0.8 the client walked EVERY decorated parameter against `args[i]`, so a parameter the
+ * client never sends (`@Header`, `@Cookie`, `@Req`, `@Res`, a custom extractor, a file or a form
+ * field) still consumed an argument. Declared before a `@Query` or a `@Body`, it shifted them:
+ * `(@Header a, @Query q)` called as `m('hello')` sent no query at all, and `(@Header a, @Body b)`
+ * called as `m({ x: 1 })` sent a POST with no body. Since 0.9 only `@Param`, `@Query` and `@Body`
+ * take arguments, one each, in the order the handler declares them.
+ */
+describe('argument mapping', () => {
+  const received: unknown[] = [];
+
+  /** A view over the SERVER's request: there is nothing for a caller to pass. */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  const FromServer = createHttpParamDecorator(() => 'from-extractor');
+
+  @Controller('/mixed')
+  class Mixed extends BaseController {
+    @Get('/header-query')
+    headerThenQuery(@Header('x-a') a: string | null, @Query('q') q?: string) {
+      received.push({ a, q: q ?? null });
+
+      return {};
+    }
+
+    @Post('/header-body')
+    headerThenBody(@Header('x-a') a: string | null, @Body() body: unknown) {
+      received.push({ a, body: body ?? null });
+
+      return {};
+    }
+
+    @Get('/header-path/:id')
+    headerThenPath(@Header('x-a') a: string | null, @Param('id') id: string) {
+      received.push({ a, id });
+
+      return {};
+    }
+
+    @Get('/custom-query')
+    customThenQuery(@FromServer() fromServer: string, @Query('q') q?: string) {
+      received.push({ fromServer, q: q ?? null });
+
+      return {};
+    }
+
+    @Post('/custom-body')
+    customThenBody(@FromServer() fromServer: string, @Body() body: unknown) {
+      received.push({ fromServer, body: body ?? null });
+
+      return {};
+    }
+
+    @Put('/all/:id')
+    everything(
+      @Req() _req: unknown,
+      @Param('id') id: string,
+      @Header('x-a') a: string | null,
+      @Query('q') q: string | undefined,
+      @Cookie('c') c: string | undefined,
+      @FromServer() fromServer: string,
+      @Body() body: unknown,
+    ) {
+      received.push({
+        id, a, q: q ?? null, c: c ?? null, fromServer, body: body ?? null,
+      });
+
+      return {};
+    }
+
+    // The second parameter has no decorator: it is not in the route metadata at all, so it never
+    // took an argument, in 0.8 either.
+    @Get('/gap/:id')
+    gap(@Param('id') id: string, _undecorated: unknown, @Query('q') q?: string) {
+      received.push({ id, q: q ?? null });
+
+      return {};
+    }
+  }
+
+  @Module({ controllers: [Mixed] })
+  class MixedModule {}
+
+  let app: OneBunApplication;
+  let client: ReturnType<typeof createServiceClient>;
+  let originalFetch: typeof fetch;
+  let fetchSpy: Mock<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>;
+
+  beforeAll(async () => {
+    app = new OneBunApplication(MixedModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+    client = createServiceClient(createServiceDefinition(MixedModule), {
+      url: `http://127.0.0.1:${app.getPort()}`,
+      retries: { max: 0, delay: 0 },
+    });
+  });
+
+  afterAll(async () => {
+    await app.stop();
+  });
+
+  beforeEach(() => {
+    received.length = 0;
+    originalFetch = globalThis.fetch;
+    const realFetch = originalFetch;
+    fetchSpy = mock(async (input: string | URL | Request, init?: RequestInit) => await realFetch(input, init));
+    globalThis.fetch = fetchSpy as unknown as typeof fetch;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** What went over the wire: method, path with query string, and body. */
+  const wire = (): string[] => fetchSpy.mock.calls.map(([input, init]) => {
+    const url = new URL(String(input));
+
+    return `${init?.method} ${url.pathname}${url.search} ${init?.body ?? '-'}`;
+  });
+
+  test('a @Header before a @Query takes no argument: the query carries the value the caller passed', async () => {
+    await client.Mixed.headerThenQuery('hello');
+
+    // 0.8: 'hello' went to the header's slot and was dropped, so `GET /mixed/header-query -`.
+    expect(wire()).toEqual(['GET /mixed/header-query?q=hello -']);
+    expect(received).toEqual([{ a: null, q: 'hello' }]);
+  });
+
+  test('a @Header before a @Body takes no argument: the body arrives', async () => {
+    await client.Mixed.headerThenBody({ x: 1 });
+
+    // 0.8: a POST with no body, and the handler received `undefined`.
+    expect(wire()).toEqual(['POST /mixed/header-body {"x":1}']);
+    expect(received).toEqual([{ a: null, body: { x: 1 } }]);
+  });
+
+  test('a @Header before a @Param takes no argument: the path value is the first argument', async () => {
+    await client.Mixed.headerThenPath('123');
+
+    // 0.8: '123' went to the header's slot, `id` read `undefined`, and the call was refused.
+    expect(wire()).toEqual(['GET /mixed/header-path/123 -']);
+    expect(received).toEqual([{ a: null, id: '123' }]);
+  });
+
+  test('a createHttpParamDecorator parameter before a @Query takes no argument', async () => {
+    await client.Mixed.customThenQuery('hello');
+
+    expect(wire()).toEqual(['GET /mixed/custom-query?q=hello -']);
+    expect(received).toEqual([{ fromServer: 'from-extractor', q: 'hello' }]);
+  });
+
+  test('a createHttpParamDecorator parameter before a @Body takes no argument', async () => {
+    await client.Mixed.customThenBody({ x: 1 });
+
+    expect(wire()).toEqual(['POST /mixed/custom-body {"x":1}']);
+    expect(received).toEqual([{ fromServer: 'from-extractor', body: { x: 1 } }]);
+  });
+
+  test('with server-only parameters between them, @Param, @Query and @Body take the arguments in order', async () => {
+    await client.Mixed.everything('7', 'hello', { x: 1 });
+
+    expect(wire()).toEqual(['PUT /mixed/all/7?q=hello {"x":1}']);
+    expect(received).toEqual([{
+      id: '7', a: null, q: 'hello', c: null, fromServer: 'from-extractor', body: { x: 1 },
+    }]);
+  });
+
+  test('an undecorated parameter takes no argument, as in 0.8', async () => {
+    await client.Mixed.gap('7', 'hello');
+
+    expect(wire()).toEqual(['GET /mixed/gap/7?q=hello -']);
+    expect(received).toEqual([{ id: '7', q: 'hello' }]);
+  });
+
+  /*
+   * The 0.8 workaround was a placeholder in the server-only parameter's slot. It is now the first
+   * client argument, and the real value is an extra one, which is dropped.
+   */
+  test('a placeholder for a server-only parameter is now read as the first client argument', async () => {
+    await client.Mixed.headerThenQuery(undefined, 'hello');
+    await client.Mixed.headerThenQuery('acme', 'hello');
+    await client.Mixed.headerThenBody(undefined, { x: 1 });
+
+    expect(wire()).toEqual([
+      'GET /mixed/header-query -',
+      'GET /mixed/header-query?q=acme -',
+      'POST /mixed/header-body -',
+    ]);
+    expect(received).toEqual([
+      { a: null, q: null },
+      { a: null, q: 'acme' },
+      { a: null, body: null },
+    ]);
+
+    // For a path value the placeholder is refused, since `undefined` cannot be sent in a path.
+    await expect(client.Mixed.headerThenPath(undefined, '123')).rejects.toThrow(
+      'Mixed.headerThenPath: path parameter "id" is undefined',
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  test('file, form-field and @Res parameters take no argument either', async () => {
+    @Controller('/uploads')
+    class Uploads {
+      @Put('/:id')
+      replace(
+        @UploadedFile('avatar', { required: false }) _avatar: unknown,
+        @Param('id') _id: string,
+        @UploadedFiles('docs', { required: false }) _docs: unknown,
+        @Query('q') _q: string,
+        @FormField('name') _name: unknown,
+        @Res() _res: unknown,
+        @Body() _body: unknown,
+      ) {
+        return {};
+      }
+    }
+
+    @Module({ controllers: [Uploads] })
+    class UploadsModule {}
+
+    fetchSpy.mockImplementation(async () => Response.json({ success: true, result: {} }));
+    const uploads = createServiceClient(createServiceDefinition(UploadsModule), {
+      url: 'http://127.0.0.1:1',
+      retries: { max: 0, delay: 0 },
+    });
+
+    await uploads.Uploads.replace('7', 'hello', { x: 1 });
+
+    expect(wire()).toEqual(['PUT /uploads/7?q=hello {"x":1}']);
   });
 });
 

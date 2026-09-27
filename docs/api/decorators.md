@@ -657,7 +657,7 @@ tenant(@Claim('tid') tid: string) { return tid; }
 `@UseGuards` is the same decorator on all three transports; parameter decorators are not. A WebSocket handler reads its own metadata key with its own parameter types, and a queue handler has no parameter machinery at all — so a decorator built here on an `@OnMessage` or `@Subscribe` method is not an error, it is simply never read, and the parameter arrives `undefined`. The name says `Http` for that reason.
 :::
 
-A custom parameter carries no schema and is never required: it is not validated, it does not appear in the OpenAPI document, and the generated service client does not take it as an argument. Validate inside the extractor if you need to. The extractor must be a pure view over data the request already carries — it runs on the request path and nothing unwinds what it allocates.
+A custom parameter carries no schema and is never required: it is not validated, it does not appear in the OpenAPI document, and the generated service client does not take it as an argument (through 0.8 it did take one and dropped it, which shifted every later argument; see [service client arguments](/api/requests#service-client-arguments)). Validate inside the extractor if you need to. The extractor must be a pure view over data the request already carries — it runs on the request path and nothing unwinds what it allocates.
 
 ## File Upload Decorators
 

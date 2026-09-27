@@ -1717,9 +1717,10 @@ const usersClient = createServiceClient(UsersServiceDefinition, {
 });
 ```
 
-Controllers are reached by their **class name**, and handler arguments are passed **positionally**, in
-the order the handler declares its decorated parameters (see
-[What the client checks](#service-client-typing) for the ones the client does not send):
+Controllers are reached by their **class name**. The arguments are the handler's `@Param`, `@Query`
+and `@Body` values, passed **positionally** in the order the handler declares those parameters; a
+`@Header` or any other parameter the callee reads from its own request takes no argument (see
+[Arguments](#service-client-arguments)):
 
 ```typescript
 // Each call resolves `any`: the response envelope, not the handler's value (see below)
@@ -1739,8 +1740,8 @@ Three mistakes this section exists to prevent:
   so `baseUrl` is an excess property AND `url` is missing: two errors, and at runtime the underlying
   client would have `baseUrl: undefined`.
 - `client.users.findById({ id: '123' })` — the proxy keys controllers by `controller.name`
-  (`UsersController`), and `buildRequestParams` consumes `args[i]` positionally, so a wrapper object is
-  stringified into the URL rather than destructured.
+  (`UsersController`), and the call takes one positional argument per `@Param`, `@Query` and `@Body`
+  parameter, so a wrapper object is stringified into the URL rather than destructured.
 
 </llm-only>
 
@@ -1753,17 +1754,8 @@ The client routes by name and checks the names. It does not check types.
 | Controller name | not checked: `createServiceClient()` returns `Record<string, ControllerClient>` | reading a name the definition lacks throws, and the error lists the controllers there are |
 | Method name | not checked: every name of a `ControllerClient` is a method | reading a name the controller lacks throws |
 | Path parameter values | not checked | each value is percent-encoded, so it stays in its segment. `null`, `undefined`, `''`, `.` and `..`, which no encoding can send, are refused before anything is sent, see [Path parameter values](#service-client-path-values) |
-| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
+| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | one per `@Param`, `@Query` and `@Body` parameter, see [Arguments](#service-client-arguments). Not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
 | Result | `any` | not checked against the handler's return type |
-
-Arguments are matched by position to **every** decorated parameter of the handler, in the order it
-declares them, and the client sends only the `@Param`, `@Query` and `@Body` values. Any other
-decorated parameter (`@Header`, `@Cookie`, `@Req`, a custom extractor, a file or form field) still
-takes a position, and whatever is passed there is dropped without an error. For
-`findById(@Header('x-tenant') tenant: string, @Param('id') id: string)` the call is
-`findById(undefined, '123')`: `findById('123')` puts `'123'` in the header's position, and rejects
-with a `TypeError` because `id` is `undefined`. Extra arguments are dropped too, and a path value
-is sent as its text, percent-encoded: `findById(42)` requests `/users/42`.
 
 The promise resolves the HTTP client's success envelope, and its `result` is the server's own
 `{ success, result }` body. The value the handler returned is therefore at `response.result.result`.
@@ -1801,6 +1793,127 @@ callee's handlers.
   inside the rejection (see "Reading the ErrorResponse").
 - The service client, like everything else exported from `@onebun/core`, cannot currently be bundled
   for a browser.
+
+</llm-only>
+
+### Arguments {#service-client-arguments}
+
+A call takes one argument per `@Param`, `@Query` and `@Body` parameter of the handler, in the order
+the handler declares them. Those are the only values the client sends. Every other decorated
+parameter reads the callee's own request: `@Header`, `@Cookie`, `@Req`, `@Res`, a
+[custom extractor](/api/decorators#createhttpparamdecorator), a file or a form field. None of them
+takes an argument, wherever it is declared:
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  createServiceClient,
+  createServiceDefinition,
+  Get,
+  Header,
+  Module,
+  Param,
+  Query,
+} from '@onebun/core';
+
+@Controller('/users')
+class UsersController extends BaseController {
+  @Get('/:id')
+  findById(
+    @Header('x-tenant') tenant: string | null,
+    @Param('id') id: string,
+    @Query('fields') fields?: string,
+  ) {
+    return { id, tenant, fields };
+  }
+}
+
+@Module({ controllers: [UsersController] })
+class UsersModule {}
+
+const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+  url: 'http://users:3001',
+});
+
+// Sends GET /users/123?fields=name. The header takes no argument, and none is sent
+await usersClient.UsersController.findById('123', 'name');
+```
+
+A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped. A path value is
+sent as its text, percent-encoded: `findById(42)` requests `/users/42`. A parameter with no
+decorator is not in the route metadata, so it takes no argument either.
+
+#### Upgrading from 0.8 {#service-client-arguments-upgrade}
+
+Through 0.8 every decorated parameter took an argument, and the client dropped the ones it does not
+send. A parameter such as `@Header` declared before a `@Param`, `@Query` or `@Body` therefore
+shifted it. The handler above had to be called as `findById(undefined, '123', 'name')`. The natural
+`findById('123')` was refused, because `id` read `undefined`, and with a `@Query` or a `@Body` in
+that place the request went out without the value. From 0.9, remove the placeholder:
+
+```typescript
+// Before: a placeholder in the header's place
+await usersClient.UsersController.findById(undefined, '123', 'name');
+
+// After
+await usersClient.UsersController.findById('123', 'name');
+```
+
+A call that keeps the placeholder does not always fail. The placeholder is now read as the value of
+the first `@Param`, `@Query` or `@Body` parameter, each real value as the value of the parameter
+after its own, and the last one is dropped as an extra argument. When that first parameter is a
+`@Param`, an `undefined` or `null` placeholder is refused with a `TypeError` and nothing is sent.
+Any other placeholder, such as a tenant id, is sent as the path value, so the call reaches a
+different resource with no error: `findById('acme', '123', 'name')` requests `/users/acme?fields=123`.
+When the first parameter is a `@Query` or a `@Body`, the request is sent with the wrong values and no
+error: `undefined` sends no value, and any other placeholder is sent as the value. Typecheck cannot
+find these calls.
+
+A real value passed in the place of a header, such as an `Authorization` token or a tenant id, was
+never sent through 0.8. From 0.9 it is sent as the first path, query or body value, so it can end up
+in a URL and in the access logs of the callee and of every proxy in between. Send such a value
+through the client's `headers` or `auth` option instead, or let the callee derive it with its own
+middleware or guard.
+
+The calls that change are the calls to endpoints with such a parameter declared before a `@Param`,
+`@Query` or `@Body`. This lists those endpoints from the callee's module:
+
+```typescript
+import { createServiceDefinition, ParamType } from '@onebun/core';
+
+import { UsersModule } from './users/users.module';
+
+const sent = new Set<ParamType>([ParamType.PATH, ParamType.QUERY, ParamType.BODY]);
+
+const changed = createServiceDefinition(UsersModule)._endpoints
+  .filter(({ params = [] }) => {
+    const lastSent = Math.max(-1, ...params.filter((param) => sent.has(param.type)).map((param) => param.index));
+
+    return params.some((param) => !sent.has(param.type) && param.index < lastSent);
+  })
+  .map(({ controller, method }) => `${controller}.${method}`);
+// ['UsersController.findById']
+```
+
+An endpoint without such parameters, or with them only after its last `@Param`, `@Query` and
+`@Body`, is called exactly as before.
+
+<llm-only>
+
+- The arguments of a service client call are the handler's `@Param`, `@Query` and `@Body` values in
+  declaration order, and nothing else. Never pass a placeholder for a `@Header`, `@Cookie`, `@Req`,
+  `@Res`, custom-extractor (`createHttpParamDecorator`), file or form-field parameter: the call
+  would read it as the first `@Param`/`@Query`/`@Body` value.
+- Through 0.8 every decorated parameter took an argument, so code written for 0.8 against a handler
+  that declares such a parameter first may pass `undefined` in its place. Remove it when moving to
+  0.9. A leftover placeholder fails loudly only when the first `@Param`/`@Query`/`@Body` parameter
+  is a path parameter and the placeholder is `undefined` or `null` (`TypeError`, nothing sent);
+  otherwise every value lands one parameter later and the request goes out with no error. A real
+  value in that place (a token, a tenant id), which 0.8 silently dropped, is now sent in the path,
+  the query string or the body.
+- Server-only values reach the callee by other means: a header through the client's `headers`
+  option or `auth`, a user or tenant through the callee's own middleware or guard.
 
 </llm-only>
 

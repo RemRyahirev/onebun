@@ -7,7 +7,7 @@ import type {
 
 import { HttpClient, type HttpMethod as RequestsHttpMethod } from '@onebun/requests';
 
-import { ParamType } from '../types';
+import { ParamType, type ParamMetadata } from '../types';
 
 /**
  * A `:name` token in a route template, in the router's own grammar: the name runs from the colon
@@ -70,6 +70,33 @@ function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown
   }
 }
 
+/** The parameter types a caller supplies. See {@link clientParams}. */
+type ClientParamType = ParamType.PATH | ParamType.QUERY | ParamType.BODY;
+
+type ClientParam = ParamMetadata & { type: ClientParamType };
+
+function isClientParam(param: ParamMetadata): param is ClientParam {
+  return param.type === ParamType.PATH || param.type === ParamType.QUERY || param.type === ParamType.BODY;
+}
+
+/**
+ * The handler parameters a generated call takes arguments for: its `@Param`, `@Query` and `@Body`
+ * parameters, in the order the handler declares them. Argument `n` of the call is entry `n`.
+ *
+ * Every other decorated parameter is a view over the SERVER's request: `@Header`, `@Cookie`,
+ * `@Req`, `@Res`, a `createHttpParamDecorator` extractor, a file or a form field. The client sends
+ * nothing for them, so they take no argument. An undecorated parameter is not in the metadata at
+ * all, and takes none either.
+ *
+ * Through 0.8 the call walked every decorated parameter against `args[i]`, so a server-only one
+ * declared before a client one took an argument too, and shifted the rest: `(@Header a, @Query q)`
+ * called as `m('hello')` sent no query. Counting only these three types is what makes the call's
+ * arguments the list a caller can see, and the list a typed contract would expose.
+ */
+function clientParams(endpoint: EndpointMetadata): ClientParam[] {
+  return (endpoint.params ?? []).filter(isClientParam).sort((a, b) => a.index - b.index);
+}
+
 /**
  * Build request parameters from endpoint metadata and arguments
  */
@@ -81,14 +108,9 @@ function buildRequestParams(
   let query: Record<string, unknown> | undefined;
   const pathValues = new Map<string, unknown>();
 
-  const params = endpoint.params || [];
-
-  // Sort params by index to match with args
-  const sortedParams = [...params].sort((a, b) => a.index - b.index);
-
-  for (let i = 0; i < sortedParams.length; i++) {
-    const param = sortedParams[i];
-    const value = args[i];
+  // Arguments past the last client parameter are dropped.
+  clientParams(endpoint).forEach((param, position) => {
+    const value = args[position];
 
     switch (param.type) {
       case ParamType.PATH:
@@ -105,22 +127,8 @@ function buildRequestParams(
           query[param.name] = value;
         }
         break;
-      case ParamType.CUSTOM:
-        // An extractor is a view over the SERVER's request — there is nothing for a caller to
-        // pass, so it consumes no argument here.
-        //
-        // It does still occupy a slot in this loop, because the loop walks `sortedParams[i]`
-        // against `args[i]`. That is pre-existing: HEADER, REQUEST and RESPONSE fall into the
-        // same shape below, so a handler that declares one of them before a QUERY already reads
-        // the wrong argument. Fixing it needs a counter compacted over client-relevant types
-        // only, which is a change to how every generated call is made — see the work item.
-        break;
-
-      // HEADER, REQUEST, RESPONSE are not typically used in client calls
-      default:
-        break;
     }
-  }
+  });
 
   // One pass over the template with a function replacer: each token is replaced by exact name,
   // and the returned text is inserted as is (a string replacement would expand `$&` and `$1`).
@@ -216,10 +224,12 @@ function createControllerProxy(
  * - Controller and method names, at run time only: reading one the definition does not have
  *   throws. The return type is `Record<string, ControllerClient>`, so any name compiles.
  * - Nothing checks the types of the arguments or the result. Each method is
- *   `(...args: any[]) => Promise<any>`. Arguments are matched by position to every decorated
- *   parameter of the handler, but only the `@Param`, `@Query` and `@Body` values are sent: an
- *   argument in the position of a `@Header`, `@Req` or any other parameter is dropped, and so are
- *   extra arguments. Path values are sent as encoded text, and a missing one is refused (see below).
+ *   `(...args: any[]) => Promise<any>`. The arguments are the handler's `@Param`, `@Query` and
+ *   `@Body` parameters, one each, in the order the handler declares them. A `@Header`, `@Cookie`,
+ *   `@Req`, custom-extractor, file or form-field parameter takes no argument, wherever it is
+ *   declared (through 0.8 it took one and dropped it, shifting every later argument). Extra
+ *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused (see
+ *   below).
  * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
  *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
  *   or 5xx response rejects.

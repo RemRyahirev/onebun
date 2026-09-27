@@ -188,11 +188,17 @@ aggregate them with `max`, not `sum`. A metric registered directly against prom-
 or pass `metrics: { registry: register }` to put one application back on the global registry.
 
 **Calling another service: `createServiceClient(createServiceDefinition(UsersModule), { url })`.**
-Controllers are keyed by class name and arguments are positional, one per decorated parameter of
-the handler in declaration order: `client.UsersController.findById(id)`. Only `@Param`, `@Query`
-and `@Body` values are sent; a `@Header`, `@Cookie`, `@Req` or custom-extractor parameter still
-takes a position, so `findById(@Header('x-tenant') t, @Param('id') id)` is called as
-`findById(undefined, id)`, and the value in that position is dropped. Since 0.9 the client
+Controllers are keyed by class name and arguments are positional, **one per `@Param`, `@Query` and
+`@Body` parameter** of the handler, in declaration order: `client.UsersController.findById(id)`.
+Only those values are sent. A `@Header`, `@Cookie`, `@Req`, `@Res`, custom-extractor, file or
+form-field parameter takes **no** argument wherever it is declared, so
+`findById(@Header('x-tenant') t, @Param('id') id)` is called as `findById(id)`. Through 0.8 it took
+one and dropped it (`findById(undefined, id)`); when upgrading, remove such placeholders: a leftover
+one is read as the first client value, which only a `null`/`undefined` path value refuses — any
+other value (a tenant id, a token 0.8 dropped) is silently sent as that path, query or body value,
+so it can land in URLs and logs; send such values via the client's `headers`/`auth` option. See
+`docs/api/requests.md#service-client-arguments`
+(the `-upgrade` subsection lists the affected endpoints from `_endpoints`). Since 0.9 the client
 **percent-encodes every path argument itself** (`encodeURIComponent`), and the router decodes it
 once, so the handler receives exactly what was passed, `/`, `?`, `#`, `\` and `%` included: pass
 user input raw, `findById(input)`, and never encode it yourself — a caller-encoded `'a%2Fb'`
@@ -1133,6 +1139,7 @@ at least in the areas you're modifying.
 | `await app.stop()` "to clean up" in the catch of a failed `start()`, and no exit | The failed `start()` already released everything, so that `stop()` runs no step again and only closes what you passed in (log transports, `spanProcessors`, `metrics.registry`) — end the bootstrap catch with `process.exit(1)`. To retry instead, build a new `OneBunApplication` per attempt (calling `start()` again on the same instance also works) |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
+| `client.UsersController.findById(undefined, id)` for `findById(@Header('x-tenant') t, @Param('id') id)` | `findById(id)`. Since 0.9 only `@Param`, `@Query` and `@Body` take arguments; the placeholder is read as `id` and refused. A non-null one (`findById('acme', id)`) is sent as `id`, so the call reaches `/users/acme` with no error; with a `@Query`/`@Body` first it is sent as that value. A token or tenant id goes in the client's `headers`/`auth` option |
 | `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. Since 0.9 the service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'` instead of `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
