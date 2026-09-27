@@ -1,6 +1,12 @@
 import { Effect, pipe } from 'effect';
 
 import { applyAuth, isSigningAuth } from './auth.js';
+import {
+  type BodyReadFailure,
+  cappedAcceptEncoding,
+  contentCodings,
+  readCappedBody,
+} from './body.js';
 import { signOneBunRequest } from './onebun-auth.js';
 import {
   currentOutgoingTraceContext,
@@ -100,7 +106,8 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  *
  * Adding a name moves every query record that uses it to the config side, so a new config key
  * does not join by default. `client.get('/login', { redirect: '/home' })` is query data, and a
- * test pins it.
+ * test pins it. `maxResponseBytes` did join: nothing names a query parameter that, and a cap that
+ * went out as `?maxResponseBytes=1048576` would leave the body it was meant to bound unbounded.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -109,6 +116,7 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'auth',
   'tracing',
   'metrics',
+  'maxResponseBytes',
 ];
 
 /**
@@ -211,6 +219,27 @@ const collectErrorHeaders = (headers: Headers): Record<string, string> => {
   });
 
   return record;
+};
+
+/**
+ * The upstream's headers as the caller gets them — a success's `headers` and an `HTTP_ERROR`'s
+ * `details.headers` alike: as they arrived, except that `content-encoding` and `content-length`
+ * are left out once the client has undone a content coding itself (`maxResponseBytes`). Both
+ * describe the bytes on the wire, and neither `result` nor `details.details` is those bytes.
+ *
+ * `fetch` keeps both on a body it decompressed, the compressed `content-length` included, so an
+ * uncapped response still carries them.
+ */
+const exposedHeaders = (response: Response, clientDecoded: boolean): Headers => {
+  if (!clientDecoded) {
+    return response.headers;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.delete('content-encoding');
+  headers.delete('content-length');
+
+  return headers;
 };
 
 /**
@@ -364,6 +393,23 @@ const classifyTransportFailure = (
 /** The `error` name of a redirect the client could not follow. */
 const REDIRECT_ERROR = 'REDIRECT_ERROR';
 
+/** The `error` name of a body larger than `maxResponseBytes`. */
+const RESPONSE_TOO_LARGE = 'RESPONSE_TOO_LARGE';
+
+/** The `error` name of a body the client could not decode under `maxResponseBytes`. */
+const RESPONSE_DECODE_ERROR = 'RESPONSE_DECODE_ERROR';
+
+/**
+ * Failures that are never retried, whatever `retryOn` lists: their `code` is a status the server
+ * did send, but asking it again gets the same redirect, the same oversized body or the same
+ * encoding back.
+ */
+const NEVER_RETRIED_ERRORS: readonly string[] = [
+  REDIRECT_ERROR,
+  RESPONSE_TOO_LARGE,
+  RESPONSE_DECODE_ERROR,
+];
+
 /** One request of a redirect chain: what is sent, and where. */
 interface RedirectHop {
   url: string;
@@ -482,10 +528,14 @@ const nextRedirectHop = (
  * Every hop runs under the attempt's one `signal`, so the client-side timeout bounds the whole
  * chain rather than each hop, and an interruption aborts whichever hop is in flight. The body of a
  * 3xx that is followed is discarded unread.
+ *
+ * `decompress: false` — set for a request under `maxResponseBytes` — hands the final body over as
+ * it came off the wire, for the client to decode and count ({@link readCappedBody}).
  */
 const fetchFollowingRedirects = (
   hop: RedirectHop,
   signal: AbortSignal,
+  decompress: boolean,
   traceId?: string,
   redirects: number = 0,
 ): Effect.Effect<Response, ErrorResponse> => pipe(
@@ -495,6 +545,7 @@ const fetchFollowingRedirects = (
       headers: hop.headers,
       signal,
       redirect: 'manual',
+      ...(decompress ? {} : { decompress: false }),
       ...(hop.body === undefined ? {} : { body: hop.body }),
     }),
     catch: (error) => classifyTransportFailure(error, signal, traceId),
@@ -509,7 +560,7 @@ const fetchFollowingRedirects = (
         response.body?.cancel().catch(() => undefined);
       }),
       Effect.flatMap(() => nextRedirectHop(hop, response, redirects, traceId)),
-      Effect.flatMap((next) => fetchFollowingRedirects(next, signal, traceId, redirects + 1)),
+      Effect.flatMap((next) => fetchFollowingRedirects(next, signal, decompress, traceId, redirects + 1)),
     );
   }),
 );
@@ -521,8 +572,9 @@ const fetchFollowingRedirects = (
  * status code. Transport failures are then decided by their own flags, so `retryOn` only ever
  * matches statuses a server actually returned.
  *
- * A `REDIRECT_ERROR` is never retried, whatever `retryOn` lists: its `code` is the 3xx that could
- * not be followed, and asking the same server again gets the same redirect.
+ * A `REDIRECT_ERROR`, a `RESPONSE_TOO_LARGE` and a `RESPONSE_DECODE_ERROR` are never retried,
+ * whatever `retryOn` lists ({@link NEVER_RETRIED_ERRORS}): each carries the status the server sent
+ * as its `code`, and asking the same server again gets the same answer.
  */
 const shouldRetryRequest = (
   error: unknown,
@@ -533,7 +585,7 @@ const shouldRetryRequest = (
     return false;
   }
 
-  if (error.error === REDIRECT_ERROR) {
+  if (NEVER_RETRIED_ERRORS.includes(error.error)) {
     return false;
   }
 
@@ -692,7 +744,25 @@ const applyAuthIfNeeded = (
 };
 
 /**
+ * The body cap a request runs under: its own `maxResponseBytes`, else the client's, else none.
+ *
+ * `Infinity` is none. A cap that can never be reached gains nothing from the client's decoder and
+ * would still pay for it: lower throughput, a `RESPONSE_DECODE_ERROR` for a coding `fetch` hands
+ * over as it is, and headers without `content-encoding`. So a request that lifts the client's cap
+ * takes `fetch`'s path, exactly as a request of a client without one.
+ */
+const responseByteLimit = (config: RequestConfig, mergedOptions: RequestsOptions): number | undefined => {
+  const limit = config.maxResponseBytes ?? mergedOptions.maxResponseBytes;
+
+  return limit === Number.POSITIVE_INFINITY ? undefined : limit;
+};
+
+/**
  * Build request headers
+ *
+ * Under `maxResponseBytes`, `fetch` is told not to decompress, and then it offers no
+ * `Accept-Encoding` at all. The client offers the codings it decodes instead
+ * ({@link cappedAcceptEncoding}), unless the caller chose an `Accept-Encoding` of its own.
  */
 const buildHeaders = (
   config: RequestConfig,
@@ -709,6 +779,13 @@ const buildHeaders = (
     ...mergedOptions.headers,
     ...config.headers,
   };
+
+  if (
+    responseByteLimit(config, mergedOptions) !== undefined &&
+    !Object.keys(headers).some((name) => name.toLowerCase() === 'accept-encoding')
+  ) {
+    headers['Accept-Encoding'] = cappedAcceptEncoding();
+  }
 
   if (traceContext && config.tracing !== false && mergedOptions.tracing) {
     // W3C `traceparent` first, because it is the only one a collector, a service mesh or a
@@ -728,7 +805,7 @@ const buildHeaders = (
 };
 
 /**
- * Read the body of a response whose status line and headers have arrived.
+ * What a failed body read is reported as.
  *
  * `fetch` resolves at the headers; the body streams in afterwards under the same signal, so the
  * client-side timeout — or an interruption of the attempt — can fire here too. Such a failure is a
@@ -740,19 +817,94 @@ const buildHeaders = (
  *
  * Any other read failure keeps `readFailure` and the status.
  */
+const bodyReadFailure = (
+  error: unknown,
+  response: Response,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+): ErrorResponse =>
+  signal.aborted || transportFailureKindOf(error) !== 'network'
+    ? classifyTransportFailure(error, signal, traceId, response.status)
+    : createErrorResponse(readFailure, response.status, traceId, { details: error });
+
+/**
+ * What a body read under `maxResponseBytes` that failed is reported as.
+ *
+ * A failure reading the connection goes through {@link bodyReadFailure}, like an uncapped read. A
+ * body the decoder rejects is a `RESPONSE_DECODE_ERROR` — unless the attempt's signal had fired,
+ * which cuts the compressed stream short and is the timeout or abort it looks like. `code` is the
+ * status that arrived, as for `RESPONSE_PARSE_ERROR`, and `details.statusCode` repeats it.
+ */
+const cappedBodyFailure = (
+  failure: BodyReadFailure,
+  response: Response,
+  limit: number,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+): ErrorResponse => {
+  const statusCode = response.status;
+
+  switch (failure.reason) {
+    case 'read':
+      return bodyReadFailure(failure.error, response, signal, readFailure, traceId);
+    case 'decode':
+      return signal.aborted
+        ? classifyTransportFailure(failure.error, signal, traceId, statusCode)
+        : createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, {
+          reason: 'corrupt-body',
+          encoding: response.headers.get('content-encoding'),
+          statusCode,
+          details: failure.error,
+        });
+    case 'unsupported-encoding':
+      return createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, {
+        reason: 'unsupported-encoding',
+        encoding: failure.encoding,
+        statusCode,
+      });
+    case 'too-large':
+      return createErrorResponse(RESPONSE_TOO_LARGE, statusCode, traceId, {
+        limit,
+        received: failure.received,
+        statusCode,
+        ...(failure.contentLength === undefined ? {} : { contentLength: failure.contentLength }),
+      });
+  }
+};
+
+/** UTF-8, as `Response.text()` decodes: a byte order mark is dropped, a malformed sequence replaced. */
+const utf8 = new TextDecoder();
+
+/**
+ * Read the body of a response whose status line and headers have arrived, as text.
+ *
+ * Every body the client reads goes through here, so the one classification of a failed read
+ * applies to all of them ({@link bodyReadFailure}). Without a `limit` the body is
+ * `response.text()`, read whole and decompressed by `fetch`. With one it is
+ * {@link readCappedBody}: decoded by the client and refused as soon as it grows past `limit`.
+ */
 const readBodyText = (
   response: Response,
   signal: AbortSignal,
   readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
   traceId?: string,
-): Effect.Effect<string, ErrorResponse> =>
-  Effect.tryPromise({
-    try: () => response.text(),
-    catch: (error) =>
-      signal.aborted || transportFailureKindOf(error) !== 'network'
-        ? classifyTransportFailure(error, signal, traceId, response.status)
-        : createErrorResponse(readFailure, response.status, traceId, { details: error }),
-  });
+  limit?: number,
+): Effect.Effect<string, ErrorResponse> => {
+  if (limit === undefined) {
+    return Effect.tryPromise({
+      try: () => response.text(),
+      catch: (error) => bodyReadFailure(error, response, signal, readFailure, traceId),
+    });
+  }
+
+  return pipe(
+    readCappedBody(response, limit),
+    Effect.map((bytes) => utf8.decode(bytes)),
+    Effect.mapError((failure) => cappedBodyFailure(failure, response, limit, signal, readFailure, traceId)),
+  );
+};
 
 /**
  * Parse response data based on content type
@@ -761,12 +913,13 @@ const parseResponseData = <T>(
   response: Response,
   signal: AbortSignal,
   traceId?: string,
+  limit?: number,
 ): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     return pipe(
-      readBodyText(response, signal, 'RESPONSE_PARSE_ERROR', traceId),
+      readBodyText(response, signal, 'RESPONSE_PARSE_ERROR', traceId, limit),
       Effect.flatMap((text) => {
         if (!text) {
           return Effect.fail(
@@ -805,7 +958,7 @@ const parseResponseData = <T>(
       }),
     );
   } else {
-    return readBodyText(response, signal, 'RESPONSE_READ_ERROR', traceId) as Effect.Effect<T, ErrorResponse>;
+    return readBodyText(response, signal, 'RESPONSE_READ_ERROR', traceId, limit) as Effect.Effect<T, ErrorResponse>;
   }
 };
 
@@ -875,6 +1028,10 @@ const signOneBunIfNeeded = (
  * through the signal `Effect.tryPromise` hands to `fetch`: that signal is only live while the
  * `fetch` promise is pending, so an interruption during the body read would not reach it.
  *
+ * Under `maxResponseBytes` the body is fetched raw and read by {@link readCappedBody}, for a
+ * success and an error status alike: an error status's body ends up in `details.details`, so it
+ * is bounded by the same cap.
+ *
  * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
@@ -895,6 +1052,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   // Serializing twice would let the two diverge, and a signature over different bytes than the
   // ones on the wire is worse than no signature — it reads as protection.
   const body = serializeBody(config);
+  const limit = responseByteLimit(config, mergedOptions);
 
   return pipe(
     // Signed HERE, inside the attempt, over the assembled request. Two reasons it cannot move
@@ -910,14 +1068,20 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         body,
       },
       signal,
+      limit === undefined,
       traceId,
     )),
     Effect.flatMap((response) => {
+      const noContent = hasNoContent(config.method, response.status);
       // `undefined` rather than `''` for a response that has no content: `head()` is typed
       // `ApiResponse<void>`, and an empty string would claim a body that was never there.
-      const readBody: Effect.Effect<T, ErrorResponse> = hasNoContent(config.method, response.status)
+      const readBody: Effect.Effect<T, ErrorResponse> = noContent
         ? Effect.succeed(undefined as T)
-        : parseResponseData<T>(response, signal, traceId);
+        : parseResponseData<T>(response, signal, traceId, limit);
+      const upstreamHeaders = exposedHeaders(
+        response,
+        limit !== undefined && !noContent && contentCodings(response.headers).length > 0,
+      );
 
       return pipe(
         readBody,
@@ -927,7 +1091,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
           if (isSuccessStatus(response.status)) {
             return withUpstreamHeaders(
               createSuccessResponse(responseData, traceId, response.status),
-              collectResponseHeaders(response.headers),
+              collectResponseHeaders(upstreamHeaders),
             );
           }
 
@@ -936,7 +1100,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
             response.status,
             traceId,
             {
-              headers: collectErrorHeaders(response.headers),
+              headers: collectErrorHeaders(upstreamHeaders),
               details: responseData,
               duration,
               url: fullUrl,

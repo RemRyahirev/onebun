@@ -1020,6 +1020,219 @@ describe('Requests API Documentation Examples', () => {
     });
   });
 
+  describe('Limiting the response size (docs/api/requests.md)', () => {
+    const EXPORT_TEXT = 'row,value\n'.repeat(10_000);
+
+    /**
+     * `/status` answers a small JSON body; `/exports/latest` answers `EXPORT_TEXT` (100 KB) gzip-
+     * compressed, `/exports/plain` the same text uncompressed with its `Content-Length`;
+     * `/legacy/feed` answers in a coding nobody decodes, `/broken` a corrupt gzip body,
+     * `/failing` a 500 with a JSON body, and `/failing-gzip` a 500 with a gzip-compressed JSON body.
+     * Records each request's path and `Accept-Encoding`.
+     */
+    function startSizedServer(): {
+      baseUrl: string;
+      arrivals: { path: string; acceptEncoding: string | null }[];
+      stop(): void;
+    } {
+      const arrivals: { path: string; acceptEncoding: string | null }[] = [];
+      const exportGzip = Bun.gzipSync(new TextEncoder().encode(EXPORT_TEXT));
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          arrivals.push({ path, acceptEncoding: req.headers.get('accept-encoding') });
+          const encoded = (body: string | Uint8Array, encoding: string) => new Response(body, {
+            headers: new Headers([['content-type', 'text/csv'], ['content-encoding', encoding]]),
+          });
+
+          switch (path) {
+            case '/status':
+              return jsonStatus(200, { status: 'ok' });
+            case '/exports/latest':
+              return encoded(exportGzip, 'gzip');
+            case '/exports/plain':
+              return new Response(EXPORT_TEXT, { headers: new Headers([['content-type', 'text/csv']]) });
+            case '/legacy/feed':
+              return encoded('abc', 'x-foo');
+            case '/broken':
+              return encoded(new Uint8Array([0x1f, 0x8b, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8]), 'gzip');
+            case '/failing':
+              return jsonStatus(500, { error: 'db down', trace: 'x'.repeat(8192) });
+            case '/failing-gzip':
+              return new Response(Bun.gzipSync(new TextEncoder().encode(JSON.stringify({ error: 'db down' }))), {
+                status: 500,
+                headers: new Headers([['content-type', 'application/json'], ['content-encoding', 'gzip']]),
+              });
+            default:
+              return jsonStatus(404);
+          }
+        },
+      });
+
+      return {
+        baseUrl: server.url.origin,
+        arrivals,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#max-response-bytes
+     */
+    it('should cap the decoded body per client, tighten or lift it per call, and decode it itself', async () => {
+      // From docs: "A request's own maxResponseBytes wins over the client's. Infinity means no
+      // limit: that request is read exactly as one without the option, and fetch decompresses it."
+      // and "A limited request sends Accept-Encoding: gzip, deflate, br, zstd"
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 1024 * 1024 });
+
+        const archive = await client.get('/exports/latest');
+        const status = await client.get('/status', undefined, { maxResponseBytes: 4096 });
+        const tooBig = await Effect.runPromise(
+          Effect.either(client.getEffect('/exports/latest', undefined, { maxResponseBytes: 4096 })),
+        );
+        const twoArgument = await Effect.runPromise(
+          Effect.either(client.getEffect('/exports/latest', { maxResponseBytes: 4096 })),
+        );
+        const unlimited = await createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 16 })
+          .get('/exports/latest', undefined, { maxResponseBytes: Number.POSITIVE_INFINITY });
+
+        expect(archive.success && archive.result).toBe(EXPORT_TEXT);
+        // "those describe the compressed bytes, not result"
+        expect(archive.success && archive.headers?.['content-encoding']).toBeUndefined();
+        expect(archive.success && archive.headers?.['content-length']).toBeUndefined();
+        expect(server.arrivals[0].acceptEncoding).toBe('gzip, deflate, br, zstd');
+        expect(status.success && status.result).toEqual({ status: 'ok' });
+        expect(tooBig._tag === 'Left' && tooBig.left.error).toBe('RESPONSE_TOO_LARGE');
+        expect(twoArgument._tag === 'Left' && twoArgument.left.error).toBe('RESPONSE_TOO_LARGE');
+        expect(unlimited.success && unlimited.result).toBe(EXPORT_TEXT);
+        // fetch decompressed it, and fetch keeps the wire headers
+        expect(unlimited.success && unlimited.headers?.['content-encoding']).toBe('gzip');
+        // "A request's own Accept-Encoding header is sent instead"
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await client.get('/status', undefined, { headers: { 'Accept-Encoding': 'identity' } });
+        expect(server.arrivals.at(-1)?.acceptEncoding).toBe('identity');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#max-response-bytes
+     */
+    it('should read an error status that fits into details.details, and drop the compressed-size headers it decoded', async () => {
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 1024 * 1024 });
+
+        const outcome = await Effect.runPromise(
+          Effect.either(client.getEffect('/failing', undefined, { retries: { max: 0 } })),
+        );
+        const compressed = await Effect.runPromise(
+          Effect.either(client.getEffect('/failing-gzip', undefined, { retries: { max: 0 } })),
+        );
+
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('HTTP_ERROR');
+        expect(outcome._tag === 'Left' && outcome.left.details?.details)
+          .toEqual({ error: 'db down', trace: 'x'.repeat(8192) });
+        expect(compressed._tag).toBe('Left');
+        if (compressed._tag === 'Left') {
+          expect(compressed.left.details?.details).toEqual({ error: 'db down' });
+          // "When the client decoded the body, neither a success's headers nor an HTTP_ERROR's
+          // details.headers has content-encoding or content-length"
+          expect(compressed.left.details?.headers).toHaveProperty('content-type', 'application/json');
+          expect(compressed.left.details?.headers).not.toHaveProperty('content-encoding');
+          expect(compressed.left.details?.headers).not.toHaveProperty('content-length');
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-too-large
+     */
+    it('should fail a body over the limit with RESPONSE_TOO_LARGE, never retried', async () => {
+      // From docs: "Its code is the status that arrived" and "It is never retried, whatever
+      // retryOn lists"
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: 4096,
+          retries: { max: 3, retryOn: [500], delay: 1 },
+        });
+
+        const decoded = await Effect.runPromise(Effect.either(client.getEffect('/exports/latest')));
+        const declared = await Effect.runPromise(Effect.either(client.getEffect('/exports/plain')));
+        const failing = await Effect.runPromise(Effect.either(client.getEffect('/failing')));
+
+        expect(decoded._tag).toBe('Left');
+        if (decoded._tag === 'Left') {
+          expect(decoded.left.error).toBe('RESPONSE_TOO_LARGE');
+          expect(decoded.left.code).toBe(200);
+          expect(decoded.left.details?.limit).toBe(4096);
+          expect(decoded.left.details?.received).toBeGreaterThan(4096);
+          expect(decoded.left.details?.statusCode).toBe(200);
+          expect(decoded.left.details?.contentLength).toBeUndefined();
+        }
+        // "the declared size, when refused before reading"
+        expect(declared._tag === 'Left' && declared.left.details).toEqual({
+          limit: 4096,
+          received: 0,
+          statusCode: 200,
+          contentLength: EXPORT_TEXT.length,
+        });
+        expect(failing._tag === 'Left' && [failing.left.error, failing.left.code])
+          .toEqual(['RESPONSE_TOO_LARGE', 500]);
+        // "The error carries no part of the body"
+        expect(JSON.stringify(failing)).not.toContain('db down');
+        expect(server.arrivals.filter((arrival) => arrival.path === '/failing')).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-decode-error
+     */
+    it('should fail a body it cannot decode with RESPONSE_DECODE_ERROR, never retried', async () => {
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: 1024 * 1024,
+          retries: { max: 3, retryOn: [200], delay: 1 },
+        });
+
+        const unknown = await Effect.runPromise(Effect.either(client.getEffect('/legacy/feed')));
+        const corrupt = await Effect.runPromise(Effect.either(client.getEffect('/broken')));
+        const uncapped = await createHttpClient({ baseUrl: server.baseUrl }).get('/legacy/feed');
+
+        expect(unknown._tag === 'Left' && unknown.left.error).toBe('RESPONSE_DECODE_ERROR');
+        expect(unknown._tag === 'Left' && unknown.left.code).toBe(200);
+        expect(unknown._tag === 'Left' && unknown.left.details?.reason).toBe('unsupported-encoding');
+        expect(unknown._tag === 'Left' && unknown.left.details?.encoding).toBe('x-foo');
+        expect(corrupt._tag === 'Left' && corrupt.left.details?.reason).toBe('corrupt-body');
+        expect(corrupt._tag === 'Left' && corrupt.left.details?.encoding).toBe('gzip');
+        // "A request without a limit is decoded by fetch, which hands a body in an unknown coding
+        // over as it is"
+        expect(uncapped.success && uncapped.result).toBe('abc');
+        expect(server.arrivals.filter((arrival) => arrival.path === '/legacy/feed')).toHaveLength(2);
+        expect(server.arrivals.filter((arrival) => arrival.path === '/broken')).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
   describe('Request Configuration (docs/api/requests.md)', () => {
     /**
      * @source docs:api/requests.md#request-configuration

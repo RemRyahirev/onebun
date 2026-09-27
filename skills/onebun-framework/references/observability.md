@@ -97,9 +97,9 @@ needs both or a `traceparent`.
   and `options` — the four share one resolver (`resolveQueryOverload` in `client.ts`, also used by the
   `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
   `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
-  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`; `retries`, `query` and `redirect` are
-  deliberately excluded (`get('/login', { redirect: '/home' })` is query data), so a config holding only
-  those takes the three-argument form. A third argument always makes the second the query, `undefined`
+  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`; `retries`, `query` and
+  `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data), so a config
+  holding only those takes the three-argument form. A third argument always makes the second the query, `undefined`
   included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped).
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
   whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
@@ -143,6 +143,26 @@ needs both or a `traceparent`.
   `'too-many-redirects' | 'missing-location' | 'invalid-location'`; it is never retried, whatever `retryOn`
   says (0.8.1: `FETCH_ERROR` replayed by `retryOnNetworkError` — Bun's own cap is 127 hops, so a loop cost
   508 requests — or `HTTP_ERROR` 3xx).
+- **`maxResponseBytes` caps the DECODED body while it is read** (client option, or per request; the request's
+  wins, `Infinity` is the same as unset — that request takes `fetch`'s path). Off by default — an uncapped
+  request keeps `fetch`'s path exactly. Set, the request goes out with `decompress: false` and
+  `Accept-Encoding: gzip, deflate, br, zstd` (unless the caller set one), and the client undoes
+  gzip/x-gzip/deflate (zlib or raw)/br/zstd itself through `DecompressionStream`, counting decoded bytes chunk
+  by chunk — Bun's own decompression inflates a whole chunk first (a 130 KB gzip bomb became one 130 MB
+  chunk, +139 MB RSS), so a cap on top of `fetch` bounds nothing. Past the cap:
+  `RESPONSE_TOO_LARGE`, `code` = the status that arrived, `details: { limit, received, statusCode,
+  contentLength? }` (`contentLength` + `received: 0` when an uncompressed body's `Content-Length` was refused
+  before reading), no body in it, connection closed and the upstream stream cancelled. Error statuses are read
+  under the same cap (a fitting 500 is still `HTTP_ERROR` with `details.details`). An unknown coding or a
+  corrupt body: `RESPONSE_DECODE_ERROR`, `details.reason` `'unsupported-encoding' | 'corrupt-body'`,
+  `details.encoding`. `corrupt-body` includes bytes after the end of the compressed stream, which `fetch`
+  drops (all codings but zstd) and `DecompressionStream` rejects. Both are never retried, whatever `retryOn`
+  lists — a 5xx included, so a broken gzip 503 that `retryOn: [503]` replays uncapped (as
+  `RESPONSE_READ_ERROR`) is sent once capped; a connection closing mid-body stays `RESPONSE_READ_ERROR` and
+  follows `retryOn`. A body-phase timeout under a cap is still `TIMEOUT_ERROR`/`phase: 'body'`. When the client
+  decoded the body, both a success's `headers` and an `HTTP_ERROR`'s `details.headers` omit
+  `content-encoding`/`content-length`. Costs ~20% throughput on small gzip JSON, which is why
+  there is no default cap before 1.0. A `NaN` cap refuses every non-empty body.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header

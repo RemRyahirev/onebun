@@ -79,7 +79,9 @@ export interface SuccessResponse<T = unknown> {
    *
    * Names are lower-cased, and a header sent more than once is joined with `, `, as
    * `Headers.get()` joins it (`set-cookie` included). Present on responses the HTTP client
-   * produced, absent when a handler's return value was wrapped by the framework.
+   * produced, absent when a handler's return value was wrapped by the framework. Under
+   * `maxResponseBytes`, a body the client decoded itself comes without `content-encoding` and
+   * `content-length`: they describe the compressed bytes, not `result`.
    *
    * NOT enumerable: `JSON.stringify`, `Object.keys`, a spread and `structuredClone` all skip it,
    * while `response.headers` and `'headers' in response` work as usual. A controller that returns
@@ -563,6 +565,12 @@ export interface RequestConfig {
   auth?: AuthConfig;
   tracing?: boolean;
   metrics?: boolean;
+  /**
+   * The largest response body this request accepts, in decoded bytes. Overrides the client's
+   * {@link RequestsOptions.maxResponseBytes}. `Infinity` lifts the client's cap for this request,
+   * which is then read as without one: decompressed by `fetch`, not by the client.
+   */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -597,6 +605,20 @@ export interface RequestsOptions {
    */
   metricsSink?: (data: RequestMetricsData) => void;
   userAgent?: string;
+  /**
+   * The largest response body any request of this client accepts, counted in decoded bytes as the
+   * body arrives. A request's own `maxResponseBytes` overrides it.
+   *
+   * Unset — the default — a body is read whole, however large, and `fetch` decompresses it. Set,
+   * the client asks for the raw bytes and undoes `gzip`, `deflate`, `br` and `zstd` itself, so the
+   * count is of what the body inflates to rather than of what crossed the wire. A body that grows
+   * past the cap fails `RESPONSE_TOO_LARGE` at that chunk and its connection is closed; an error
+   * status is read under the same cap. A content coding the client cannot decode fails
+   * `RESPONSE_DECODE_ERROR` before anything is read. Neither is ever retried. A body the client
+   * decoded comes without `content-encoding` and `content-length`, in a success's `headers` and in
+   * an `HTTP_ERROR`'s `details.headers` alike. `Infinity` is the same as unset.
+   */
+  maxResponseBytes?: number;
 }
 
 /**
@@ -724,7 +746,9 @@ export interface ReqConfig {
  */
 export const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
 
-export const DEFAULT_REQUESTS_OPTIONS: Required<Omit<RequestsOptions, 'baseUrl' | 'auth' | 'metricsSink'>> = {
+export const DEFAULT_REQUESTS_OPTIONS: Required<
+  Omit<RequestsOptions, 'baseUrl' | 'auth' | 'metricsSink' | 'maxResponseBytes'>
+> = {
   timeout: DEFAULT_TIMEOUT_MS,
   headers: {},
   retries: DEFAULT_RETRY_CONFIG,

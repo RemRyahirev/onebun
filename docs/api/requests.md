@@ -12,6 +12,7 @@ OneBun provides a unified HTTP client with:
 - Multiple authentication schemes
 - Automatic retries with configurable strategies
 - Redirects followed without taking credentials to another origin
+- An optional cap on the decoded size of a response body
 - Integrated tracing and metrics
 - Standardized error handling
 
@@ -43,7 +44,7 @@ const response = await client.get('/users', { page: 1, limit: 10 });
 // GET /users?page=1&limit=10
 
 // With custom headers — an object carrying `method`, `headers`, `timeout`, `auth`,
-// `tracing` or `metrics` is read as per-request config instead of as query
+// `tracing`, `metrics` or `maxResponseBytes` is read as per-request config instead of as query
 const response = await client.get('/users', {
   headers: { 'X-Custom-Header': 'value' },
 });
@@ -56,7 +57,7 @@ const response = await client.get('/users', undefined, { retries: { max: 0 } });
 ```
 
 `delete`, `head` and `options` take the same three arguments and resolve them by the same rule.
-With two arguments, only the six names above make the object config: every other key is query
+With two arguments, only the seven names above make the object config: every other key is query
 data, so `client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`.
 `retries` and `query` are deliberately not on the list, so a config that sets only those takes the
 three-argument form, as in the last call above.
@@ -317,7 +318,10 @@ so `retryOn` stays a pure list of status codes.
 The timeout covers the body too, so a `500` whose body stalls until the timeout is a
 `TIMEOUT_ERROR`: `retryOnTimeout` decides whether it is replayed, and `retryOn` never sees it.
 A `500` that arrives whole is a server answer and follows `retryOn`, even when its body does not
-parse. See [Timeouts and interruption](#timeouts-and-interruption).
+parse. See [Timeouts and interruption](#timeouts-and-interruption). The exception is a request under
+[`maxResponseBytes`](#max-response-bytes): a `5xx` whose body is over the limit
+([`RESPONSE_TOO_LARGE`](#response-too-large)) or cannot be decoded
+([`RESPONSE_DECODE_ERROR`](#response-decode-error)) is never replayed.
 
 A network failure is not always a request the server never saw. A refused connection or a failed
 DNS lookup is; a connection **reset after the request was sent** is reported the same way
@@ -673,6 +677,150 @@ each — 508 requests. A redirect status without a `Location` was an `HTTP_ERROR
 
 </llm-only>
 
+## Limiting the response size {#max-response-bytes}
+
+Without a limit the client reads a body whole, however large it is. `maxResponseBytes` sets one,
+in bytes of **decoded** body — on the client for all of its requests, or on one request:
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const client = createHttpClient({
+  baseUrl: 'https://api.example.com',
+  maxResponseBytes: 1024 * 1024, // 1 MiB
+});
+
+// Tighter for one call
+const status = await client.get('/status', undefined, { maxResponseBytes: 4096 });
+
+// No limit for one call
+const archive = await client.get('/exports/latest', undefined, {
+  maxResponseBytes: Number.POSITIVE_INFINITY,
+});
+```
+
+A request's own `maxResponseBytes` wins over the client's. `Infinity` means no limit: that
+request is read exactly as one without the option, and `fetch` decompresses it. The option is
+config in the two-argument form too: `client.get('/status', { maxResponseBytes: 4096 })`.
+
+The limit is checked while the body is read, never after:
+
+- **Decoded bytes are counted.** A limited request takes the body as it came off the wire and
+  undoes `gzip`, `deflate`, `br` and `zstd` itself, counting what comes out. A small compressed
+  body that inflates far past the limit, such as a gzip bomb, is stopped at the chunk that crosses
+  the limit. It is never inflated whole.
+- **A declared size over the limit is refused before reading.** This applies to a body sent
+  uncompressed whose `Content-Length` exceeds the limit. A compressed body's `Content-Length` is
+  its compressed size, so that body is counted instead.
+- **Error statuses are read under the same limit.** A `500` whose body fits is an `HTTP_ERROR`
+  with that body in `details.details`, as without a limit. A `500` whose body does not fit fails
+  `RESPONSE_TOO_LARGE`.
+- **Reading stops at once.** The connection is closed and the upstream sees its response stream
+  cancelled.
+
+A limited request sends `Accept-Encoding: gzip, deflate, br, zstd`, the same value `fetch` sends
+by itself. An `Accept-Encoding` header you set is sent instead. When the client decoded the body,
+neither a success's `headers` nor an `HTTP_ERROR`'s `details.headers` has `content-encoding` or
+`content-length`: those describe the compressed bytes, not `result` or `details.details`.
+
+### RESPONSE_TOO_LARGE {#response-too-large}
+
+A body larger than the limit fails with `RESPONSE_TOO_LARGE`. Its `code` is the status that
+arrived:
+
+```typescript
+import { Effect } from '@onebun/core';
+
+const outcome = await Effect.runPromise(Effect.either(client.getEffect('/exports/latest')));
+
+if (outcome._tag === 'Left' && outcome.left.error === 'RESPONSE_TOO_LARGE') {
+  outcome.left.code;                   // the status that arrived, e.g. 200 or 500
+  outcome.left.details?.limit;         // the limit, e.g. 1048576
+  outcome.left.details?.received;      // decoded bytes counted when reading stopped
+  outcome.left.details?.statusCode;    // the status again
+  outcome.left.details?.contentLength; // the declared size, when refused before reading
+}
+```
+
+The error carries no part of the body. It is never retried, whatever `retryOn` lists: asking
+again gets the same body.
+
+### RESPONSE_DECODE_ERROR {#response-decode-error}
+
+A limited request whose body the client cannot decode fails with `RESPONSE_DECODE_ERROR`. `code`
+is the status that arrived, and `details.reason` says why:
+
+- `'unsupported-encoding'` — a `Content-Encoding` other than `gzip`, `x-gzip`, `deflate`, `br`,
+  `zstd` or `identity`. `details.encoding` names it, and nothing is read.
+- `'corrupt-body'` — the decoder rejected the bytes: they were corrupt, the compressed data
+  stopped short of its end, or bytes followed its end. `fetch` drops such trailing bytes; the
+  client does not.
+  `details.encoding` is the `Content-Encoding` header.
+
+```typescript
+import { Effect } from '@onebun/core';
+
+const outcome = await Effect.runPromise(Effect.either(client.getEffect('/legacy/feed')));
+
+if (outcome._tag === 'Left' && outcome.left.error === 'RESPONSE_DECODE_ERROR') {
+  outcome.left.details?.reason;   // 'unsupported-encoding' | 'corrupt-body'
+  outcome.left.details?.encoding; // e.g. 'x-foo'
+}
+```
+
+It is never retried either, whatever `retryOn` lists. A request without a limit is decoded by
+`fetch`, which hands a body in an unknown coding over as it is.
+
+<llm-only>
+
+- Up to 0.8.2 there was no limit. Every body was read whole with `response.text()`, and an error
+  status's body was copied whole into `details.details`: a 64 MiB `502` ended up inside the error,
+  and so inside whatever logged or serialized it.
+- Why the client decodes instead of `fetch`: Bun's automatic decompression inflates a whole
+  compressed chunk before a reader sees any of it. Measured on Bun 1.4.2, a 128 MiB gzip of zeros
+  (130 KB on the wire) reached a reader that wanted 1 MiB as one 130 MB first chunk, and the
+  process grew by 139 MB. With `decompress: false` and `DecompressionStream`, it grew by about
+  4 MB. No limit placed on top of `fetch`'s own decompression bounds memory.
+- Why there is no default limit: decoding in the client costs throughput (about 20% on a 29 KB
+  gzip JSON body, measured through the client on Bun 1.4.2) and changes what the request sends.
+  A request without `maxResponseBytes` keeps `fetch`'s path exactly: its own `Accept-Encoding`,
+  its own decompression, and `content-encoding`/`content-length` in `headers`. A default limit
+  would be a breaking change and is left for 1.0.
+- `code` is the status that arrived, as for `RESPONSE_PARSE_ERROR` and `REDIRECT_ERROR`, and
+  `getTransportFailureKind()` is `undefined` for both new errors. They are excluded from retries by
+  name, so `retryOn: [500]` does not replay a `RESPONSE_TOO_LARGE` on a `500`, and `retryOn: [200]`
+  does not replay one on a `200`.
+- One retry difference with and without a limit: a `503` whose compressed body is broken while its
+  framing is complete. Without a limit `fetch`'s decompression fails it as `RESPONSE_READ_ERROR`
+  (`RESPONSE_PARSE_ERROR` for a JSON body) with `code: 503`, which `retryOn: [503]` replays. With
+  one it is `corrupt-body` and is sent once. A connection that closes mid-body is
+  `RESPONSE_READ_ERROR` in both cases and follows `retryOn`.
+- `corrupt-body` also covers bytes after the end of the compressed stream. `DecompressionStream`
+  rejects them for every coding, and Bun's `fetch` drops them for all but `zstd`. So a server that
+  pads its gzip body fails under a limit and succeeds without one. Two whole gzip or zstd members
+  back to back are decoded by both.
+- `details.received` is the count after the chunk that crossed the limit, so it exceeds `limit` by
+  at most one decoded chunk. It is `0` when the body was refused on its `Content-Length`.
+- A timeout while a limited body is read is still `TIMEOUT_ERROR` with `code: 0` and
+  `details.phase: 'body'`. A decode failure that happens because the signal fired is reported as
+  that timeout or abort, not as `corrupt-body`. Interrupting the Effect cancels the upstream
+  stream as it does without a limit.
+- `deflate` accepts both the zlib-wrapped form (RFC 1950) and raw deflate, told apart by the first
+  two bytes, as Bun's `fetch` accepts both. A chain such as `Content-Encoding: deflate, gzip` is
+  undone in reverse order; Bun's `fetch` hands such a body over undecoded. An empty body is empty
+  whatever its `Content-Encoding` says.
+- The offered `Accept-Encoding` is narrowed to the codings this runtime's `DecompressionStream`
+  decodes: all four on Bun 1.4.
+- A `NaN` limit refuses every non-empty body rather than letting every body through. `Infinity`,
+  on the client or on one request, is the same as no limit: `fetch`'s `Accept-Encoding`, its
+  decompression, the wire headers. A request that lifts a client's limit this way pays nothing for
+  the client's decoder, and a body in an unknown coding comes back as it is.
+- The decoded bytes are turned into text as UTF-8, as `response.text()` does.
+- `RequestsService` and the service client take it from their options like any other
+  `RequestsOptions` field.
+
+</llm-only>
+
 ## Request Configuration
 
 Every per-request config argument is a `Partial<RequestConfig>` — `method` and `url` come from the
@@ -702,6 +850,9 @@ method you call and the path you pass, so only these fields are yours to set:
   /** Set to `false` to skip the trace headers / the metrics for this one request */
   tracing?: boolean;
   metrics?: boolean;
+
+  /** The largest body this request accepts, in decoded bytes; `Infinity` lifts the client's */
+  maxResponseBytes?: number;
 }
 ```
 
@@ -1034,7 +1185,9 @@ interface SuccessResponse<T> {
 a `location`, a rate-limit header. Names are lower-cased. A header sent more than once is joined
 with `, `, as `Headers.get()` joins it, and `set-cookie` is joined the same way. After a redirect,
 they are the final hop's headers. An error's `details.headers` is collected as it always was: there,
-a `set-cookie` sent more than once keeps only its last value.
+a `set-cookie` sent more than once keeps only its last value. Under
+[`maxResponseBytes`](#max-response-bytes), both leave out `content-encoding` and `content-length`
+when the client decoded the body.
 
 ```typescript
 const head = await client.head('/files/report.pdf');
@@ -1079,7 +1232,9 @@ To log or snapshot an envelope, use `{ ...response }` or the fields you need.
   `{ ...response }` or pick the fields it needs.
 - `content-length` and `content-encoding` describe the bytes on the wire. `fetch` decompresses the
   body, so for a gzip answer `result` is the decoded body while `content-length` is the compressed
-  size.
+  size. Under `maxResponseBytes` the client decodes the body itself and leaves both out of
+  `headers` whenever it undid a coding, and out of an `HTTP_ERROR`'s `details.headers` too (see
+  [Limiting the response size](#max-response-bytes)).
 - `set-cookie` values are joined with `, `, and a cookie's own `Expires=Wed, 21 Oct ...` contains a
   comma, so the joined string cannot be split back reliably.
 - `RequestsService` methods return `result` alone, so they have no headers. Use `HttpClient` (or the
@@ -1131,7 +1286,7 @@ interface ErrorResponse<E extends string = string, R extends string = string>
 interface OneBunError<E extends string = string, R extends string = string> {
   /** Machine-readable error name, e.g. 'HTTP_ERROR' or 'TIMEOUT_ERROR' */
   error: E;
-  /** HTTP status, or `0` (`TRANSPORT_FAILURE_CODE`) when no complete response arrived */
+  /** HTTP status, or `0` (`TRANSPORT_FAILURE_CODE`) for a timeout, an abort or a network failure */
   code: number;
   traceId?: string;
   /** Request context: url, method, duration, response headers, raw body */
