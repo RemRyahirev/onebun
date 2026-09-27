@@ -2256,8 +2256,12 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Collect all descendant modules in depth-first order (leaves first).
-   * This ensures that deeply nested modules are initialized before their parents.
+   * Collect all descendant modules in depth-first post-order (leaves first).
+   *
+   * `childModules` holds only the modules this one BUILT (a module reused from the scope, or a
+   * `@Global()` one built by the tree root's pre-pass, sits under whoever built it first), so this
+   * is the order in which the modules finished construction. Every module that imports another
+   * finished after it, which is what lets `setup()` initialize imports before their importers.
    */
   private collectDescendantModules(): OneBunModule[] {
     const result: OneBunModule[] = [];
@@ -2272,13 +2276,15 @@ export class OneBunModule implements ModuleInstance {
   setup(): Effect.Effect<unknown, never, void> {
     const allDescendants = this.collectDescendantModules();
 
-    return this.callServicesOnModuleInit().pipe(
-      // Run onModuleInit for all descendant modules' services (depth-first)
-      Effect.flatMap(() =>
-        Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
-          discard: true,
-        }),
-      ),
+    // Services' onModuleInit: every imported module first, leaves first, and this module last.
+    // A service here may inject one an import exports, and its hook must find that dependency's
+    // hook already completed — within a module `pendingServiceInits` gives the same guarantee.
+    // Through 0.8.x this module went first, so a root service's hook ran before the hooks of
+    // everything it imported.
+    return Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
+      discard: true,
+    }).pipe(
+      Effect.flatMap(() => this.callServicesOnModuleInit()),
       // Resolve module-level middleware with DI (services are now available)
       // resolveModuleMiddleware is recursive and handles all descendants
       Effect.flatMap(() =>

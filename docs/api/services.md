@@ -373,7 +373,7 @@ Pipeline elements get the module hooks too, on the instance that actually serves
 :::
 
 ::: tip Cross-Module Lifecycle
-`onModuleInit` is called for services and controllers in **all modules** across the entire import tree — not just the root module. If `AppModule` imports `UserModule` which imports `AuthModule`, then services in all three modules will have their `onModuleInit` called. Deeply nested modules are initialized first (depth-first order).
+`onModuleInit` is called for services and controllers in **all modules** across the entire import tree — not just the root module. If `AppModule` imports `UserModule` which imports `AuthModule`, then services in all three modules will have their `onModuleInit` called: `AuthModule`'s first, then `UserModule`'s, then `AppModule`'s. Every imported module is initialized before the module that imports it — see [Initialization Across Modules](#initialization-across-modules).
 :::
 
 ### Usage
@@ -498,6 +498,90 @@ export class CleanupService extends BaseService
 }
 ```
 
+### Initialization Across Modules
+
+Services' `onModuleInit` hooks run one at a time, one module at a time: **every imported module
+before the module that imports it**. The deepest import goes first and the root module last; within
+a module the hooks run in dependency order. So when a hook runs, the hooks of everything the service
+injects have completed, whether the dependency is a provider of its own module or an export of an
+import:
+
+```typescript
+import { BaseService, Module, Service, type OnModuleInit } from '@onebun/core';
+
+@Service()
+export class ConnectionService extends BaseService implements OnModuleInit {
+  private open = false;
+
+  async onModuleInit(): Promise<void> {
+    // Open the pool here, not in the constructor
+    this.open = true;
+  }
+
+  async query(sql: string): Promise<string[]> {
+    if (!this.open) {
+      throw new Error('Connection is not open yet');
+    }
+
+    return [sql];
+  }
+}
+
+@Module({ providers: [ConnectionService], exports: [ConnectionService] })
+export class DatabaseModule {}
+
+@Service()
+export class CatalogService extends BaseService implements OnModuleInit {
+  private products: string[] = [];
+
+  constructor(private readonly db: ConnectionService) {
+    super();
+  }
+
+  async onModuleInit(): Promise<void> {
+    // DatabaseModule's hooks have completed: the connection is open
+    this.products = await this.db.query('SELECT name FROM products');
+  }
+
+  list(): string[] {
+    return this.products;
+  }
+}
+
+@Module({ imports: [DatabaseModule], providers: [CatalogService] })
+export class AppModule {}
+```
+
+- A `@Global()` module is built before the rest of the tree, so its services are initialized among
+  the first, even when it is listed last in `imports`.
+- A module imported by several others is built and initialized once.
+- Controllers' `onModuleInit` runs after the service hooks of the whole tree.
+- A hook that throws stops the pass there: no later hook runs, none in the modules importing its
+  module in particular, and `start()` rejects. The destroy hooks still run over every instance that
+  was built (see [When `start()` fails](./core.md#when-start-fails)).
+- `TestingModule.create({ providers, imports })` builds its root module from `providers`, so those
+  providers are initialized after everything in `imports`.
+
+::: warning Changed in 0.9.0
+Up to 0.8.x the **root module's** own services were initialized first, before any imported
+module's; below the root, imports already went first. `CatalogService` above, declared in the root
+module, queried a connection whose hook had not run yet.
+
+**Migration:** only the hooks of the root module's services move — they now run last. The same
+holds for the `providers` passed to `TestingModule.create()`. Check a root-module hook that an
+imported module relied on having run first, for example one that prepares state an imported
+service's `onModuleInit` reads: do that work in the constructor instead, or move the reading side
+to `onApplicationInit`, which runs after every `onModuleInit`. Code that worked around the old
+order, such as waiting inside a root service's hook for an imported service to finish
+initializing, can be removed.
+
+Check the root module's `onModuleDestroy` hooks too. When an imported module's `onModuleInit`
+throws — typically a database or cache unreachable at boot — no root-module hook has run yet, but
+the failed `start()` still runs `onModuleDestroy` on every service it built. Up to 0.8.x the root's services had been
+initialized by then; now their destroy hooks find nothing set up, so guard them on the state the
+init hook creates, as `DatabaseService` above does with `if (this.pool)`.
+:::
+
 ### Lifecycle Order
 
 ```
@@ -508,7 +592,7 @@ STARTUP:
    └─ this.config and this.logger are available after super()
 3. Framework clears init context
 4. Framework calls initializeService() (no-op if already initialized via constructor)
-5. Module init hook → onModuleInit()  (sequential, in dependency order)
+5. Module init hook → onModuleInit()  (sequential: imported modules first, then in dependency order)
 6. Application init hook → onApplicationInit()
 7. HTTP server starts
 

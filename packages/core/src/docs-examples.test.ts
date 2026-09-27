@@ -72,7 +72,11 @@ import { BadGatewayError } from '@onebun/requests';
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
 import { MessageExecutionContextImpl } from './queue/guards';
-import { makeMockLoggerLayer, makeRecordingLoggerLayer } from './testing';
+import {
+  makeMockLoggerLayer,
+  makeRecordingLoggerLayer,
+  TestingModule,
+} from './testing';
 
 import {
   All,
@@ -2639,8 +2643,8 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
     /**
      * @source docs:api/services.md#lifecycle-hooks
      * onModuleInit is called for services in ALL modules across the entire
-     * import tree, not just the root module. Deeply nested modules are
-     * initialized in depth-first order.
+     * import tree, not just the root module. Every imported module is
+     * initialized before the module importing it: AuthModule, UserModule, AppModule.
      */
     it('should call onModuleInit for services across the entire module import tree', async () => {
       const moduleMod = await import('./module/module');
@@ -2690,11 +2694,146 @@ describe('Lifecycle Hooks API Documentation Examples (docs/api/services.md)', ()
       const mod = new moduleMod.OneBunModule(AppModule, testUtils.makeMockLoggerLayer());
       await effectLib.Effect.runPromise(mod.setup() as import('effect').Effect.Effect<unknown, never, never>);
 
-      // All three modules' services should have onModuleInit called
-      expect(initLog).toContain('auth');
-      expect(initLog).toContain('user');
-      expect(initLog).toContain('app');
-      expect(initLog.length).toBe(3);
+      // All three modules' services have onModuleInit called, the deepest import first
+      // and the root module last (0.8.x: app, auth, user)
+      expect(initLog).toEqual(['auth', 'user', 'app']);
+    });
+
+    describe('Initialization Across Modules', () => {
+      // From docs: the DatabaseModule / AppModule example
+      @Service()
+      class ConnectionService extends BaseService implements OnModuleInit {
+        private open = false;
+
+        async onModuleInit(): Promise<void> {
+          // Open the pool here, not in the constructor
+          this.open = true;
+        }
+
+        async query(sql: string): Promise<string[]> {
+          if (!this.open) {
+            throw new Error('Connection is not open yet');
+          }
+
+          return [sql];
+        }
+      }
+
+      @Module({ providers: [ConnectionService], exports: [ConnectionService] })
+      class DatabaseModule {}
+
+      @Service()
+      class CatalogService extends BaseService implements OnModuleInit {
+        private products: string[] = [];
+
+        constructor(private readonly db: ConnectionService) {
+          super();
+        }
+
+        async onModuleInit(): Promise<void> {
+          // DatabaseModule's hooks have completed: the connection is open
+          this.products = await this.db.query('SELECT name FROM products');
+        }
+
+        list(): string[] {
+          return this.products;
+        }
+      }
+
+      @Module({ imports: [DatabaseModule], providers: [CatalogService] })
+      class AppModule {}
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should run an imported module\'s hooks before the root module\'s (0.8.x threw "not open yet")', async () => {
+        const app = new OneBunApplication(AppModule, {
+          port: 0,
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+          loggerLayer: makeMockLoggerLayer(),
+        });
+        await app.start();
+        try {
+          expect(app.getService(CatalogService).list()).toEqual(['SELECT name FROM products']);
+        } finally {
+          await app.stop();
+        }
+      });
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should initialize TestingModule providers after everything in its imports', async () => {
+        const testing = await TestingModule.create({
+          imports: [DatabaseModule],
+          providers: [CatalogService],
+        }).compile();
+        try {
+          expect(testing.get(CatalogService).list()).toEqual(['SELECT name FROM products']);
+        } finally {
+          await testing.close();
+        }
+      });
+
+      /**
+       * @source docs:api/services.md#initialization-across-modules
+       */
+      it('should run a root service\'s onModuleDestroy without its onModuleInit when an import\'s hook fails', async () => {
+        // From docs: the 0.9.0 migration note — an imported connection unreachable at boot
+        const events: string[] = [];
+
+        @Service()
+        class UnreachableConnection extends BaseService implements OnModuleInit, OnModuleDestroy {
+          async onModuleInit(): Promise<void> {
+            events.push('connection:init');
+            throw new Error('connection refused');
+          }
+
+          async onModuleDestroy(): Promise<void> {
+            events.push('connection:destroy');
+          }
+        }
+
+        @Module({ providers: [UnreachableConnection], exports: [UnreachableConnection] })
+        class UnreachableDatabaseModule {}
+
+        @Service()
+        class Worker extends BaseService implements OnModuleInit, OnModuleDestroy {
+          private timer: Timer | null = null;
+
+          constructor(readonly connection: UnreachableConnection) {
+            super();
+          }
+
+          async onModuleInit(): Promise<void> {
+            events.push('worker:init');
+            this.timer = setInterval(() => undefined, 60_000);
+          }
+
+          async onModuleDestroy(): Promise<void> {
+            // Guarded: onModuleInit never ran, so there is no timer to clear
+            events.push(`worker:destroy (timer ${this.timer ? 'set' : 'never set'})`);
+            if (this.timer) {
+              clearInterval(this.timer);
+            }
+          }
+        }
+
+        @Module({ imports: [UnreachableDatabaseModule], providers: [Worker] })
+        class WorkerAppModule {}
+
+        const app = new OneBunApplication(WorkerAppModule, {
+          port: 0,
+          metrics: { enabled: false },
+          gracefulShutdown: false,
+          loggerLayer: makeMockLoggerLayer(),
+        });
+
+        await expect(app.start()).rejects.toThrow('connection refused');
+        // 0.8.x: worker:init ran first, so its destroy found the timer set
+        expect(events).toEqual(['connection:init', 'worker:destroy (timer never set)', 'connection:destroy']);
+      });
     });
   });
 });
@@ -6407,6 +6546,125 @@ describe('Architecture Documentation (docs/architecture.md)', () => {
         'onModuleDestroy',
         'onApplicationDestroy:SIGTERM',
       ]);
+    });
+
+    /**
+     * The documented Initialization Phase, step 3: services of every imported module are
+     * initialized before the module that imports them, the root module last. The fixture is the
+     * one the defect was verified on: 0.8.x ran R1, R2, S1, S2, S3, S4, so R1's hook ran before
+     * the hook of S4, which it injects.
+     *
+     * @source docs:architecture.md#module-lifecycle
+     */
+    it('should complete every imported service\'s onModuleInit before the root module\'s services start theirs', async () => {
+      const order: string[] = [];
+
+      /** Start and end are a microtask turn apart, so overlapping hooks would interleave. */
+      abstract class OrderedService extends BaseService implements OnModuleInit {
+        ready = false;
+        dependencyWasReady: boolean | undefined;
+
+        protected abstract dependency(): OrderedService | undefined;
+
+        async onModuleInit(): Promise<void> {
+          const name = this.constructor.name;
+          this.dependencyWasReady = this.dependency()?.ready;
+          order.push(`${name}:start`);
+          await Promise.resolve();
+          this.ready = true;
+          order.push(`${name}:end`);
+        }
+      }
+
+      @Service()
+      class S1 extends OrderedService {
+        protected dependency(): OrderedService | undefined {
+          return undefined;
+        }
+      }
+
+      @Service()
+      class S2 extends OrderedService {
+        constructor(private readonly s1: S1) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s1;
+        }
+      }
+
+      @Service()
+      class S3 extends OrderedService {
+        constructor(private readonly s2: S2) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s2;
+        }
+      }
+
+      @Service()
+      class S4 extends OrderedService {
+        constructor(private readonly s3: S3) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s3;
+        }
+      }
+
+      @Module({ providers: [S1, S2, S3, S4], exports: [S4] })
+      class Inner {}
+
+      @Service()
+      class R1 extends OrderedService {
+        constructor(private readonly s4: S4) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.s4;
+        }
+      }
+
+      @Service()
+      class R2 extends OrderedService {
+        constructor(private readonly r1: R1) {
+          super();
+        }
+
+        protected dependency(): OrderedService {
+          return this.r1;
+        }
+      }
+
+      @Module({ imports: [Inner], providers: [R1, R2] })
+      class Root {}
+
+      const app = new OneBunApplication(Root, {
+        port: 0,
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        loggerLayer: makeMockLoggerLayer(),
+      });
+      await app.start();
+      try {
+        expect(order).toEqual([
+          'S1:start', 'S1:end',
+          'S2:start', 'S2:end',
+          'S3:start', 'S3:end',
+          'S4:start', 'S4:end',
+          'R1:start', 'R1:end',
+          'R2:start', 'R2:end',
+        ]);
+        expect(app.getService(R1).dependencyWasReady).toBe(true);
+        expect(app.getService(R2).dependencyWasReady).toBe(true);
+      } finally {
+        await app.stop();
+      }
     });
   });
 });

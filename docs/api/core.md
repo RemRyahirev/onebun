@@ -92,7 +92,7 @@ await app.start();
 - `app.getHttpUrl()` - get listening URL
 
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
-- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree)
+- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree, every imported module's services before those of the module importing it, the root module's last — since 0.9.0; through 0.8.x the root module's went first. See [Initialization Across Modules](./services.md#initialization-across-modules))
 - `onApplicationInit()` - after all modules, before HTTP starts
 - `beforeApplicationDestroy(signal?)` - FIRST destroy hook, but NOT the start of shutdown: it runs after new requests are refused with 503, after the in-flight drain, and after the HTTP listener is closed. A request issued from inside it is refused (connection refused, not 503)
 - `onModuleDestroy()` - after `beforeApplicationDestroy`, WebSocket close, queue stop and trace flush; before `onApplicationDestroy`

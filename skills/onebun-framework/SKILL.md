@@ -509,6 +509,13 @@ Key rules:
   `createTestService` supports this — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
+- **`onModuleInit` runs imported modules first** (0.9.0): every imported module's services before
+  those of the module importing it, the root module's (and `TestingModule.create({ providers })`'s)
+  last, and within a module in dependency order — a hook always finds the hooks of what it injects
+  completed. Through 0.8.x the root module's services went first. A root hook that an imported
+  module's hook relied on is now too late: do that work in the constructor, or read it in
+  `onApplicationInit`. An imported hook that throws at boot now leaves every root-module service
+  with `onModuleDestroy` called but `onModuleInit` never run — guard destroy (`if (this.pool)`)
 - `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
   is held until the handlers are registered and then delivered, and the shutdown message goes out
   before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the

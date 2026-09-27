@@ -13,8 +13,8 @@ description: System architecture overview. Module hierarchy, DI container, reque
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
 **Lifecycle Hooks Order**:
-1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service (sequentially in dependency order; called for all providers, even standalone ones not injected anywhere)
-2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all`)
+1. Services created (ambient init context provides logger/config to `BaseService` constructor — `this.config` and `this.logger` are available after `super()`) → `onModuleInit()` called on each service, sequentially, one module at a time: every imported module before the module that imports it (depth-first post-order over the modules as they were built: the deepest import first, `@Global()` modules — built up front by the root — among the first, a module shared by several importers once, where it was first built, the root module last), and within a module in dependency order. So a service's hook always finds the hooks of everything it injects completed, from its own module or an imported one. Called for all providers, even standalone ones not injected anywhere. A throwing hook stops the pass: the importing modules' hooks never run (the destroy hooks still run over everything built). Since 0.9.0 — through 0.8.x the root module's services went FIRST, then the imports, so a root service's hook ran before the hooks of the services it injected from imports
+2. Controllers created → `onModuleInit()` called on all controllers (in parallel via `Promise.all` within a module), after the service hooks of the whole tree; controllers are not injectable, so their order across modules carries no dependency
 3. All modules ready → `onApplicationInit()` called (before HTTP server starts)
 4. Shutdown signal (or `app.stop()`) → every route answers `503 Service Unavailable` while the listener deliberately stays open, in-flight requests are drained (budget: half of `shutdownTimeout`, 7500ms by default), then the HTTP listener is closed
 5. Listener already closed → `beforeApplicationDestroy(signal?)` called
@@ -357,20 +357,31 @@ if (metadata.imports) {
 // Phase 2: Create this module's services with DI
 this.createServicesWithDI(metadata);
 
-// Phase 3: Call onModuleInit() on services that implement it
-// (sequentially in dependency order — dependencies complete before dependents)
-// Recursively traverses ALL modules in the import tree (depth-first)
-await this.callServicesOnModuleInit(); // root + all descendants
+// Phase 3: Call onModuleInit() on services that implement it, sequentially,
+// across ALL modules in the import tree: every imported module before the module
+// that imports it (deepest first), the root module last. Within a module, in
+// dependency order. Either way a dependency's hook completes before its dependents'.
+for (const importedModule of this.collectDescendantModules()) {
+  await importedModule.callServicesOnModuleInit();
+}
+await this.callServicesOnModuleInit(); // the root module's own services, last
 
 // Phase 4: Create controllers with injected services (all modules)
 this.createControllersWithDI();
 
-// Phase 5: Call onModuleInit() on controllers that implement it (all modules)
+// Phase 5: Call onModuleInit() on controllers that implement it (all modules),
+// once every service hook of the tree has completed
 await this.callControllersOnModuleInit();
 
 // Phase 6: After all modules ready, call onApplicationInit() (before HTTP server)
 await this.callOnApplicationInit();
 ```
+
+Phase 3 runs the imports first since 0.9.0. Up to 0.8.x the root module's services were
+initialized before those of the modules it imports, so a root service's `onModuleInit` could run
+before the hook of a service it injects from an import — see
+[Initialization Across Modules](/api/services#initialization-across-modules) for what changes on
+upgrade.
 
 **Shutdown Phase:**
 
@@ -510,12 +521,14 @@ export class BaseService {
 
 // Lifecycle hooks are optional - implement the interface to use:
 // onModuleInit is called for ALL providers, even standalone services
-// not injected anywhere. Hooks run sequentially in dependency order.
+// not injected anywhere. Hooks run sequentially in dependency order,
+// imported modules' services before those of the module importing them.
 @Service()
 class MyService extends BaseService implements OnModuleInit {
   async onModuleInit(): Promise<void> {
     // Called after construction and DI injection
-    // All dependencies' onModuleInit have already completed
+    // All dependencies' onModuleInit have already completed,
+    // whether they come from this module or from an imported one
   }
 }
 ```

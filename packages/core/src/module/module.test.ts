@@ -3236,6 +3236,246 @@ describe('OneBunModule', () => {
       expect(initLog).toContain('root-service');
       expect(initLog).toContain('root-controller');
       expect(initLog.length).toBe(6);
+
+      // Services: the deepest import first, the root module last (0.9.0; the root used to be first).
+      // Controllers only after every service of the tree.
+      expect(initLog.slice(0, 3)).toEqual(['grandchild-service', 'child-service', 'root-service']);
+      expect([...initLog.slice(3)].sort()).toEqual(['child-controller', 'grandchild-controller', 'root-controller']);
+    });
+
+    describe('services of imported modules are initialized before the importing module (0.9.0)', () => {
+      /**
+       * A service that records when its hook starts and ends, with a microtask turn in between:
+       * hooks that overlapped would interleave in the log. `dependenciesReady` records, per
+       * service, what its hook found: every dependency's own hook already finished, or not.
+       */
+      abstract class TrackedService {
+        static log: string[] = [];
+        static dependenciesReady = new Map<string, boolean>();
+        ready = false;
+
+        protected abstract dependencies(): TrackedService[];
+
+        async onModuleInit(): Promise<void> {
+          const name = this.constructor.name;
+          TrackedService.dependenciesReady.set(name, this.dependencies().every((dependency) => dependency.ready));
+          TrackedService.log.push(`${name}:start`);
+          await Promise.resolve();
+          this.ready = true;
+          TrackedService.log.push(`${name}:end`);
+        }
+      }
+
+      beforeEach(() => {
+        TrackedService.log = [];
+        TrackedService.dependenciesReady = new Map();
+      });
+
+      test('Root(R1(S4), R2(R1)) importing Inner(S1..S4): every Inner hook completes before R1 and R2', async () => {
+        @Service()
+        class S1 extends TrackedService {
+          protected dependencies(): TrackedService[] {
+            return [];
+          }
+        }
+
+        @Service()
+        class S2 extends TrackedService {
+          constructor(readonly s1: S1) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.s1];
+          }
+        }
+
+        @Service()
+        class S3 extends TrackedService {
+          constructor(readonly s2: S2) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.s2];
+          }
+        }
+
+        @Service()
+        class S4 extends TrackedService {
+          constructor(readonly s3: S3) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.s3];
+          }
+        }
+
+        @Module({ providers: [S1, S2, S3, S4], exports: [S4] })
+        class Inner {}
+
+        @Service()
+        class R1 extends TrackedService {
+          constructor(readonly s4: S4) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.s4];
+          }
+        }
+
+        @Service()
+        class R2 extends TrackedService {
+          constructor(readonly r1: R1) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.r1];
+          }
+        }
+
+        @Module({ imports: [Inner], providers: [R1, R2] })
+        class Root {}
+
+        const module = new ModuleClass(Root, mockLoggerLayer);
+        await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+        // 0.8.x: R1, R2, S1, S2, S3, S4 — R1's hook ran before S4's, which it injects.
+        expect(TrackedService.log).toEqual([
+          'S1:start', 'S1:end',
+          'S2:start', 'S2:end',
+          'S3:start', 'S3:end',
+          'S4:start', 'S4:end',
+          'R1:start', 'R1:end',
+          'R2:start', 'R2:end',
+        ]);
+        expect(Object.fromEntries(TrackedService.dependenciesReady)).toEqual({
+          S1: true, S2: true, S3: true, S4: true, R1: true, R2: true,
+        });
+      });
+
+      test('a module shared by two importers and a @Global() module are initialized before every consumer', async () => {
+        const { Global } = require('../decorators/decorators');
+
+        @Service()
+        class ClockService extends TrackedService {
+          protected dependencies(): TrackedService[] {
+            return [];
+          }
+        }
+
+        // Imported by nobody but the root, and last: a global module is visible everywhere.
+        @Global()
+        @Module({ providers: [ClockService], exports: [ClockService] })
+        class ClockModule {}
+
+        @Service()
+        class StoreService extends TrackedService {
+          protected dependencies(): TrackedService[] {
+            return [];
+          }
+        }
+
+        @Module({ providers: [StoreService], exports: [StoreService] })
+        class StoreModule {}
+
+        @Service()
+        class OrdersService extends TrackedService {
+          constructor(readonly store: StoreService) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.store];
+          }
+        }
+
+        @Module({ imports: [StoreModule], providers: [OrdersService], exports: [OrdersService] })
+        class OrdersModule {}
+
+        @Service()
+        class BillingService extends TrackedService {
+          constructor(readonly store: StoreService, readonly clock: ClockService) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.store, this.clock];
+          }
+        }
+
+        @Module({ imports: [StoreModule], providers: [BillingService], exports: [BillingService] })
+        class BillingModule {}
+
+        @Service()
+        class AppService extends TrackedService {
+          constructor(readonly orders: OrdersService, readonly billing: BillingService) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.orders, this.billing];
+          }
+        }
+
+        @Module({ imports: [OrdersModule, BillingModule, ClockModule], providers: [AppService] })
+        class AppModule {}
+
+        const module = new ModuleClass(AppModule, mockLoggerLayer);
+        await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+        const ends = TrackedService.log.filter((entry) => entry.endsWith(':end'));
+        expect([...ends].sort()).toEqual([
+          'AppService:end', 'BillingService:end', 'ClockService:end', 'OrdersService:end', 'StoreService:end',
+        ]);
+        // StoreModule is built once, as OrdersModule's import, and initialized once.
+        expect(ends.filter((entry) => entry === 'StoreService:end')).toHaveLength(1);
+        expect(ends.at(-1)).toBe('AppService:end');
+        expect(Object.fromEntries(TrackedService.dependenciesReady)).toEqual({
+          ClockService: true, StoreService: true, OrdersService: true, BillingService: true, AppService: true,
+        });
+      });
+
+      test('a failing hook in an imported module stops the boot before the importing module\'s hooks run', async () => {
+        @Service()
+        class BrokenConnection extends TrackedService {
+          protected dependencies(): TrackedService[] {
+            return [];
+          }
+
+          override async onModuleInit(): Promise<void> {
+            TrackedService.log.push('BrokenConnection:start');
+            throw new Error('connection refused');
+          }
+        }
+
+        @Module({ providers: [BrokenConnection], exports: [BrokenConnection] })
+        class ConnectionModule {}
+
+        @Service()
+        class Repository extends TrackedService {
+          constructor(readonly connection: BrokenConnection) {
+            super();
+          }
+
+          protected dependencies(): TrackedService[] {
+            return [this.connection];
+          }
+        }
+
+        @Module({ imports: [ConnectionModule], providers: [Repository] })
+        class AppModule {}
+
+        const module = new ModuleClass(AppModule, mockLoggerLayer);
+        await expect(Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>))
+          .rejects.toThrow('connection refused');
+
+        // 0.8.x ran Repository's hook first, against a connection that was never opened.
+        expect(TrackedService.log).toEqual(['BrokenConnection:start']);
+      });
     });
   });
 
