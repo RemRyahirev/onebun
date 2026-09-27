@@ -3,8 +3,10 @@ import { Effect, pipe } from 'effect';
 import { applyAuth, isSigningAuth } from './auth.js';
 import {
   type BodyReadFailure,
+  bodyStream,
   cappedAcceptEncoding,
   contentCodings,
+  openBodyReader,
   readCappedBody,
 } from './body.js';
 import { signOneBunRequest } from './onebun-auth.js';
@@ -35,6 +37,7 @@ import {
   type RequestMetricsData,
   type RequestsOptions,
   resolveRetryConfig,
+  type ResponseType,
   type RetryConfig,
   type SuccessResponse,
   TRANSPORT_FAILURE_CODE,
@@ -112,7 +115,9 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  * { redirect: '/home' })` is query data — a login flow's return path — and a test pins it, so the
  * redirect policy takes the three-argument form. `maxResponseBytes` did join: nothing names a
  * query parameter that, and a cap that went out as `?maxResponseBytes=1048576` would leave the
- * body it was meant to bound unbounded.
+ * body it was meant to bound unbounded. `responseType` joined for the same reason: sent as
+ * `?responseType=stream`, it would leave a caller waiting for a stream with a string that arrives
+ * only once the whole body has.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -122,6 +127,7 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'tracing',
   'metrics',
   'maxResponseBytes',
+  'responseType',
 ];
 
 /**
@@ -908,7 +914,8 @@ const bodyReadFailure = (
     : createErrorResponse(readFailure, response.status, traceId, markTransportDetails({ details: error }, ['details']));
 
 /**
- * What a body read under `maxResponseBytes` that failed is reported as.
+ * What a failed body read through {@link openBodyReader} is reported as — under
+ * `maxResponseBytes`, and every read of a `'stream'` result.
  *
  * A failure reading the connection goes through {@link bodyReadFailure}, like an uncapped read. A
  * body the decoder rejects is a `RESPONSE_DECODE_ERROR` — unless the attempt's signal had fired,
@@ -918,7 +925,7 @@ const bodyReadFailure = (
 const cappedBodyFailure = (
   failure: BodyReadFailure,
   response: Response,
-  limit: number,
+  limit: number | undefined,
   signal: AbortSignal,
   readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
   traceId?: string,
@@ -984,6 +991,131 @@ const readBodyText = (
     Effect.mapError((failure) => cappedBodyFailure(failure, response, limit, signal, readFailure, traceId)),
   );
 };
+
+/**
+ * Read the body of a response whose headers have arrived as bytes, exactly as they are once the
+ * content coding is undone — `responseType: 'bytes'`.
+ *
+ * The same read as {@link readBodyText}, without the UTF-8 decoding that turned every byte of a
+ * binary body outside UTF-8 into U+FFFD, and a failed read is reported the same way.
+ */
+const readBodyBytes = (
+  response: Response,
+  signal: AbortSignal,
+  traceId?: string,
+  limit?: number,
+): Effect.Effect<Uint8Array, ErrorResponse> => {
+  if (limit === undefined) {
+    return Effect.tryPromise({
+      try: () => response.arrayBuffer().then((buffer) => new Uint8Array(buffer)),
+      catch: (error) => bodyReadFailure(error, response, signal, 'RESPONSE_READ_ERROR', traceId),
+    });
+  }
+
+  return pipe(
+    readCappedBody(response, limit),
+    Effect.mapError((failure) => cappedBodyFailure(failure, response, limit, signal, 'RESPONSE_READ_ERROR', traceId)),
+  );
+};
+
+/**
+ * A countdown that aborts its signal with a `TimeoutError` — the reason `AbortSignal.timeout`
+ * aborts with — and that can be stopped and started again.
+ *
+ * A `'stream'` result needs it: its body outlives the call, so no single deadline set when the
+ * attempt starts can bound it. The countdown bounds each wait instead — the wait for the headers,
+ * then every wait of the caller's reads for the next chunk.
+ */
+interface RestartableTimeout {
+  readonly signal: AbortSignal;
+  /** Start counting `timeout` from now, dropping whatever was counted before. */
+  start(): void;
+  /** Stop counting. */
+  stop(): void;
+}
+
+/**
+ * The longest delay `setTimeout` keeps, 2^31 - 1 ms (about 24.8 days). The runtime sets a longer
+ * one to 1 ms, with a `TimeoutOverflowWarning`.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * A countdown is counted in stretches of at most {@link MAX_TIMER_DELAY_MS}, each re-arming the
+ * next for what is left. `AbortSignal.timeout`, which bounds a request under `'auto'` and
+ * `'bytes'`, takes any delay up to 2^53 - 1 ms. A single `setTimeout` did not: a `timeout` past
+ * 2^31 - 1, the obvious way to say "no idle limit" on a long-lived stream, fired after 1 ms, and
+ * every `'stream'` call under it failed `TIMEOUT_ERROR` at the headers while the same call under
+ * `'auto'` went through.
+ */
+const restartableTimeout = (timeout: number): RestartableTimeout => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const countDown = (left: number): void => {
+    const stretch = Math.min(left, MAX_TIMER_DELAY_MS);
+    timer = setTimeout(() => {
+      if (left > stretch) {
+        countDown(left - stretch);
+      } else {
+        controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+      }
+    }, stretch);
+  };
+
+  return {
+    signal: controller.signal,
+    start() {
+      stop();
+      countDown(timeout);
+    },
+    stop,
+  };
+};
+
+/**
+ * Open the body of a success as the `ReadableStream` a `responseType: 'stream'` call resolves with.
+ *
+ * The call resolves at the headers; the body is read only as the caller reads the stream. Every
+ * read that waits on the upstream restarts `waitTimeout`, and the read that waits past it errors
+ * the stream with `TIMEOUT_ERROR` and closes the connection: a stream whose chunks keep coming
+ * lives as long as they do, a stalled one does not. The time the caller spends between reads
+ * counts for nothing.
+ *
+ * Under `maxResponseBytes` the body is decoded by the client and counted as the stream is read
+ * ({@link bodyStream}); a body refused before reading fails the call itself. Whatever the stream
+ * errors with is the `ErrorResponse` the same failure of an ordinary read would have produced.
+ */
+const openBodyStream = (
+  response: Response,
+  signal: AbortSignal,
+  waitTimeout: RestartableTimeout,
+  traceId?: string,
+  limit?: number,
+): Effect.Effect<ReadableStream<Uint8Array>, ErrorResponse> => {
+  const errorFor = (failure: BodyReadFailure): ErrorResponse =>
+    cappedBodyFailure(failure, response, limit, signal, 'RESPONSE_READ_ERROR', traceId);
+
+  return pipe(
+    openBodyReader(response, limit),
+    Effect.mapError(errorFor),
+    Effect.map((reader) => bodyStream(reader, limit, {
+      waiting: waitTimeout.start,
+      settled: waitTimeout.stop,
+      errorFor,
+    })),
+  );
+};
+
+/**
+ * The shape a request's success `result` takes: `'bytes'` and `'stream'` as asked, and anything
+ * else — `undefined`, or a value no caller typed in TypeScript — as `'auto'`.
+ */
+const responseTypeOf = (config: RequestConfig): ResponseType =>
+  config.responseType === 'bytes' || config.responseType === 'stream' ? config.responseType : 'auto';
 
 /**
  * Parse response data based on content type.
@@ -1142,6 +1274,15 @@ const resignerFor = (
  * success and an error status alike: an error status's body ends up in `details.details`, so it
  * is bounded by the same cap.
  *
+ * `responseType` shapes a success's `result` only: `'bytes'` reads the body as bytes
+ * ({@link readBodyBytes}), and `'stream'` resolves at the headers with the body still to be read
+ * ({@link openBodyStream}). An error status's body is read as under `'auto'` in every mode, so an
+ * `HTTP_ERROR` carries the same `details.details` whichever was asked for. Under `'stream'` the
+ * timeout is a {@link RestartableTimeout} rather than one deadline for the whole attempt: it bounds
+ * the wait for the headers — and an error status's body, as it would anyway — and is stopped once
+ * the stream is handed over, which restarts it for each read. The attempt ends at the headers, so
+ * nothing read from the stream is ever retried, and the metrics record the time to the headers.
+ *
  * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
@@ -1153,10 +1294,14 @@ const executeSingleRequest = <T, E extends string, R extends string>(
 ): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => Effect.suspend(() => {
   const requestStartTime = Date.now();
   const interruption = new AbortController();
+  const timeout = config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS;
+  const responseType = responseTypeOf(config);
+  const waitTimeout = responseType === 'stream' ? restartableTimeout(timeout) : undefined;
   const signal = AbortSignal.any([
-    AbortSignal.timeout(config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS),
+    waitTimeout?.signal ?? AbortSignal.timeout(timeout),
     interruption.signal,
   ]);
+  waitTimeout?.start();
 
   // One serialization, used both for the body that is sent and for the body that is signed.
   // Serializing twice would let the two diverge, and a signature over different bytes than the
@@ -1187,25 +1332,38 @@ const executeSingleRequest = <T, E extends string, R extends string>(
     })),
     Effect.flatMap((response) => {
       const noContent = hasNoContent(config.method, response.status);
+      const success = isSuccessStatus(response.status, policy);
       // `undefined` rather than `''` for a response that has no content: `head()` is typed
       // `ApiResponse<void>`, and an empty string would claim a body that was never there.
       // A redirect handed back under 'manual' is wanted for its status and `Location`, not its
       // body: an empty one typed as JSON (some gateways send that) resolves with `undefined`
       // rather than failing RESPONSE_PARSE_ERROR, which would take the `Location` down with it.
-      const readBody: Effect.Effect<T, ErrorResponse> = noContent
-        ? Effect.succeed(undefined as T)
-        : parseResponseData<T>(response, signal, traceId, limit, isHandedBackRedirect(response.status, policy));
+      const readBody = (): Effect.Effect<T, ErrorResponse> => {
+        if (noContent) {
+          return Effect.succeed(undefined as T);
+        }
+
+        if (success && responseType === 'bytes') {
+          return readBodyBytes(response, signal, traceId, limit) as Effect.Effect<T, ErrorResponse>;
+        }
+
+        if (success && responseType === 'stream' && waitTimeout !== undefined) {
+          return openBodyStream(response, signal, waitTimeout, traceId, limit) as Effect.Effect<T, ErrorResponse>;
+        }
+
+        return parseResponseData<T>(response, signal, traceId, limit, isHandedBackRedirect(response.status, policy));
+      };
       const upstreamHeaders = exposedHeaders(
         response,
         limit !== undefined && !noContent && contentCodings(response.headers).length > 0,
       );
 
       return pipe(
-        readBody,
+        readBody(),
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
 
-          if (isSuccessStatus(response.status, policy)) {
+          if (success) {
             return withUpstreamHeaders(
               createSuccessResponse(responseData, traceId, response.status),
               collectResponseHeaders(upstreamHeaders),
@@ -1228,6 +1386,8 @@ const executeSingleRequest = <T, E extends string, R extends string>(
       );
     }),
     Effect.onInterrupt(() => Effect.sync(() => interruption.abort())),
+    // The attempt is over: a `'stream'` result restarts the countdown for each read of its own
+    Effect.ensuring(Effect.sync(() => waitTimeout?.stop())),
     Effect.catchAll((error) => {
       return Effect.succeed(error);
     }),

@@ -13,6 +13,7 @@ OneBun provides a unified HTTP client with:
 - Automatic retries with configurable strategies
 - Redirects followed without taking credentials to another origin — or refused, or handed back
 - An optional cap on the decoded size of a response body
+- Binary bodies as bytes, and bodies streamed as they arrive
 - Integrated tracing and metrics
 - Standardized error handling
 
@@ -43,8 +44,8 @@ const response = await client.get('/users');
 const response = await client.get('/users', { page: 1, limit: 10 });
 // GET /users?page=1&limit=10
 
-// With custom headers — an object carrying `method`, `headers`, `timeout`, `auth`,
-// `tracing`, `metrics` or `maxResponseBytes` is read as per-request config instead of as query
+// With custom headers — an object carrying `method`, `headers`, `timeout`, `auth`, `tracing`,
+// `metrics`, `maxResponseBytes` or `responseType` is read as per-request config instead of as query
 const response = await client.get('/users', {
   headers: { 'X-Custom-Header': 'value' },
 });
@@ -57,7 +58,7 @@ const response = await client.get('/users', undefined, { retries: { max: 0 } });
 ```
 
 `delete`, `head` and `options` take the same three arguments and resolve them by the same rule.
-With two arguments, only the seven names above make the object config: every other key is query
+With two arguments, only the eight names above make the object config: every other key is query
 data, so `client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`.
 `retries`, `query` and `redirect` are deliberately not on the list, so a config that sets only
 those takes the three-argument form, as in the last call above.
@@ -694,6 +695,9 @@ if (outcome._tag === 'Left' && getTransportFailureKind(outcome.left) === 'timeou
 
 The upstream sees the connection close when the timeout fires, in either phase.
 
+A streamed response is the exception: under `responseType: 'stream'`, `timeout` bounds each wait
+on the upstream rather than the whole response (see [Streaming a response](#response-stream)).
+
 A `500` whose body stalls is therefore a timeout, not a `500`: the status arrived, the response did
 not, and `retryOnTimeout` — off by default — decides whether it is replayed.
 
@@ -1082,6 +1086,196 @@ It is never retried either, whatever `retryOn` lists. A request without a limit 
 
 </llm-only>
 
+## Response types {#response-types}
+
+A success's `result` is the body parsed as JSON when the response says `application/json`, and
+text otherwise. `responseType` asks for something else, per request:
+
+| `responseType` | `result` | The call resolves |
+| --- | --- | --- |
+| `'auto'` (the default) | parsed JSON, or text | once the whole body has arrived |
+| `'bytes'` | a `Uint8Array` of the body, byte for byte | once the whole body has arrived |
+| `'stream'` | a `ReadableStream<Uint8Array>` of the body | as soon as the headers arrive |
+
+The option's type is `ResponseType`, exported by `@onebun/requests`. Name the type of `result` as
+the call's type argument, as in the examples below.
+
+`responseType` changes only what a success resolves with:
+
+- An error status's body is read as under `'auto'`, so an `HTTP_ERROR` carries the same
+  `details.details` whichever mode was asked for.
+- An answer to `HEAD`, a `204` and a `304` resolve with `result: undefined` in every mode (see
+  [Responses without a body](#responses-without-a-body)).
+- [`maxResponseBytes`](#max-response-bytes) applies in every mode, with the body decoded and
+  counted by the client.
+- `responseType` is one of the config markers, so `client.get('/events', { responseType: 'stream' })`
+  is config, not query data.
+
+### Binary bodies {#response-bytes}
+
+Decoding a body as text replaces every byte sequence that is not valid UTF-8 with `U+FFFD`, so an
+image, a font, a PDF or a protobuf message comes back corrupted under `'auto'`. `'bytes'` hands
+the body over as it is:
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const cdn = createHttpClient({ baseUrl: 'https://cdn.example.com' });
+
+const font = await cdn.get<Uint8Array>('/fonts/inter.woff2', undefined, { responseType: 'bytes' });
+
+if (font.success) {
+  font.result;                    // Uint8Array
+  font.headers?.['content-type']; // 'font/woff2'
+}
+```
+
+The content coding is undone first, so `result` holds the resource itself, not its `gzip` or `br`
+transfer form. A JSON body is not parsed either: `result` is its bytes.
+
+### Streaming a response {#response-stream}
+
+`'stream'` resolves as soon as the status line and headers arrive, with the body as a
+`ReadableStream<Uint8Array>` that you read as it comes. Use it for a server-sent event stream, a
+long export, or a download you pass on:
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const api = createHttpClient({ baseUrl: 'https://api.example.com', timeout: 30_000 });
+
+const feed = await api.get<ReadableStream<Uint8Array>>('/events', undefined, {
+  responseType: 'stream',
+  headers: { Accept: 'text/event-stream' },
+});
+
+if (feed.success) {
+  const decoder = new TextDecoder();
+
+  for await (const chunk of feed.result) {
+    handleEvents(decoder.decode(chunk, { stream: true }));
+  }
+}
+```
+
+**`timeout` bounds each wait, not the whole response.** A stream may rightly go on for hours, so
+under `'stream'` `timeout` bounds:
+
+- the wait for the headers, as for any request, across the whole redirect chain;
+- then every read's wait for the next chunk. A read that waits longer errors the stream with
+  `TIMEOUT_ERROR`, and the connection is closed.
+
+A stream whose chunks keep coming lives as long as they do, and one that stalls is cut off
+`timeout` after its last chunk. Only the time spent waiting on the upstream counts; the time your
+code takes between two reads does not. Keep `timeout` above the longest silence the upstream
+allows itself, such as its heartbeat interval.
+
+**A failed read rejects with an `ErrorResponse`**, the same record the Effect API fails with:
+
+- `TIMEOUT_ERROR`, `code: 0`, `details.phase: 'body'` — a read waited longer than `timeout`
+- `RESPONSE_TOO_LARGE` — under `maxResponseBytes`, at the chunk that takes the count past the
+  limit; that chunk is not handed out
+- `RESPONSE_DECODE_ERROR` — under `maxResponseBytes`, a body the decoder rejects
+- `RESPONSE_READ_ERROR` — the connection broke off mid-body
+
+```typescript
+import { getTransportFailureKind, isErrorResponse } from '@onebun/requests';
+
+async function readFeed(feed: ReadableStream<Uint8Array>): Promise<void> {
+  try {
+    for await (const chunk of feed) {
+      handleChunk(chunk);
+    }
+  } catch (error) {
+    if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
+      // The upstream went quiet for longer than `timeout`: reconnect
+    }
+  }
+}
+```
+
+Up to the headers, a streamed request is an ordinary one. An error status fails the call with
+`HTTP_ERROR` and is retried as `retryOn` says. A body refused before reading under
+`maxResponseBytes` fails the call too. Once the stream is handed over, nothing is retried: the
+call has resolved, and a failure errors the stream. The metrics record the time to the headers.
+
+**Read the stream to its end, or cancel it.** The connection stays open for as long as the
+stream does. `cancel()` on the stream or its reader, or a `break` out of a `for await` loop, closes
+the connection, and the upstream sees its stream cancelled.
+
+To pass a body on, return it in a `Response`; the framework sends it
+[as it arrives](./controllers.md#custom-response-headers), and when the caller disconnects the
+upstream stream is cancelled:
+
+```typescript
+import { BaseController, Controller, Get, Param, createHttpClient, isErrorResponse } from '@onebun/core';
+
+@Controller('/files')
+export class FilesController extends BaseController {
+  private readonly storage = createHttpClient({ baseUrl: 'https://storage.example.com' });
+
+  @Get('/:id')
+  async download(@Param('id') id: string): Promise<Response> {
+    const file = await this.storage.get<ReadableStream<Uint8Array>>(`/objects/${id}`, undefined, {
+      responseType: 'stream',
+    });
+
+    if (isErrorResponse(file)) {
+      throw new Error(file.error);
+    }
+
+    return new Response(file.result, {
+      headers: { 'Content-Type': file.headers?.['content-type'] ?? 'application/octet-stream' },
+    });
+  }
+}
+```
+
+Pass on `content-type`, never `content-encoding` or `content-length`: `fetch` has already undone
+the coding, and those two describe the compressed bytes.
+
+<llm-only>
+
+- Up to 0.8.3 there was no `responseType`. Every body the client read went through
+  `response.text()` or JSON parsing: a binary body came back with its non-UTF-8 bytes replaced by
+  `U+FFFD` (bytes `[0, 255, 128, 65]` became `"\u0000��A"`), and nothing resolved before
+  the whole body had arrived, so a server-sent event stream never resolved at all. The only way
+  out was a `fetch` of your own. `'auto'` is still the default and reads exactly as before.
+- `responseType` joined the config markers of the two-argument `get`/`delete`/`head`/`options`
+  form, as `maxResponseBytes` did: sent as `?responseType=stream`, it would leave a caller waiting
+  for a stream with a string that arrives only once the whole body has. A query that really has a
+  `responseType` parameter takes the three-argument form, `get(url, { responseType }, config)`.
+  In the two-argument form the whole record is config, so its other keys stop being query data
+  too: `get('/search', { q: 'cats', responseType: 'json' })` now sends `GET /search`, where up to
+  0.8.3 it sent `GET /search?q=cats&responseType=json`. A value other than `'bytes'` or `'stream'`
+  reads as `'auto'`.
+- Under `'stream'` `timeout` takes what it takes in the other modes, up to 2^53 - 1 ms. The
+  countdown is kept in stretches of at most 2^31 - 1 ms, the longest delay `setTimeout` keeps,
+  each re-armed for the rest; a single `setTimeout` past that fires after 1 ms, and would have
+  failed every streamed call under such a `timeout` at the headers.
+- In `'bytes'` and `'stream'` a 2xx JSON body shaped like `{ success: false, error, code }` is
+  handed over as it is. Under `'auto'` such a body fails the call with the upstream's error.
+- Stream timing: the countdown restarts at every read that has to wait on the upstream, and stops
+  when that read gets a chunk, when the stream ends, errors or is cancelled, and whenever nobody is
+  reading. The stream is pulled on demand (`highWaterMark: 0`), so nothing is read ahead of the
+  caller: time the caller spends on a chunk never counts. A stream that nobody reads or cancels
+  keeps its connection open indefinitely.
+- A stream's error record is the one a body read of the other modes produces: `TIMEOUT_ERROR` with
+  `code: 0`, `details.phase: 'body'`, `details.statusCode` and `getTransportFailureKind()`
+  `'timeout'`; `RESPONSE_TOO_LARGE` with `details.limit`, `details.received` and
+  `details.statusCode`. It is a plain object, not an `Error`: `isErrorResponse(error)` narrows it.
+- Under `'stream'` a timeout during an error status's body read is still `TIMEOUT_ERROR`: that
+  body is read within the `timeout` left from the wait for the headers, as it is in every mode.
+- Without `maxResponseBytes`, `fetch` decompresses a streamed body itself and keeps
+  `content-encoding` and `content-length` in `headers`. With it, the client decodes it, and leaves
+  both out. Either way the stream carries decoded bytes.
+- Interrupting the `*Effect` call aborts the request while it waits for the headers, as for any
+  request. After it has resolved, only the stream controls the connection.
+- `RequestsService` methods return `result` alone, so under `'stream'` they resolve with the
+  stream itself, and under `'bytes'` with the `Uint8Array`. `req()` returns them too.
+
+</llm-only>
+
 ## Request Configuration
 
 Every per-request config argument is a `Partial<RequestConfig>` — `method` and `url` come from the
@@ -1117,6 +1311,9 @@ method you call and the path you pass, so only these fields are yours to set:
 
   /** What a redirect leads to: 'follow' (the default), 'error' or 'manual' */
   redirect?: 'follow' | 'error' | 'manual';
+
+  /** What a success's `result` is: parsed JSON or text, a Uint8Array, or a ReadableStream */
+  responseType?: 'auto' | 'bytes' | 'stream';
 }
 ```
 
@@ -1444,6 +1641,9 @@ interface SuccessResponse<T> {
   headers?: Record<string, string>;
 }
 ```
+
+`result` is what [`responseType`](#response-types) asks for: parsed JSON or text by default, a
+`Uint8Array` under `'bytes'`, a `ReadableStream<Uint8Array>` under `'stream'`.
 
 `headers` holds the upstream's response headers on every success the client produced: an `etag`,
 a `location`, a rate-limit header. Names are lower-cased. A header sent more than once is joined

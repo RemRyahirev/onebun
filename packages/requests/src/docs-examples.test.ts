@@ -113,6 +113,12 @@ interface EchoedCall {
   headers: Headers;
 }
 
+/** The two callbacks of a fixture's body stream that produce its chunks. */
+interface BodySource {
+  start?(controller: ReadableStreamDefaultController<Uint8Array>): void | Promise<void>;
+  pull?(controller: ReadableStreamDefaultController<Uint8Array>): void | Promise<void>;
+}
+
 /** Records what the client really put on the wire, so call-shape claims can be checked. */
 function startEchoServer(): { baseUrl: string; calls: EchoedCall[]; stop(): void } {
   const calls: EchoedCall[] = [];
@@ -1345,6 +1351,330 @@ describe('Requests API Documentation Examples', () => {
         expect(server.arrivals.filter((arrival) => arrival.path === '/broken')).toHaveLength(1);
       } finally {
         server.stop();
+      }
+    });
+  });
+
+  describe('Response types (docs/api/requests.md)', () => {
+    /** A body that is not UTF-8: every byte value, backwards. */
+    const FONT = Uint8Array.from({ length: 256 }, (_, index) => 255 - index);
+    const textEncoder = new TextEncoder();
+    const textDecoder = new TextDecoder();
+
+    /**
+     * `/fonts/inter.woff2` answers `FONT` gzip-compressed as `font/woff2`; `/doc` a JSON document;
+     * `/events` an event every 50 ms for as long as it is read, and `/quiet` one event and then
+     * nothing; `/missing` a 404 and `/busy` a 503, each with a JSON body; `/empty` a 204. Records
+     * each request's URL and `Accept`, and the paths whose body stream the client cancelled.
+     */
+    function startStreamingServer(): {
+      baseUrl: string;
+      requests: { url: string; accept: string | null }[];
+      cancelled: string[];
+      stop(): void;
+    } {
+      const requests: { url: string; accept: string | null }[] = [];
+      const cancelled: string[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          requests.push({ url: req.url, accept: req.headers.get('accept') });
+          const events = (source: BodySource) => new Response(
+            new ReadableStream<Uint8Array>({
+              ...source,
+              cancel() {
+                cancelled.push(path);
+              },
+            }),
+            { headers: new Headers([['content-type', 'text/event-stream']]) },
+          );
+
+          switch (path) {
+            case '/fonts/inter.woff2':
+              return new Response(Bun.gzipSync(FONT), {
+                headers: new Headers([['content-type', 'font/woff2'], ['content-encoding', 'gzip']]),
+              });
+            case '/doc':
+              return jsonStatus(200, { title: 'Report' });
+            case '/events': {
+              let sent = 0;
+
+              return events({
+                async pull(controller) {
+                  if (sent > 0) {
+                    await Bun.sleep(50);
+                  }
+                  controller.enqueue(textEncoder.encode(`data: ${sent++}\n\n`));
+                },
+              });
+            }
+            case '/quiet':
+              return events({
+                start(controller) {
+                  controller.enqueue(textEncoder.encode('data: hello\n\n'));
+                },
+              });
+            case '/missing':
+              return jsonStatus(404, { reason: 'gone' });
+            case '/busy':
+              return jsonStatus(503, { reason: 'busy' });
+            case '/empty':
+              return new Response(null, { status: 204 });
+            default:
+              return jsonStatus(500);
+          }
+        },
+      });
+
+      return {
+        baseUrl: server.url.origin,
+        requests,
+        cancelled,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#response-types
+     */
+    it('should resolve parsed JSON, bytes or a stream as asked, and read everything else the same in every mode', async () => {
+      // From docs: "responseType changes only what a success resolves with"
+      const server = startStreamingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        const auto = await client.get('/doc');
+        const bytes = await client.get<Uint8Array>('/doc', undefined, { responseType: 'bytes' });
+        const stream = await client.get<ReadableStream<Uint8Array>>('/doc', undefined, { responseType: 'stream' });
+
+        expect(auto.success && auto.result).toEqual({ title: 'Report' });
+        expect(bytes.success && bytes.result).toBeInstanceOf(Uint8Array);
+        expect(bytes.success && JSON.parse(textDecoder.decode(bytes.result))).toEqual({ title: 'Report' });
+        expect(stream.success && stream.result).toBeInstanceOf(ReadableStream);
+        if (stream.success) {
+          expect(JSON.parse(textDecoder.decode(await Bun.readableStreamToBytes(stream.result))))
+            .toEqual({ title: 'Report' });
+        }
+
+        // "An error status's body is read as under 'auto'", and "a 204 ... result: undefined in every mode"
+        for (const responseType of ['auto', 'bytes', 'stream'] as const) {
+          const failure = await Effect.runPromise(
+            Effect.either(client.getEffect('/missing', undefined, { responseType })),
+          );
+          const empty = await client.get('/empty', undefined, { responseType });
+
+          expect(failure._tag === 'Left' && [failure.left.error, failure.left.code, failure.left.details?.details])
+            .toEqual(['HTTP_ERROR', 404, { reason: 'gone' }]);
+          expect(empty.success && empty.statusCode).toBe(204);
+          expect(empty.success && empty.result).toBeUndefined();
+        }
+
+        // "responseType is one of the config markers"
+        const marker = await client.get<ReadableStream<Uint8Array>>('/doc', { responseType: 'stream' });
+        expect(marker.success && marker.result).toBeInstanceOf(ReadableStream);
+        expect(server.requests.at(-1)?.url).toBe(`${server.baseUrl}/doc`);
+        if (marker.success) {
+          await marker.result.cancel();
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-bytes
+     */
+    it('should hand a binary body over byte for byte, decompressed, where auto corrupts it', async () => {
+      const server = startStreamingServer();
+
+      try {
+        const cdn = createHttpClient({ baseUrl: server.baseUrl });
+
+        const font = await cdn.get<Uint8Array>('/fonts/inter.woff2', undefined, { responseType: 'bytes' });
+        const asText = await cdn.get<string>('/fonts/inter.woff2');
+
+        expect(font.success).toBe(true);
+        if (font.success) {
+          expect(font.result).toBeInstanceOf(Uint8Array);
+          // "The content coding is undone first"
+          expect(font.result).toEqual(FONT);
+          expect(font.headers?.['content-type']).toBe('font/woff2');
+        }
+        // "Decoding a body as text replaces every byte sequence that is not valid UTF-8 with U+FFFD"
+        expect(asText.success && asText.result).toContain('�');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should resolve at the headers and read the events as they come, closing the connection on break', async () => {
+      const server = startStreamingServer();
+
+      try {
+        const api = createHttpClient({ baseUrl: server.baseUrl, timeout: 30_000 });
+
+        const feed = await api.get<ReadableStream<Uint8Array>>('/events', undefined, {
+          responseType: 'stream',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        const events: string[] = [];
+        if (feed.success) {
+          const decoder = new TextDecoder();
+
+          for await (const chunk of feed.result) {
+            events.push(decoder.decode(chunk, { stream: true }));
+            if (events.length === 3) {
+              break;
+            }
+          }
+        }
+
+        expect(feed.success).toBe(true);
+        expect(server.requests[0]?.accept).toBe('text/event-stream');
+        expect(events).toEqual(['data: 0\n\n', 'data: 1\n\n', 'data: 2\n\n']);
+        // "a break out of a for await loop, closes the connection"
+        await waitFor(() => server.cancelled.includes('/events'), 1000);
+        expect(server.cancelled).toContain('/events');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR ErrorResponse', async () => {
+      const server = startStreamingServer();
+      const outcomes: string[] = [];
+
+      async function readFeed(feed: ReadableStream<Uint8Array>): Promise<void> {
+        try {
+          for await (const chunk of feed) {
+            outcomes.push(textDecoder.decode(chunk));
+          }
+        } catch (error) {
+          if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
+            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details?.phase)}`);
+          }
+        }
+      }
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, timeout: 150 });
+
+        // "A stream whose chunks keep coming lives as long as they do": 50 ms apart, read for 500 ms
+        const flowing = await client.get<ReadableStream<Uint8Array>>('/events', undefined, { responseType: 'stream' });
+        let flowed = 0;
+        if (flowing.success) {
+          const reader = flowing.result.getReader();
+          const started = performance.now();
+          while (performance.now() - started < 500) {
+            await reader.read();
+            flowed++;
+          }
+          await reader.cancel();
+        }
+
+        // "one that stalls is cut off timeout after its last chunk"
+        const quiet = await client.get<ReadableStream<Uint8Array>>('/quiet', undefined, { responseType: 'stream' });
+        if (quiet.success) {
+          await readFeed(quiet.result);
+        }
+
+        expect(flowed).toBeGreaterThanOrEqual(5);
+        expect(outcomes).toEqual(['data: hello\n\n', 'timeout: TIMEOUT_ERROR 0 body']);
+        // "and the connection is closed"
+        await waitFor(() => server.cancelled.includes('/quiet'), 1000);
+        expect(server.cancelled).toContain('/quiet');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should retry an error status before the hand-over, and record the time to the headers', async () => {
+      // From docs: "Up to the headers, a streamed request is an ordinary one" and "The metrics
+      // record the time to the headers"
+      const server = startStreamingServer();
+      const records: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 1, retryOn: [503], delay: 1 },
+          metricsSink: (data) => records.push(data),
+        });
+
+        const busy = await Effect.runPromise(
+          Effect.either(client.getEffect('/busy', undefined, { responseType: 'stream' })),
+        );
+        const endless = await client.get<ReadableStream<Uint8Array>>('/events', undefined, { responseType: 'stream' });
+
+        expect(busy._tag === 'Left' && [busy.left.error, busy.left.retryCount]).toEqual(['HTTP_ERROR', 1]);
+        expect(server.requests.filter((request) => request.url.endsWith('/busy'))).toHaveLength(2);
+        // The body of /events never ends, and its record is already there
+        expect(records.at(-1)?.url).toBe(`${server.baseUrl}/events`);
+        expect(records.at(-1)?.statusCode).toBe(200);
+        if (endless.success) {
+          await endless.result.cancel();
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should pass a stream on in a Response, and cancel the upstream when the caller disconnects', async () => {
+      const storage = startStreamingServer();
+      const proxy = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        async fetch(req) {
+          const client = createHttpClient({ baseUrl: storage.baseUrl });
+          const file = await client.get<ReadableStream<Uint8Array>>(new URL(req.url).pathname, undefined, {
+            responseType: 'stream',
+          });
+
+          if (isErrorResponse(file)) {
+            throw new Error(file.error);
+          }
+
+          return new Response(file.result, {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            headers: { 'Content-Type': file.headers?.['content-type'] ?? 'application/octet-stream' },
+          });
+        },
+      });
+
+      try {
+        const download = await fetch(`${proxy.url.origin}/fonts/inter.woff2`);
+        const body = new Uint8Array(await download.arrayBuffer());
+
+        expect(body).toEqual(FONT);
+        expect(download.headers.get('content-type')).toBe('font/woff2');
+
+        const caller = new AbortController();
+        const events = await fetch(`${proxy.url.origin}/events`, { signal: caller.signal });
+        await events.body?.getReader().read();
+        caller.abort();
+
+        await waitFor(() => storage.cancelled.includes('/events'), 1000);
+        expect(storage.cancelled).toContain('/events');
+      } finally {
+        proxy.stop(true);
+        storage.stop();
       }
     });
   });

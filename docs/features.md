@@ -66,6 +66,7 @@ production-grade backend services.
 - Typed `ApiResponse<T>` with success/error discrimination; a success carries the upstream status and response headers
 - Optional `maxResponseBytes`: a cap on the decoded response body, checked while it is read, error statuses included
 - Redirect policy `'follow' | 'error' | 'manual'`, on the client or per request; no credential follows a redirect to another origin
+- `responseType: 'bytes' | 'stream'`: binary bodies as a `Uint8Array`, or a `ReadableStream` that resolves at the headers, with `timeout` bounding each wait on the upstream
 - Transport of the inter-service clients (createServiceClient, untyped arguments and results)
 
 ### Observability
@@ -289,6 +290,10 @@ Full-featured HTTP client with:
 - **Redirects**: followed by the client with no credential crossing to another origin, refused
   with `redirect: 'error'`, or handed back with `redirect: 'manual'` (see
   [Redirect policy](/api/requests#redirect-policy))
+- **Binary and streamed bodies**: `responseType: 'bytes'` hands a body over as a `Uint8Array`, and
+  `responseType: 'stream'` resolves at the headers with a `ReadableStream`, so a server-sent event
+  stream or a long download is read as it arrives (see
+  [Response types](/api/requests#response-types))
 
 ### Service Clients
 `createServiceDefinition()` + `createServiceClient()` call another OneBun service by

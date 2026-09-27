@@ -97,7 +97,7 @@ needs both or a `traceparent`.
   and `options` — the four share one resolver (`resolveQueryOverload` in `client.ts`, also used by the
   `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
   `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
-  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`; `retries`, `query` and
+  are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`/`responseType`; `retries`, `query` and
   `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data, even though
   `redirect` is also the redirect-policy config key), so a config holding only those takes the
   three-argument form: `get(url, undefined, { redirect: 'error' })`. A third argument always makes the second the query, `undefined`
@@ -182,6 +182,27 @@ needs both or a `traceparent`.
   decoded the body, both a success's `headers` and an `HTTP_ERROR`'s `details.headers` omit
   `content-encoding`/`content-length`. Costs ~20% throughput on small gzip JSON, which is why
   there is no default cap before 1.0. A `NaN` cap refuses every non-empty body.
+- **`responseType: 'auto' | 'bytes' | 'stream'`** (type `ResponseType`, per request only; default `'auto'` =
+  JSON or text as before). `'bytes'`: `result` is a `Uint8Array`, byte for byte (content coding undone, JSON not
+  parsed) — `'auto'` turns non-UTF-8 bytes into U+FFFD. `'stream'`: the call resolves AT THE HEADERS with
+  `result: ReadableStream<Uint8Array>`; type it as the call's generic (`get<ReadableStream<Uint8Array>>(url,
+  undefined, { responseType: 'stream' })`). Under `'stream'` `timeout` is NOT a whole-response deadline: it bounds
+  the wait for the headers, then each read's wait for the next chunk (restarted per read, stopped while nobody
+  reads — the stream is pulled on demand), so a flowing SSE lives on and a stalled one errors `TIMEOUT_ERROR`
+  (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the plain `ErrorResponse`
+  object (`isErrorResponse(e)`), not an `Error`: `TIMEOUT_ERROR`, `RESPONSE_TOO_LARGE` (under `maxResponseBytes`,
+  counted as read; the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR`, `RESPONSE_READ_ERROR`. An
+  error status is read as under `'auto'` in every mode (`HTTP_ERROR` with `details.details`, retried per
+  `retryOn`); a declared `Content-Length` over the cap fails the call. Nothing after the hand-over is retried,
+  and the metrics duration is the time to the headers. Read to the end or cancel (`cancel()`, `break` in
+  `for await`) — the connection stays open with the stream. HEAD/204/304 → `result: undefined` in every mode.
+  Pass a stream on with `new Response(r.result, { headers: { 'Content-Type': ... } })`, never forwarding
+  `content-encoding`/`content-length`. `responseType` IS a config marker (two-argument `get(url, { responseType })`
+  is config; before, it went out as `?responseType=`) — the whole record then becomes config, so a query record
+  that also carries `responseType` loses all its keys; use `get(url, query, config)`. The stream's countdown is
+  re-armed in stretches of at most 2^31 - 1 ms (`setTimeout` fires a longer delay after 1 ms), so any `timeout`
+  `AbortSignal.timeout` takes (up to 2^53 - 1) works under `'stream'` too. Up to 0.8.3 every body was text, and
+  nothing resolved before the body ended.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header

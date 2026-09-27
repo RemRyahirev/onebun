@@ -573,6 +573,27 @@ export interface RetryConfig {
 export type RedirectPolicy = 'follow' | 'error' | 'manual';
 
 /**
+ * What a success's `result` is.
+ *
+ * - `'auto'` — the default: parsed JSON when the response says `application/json`, text otherwise.
+ * - `'bytes'` — a `Uint8Array` of the body, byte for byte, whatever its content type.
+ * - `'stream'` — a `ReadableStream<Uint8Array>` of the body. The call resolves as soon as the
+ *   headers arrive, and the body is read as the stream is. `timeout` bounds the wait for the
+ *   headers, and then each read's wait for the next chunk, rather than the whole response: a read
+ *   that waits longer errors the stream with `TIMEOUT_ERROR` and closes the connection. Read the
+ *   stream to its end, or cancel it, to let the connection go.
+ *
+ * Only a success's `result` changes. An error status's body is read as under `'auto'`, into an
+ * `HTTP_ERROR`'s `details.details`, and a `204`, a `304` or an answer to `HEAD` resolves with
+ * `result: undefined` in every mode. Under `maxResponseBytes` the body is decoded and counted by
+ * the client in `'bytes'` and `'stream'` too; a stream errors with `RESPONSE_TOO_LARGE` at the chunk
+ * that crosses the limit.
+ *
+ * @see docs:api/requests.md
+ */
+export type ResponseType = 'auto' | 'bytes' | 'stream';
+
+/**
  * Request configuration
  */
 export interface RequestConfig {
@@ -600,6 +621,15 @@ export interface RequestConfig {
    * `delete`, `head` and `options` take the policy in their third argument.
    */
   redirect?: RedirectPolicy;
+  /**
+   * What a success's `result` is ({@link ResponseType}): parsed JSON or text (`'auto'`, the
+   * default), a `Uint8Array` (`'bytes'`), or a `ReadableStream<Uint8Array>` that the call resolves
+   * with at the headers (`'stream'`). Name the result's type as the call's type argument:
+   * `client.get<Uint8Array>(url, undefined, { responseType: 'bytes' })`.
+   *
+   * A config marker: `client.get('/events', { responseType: 'stream' })` is config, not query data.
+   */
+  responseType?: ResponseType;
 }
 
 /**
