@@ -19,6 +19,7 @@ import {
   parseLogLevel,
   resolveOtlpLogEndpoint,
   shutdownLogger,
+  shutdownLoggerLayer,
 } from './logger';
 import { makeLogger } from './logger';
 import { ConsoleTransport } from './transport';
@@ -1084,5 +1085,85 @@ describe('OTLP log export from the environment alone', () => {
     expect(posted).toHaveLength(2);
     expect(bodies).toContain('first-service');
     expect(bodies).toContain('second-service');
+  });
+
+  /**
+   * Handed point-free, the function receives whatever its caller passes: `Effect.promise` an
+   * AbortSignal, a `beforeExit` listener the exit code. A `shutdownLogger(layer?)` read that
+   * argument as a layer, found no transport for it and shut down nothing.
+   */
+  it('flushes every logger when passed point-free with an argument it does not take', async () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+    const layer = makeLoggerFromOptions({ otlpBatchTimeout: LONG_BATCH_TIMEOUT });
+    const logger = Effect.runSync(
+      Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+    );
+    await Effect.runPromise(logger.info('flushed point-free'));
+
+    expect(shutdownLogger.length).toBe(0);
+    await Effect.runPromise(Effect.promise(shutdownLogger));
+
+    expect(posted).toHaveLength(1);
+    expect(posted[0].body).toContain('flushed point-free');
+  });
+
+  /**
+   * An owner closing what it built — an application undoing a failed start — must not close a
+   * logger it was handed, or a sibling's. Shutting down every transport there made the next
+   * attempt, which shared the caller's layer, export nothing.
+   */
+  describe('shutdownLoggerLayer', () => {
+    async function logThrough(layer: ReturnType<typeof makeLoggerFromOptions>, message: string): Promise<void> {
+      const logger = Effect.runSync(
+        Effect.provide(Effect.flatMap(LoggerService, (l) => Effect.succeed(l)), layer),
+      );
+      await Effect.runPromise(logger.info(message));
+    }
+
+    it('shuts down only the transport that layer was built with', async () => {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+      const own = makeLoggerFromOptions({ otlpBatchTimeout: LONG_BATCH_TIMEOUT });
+      const handedIn = makeLoggerFromOptions({ otlpBatchTimeout: LONG_BATCH_TIMEOUT });
+
+      await logThrough(own, 'own-before');
+      await logThrough(handedIn, 'handed-in-before');
+
+      await shutdownLoggerLayer(own);
+
+      // Its buffer was flushed on the way down, and nothing else was sent
+      expect(posted.map((p) => p.body).join('')).toContain('own-before');
+      expect(posted.map((p) => p.body).join('')).not.toContain('handed-in-before');
+
+      // The closed transport drops what it is given; the other one is still open
+      await logThrough(own, 'own-after');
+      await logThrough(handedIn, 'handed-in-after');
+      await shutdownLogger();
+
+      const bodies = posted.map((p) => p.body).join('');
+      expect(bodies).toContain('handed-in-before');
+      expect(bodies).toContain('handed-in-after');
+      expect(bodies).not.toContain('own-after');
+      // Shut down once: the process-wide call did not reach the layer's transport a second time
+      expect(posted).toHaveLength(2);
+    });
+
+    it('is a no-op for a layer with nothing to shut down, and leaves the others alone', async () => {
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://collector:4318';
+      const exporting = makeLoggerFromOptions({ otlpBatchTimeout: LONG_BATCH_TIMEOUT });
+      delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+      const consoleOnly = makeLoggerFromOptions();
+
+      await logThrough(exporting, 'still-exporting');
+
+      await shutdownLoggerLayer(consoleOnly);
+      await shutdownLoggerLayer(makeDevLogger());
+      expect(posted).toHaveLength(0);
+
+      // A layer shut down twice sends its batch once
+      await shutdownLoggerLayer(exporting);
+      await shutdownLoggerLayer(exporting);
+      expect(posted).toHaveLength(1);
+      expect(posted[0].body).toContain('still-exporting');
+    });
   });
 });

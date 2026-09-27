@@ -252,6 +252,11 @@ Services can implement lifecycle hooks to execute code at specific points in the
 | `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain and listener close — first hook of the teardown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | At the very end of shutdown |
 
+The destroy hooks also run when `start()` fails: the failed boot runs the shutdown sequence over
+every instance it built before rethrowing — including one whose `onModuleInit` never ran or threw
+halfway. Release what exists, as `DatabaseService` below does with `if (this.pool)`. See
+[When `start()` fails](./core.md#when-start-fails).
+
 ::: warning Destroy hooks run after the server is gone
 `beforeApplicationDestroy` is the first *hook*, not the first act of shutdown. Three phases precede
 it: new requests are answered `503`, the in-flight ones are drained (force-closed once the drain
@@ -423,6 +428,14 @@ SHUTDOWN:
 7. Shared Redis released
 8. Application destroy hook → onApplicationDestroy(signal)
 9. Logger transport flushed
+
+FAILED START (a startup step threw):
+1. The error is logged
+2. The SHUTDOWN sequence runs over what was built; steps with nothing to release are skipped,
+   and a loggerLayer, spanProcessors or metrics registry passed in options is left open
+3. start() rejects with the error it caught (an onModuleInit failure arrives wrapped by
+   Effect as a FiberFailure, message intact) — a stop() before the next start() runs no
+   step again; it only closes what step 2 left open, as every stop() does
 ```
 
 A destroy hook can no longer serve or reach the application's own HTTP server: the listener is

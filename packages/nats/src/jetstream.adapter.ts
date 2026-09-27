@@ -1005,9 +1005,28 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
       this.emit('onReady');
     } catch (error) {
+      await this.releaseFailedConnect();
       this.emit('onError', error as Error);
       throw error;
     }
+  }
+
+  /**
+   * Close the connection a failed `connect()` opened, before its error reaches the caller.
+   *
+   * `disconnect()` returns early while `connected` is false, and `connected` is set only once the
+   * streams are reconciled. So a failure after the connection opened — a declared stream the
+   * server refuses (`replicas: 3` on a single node, a narrowing or create-only change), or a
+   * server without JetStream — left the socket open with nothing able to close it: the adapter
+   * said it was disconnected, and the process never exited. Nothing was subscribed yet, so there
+   * is nothing to wait for; bounded all the same, and never thrown, so the connect error stays
+   * the one the caller sees.
+   */
+  private async releaseFailedConnect(): Promise<void> {
+    this.js = null;
+    this.jsm = null;
+    this.jsmPending = null;
+    await awaitBounded(this.client.disconnect(), RELEASE_TIMEOUT_MS);
   }
 
   async disconnect(): Promise<void> {

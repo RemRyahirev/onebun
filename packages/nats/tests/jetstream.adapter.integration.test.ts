@@ -1087,6 +1087,26 @@ describe('JetStreamQueueAdapter Integration', () => {
     }
   }, CASE_TIMEOUT_MS);
 
+  it('closes the connection when connect() fails after opening it', async () => {
+    // A single-node server refuses `replicas: 3` from stream reconciliation, which runs after the
+    // socket is open and before the adapter counts itself connected. `disconnect()` returns early
+    // for an adapter that never connected, so this connection used to stay open with nothing able
+    // to close it — a process that caught the error never exited.
+    const js = new JetStreamQueueAdapter({
+      servers: nats.url,
+      streams: [{ name: 'ITEST_REPLICAS', subjects: ['replicas.>'], replicas: 3 }],
+    });
+    adapter = js;
+
+    await expect(js.connect()).rejects.toThrow('ITEST_REPLICAS');
+
+    expect(js.isConnected()).toBe(false);
+    expect(asAny(js).client.isConnected()).toBe(false);
+    expect(asAny(js).js).toBeNull();
+    // The rollback's own disconnect() still resolves, with nothing left to release.
+    await expect(js.disconnect()).resolves.toBeUndefined();
+  }, CASE_TIMEOUT_MS);
+
   // ==========================================================================
   // Workqueue streams (FB-30)
   //

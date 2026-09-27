@@ -28,6 +28,7 @@ import {
   makeLoggerFromOptions,
   resolveOtlpLogEndpoint,
   shutdownLogger,
+  shutdownLoggerLayer,
   type SyncLogger,
 } from '@onebun/logger';
 import {
@@ -636,6 +637,28 @@ interface ShutdownOutcome {
   failures: string[];
 }
 
+/** What set a shutdown off, and how it should be worded. */
+interface ShutdownRequest {
+  /** Deprecated and ignored; see `stop()`. */
+  closeSharedRedis?: boolean;
+  /** The signal that triggered it, handed to the destroy hooks. */
+  signal?: string;
+  /**
+   * A `start()` that rejected is undoing itself. The same sequence as `stop()` — whatever a stop
+   * releases is exactly what a half-finished start holds — logged as a rollback, so an operator
+   * reading the tail of a failed boot is not told the application was stopped by someone. The
+   * telemetry steps close only what the application built: a `loggerLayer`,
+   * `tracing.spanProcessors` and `metrics.registry` passed in stay open for the next attempt.
+   */
+  rollback?: boolean;
+  /**
+   * A `stop()` after such a rollback, with no `start()` since. The rollback ran the sequence, so
+   * this runs only the three telemetry steps it narrowed, now in their `stop()` form: the caller
+   * is done with this application, and every `stop()` has always closed those as well.
+   */
+  afterRollback?: boolean;
+}
+
 /**
  * OneBun Application
  * @see docs:api/core.md
@@ -706,6 +729,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * returns from.
    */
   private shutdownPromise: Promise<ShutdownOutcome> | null = null;
+  /**
+   * The rollback of the last `start()` that rejected, until the next `start()` begins.
+   *
+   * Not the shutdown latch, which is terminal: a failed start is something the caller may retry
+   * on the same instance, and a latch left behind by its rollback would turn the `stop()` after a
+   * successful retry into a no-op that releases nothing. While it is set, a `stop()` awaits it and
+   * does nothing else — the rollback already ran that sequence.
+   */
+  private rollbackPromise: Promise<ShutdownOutcome> | null = null;
+  /**
+   * A `start()` resolved and nothing has shut the application down since.
+   *
+   * A second `start()` on a running application that fails — the listener's port is its own — must
+   * not roll back: whatever the rollback reached would be the running boot's listener, sampler and
+   * observability, not the attempt's.
+   */
+  private running = false;
   /** Signal handlers are installed at most once per instance. */
   private signalHandlersRegistered = false;
   // Docs (OpenAPI/Swagger) - generated on start()
@@ -793,7 +833,30 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // Priority: loggerLayer > loggerOptions > env variables > NODE_ENV defaults
     this.loggerLayer = this.options.loggerLayer
       ?? makeLoggerFromOptions(this.resolveLoggerOptions());
+    this.logger = this.createApplicationLogger();
 
+    // Create configuration service eagerly if config exists (it stores a reference,
+    // doesn't call config.get(), so safe before initialization)
+    if (!(this.config instanceof NotInitializedConfig)) {
+      this.configService = new ConfigServiceImpl(this.logger, this.config);
+    }
+
+    this.initializeMetrics();
+    this.initializeTracing();
+
+    // Initialize profiler from options (env-based init happens at module load in profiler.ts)
+    if (this.options.profiling?.enabled && !getProfiler()) {
+      setProfiler(this.options.profiling.profiler ?? new DefaultProfiler());
+    } else if (this.options.profiling?.profiler) {
+      setProfiler(this.options.profiling.profiler);
+    }
+
+    // Note: root module creation is deferred to start() to ensure
+    // config is fully initialized before services are created.
+  }
+
+  /** The application's own logger, built from the current logger layer. */
+  private createApplicationLogger(): SyncLogger {
     // Initialize logger with application class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -803,14 +866,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         this.loggerLayer,
       ) as Effect.Effect<Logger, never, never>,
     ) as Logger;
-    this.logger = createSyncLogger(effectLogger, getCurrentTraceContext);
 
-    // Create configuration service eagerly if config exists (it stores a reference,
-    // doesn't call config.get(), so safe before initialization)
-    if (!(this.config instanceof NotInitializedConfig)) {
-      this.configService = new ConfigServiceImpl(this.logger, this.config);
-    }
+    return createSyncLogger(effectLogger, getCurrentTraceContext);
+  }
 
+  /**
+   * Build the metrics service, if metrics are enabled and available.
+   *
+   * Called by the constructor, and again by a `start()` that retries after a failed one: that
+   * start's rollback disposed the registry this built.
+   */
+  private initializeMetrics(): void {
     // Initialize metrics if enabled and available
     if (this.options.metrics?.enabled !== false && createMetricsService) {
       try {
@@ -842,7 +908,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     } else if (this.options.metrics?.enabled !== false) {
       this.logger.debug('createMetricsService not available, metrics will be disabled');
     }
+  }
 
+  /**
+   * Build the trace service, if tracing is enabled.
+   *
+   * Called by the constructor, and again by a `start()` that retries after a failed one: that
+   * start's rollback shut down the provider this built.
+   */
+  private initializeTracing(): void {
     // Initialize tracing if enabled (lazy import to avoid loading OTEL at startup when not needed)
     if (this.options.tracing?.enabled !== false) {
       try {
@@ -877,16 +951,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         });
       }
     }
-
-    // Initialize profiler from options (env-based init happens at module load in profiler.ts)
-    if (this.options.profiling?.enabled && !getProfiler()) {
-      setProfiler(this.options.profiling.profiler ?? new DefaultProfiler());
-    } else if (this.options.profiling?.profiler) {
-      setProfiler(this.options.profiling.profiler);
-    }
-
-    // Note: root module creation is deferred to start() to ensure
-    // config is fully initialized before services are created.
   }
 
   /**
@@ -1130,8 +1194,31 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Start the application
-   * This method now handles all the Effect.js calls internally
+   * Start the application.
+   *
+   * When it rejects, it has already stopped the application: everything the boot acquired
+   * before the failure — the HTTP listener, the queue connection, the system-metrics sampler,
+   * whatever `onModuleDestroy` releases — is released by the same sequence as `stop()`, and the
+   * error `start()` caught is rethrown; nothing in the rollback replaces it. A failure in a
+   * service's or controller's `onModuleInit` is caught already wrapped by Effect (a
+   * `FiberFailure` carrying the original message), so match on the message there. A caller that
+   * catches it does not need `stop()` for the process to exit; calling it anyway runs nothing
+   * again but the process-wide log shutdown every `stop()` ends with.
+   *
+   * The rollback closes the telemetry this application built — its metrics registry, its trace
+   * provider, its OTLP log transport — and leaves open what was passed in: a `loggerLayer`, the
+   * `tracing.spanProcessors`, a `metrics.registry`. Those go on working for the next attempt,
+   * whether that is a new application built from the same options or a retry of this one.
+   *
+   * A retry may call `start()` again on the same instance: the rollback left nothing of the
+   * failed attempt running, and the retry rebuilds what the rollback closed. A `start()` that
+   * fails on an application that is already running is not rolled back: what the rollback would
+   * reach is the running boot.
+   *
+   * In multi-service mode each service rolls back its own failed start; services that did
+   * start keep running.
+   *
+   * @throws The error that stopped the boot, as `start()` caught it (see above for `onModuleInit`)
    */
   async start(): Promise<void> {
     if (this.multiServiceMode) {
@@ -1147,6 +1234,21 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
 
       return;
     }
+
+    // A retry after a failed start. Its rollback is over by now — start() awaited it before
+    // rejecting — and from here on a stop() must stop THIS boot rather than await that rollback.
+    // What the constructor built and the rollback released is built again, so the retry boots
+    // with what it booted with before the rollback existed. Not after a stop(): an application
+    // restarted after stop() keeps booting exactly as it always has.
+    if (this.rollbackPromise) {
+      await this.rollbackPromise;
+      this.rollbackPromise = null;
+      if (!this.shutdownPromise) {
+        this.reacquireAfterRollback();
+      }
+    }
+    const wasRunning = this.running;
+    const stopBeforeStart = this.shutdownPromise;
 
     // Default exception filter respects httpEnvelope option
     const appDefaultExceptionFilter = createDefaultExceptionFilter({
@@ -2613,11 +2715,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       if (this.options.gracefulShutdown !== false) {
         this.enableGracefulShutdown();
       }
+      this.running = true;
     } catch (error) {
+      // The cause first, so it heads the output rather than trailing the teardown — and so the
+      // log flush that ends the rollback carries it to a collector before the process goes.
       this.logger.error(
         'Failed to start application:',
         error instanceof Error ? error : new Error(String(error)),
       );
+      if (!wasRunning) {
+        await this.rollBackFailedStart(stopBeforeStart);
+      }
       throw error;
     }
 
@@ -3198,7 +3306,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *
    * Idempotent and concurrency-safe: every call after the first awaits the same shutdown
    * and performs no second pass over the destroy hooks. Bounded by `shutdownTimeout` —
-   * it always resolves, even if a request or a hook never does.
+   * it always resolves, even if a request or a hook never does. After a `start()` that
+   * rejected, it awaits that start's rollback and runs none of its steps again; it only closes
+   * what the rollback left open for a retry — a `loggerLayer`, `tracing.spanProcessors` and
+   * `metrics.registry` passed in — as every `stop()` does.
    *
    * @param options - Shutdown options
    */
@@ -3214,13 +3325,172 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
+   * Undo a `start()` that rejected, before its error reaches the caller.
+   *
+   * It used to log and rethrow with nothing released. Whatever the boot had acquired stayed
+   * open — the queue adapter's connection and the system-metrics `setInterval` each kept the
+   * event loop alive on their own (measured: only releasing both let the process end) — so a
+   * caller that caught the rejection without calling `stop()` never exited. Tests and
+   * supervisors that catch a failed boot hung.
+   *
+   * The `stop()` sequence, not a list of its own: the half-started application holds exactly
+   * what a started one holds, minus what it never reached, and every step already tolerates
+   * the part that is missing. It is kept as `rollbackPromise`, so a later `stop()` awaits this
+   * outcome instead of walking the destroy hooks a second time. It does NOT take the shutdown
+   * latch: that one is terminal, and a retry on the same instance must still be stoppable.
+   *
+   * Where `stop()` shuts down telemetry wholesale, the rollback narrows to what this application
+   * built. `stop()` ends the process's logging and shuts down every span processor the provider
+   * holds; after a failed start the caller usually tries again, often with the same options
+   * object, and a `loggerLayer`, `tracing.spanProcessors` or `metrics.registry` it passed in must
+   * still work for that attempt — measured: shut down here, the successful retry exported no log
+   * line and no span, and in multi-service mode a sibling that had started stopped exporting logs.
+   *
+   * Never throws. A step that fails is logged by the sequence and the caller still receives
+   * the error that stopped the boot — a cleanup failure standing in for it would send the
+   * operator after the wrong problem.
+   *
+   * @param stopBeforeStart - The shutdown latch as the failed `start()` found it
+   */
+  private async rollBackFailedStart(
+    stopBeforeStart: Promise<ShutdownOutcome> | null,
+  ): Promise<void> {
+    // A stop() that began while this start() was still booting is already tearing it down; a
+    // second sequence beside it would run the destroy hooks twice.
+    const stopDuringStart = this.shutdownPromise !== stopBeforeStart ? this.shutdownPromise : null;
+    const rollback = (stopDuringStart ?? this.executeShutdown({ rollback: true })).catch(
+      (rollbackError: unknown): ShutdownOutcome => {
+        // Unreachable while every step is guarded and the sequence is raced against its
+        // deadline; kept so a future unguarded step cannot replace the boot error with its own.
+        this.logger.error(
+          'Rolling back the failed start failed:',
+          rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)),
+        );
+
+        return {
+          timedOut: false, phase: null, forceClosed: 0, failures: ['rolling back the failed start'],
+        };
+      },
+    );
+    if (!stopDuringStart) {
+      this.rollbackPromise = rollback;
+    }
+    await rollback;
+  }
+
+  /**
+   * Re-provide what the constructor built and the rollback of a failed start released, before
+   * a retry on the same instance boots.
+   *
+   * The rollback is the `stop()` sequence narrowed to what this application owns: it disposes the
+   * metrics registry the application created, shuts down the trace provider and the export
+   * pipeline it built, and closes the OTLP log transport of the logger it built — right for an
+   * application that is gone, which a failed start is until someone calls `start()` again. Before
+   * the rollback existed nothing was released, so a retry reused all three; building them again
+   * is what keeps the retry's `/metrics`, spans and exported logs working, while the failed
+   * attempt's sampler and connection are gone instead of running beside the retry's own.
+   *
+   * What the caller passed in was left open by the rollback and is reused as it is: a
+   * `loggerLayer`, the `tracing.spanProcessors` (the rebuilt provider gets the same instances), and
+   * a `metrics.registry`, whose metrics service is kept rather than rebuilt — registering the
+   * same metric names on it a second time would throw.
+   */
+  private reacquireAfterRollback(): void {
+    if (!this.options.loggerLayer && resolveOtlpLogEndpoint(this.options.loggerOptions)) {
+      this.loggerLayer = makeLoggerFromOptions(this.resolveLoggerOptions());
+      this.logger = this.createApplicationLogger();
+    }
+    if (this.metricsService && this.ownsMetricsRegistry()) {
+      this.metricsService = null;
+      this.initializeMetrics();
+    }
+    if (this.traceService) {
+      this.traceService = null;
+      this.initializeTracing();
+    }
+  }
+
+  /**
+   * Whether the metrics registry is this application's own, rather than one passed in
+   * `metrics.registry`. A rollback disposes only its own.
+   */
+  private ownsMetricsRegistry(): boolean {
+    // Read through a cast: the core's typing of `metrics` does not list `registry`, but the
+    // options reach `createMetricsService` as they are, which is how the metrics docs pass one.
+    return (this.options.metrics as { registry?: unknown } | undefined)?.registry === undefined;
+  }
+
+  /**
+   * Release the metrics registry, and hand back the process-wide slot if it still points here —
+   * nothing ever cleared it, so a stopped application kept receiving writes from every code path
+   * that has no application handle.
+   */
+  private releaseMetricsRegistry(): void {
+    this.metricsService?.dispose?.();
+    if (
+      typeof globalThis !== 'undefined'
+      && (globalThis as Record<string, unknown>).__onebunMetricsService === this.metricsService
+    ) {
+      delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+    }
+  }
+
+  /**
+   * The part of `stop()` a rollback leaves out, for a `stop()` that follows one.
+   *
+   * The rollback narrowed three telemetry steps to what the application built, and left what the
+   * caller passed in open for the next attempt. A `stop()` is the caller done with this
+   * application, so these steps run as every `stop()` runs them: the `metrics.registry` passed in
+   * is released, the `tracing.spanProcessors` the rollback only flushed are shut down (a second
+   * `shutdown()` of the trace service does just that and nothing else), and every log transport
+   * in the process is shut down. Nothing else runs twice: the destroy hooks and the disconnects
+   * belong to the rollback, which already ran them.
+   */
+  private async closeWhatTheRollbackLeftOpen(outcome: ShutdownOutcome): Promise<void> {
+    if (this.metricsService && !this.ownsMetricsRegistry()) {
+      await this.runShutdownStep(outcome, 'releasing the metrics registry', async () => {
+        this.releaseMetricsRegistry();
+      });
+    }
+
+    if (this.traceService?.shutdown) {
+      await this.runShutdownStep(outcome, 'flushing traces', async () => {
+        await this.traceService!.shutdown!();
+      });
+    }
+
+    await this.runShutdownStep(outcome, 'flushing logs', async () => {
+      await shutdownLogger();
+    });
+  }
+
+  /**
    * The shutdown latch. The first caller runs the sequence; everyone after — a second
    * `stop()`, a second signal, the orchestrator stopping an already-stopped child —
-   * awaits that same promise and its outcome.
+   * awaits that same promise and its outcome. After a failed start with no `start()` since,
+   * the rollback already ran the sequence: the caller awaits that instead, then closes the
+   * telemetry the rollback left open for a retry, and the latch stays clear so a retry can
+   * still be stopped.
    */
   private async runShutdown(
-    options?: { closeSharedRedis?: boolean; signal?: string },
+    options?: ShutdownRequest,
   ): Promise<ShutdownOutcome> {
+    if (!this.shutdownPromise && this.rollbackPromise) {
+      const rolledBack = await this.rollbackPromise;
+      // The steps the rollback narrowed, so that a retry and the other applications in the
+      // process kept what the caller passed in. A `stop()` is the caller done with this one, and
+      // ends as every `stop()` does. Skipped, what the caller passed in outlived a `stop()` that
+      // had always closed it: an OTLP `loggerLayer`'s flush timer, or a span processor holding a
+      // handle until its `shutdown()`, kept alive a process that used to exit.
+      const closed = await this.executeShutdown({ ...options, afterRollback: true });
+
+      return {
+        timedOut: rolledBack.timedOut || closed.timedOut,
+        phase: closed.timedOut ? closed.phase : rolledBack.phase,
+        forceClosed: rolledBack.forceClosed,
+        failures: [...rolledBack.failures, ...closed.failures],
+      };
+    }
     this.shutdownPromise ??= this.executeShutdown(options);
 
     return await this.shutdownPromise;
@@ -3234,7 +3504,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * caller decide (the signal path exits with code 1).
    */
   private async executeShutdown(
-    options?: { closeSharedRedis?: boolean; signal?: string },
+    options?: ShutdownRequest,
   ): Promise<ShutdownOutcome> {
     const budgetMs = this.resolveShutdownTimeout();
     const outcome: ShutdownOutcome = {
@@ -3273,8 +3543,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // this one exists so an operator scanning the tail of the log sees the whole picture
       // rather than whichever failure happened to be last.
       this.logger.error(
-        `Shutdown completed with ${outcome.failures.length} failed step(s): `
-        + outcome.failures.join(', '),
+        `${options?.rollback ? 'Rollback of the failed start' : 'Shutdown'} completed with `
+        + `${outcome.failures.length} failed step(s): ${outcome.failures.join(', ')}`,
       );
     }
 
@@ -3328,9 +3598,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * can name what was still running.
    */
   private async performShutdown(
-    options: { closeSharedRedis?: boolean; signal?: string } | undefined,
+    options: ShutdownRequest | undefined,
     outcome: ShutdownOutcome,
   ): Promise<void> {
+    if (options?.afterRollback) {
+      await this.closeWhatTheRollbackLeftOpen(outcome);
+
+      return;
+    }
+
     if (this.multiServiceMode) {
       if (this.orchestrator) {
         await this.runShutdownStep(outcome, 'stopping services', async () => {
@@ -3352,8 +3628,13 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       );
     }
     const signal = options?.signal;
+    this.running = false;
 
-    this.logger.info('Stopping OneBun application...');
+    this.logger.info(
+      options?.rollback
+        ? 'Rolling back the failed start: releasing what it acquired'
+        : 'Stopping OneBun application...',
+    );
 
     // Drain and close the HTTP server FIRST. Destroy hooks used to run while the socket
     // was still accepting new work — a hook that deregisters from discovery or flushes a
@@ -3429,24 +3710,27 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // looking for it: in the default configuration the start is in the log and the stop is not.
         this.logger.info('System metrics collection stopped');
         this.metricsService!.stopSystemMetricsCollection!();
-        // Release this application's registry too, and hand back the process-wide slot if it
-        // still points here — nothing ever cleared it, so a stopped application kept receiving
-        // writes from every code path that has no application handle.
-        this.metricsService!.dispose?.();
-        if (
-          typeof globalThis !== 'undefined'
-          && (globalThis as Record<string, unknown>).__onebunMetricsService === this.metricsService
-        ) {
-          delete (globalThis as Record<string, unknown>).__onebunMetricsService;
+        // A rollback leaves a registry passed in `metrics.registry` alone: it is the caller's,
+        // it may hold the caller's own metrics, and a retry of this start() — which keeps this
+        // service and its registrations — scrapes it. Only the sampler, which holds the event
+        // loop, had to go. A `stop()` that follows releases it (`closeWhatTheRollbackLeftOpen`).
+        if (options?.rollback && !this.ownsMetricsRegistry()) {
+          return;
         }
+        this.releaseMetricsRegistry();
       });
     }
 
-    // Shutdown trace service — flush pending spans before module destroy
+    // Shutdown trace service — flush pending spans before module destroy. A rollback flushes the
+    // processors passed in `tracing.spanProcessors` without shutting them down: they are the
+    // caller's, and the next attempt — a retry of this start(), or a new application built from
+    // the same options — records into them. The provider and the export pipeline this
+    // application built are closed either way, and a `stop()` that follows shuts the caller's
+    // processors down (`closeWhatTheRollbackLeftOpen`).
     if (this.traceService?.shutdown) {
       await this.runShutdownStep(outcome, 'flushing traces', async () => {
         this.logger.debug('Shutting down trace service');
-        await this.traceService!.shutdown!();
+        await this.traceService!.shutdown!(options?.rollback ? { spanProcessors: 'flush' } : undefined);
       });
     }
 
@@ -3522,18 +3806,32 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // conflicting unnamed forRoot() through on the next boot. `resetRegistrations()` is the
     // reset, and it belongs to tests, which are the only thing that needs a clean process.
 
-    this.logger.info(
-      outcome.forceClosed > 0
-        ? `OneBun application stopped (${outcome.forceClosed} request(s) force-closed)`
-        : 'OneBun application stopped',
-    );
+    if (options?.rollback) {
+      this.logger.info('Failed start rolled back');
+    } else {
+      this.logger.info(
+        outcome.forceClosed > 0
+          ? `OneBun application stopped (${outcome.forceClosed} request(s) force-closed)`
+          : 'OneBun application stopped',
+      );
+    }
 
     // Shutdown logger transport LAST — flush OTLP log batches after final log message.
     // Guarded like the rest, with one caveat: if this is what failed, the line reporting it is
     // written through the transport that is going down, so it may not land. Continuing is still
     // right — the alternative is an unhandled rejection at the very end of the process.
+    //
+    // `stop()` shuts down every transport in the process. A rollback shuts down only the logger
+    // this application built — its flush timer would keep the process alive — and leaves the
+    // rest exporting: a `loggerLayer` passed in is the caller's and goes on to the next attempt,
+    // and in multi-service mode the other transports are the siblings' that did start. A
+    // `stop()` that follows shuts them all down (`closeWhatTheRollbackLeftOpen`).
     await this.runShutdownStep(outcome, 'flushing logs', async () => {
-      await shutdownLogger();
+      if (!options?.rollback) {
+        await shutdownLogger();
+      } else if (!this.options.loggerLayer) {
+        await shutdownLoggerLayer(this.loggerLayer as Layer.Layer<Logger>);
+      }
     });
   }
 

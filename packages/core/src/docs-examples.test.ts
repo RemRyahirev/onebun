@@ -284,9 +284,10 @@ describe('Minimal Working Example (docs/index.md)', () => {
   });
 
   /**
-   * The sample's `.catch()` ends in `process.exit(1)` because a failed boot leaves a live
-   * process that never binds a port. Pins the half a test can assert: `start()` rejects,
-   * and nothing is listening afterwards.
+   * The sample's `.catch()` ends in `process.exit(1)` because a rejected `start()` has already
+   * released everything, so without it the process ends with code 0 — a failed boot reported as
+   * a success. Pins the half a test can assert: `start()` rejects, and nothing is listening
+   * afterwards. That the process really ends is `application/failed-start-exit.test.ts`.
    *
    * @source docs:index.md#minimal-working-example
    */

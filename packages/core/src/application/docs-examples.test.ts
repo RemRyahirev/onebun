@@ -1574,6 +1574,166 @@ describe('OneBunApplication quick reference (docs/api/core.md)', () => {
 });
 
 // ============================================================================
+// docs/api/core.md — When start() fails
+// ============================================================================
+
+describe('When start() fails (docs/api/core.md)', () => {
+  /**
+   * @source docs:api/core.md#when-start-fails
+   */
+  it('should retry a failed boot with a new instance, the failed one already stopped', async () => {
+    const MAX_ATTEMPTS = 5;
+    const RETRY_DELAY_MS = 1;
+    const events: string[] = [];
+    let bootsLeftToFail = 2;
+
+    @Service()
+    class BackendService extends BaseService {
+      private connection: { close(): void } | null = null;
+
+      async onModuleInit(): Promise<void> {
+        if (bootsLeftToFail > 0) {
+          bootsLeftToFail--;
+          throw new Error('backend unreachable at boot');
+        }
+        this.connection = { close: () => events.push('connection closed') };
+      }
+
+      // Runs on the failed boots too, where onModuleInit threw: release what exists
+      async onModuleDestroy(): Promise<void> {
+        events.push('destroy');
+        this.connection?.close();
+      }
+    }
+
+    @Module({ providers: [BackendService] })
+    class AppModule {}
+
+    const attempts: OneBunApplication[] = [];
+
+    // From docs: startWithRetry()
+    async function startWithRetry(): Promise<OneBunApplication> {
+      for (let attempt = 1; ; attempt++) {
+        const app = new OneBunApplication(AppModule, appOptions());
+        attempts.push(app);
+        try {
+          await app.start();
+
+          return app;
+        } catch (error) {
+          if (attempt === MAX_ATTEMPTS) {
+            throw error;
+          }
+          await Bun.sleep(RETRY_DELAY_MS);
+        }
+      }
+    }
+
+    const app = await startWithRetry();
+
+    try {
+      expect(attempts.length).toBe(3);
+      // Both failed boots rolled back on their own, destroy hooks included
+      expect(events).toEqual(['destroy', 'destroy']);
+      expect((await fetch(`${app.getHttpUrl()}/nothing-here`)).status).toBe(HttpStatusCode.NOT_FOUND);
+
+      // "Nothing to clean up in the catch": stop() on a failed instance runs nothing again
+      await attempts[0].stop();
+      expect(events).toEqual(['destroy', 'destroy']);
+    } finally {
+      await app.stop();
+    }
+
+    expect(events).toEqual(['destroy', 'destroy', 'destroy', 'connection closed']);
+  });
+
+  /**
+   * "...or the same one": the instance whose start() failed boots on a second start(), and the
+   * stop() after that retry releases it — the failed start left no stopped state behind.
+   *
+   * @source docs:api/core.md#when-start-fails
+   */
+  it('should boot a retry on the same instance, and stop that retry for real', async () => {
+    const events: string[] = [];
+    let bootsLeftToFail = 1;
+
+    @Service()
+    class BackendService extends BaseService {
+      private connection: { close(): void } | null = null;
+
+      async onModuleInit(): Promise<void> {
+        if (bootsLeftToFail > 0) {
+          bootsLeftToFail--;
+          throw new Error('backend unreachable at boot');
+        }
+        this.connection = { close: () => events.push('connection closed') };
+      }
+
+      async onModuleDestroy(): Promise<void> {
+        events.push('destroy');
+        this.connection?.close();
+      }
+    }
+
+    @Module({ providers: [BackendService] })
+    class AppModule {}
+
+    const app = new OneBunApplication(AppModule, appOptions());
+
+    await expect(app.start()).rejects.toThrow('backend unreachable at boot');
+    expect(events).toEqual(['destroy']);
+
+    await app.start();
+    const url = app.getHttpUrl();
+    expect((await fetch(`${url}/nothing-here`)).status).toBe(HttpStatusCode.NOT_FOUND);
+
+    await app.stop();
+
+    expect(events).toEqual(['destroy', 'destroy', 'connection closed']);
+    const afterStop = await fetch(`${url}/nothing-here`).then(() => 'listening', () => 'closed');
+    expect(afterStop).toBe('closed');
+  });
+
+  /**
+   * @source docs:api/core.md#when-start-fails
+   */
+  it('should give up with the original error after MAX_ATTEMPTS', async () => {
+    const MAX_ATTEMPTS = 2;
+
+    @Service()
+    class UnreachableService extends BaseService {
+      async onModuleInit(): Promise<void> {
+        throw new Error('backend unreachable at boot');
+      }
+    }
+
+    @Module({ providers: [UnreachableService] })
+    class AppModule {}
+
+    let built = 0;
+    async function startWithRetry(): Promise<OneBunApplication> {
+      for (let attempt = 1; ; attempt++) {
+        const app = new OneBunApplication(AppModule, appOptions());
+        built++;
+        try {
+          await app.start();
+
+          return app;
+        } catch (error) {
+          if (attempt === MAX_ATTEMPTS) {
+            throw error;
+          }
+          await Bun.sleep(1);
+        }
+      }
+    }
+
+    await expect(startWithRetry()).rejects.toThrow('backend unreachable at boot');
+    expect(built).toBe(MAX_ATTEMPTS);
+  });
+});
+
+// ============================================================================
 // docs/api/core.md — OneBunModule
 // ============================================================================
 

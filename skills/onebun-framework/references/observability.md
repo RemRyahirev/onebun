@@ -296,7 +296,12 @@ Implementation details:
 - `tracing.spanProcessors` attaches a processor to THIS application's provider, appended to whatever
   `exportOptions` produces. A processor on the process-global provider sees none of an application's spans.
   An application with a processor and no OTLP endpoint records real spans rather than taking the lightweight
-  path — the question is whether anything will see the span, not how it is shipped
+  path — the question is whether anything will see the span, not how it is shipped. `app.stop()` shuts the
+  processors down with the provider; a FAILED `start()` does not — its rollback calls
+  `traceService.shutdown({ spanProcessors: 'flush' })` (`TraceShutdownOptions`), which flushes them, shuts down
+  only the exporter built from `exportOptions` and hands back the global slot, so the next attempt built from
+  the same options still records into them. A `stop()` after that failed start still shuts them down: a plain
+  `shutdown()` after a `'flush'` one shuts down exactly what the flush left running
 - On `app.stop()`, provider is shut down (flushes pending spans), then `trace.disable()` clears the global —
   not reached if that flush rejects
 
@@ -337,6 +342,12 @@ Key points:
 - `shutdownLogger()` flushes **every** transport built in the process, not only the most recent one. A
   multi-service application builds one logger per child; a single active-transport slot used to drop all but
   the last, leaving their flush timers rescheduling forever with nobody holding a reference.
+  `shutdownLoggerLayer(layer)` closes only the transport of that `makeLoggerFromOptions()` layer (a separate
+  function, so `shutdownLogger` keeps its zero-argument signature and still works point-free). A failed
+  `app.start()` uses it for the logger the application built, so a `loggerLayer` passed in options (built once,
+  shared across retry attempts) and a multi-service sibling's logger keep exporting; `app.stop()` — including a
+  `stop()` after a failed start — still closes them all. A `loggerLayer` you built with OTLP holds the process
+  open via its flush timer until one of those runs.
 - **Delivery failures are inspected.** `flush()` never looked at the response, so a 503, a 404 and a success
   were indistinguishable and a misconfigured endpoint swallowed every line. Now: transport failures and
   408/429/500/502/503/504 put the batch back at the head of the buffer for the next flush; any other status

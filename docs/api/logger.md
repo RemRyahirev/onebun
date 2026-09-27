@@ -318,6 +318,13 @@ Log entries are sent as OTLP JSON to `{endpoint}/v1/logs`:
 - Context fields become OTLP attributes
 - Pending logs are flushed on application shutdown
 
+`app.stop()` ends with `shutdownLogger()`, which flushes and closes every OTLP transport in the
+process. `shutdownLoggerLayer(layer)` closes only the one a layer from `makeLoggerFromOptions()`
+was built with. That is what a failed `app.start()` does: it closes the logger the application built,
+and leaves a `loggerLayer` you passed in exporting for the next attempt — see
+[When `start()` fails](./core.md#when-start-fails). An open OTLP transport keeps the process alive
+through its flush timer, so a layer you built yourself is yours to close when nothing else will.
+
 ### When the Collector Rejects a Batch
 
 The response is inspected. A 503, a 404 and a success used to be indistinguishable — nothing looked
@@ -474,6 +481,7 @@ The `trace` key is **absent**, not empty, where no span is open: bootstrap and s
 - `resolveOtlpLogEndpoint(options?)` is that resolution as a function — the application calls it to decide whether to attach resource attributes BEFORE building the logger
 - `OneBunApplication` always builds through `makeLoggerFromOptions()`, including when no `loggerOptions` are given; routing that case to `makeLogger()` is what used to make the env variables inert
 - `shutdownLogger()` flushes every transport built in the process, not only the most recent one — a multi-service application builds one logger per child, and a single active-transport slot dropped all but the last
+- `shutdownLoggerLayer(layer)` shuts down only the transport that `layer` was built with (a `WeakMap` from each layer `makeLoggerFromOptions()` returns to its tracked transport); a console-only layer, a layer from another factory, or one already shut down is a no-op, and a later `shutdownLogger()` does not reach it again. A separate function, not an optional argument of `shutdownLogger`: that one keeps its zero-argument signature, so it still works point-free (`process.on('beforeExit', shutdownLogger)`, `.then(shutdownLogger)`, `Effect.promise(shutdownLogger)`), where an optional `layer` parameter read the exit code or `AbortSignal` as a layer and shut down nothing. `OneBunApplication` calls it in the rollback of a failed `start()` for a logger it built itself, so a `loggerLayer` passed in options and a sibling service's logger keep exporting; `stop()` still calls the process-wide form, and so does a `stop()` after a failed start
 - Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
 
 </llm-only>

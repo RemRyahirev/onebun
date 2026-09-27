@@ -23,6 +23,7 @@ app
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+    process.exit(1);
   });
 ```
 
@@ -82,7 +83,7 @@ await app.start();
 ```
 
 **Important Methods**:
-- `app.start()` - starts HTTP server
+- `app.start()` - starts HTTP server. When it rejects it has ALREADY run the `stop()` sequence over what the boot acquired (listener, queue connection, metrics sampler, destroy hooks) and rethrows the error it caught — see [When `start()` fails](#when-start-fails) for what that error is: the catch has nothing to clean up, a later `stop()` runs none of that again, and the process ends by itself — so exit non-zero from the catch. A `loggerLayer`, `tracing.spanProcessors` or `metrics.registry` you passed in is left open for the next attempt; a `stop()` after the failure closes them, as every `stop()` does. To retry, build a new `OneBunApplication` per attempt, or call `start()` again on the same instance
 - `app.stop()` - graceful shutdown (calls lifecycle hooks)
 - `app.getService(ServiceClass)` - get service instance by class
 - `app.getLogger({ className: 'X' })` - get logger instance
@@ -343,7 +344,12 @@ const app = new OneBunApplication(AppModule, {
 
 ```typescript
 class OneBunApplication {
-  /** Start the HTTP server */
+  /**
+   * Start the HTTP server.
+   * Rejects with the error that stopped the boot, after releasing everything the boot had
+   * acquired — the same sequence as `stop()`. A failure in `onModuleInit` arrives wrapped by
+   * Effect (`FiberFailure`, message intact). A retry may call it again on the same instance.
+   */
   async start(): Promise<void>;
 
   /**
@@ -429,6 +435,8 @@ app
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+    // The failed start() already released everything, so without this the process exits 0
+    process.exit(1);
   });
 
 // Application will automatically handle shutdown signals (SIGTERM, SIGINT)
@@ -598,6 +606,111 @@ with no arguments, so `beforeApplicationDestroy(signal)` and `onApplicationDestr
 receive `undefined` in multi-service mode — even when the parent was given an explicit
 `stop({ signal: 'SIGTERM' })`. Do not branch on `signal` there.
 
+### When `start()` fails {#when-start-fails}
+
+A `start()` that rejects has already stopped the application. Before the error reaches your
+`catch`, it runs the [shutdown sequence](#graceful-shutdown) over whatever the boot got as far as
+acquiring — the HTTP listener, the WebSocket storage, the queue service and the adapter's
+connection, the system-metrics sampler, the trace and log flushes — and the destroy hooks. Then it
+rethrows the error it caught; nothing in the rollback replaces it.
+
+So a process that catches a failed boot ends on its own. It used to stay alive instead: the queue
+adapter's connection and the metrics sampler each kept the event loop open, so a test or a
+supervisor that caught the rejection without calling `stop()` hung until something killed it.
+
+- **Nothing to clean up in the catch.** `await app.stop()` after a rejected `start()` resolves and
+  runs none of the sequence again: it awaits the rollback that already ran, and the destroy hooks
+  do not run twice. It does close what the rollback left open for a retry, as every `stop()` does:
+  it shuts down the `tracing.spanProcessors` you passed in, releases a `metrics.registry` you passed
+  in, and flushes and closes every OTLP log transport in the process — a `loggerLayer` you passed in
+  included, and the log export of any other application still running in the process.
+- **Exit non-zero yourself.** With nothing holding the process, a catch that only logs lets it end
+  with code `0` — a failed boot reported to the supervisor as a success. End the catch with
+  `process.exit(1)`, as the [minimal example](../index.md#minimal-working-example) does.
+- **The error is the one that stopped the boot.** The log leads with it
+  (`Failed to start application:`), then brackets the teardown between
+  `Rolling back the failed start: releasing what it acquired` and `Failed start rolled back`. A
+  teardown step that fails is logged — `Shutdown step "disconnecting the queue adapter" failed; ...`
+  and a summary, `Rollback of the failed start completed with 1 failed step(s): ...` — and never
+  takes the original error's place.
+- **Match a hook failure on its message, not its class.** `start()` rethrows the value it caught.
+  Thrown from `onApplicationInit`, a queue subscription or a taken port, that is the very object
+  thrown. Thrown from a service's or controller's `onModuleInit` — where a backend unreachable at
+  boot usually fails — it reaches `start()` already wrapped by Effect as a `FiberFailure`: the
+  message is intact, the class is not, so `instanceof` and `toBe` do not hold there. The
+  [cache](./cache.md#telling-this-failure-apart-from-any-other) and
+  [drizzle](./drizzle.md#startup-contract) startup errors are matched that way.
+- **The rollback closes what the application built, and nothing you passed in.** It disposes the
+  application's own metrics registry, shuts down its trace provider and OTLP span exporter, and
+  closes the OTLP transport of the logger it built — `Failed to start application:` is flushed to
+  the collector first, and a line you log in the catch afterwards through `app.getLogger()`
+  reaches the console only. A `loggerLayer`, the `tracing.spanProcessors` and a
+  `metrics.registry` from your options stay open and keep working: the processors are flushed,
+  not shut down, and nothing registered on the registry is cleared. In multi-service mode the
+  services that did start keep exporting their logs.
+- **A `loggerLayer` you built keeps an OTLP transport open.** Its flush timer holds the process
+  alive after the rollback, as it would after any failed attempt you intend to retry. When you give
+  up without `process.exit()`, close it with `await app.stop()` or with `shutdownLogger()` from
+  `@onebun/logger`.
+- **Destroy hooks run for everything that was built**, including a service whose `onModuleInit`
+  never ran, or threw halfway: the boot may have failed before it, or in it. Release what exists
+  (`if (this.pool) { ... }`), not what `onModuleInit` would have opened.
+- **Retry with a new instance — or the same one.** A new `OneBunApplication` per attempt is the
+  simplest retry: the next attempt shares nothing with the failed one except what you pass to
+  both, and a `loggerLayer`, `tracing.spanProcessors` or `metrics.registry` shared that way still
+  works, because the rollback left it open. Calling `start()` again on the instance whose start
+  failed boots as well: nothing of the failed attempt is left running, the retry rebuilds the
+  metrics registry, the trace provider and the OTLP log transport the rollback closed, reuses what
+  you passed in, and a `stop()` after the retry stops it.
+
+```typescript
+import { OneBunApplication } from '@onebun/core';
+import { AppModule } from './app.module';
+
+const MAX_ATTEMPTS = 5;
+const RETRY_DELAY_MS = 2_000;
+
+async function startWithRetry(): Promise<OneBunApplication> {
+  for (let attempt = 1; ; attempt++) {
+    // A new instance per attempt: the one whose start() failed has released everything
+    const app = new OneBunApplication(AppModule);
+    try {
+      await app.start();
+
+      return app;
+    } catch (error) {
+      // Nothing to stop() here — the failed start() released what it had acquired
+      if (attempt === MAX_ATTEMPTS) {
+        throw error;
+      }
+      await Bun.sleep(RETRY_DELAY_MS);
+    }
+  }
+}
+```
+
+The rollback is bounded by `shutdownTimeout` like any shutdown. In multi-service mode each service
+rolls back its own failed start; the services that did start are not stopped by it, and the
+parent's `stop()` does not reach them either — exit the process from the catch.
+
+<llm-only>
+
+- Mechanism: the single-service `start()` catch logs `Failed to start application:`, then calls `rollBackFailedStart()` → `executeShutdown({ rollback: true })` — the SAME `performShutdown` as `stop()`. `rollback` changes the wording of the first, last and summary lines, and narrows the three telemetry steps to what the application owns (next bullet). Every step is guarded (`runShutdownStep`), the sequence is raced against `shutdownTimeout`, and `rollBackFailedStart` catches on top, so `start()` rethrows exactly the value its catch received — the rollback never substitutes its own error
+- Telemetry in the rollback, versus `stop()`: metrics — the sampler is always stopped, but `dispose()` (registry `clear()`, `__onebunMetricsService` handed back) runs only when the application created the registry (`ownsMetricsRegistry()`: no `metrics.registry` in options); traces — `traceService.shutdown({ spanProcessors: 'flush' })` (`TraceShutdownOptions`): `forceFlush()` on the provider, shutdown of only the `BatchSpanProcessor` it built from `exportOptions`, global slot and context manager handed back — `stop()` calls `shutdown()`, which reaches the caller's processors too; logs — `shutdownLoggerLayer(this.loggerLayer)` when the application built the layer, nothing for a `loggerLayer` from options — `stop()` calls the process-wide `shutdownLogger()`. Measured on the version that shut all three down: a `loggerLayer` or `spanProcessors` shared across attempts (the documented new-instance loop, or a same-instance retry) exported no log line and no span from the attempt that booted; a `metrics.registry` lost everything registered on it; a started multi-service sibling stopped exporting logs
+- The rollback does NOT take the shutdown latch (`shutdownPromise`), which is terminal: its outcome is kept as `rollbackPromise` until the next `start()`. While it is set, `stop()` and a signal await it and run no step of the sequence again (no destroy hook or `disconnect()` twice), then run the three narrowed telemetry steps in their `stop()` form — `executeShutdown({ afterRollback: true })` → `closeWhatTheRollbackLeftOpen()`, bounded by `shutdownTimeout`, each step guarded: `dispose()` of a `metrics.registry` from options, `traceService.shutdown()` (a plain shutdown after the `'flush'` one shuts down exactly the caller's processors that pass left running, and releases nothing again), and the process-wide `shutdownLogger()`. Its outcome is merged into the rollback's (`timedOut` OR-ed, failures concatenated). Without it, what the caller passed in outlived a `stop()` that had always closed it: an OTLP `loggerLayer`'s flush timer, or a span processor holding a ref'd handle until its `shutdown()`, kept alive a process that `stop()` after a failed start had always let exit (measured: killed at 12 s, 0.8.1 exited in 0.4 s). Stock OTel exporters in a `BatchSpanProcessor` do not hold the loop, so they exited either way The next `start()` awaits and clears `rollbackPromise`, so a `stop()` after a successful retry is a real stop. A `stop()` that began while the failing `start()` was still booting is awaited instead of a second sequence
+- Same-instance retry: the `start()` that clears `rollbackPromise` calls `reacquireAfterRollback()` unless the application had been `stop()`ped before (latch set). It rebuilds what the rollback closed: the metrics service when the application owns its registry (new registry and sampler; `__onebunMetricsService` re-pointed — with a `metrics.registry` from options the service is kept, since registering its metric names on the same registry again would throw, and `start()` restarts its sampler), the trace service (new provider built with the same `spanProcessors` instances; the global slot and the context manager are claimed again) and — only when the application built its own logger and it exports over OTLP — the logger layer. Not rebuilt, and not needing it: a `loggerLayer` passed in options (still open). Not rebuilt: a logger taken with `getLogger()` before the retry (console only). The failed attempt's queue connection and sampler are gone, not running beside the retry's (tests pin one live connection and one sampler)
+- A `start()` that fails on an application that is already running (a second `start()` while the first boot serves, e.g. on its own explicit port) is NOT rolled back — the rollback would reach the running boot's listener, sampler and observability. It rethrows and leaves that attempt's partial resources, as before the rollback existed
+- `start()` after a successful `stop()` behaves as it did before the rollback existed: it boots with the metrics registry disposed and the trace provider shut down, and the `stop()` after it is a no-op (terminal latch) — build a new instance to restart
+- That value is NOT always the object user code threw. Service and controller `onModuleInit` run inside `Effect.runPromise(module.setup())`, so their failure arrives as Effect's `FiberFailure` (`Runtime.isFiberFailure(e)` is true, `e.message` is the original message, `e.name` is prefixed `(FiberFailure) `): assert with `toThrow('<message>')` / match on the message, never `toBe(thrown)` or `instanceof`. Failures outside Effect — `onApplicationInit`, middleware/interceptor `onModuleInit`, a queue `subscribe`, `Bun.serve` on a taken port, env schema validation — arrive as the thrown object itself; an env LOADING failure (`EnvLoadError`, run through `Effect.runPromise`) arrives as a `FiberFailure` too. Same caveat as `DrizzleStartupError` and `CacheBackendUnavailableError`
+- Measured before the fix (FB-30): a JetStream application whose `@Subscribe` named a subject no declared stream binds was still alive 12 s after catching the rejection; disconnecting the adapter alone did not end it and neither did disabling metrics alone — both held the loop. The in-memory adapter's 100 ms delayed-message interval, the scheduler's job timers, a bound listener and an OTLP log transport's flush timer are the same class of holder
+- A failure inside handler registration (a refused `subscribe`) happens before `QueueService.start()`, and `QueueService.stop()` returns early for a service that never started; the adapter `disconnect()` that follows is what closes the connection and the subscriptions made so far
+- `publish()` calls from `onModuleInit` are held until the queue is ready; a boot that fails before that point never sends them, although their message ids were already returned
+- `shutdownLoggerLayer(layer)` at the end of the rollback closes only the application's own transport, so whatever the caller logs in its catch through `app.getLogger()` after the rollback reaches the console but not the collector; a line logged through a `loggerLayer` of its own is still exported, on that transport's next batch or at its `shutdownLogger()`
+- A failure inside the adapter's own `connect()` (JetStream: a declared stream the server refuses, such as `replicas: 3` on one node or a narrowing change; a server without JetStream) happens before the adapter counts itself connected, and its `disconnect()` returns early in that state. So `connect()` closes the connection it opened before rethrowing — the rollback's adapter step has nothing left to release. An adapter written for this interface must do the same: release in `connect()`'s catch, as `RedisQueueAdapter` and `JetStreamQueueAdapter` do
+- Tests: `packages/core/src/application/failed-start-rollback.test.ts` (what is released, error identity and the `onModuleInit` `FiberFailure`, logs, `stop()` a no-op after a failure and a real stop after a retry, same-instance retry with one live connection and one sampler, OTLP logger rebuilt, a `loggerLayer` and `spanProcessors` shared with a new instance and with a same-instance retry still exporting, a `stop()` after the failure closing that `loggerLayer`, and shutting down the `spanProcessors` and releasing the `metrics.registry` passed in, a `metrics.registry` kept with what is on it, a started multi-service sibling still exporting logs, restart after `stop()`, a failed second `start()` on a running application), `packages/core/src/application/failed-start-exit.test.ts` (a spawned process ends by itself, also with OTLP log export switched on from the environment), `packages/nats/tests/failed-start-exit.integration.test.ts` (the same against a real nats-server, including a stream refused inside the adapter's `connect()`)
+
+</llm-only>
+
 ### Lifecycle Hooks
 
 Services and controllers can implement lifecycle hooks to execute code at specific points:
@@ -612,6 +725,8 @@ Services and controllers can implement lifecycle hooks to execute code at specif
 
 The listener is already closed when `beforeApplicationDestroy` runs, so a hook cannot serve or
 self-call over HTTP — traffic was refused with `503` from the start of the drain, well before it.
+The three destroy hooks also run when `start()` fails, for every instance that was built — see
+[When `start()` fails](#when-start-fails).
 In multi-service mode `signal` is `undefined` in both hooks — see [Graceful Shutdown](#graceful-shutdown).
 
 See [Services API](./services.md#lifecycle-hooks) for detailed usage examples.

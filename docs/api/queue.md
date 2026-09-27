@@ -1095,6 +1095,8 @@ await app.start();
 
 The framework instantiates the adapter with `new Adapter(queue.options)` and uses it as the queue backend. When you pass a class constructor as `adapter`, `options` is automatically typed to match the adapter's constructor argument — no type assertions needed. For a ready-made NATS/JetStream adapter, use the `@onebun/nats` package if available and pass its adapter class and options the same way.
 
+If your `connect()` can fail after it has opened a connection, close that connection in `connect()`'s own `catch` before rethrowing. A failed `app.start()` calls `disconnect()` as part of its [rollback](./core.md#when-start-fails), but a `disconnect()` that returns early for an adapter that never finished connecting leaves the socket open, and the process never exits. The built-in adapters release it in `connect()`.
+
 ### Connecting to NATS
 
 Both `@onebun/nats` adapters take the same connection options. `servers` is the only required one:
@@ -1244,7 +1246,7 @@ const app = new OneBunApplication(AppModule, {
 await app.start();
 ```
 
-Declared streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter resolves the stream from these declarations — `agent_events`, whose `agent.events.>` binds it — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
+Declared streams are reconciled during startup, not recreated: a stream the server does not have yet is created, and a stream that already exists is reconciled only when its configuration hash changed. The reconcile runs inside the adapter's `connect()`: a stream the server refuses (`replicas: 3` on a single node, a server without JetStream) fails `app.start()`, and the adapter closes the connection it opened before the error reaches you. `streamDefaults` is merged into each stream definition (per-stream values take priority). `QueueService` is automatically available for injection in any controller or service. When using `@Subscribe('agent.events.task.done')`, the adapter resolves the stream from these declarations — `agent_events`, whose `agent.events.>` binds it — and, since that subscription declares no `group`, its consumer is ephemeral: every process running it gets its own, and each one delivers only what is published after it starts, never the backlog already stored in `agent_events`. Passing `adapter: JetStreamQueueAdapter` alone enables the queue, so a producer-only service with zero `@Subscribe` handlers still connects to NATS during `app.start()`.
 
 #### A declaration says two things, and they can be separated {#stream-declarations}
 

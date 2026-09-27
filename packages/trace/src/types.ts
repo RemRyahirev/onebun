@@ -242,6 +242,28 @@ export interface TraceOptions {
 }
 
 /**
+ * How `shutdown()` treats the processors passed in `TraceOptions.spanProcessors`.
+ *
+ * @see docs:api/trace.md
+ */
+export interface TraceShutdownOptions {
+  /**
+   * `'shutdown'` shuts them down with the provider, as OpenTelemetry does with every processor a
+   * provider holds. `'flush'` flushes them and leaves them running, for a caller that goes on
+   * using them — with the next application built from the same options, or a retry of this one.
+   * What this package built from `exportOptions` is shut down either way, and the provider hands
+   * back the process-global slot and the context manager either way.
+   *
+   * A later `shutdown()` without `'flush'` shuts down the processors a `'flush'` call left
+   * running, and does nothing else: the provider is already released. Every other repeated call
+   * is a no-op.
+   *
+   * @defaultValue 'shutdown'
+   */
+  spanProcessors?: 'shutdown' | 'flush';
+}
+
+/**
  * Trace export options
  */
 export interface TraceExportOptions {

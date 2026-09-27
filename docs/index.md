@@ -273,9 +273,11 @@ app
 `start()` rejects when a configured backend cannot be reached at boot — for example
 `CacheModule.forRoot({ type: REDIS })` against an unreachable Redis raises
 `CacheBackendUnavailableError` (set `allowDegradedStart: true` / `CACHE_ALLOW_DEGRADED_START=true`
-to start degraded instead). **Exit non-zero from the catch.** Without it the process either
-exits `0` — reporting a failed boot to your supervisor as a success — or stays alive holding
-the failed backend's handles while never binding a port.
+to start degraded instead). **Exit non-zero from the catch.** A rejected `start()` has already
+released everything the boot acquired — see [When `start()` fails](./api/core.md#when-start-fails) —
+so without the exit the process ends with code `0`, reporting a failed boot to your supervisor as a
+success. The catch needs no `stop()`. To retry, build a new `OneBunApplication` per attempt, or
+call `start()` again on the same one.
 
 ## Key Patterns
 

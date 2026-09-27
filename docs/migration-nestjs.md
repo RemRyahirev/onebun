@@ -536,6 +536,7 @@ app
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+    process.exit(1);
   });
 ```
 

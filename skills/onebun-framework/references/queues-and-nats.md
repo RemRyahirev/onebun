@@ -629,6 +629,13 @@ Key JetStream behaviors:
   `streams.info` rejection is treated as absence only when it carries the numeric `StreamNotFound`
   code (10059) and is otherwise rethrown as itself. Every such failure emits `onError` in addition
   to throwing
+- **A failed `connect()` closes its own connection**: stream reconciliation runs inside `connect()`,
+  before the adapter counts itself connected, and `disconnect()` returns early for an adapter that
+  never connected. So `connect()` releases the socket in its own catch before rethrowing — a refused
+  stream (`replicas: 3` on one node, a narrowing, a create-only change) or a server without
+  JetStream fails `app.start()` and the process can still exit. (Before this, the socket stayed open
+  and a caught failed boot hung.) A custom `QueueAdapter` must do the same: release in `connect()`'s
+  catch — the `start()` rollback's `disconnect()` cannot reach a half-open connection
 - **Create-path-only fields**: `retention`, `storage` and the `num_replicas` default are sent on
   create only — `update` cannot change the first two, and applying a default on update would
   rewrite a value the application never asked about. A value you declare yourself, directly or

@@ -32,6 +32,7 @@ import {
   type TraceContext,
   type TraceHeaders,
   type TraceOptions,
+  type TraceShutdownOptions,
   type TraceSpan,
 } from './types.js';
 
@@ -137,9 +138,13 @@ export interface TraceService {
   endHttpTrace(span: TraceSpan, data: Partial<HttpTraceData>): Effect.Effect<void>;
 
   /**
-   * Shutdown the trace service, flushing pending spans
+   * Shutdown the trace service, flushing pending spans.
+   *
+   * `{ spanProcessors: 'flush' }` flushes the processors passed in `TraceOptions.spanProcessors`
+   * and leaves them running for whoever passed them; a later `shutdown()` without it shuts them
+   * down. See `TraceShutdownOptions`.
    */
-  shutdown(): Promise<void>;
+  shutdown(options?: TraceShutdownOptions): Promise<void>;
 
   // --- Sync hot-path methods (avoid Effect.runPromise overhead) ---
 
@@ -275,9 +280,9 @@ export class TraceServiceImpl implements TraceService {
       && installedTracerProvider() === this.providerResult.provider;
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(options?: TraceShutdownOptions): Promise<void> {
     if (this.providerResult) {
-      await this.providerResult.shutdown();
+      await this.providerResult.shutdown(options);
     }
   }
 

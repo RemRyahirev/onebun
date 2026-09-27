@@ -632,6 +632,16 @@ const options = {
 
 An application with a processor and no OTLP endpoint records real spans rather than taking the
 lightweight path: the question is whether anything will see the span, not how it is shipped.
+
+The processors stay yours. `app.stop()` shuts them down with the application's provider, as
+OpenTelemetry does with every processor a provider holds. A `start()` that fails does not: its
+rollback flushes them and leaves them running, so the next attempt — a new application built from
+the same `options`, or `start()` again on the same one — still records into them (see
+[When `start()` fails](./core.md#when-start-fails)). That is
+`traceService.shutdown({ spanProcessors: 'flush' })`, described by `TraceShutdownOptions`; the
+exporter built from `exportOptions` is shut down either way. An `app.stop()` after that failed
+`start()` still shuts them down, as every `stop()` does: a later `shutdown()` without the option
+finishes what the flush left running.
 :::
 
 <llm-only>
@@ -642,6 +652,8 @@ lightweight path: the question is whether anything will see the span, not how it
 - `installedTracerProvider()` is exported and re-derives ownership from reality: `trace.getTracerProvider()` returns a `ProxyTracerProvider` wrapper, so identity is read through its public `getDelegate()`. Shutdown releases the global only when the remembered owner AND the installed delegate are both this provider
 - Teardown has three cases and only the last disables anything: not the owner -> touch nothing; owner with another live provider -> `trace.disable()` immediately followed by `setGlobalTracerProvider(successor)`, because a duplicate registration would be refused; owner with nothing left -> `trace.disable()`
 - `shutdown()` is idempotent via a `shutdownStarted` flag, and removes the provider from the live set BEFORE flushing so a concurrent shutdown cannot elect a provider that is on its way down. `releaseGlobal` runs in a `finally`, because a failed flush is still a dead provider
+- `shutdown(options?: TraceShutdownOptions)`: `{ spanProcessors: 'flush' }` does `provider.forceFlush()` and shuts down only the processors `initTracerProvider` built itself (the `BatchSpanProcessor` over `OtlpFetchSpanExporter`), NOT `provider.shutdown()` — that one reaches every processor the provider holds, the caller's `spanProcessors` included. The global slot and the context-manager claim are released the same way in both modes. The provider object itself is left un-shut-down and is dropped by its owner. `OneBunApplication` uses it only in the rollback of a failed `start()`; `stop()` keeps the default `'shutdown'`. Without caller processors the two modes are the same `provider.shutdown()`
+- The `shutdownStarted` idempotence has one exception: after a `'flush'` pass that left caller processors running (`callerProcessorsLeftRunning`), a later call WITHOUT `'flush'` shuts those processors down and does nothing else — no second `releaseGlobal`, no context-manager release, the processors built here are not touched again. A repeated `'flush'` is a no-op. That is what an application's `stop()` after a failed start calls; returning early there left a caller processor holding a ref'd handle until its `shutdown()` keeping the process alive, where 0.8.1's `stop()` shut it down
 - `enabled: false` builds no provider, and its tracer comes from a detached `new ProxyTracerProvider()` — NOT from `trace.getTracer()`. The global fallback made a switched-off service borrow whichever enabled sibling had installed the slot and record spans under that sibling's `service.name`; measured in one process, the same disabled service answered with a valid trace id after an enabled sibling was constructed and with the all-zero one when alone. A delegate-less `ProxyTracerProvider` resolves to the API's no-op tracer and cannot reach the global
 
 </llm-only>

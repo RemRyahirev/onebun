@@ -109,8 +109,29 @@ app
   .catch((error: unknown) => {
     const logger = app.getLogger({ className: 'AppBootstrap' });
     logger.error('Failed to start:', error instanceof Error ? error : new Error(String(error)));
+    process.exit(1);
   });
 ```
+
+A rejected `start()` has already run the `stop()` sequence over what the boot acquired — listener,
+queue connection, metrics sampler, destroy hooks — and rethrows the error it caught; the rollback
+never replaces it. A failure thrown in a service's or controller's `onModuleInit` reaches `start()`
+wrapped by Effect as a `FiberFailure` that keeps the MESSAGE but not the class: match on the
+message (`rejects.toThrow('...')`), never `instanceof` / `toBe(thrown)` — same caveat as
+`DrizzleStartupError` in `references/drizzle.md`. The catch needs no `stop()` (calling it runs no
+step again; it only closes what the rollback left open for a retry, as every `stop()` does), and the process ends by itself, so exit non-zero or a failed boot reports success. (Older
+versions left the process alive instead: the queue connection and the metrics sampler held it.)
+The rollback closes the telemetry the application BUILT (its metrics registry, trace provider, and the
+OTLP transport of its own logger — so what the catch logs via `app.getLogger()` reaches the console only)
+and leaves open what you PASSED IN: a `loggerLayer`, `tracing.spanProcessors` (flushed, not shut down),
+a `metrics.registry` (nothing cleared). Sharing those across retry attempts is therefore safe; an OTLP
+`loggerLayer` you built keeps the process alive until `app.stop()` or `shutdownLogger()` closes it. A
+`stop()` after the failed start closes all three, as every `stop()` does — so don't call it on a failed
+instance whose `loggerLayer` / processors / registry the next attempt shares.
+To retry, a NEW `OneBunApplication` per attempt is simplest; `start()` again on the same instance
+boots too (it rebuilds what the rollback closed and reuses what you passed in), and a `stop()` after
+that retry really stops it. Destroy hooks run on a failed boot too, even where
+`onModuleInit` never ran: release what exists (`this.pool?.end()`).
 
 ### Multi-Service Mode
 
@@ -376,7 +397,8 @@ export class MyService extends BaseService implements OnModuleInit, OnModuleDest
   }
 
   async onModuleDestroy(): Promise<void> {
-    // Called on graceful shutdown — clean up timers, connections
+    // Called on graceful shutdown AND when start() fails (even if onModuleInit never ran)
+    // — clean up the timers and connections that exist
   }
 
   doWork() {
@@ -1092,6 +1114,7 @@ at least in the areas you're modifying.
 | Manual OTLP exporter setup for traces | Configure `tracing.exportOptions.endpoint` — provider is auto-registered |
 | Duplicate full paths across controllers (`/users/me` in two controllers) | Second registration overwrites first — keep each path in one controller |
 | `console.error` in bootstrap `.catch()` | Use `app.getLogger()` — framework logger is available even before `start()` resolves |
+| `await app.stop()` "to clean up" in the catch of a failed `start()`, and no exit | The failed `start()` already released everything, so that `stop()` runs no step again and only closes what you passed in (log transports, `spanProcessors`, `metrics.registry`) — end the bootstrap catch with `process.exit(1)`. To retry instead, build a new `OneBunApplication` per attempt (calling `start()` again on the same instance also works) |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
 | `client.UsersController.findById(input)` with a raw user-supplied id | `findById(encodeURIComponent(input))`. The service client does not encode path values; one containing `/`, `?`, `#` or `\`, or reading as `''`/`.`/`..`, rejects with a `TypeError` and sends nothing, because it would reach a different route |

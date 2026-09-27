@@ -438,6 +438,7 @@ describe('MyService', () => {
 | `toBeTruthy()` / `toBeFalsy()` | Use specific matchers: `toBe(true)`, `toBeNull()`, etc. |
 | Test takes >10ms with fake timers | Fake timer mock is likely used incorrectly |
 | Not calling `close()` / `stop()` | Always clean up in `afterEach`/`afterAll` to prevent leaks |
+| `expect(error).toBe(thrown)` / `instanceof MyError` on what `app.start()` rejects with, when `onModuleInit` threw it | Service and controller `onModuleInit` run inside Effect, so the rejection is a `FiberFailure` carrying the MESSAGE, not the object: `await expect(app.start()).rejects.toThrow('backend down')`. Identity holds only for failures outside Effect (`onApplicationInit`, a queue subscribe, a taken port) |
 | Mocking fetch for integration tests | `TestingModule.inject()` uses `undici.fetch` — bypasses global mocks |
 | Manual mock loggers | Use `createTestService`/`createTestController`/`createTestMiddleware` — mocks are built in |
 | `createMockSyncLogger().info.mock.calls` | That logger is plain no-ops — build the subject with `createTestService` to get an instrumented one |
