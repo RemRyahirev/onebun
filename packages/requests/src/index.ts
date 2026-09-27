@@ -25,7 +25,7 @@ export {
 } from './trace-context.js';
 
 // Keeping a client error's transport details out of what the application's caller reads
-export { withoutTransportDetails } from './transport-details.js';
+export { isHttpClientFailure, withoutTransportDetails } from './transport-details.js';
 
 // Service for dependency injection
 export {

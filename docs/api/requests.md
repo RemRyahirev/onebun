@@ -460,7 +460,9 @@ so `retryOn` stays a pure list of status codes.
 The timeout covers the body too, so a `500` whose body stalls until the timeout is a
 `TIMEOUT_ERROR`: `retryOnTimeout` decides whether it is replayed, and `retryOn` never sees it.
 A `500` that arrives whole is a server answer and follows `retryOn`, even when its body does not
-parse. See [Timeouts and interruption](#timeouts-and-interruption). The exception is a request under
+parse, and even when its body is a OneBun upstream's report that ITS upstream timed out (`code: 0`,
+see [A failed request rejects](#a-failed-request-rejects)). See
+[Timeouts and interruption](#timeouts-and-interruption). The exception is a request under
 [`maxResponseBytes`](#max-response-bytes): a `5xx` whose body is over the limit
 ([`RESPONSE_TOO_LARGE`](#response-too-large)) or cannot be decoded
 ([`RESPONSE_DECODE_ERROR`](#response-decode-error)) is never replayed.
@@ -572,31 +574,128 @@ retries: { max: 3, backoff: 'exponential', delay: 1000, factor: 2 }
 
 ### A failed request rejects
 
-The Promise methods run the underlying Effect with `Effect.runPromise`, and a failure — a 4xx/5xx
-the server returned, a timeout, a refused connection — is an Effect *failure*. So `await` on a
-failed request **throws**; it never resolves with an `ErrorResponse`:
+Every Promise method — `request`, `get`, `post`, `put`, `patch`, `delete`, `head`, `options`,
+`reqRaw` and `req` — rejects on every failure: a 4xx or 5xx the server returned, a timeout, a
+refused connection. It never resolves with an `ErrorResponse`. The rejection is a
+`OneBunBaseError` subclass chosen by the failure's `code`, and it carries the failure's `error`,
+`code` and `details`:
 
 ```typescript
-import { isErrorResponse } from '@onebun/core';
+import { NotFoundError, TransportError, isErrorResponse } from '@onebun/core';
 
-const response = await client.get<User>('/users/123');
+try {
+  const response = await client.get<User>('/users/123');
 
-// The declared type is the `ApiResponse<T>` union, so TypeScript asks you to narrow it before
-// reading `result`. The branch itself never runs — a failed request has already thrown.
-if (isErrorResponse(response)) {
-  throw new Error(response.error);
+  // The declared type is the `ApiResponse<T>` union, so TypeScript asks you to narrow it before
+  // reading `result`. The branch itself never runs: a failed request has already thrown.
+  if (isErrorResponse(response)) {
+    throw new Error(response.error);
+  }
+
+  const user = response.result;
+} catch (error) {
+  if (error instanceof NotFoundError) {
+    error.error;   // 'HTTP_ERROR'
+    error.code;    // 404
+    error.details; // { url, method, duration, headers, details }
+  } else if (error instanceof TransportError) {
+    error.error;   // 'TIMEOUT_ERROR', 'ABORT_ERROR' or 'FETCH_ERROR'
+    error.code;    // 0
+  }
 }
-
-const user = response.result;
 ```
 
-The failure names itself in `error`, not `message`: `ErrorResponse` has no `message` field — see
-[Response Format](#response-format).
+| `code` | Rejects with |
+|--------|--------------|
+| 400 | `BadRequestError` |
+| 401 | `UnauthorizedError` |
+| 403 | `ForbiddenError` |
+| 404 | `NotFoundError` |
+| 409 | `ConflictError` |
+| 422 | `ValidationError` |
+| 429 | `TooManyRequestsError` |
+| 500 | `InternalServerError` |
+| 502 | `BadGatewayError` |
+| 503 | `ServiceUnavailableError` |
+| 504 | `GatewayTimeoutError` |
+| `0` | `TransportError`: a timeout, an abort or a network failure (`TRANSPORT_FAILURE_CODE`) |
+| any other | `HttpStatusError`, whose `code` is that status: a 418 stays 418 |
+
+Every class is exported from `@onebun/requests`, and all but `ValidationError` from `@onebun/core`
+too: there, `ValidationError` is the name of the validation-issue interface, so import the class
+from `@onebun/requests`. `OneBunBaseError.fromErrorResponse(failure)` makes the same choice for an
+`ErrorResponse` you hold. `getTransportFailureKind(error)` reads a `TransportError`'s kind, as it
+reads an `ErrorResponse`'s.
+
+When the upstream is a OneBun service, the failure is the error its handler threw, as its
+exception filter sent it: a `ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 })`
+rejects here as a `ConflictError` with `code` 409, `error` `'REVISION_CONFLICT'` and those
+`details`. The `details` are for your code to read: if the error escapes a controller, the default
+exception filter sends its status and `error` on, not the upstream's `details` (see
+[An uncaught client error and your caller](#uncaught-client-errors)). Any other upstream's error
+status is an `HTTP_ERROR`, with the upstream's answer in `details`.
+
+A body's `code` counts only when it is an error status, 400–599. A OneBun upstream that lets its
+own client failure escape answers HTTP 500 with that failure's `code` in the body: `0` when ITS
+upstream timed out or refused the connection, a 3xx for a `REDIRECT_ERROR`. Such a body rejects
+here with the response's status (an `InternalServerError`, 500), never as a `TransportError`: a
+`TransportError` is always this request's own timeout, abort or connection failure, and the 500
+follows `retryOn`. A body's other code outside 400–599 takes the response's status the same way, or
+500 when that is not an error status either.
+
+`message` is the `error` name. `retryCount` and `traceId` are not on the rejection: read them off
+the `ErrorResponse` of the Effect API, below.
+
+<llm-only>
+
+- Catch with `instanceof`: `error instanceof ConflictError`, `error instanceof OneBunBaseError`.
+  Every class comes from `@onebun/requests`; `@onebun/core` re-exports all of them except
+  `ValidationError`.
+- A failure's `details` on the rejection is the client's own record, by reference: the default
+  exception filter recognises it and leaves its transport details out (see
+  [An uncaught client error and your caller](#uncaught-client-errors)).
+- Up to 0.8 the Promise methods rejected with Effect's `FiberFailure`: `instanceof` recognised
+  nothing, the failure was reachable only by unwrapping the fiber's cause with `Runtime` and `Cause`
+  from `effect`, and `error.message` held the failure as JSON. `req()` wrapped it into an `InternalServerError`
+  `REQUEST_FAILED` with code 500 whatever the status was. `OneBunBaseError.fromErrorResponse`
+  turned every code without a class of its own into an `InternalServerError` with code 500, so a
+  418 read as a 500 and a timeout as a server error; that was also what the `RequestsService`
+  Effect API failed with.
+- A defect — a throw inside the client, not a failed request — rejects with what was thrown.
+  `req()` wraps it into `InternalServerError` `REQUEST_FAILED`.
+- A body `{ success: false, error, code }` fails the request whatever its HTTP status, so a OneBun
+  service under `httpEnvelope` (HTTP 200, the status in the body) rejects with the body's `code`.
+  That `code` is kept only when it is 400–599; otherwise the failure's `code` is the HTTP status when
+  that is 400–599, else 500. A `TransportError` (code 0) and `getTransportFailureKind` never come
+  from a body, whatever its `details.transport` says, and a body's `error` of `REDIRECT_ERROR`,
+  `RESPONSE_TOO_LARGE` or `RESPONSE_DECODE_ERROR` does not exempt it from `retryOn`. Read as a
+  `TransportError`, a relayed `code: 0` would make the caller of a service whose upstream is down
+  take the failure for its own network error, retry it under `retryOnNetworkError` and skip
+  `retryOn`. Up to 0.8 such a body, as every code without a class of its own, was an
+  `InternalServerError` with code 500.
+
+</llm-only>
+
+### Upgrading from 0.8 {#rejection-upgrade}
+
+| 0.8 | 0.9 |
+|-----|-----|
+| unwrapping a `FiberFailure` rejection with `Runtime` and `Cause` from `effect` | `e instanceof OneBunBaseError`, or the subclass: `e.code`, `e.error`, `e.details` |
+| `rejects.toThrow(/"code":503/)`: the failure's JSON in `message` | `rejects.toBeInstanceOf(ServiceUnavailableError)`, or a check of `e.code` |
+| `req()` rejected with `InternalServerError` `REQUEST_FAILED`, code 500, the failure in `details.originalError` | `req()` rejects with the failure's own class: a 404 is a `NotFoundError` with code 404 |
+| a code without a class (418, 405, a 3xx `REDIRECT_ERROR`) and a timeout were an `InternalServerError`, code 500 | an `HttpStatusError` with that code; a `TransportError` with code 0 |
+
+A client error a controller does not catch now reaches the default exception filter as a
+`OneBunBaseError`, so the caller gets its status and `error` instead of a 500
+`Internal Server Error`, and the application still logs it as an unhandled error. That includes the
+client's own `AUTH_ERROR` (a request it could not sign), which is an `UnauthorizedError`, 401: map
+it if your caller must not read it as a failure of its own credentials. See
+[An uncaught client error and your caller](#uncaught-client-errors).
 
 ### Reading the ErrorResponse
 
-The Effect API puts the failure in the error channel, which is where the `ErrorResponse` is
-actually reachable:
+The Effect API puts the `ErrorResponse` itself in the error channel, `retryCount` and `traceId`
+included:
 
 ```typescript
 import { Effect, isErrorResponse } from '@onebun/core';
@@ -613,52 +712,29 @@ if (outcome._tag === 'Left') {
 }
 ```
 
-Staying on the Promise API, the same `ErrorResponse` can be dug out of the rejection — it travels
-inside Effect's `FiberFailure`, so it is not on `error.message` and `instanceof` tells you nothing:
-
-```typescript
-import { Cause, Runtime } from 'effect';
-import { isErrorResponse } from '@onebun/core';
-
-try {
-  const response = await client.get<User>('/users/123');
-  // ... use response
-} catch (error) {
-  if (Runtime.isFiberFailure(error)) {
-    const failure = Cause.squash(error[Runtime.FiberFailureCauseId]);
-
-    if (isErrorResponse(failure)) {
-      // failure.code === 404, failure.error === 'HTTP_ERROR'
-    }
-  }
-}
-```
+The Promise API's rejection carries the same `error`, `code` and `details`, as the class above.
 
 ### Mapping upstream failures to framework errors
 
 ```typescript
-import { Effect, isErrorResponse, NotFoundError, InternalServerError } from '@onebun/core';
+import { InternalServerError, NotFoundError, OneBunBaseError } from '@onebun/core';
 
 @Service()
 export class UserService extends BaseService {
   async findById(id: string): Promise<User> {
-    const outcome = await Effect.runPromise(
-      Effect.either(this.client.getEffect<User>(`/users/${id}`)),
-    );
-
-    if (outcome._tag === 'Left') {
-      if (outcome.left.code === 404) {
+    try {
+      return await this.client.req<User>('GET', `/users/${id}`);
+    } catch (error) {
+      if (error instanceof NotFoundError) {
         throw new NotFoundError('User', { id });
       }
-      throw new InternalServerError(outcome.left.error, outcome.left.details);
+      if (error instanceof OneBunBaseError) {
+        // The upstream's status is not this service's: answer 500 with its name. Its details, by
+        // reference, stay the upstream's record: the default filter keeps them out of the body
+        throw new InternalServerError(error.error, error.details);
+      }
+      throw error;
     }
-
-    // Narrows the success channel, which is typed as the `ApiResponse<T>` union
-    if (isErrorResponse(outcome.right)) {
-      throw new InternalServerError(outcome.right.error);
-    }
-
-    return outcome.right.result;
   }
 }
 ```
@@ -666,12 +742,13 @@ export class UserService extends BaseService {
 ### An uncaught client error and your caller {#uncaught-client-errors}
 
 A client error that a controller does not catch is answered by the
-[default exception filter](./exception-filters.md#default-filter-behaviour). `client.req()` throws a
-`OneBunBaseError`, the `RequestsService` Effect API fails with one, and an error you build from a
-failure's `details`, as in the example above, carries the client's record as its own. The filter sends a
-`OneBunBaseError` whole, `details` included, **except the transport details of an error the client
-produced**: what the upstream answered with and where the request went. The upstream sent those to
-your application, not to its caller.
+[default exception filter](./exception-filters.md#default-filter-behaviour). Every Promise method
+of `HttpClient` and `RequestsService`, and the service client, rejects with a `OneBunBaseError`, the
+`RequestsService` Effect API fails with one, and an error you build from a failure's `details`, as
+in the example above, carries the client's record as its own. The filter answers with the error's
+status and sends a `OneBunBaseError` whole, `details` included, **except the transport details of an
+error the client produced**: what the upstream answered with and where the request went. The
+upstream sent those to your application, not to its caller.
 
 | Error | Left out of the caller's body |
 |-------|-------------------------------|
@@ -680,10 +757,24 @@ your application, not to its caller.
 | `REQUEST_CONFIG_ERROR` | `details.url`; for a [refused body](#request-body-refused), also `details.details`, the error a serialization or a `Blob` read threw (an `ENOENT` names the file's path) |
 | `TIMEOUT_ERROR`, `ABORT_ERROR`, `FETCH_ERROR` | `details.details`, the raw error: Bun's connection error names the request URL |
 | `RESPONSE_PARSE_ERROR`, `RESPONSE_READ_ERROR`, `RESPONSE_DECODE_ERROR` | `details.details`: the upstream's body, or the raw error |
+| an upstream's own error (`{ success: false, error, code, details }` in its body, as a OneBun service sends) | all of `details` and of `originalError`: sent as `{}` |
 
 The rest of the body is sent: the status, `error`, `code`, `details.method`,
 `details.duration`, `details.transport`, and every field of an error you wrote yourself. The error
-object keeps everything: only the body the filter serializes leaves the transport details out.
+object keeps everything: only the body the filter serializes leaves the transport details out. A
+`code` that is not an error status — the `0` of a `TransportError`, the 3xx of a `REDIRECT_ERROR` —
+is answered with HTTP 500, and the body keeps the `code`; a OneBun client reading that body takes the
+500 ([A failed request rejects](#a-failed-request-rejects)).
+
+**The application logs it.** An escaped client failure is logged at error level as
+`Unhandled error in <Controller>.<handler>:`, as any unhandled error is, although a
+`OneBunBaseError` the application throws itself is not: nobody in the application chose this one's
+status. The logger writes the error's name and stack; beside them go its `code` and the `details`
+the caller's body keeps, `{ code: 503, details: { method: 'GET', duration: 12 } }` or, for a refused
+connection, `{ code: 0, details: { transport: 'network' } }`. The transport details stay out of the
+log as well: the request URL and its query, the upstream's headers and its body. Log what you need
+of them where you catch the error. `isHttpClientFailure(error)` tells such an error apart in a
+filter or an interceptor of your own.
 
 ```typescript
 import { Controller, Get, Param } from '@onebun/core';
@@ -695,37 +786,21 @@ const billing = createHttpClient({ baseUrl: 'http://billing.internal:8080' });
 export class InvoicesController {
   @Get('/:id')
   async findOne(@Param('id') id: string) {
-    // Billing answers 404 with its own cookies: the caller gets a 500 REQUEST_FAILED
+    // Billing answers 404 with its own cookies: req() rejects with a NotFoundError
     return await billing.req('GET', `/invoices/${id}`);
   }
 }
 ```
 
-The caller of `GET /invoices/42` reads the failure's name, status, method and duration, and none of
-billing's headers, its body or `http://billing.internal:8080/invoices/42`:
+The caller of `GET /invoices/42` gets a 404 with the failure's name, status, method and duration,
+and none of billing's headers, its body or `http://billing.internal:8080/invoices/42`:
 
 ```json
 {
   "success": false,
-  "error": "REQUEST_FAILED",
-  "code": 500,
-  "details": {
-    "originalError": {
-      "_id": "FiberFailure",
-      "cause": {
-        "_id": "Cause",
-        "_tag": "Fail",
-        "failure": {
-          "success": false,
-          "error": "HTTP_ERROR",
-          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
-          "code": 404,
-          "details": { "duration": 12, "method": "GET" },
-          "retryCount": 0
-        }
-      }
-    }
-  }
+  "error": "HTTP_ERROR",
+  "code": 404,
+  "details": { "duration": 12, "method": "GET" }
 }
 ```
 
@@ -753,6 +828,32 @@ const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoic
 if (outcome._tag === 'Left') {
   // Not `{ ...outcome.left.details, invoiceId: id }`: that copy is sent whole
   throw new BadGatewayError('BILLING_UNAVAILABLE', { invoiceId: id, upstreamStatus: outcome.left.code });
+}
+```
+
+**A OneBun upstream's error is its own.** When the upstream is a OneBun service, the rejection is
+the error its handler threw: your code reads its `details`, and the default filter sends your
+caller its status and `error` with `details: {}`. A callee's `details` can name its database host or
+the statement that failed; they were written for your service, not for its callers. To pass them on,
+throw an error of your own with a copy, or with the fields you choose:
+
+```typescript
+import { ConflictError, Controller, Param, Put } from '@onebun/core';
+
+@Controller('/orders')
+export class OrdersController {
+  @Put('/:id/items')
+  async reserve(@Param('id') id: string) {
+    try {
+      return await inventory.InventoryController.reserve(id);
+    } catch (error) {
+      if (error instanceof ConflictError) {
+        // `{ expected, actual }` from inventory: a copy is your record, and is sent whole
+        throw new ConflictError(error.error, { ...error.details });
+      }
+      throw error;
+    }
+  }
 }
 ```
 
@@ -787,28 +888,41 @@ export const envelopeFilter = createExceptionFilter((error) => {
   does. Two copies of `@onebun/requests` in one process share the registry.
 - `withoutTransportDetails` is a `JSON.stringify` replacer. `JSON.stringify` hands it every value
   after `toJSON`, so it finds the client's record at any depth: under `details.originalError`, where
-  `req()` puts the `FiberFailure` whose `toJSON` keeps a reference to the failure, and as the
-  `details` of an error built from `outcome.left.details` or by `OneBunBaseError.fromErrorResponse`.
+  `req()` with an `errors` map puts the error the failure became, and as the `details` of the error
+  the Promise API rejects with, of one built from `outcome.left.details` or by
+  `OneBunBaseError.fromErrorResponse`.
 - It drops only the registered keys of a registered record, and returns every other value as it got
   it. An error you write yourself with `details: { headers, url }` is sent whole: those are yours.
 - A copy is not registered: `{ ...details }`, `Object.assign({}, details)`, `structuredClone`, a
   JSON round trip. Code that rebuilds a client failure into another error must pass the record by
   reference, or pick fields.
-- An upstream OneBun service's own error envelope (`{ success: false, error, code, details }` parsed
-  from its body) is not a transport detail: it is propagated as the error, `details` and all.
-  `RESPONSE_PARSE_ERROR` with `details: 'Response text is empty'` is the client's own text
-  and is not withheld either.
-- Rejections of the Promise API (`client.get()`, `RequestsService.get()`, the service client) are a
-  `FiberFailure`, which is not a `OneBunBaseError`: the default filter answers it as any unhandled
-  error, `'Internal Server Error'` and empty `details`. Under `exposeErrorDetails` its message, the
-  failure's JSON, goes out whole like any unhandled error's message.
-- The application does not log a `OneBunBaseError` before the filter runs, so with the flag off the
-  transport details reach neither the body nor the log. Catch the error and log what you need.
-- Where the transport details sit: `req()`'s `REQUEST_FAILED` carries the upstream's last
-  `set-cookie`, its other headers, its body and the full request URL under
-  `details.originalError.cause.failure.details`, and an error built from a failure's `details`
-  (the `RequestsService` Effect API, `fromErrorResponse`, the mapping example above) carries them
-  at the top of `details`. The replacer leaves them out in both places.
+- An upstream's own error envelope (`{ success: false, error, code, details }` parsed from its body,
+  what a OneBun service's exception filter sends) becomes the rejection's `error`, `code` and
+  `details`, and the client registers its `details` and `originalError` under every key they have:
+  the default filter sends them as `{}`, also through an error built from the failure's `details`
+  (`fromErrorResponse`, the `RequestsService` Effect API), and `exposeErrorDetails` sends them whole.
+  `RESPONSE_PARSE_ERROR` with `details: 'Response text is empty'` is the client's own text and is
+  not withheld.
+- Rejections of the Promise API (`client.get()`, `client.req()`, `RequestsService.get()`, the service
+  client) are the `OneBunBaseError` the failure maps to, built around the client's record by
+  reference, so the default filter answers them with their status and without the transport details.
+- The default filter answers a `OneBunBaseError` whose `code` is outside 400–599 with HTTP 500 and
+  keeps the `code` in the body: a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx, the 2xx of a
+  `RESPONSE_PARSE_ERROR`. A caller never reads `200 OK` or a redirect without a `Location` for a
+  failure.
+- The application logs an escaped error for which `isHttpClientFailure(error)` is true at error
+  level, `Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, before
+  the filter runs; any other `OneBunBaseError` it does not log. The logger writes the error's message
+  (its `error` name) and stack; `details` is serialized with `withoutTransportDetails`, as for the
+  body, so the transport details reach neither the body nor the log, whatever `exposeErrorDetails`
+  says. A OneBun callee's own `details` log as `{}`. `isHttpClientFailure` is true for an object
+  whose `details` the client registered: every failure's record, including those with nothing
+  withheld (`AUTH_ERROR`, `RESPONSE_TOO_LARGE`). A copy is not recognised, and `req()` with an
+  `errors` map throws an error of its own, which is not logged either.
+- Where the transport details sit: as the `details` of the error the Promise API rejects with, under
+  `details.originalError` of the error `req()` throws for an `errors` map, and at the top of
+  `details` of an error built from a failure's `details` (the `RequestsService` Effect API,
+  `fromErrorResponse`, the mapping example above). The replacer leaves them out in every place.
 
 </llm-only>
 
@@ -1080,11 +1194,11 @@ Redirect policy:
 - `RequestsService` takes `redirect` from its options like any other `RequestsOptions` field, and
   per request through the config argument. Its methods return `result` alone, so under `'manual'`
   a handed-back redirect resolves with the body of the `3xx` (`''` or `undefined` when there is
-  none), and its status and `Location` cannot be read there. Use `HttpClient`, or the service
-  client, which returns the `HttpClient` envelope, to read `statusCode` and `headers.location`.
-  `RequestsService` fails a refused redirect with a `OneBunBaseError` whose `error` is
-  `REDIRECT_ERROR`, with the `3xx` in `details.status`. The service client takes the policy from
-  its options.
+  none), and its status and `Location` cannot be read there. Use `HttpClient` to read `statusCode`
+  and `headers.location`; the service client resolves the handler's value alone as well.
+  `RequestsService` fails a refused redirect with an `HttpStatusError` whose `error` is
+  `REDIRECT_ERROR` and whose `code` is the `3xx`, also in `details.status` (up to 0.8 an
+  `InternalServerError` with code 500). The service client takes the policy from its options.
 
 </llm-only>
 
@@ -1316,16 +1430,22 @@ A stream whose chunks keep coming lives as long as they do, and one that stalls 
 code takes between two reads does not. Keep `timeout` above the longest silence the upstream
 allows itself, such as its heartbeat interval.
 
-**A failed read rejects with an `ErrorResponse`**, the same record the Effect API fails with:
+**A failed read rejects with a `OneBunBaseError`**, the error a Promise method rejects with for
+the same failure (see [A failed request rejects](#a-failed-request-rejects)), whichever API made
+the call:
 
-- `TIMEOUT_ERROR`, `code: 0`, `details.phase: 'body'` — a read waited longer than `timeout`
+- `TIMEOUT_ERROR`, a `TransportError` with `code: 0` and `details.phase: 'body'` — a read waited
+  longer than `timeout`
 - `RESPONSE_TOO_LARGE` — under `maxResponseBytes`, at the chunk that takes the count past the
   limit; that chunk is not handed out
 - `RESPONSE_DECODE_ERROR` — under `maxResponseBytes`, a body the decoder rejects
 - `RESPONSE_READ_ERROR` — the connection broke off mid-body
 
+The last three carry the status that arrived as their `code`, so after a 200 each is an
+`HttpStatusError` with code 200; tell them apart by `error`.
+
 ```typescript
-import { getTransportFailureKind, isErrorResponse } from '@onebun/requests';
+import { TransportError, getTransportFailureKind } from '@onebun/requests';
 
 async function readFeed(feed: ReadableStream<Uint8Array>): Promise<void> {
   try {
@@ -1333,7 +1453,7 @@ async function readFeed(feed: ReadableStream<Uint8Array>): Promise<void> {
       handleChunk(chunk);
     }
   } catch (error) {
-    if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
+    if (error instanceof TransportError && getTransportFailureKind(error) === 'timeout') {
       // The upstream went quiet for longer than `timeout`: reconnect
     }
   }
@@ -1366,6 +1486,8 @@ export class FilesController extends BaseController {
       responseType: 'stream',
     });
 
+    // Narrows the `ApiResponse` union for TypeScript. A failed request has already rejected: let
+    // it escape, and the caller gets the storage's status without its details
     if (isErrorResponse(file)) {
       throw new Error(file.error);
     }
@@ -1406,10 +1528,15 @@ the coding, and those two describe the compressed bytes.
   reading. The stream is pulled on demand (`highWaterMark: 0`), so nothing is read ahead of the
   caller: time the caller spends on a chunk never counts. A stream that nobody reads or cancels
   keeps its connection open indefinitely.
-- A stream's error record is the one a body read of the other modes produces: `TIMEOUT_ERROR` with
-  `code: 0`, `details.phase: 'body'`, `details.statusCode` and `getTransportFailureKind()`
-  `'timeout'`; `RESPONSE_TOO_LARGE` with `details.limit`, `details.received` and
-  `details.statusCode`. It is a plain object, not an `Error`: `isErrorResponse(error)` narrows it.
+- A stream errors with the `OneBunBaseError` built, by reference, around the record a body read of
+  the other modes produces: `TIMEOUT_ERROR` is a `TransportError` with `code: 0`,
+  `details.phase: 'body'`, `details.statusCode` and `getTransportFailureKind()` `'timeout'`;
+  `RESPONSE_TOO_LARGE` has `details.limit`, `details.received` and `details.statusCode`. It is the
+  same for a stream from the `*Effect` API, whose call fails with an `ErrorResponse`: the stream's
+  reads are promises. In the 0.8 line the stream errored with the plain `ErrorResponse` record, which
+  `isErrorResponse(error)` narrowed; that is now `false`, and `instanceof` or
+  `getTransportFailureKind(error)` reads the error. Its `details` is the client's record, so the
+  default exception filter leaves its transport details out if it escapes a controller.
 - Under `'stream'` a timeout during an error status's body read is still `TIMEOUT_ERROR`: that
   body is read within the `timeout` left from the wait for the headers, as it is in every mode.
 - Without `maxResponseBytes`, `fetch` decompresses a streamed body itself and keeps
@@ -1537,9 +1664,10 @@ URL with the address in it:
   one host name is never reused for another at the same address.
 - A URL whose host is itself an IP literal: `tls.serverName` is that IP, so `fetch` sends no SNI
   and verifies the certificate against the URL's IP, whichever address it connects to.
-- `REQUEST_CONFIG_ERROR` has `code: 500`, so `OneBunBaseError.fromErrorResponse`, `req()` and the
-  `RequestsService` Effect API turn it into an `InternalServerError`. `details.url` is a transport
-  detail, left out of the body the default exception filter sends.
+- `REQUEST_CONFIG_ERROR` has `code: 500`, so every Promise method (`req()` included) rejects with
+  an `InternalServerError`, and `OneBunBaseError.fromErrorResponse` and the `RequestsService` Effect
+  API turn it into one. `details.url` is a transport detail, left out of the body
+  the default exception filter sends.
 - A `custom` auth interceptor that sets `connectAddress` is checked the same way: the value is
   read from the config auth produced. An interceptor may set `connectAddress` or replace the
   caller's, but not remove it: a config it returns without one — rebuilt as
@@ -1723,7 +1851,7 @@ and `@Body` values, passed **positionally** in the order the handler declares th
 [Arguments](#service-client-arguments)):
 
 ```typescript
-// Each call resolves `any`: the response envelope, not the handler's value (see below)
+// Each call resolves with the value the handler returned, typed `unknown` (see below)
 const all = await usersClient.UsersController.findAll();
 const found = await usersClient.UsersController.findById('123');
 const created = await usersClient.UsersController.create({ name: 'John' });
@@ -1754,14 +1882,14 @@ The client routes by name and checks the names. It does not check types.
 | Controller name | not checked: `createServiceClient()` returns `Record<string, ControllerClient>` | reading a name the definition lacks throws, and the error lists the controllers there are |
 | Method name | not checked: every name of a `ControllerClient` is a method | reading a name the controller lacks throws |
 | Path parameter values | not checked | each value is percent-encoded, so it stays in its segment. `null`, `undefined`, `''`, `.` and `..`, which no encoding can send, are refused before anything is sent, see [Path parameter values](#service-client-path-values) |
-| Arguments | not checked: every method is `(...args: any[]) => Promise<any>` | one per `@Param`, `@Query` and `@Body` parameter, see [Arguments](#service-client-arguments). Not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
+| Arguments | not checked: every method is `(...args: any[]) => Promise<unknown>` | one per `@Param`, `@Query` and `@Body` parameter, see [Arguments](#service-client-arguments). Not checked, except that a path parameter left out (`undefined`) or `null` is refused like the other values that cannot be sent in a path. A missing `@Query` or `@Body` argument is not sent, and extra arguments are dropped |
 | Query and body values | not checked | a `@Query` array arrives as an array, and the `@Body` value of a `POST`, `PUT` or `PATCH` is sent as JSON, so a string, `0`, `false`, `''` and `null` arrive as passed. A body `JSON.stringify` throws on is refused before anything is sent, see [Query and body values](#service-client-query-body) |
-| Result | `any` | not checked against the handler's return type |
+| Result | `unknown`: annotate or check it before use | not checked against the handler's return type |
 
-The promise resolves the HTTP client's success envelope, and its `result` is the server's own
-`{ success, result }` body. The value the handler returned is therefore at `response.result.result`.
-A 4xx or 5xx response rejects the promise instead, as described in
-[A failed request rejects](#a-failed-request-rejects).
+The promise resolves with the value the handler returned, typed `unknown`, and a failure rejects
+with a `OneBunBaseError` subclass (see
+[What a call resolves and rejects with](#service-client-results)). Keep the expected type next to
+the call: the client has no way to derive it from the callee's handlers.
 
 ```typescript
 interface User {
@@ -1769,15 +1897,10 @@ interface User {
   name: string;
 }
 
-const response = await usersClient.UsersController.findById('123');
-// { success: true, result: { success: true, result: { id: '123', name: 'Ada' } }, statusCode: 200, retryCount: 0 }
-
-// The annotation is an assertion: nothing compares it with what the handler returns
-const user: User = response.result.result;
+// The assertion is yours: nothing compares it with what the handler returns
+const user = (await usersClient.UsersController.findById('123')) as User;
+// { id: '123', name: 'Ada' }
 ```
-
-Keep the expected types next to the call, as above: the client has no way to derive them from the
-callee's handlers.
 
 <llm-only>
 
@@ -1789,11 +1912,103 @@ callee's handlers.
   nothing supplies argument or result types.
 - `usersClient.users.findById(...)` (a lowercase key) compiles and then throws
   `Controller "users" not found in service definition`. The key is the controller class name.
-- `const user = await client.UsersController.findById(id)` compiles and gives the envelope, not the
-  entity: read `.result.result`. A 409 or 401 from the callee rejects; the status and details are
-  inside the rejection (see "Reading the ErrorResponse").
+- The result is `unknown`, not `any`: `const user: User = await client.UsersController.findById(id)`
+  does not compile. Assert (`as User`) or validate it.
 - The service client, like everything else exported from `@onebun/core`, cannot currently be bundled
   for a browser.
+
+</llm-only>
+
+### What a call resolves and rejects with {#service-client-results}
+
+A call resolves with the value the handler returned. The callee's server wraps every returned value
+into `{ success: true, result }` ([one envelope rule](./controllers.md#one-envelope-rule)), and the
+client takes `result` out of it — a value shaped like an error included, since a handler's return
+value is data. A handler that returns a `Response` of its own sends its body as it is: a body that
+is itself a success envelope (`this.success(item, 201)`) resolves with its `result`, and any other
+body resolves whole.
+
+A failure rejects, as every Promise method of the HTTP client does (see
+[A failed request rejects](#a-failed-request-rejects)): with the `OneBunBaseError` subclass the
+status names, carrying the callee's `error`, `code` and `details`. What the callee's handler threw
+arrives as it was thrown:
+
+```typescript
+import {
+  BaseController,
+  Body,
+  ConflictError,
+  Controller,
+  NotFoundError,
+  Param,
+  Put,
+} from '@onebun/core';
+
+// On the callee
+@Controller('/items')
+export class ItemsController extends BaseController {
+  @Put('/:id')
+  update(@Param('id') id: string, @Body() body: { revision: number }) {
+    throw new ConflictError('REVISION_CONFLICT', { expected: body.revision, actual: 2 });
+  }
+}
+
+// On the caller
+try {
+  await itemsClient.ItemsController.update('a', { revision: 1 });
+} catch (error) {
+  if (error instanceof ConflictError) {
+    error.error;   // 'REVISION_CONFLICT'
+    error.code;    // 409
+    error.details; // { expected: 1, actual: 2 }
+  } else if (error instanceof NotFoundError) {
+    // the callee answered 404
+  }
+}
+```
+
+A status without a class of its own rejects with an `HttpStatusError` carrying that `code` (a 418
+stays 418), and a timeout or a refused connection with a `TransportError`, code `0`. The call has
+no `statusCode`, `headers` or `retryCount` to read: use `createHttpClient` when those matter.
+
+Retries follow the client's `retries` option as on any `HttpClient`, so a POST is never replayed
+unless its method is listed: a POST whose response is lost to the timeout reaches the callee once,
+with `retries: { max: 0 }` and with no retry configuration at all.
+
+#### Upgrading from 0.8 {#service-client-upgrade}
+
+| 0.8 | 0.9 |
+|-----|-----|
+| `const response = await client.C.m()`, then `response.result.result` | `const value = await client.C.m()`: the handler's value itself |
+| `response.statusCode`, `response.retryCount`, `response.success` | not on the result; use `createHttpClient` for a status or a header |
+| unwrapping the `FiberFailure` with `Runtime` and `Cause` to read a 409's details | `e instanceof ConflictError`, then `e.error`, `e.code`, `e.details` |
+| a 418 rejected as code 500 | an `HttpStatusError` with code 418 |
+| method result `Promise<any>` | `Promise<unknown>` |
+
+The result type is `unknown` so that a stale `.result.result`, `.statusCode` or `.retryCount` read
+fails `tsc` instead of turning into `undefined` at run time. Run the type checker after the upgrade
+and replace each flagged read with the value itself.
+
+<llm-only>
+
+- The unwrap rule: the HTTP client's success `result` is the callee's body; when that body is the
+  success envelope — `success: true` with nothing but `result` and `traceId` beside it, which is what
+  the callee's server sends for every value a handler returns and what `this.success()` /
+  `this.json()` send — the call resolves `result`. A handler that returns `undefined` sends
+  `{ "success": true }` (`JSON.stringify` drops the key), and the call resolves `undefined`. Any
+  other body (a `Response.json(...)` of the handler's own, a text body, `undefined` for a 204 or
+  HEAD) resolves as it is.
+- A 200 value shaped `{ success: false, error, code }` returned by a handler is data: it resolves.
+  Only a callee's error status (or an error envelope a handler sent in a `Response` of its own)
+  rejects.
+- The rejection is a `OneBunBaseError` subclass from `@onebun/requests`, re-exported from
+  `@onebun/core` (all but `ValidationError`, which is core's validation-issue interface there).
+  `instanceof` works; the test of a 409 needs nothing from `effect`.
+- A callee's `details` reach the calling code whole. If the error escapes a controller, the default
+  exception filter sends the callee's status and `error` with `details: {}`; the same filter leaves
+  the transport details of an `HTTP_ERROR` from a non-OneBun upstream out.
+- A `TypeError` rejection still means a refused argument, a path value or a body `JSON.stringify`
+  throws on: nothing was sent.
 
 </llm-only>
 
@@ -2321,8 +2536,8 @@ To log or snapshot an envelope, use `{ ...response }` or the fields you need.
   [Limiting the response size](#max-response-bytes)).
 - `set-cookie` values are joined with `, `, and a cookie's own `Expires=Wed, 21 Oct ...` contains a
   comma, so the joined string cannot be split back reliably.
-- `RequestsService` methods return `result` alone, so they have no headers. Use `HttpClient` (or the
-  service client, which returns the `HttpClient` envelope) when a header matters.
+- `RequestsService` methods return `result` alone, so they have no headers, and neither does what
+  the service client resolves (the handler's value). Use `HttpClient` when a header matters.
 - An `HTTP_ERROR`'s `details.headers` is NOT the same record: it is enumerable, and there a repeated
   `set-cookie` keeps only its last value. The default exception filter leaves it out of the body it
   sends a controller's caller, with the request URL and the upstream's body (see

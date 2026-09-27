@@ -1,7 +1,13 @@
 import { isIP } from 'node:net';
 import { Readable } from 'node:stream';
 
-import { Effect, pipe } from 'effect';
+import {
+  Cause,
+  Effect,
+  Exit,
+  Option,
+  pipe,
+} from 'effect';
 
 import { applyAuth, isSigningAuth } from './auth.js';
 import {
@@ -18,7 +24,11 @@ import {
   formatTraceparent,
   type OutgoingTraceContext,
 } from './trace-context.js';
-import { markTransportDetails } from './transport-details.js';
+import {
+  markClientFailureRecord,
+  markTransportDetails,
+  markUpstreamRecord,
+} from './transport-details.js';
 import {
   type ApiResponse,
   createErrorResponse,
@@ -34,6 +44,7 @@ import {
   isRetryableMethod,
   type OneBunAuthConfig,
   OneBunBaseError,
+  type OneBunError,
   type RedirectPolicy,
   type ReqConfig,
   type RequestConfig,
@@ -861,7 +872,9 @@ const shouldRetryRequest = (
     return false;
   }
 
-  if (NEVER_RETRIED_ERRORS.includes(error.error)) {
+  // By name, so only for a failure this client built: an upstream's own body may carry the same
+  // name for a failure of ITS upstream, and its status is an answer that follows `retryOn`
+  if (NEVER_RETRIED_ERRORS.includes(error.error) && !isUpstreamFailure(error)) {
     return false;
   }
 
@@ -1377,6 +1390,73 @@ const readBodyText = (
   );
 };
 
+/** The highest HTTP error status. */
+const MAX_ERROR_STATUS = 599;
+
+/** Whether `code` is an HTTP error status, 400–599. */
+const isErrorStatus = (code: number): boolean =>
+  Number.isInteger(code) && code >= HttpStatusCode.BAD_REQUEST && code <= MAX_ERROR_STATUS;
+
+/** A plain record: an object that is neither `null` nor an array. */
+const isPlainRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * The `details` records of failures an upstream sent in its body, as opposed to failures this
+ * client built. Keyed by the record because the envelope around it is copied on the way out (a
+ * retry count is added to a copy), while the record travels by reference.
+ */
+const upstreamFailureRecords = new WeakSet<object>();
+
+/** Whether `failure` came from an upstream's error body rather than from this client. */
+const isUpstreamFailure = (failure: ErrorResponse): boolean =>
+  isPlainRecord(failure.details) && upstreamFailureRecords.has(failure.details);
+
+/**
+ * The code of an error envelope that arrived with HTTP status `status`.
+ *
+ * The body's `code` when it is an error status: under `httpEnvelope` a OneBun service answers HTTP
+ * 200 and carries the status in the body. Any other code is not a status this response had — the
+ * `0` of a transport failure or the 3xx of a `REDIRECT_ERROR`, relayed from the upstream's OWN
+ * upstream by its exception filter — so the response's status stands, or 500 when that is not an
+ * error status either. A body never makes a `TransportError`: a response arrived.
+ */
+const upstreamFailureCode = (bodyCode: number, status: number): number => {
+  if (isErrorStatus(bodyCode)) {
+    return bodyCode;
+  }
+
+  return isErrorStatus(status) ? status : HttpStatusCode.INTERNAL_SERVER_ERROR;
+};
+
+/**
+ * The failure an error envelope in a response body stands for: its `error`, the code
+ * {@link upstreamFailureCode} settles on, and its `details` and `originalError`.
+ *
+ * The upstream wrote `details` and `originalError` for its own caller, this application, and a
+ * OneBun callee's can name its database host or the statement that failed. Both are registered as
+ * transport details whole ({@link markUpstreamRecord}), so the default exception filter leaves
+ * them out of the body this application's caller gets, as it leaves out an `HTTP_ERROR`'s body.
+ * `details` that is not a record is kept under `details.details`, where an `HTTP_ERROR` keeps the
+ * upstream's body.
+ */
+const upstreamFailure = (body: ErrorResponse, status: number): ErrorResponse => {
+  const sent: unknown = body.details;
+  const details = markUpstreamRecord(
+    isPlainRecord(sent) ? sent : sent === undefined ? {} : { details: sent },
+  );
+  upstreamFailureRecords.add(details);
+  const originalError: unknown = body.originalError;
+
+  return createErrorResponse(
+    body.error,
+    upstreamFailureCode(body.code, status),
+    undefined,
+    details,
+    isPlainRecord(originalError) ? markUpstreamRecord(originalError) as unknown as OneBunError : undefined,
+  );
+};
+
 /**
  * Read the body of a response whose headers have arrived as bytes, exactly as they are once the
  * content coding is undone — `responseType: 'bytes'`.
@@ -1471,8 +1551,9 @@ const restartableTimeout = (timeout: number): RestartableTimeout => {
  * counts for nothing.
  *
  * Under `maxResponseBytes` the body is decoded by the client and counted as the stream is read
- * ({@link bodyStream}); a body refused before reading fails the call itself. Whatever the stream
- * errors with is the `ErrorResponse` the same failure of an ordinary read would have produced.
+ * ({@link bodyStream}); a body refused before reading fails the call itself. A read that fails
+ * errors the stream with {@link streamReadError} of the `ErrorResponse` the same failure of an
+ * ordinary read would have produced.
  */
 const openBodyStream = (
   response: Response,
@@ -1490,9 +1571,27 @@ const openBodyStream = (
     Effect.map((reader) => bodyStream(reader, limit, {
       waiting: waitTimeout.start,
       settled: waitTimeout.stop,
-      errorFor,
+      errorFor: (failure) => streamReadError(errorFor(failure)),
     })),
   );
+};
+
+/**
+ * What a `'stream'` result errors with when a read fails after the call has resolved: the
+ * `OneBunBaseError` subclass the failure's `code` names, the error a Promise method rejects with
+ * ({@link runRequestPromise}), whichever API made the call. A stream's reads are promises, and the
+ * same failure at the headers rejects the call with that class.
+ *
+ * Built around the failure's `details` record by reference, as the Promise API's rejection is, and
+ * the record is registered as a client failure's: the call resolved before the read failed, so the
+ * registration {@link executeRequest} gives every failure it fails with never saw this one. The
+ * default exception filter then leaves its transport details out, and the application logs it when
+ * a handler lets it escape.
+ */
+const streamReadError = (failure: ErrorResponse): OneBunBaseError => {
+  markClientFailureRecord(failure.details);
+
+  return OneBunBaseError.fromErrorResponse(failure);
 };
 
 /**
@@ -1551,10 +1650,9 @@ const parseResponseData = <T>(
           );
         }
 
-        // Check if response is a standardized error format
+        // An error envelope: the upstream's own failure, typically a OneBun service's exception filter
         if (isErrorResponse(parsedData)) {
-          // Create OneBunApiError to throw
-          const apiError = OneBunBaseError.fromErrorResponse(parsedData);
+          const apiError = OneBunBaseError.fromErrorResponse(upstreamFailure(parsedData, response.status));
 
           return Effect.fail(wrapToErrorResponse(apiError));
         }
@@ -1952,11 +2050,55 @@ export const executeRequest = <
         )),
       )),
     )),
+    // Every failure's record is registered, so the error made around it is recognisable as the
+    // client's wherever it ends up (`isHttpClientFailure`): the application logs one that escapes.
+    Effect.tapError((failure) => Effect.sync(() => markClientFailureRecord(failure.details))),
   );
 };
 
 /**
- * HTTP Client class for making requests with configuration
+ * The error a failed request rejects with on the Promise API: the `OneBunBaseError` subclass the
+ * failure's `code` names ({@link OneBunBaseError.fromErrorResponse}), or the failure itself when
+ * it already is one (`RequestsService`).
+ *
+ * Built around the failure's `details` record by reference, not a copy of it: the record is
+ * registered as holding transport details ({@link markTransportDetails}), and the default
+ * exception filter recognises it only by identity.
+ */
+const toRequestError = (failure: ErrorResponse | OneBunBaseError): OneBunBaseError =>
+  failure instanceof OneBunBaseError ? failure : OneBunBaseError.fromErrorResponse(failure);
+
+/**
+ * Run a request's Effect for the Promise API: resolve with its success, reject with the
+ * `OneBunBaseError` its failure maps to ({@link toRequestError}).
+ *
+ * `Effect.runPromise` rejected with Effect's `FiberFailure`, which no `instanceof` recognises: the
+ * failure was reachable only through `Runtime.isFiberFailure` and `Cause.squash`. A defect — a
+ * throw inside the client, not a failed request — rejects with what was thrown.
+ *
+ * @internal
+ */
+export const runRequestPromise = async <A>(
+  effect: Effect.Effect<A, ErrorResponse | OneBunBaseError>,
+): Promise<A> => {
+  const exit = await Effect.runPromiseExit(effect);
+
+  if (Exit.isSuccess(exit)) {
+    return exit.value;
+  }
+
+  throw Option.match(Cause.failureOption(exit.cause), {
+    onSome: toRequestError,
+    onNone: () => Cause.squash(exit.cause),
+  });
+};
+
+/**
+ * HTTP Client class for making requests with configuration.
+ *
+ * The Promise methods resolve with the success envelope and reject with a `OneBunBaseError`
+ * subclass on every failure: a 4xx or 5xx, a timeout, a refused connection. The `*Effect` methods
+ * fail with the `ErrorResponse` instead.
  *
  * @see docs:api/requests.md
  */
@@ -1987,7 +2129,7 @@ export class HttpClient {
   async request<T = any>(
     config: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.requestEffect<T>(config));
+    return await runRequestPromise(this.requestEffect<T>(config));
   }
 
   /**
@@ -2015,7 +2157,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.getEffect<T, Q>(url, queryOrConfig, config));
+    return await runRequestPromise(this.getEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
@@ -2044,7 +2186,7 @@ export class HttpClient {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.postEffect<T, D>(url, data, config));
+    return await runRequestPromise(this.postEffect<T, D>(url, data, config));
   }
 
   /**
@@ -2073,7 +2215,7 @@ export class HttpClient {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.putEffect<T, D>(url, data, config));
+    return await runRequestPromise(this.putEffect<T, D>(url, data, config));
   }
 
   /**
@@ -2102,7 +2244,7 @@ export class HttpClient {
     data?: D,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.patchEffect<T, D>(url, data, config));
+    return await runRequestPromise(this.patchEffect<T, D>(url, data, config));
   }
 
   /**
@@ -2130,7 +2272,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.deleteEffect<T, Q>(url, queryOrConfig, config));
+    return await runRequestPromise(this.deleteEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
@@ -2156,7 +2298,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<void>> {
-    return await Effect.runPromise(this.headEffect<Q>(url, queryOrConfig, config));
+    return await runRequestPromise(this.headEffect<Q>(url, queryOrConfig, config));
   }
 
   /**
@@ -2184,11 +2326,15 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Promise<ApiResponse<T>> {
-    return await Effect.runPromise(this.optionsEffect<T, Q>(url, queryOrConfig, config));
+    return await runRequestPromise(this.optionsEffect<T, Q>(url, queryOrConfig, config));
   }
 
   /**
-   * Generic request method - throws on error, returns data directly
+   * Generic request method: resolves with `result` alone, and rejects as the other Promise
+   * methods do — with the `OneBunBaseError` the failure maps to.
+   *
+   * With `config.errors`, every failure rejects with an `InternalServerError` named after the
+   * first entry instead, holding the failure in `details.originalError`.
    */
   async req<
     T = any, // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -2199,8 +2345,9 @@ export class HttpClient {
     queryOrData?: Q,
     config?: ReqConfig & Partial<RequestConfig>,
   ): Promise<T> {
+    const methodEnum = typeof method === 'string' ? (method as HttpMethod) : method;
+
     try {
-      const methodEnum = typeof method === 'string' ? (method as HttpMethod) : method;
       const response = await this.request<T>({
         method: methodEnum,
         url,
@@ -2210,35 +2357,11 @@ export class HttpClient {
         ...config,
       });
 
-      if (isErrorResponse(response)) {
-        // Check if we have custom error configuration
-        if (config?.errors) {
-          const errorKey = Object.keys(config.errors)[0]; // Use first error config as default
-          const errorConfig = config.errors[errorKey];
-          const customError = new InternalServerError(
-            errorConfig.error,
-            { ...errorConfig.details, originalResponse: response },
-            response,
-          );
-          if (errorConfig.message) {
-            customError.message = errorConfig.message;
-          }
-          throw customError;
-        }
-
-        throw OneBunBaseError.fromErrorResponse(response);
-      }
-
-      return response.result;
+      // `request()` rejects on every failure, so what it resolves is a success
+      return (response as SuccessResponse<T>).result;
     } catch (error: unknown) {
-      // If it's already an OneBun error, rethrow
-      if (error instanceof OneBunBaseError) {
-        throw error;
-      }
-
-      // Check if we have custom error configuration for unexpected errors
       if (config?.errors) {
-        const errorKey = Object.keys(config.errors)[0];
+        const errorKey = Object.keys(config.errors)[0]; // Use first error config as default
         const errorConfig = config.errors[errorKey];
         throw new InternalServerError(errorConfig.error, {
           ...errorConfig.details,
@@ -2246,7 +2369,11 @@ export class HttpClient {
         });
       }
 
-      // Wrap unexpected errors
+      // A failed request is already a OneBunBaseError; anything else is a defect of the client
+      if (error instanceof OneBunBaseError) {
+        throw error;
+      }
+
       throw new InternalServerError('REQUEST_FAILED', { originalError: error });
     }
   }

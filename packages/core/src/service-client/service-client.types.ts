@@ -55,7 +55,7 @@ type ExtractControllerNames<TDef extends ServiceDefinition> =
  * @example
  * ```typescript
  * const client = createServiceClient(usersDefinition, { url: 'http://localhost:3001' });
- * const response = await client.UsersController.getById('123'); // `any`
+ * const user = await client.UsersController.getById('123'); // `unknown`
  * ```
  *
  * @see docs:api/requests.md
@@ -67,8 +67,9 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
 /**
  * Client interface for a single controller. Methods are accessed by their handler names.
  *
- * Every method is `(...args: any[]) => Promise<any>`. Nothing checks the order or types of the
- * arguments against the handler, and the resolved value is not typed by the handler's return type.
+ * Every method is `(...args: any[]) => Promise<unknown>`. Nothing checks the order or types of the
+ * arguments against the handler. The promise resolves with the value the handler returned, typed
+ * `unknown` because nothing derives its type from the handler: annotate or check it before use.
  * At run time only the path parameter values are checked: each is percent-encoded, and one that no
  * encoding can send as a single segment (`undefined`, `null`, `''`, `.`, `..`) is refused. The
  * arguments are the handler's `@Param`, `@Query` and `@Body` parameters in declaration order; a
@@ -78,9 +79,13 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
  * arrives as it was passed. The method name itself is checked at run time: reading one the
  * controller does not have throws.
  *
+ * The result was `any` up to 0.8, when the call resolved the HTTP client's envelope: `unknown`
+ * makes code that still reads `.result.result`, `.statusCode` or `.retryCount` fail to compile
+ * instead of reading `undefined`.
+ *
  * @see docs:api/requests.md
  */
 export interface ControllerClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  [methodName: string]: (...args: any[]) => Promise<any>;
+  [methodName: string]: (...args: any[]) => Promise<unknown>;
 }

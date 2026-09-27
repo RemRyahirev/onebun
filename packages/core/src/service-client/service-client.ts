@@ -5,7 +5,11 @@ import type {
   ServiceDefinition,
 } from './service-definition';
 
-import { HttpClient, type HttpMethod as RequestsHttpMethod } from '@onebun/requests';
+import {
+  type ApiResponse,
+  HttpClient,
+  type HttpMethod as RequestsHttpMethod,
+} from '@onebun/requests';
 
 import {
   HttpMethod,
@@ -279,6 +283,40 @@ function createNameProxy<TEntry, TValue>(
   });
 }
 
+/** The keys of the success envelope the server builds around a handler's return value. */
+const SUCCESS_ENVELOPE_KEYS: ReadonlySet<string> = new Set(['success', 'result', 'traceId']);
+
+/**
+ * Whether a body is the server's success envelope: `success: true` and nothing but `result` and
+ * `traceId` beside it. `result` is absent when the handler returned `undefined`, because
+ * `JSON.stringify` drops an `undefined` property, so `{ "success": true }` is the envelope of a
+ * `void` handler.
+ */
+function isSuccessEnvelope(body: unknown): body is { success: true; result?: unknown } {
+  return typeof body === 'object' &&
+    body !== null &&
+    (body as { success?: unknown }).success === true &&
+    Object.keys(body).every((key) => SUCCESS_ENVELOPE_KEYS.has(key));
+}
+
+/**
+ * The value the handler returned, out of what the HTTP client resolved.
+ *
+ * `request()` rejects on every failure, so it resolves a success, and its `result` is the body the
+ * server sent. The server wraps every value a handler returns into `{ success: true, result }`,
+ * on every route, so that `result` is the value. A handler that returned a `Response` of its own
+ * sent its body as it is: a success envelope (`this.success(value, 201)`) resolves its `result`,
+ * and any other body resolves whole.
+ *
+ * The call used to resolve the HTTP client's envelope around the server's, so the value sat at
+ * `response.result.result`.
+ */
+function handlerValue(response: ApiResponse<unknown>): unknown {
+  const body = response.success ? response.result : undefined;
+
+  return isSuccessEnvelope(body) ? body.result : body;
+}
+
 /**
  * Create a proxy for controller methods
  */
@@ -288,19 +326,21 @@ function createControllerProxy(
 ): ControllerClient {
   return createNameProxy(
     controllerDef.methods,
-    (endpoint) => async (...args: unknown[]) => {
+    (endpoint) => async (...args: unknown[]): Promise<unknown> => {
       const { url, body } = buildRequestParams(endpoint, args);
 
       // The query string is already in `url` and the body is JSON text, so the HTTP client sends
       // both as they are. It only appends a query key of its own (an API key in query mode). A
       // `custom` auth interceptor sees exactly these: the call's query in `config.url`, not in
       // `config.query`, and the text in `config.data`.
-      return await httpClient.request({
+      const response = await httpClient.request({
         // Cast to RequestsHttpMethod to handle enum type difference between @onebun/core and @onebun/requests
         method: endpoint.httpMethod as unknown as RequestsHttpMethod,
         url,
         data: body,
       });
+
+      return handlerValue(response);
     },
     (methodName) => new Error(`Method "${methodName}" not found in controller "${controllerDef.name}"`),
   );
@@ -314,15 +354,17 @@ function createControllerProxy(
  * - Controller and method names, at run time only: reading one the definition does not have
  *   throws. The return type is `Record<string, ControllerClient>`, so any name compiles.
  * - Nothing checks the types of the arguments or the result. Each method is
- *   `(...args: any[]) => Promise<any>`. The arguments are the handler's `@Param`, `@Query` and
+ *   `(...args: any[]) => Promise<unknown>`. The arguments are the handler's `@Param`, `@Query` and
  *   `@Body` parameters, one each, in the order the handler declares them. A `@Header`, `@Cookie`,
  *   `@Req`, custom-extractor, file or form-field parameter takes no argument, wherever it is
  *   declared (through 0.8 it took one and dropped it, shifting every later argument). Extra
  *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused;
  *   a query array arrives as an array, and the body as JSON (see below).
- * - The promise resolves the HTTP client's success envelope, whose `result` is the server's own
- *   `{ success, result }` body: the handler's return value is at `response.result.result`. A 4xx
- *   or 5xx response rejects.
+ * - The promise resolves with the value the handler returned. A failure rejects with the
+ *   `OneBunBaseError` subclass its status names, carrying the callee's `error`, `code` and
+ *   `details`: a `ConflictError` the handler threw arrives as a `ConflictError` with its 409.
+ *   A status without a class of its own is an `HttpStatusError` with that `code`, and a timeout
+ *   or a refused connection a `TransportError` with code `0`.
  *
  * @param definition - Service definition created by createServiceDefinition()
  * @param options - Client options including URL, timeout, retries, etc.
@@ -341,8 +383,8 @@ function createControllerProxy(
  *   retries: { max: 3, delay: 100, backoff: 'exponential' },
  * });
  *
- * // Calls GET /users/:id on UsersController.getById. `response` is `any`.
- * const response = await usersClient.UsersController.getById('123');
+ * // Calls GET /users/:id on UsersController.getById. `user` is `unknown`: annotate or check it.
+ * const user = await usersClient.UsersController.getById('123');
  * ```
  *
  * Each path parameter value is converted to text and percent-encoded with `encodeURIComponent`,

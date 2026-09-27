@@ -12,12 +12,7 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
-import {
-  Cause,
-  Effect,
-  pipe,
-  Runtime,
-} from 'effect';
+import { Effect, pipe } from 'effect';
 
 import { createHttpClient } from './client.js';
 import {
@@ -30,6 +25,7 @@ import { makeRequestsService, RequestsService } from './service.js';
 import {
   type ErrorResponse,
   HttpMethod,
+  HttpStatusError,
   type OneBunAuthConfig,
   type OneBunBaseError,
   type RequestMetricsData,
@@ -181,14 +177,12 @@ describe('redirect policy', () => {
       expect(a.arrivals).toHaveLength(1);
       expect(b.arrivals).toHaveLength(0);
 
-      // The Promise API rejects, with the same failure inside
+      // The Promise API rejects with the same failure, as the class its 307 names: none but the
+      // status-preserving one
       const rejection: unknown = await client.post(url, { n: 1 }).then(() => undefined, (error: unknown) => error);
-      expect(Runtime.isFiberFailure(rejection)).toBe(true);
-      if (Runtime.isFiberFailure(rejection)) {
-        expect(Cause.squash(rejection[Runtime.FiberFailureCauseId])).toMatchObject({
-          error: 'REDIRECT_ERROR', code: 307, retryCount: 0,
-        });
-      }
+      expect(rejection).toBeInstanceOf(HttpStatusError);
+      expect(rejection).toMatchObject({ error: 'REDIRECT_ERROR', code: 307 });
+      expect((rejection as HttpStatusError).details).toMatchObject({ reason: 'refused-by-policy', status: 307 });
       expect(b.arrivals).toHaveLength(0);
     });
 
@@ -405,6 +399,9 @@ describe('redirect policy', () => {
       expect(handedBack._tag === 'Right' && handedBack.right).toBe(MOVED_BODY);
       expect(refused._tag === 'Left' && [refused.left.error, refused.left.details.status, refused.left.details.reason])
         .toEqual(['REDIRECT_ERROR', 302, 'refused-by-policy']);
+      // The 302 is kept as the code: up to 0.8 an InternalServerError with code 500
+      expect(refused._tag === 'Left' && refused.left).toBeInstanceOf(HttpStatusError);
+      expect(refused._tag === 'Left' && refused.left.code).toBe(302);
     });
   });
 

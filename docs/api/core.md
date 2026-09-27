@@ -1071,16 +1071,33 @@ export { Env, type EnvSchema, type InferConfigType, EnvValidationError } from '@
 // From @onebun/logger
 export type { SyncLogger } from '@onebun/logger';
 
-// From @onebun/requests
+// From @onebun/requests: the client, and the error family it rejects with.
+// `ValidationError` (422) is imported from '@onebun/requests': here the name is the
+// validation-issue interface.
 export {
+  BadGatewayError,
+  BadRequestError,
+  ConflictError,
   createHttpClient,
   type ErrorResponse,
+  ForbiddenError,
+  GatewayTimeoutError,
+  getTransportFailureKind,
   HttpStatusCode,
+  HttpStatusError,
   InternalServerError,
   isErrorResponse,
+  isHttpClientFailure,
   NotFoundError,
   OneBunBaseError,
+  ServiceUnavailableError,
   type SuccessResponse,
+  TooManyRequestsError,
+  TRANSPORT_FAILURE_CODE,
+  TransportError,
+  type TransportFailureKind,
+  UnauthorizedError,
+  withoutTransportDetails,
 } from '@onebun/requests';
 
 // From effect

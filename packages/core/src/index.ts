@@ -8,15 +8,32 @@ export {
   type EnvVariableConfig,
 } from '@onebun/envs';
 export type { SyncLogger } from '@onebun/logger';
+// The error family the HTTP client and the service client reject with, and that a handler throws.
+// `ValidationError` (422) is not here: in this package that name is the validation-issue
+// interface, so import the class from '@onebun/requests'.
 export {
+  BadGatewayError,
+  BadRequestError,
+  ConflictError,
   createHttpClient,
   type ErrorResponse,
+  ForbiddenError,
+  GatewayTimeoutError,
+  getTransportFailureKind,
   HttpStatusCode,
+  HttpStatusError,
   InternalServerError,
   isErrorResponse,
+  isHttpClientFailure,
   NotFoundError,
   OneBunBaseError,
+  ServiceUnavailableError,
   type SuccessResponse,
+  TooManyRequestsError,
+  TRANSPORT_FAILURE_CODE,
+  TransportError,
+  type TransportFailureKind,
+  UnauthorizedError,
   withoutTransportDetails,
 } from '@onebun/requests';
 // Re-export Effect and Layer from effect

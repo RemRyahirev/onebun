@@ -225,14 +225,10 @@ describe('the success envelope', () => {
       retries: { max: 0, delay: 0 },
     });
 
-    // The full arm used to send DOMAIN_FAILURE raw, and the client rejected it as a 500. The
-    // resolved value is still the HTTP client's envelope around the server's body; resolving the
-    // payload itself is the service client's own change (WI-400).
+    // The full arm used to send DOMAIN_FAILURE raw, and the client rejected it as a 500. It is
+    // the handler's value, so the call resolves with it, on either arm.
     for (const method of ['fast', 'full'] as const) {
-      expect(await client.EnvelopeController[method]()).toMatchObject({
-        success: true,
-        result: { success: true, result: DOMAIN_FAILURE },
-      });
+      expect(await client.EnvelopeController[method]()).toEqual(DOMAIN_FAILURE);
     }
   });
 });

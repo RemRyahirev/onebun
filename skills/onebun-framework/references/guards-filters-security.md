@@ -348,7 +348,7 @@ file/form parameter decorators.
 | Error type | HTTP status | Body |
 |---|---|---|
 | `HttpException` | exception's `statusCode` | `{ success: false, error: message, code: statusCode, details: {} }` |
-| `OneBunBaseError` | `toHttpStatus(error.code)` | `error.toErrorResponse()` → `{ success: false, error, code, details, originalError }` |
+| `OneBunBaseError` | `error.code` when it is 400–599, else 500 | `error.toErrorResponse()` → `{ success: false, error, code, details, originalError }` |
 | Any other `Error` or thrown value | `toHttpStatus(error.code)`, else 500 | `{ success: false, error: 'Internal Server Error', code, details: {} }` |
 
 Three things about the last row that a reader will otherwise get wrong:
@@ -390,15 +390,33 @@ details of an error `@onebun/requests` produced: an `HTTP_ERROR`'s `details.head
 `set-cookie`), `details.url` and `details.details` (the upstream's body); a `REDIRECT_ERROR`'s
 `details.url` and `details.location`; the raw error in `details.details` of a transport failure
 (Bun's connection error names the URL) and of `RESPONSE_PARSE/READ/DECODE_ERROR`. They are dropped at
-any depth — `client.req()` nests the failure under `details.originalError` — by serializing with the
-`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`).
+any depth — `client.req()` with an `errors` map nests the failure under `details.originalError` — by serializing with the
+`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`). Since 0.9 every
+Promise method of the HTTP client and the service client reject with such a `OneBunBaseError` (the class
+the status names, the client's record as `details` by reference), so an escaped client call answers with
+the upstream's status minus the transport details — not an unhandled 500 as with 0.8's `FiberFailure`. A
+code outside 400–599 (a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx, a `RESPONSE_PARSE_ERROR`'s 2xx)
+answers HTTP 500 and keeps the `code` in the body; a OneBun client reading such a body takes the HTTP
+status (500), never a `TransportError` — a body's `code` counts only when it is 400–599. A OneBun
+callee's own error (`{ success: false, error, code, details }` in its body) keeps its status and `error`
+on the way out, but its `details` and `originalError` go out as `{}`: they were written for the calling
+service's code, which reads them whole. To pass them on, throw your own error with a copy
+(`new ConflictError(e.error, { ...e.details })`). The escaped client failure is also LOGGED at error level
+(`Unhandled error in <Controller>.<handler>:` with the error and `{ code, details }`, `details` minus
+the transport details: no URL, upstream headers or body — log those where you catch), unlike a `OneBunBaseError`
+the application throws itself; `isHttpClientFailure(error)` (from `@onebun/core` / `@onebun/requests`)
+tells one apart. The client's own `AUTH_ERROR` (signing failed) is an `UnauthorizedError`, 401 — map it
+if your caller must not read it as its own credentials failing.
 `exposeErrorDetails: true` sends them. Only records the client built are touched: an author-written
 `details: { headers, url }` is sent whole, and so is a COPY of a client record
 (`{ ...e.details, extra }`) — rebuild errors from `e.details` by reference, or pick fields. A filter
 of your own that serializes such an error, or puts its `details` into a body of its own (a
 `ValidationError` from an upstream's 422 carries the client's record as `details`):
-`JSON.stringify(body, withoutTransportDetails)`. Filters see only throws: a handler that RETURNS a
-client failure (`return outcome.left`) sends it whole as its `result`.
+`JSON.stringify(body, withoutTransportDetails)`. A filter of your own that answers with `error.code` as
+the HTTP status must map a code outside 400–599 to 500 (`error.code >= 400 && error.code <= 599 ?
+error.code : 500`): `new Response(body, { status: 0 })` throws RangeError, the filter is reported as
+buggy and the default filter answers, and a 3xx or 2xx would read as success. Filters see only throws:
+a handler that RETURNS a client failure (`return outcome.left`) sends it whole as its `result`.
 
 `httpEnvelope: true` overrides the status column: every row answers HTTP 200 and the real status
 lives in `code`.

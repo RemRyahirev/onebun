@@ -44,11 +44,57 @@ export const markTransportDetails = <D extends Record<string, unknown>>(
 };
 
 /**
+ * `record`, which an upstream sent in its error body, registered as transport details under every
+ * key it has: `withoutTransportDetails` serializes it as `{}`. Returns the same object, unchanged.
+ *
+ * The upstream wrote it for its own caller, this application, as it wrote an `HTTP_ERROR`'s body:
+ * a OneBun callee's `details` can name its database host or the statement that failed.
+ */
+export const markUpstreamRecord = <D extends Record<string, unknown>>(record: D): D =>
+  markTransportDetails(record, Object.keys(record));
+
+/**
+ * Register the record of a failure the client produced, with nothing to leave out, unless it is
+ * registered already: every failure record is then one {@link isHttpClientFailure} recognises,
+ * including those with no transport details to withhold (`AUTH_ERROR`, `RESPONSE_TOO_LARGE`, ...).
+ */
+export const markClientFailureRecord = (record: unknown): void => {
+  if (typeof record === 'object' && record !== null && !transportDetailKeys.has(record)) {
+    transportDetailKeys.set(record, []);
+  }
+};
+
+/**
+ * Whether `failure` is a failure of the HTTP client: an `ErrorResponse` the Effect API fails with,
+ * or an error whose `details` is that failure's record, by reference. That is the error every
+ * Promise method of `HttpClient` and `RequestsService` and the service client rejects with, the
+ * error the `RequestsService` Effect API fails with, and one built from a failure by
+ * `OneBunBaseError.fromErrorResponse` or around its `details`.
+ *
+ * A `OneBunBaseError` is otherwise an answer its author chose, but nobody in this application chose
+ * this one's status: the upstream or the network did. The application logs it when a handler lets
+ * it escape. A copy of the record, `{ ...failure.details }`, is yours, and is not recognised.
+ *
+ * @see docs:api/requests.md
+ */
+export const isHttpClientFailure = (failure: unknown): boolean => {
+  if (typeof failure !== 'object' || failure === null || !('details' in failure)) {
+    return false;
+  }
+
+  const { details } = failure as { details: unknown };
+
+  return typeof details === 'object' && details !== null && transportDetailKeys.has(details);
+};
+
+/**
  * A `JSON.stringify` replacer that leaves the transport details of an HTTP-client error out:
  * `details.headers` (the upstream's response headers, `set-cookie` included), `details.url` (the
  * request URL and its query), `details.location` (a redirect's `Location`) and `details.details`
- * (the upstream's body, or the raw error the transport failed with). Everything else, including
- * every error the client did not produce, serializes exactly as it does without the replacer.
+ * (the upstream's body, or the raw error the transport failed with). An error an upstream sent in
+ * its body (`{ success: false, error, code, details }`) keeps its `error` and `code`, and its
+ * `details` and `originalError` serialize as `{}`. Everything else, including every error the
+ * client did not produce, serializes exactly as it does without the replacer.
  *
  * It reaches a client error at any depth — the `originalError` that `client.req()` wraps, an error
  * that carries a client error's `details` as its own — because `JSON.stringify` hands the replacer
@@ -69,7 +115,7 @@ export const withoutTransportDetails = (_key: string, value: unknown): unknown =
 
   const withheld = transportDetailKeys.get(value);
 
-  if (withheld === undefined) {
+  if (withheld === undefined || withheld.length === 0) {
     return value;
   }
 

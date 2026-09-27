@@ -115,7 +115,13 @@ export type ApiResponse<T = unknown, E extends string = string, R extends string
   | ErrorResponse<E, R>;
 
 /**
- * Base OneBun error class
+ * Base OneBun error class.
+ *
+ * What the Promise API of `@onebun/requests` and the service client reject with: a failure's
+ * `ErrorResponse` becomes the subclass {@link OneBunBaseError.fromErrorResponse} picks, with the
+ * failure's `error`, `code` and `details`.
+ *
+ * @see docs:api/requests.md
  */
 export abstract class OneBunBaseError<
   E extends string = string,
@@ -142,6 +148,15 @@ export abstract class OneBunBaseError<
     };
   }
 
+  /**
+   * The error an `ErrorResponse` stands for: the class named after its `code`, carrying its
+   * `error`, `details` (the same record, not a copy) and `originalError`.
+   *
+   * A `code` without a class of its own keeps its value: `0`, a transport failure, becomes a
+   * {@link TransportError}, and any other code a {@link HttpStatusError} with that code. Up to 0.8
+   * both became an `InternalServerError` with code 500, so a 418 read as a 500 and a timeout as a
+   * server failure.
+   */
   static fromErrorResponse<U extends string, V extends string>(
     errorResponse: ErrorResponse<U, V>,
   ): OneBunBaseError<U, V> {
@@ -212,8 +227,15 @@ export abstract class OneBunBaseError<
           errorResponse.details,
           errorResponse.originalError,
         );
+      case TRANSPORT_FAILURE_CODE:
+        return new TransportError<U, V>(
+          errorResponse.error,
+          errorResponse.details,
+          errorResponse.originalError,
+        );
       default:
-        return new InternalServerError<U, V>(
+        return new HttpStatusError<U, V>(
+          errorResponse.code,
           errorResponse.error,
           errorResponse.details,
           errorResponse.originalError,
@@ -316,6 +338,49 @@ export class GatewayTimeoutError<
   R extends string = string,
 > extends OneBunBaseError<E, R> {
   public readonly code = HttpStatusCode.GATEWAY_TIMEOUT;
+}
+
+/**
+ * An error for a status that has no class of its own — a 418, a 405, a 408 — which it keeps as
+ * its `code`.
+ *
+ * The HTTP client also uses it for a failure whose `code` is the status of a response that did
+ * arrive but is not an error status: a `REDIRECT_ERROR` (its 3xx), and a `RESPONSE_PARSE_ERROR`,
+ * `RESPONSE_READ_ERROR`, `RESPONSE_TOO_LARGE` or `RESPONSE_DECODE_ERROR` of a 2xx or 3xx. The
+ * default exception filter answers a code outside 400–599 with HTTP 500.
+ *
+ * @see docs:api/requests.md
+ */
+export class HttpStatusError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
+  public readonly code: number;
+
+  constructor(
+    code: number,
+    error: E,
+    details: Record<string, unknown> = {},
+    originalError?: OneBunError<R>,
+  ) {
+    super(error, details, originalError);
+    this.code = code;
+  }
+}
+
+/**
+ * A request that failed before a complete response arrived: the client-side timeout
+ * (`TIMEOUT_ERROR`), an abort (`ABORT_ERROR`) or a network failure (`FETCH_ERROR`). Its `code` is
+ * {@link TRANSPORT_FAILURE_CODE}, `0`, since no status describes it, and
+ * `getTransportFailureKind(error)` reads the kind.
+ *
+ * @see docs:api/requests.md
+ */
+export class TransportError<
+  E extends string = string,
+  R extends string = string,
+> extends OneBunBaseError<E, R> {
+  public readonly code: number = TRANSPORT_FAILURE_CODE;
 }
 
 /**
@@ -499,7 +564,8 @@ export type TransportFailureKind = 'timeout' | 'abort' | 'network';
 export const TRANSPORT_FAILURE_CODE = 0;
 
 /**
- * Read the transport failure kind off a response, if it is one.
+ * Read the transport failure kind off a failure, if it is one: an `ErrorResponse` (the Effect
+ * API's failure) or the `OneBunBaseError` the Promise API rejects with.
  *
  * Returns `undefined` for every response that came back from a server complete, including 5xx. A
  * response whose body timed out did not: it is a `'timeout'`, and the status that arrived is in
@@ -508,11 +574,13 @@ export const TRANSPORT_FAILURE_CODE = 0;
  * @see docs:api/requests.md
  */
 export function getTransportFailureKind(response: unknown): TransportFailureKind | undefined {
-  if (!isErrorResponse(response) || response.code !== TRANSPORT_FAILURE_CODE) {
+  const failure = response instanceof OneBunBaseError || isErrorResponse(response) ? response : undefined;
+
+  if (failure === undefined || failure.code !== TRANSPORT_FAILURE_CODE) {
     return undefined;
   }
 
-  const kind = response.details?.transport;
+  const kind = failure.details?.transport;
 
   return kind === 'timeout' || kind === 'abort' || kind === 'network' ? kind : undefined;
 }

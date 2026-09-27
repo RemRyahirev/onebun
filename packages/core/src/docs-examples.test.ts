@@ -104,6 +104,7 @@ import {
   NotFoundError,
   InternalServerError,
   OneBunBaseError,
+  ConflictError,
   Env,
   validate,
   validateOrThrow,
@@ -194,6 +195,7 @@ import {
   registerModule,
   resetRegistrations,
   createHttpClient,
+  isHttpClientFailure,
   withoutTransportDetails,
 } from './';
 
@@ -3602,7 +3604,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
   /**
    * @source docs:api/requests.md#service-client-typing
    */
-  it('should check controller and method names at run time only, and resolve an untyped envelope', async () => {
+  it('should check controller and method names at run time only, and resolve the handler value as unknown', async () => {
     const received: unknown[] = [];
 
     @Controller('/users')
@@ -3635,38 +3637,38 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       });
 
       // From the table, compile time: the client is `Record<string, ControllerClient>`, the
-      // exported `ServiceClient<TDef>` is the same string index, and the result is `any`. These
-      // lines are checked by `bun run typecheck`, which covers this file.
+      // exported `ServiceClient<TDef>` is the same string index, and the result is `unknown`, not
+      // `any`. These lines are checked by `bun run typecheck`, which covers this file.
       type IsAny<T> = 0 extends 1 & T ? true : false;
+      type IsUnknown<T> = IsAny<T> extends true ? false : unknown extends T ? true : false;
+      type Result = Awaited<ReturnType<ControllerClient[string]>>;
       const asRecord: Record<string, ControllerClient> = usersClient;
       const asServiceClient: ServiceClient<ServiceDefinition> = usersClient;
-      const resultIsAny: IsAny<Awaited<ReturnType<ControllerClient[string]>>> = true;
+      const resultIsAny: IsAny<Result> = false;
+      const resultIsUnknown: IsUnknown<Result> = true;
       expect(asRecord).toBe(usersClient);
       expect(asServiceClient).toBe(usersClient);
-      expect(resultIsAny).toBe(true);
+      expect(resultIsAny).toBe(false);
+      expect(resultIsUnknown).toBe(true);
 
       interface User {
         id: string;
         name: string;
       }
 
-      // From docs: the envelope, exactly as the comment on the page shows it
-      const response = await usersClient.UsersController.findById('123');
-      expect(response).toEqual({
-        success: true,
-        result: { success: true, result: { id: '123', name: 'Ada' } },
-        statusCode: 200,
-        retryCount: 0,
-      });
-
-      // From docs: the annotation is an assertion, and the handler's value is two levels down
-      const user: User = response.result.result;
+      // From docs: the assertion is the caller's, and the value is the handler's own
+      const user = (await usersClient.UsersController.findById('123')) as User;
       expect(user).toEqual({ id: '123', name: 'Ada' });
+
+      // From the llm-only notes: a stale read of the 0.8 envelope no longer compiles
+      const found = await usersClient.UsersController.findById('123');
+      // @ts-expect-error `found` is unknown: `.result.result` was the 0.8 envelope
+      expect(found.result).toBeUndefined();
 
       // From docs: extra arguments are dropped without an error, and a path value is sent as text
       await usersClient.UsersController.findById('123', 'extra', 42);
       await usersClient.UsersController.findById(42);
-      expect(received).toEqual(['123', '123', '42']);
+      expect(received).toEqual(['123', '123', '123', '42']);
 
       // From the table, run time: a name the definition lacks compiles and throws when it is read
       expect(() => usersClient.UserController).toThrow(
@@ -3675,7 +3677,85 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       expect(() => usersClient.UsersController.findByld).toThrow(
         'Method "findByld" not found in controller "UsersController"',
       );
-      expect(received).toEqual(['123', '123', '42']);
+      expect(received).toEqual(['123', '123', '123', '42']);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-results
+   */
+  it('should resolve the handler value and reject with the error class the callee threw', async () => {
+    // From docs: the callee's controller, as the page shows it
+    @Controller('/items')
+    class ItemsController extends BaseController {
+      @Put('/:id')
+      update(@Param('id') _id: string, @Body() body: { revision: number }) {
+        throw new ConflictError('REVISION_CONFLICT', { expected: body.revision, actual: 2 });
+      }
+
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id, name: 'Ada' };
+      }
+
+      @Post('/')
+      create(@Body() body: { name: string }) {
+        return this.success({ id: 'b', ...body }, 201);
+      }
+
+      @Get('/:id/raw')
+      raw(@Param('id') id: string) {
+        return Response.json({ id, shape: 'mine' });
+      }
+
+      @Get('/:id/missing')
+      missing(@Param('id') id: string) {
+        throw new NotFoundError('NO_SUCH_ITEM', { id });
+      }
+    }
+
+    @Module({ controllers: [ItemsController] })
+    class ItemsModule {}
+
+    const app = new OneBunApplication(ItemsModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const itemsClient = createServiceClient(createServiceDefinition(ItemsModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+        retries: { max: 0 },
+      });
+
+      // From docs: a call resolves with the value the handler returned
+      expect(await itemsClient.ItemsController.findById('a')).toEqual({ id: 'a', name: 'Ada' });
+      // From docs: `this.success(item, 201)` resolves with its `result`, any other body whole
+      expect(await itemsClient.ItemsController.create({ name: 'Grace' })).toEqual({ id: 'b', name: 'Grace' });
+      expect(await itemsClient.ItemsController.raw('a')).toEqual({ id: 'a', shape: 'mine' });
+
+      // From docs: the caller's catch, as the page shows it
+      let caught: { error: string; code: number; details: Record<string, unknown> } | undefined;
+      try {
+        await itemsClient.ItemsController.update('a', { revision: 1 });
+      } catch (error) {
+        if (error instanceof ConflictError) {
+          caught = { error: error.error, code: error.code, details: error.details };
+        }
+      }
+
+      expect(caught).toEqual({ error: 'REVISION_CONFLICT', code: 409, details: { expected: 1, actual: 2 } });
+
+      const missing = await itemsClient.ItemsController.missing('a').then(() => undefined, (error: unknown) => error);
+      expect(missing).toBeInstanceOf(NotFoundError);
+      expect(missing).toMatchObject({ code: 404, error: 'NO_SUCH_ITEM', details: { id: 'a' } });
     } finally {
       await app.stop();
     }
@@ -3806,7 +3886,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       // From docs: sends GET /users/123?fields=name, and the header takes no argument
       const response = await usersClient.UsersController.findById('123', 'name');
       expect(sent).toEqual(['GET /users/123?fields=name']);
-      expect(response.result.result).toEqual({ id: '123', tenant: null, fields: 'name' });
+      expect(response).toEqual({ id: '123', tenant: null, fields: 'name' });
 
       // From docs: a missing @Query argument is not sent, extra arguments are dropped, and a path
       // value is sent as its text
@@ -3927,7 +4007,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       // From docs: a real value in the header's place, dropped through 0.8, now goes into the URL
       const leaked = await usersClient.UsersController.list('Bearer secret-token');
       expect(wire.slice(5)).toEqual(['GET /users/?page=Bearer+secret-token']);
-      expect(leaked.result.result).toEqual({ tenant: null, page: 'Bearer secret-token' });
+      expect(leaked).toEqual({ tenant: null, page: 'Bearer secret-token' });
 
       // ... send it through the client's `headers` option instead
       const tenantClient = createServiceClient(createServiceDefinition(UsersModule), {
@@ -3937,7 +4017,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       });
       const scoped = await tenantClient.UsersController.list();
       expect(wire.slice(6)).toEqual(['GET /users/']);
-      expect(scoped.result.result).toEqual({ tenant: 'acme' });
+      expect(scoped).toEqual({ tenant: 'acme' });
     } finally {
       globalThis.fetch = originalFetch;
       await app.stop();
@@ -4141,7 +4221,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
 
       // From docs: the tolerant handler, called by a 0.9 client and by a 0.8 caller's wire format
       const fromNewCaller = await client.PostsController.findByTags(['news', 'tech']);
-      expect(fromNewCaller.result.result).toEqual({ tags: ['news', 'tech'] });
+      expect(fromNewCaller).toEqual({ tags: ['news', 'tech'] });
 
       const fromOldCaller = (await (await fetch(`${url}/posts?tags=news%2Ctech`)).json()) as { result: unknown };
       expect(fromOldCaller.result).toEqual({ tags: ['news', 'tech'] });
@@ -4149,17 +4229,17 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       // From docs: a string-only schema answers the array with a 400; the widened one takes both
       await expect(client.PostsController.strict(['news'])).rejects.toThrow('Parameter tags validation failed');
       const widened = await client.PostsController.widened(['news']);
-      expect(widened.result.result).toEqual({ tags: ['news'] });
+      expect(widened).toEqual({ tags: ['news'] });
       const widenedText = await client.PostsController.widened('news');
-      expect(widenedText.result.result).toEqual({ tags: 'news' });
+      expect(widenedText).toEqual({ tags: 'news' });
 
       // From docs, "Before": serialized by the caller, so @Body() receives the JSON text as a string
       const before = await client.UsersController.create(JSON.stringify({ name: 'Ada' }));
-      expect(before.result.result).toEqual({ body: '{"name":"Ada"}' });
+      expect(before).toEqual({ body: '{"name":"Ada"}' });
 
       // From docs, "After": the value
       const after = await client.UsersController.create({ name: 'Ada' });
-      expect(after.result.result).toEqual({ body: { name: 'Ada' } });
+      expect(after).toEqual({ body: { name: 'Ada' } });
 
       // From docs: code that reads the raw request sees `tags[]` keys and a quoted string body
       const raw: unknown[] = [];
@@ -4375,32 +4455,17 @@ describe('An uncaught client error and your caller (docs/api/requests.md)', () =
       const response = await fetch(`${base}/invoices/42`);
       const text = await response.text();
 
-      expect(response.status).toBe(500);
+      // req() rejects with billing's own 404, a NotFoundError, and the caller gets that status
+      expect(response.status).toBe(404);
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain('BODY-SECRET');
       expect(text).not.toContain(billingOrigin);
       // The body the page prints, field for field
       expect(JSON.parse(text)).toEqual({
         success: false,
-        error: 'REQUEST_FAILED',
-        code: 500,
-        details: {
-          originalError: {
-            _id: 'FiberFailure',
-            cause: {
-              _id: 'Cause',
-              _tag: 'Fail',
-              failure: {
-                success: false,
-                error: 'HTTP_ERROR',
-                code: 404,
-                traceId: expect.any(String),
-                details: { duration: expect.any(Number), method: 'GET' },
-                retryCount: 0,
-              },
-            },
-          },
-        },
+        error: 'HTTP_ERROR',
+        code: 404,
+        details: { duration: expect.any(Number), method: 'GET' },
       });
     });
   });
@@ -4448,10 +4513,112 @@ describe('An uncaught client error and your caller (docs/api/requests.md)', () =
       const text = await response.text();
 
       expect(response.status).toBe(200);
-      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: 500 });
+      expect(JSON.parse(text)).toEqual({
+        success: false,
+        error: 'HTTP_ERROR',
+        code: 404,
+        details: { duration: expect.any(Number), method: 'GET' },
+      });
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain(billingOrigin);
     });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('keeps a OneBun upstream\'s details from the caller, unless you send a copy', async () => {
+    // The callee the snippet calls `inventory`
+    @Controller('/inventory')
+    class InventoryController extends BaseController {
+      @Put('/:id')
+      reserve(@Param('id') _id: string) {
+        throw new ConflictError('ALREADY_RESERVED', { expected: 1, actual: 2 });
+      }
+    }
+
+    @Module({ controllers: [InventoryController] })
+    class InventoryModule {}
+
+    const inventoryApp = new OneBunApplication(InventoryModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await inventoryApp.start();
+    const inventory = createServiceClient(createServiceDefinition(InventoryModule), {
+      url: `http://127.0.0.1:${inventoryApp.getPort()}`,
+    });
+
+    // From docs: the snippet's controller, plus a route that lets the same error escape as it is
+    @Controller('/orders')
+    class OrdersController extends BaseController {
+      @Put('/:id/items')
+      async reserve(@Param('id') id: string) {
+        try {
+          return await inventory.InventoryController.reserve(id);
+        } catch (error) {
+          if (error instanceof ConflictError) {
+            // `{ expected, actual }` from inventory: a copy is your record, and is sent whole
+            throw new ConflictError(error.error, { ...error.details });
+          }
+          throw error;
+        }
+      }
+
+      @Put('/:id/escaped')
+      async escaped(@Param('id') id: string) {
+        return await inventory.InventoryController.reserve(id);
+      }
+    }
+
+    @Module({ controllers: [OrdersController] })
+    class OrdersModule {}
+
+    const ordersApp = new OneBunApplication(OrdersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await ordersApp.start();
+
+    try {
+      const base = `http://127.0.0.1:${ordersApp.getPort()}`;
+      const copied = await fetch(`${base}/orders/7/items`, { method: 'PUT' });
+      const escaped = await fetch(`${base}/orders/7/escaped`, { method: 'PUT' });
+
+      expect(copied.status).toBe(409);
+      expect(await copied.json()).toEqual({
+        success: false, error: 'ALREADY_RESERVED', code: 409, details: { expected: 1, actual: 2 },
+      });
+      // Your code read them; your caller gets the status and the name
+      expect(escaped.status).toBe(409);
+      expect(await escaped.json()).toEqual({
+        success: false, error: 'ALREADY_RESERVED', code: 409, details: {},
+      });
+    } finally {
+      await ordersApp.stop();
+      await inventoryApp.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('logs the escaped client failure with its code and details, and tells it apart with isHttpClientFailure', async () => {
+    const recorder = makeRecordingLoggerLayer();
+    const billing = createHttpClient({ baseUrl: billingOrigin, retries: { max: 0 } });
+    const rejection = await billing.req('GET', '/invoices/42').catch((error: unknown) => error);
+
+    expect(isHttpClientFailure(rejection)).toBe(true);
+    expect(isHttpClientFailure(new NotFoundError('NO_SUCH_INVOICE'))).toBe(false);
+
+    const app = new OneBunApplication(invoicesModule(), { port: 0, loggerLayer: recorder.layer });
+    await app.start();
+
+    try {
+      await (await fetch(`http://127.0.0.1:${app.getPort()}/invoices/42`)).text();
+      const logged = recorder.records.filter((record) => record.level === 'error');
+
+      expect(logged.map((record) => record.message)).toEqual(['Unhandled error in InvoicesController.findOne:']);
+      expect(logged[0].args[0]).toBeInstanceOf(NotFoundError);
+      // Its code and the details the caller's body keeps; not billing's URL, headers or body
+      expect(logged[0].args[1]).toEqual({ code: 404, details: { method: 'GET', duration: expect.any(Number) } });
+    } finally {
+      await app.stop();
+    }
   });
 });
 

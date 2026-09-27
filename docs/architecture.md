@@ -688,16 +688,18 @@ const usersClient = createServiceClient(UsersServiceDefinition, {
   url: 'http://localhost:3001',
 });
 
-// Sends GET /users/123. The key is the controller class name
-const response = await usersClient.UsersController.findById('123');
-
-// `response` is `any`: the HTTP client's envelope around the server's `{ success, result }` body
-const user = response.result.result;
+// Sends GET /users/123 and resolves with what the handler returned: { id: '123', name: 'Ada' }.
+// The key is the controller class name
+const user = await usersClient.UsersController.findById('123');
 ```
 
 The client checks controller and method names at run time: a name the definition lacks throws when
 it is read. It does not check types. Any name compiles, arguments are `any[]`, and the result is
-`any`. See [What the client checks](/api/requests#service-client-typing).
+`unknown`. See [What the client checks](/api/requests#service-client-typing).
+
+A failure rejects with the error class its status names: a `ConflictError` the callee's handler
+throws arrives as a `ConflictError`, with its `code`, `error` and `details`. See
+[What a call resolves and rejects with](/api/requests#service-client-results).
 
 <llm-only>
 

@@ -30,7 +30,11 @@ import { HttpException } from './http-exception';
  * ```typescript
  * class HttpExceptionFilter implements ExceptionFilter {
  *   catch(error: unknown, ctx: HttpExecutionContext): Response {
- *     const status = error instanceof OneBunBaseError ? error.code : 500;
+ *     // An HTTP-client error's code need not be an error status: 0 for a timeout or a refused
+ *     // connection, a 3xx for a refused redirect. `new Response` throws RangeError on a 0
+ *     const status = error instanceof OneBunBaseError && error.code >= 400 && error.code <= 599
+ *       ? error.code
+ *       : 500;
  *     return new Response(JSON.stringify({ message: String(error) }), {
  *       status,
  *       headers: { 'Content-Type': 'application/json' },
@@ -141,6 +145,23 @@ function toHttpStatus(code: unknown): number {
     : HttpStatusCode.INTERNAL_SERVER_ERROR;
 }
 
+const MIN_ERROR_STATUS = 400;
+
+/**
+ * The status the default filter answers a `OneBunBaseError` with: its `code` when that is an error
+ * status (400–599), otherwise 500. The body keeps the `code` either way.
+ *
+ * Narrower than {@link toHttpStatus} because the HTTP client rejects with a `OneBunBaseError`
+ * whose `code` need not be an error status: `0` for a timeout or a refused connection, the 3xx of a
+ * `REDIRECT_ERROR`, the 200 of a body that did not parse. Answered with that status, an escaped
+ * client error would tell the caller "200 OK" or send a redirect without a `Location`.
+ */
+function toErrorStatus(code: number): number {
+  const status = toHttpStatus(code);
+
+  return status >= MIN_ERROR_STATUS ? status : HttpStatusCode.INTERNAL_SERVER_ERROR;
+}
+
 /**
  * What the default filter answers for an error it did not recognise.
  *
@@ -205,7 +226,7 @@ export function createDefaultExceptionFilter(
           : JSON.stringify(error.toErrorResponse(), withoutTransportDetails);
 
         return new Response(body, {
-          status: httpEnvelope ? HttpStatusCode.OK : toHttpStatus(error.code),
+          status: httpEnvelope ? HttpStatusCode.OK : toErrorStatus(error.code),
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention
             'Content-Type': 'application/json',

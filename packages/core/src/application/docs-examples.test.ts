@@ -29,25 +29,33 @@ import type {
 } from '@onebun/core';
 import {
   ApiResponse,
+  BadGatewayError,
+  BadRequestError,
   BaseController,
   BaseMiddleware,
   BaseService,
   Body,
+  ConflictError,
   Controller,
   createHttpClient,
   Delete,
   Effect,
   Env,
   EnvValidationError,
+  ForbiddenError,
+  GatewayTimeoutError,
   Get,
   getControllerMetadata,
   getServiceTag,
+  getTransportFailureKind,
   Header,
   HttpException,
   HttpMethod,
   HttpStatusCode,
+  HttpStatusError,
   InternalServerError,
   isErrorResponse,
+  isHttpClientFailure,
   Layer,
   Middleware,
   Module,
@@ -60,9 +68,15 @@ import {
   Put,
   Query,
   Service,
+  ServiceUnavailableError,
+  TooManyRequestsError,
+  TRANSPORT_FAILURE_CODE,
+  TransportError,
   type,
+  UnauthorizedError,
   UseMiddleware,
   validate,
+  withoutTransportDetails,
 } from '@onebun/core';
 import { makeMockLoggerLayer } from '@onebun/core/testing';
 import * as envs from '@onebun/envs';
@@ -1975,13 +1989,27 @@ describe('Core re-exports (docs/api/core.md)', () => {
     expect(Env).toBe(envs.Env);
     expect(EnvValidationError).toBe(envs.EnvValidationError);
 
-    // From @onebun/requests
+    // From @onebun/requests: the client, and the error family it rejects with
+    expect(BadGatewayError).toBe(requests.BadGatewayError);
+    expect(BadRequestError).toBe(requests.BadRequestError);
+    expect(ConflictError).toBe(requests.ConflictError);
     expect(createHttpClient).toBe(requests.createHttpClient);
+    expect(ForbiddenError).toBe(requests.ForbiddenError);
+    expect(GatewayTimeoutError).toBe(requests.GatewayTimeoutError);
+    expect(getTransportFailureKind).toBe(requests.getTransportFailureKind);
     expect(HttpStatusCode).toBe(requests.HttpStatusCode);
+    expect(HttpStatusError).toBe(requests.HttpStatusError);
     expect(InternalServerError).toBe(requests.InternalServerError);
     expect(isErrorResponse).toBe(requests.isErrorResponse);
+    expect(isHttpClientFailure).toBe(requests.isHttpClientFailure);
     expect(NotFoundError).toBe(requests.NotFoundError);
     expect(OneBunBaseError).toBe(requests.OneBunBaseError);
+    expect(ServiceUnavailableError).toBe(requests.ServiceUnavailableError);
+    expect(TooManyRequestsError).toBe(requests.TooManyRequestsError);
+    expect(TRANSPORT_FAILURE_CODE).toBe(requests.TRANSPORT_FAILURE_CODE);
+    expect(TransportError).toBe(requests.TransportError);
+    expect(UnauthorizedError).toBe(requests.UnauthorizedError);
+    expect(withoutTransportDetails).toBe(requests.withoutTransportDetails);
 
     // From effect
     expect(Effect).toBe(effect.Effect);

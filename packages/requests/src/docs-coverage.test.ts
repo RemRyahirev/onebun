@@ -23,11 +23,13 @@ import {
   HttpStatusCode,
   InternalServerError,
   isErrorResponse,
+  isHttpClientFailure,
   NotFoundError,
   OneBunBaseError,
   TRANSPORT_FAILURE_CODE,
   makeSingleReplicaNonceStore,
   verifyOneBunRequest,
+  withoutTransportDetails,
 } from '@onebun/requests';
 
 interface RecordedCall {
@@ -352,23 +354,19 @@ describe('Mapping upstream failures to framework errors (docs/api/requests.md)',
     constructor(private readonly client: HttpClient) {}
 
     async findById(id: string): Promise<User> {
-      const outcome = await Effect.runPromise(
-        Effect.either(this.client.getEffect<User>(`/users/${id}`)),
-      );
-
-      if (outcome._tag === 'Left') {
-        if (outcome.left.code === 404) {
+      try {
+        return await this.client.req<User>('GET', `/users/${id}`);
+      } catch (error) {
+        if (error instanceof NotFoundError) {
           throw new NotFoundError('User', { id });
         }
-
-        throw new InternalServerError(outcome.left.error, outcome.left.details);
+        if (error instanceof OneBunBaseError) {
+          // The upstream's status is not this service's: answer 500 with its name. Its details, by
+          // reference, stay the upstream's record: the default filter keeps them out of the body
+          throw new InternalServerError(error.error, error.details);
+        }
+        throw error;
       }
-
-      if (isErrorResponse(outcome.right)) {
-        throw new InternalServerError(outcome.right.error);
-      }
-
-      return outcome.right.result;
     }
   }
 
@@ -416,9 +414,12 @@ describe('Mapping upstream failures to framework errors (docs/api/requests.md)',
 
       expect(serverError?.code).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
       expect(serverError?.error).toBe('HTTP_ERROR');
-      // `outcome.left.details` is carried across into the framework error
+      // `error.details` is carried across into the framework error: the client's record itself
       expect(serverError?.details?.method).toBe('GET');
       expect(String(serverError?.details?.url)).toBe(`${server.baseUrl}/users/boom`);
+      // ...by reference, so the default filter still leaves the upstream's URL out of the body
+      expect(isHttpClientFailure(serverError)).toBe(true);
+      expect(JSON.stringify(serverError, withoutTransportDetails)).not.toContain('/users/boom');
     } finally {
       server.stop();
     }

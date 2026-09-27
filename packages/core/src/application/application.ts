@@ -35,8 +35,10 @@ import {
   createErrorResponse,
   createSuccessResponse,
   HttpStatusCode,
+  isHttpClientFailure,
   OneBunBaseError,
   setTraceContextProvider,
+  withoutTransportDetails,
 } from '@onebun/requests';
 
 import { awaitBounded } from '../await-bounded';
@@ -631,6 +633,25 @@ function resolvePathUnderRoot(rootDir: string, relativePath: string): string | n
   }
 
   return null;
+}
+
+/**
+ * What the "Unhandled error" line of an HTTP-client failure a handler let escape carries beside the
+ * error, whose message is only its `error` name: its `code`, and its `details` as the default filter
+ * sends them to the caller, through the same replacer — an `HTTP_ERROR`'s method and duration, a
+ * transport failure's kind, a redirect's reason. The request URL (its query can carry a token), the
+ * upstream's headers (its `set-cookie` among them) and body, and a OneBun callee's own `details`
+ * stay out: log what you need of them where you catch the error.
+ */
+function clientFailureLogContext(error: unknown): Record<string, unknown> {
+  const { code, details } = error as { code?: unknown; details?: unknown };
+
+  try {
+    return { code, details: JSON.parse(JSON.stringify(details, withoutTransportDetails)) };
+  } catch {
+    // A record that does not serialize must not cost the log line its code
+    return { code };
+  }
 }
 
 /**
@@ -2913,7 +2934,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      *
      * `Unhandled error in <Controller>.<handler>:` is written only on the way to the default
      * filter — every filter declined, or one misbehaved — and never for an `HttpException` or a
-     * `OneBunBaseError`. An error a filter answered is not logged here at all.
+     * `OneBunBaseError`, except an HTTP-client failure the handler let escape, which is logged
+     * with its code and details. An error a filter answered is not logged here at all.
      */
     async function applyExceptionFilters(
       error: unknown,
@@ -2970,9 +2992,20 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // on entry: an error a filter answered is the application's own control flow — a domain
       // refusal mapped to a 4xx — and logging it at error level would bury the real failures.
       // HttpException and OneBunBaseError carry a deliberate status and are not incidents
-      // either. After a misbehaving filter this line follows that filter's own, so the error
-      // it was handed is not lost behind the filter's failure.
-      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
+      // either. Except a failure of the HTTP client the handler let escape — a refused
+      // connection, an upstream 5xx or 401: it is a OneBunBaseError, but nobody here chose its
+      // status. It was logged here while the client rejected with a FiberFailure, and the
+      // client's error keeps it logged. The logger writes an error's message, only its name here,
+      // and its stack, so its code and the details its caller may read go along as context; its
+      // transport details do not. After a misbehaving filter this line follows that filter's own,
+      // so the error it was handed is not lost behind the filter's failure.
+      if (isHttpClientFailure(error)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+          clientFailureLogContext(error),
+        );
+      } else if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
         appLogger.error(
           `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
           error instanceof Error ? error : new Error(String(error)),

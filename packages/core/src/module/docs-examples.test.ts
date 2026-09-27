@@ -1567,14 +1567,10 @@ describe('Architecture (docs/architecture.md)', () => {
         url: app.getHttpUrl(),
       });
 
-      // From docs: sends GET /users/123. The key is the controller class name
-      const response = await usersClient.UsersController.findById('123');
-
-      // From docs: `response` is the HTTP client's envelope around the server's `{ success, result }`
-      // body, so the handler's value is at `response.result.result`.
-      expect(response.success).toBe(true);
-      expect(response.result).toEqual({ success: true, result: { id: '123', name: 'Ada' } });
-      const user = response.result.result;
+      // From docs: sends GET /users/123 and resolves with what the handler returned. The key is
+      // the controller class name. Up to 0.8 this was the HTTP client's envelope around the
+      // server's own, with the value at `.result.result`.
+      const user = await usersClient.UsersController.findById('123');
       expect(user).toEqual({ id: '123', name: 'Ada' });
 
       // From docs: names are checked at run time only. The lowercase key the page used to show

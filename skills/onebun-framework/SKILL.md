@@ -226,11 +226,33 @@ The client is a plain value: an `async` factory may return it, and `await`, `JSO
 or method with `'UsersController' in client`: reading a name the definition lacks throws (a
 missing controller's error lists the available ones). See `docs/api/requests.md#service-client-as-value`.
 **The service client is not type-safe.** Names are checked at run time only; the client is
-`Record<string, ControllerClient>` and every method is `(...args: any[]) => Promise<any>`, so a
+`Record<string, ControllerClient>` and every method is `(...args: any[]) => Promise<unknown>`, so a
 misspelled name, a wrong argument or an extra one compiles (extra ones are dropped). The call
-resolves the HTTP client's envelope around the server's `{ success, result }` body: the handler's
-value is `response.result.result`. Annotate the expected type at the call site; nothing checks it.
-See `docs/api/requests.md#service-client-typing`.
+resolves with the value the handler returned (`unknown`: assert `as User` or validate; a `void`
+handler gives `undefined`, a handler's own `Response.json(body)` gives `body`). See
+`docs/api/requests.md#service-client-typing`. `createHttpClient` does NOT unwrap: pointed at a OneBun
+service, `req()` resolves the service's body, its envelope `{ success: true, result }`, so read
+`(await client.req<{ result: User }>('GET', path)).result` (the `result` of `get()` is that
+envelope). The multi-service example does this.
+**A failure rejects with a OneBun error class, never a `FiberFailure`** — for the service client and
+every Promise method of `HttpClient` (`get`, `post`, ..., `req`, `reqRaw`) and `RequestsService`.
+The class is the one `OneBunBaseError.fromErrorResponse` picks for the `code`: a callee's
+`throw new ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 })` arrives as
+`instanceof ConflictError` with `code` 409, `error` and `details` as thrown; a non-OneBun 404 is a
+`NotFoundError` with `error: 'HTTP_ERROR'`; a status without a class of its own is an
+`HttpStatusError` keeping that `code` (a 418 stays 418); a timeout / abort / refused connection is a
+`TransportError` with code `0` (`getTransportFailureKind(error)` reads the kind). All are exported from
+`@onebun/core` except `ValidationError` (import it from `@onebun/requests`: in core the name is the
+validation-issue interface). Catch with `instanceof`; nothing from `effect` is needed.
+A body's `code` counts only when it is 400–599: a OneBun service relaying its own upstream's timeout
+answers 500 with `code: 0` in the body, and that rejects as an `InternalServerError` 500 retried under
+`retryOn`, never a `TransportError`. A callee's `details` are for the caller's code; if the error escapes
+a controller, the default filter sends status and `error` with `details: {}` (and the app logs it).
+`retryCount`/`traceId` of a failure are on the Effect API's `ErrorResponse` only. Up to 0.8 the
+result was the double envelope (`response.result.result`, `.statusCode`, `.retryCount`) and a
+rejection needed `Runtime.isFiberFailure` + `Cause.squash`; `req()` threw `InternalServerError`
+`REQUEST_FAILED` 500. See `docs/api/requests.md#service-client-results` and
+`#a-failed-request-rejects`.
 
 **WebSocket clients: untyped, and Bun-only.** `createWsClient(createWsServiceDefinition(Module), { url })`
 reaches gateways by class name (a missing one reads as `undefined`); `createNativeWsClient({ url })`
@@ -639,7 +661,7 @@ module exports only `OneBunFile`, `MimeType`, `matchMimeType`, `validateFile`.
 | Error type | HTTP status | Response body |
 |---|---|---|
 | `HttpException` | exception's statusCode | `{ success: false, error: message, code: statusCode }` |
-| `OneBunBaseError` | error's code | `toErrorResponse()`: `{ success: false, error, code, details, originalError }`, minus an HTTP-client error's transport details |
+| `OneBunBaseError` | error's code if 400–599, else 500 (a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx) | `toErrorResponse()`: `{ success: false, error, code, details, originalError }`, minus an HTTP-client error's transport details and an upstream's own `details` (sent as `{}`) |
 | Any other `Error` or thrown value | 500 | `{ success: false, error: 'Internal Server Error', code: 500 }` |
 
 The third row does **not** carry the error's own message. That text is written by whatever threw — a
@@ -1158,6 +1180,7 @@ at least in the areas you're modifying.
 | `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. Since 0.9 the service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'` instead of `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
 | `client.UsersController.create(JSON.stringify(dto))`, or `findByTags(tags.join(','))` with a handler that splits `'a,b'` | `create(dto)` and `findByTags(tags)`. Since 0.9 the service client serializes every `@Body` value as JSON itself (a pre-serialized body arrives as a string) and sends a query array as `tags[]` keys, so the handler receives the array. Strings, `0`, `false`, `''` and `null` are valid bodies and arrive unchanged |
 | A service client `auth: { type: 'custom', interceptor: (c) => ({ ...c, data: { ...c.data, tenantId } }) }` | Since 0.9 `c.data` is the JSON text that is sent, not the value, so the spread sends the string's characters as keys. `if (typeof c.data === 'string') data = JSON.stringify({ ...JSON.parse(c.data), tenantId })`; sign `c.data` as it is, never `JSON.stringify(c.data)` |
+| `response.result.result` / `.statusCode` on a service-client call, or `Runtime.isFiberFailure` + `Cause.squash` on a client rejection | 0.9: the call resolves the handler's value itself (`unknown`), and rejects with the error class (`e instanceof ConflictError`, `e.code`, `e.details`) |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |

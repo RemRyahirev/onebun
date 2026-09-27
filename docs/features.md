@@ -28,7 +28,7 @@ production-grade backend services.
 ### Microservices
 - OneBunApplication multi-service mode: run multiple services from single codebase/image
 - Dev: all services in one process. Prod: ONEBUN_SERVICES=name selects services
-- Inter-service HTTP clients with createServiceDefinition/createServiceClient: routes reflected from the callee's module, controller and method names checked at run time, arguments and results untyped (`any`)
+- Inter-service HTTP clients with createServiceDefinition/createServiceClient: routes reflected from the callee's module, controller and method names checked at run time, arguments untyped, a call resolves with the handler's value (typed `unknown`) and rejects with the callee's error class
 - HMAC authentication for service-to-service communication
 
 ### Validation (ArkType)
@@ -285,6 +285,9 @@ Full-featured HTTP client with:
   POST and PATCH must opt in via `retries.methods`. See the [defaults table](/api/requests#defaults).
 - **Typed responses**: `ApiResponse<T>` with success/error discrimination; a success carries the
   upstream `statusCode` and response `headers` (see [Success Response](/api/requests#success-response))
+- **Errors as classes**: a failure rejects with the `OneBunBaseError` subclass its status names —
+  `NotFoundError`, `ConflictError`, an `HttpStatusError` for any other status, a `TransportError`
+  for a timeout (see [A failed request rejects](/api/requests#a-failed-request-rejects))
 - **Bounded responses**: `maxResponseBytes` caps the decoded body while it is read, so a gzip bomb
   or an oversized error body stops at the limit (see
   [Limiting the response size](/api/requests#max-response-bytes))
@@ -303,7 +306,8 @@ Full-featured HTTP client with:
 ### Service Clients
 `createServiceDefinition()` + `createServiceClient()` call another OneBun service by
 controller and method name, with the routes reflected from its module at run time. The names
-are checked when they are read; arguments and results are untyped (`any`).
+are checked when they are read; arguments are untyped, and a call resolves with the handler's
+value typed `unknown`. A failure rejects with the callee's error class (`ConflictError`, ...).
 → [API Reference](/api/requests#service-client-typing)
 
 ## Observability

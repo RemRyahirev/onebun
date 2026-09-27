@@ -38,6 +38,7 @@ import {
   UseFilters,
   BaseService,
   Service,
+  ConflictError,
   createHttpClient,
   withoutTransportDetails,
 } from '@onebun/core';
@@ -47,7 +48,7 @@ import { ValidationError } from '@onebun/requests';
 // `@onebun/core/testing` is a package subpath with no tsconfig path mapping, so in-repo
 // tests reach the helper directly. Every documented symbol above comes through the public
 // barrel, exactly as docs/api/exception-filters.md tells the reader to import it.
-import { makeMockLoggerLayer } from '../testing/test-utils';
+import { makeMockLoggerLayer, makeRecordingLoggerLayer } from '../testing/test-utils';
 import { TestingModule, type CompiledTestingModule } from '../testing/testing-module';
 
 // ============================================================================
@@ -1109,14 +1110,16 @@ describe('Default Filter Behaviour: an HTTP-client error (docs/api/exception-fil
       const response = await fetch(`${base}/client-error/escaped`);
       const text = await response.text();
 
-      expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      // req() rejects with the upstream's own 404, and the filter answers with it
+      expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain('BODY-SECRET');
       expect(text).not.toContain('URL-SECRET');
-      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: HTTP_INTERNAL_SERVER_ERROR });
-      expect(JSON.parse(text).details.originalError.cause.failure.details).toEqual({
-        duration: expect.any(Number),
-        method: 'GET',
+      expect(JSON.parse(text)).toEqual({
+        success: false,
+        error: 'HTTP_ERROR',
+        code: HttpStatusCode.NOT_FOUND,
+        details: { duration: expect.any(Number), method: 'GET' },
       });
     });
   });
@@ -1151,7 +1154,7 @@ describe('Default Filter Behaviour: an HTTP-client error (docs/api/exception-fil
       const text = await response.text();
 
       expect(response.status).toBe(HttpStatusCode.OK);
-      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED' });
+      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'HTTP_ERROR', code: HttpStatusCode.NOT_FOUND });
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain('URL-SECRET');
     });
@@ -1266,5 +1269,108 @@ describe('What Gets Logged (docs/api/exception-filters.md)', () => {
       expect(lines[0]).toContain('threw; falling back to the default filter');
       expect(lines[1]).toBe('Unhandled error in RefusingController.bug:');
     });
+  });
+});
+
+/**
+ * @source docs:api/exception-filters.md#default-filter-behaviour
+ */
+describe('Default Filter Behaviour: a filter that answers with error.code (docs/api/exception-filters.md)', () => {
+  let redirecting: ReturnType<typeof Bun.serve>;
+  let closedOrigin: string;
+
+  beforeAll(() => {
+    redirecting = Bun.serve({
+      port: 0,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      fetch: () => new Response(null, { status: 302, headers: { Location: '/elsewhere' } }),
+    });
+    const closed = Bun.serve({ port: 0, fetch: () => new Response('') });
+    closedOrigin = `http://127.0.0.1:${closed.port}`;
+    closed.stop(true);
+  });
+
+  afterAll(() => {
+    redirecting.stop(true);
+  });
+
+  it('answers a code outside 400-599 with 500 and keeps the rest, as the default filter does', async () => {
+    // From docs: the filter that answers with the error's code
+    const statusFilter = createExceptionFilter((error) => {
+      if (!(error instanceof OneBunBaseError)) {
+        return undefined;
+      }
+
+      const status = error.code >= 400 && error.code <= 599 ? error.code : 500;
+
+      return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+        status,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const refusing = createHttpClient({ baseUrl: closedOrigin, retries: { max: 0 } });
+    const refusingRedirects = createHttpClient({
+      baseUrl: `http://127.0.0.1:${redirecting.port}`,
+      redirect: 'error',
+      retries: { max: 0 },
+    });
+
+    @UseFilters(statusFilter)
+    @Controller('/status-filter')
+    class StatusFilterController extends BaseController {
+      @Get('/refused')
+      async refused() {
+        return await refusing.req('GET', '/x');
+      }
+
+      @Get('/redirect')
+      async redirect() {
+        return await refusingRedirects.req('GET', '/x');
+      }
+
+      @Get('/conflict')
+      conflict(): never {
+        throw new ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 });
+      }
+    }
+
+    @Module({ controllers: [StatusFilterController] })
+    class StatusFilterModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const app = new OneBunApplication(StatusFilterModule, {
+      port: 0,
+      loggerLayer: recorder.layer,
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const base = app.getHttpUrl();
+
+      // A refused connection is a TransportError coded 0: the filter answers 500 and keeps the code
+      const refused = await fetch(`${base}/status-filter/refused`);
+      expect(refused.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(await refused.json()).toMatchObject({ success: false, error: 'FETCH_ERROR', code: 0 });
+
+      // A refused redirect keeps its 302 in the body, and is not answered as one
+      const redirect = await fetch(`${base}/status-filter/redirect`, { redirect: 'manual' });
+      expect(redirect.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(redirect.headers.get('location')).toBeNull();
+      expect(await redirect.json()).toMatchObject({ success: false, error: 'REDIRECT_ERROR', code: 302 });
+
+      // An error status is answered as it is
+      const conflict = await fetch(`${base}/status-filter/conflict`);
+      expect(conflict.status).toBe(HttpStatusCode.CONFLICT);
+      expect(await conflict.json()).toMatchObject({ error: 'REVISION_CONFLICT', code: HttpStatusCode.CONFLICT });
+
+      // The filter answered each of them: none threw RangeError and fell back to the default filter
+      expect(recorder.messages('error').filter((message) => message.startsWith('Exception filter'))).toEqual([]);
+    } finally {
+      await app.stop();
+    }
   });
 });

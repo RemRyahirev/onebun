@@ -8,8 +8,10 @@ import type { OneBunRequest } from '../types';
 
 import {
   HttpStatusCode,
+  HttpStatusError,
   InternalServerError,
   NotFoundError,
+  TransportError,
 } from '@onebun/requests';
 
 import { HttpExecutionContextImpl } from '../http-guards/http-guards';
@@ -117,6 +119,28 @@ describe('defaultExceptionFilter', () => {
     expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
     const body = await response.json() as { success: boolean };
     expect(body.success).toBe(false);
+  });
+
+  it('answers a status-preserving error with its status when that is an error status', async () => {
+    const response = await defaultExceptionFilter.catch(new HttpStatusError(418, 'I_AM_A_TEAPOT'), makeContext());
+
+    expect(response.status).toBe(418);
+    expect(await response.json()).toEqual({
+      success: false, error: 'I_AM_A_TEAPOT', code: 418, details: {}, 
+    });
+  });
+
+  it.each([
+    ['a TransportError, code 0', new TransportError('TIMEOUT_ERROR', { transport: 'timeout' }), 0],
+    ['a REDIRECT_ERROR, a 3xx', new HttpStatusError(302, 'REDIRECT_ERROR'), 302],
+    ['a RESPONSE_PARSE_ERROR of a 200', new HttpStatusError(200, 'RESPONSE_PARSE_ERROR'), 200],
+  ])('answers %s with HTTP 500 and keeps the code in the body', async (_label, error, code) => {
+    // The HTTP client rejects with these. Answered with their code, the caller would read
+    // "200 OK" for a failure, or a redirect without a Location.
+    const response = await defaultExceptionFilter.catch(error, makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+    expect(await response.json()).toMatchObject({ success: false, error: error.error, code });
   });
 
   it('returns HTTP 500 for plain Error, without the error message', async () => {

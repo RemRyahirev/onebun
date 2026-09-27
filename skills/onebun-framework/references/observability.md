@@ -112,8 +112,8 @@ needs both or a `traceparent`.
   dispatch arm). The flip side: `{ ...response }` loses it — read it before copying, and never spread it back
   in to "keep" it (that makes it serializable again). `toEqual` ignores it; assert the header directly.
   `Bun.inspect`, `console.log` and `toMatchSnapshot` DO show it (`set-cookie`, `date`): log or snapshot
-  `{ ...response }` or the fields you need. `RequestsService` returns `result` only (no headers);
-  `HttpClient` and the service client carry them. `SuccessResponse.headers` exists since 0.8.2.
+  `{ ...response }` or the fields you need. `RequestsService` and the service client return the value only
+  (no headers); `HttpClient` carries them. `SuccessResponse.headers` exists since 0.8.2.
 - **An `HTTP_ERROR`'s `details.headers` is a different record**: enumerable, and a repeated `set-cookie` keeps
   only its last value. The error object keeps it, `details.url` and the upstream body; the default exception
   filter leaves those out of the caller's body when a client error escapes a controller (`withoutTransportDetails`,
@@ -156,9 +156,10 @@ needs both or a `traceparent`.
   resolves `result: undefined` so the `Location` survives — a 200/300 like that is still
   `RESPONSE_PARSE_ERROR`), metrics record the 3xx with `success: true`; `req()` returns the 3xx body.
   `RequestsService` returns `result` alone, so under `'manual'` it yields only the 3xx body — no status, no
-  `Location`: read redirects through `HttpClient` (or the service client, which returns the envelope).
-  `RequestsService` fails a refused redirect with a `OneBunBaseError` (`code` 500 as for every non-mapped
-  status, the 3xx in `details.status`). The `redirect` option exists since 0.8.2.
+  `Location`: read redirects through `HttpClient` (the service client resolves the handler's value alone too).
+  `RequestsService`, and every Promise method of `HttpClient`, fail a refused redirect with an
+  `HttpStatusError` whose `code` is the 3xx (also in `details.status`). The `redirect` option exists since
+  0.8.2.
 - **`maxResponseBytes` caps the DECODED body while it is read** (client option, or per request; the request's
   wins, `Infinity` is the same as unset — that request takes `fetch`'s path). Off by default — an uncapped
   request keeps `fetch`'s path exactly. Set, the request goes out with `decompress: false` and
@@ -186,9 +187,12 @@ needs both or a `traceparent`.
   undefined, { responseType: 'stream' })`). Under `'stream'` `timeout` is NOT a whole-response deadline: it bounds
   the wait for the headers, then each read's wait for the next chunk (restarted per read, stopped while nobody
   reads — the stream is pulled on demand), so a flowing SSE lives on and a stalled one errors `TIMEOUT_ERROR`
-  (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the plain `ErrorResponse`
-  object (`isErrorResponse(e)`), not an `Error`: `TIMEOUT_ERROR`, `RESPONSE_TOO_LARGE` (under `maxResponseBytes`,
-  counted as read; the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR`, `RESPONSE_READ_ERROR`. An
+  (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the `OneBunBaseError` the
+  Promise API rejects with for that failure, whichever API made the call (0.9; the 0.8 line errored the stream with
+  the plain `ErrorResponse`, so `isErrorResponse(e)` is now false): `TIMEOUT_ERROR` is a `TransportError`
+  (`getTransportFailureKind(e) === 'timeout'`); `RESPONSE_TOO_LARGE` (under `maxResponseBytes`, counted as read;
+  the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR` and `RESPONSE_READ_ERROR` carry the status that
+  arrived as `code` (a 200 is an `HttpStatusError`); `e.error` and `e.details` are the record's. An
   error status is read as under `'auto'` in every mode (`HTTP_ERROR` with `details.details`, retried per
   `retryOn`); a declared `Content-Length` over the cap fails the call. Nothing after the hand-over is retried,
   and the metrics duration is the time to the headers. Read to the end or cancel (`cancel()`, `break` in

@@ -15,19 +15,29 @@ import {
   beforeEach,
   afterEach,
 } from 'bun:test';
-import {
-  Cause,
-  Effect,
-  Runtime,
-} from 'effect';
+import { Cause, Effect } from 'effect';
 
 import { runPinnedRequest } from './connect-address-fixtures/fixture-protocol';
 
 import {
+  BadGatewayError,
+  BadRequestError,
   calculateRetryDelay,
+  ConflictError,
   createHttpClient,
+  ForbiddenError,
+  GatewayTimeoutError,
   getTransportFailureKind,
+  HttpStatusError,
+  InternalServerError,
   isErrorResponse,
+  NotFoundError,
+  OneBunBaseError,
+  ServiceUnavailableError,
+  TooManyRequestsError,
+  TransportError,
+  UnauthorizedError,
+  ValidationError,
   makeSingleReplicaNonceStore,
   resolveRetryConfig,
   DEFAULT_RETRY_CONFIG,
@@ -375,7 +385,8 @@ describe('Requests API Documentation Examples', () => {
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 2, delay: 1 } });
 
-        await expect(client.get('/users', undefined, { retries: { max: 0 } })).rejects.toThrow(/"code":503/);
+        await expect(client.get('/users', undefined, { retries: { max: 0 } }))
+          .rejects.toBeInstanceOf(ServiceUnavailableError);
 
         // One arrival: the per-request `retries: { max: 0 }` reached the request. Dropped, the
         // client's own `max: 2` would have sent three.
@@ -852,36 +863,128 @@ describe('Requests API Documentation Examples', () => {
     });
 
     /**
-     * @source docs:api/requests.md#reading-the-errorresponse
+     * @source docs:api/requests.md#a-failed-request-rejects
      */
-    it('should carry the ErrorResponse inside the rejected FiberFailure', async () => {
-      // From docs: unwrapping the rejection with Runtime.isFiberFailure + Cause.squash
+    it('should reject with the OneBunBaseError subclass the failure names', async () => {
+      // From docs: "The rejection is a `OneBunBaseError` subclass chosen by the failure's `code`"
       const server = startEchoServer();
 
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
-        let code: number | undefined;
-        let name: string | undefined;
+        const rejection = await client.get('/missing').then(() => undefined, (error: unknown) => error);
 
-        try {
-          await client.get('/missing');
-        } catch (error) {
-          expect(Runtime.isFiberFailure(error)).toBe(true);
+        expect(rejection).toBeInstanceOf(NotFoundError);
+        expect(rejection).toBeInstanceOf(OneBunBaseError);
 
-          if (Runtime.isFiberFailure(error)) {
-            const failure = Cause.squash(error[Runtime.FiberFailureCauseId]);
-
-            expect(isErrorResponse(failure)).toBe(true);
-
-            if (isErrorResponse(failure)) {
-              code = failure.code;
-              name = failure.error;
-            }
-          }
+        if (rejection instanceof NotFoundError) {
+          expect(rejection.error).toBe('HTTP_ERROR');
+          expect(rejection.code).toBe(HttpStatusCode.NOT_FOUND);
+          expect(rejection.details).toMatchObject({ method: 'GET', url: `${server.baseUrl}/missing` });
+          // From docs: "`message` is the `error` name"
+          expect(rejection.message).toBe('HTTP_ERROR');
         }
+      } finally {
+        server.stop();
+      }
+    });
 
-        expect(code).toBe(HttpStatusCode.NOT_FOUND);
-        expect(name).toBe('HTTP_ERROR');
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it('should reject a timeout with a TransportError coded 0, whose kind getTransportFailureKind reads', async () => {
+      const server = startStallingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 }, timeout: 50 });
+        const rejection = await client.get('/slow').then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(TransportError);
+        expect(rejection).toMatchObject({ error: 'TIMEOUT_ERROR', code: TRANSPORT_FAILURE_CODE });
+        expect(getTransportFailureKind(rejection)).toBe('timeout');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it('should map every status of the table to its class, and keep any other status', async () => {
+      // From docs: the `code` -> class table
+      const expected: [number, new (...args: never[]) => OneBunBaseError][] = [
+        [HttpStatusCode.BAD_REQUEST, BadRequestError],
+        [HttpStatusCode.UNAUTHORIZED, UnauthorizedError],
+        [HttpStatusCode.FORBIDDEN, ForbiddenError],
+        [HttpStatusCode.NOT_FOUND, NotFoundError],
+        [HttpStatusCode.CONFLICT, ConflictError],
+        [HttpStatusCode.UNPROCESSABLE_ENTITY, ValidationError],
+        [HttpStatusCode.TOO_MANY_REQUESTS, TooManyRequestsError],
+        [HttpStatusCode.INTERNAL_SERVER_ERROR, InternalServerError],
+        [HttpStatusCode.BAD_GATEWAY, BadGatewayError],
+        [HttpStatusCode.SERVICE_UNAVAILABLE, ServiceUnavailableError],
+        [HttpStatusCode.GATEWAY_TIMEOUT, GatewayTimeoutError],
+        [418, HttpStatusError],
+        [405, HttpStatusError],
+      ];
+
+      const statusServer = Bun.serve({
+        port: 0,
+        fetch: (req) => jsonStatus(Number(new URL(req.url).pathname.slice(1))),
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${statusServer.port}`, retries: { max: 0 } });
+
+        for (const [status, errorClass] of expected) {
+          const rejection = await client.get(`/${status}`).then(() => undefined, (error: unknown) => error);
+
+          expect({ status, instance: rejection instanceof errorClass }).toEqual({ status, instance: true });
+          expect({ status, code: (rejection as OneBunBaseError).code }).toEqual({ status, code: status });
+        }
+      } finally {
+        statusServer.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#a-failed-request-rejects
+     */
+    it("should reject with a OneBun upstream's own error, as its handler threw it", async () => {
+      // From docs: "a `ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 })` rejects here as a
+      // `ConflictError` with `code` 409, `error` 'REVISION_CONFLICT' and those `details`"
+      const upstream = Bun.serve({
+        port: 0,
+        fetch: () => jsonStatus(
+          HttpStatusCode.CONFLICT,
+          new ConflictError('REVISION_CONFLICT', { expected: 1, actual: 2 }).toErrorResponse(),
+        ),
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${upstream.port}`, retries: { max: 0 } });
+        const rejection = await client.put('/items/a', { revision: 1 }).then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(ConflictError);
+        expect(rejection).toMatchObject({ code: 409, error: 'REVISION_CONFLICT' });
+        expect((rejection as ConflictError).details).toEqual({ expected: 1, actual: 2 });
+      } finally {
+        upstream.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#rejection-upgrade
+     */
+    it('should reject req() with the failure\'s own class, not a 500 REQUEST_FAILED', async () => {
+      // From the upgrade table: `req()` rejects with the failure's own class
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        const rejection = await client.req('GET', '/missing').then(() => undefined, (error: unknown) => error);
+
+        expect(rejection).toBeInstanceOf(NotFoundError);
+        expect(rejection).toMatchObject({ code: HttpStatusCode.NOT_FOUND, error: 'HTTP_ERROR' });
       } finally {
         server.stop();
       }
@@ -1861,7 +1964,7 @@ describe('Requests API Documentation Examples', () => {
     /**
      * @source docs:api/requests.md#response-stream
      */
-    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR ErrorResponse', async () => {
+    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR TransportError', async () => {
       const server = startStreamingServer();
       const outcomes: string[] = [];
 
@@ -1871,8 +1974,8 @@ describe('Requests API Documentation Examples', () => {
             outcomes.push(textDecoder.decode(chunk));
           }
         } catch (error) {
-          if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
-            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details?.phase)}`);
+          if (error instanceof TransportError && getTransportFailureKind(error) === 'timeout') {
+            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details.phase)}`);
           }
         }
       }
