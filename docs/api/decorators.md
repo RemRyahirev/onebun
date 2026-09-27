@@ -27,6 +27,7 @@ export class DbModule {}
 
 **Module resolution rules**:
 - `exports` accepts SERVICES only. `exports: [SomeModule]` throws `OneBunInvalidExportError` naming both modules — a re-exported module never contributed anything. Import the providing module directly where its services are needed
+- `imports` must not form a cycle. A module that imports itself, directly or through its imports, throws `OneBunModuleImportCycleError` (a `OneBunBootstrapError`, matched by `name`) at `start()`: `Module import cycle: A -> B -> A`, plus `(import path from the root: Root -> A -> B -> A)` when the cycle starts below the root. A self-import ends with `Remove A from its own imports.` Detection looks only at the modules still under construction (the importer and its builders), after an already-built module or an already-processed `@Global()` module has been taken from the scope, so a module reached twice without a cycle (a diamond) still boots with one instance. A `@Global()` module that the root builds ahead of its import loop is reported with the real imports that reach it, never as a direct import of the root. It used to overflow the stack (`RangeError: Maximum call stack size exceeded`, naming no module)
 - A `@Global()` module's services reach every module regardless of its position in an `imports` array, and whether the importing module lists it at all — import order is not semantic
 - One `@Global()` service instance per application (per sub-application in multi-service mode), not per process
 - Object providers (`{ provide: X, useValue: v }`) throw `OneBunInvalidProviderError`; providers are classes
@@ -191,6 +192,17 @@ export class FeatureModule {}
 @Module({ imports: [CoreModule], providers: [UserService] })
 export class FeatureModule {}
 ```
+
+**`imports` must not form a cycle.** A module that imports itself — directly, or through the modules it imports — fails `start()` with `OneBunModuleImportCycleError` (a `OneBunBootstrapError`). Each imported module is built before its importer, so a cycle leaves no module to build first. The message lists the cycle in import order and, when the cycle does not start at the root module, the import path the application took to reach it. It used to overflow the stack instead, with `RangeError: Maximum call stack size exceeded` naming no module.
+
+```typescript
+// Throws at start(): "Module import cycle: UsersModule -> UsersModule. ...
+// Remove UsersModule from its own imports."
+@Module({ imports: [UsersModule] })
+export class UsersModule {}
+```
+
+A longer cycle — `Module import cycle: OrdersModule -> BillingModule -> OrdersModule` — is fixed the same way whatever its length: move what the modules on the cycle share into a module that imports none of them, and import that one from each. Split across files, such a cycle usually fails earlier, while the files load, with `ReferenceError: Cannot access 'OrdersModule' before initialization`.
 
 ### @Global()
 

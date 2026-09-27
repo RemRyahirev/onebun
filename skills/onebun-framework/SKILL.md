@@ -355,6 +355,14 @@ coexist; in tests, call `resetRegistrations()` in `beforeEach`.
 idiom — throws `OneBunInvalidExportError`. Import the module that provides the service directly
 wherever the service is needed.
 
+**`imports` must not form a cycle.** A module that imports itself, directly or through its
+imports, fails `start()` with `OneBunModuleImportCycleError` (a `OneBunBootstrapError`; match on
+`name`): `Module import cycle: A -> B -> A`, plus the import path from the root when the cycle
+starts below it. There is no `forwardRef`: move what the modules on the cycle share into a module
+that imports none of them. Older releases overflowed the stack instead (`RangeError: Maximum call
+stack size exceeded`, naming no module), so on those, check `imports` for a cycle first when boot
+dies with that RangeError.
+
 **Import order is not semantic.** A `@Global()` module's services reach every module regardless
 of where it sits in an `imports` array, and whether or not the importing module lists it at all.
 

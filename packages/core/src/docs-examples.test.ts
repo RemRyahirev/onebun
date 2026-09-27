@@ -190,6 +190,7 @@ import {
   Optional,
   CircularDependencyError,
   DependencyResolutionError,
+  OneBunBootstrapError,
   registerModule,
   resetRegistrations,
   createHttpClient,
@@ -4337,6 +4338,27 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
     expect(() => new OneBunModule(AppModule, makeMockLoggerLayer()))
       .toThrow(/exports the module CoreModule/);
+  });
+
+  /**
+   * @source docs:api/decorators.md#module
+   */
+  it('should fail the boot naming the module when a module imports itself', () => {
+    // From docs: a self-import throws OneBunModuleImportCycleError instead of overflowing the stack
+    @Module({ imports: [UsersModule] })
+    class UsersModule {}
+
+    let thrown: unknown;
+    try {
+      new OneBunModule(UsersModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope());
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(OneBunBootstrapError);
+    expect((thrown as Error).name).toBe('OneBunModuleImportCycleError');
+    expect((thrown as Error).message).toStartWith('Module import cycle: UsersModule -> UsersModule. ');
+    expect((thrown as Error).message).toEndWith('Remove UsersModule from its own imports.');
   });
 
   /**

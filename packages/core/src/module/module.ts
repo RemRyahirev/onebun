@@ -34,7 +34,11 @@ import {
   getOwnGlobalMetadata,
   isInjectableParamType,
 } from '../decorators/metadata';
-import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
+import {
+  CircularDependencyError,
+  DependencyResolutionError,
+  OneBunBootstrapError,
+} from '../errors/dependency-errors';
 import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
 import {
@@ -387,6 +391,23 @@ export class OneBunModule implements ModuleInstance {
    */
   private readonly isTreeRoot: boolean;
 
+  /**
+   * The module whose initialization is building this one, if any.
+   *
+   * A module builds its imports inside its own constructor, so this module and its `parent`
+   * chain are exactly the modules still under construction — the ones an import cycle meets
+   * again (see `assertNotUnderConstruction`).
+   */
+  private readonly parent: OneBunModule | undefined;
+
+  /**
+   * The imports by which `parent` reached this module, ending with this module's class:
+   * `[moduleClass]` for a direct import and for the tree root, and the whole route for a
+   * `@Global()` module the tree root builds ahead of its import loop — the root does not
+   * necessarily import it, and an import-cycle report must not print an import nobody wrote.
+   */
+  private readonly importedVia: readonly Function[];
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
@@ -395,9 +416,12 @@ export class OneBunModule implements ModuleInstance {
     tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
     scope?: GlobalScope,
     parent?: OneBunModule,
+    importedVia?: readonly Function[],
   ) {
     this.scope = scope ?? processDefaultScope;
     this.isTreeRoot = parent === undefined;
+    this.parent = parent;
+    this.importedVia = importedVia ?? [moduleClass];
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -603,12 +627,16 @@ export class OneBunModule implements ModuleInstance {
           continue;
         }
 
+        // Neither shared nor processed, so it is either new or still being built above us —
+        // and building it again would never end.
+        this.assertNotUnderConstruction(importModule, [importModule]);
+
         // Pass the logger layer, config, accumulated middleware class refs and — by
         // reference — this application's scope to child modules
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
         const childModule = new OneBunModule(
           importModule, this.loggerLayer, this.config,
-          accumulatedMiddleware, this.tracingOptions, this.scope, this,
+          accumulatedMiddleware, this.tracingOptions, this.scope, this, [importModule],
         );
         this.childModules.push(childModule);
 
@@ -690,21 +718,28 @@ export class OneBunModule implements ModuleInstance {
 
     const globals: Function[] = [];
     const visited = new Set<Function>();
+    // The imports by which the walk first reached each global, from one of this module's own
+    // imports down to the global. Only an import-cycle report reads it.
+    const routes = new Map<Function, Function[]>();
+    const route: Function[] = [];
 
     const walk = (moduleClass: Function): void => {
       if (visited.has(moduleClass)) {
         return;
       }
       visited.add(moduleClass);
+      route.push(moduleClass);
 
       if (isGlobalModule(moduleClass) && !this.scope.processedModules.has(moduleClass)) {
         globals.push(moduleClass);
+        routes.set(moduleClass, [...route]);
       }
 
       const childMetadata = getModuleMetadata(moduleClass);
       for (const imported of childMetadata?.imports ?? []) {
         walk(imported);
       }
+      route.pop();
     };
 
     for (const imported of metadata.imports ?? []) {
@@ -721,10 +756,15 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
+      // The tree root is the only module under construction here, and it is on the route
+      // back to itself when a global it reaches imports it.
+      const via = routes.get(globalModule) ?? [globalModule];
+      this.assertNotUnderConstruction(globalModule, via);
+
       const childModule = new OneBunModule(
         globalModule, this.loggerLayer, this.config,
         [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses],
-        this.tracingOptions, this.scope, this,
+        this.tracingOptions, this.scope, this, via,
       );
       this.childModules.push(childModule);
       this.preRegisteredModules.set(globalModule, childModule);
@@ -741,6 +781,60 @@ export class OneBunModule implements ModuleInstance {
 
     // Make them visible to THIS module too, since PHASE 0 already ran.
     this.seedGlobalServices();
+  }
+
+  /**
+   * Refuse to build a module that this construction is already building.
+   *
+   * Every import is built before its importer, and a module is published to
+   * `scope.sharedModules` only when its own initialization finishes. So a module met again while
+   * it is still under construction — it imports itself, directly or through its imports — was
+   * built again from scratch, which met it again, without end. `start()` died with
+   * `RangeError: Maximum call stack size exceeded`, which names no module (WI-408).
+   *
+   * Only a real cycle gets here: the callers first take a module that finished building, or a
+   * `@Global()` module already processed, from the scope.
+   *
+   * @param importModule - The module about to be built as a child of this one
+   * @param via - The imports from this module to `importModule`, ending with it
+   * @throws OneBunBootstrapError named `OneBunModuleImportCycleError`, whose message lists the
+   *   cycle in import order and, when the cycle does not start at the tree root, the import path
+   *   from the root
+   */
+  private assertNotUnderConstruction(importModule: Function, via: readonly Function[]): void {
+    const building = this.findUnderConstruction(importModule);
+    if (building === undefined) {
+      return;
+    }
+
+    const path = [...this.importRoute(), ...via];
+    // `building` is on this module's route, so its own route is a prefix of `path`.
+    const cycleStart = building.importRoute().length - 1;
+    const cycle = path.slice(cycleStart);
+    const names = (modules: readonly Function[]): string => modules.map((module) => module.name).join(' -> ');
+    const fromRoot = cycleStart > 0 ? ` (import path from the root: ${names(path)})` : '';
+    const remedy = cycle.length === 2
+      ? `Remove ${importModule.name} from its own imports.`
+      : 'Move what the modules on the cycle share into a module that imports none of them, and ' +
+        'import that one instead.';
+
+    const error = new OneBunBootstrapError(
+      `Module import cycle: ${names(cycle)}${fromRoot}. A module cannot import itself, directly or ` +
+      'through the modules it imports: each imported module is built before its importer, so a ' +
+      `cycle leaves no module to build first. ${remedy}`,
+    );
+    error.name = 'OneBunModuleImportCycleError';
+    throw error;
+  }
+
+  /** This module or the ancestor of it that is building `moduleClass`, if either is. */
+  private findUnderConstruction(moduleClass: Function): OneBunModule | undefined {
+    return this.moduleClass === moduleClass ? this : this.parent?.findUnderConstruction(moduleClass);
+  }
+
+  /** The imports from the tree root down to this module, both included. */
+  private importRoute(): Function[] {
+    return [...(this.parent?.importRoute() ?? []), ...this.importedVia];
   }
 
   /**
