@@ -90,7 +90,7 @@ OneBunApplication
 1. **Service Registration**: `@Service()` decorator registers class with Effect.js Context tag
 2. **Module Assembly**: `@Module()` collects controllers and providers
 3. **Dependency Resolution**: Framework analyzes constructor parameters
-4. **Instance Creation**: Services created in dependency order — the order of `providers` does not matter — then controllers
+4. **Instance Creation**: Services created in dependency order — the order of `providers` does not matter, except for an [`@Optional()` parameter typed as an abstract class](/api/decorators#optional), which does not wait for its implementation — then controllers
 
 ### DI Resolution Flow
 

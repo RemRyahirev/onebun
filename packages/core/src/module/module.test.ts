@@ -951,6 +951,43 @@ describe('OneBunModule', () => {
         expect(implementationFirst.warnings).toEqual([]);
       });
 
+      /**
+       * The optional parameter is reached before a later one defers the consumer. By the retry the
+       * implementation is built and injected, as on 0.8.1, so a warning logged on the first attempt
+       * would claim an `undefined` the consumer never received.
+       */
+      test('an @Optional() one is not warned about when a later parameter defers the consumer until it is built', () => {
+        @Service()
+        class InstantGateway extends PaymentGateway {
+          charge(amount: number): string {
+            return `instant:${amount}`;
+          }
+        }
+
+        @Service()
+        class Ledger {}
+
+        @Service()
+        class LedgerCheckout {
+          constructor(
+            @Optional() readonly gateway: PaymentGateway | undefined,
+            readonly ledger: Ledger,
+          ) {}
+        }
+
+        const recorder = makeRecordingLoggerLayer();
+
+        @Module({ providers: [LedgerCheckout, InstantGateway, Ledger] })
+        class LedgerCheckoutModule {}
+
+        const module = new OneBunModule(LedgerCheckoutModule, recorder.layer);
+        const checkout = module.getServiceByClass(LedgerCheckout)!;
+
+        expect(checkout.gateway).toBe(module.getServiceByClass(InstantGateway)!);
+        expect(checkout.ledger).toBe(module.getServiceByClass(Ledger)!);
+        expect(recorder.messages('warn').filter((message) => message.includes('LedgerCheckout'))).toEqual([]);
+      });
+
       test('an @Optional() one whose implementation injects the consumer back still boots, in either order', () => {
         @Service()
         class OptionalCheckout {
@@ -1015,6 +1052,42 @@ describe('OneBunModule', () => {
         expect(warnings[0]).toContain('Failed to create service FailingDependency');
         expect(warnings[1]).toContain('UndecoratedDependency is listed in the providers of TolerantModule');
       }
+    });
+
+    test('a consumer deferred after its @Optional() parameter was left undefined is warned about once, not per attempt', () => {
+      @Service()
+      class FailingDependency {
+        constructor() {
+          throw new Error('db url not set');
+        }
+      }
+
+      @Service()
+      class LaterDependency {}
+
+      @Service()
+      class RetriedConsumer {
+        constructor(
+          @Optional() readonly failing: FailingDependency | undefined,
+          readonly later: LaterDependency,
+        ) {}
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      // RetriedConsumer reaches `failing` on both of its attempts: the first one defers on LaterDependency.
+      @Module({ providers: [FailingDependency, RetriedConsumer, LaterDependency] })
+      class RetriedModule {}
+
+      const module = new OneBunModule(RetriedModule, recorder.layer);
+      const consumer = module.getServiceByClass(RetriedConsumer)!;
+      const warnings = recorder.messages('warn').filter((message) => message.includes('RetriedConsumer'));
+
+      expect(consumer.failing).toBeUndefined();
+      expect(consumer.later).toBe(module.getServiceByClass(LaterDependency)!);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith('RetriedConsumer gets undefined for its @Optional() parameter #0 (FailingDependency)');
+      expect(warnings[0]).toContain('Failed to create service FailingDependency');
     });
   });
 

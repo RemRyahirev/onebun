@@ -991,6 +991,10 @@ export class OneBunModule implements ModuleInstance {
       let allDependenciesResolved = true;
       const holes: number[] = [];
       let resolvedAfterHole = false;
+      // Logged only once this attempt resolves every parameter. A later parameter can still defer
+      // the provider, and by its next attempt the implementation may be built and injected: a
+      // warning logged now would then be false, and a true one would repeat on every attempt.
+      const optionalLeftUndefined: string[] = [];
 
       if (detectedDeps !== undefined) {
         for (let i = 0; i < detectedDeps.length; i++) {
@@ -1027,7 +1031,7 @@ export class OneBunModule implements ModuleInstance {
 
           if (isOptional) {
             if (waitFor !== undefined) {
-              this.logger.warn(this.describeOptionalLeftUndefined(provider, i, depType, waitFor, reason));
+              optionalLeftUndefined.push(this.describeOptionalLeftUndefined(provider, i, depType, waitFor, reason));
             }
             continue;
           }
@@ -1043,6 +1047,9 @@ export class OneBunModule implements ModuleInstance {
       // Leaving the queue is progress whether or not the constructor below succeeds.
       deferralsSinceProgress = 0;
 
+      for (const warning of optionalLeftUndefined) {
+        this.logger.warn(warning);
+      }
       this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
       if (detectedDeps === undefined) {
         this.reportInheritedConstructorDependencies(provider);

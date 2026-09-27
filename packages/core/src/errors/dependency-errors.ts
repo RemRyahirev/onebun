@@ -41,7 +41,7 @@ export class DependencyResolutionError extends OneBunBootstrapError {
  * The framework does not support circular dependencies — bootstrap will fail
  * with a clear error message showing the dependency chain. `chain` names only the
  * cycle itself; a provider that merely waits on it is listed in `unresolvedServices`.
- * The order of a module's `providers` never produces this error.
+ * An acyclic graph never produces this error, whatever the order of its `providers`.
  *
  * @see docs:api/services.md
  */
