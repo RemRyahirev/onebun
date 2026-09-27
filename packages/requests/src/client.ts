@@ -26,7 +26,9 @@ import {
   InternalServerError,
   isErrorResponse,
   isRetryableMethod,
+  type OneBunAuthConfig,
   OneBunBaseError,
+  type RedirectPolicy,
   type ReqConfig,
   type RequestConfig,
   type RequestMetricsData,
@@ -105,9 +107,11 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  * need the three-argument form, as does any caller whose query really contains one of these names.
  *
  * Adding a name moves every query record that uses it to the config side, so a new config key
- * does not join by default. `client.get('/login', { redirect: '/home' })` is query data, and a
- * test pins it. `maxResponseBytes` did join: nothing names a query parameter that, and a cap that
- * went out as `?maxResponseBytes=1048576` would leave the body it was meant to bound unbounded.
+ * does not join by default. `redirect` is a config key and stays off: `client.get('/login',
+ * { redirect: '/home' })` is query data — a login flow's return path — and a test pins it, so the
+ * redirect policy takes the three-argument form. `maxResponseBytes` did join: nothing names a
+ * query parameter that, and a cap that went out as `?maxResponseBytes=1048576` would leave the
+ * body it was meant to bound unbounded.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -179,15 +183,27 @@ const hasNoContent = (method: string, status: number): boolean =>
   status === HttpStatusCode.NOT_MODIFIED;
 
 /**
+ * Whether a response is a redirect handed back as the answer: one of the five statuses the client
+ * follows, under `redirect: 'manual'`. Under the other two policies such a status never reaches
+ * the caller — it was followed, or it failed `REDIRECT_ERROR`.
+ */
+const isHandedBackRedirect = (status: number, policy: RedirectPolicy): boolean =>
+  policy === 'manual' && REDIRECT_STATUSES.includes(status);
+
+/**
  * Whether an upstream status resolves as a success.
  *
  * 304 Not Modified is one. A server sends it only in answer to a conditional request
  * (`If-None-Match`, `If-Modified-Since`), so it is the outcome the caller asked about — "your copy
  * is current" — not a failure to recover from. It used to fall outside the range and reject.
+ *
+ * A redirect handed back under `redirect: 'manual'` is one as well: the redirect is what the
+ * caller asked for ({@link isHandedBackRedirect}).
  */
-const isSuccessStatus = (status: number): boolean =>
+const isSuccessStatus = (status: number, policy: RedirectPolicy): boolean =>
   (status >= HttpStatusCode.OK && status < HttpStatusCode.MOVED_PERMANENTLY) ||
-  status === HttpStatusCode.NOT_MODIFIED;
+  status === HttpStatusCode.NOT_MODIFIED ||
+  isHandedBackRedirect(status, policy);
 
 /**
  * A success's headers as a record: names lower-cased, as `Headers` iterates them, and a header
@@ -451,6 +467,31 @@ const redirectBecomesGet = (status: number, method: string): boolean => {
     normalized !== HttpMethod.HEAD;
 };
 
+/** Why a redirect was not followed: the `details.reason` of its `REDIRECT_ERROR`. */
+type RedirectRefusal = 'refused-by-policy' | 'missing-location' | 'invalid-location' | 'too-many-redirects';
+
+/**
+ * The `REDIRECT_ERROR` for a redirect that is not followed. `code` is its 3xx, `details.url` the
+ * URL that answered with it, and `details.redirects` how many redirects the attempt had followed.
+ */
+const redirectError = (
+  hop: RedirectHop,
+  response: Response,
+  redirects: number,
+  reason: RedirectRefusal,
+  traceId?: string,
+): ErrorResponse => {
+  const location = response.headers.get('location');
+
+  return createErrorResponse(REDIRECT_ERROR, response.status, traceId, {
+    reason,
+    status: response.status,
+    url: hop.url,
+    redirects,
+    ...(location === null ? {} : { location }),
+  });
+};
+
 /**
  * The request a redirect asks for, or a `REDIRECT_ERROR` when it cannot be followed: no
  * `Location`, a `Location` that is not an http(s) URL, or {@link MAX_REDIRECTS} already followed.
@@ -462,9 +503,9 @@ const redirectBecomesGet = (status: number, method: string): boolean => {
  * dropped stays dropped, so a chain that comes back to the first origin does not bring the
  * credentials back with it.
  *
- * An `X-OneBun-Signature` travels on a same-origin hop unchanged, and is not re-signed: it covers
- * the original method, URL and body, so the callee rejects it for any other path — the redirect
- * fails closed, as it did when `fetch` followed it.
+ * An `X-OneBun-Signature` travels on a same-origin hop as it was. It covers the previous method,
+ * URL and body, so the callee rejects it for any other path — unless {@link RedirectChain.resign}
+ * signs the hop afresh.
  */
 const nextRedirectHop = (
   hop: RedirectHop,
@@ -473,14 +514,7 @@ const nextRedirectHop = (
   traceId?: string,
 ): Effect.Effect<RedirectHop, ErrorResponse> => {
   const location = response.headers.get('location');
-  const refuse = (reason: 'missing-location' | 'invalid-location' | 'too-many-redirects') =>
-    Effect.fail(createErrorResponse(REDIRECT_ERROR, response.status, traceId, {
-      reason,
-      status: response.status,
-      url: hop.url,
-      redirects,
-      ...(location === null ? {} : { location }),
-    }));
+  const refuse = (reason: RedirectRefusal) => Effect.fail(redirectError(hop, response, redirects, reason, traceId));
 
   if (location === null) {
     return refuse('missing-location');
@@ -515,43 +549,72 @@ const nextRedirectHop = (
   });
 };
 
+/** The name of the `onebun` auth header, lower-cased. */
+const SIGNATURE_HEADER = 'x-onebun-signature';
+
+/** Whether a hop still carries an `X-OneBun-Signature`, in any letter case. */
+const carriesSignature = (hop: RedirectHop): boolean =>
+  Object.keys(hop.headers).some((name) => name.toLowerCase() === SIGNATURE_HEADER);
+
+/** What stays the same across the redirect chain of one attempt. */
+interface RedirectChain {
+  /** The attempt's one signal: the client-side timeout and an interruption, for every hop. */
+  signal: AbortSignal;
+  /** `false` under `maxResponseBytes`: the final body is handed over as it came off the wire. */
+  decompress: boolean;
+  policy: RedirectPolicy;
+  /**
+   * Signs a same-origin hop afresh, over its own method, URL and body. Set only under `onebun`
+   * auth that names an `audience` ({@link resignerFor}).
+   *
+   * Applied to a hop that still carries `X-OneBun-Signature` — one whose every redirect so far
+   * stayed on the first origin, since a hop to another origin drops the header for good. So it
+   * never signs anything for another origin.
+   */
+  resign?: (hop: RedirectHop) => Effect.Effect<RedirectHop, ErrorResponse>;
+  traceId?: string;
+}
+
 /**
- * Send a request, following redirects in the client rather than in `fetch`.
+ * Send a request, handling redirects in the client rather than in `fetch`.
  *
  * `fetch` follows a 3xx itself unless told otherwise, and on a hop to another origin it strips only
  * `Authorization`, `Cookie` and `Proxy-Authorization`. Everything else went along: an `apikey`
  * header, `custom` auth headers, `X-OneBun-Signature`, and any credential passed through
  * `RequestsOptions.headers` or `config.headers` — a POST answered 307 re-sent its body to the other
- * origin together with the key. So each hop is fetched with `redirect: 'manual'`, and
- * {@link nextRedirectHop} decides what the next one carries.
+ * origin together with the key. So each hop is fetched with `redirect: 'manual'`, and the policy
+ * decides what a redirect status leads to:
+ *
+ * - `'follow'` — {@link nextRedirectHop} works out the next hop and what it carries.
+ * - `'error'` — `REDIRECT_ERROR` with `reason: 'refused-by-policy'`. The `Location` is not
+ *   contacted, and the error is excluded from retries by name ({@link NEVER_RETRIED_ERRORS}).
+ * - `'manual'` — the redirect is the response, and its body is read as any other.
  *
  * Every hop runs under the attempt's one `signal`, so the client-side timeout bounds the whole
  * chain rather than each hop, and an interruption aborts whichever hop is in flight. The body of a
- * 3xx that is followed is discarded unread.
+ * 3xx that is followed or refused is discarded unread.
  *
  * `decompress: false` — set for a request under `maxResponseBytes` — hands the final body over as
  * it came off the wire, for the client to decode and count ({@link readCappedBody}).
  */
 const fetchFollowingRedirects = (
   hop: RedirectHop,
-  signal: AbortSignal,
-  decompress: boolean,
-  traceId?: string,
+  chain: RedirectChain,
   redirects: number = 0,
 ): Effect.Effect<Response, ErrorResponse> => pipe(
   Effect.tryPromise({
     try: () => fetch(hop.url, {
       method: hop.method,
       headers: hop.headers,
-      signal,
+      signal: chain.signal,
       redirect: 'manual',
-      ...(decompress ? {} : { decompress: false }),
+      ...(chain.decompress ? {} : { decompress: false }),
       ...(hop.body === undefined ? {} : { body: hop.body }),
     }),
-    catch: (error) => classifyTransportFailure(error, signal, traceId),
+    catch: (error) => classifyTransportFailure(error, chain.signal, chain.traceId),
   }),
   Effect.flatMap((response) => {
-    if (!REDIRECT_STATUSES.includes(response.status)) {
+    if (!REDIRECT_STATUSES.includes(response.status) || chain.policy === 'manual') {
       return Effect.succeed(response);
     }
 
@@ -559,8 +622,13 @@ const fetchFollowingRedirects = (
       Effect.sync(() => {
         response.body?.cancel().catch(() => undefined);
       }),
-      Effect.flatMap(() => nextRedirectHop(hop, response, redirects, traceId)),
-      Effect.flatMap((next) => fetchFollowingRedirects(next, signal, decompress, traceId, redirects + 1)),
+      Effect.flatMap(() => (chain.policy === 'error'
+        ? Effect.fail(redirectError(hop, response, redirects, 'refused-by-policy', chain.traceId))
+        : nextRedirectHop(hop, response, redirects, chain.traceId))),
+      Effect.flatMap((next) => (chain.resign !== undefined && carriesSignature(next)
+        ? chain.resign(next)
+        : Effect.succeed(next))),
+      Effect.flatMap((next) => fetchFollowingRedirects(next, chain, redirects + 1)),
     );
   }),
 );
@@ -758,6 +826,15 @@ const responseByteLimit = (config: RequestConfig, mergedOptions: RequestsOptions
 };
 
 /**
+ * The redirect policy a request runs under: its own `redirect`, else the client's, else `'follow'`.
+ *
+ * Resolved with `??` rather than trusted to the spread defaults: `{ redirect: undefined }` in the
+ * client's options spreads over the default, and the same on a request means "the client's".
+ */
+const redirectPolicyOf = (config: RequestConfig, mergedOptions: RequestsOptions): RedirectPolicy =>
+  config.redirect ?? mergedOptions.redirect ?? DEFAULT_REQUESTS_OPTIONS.redirect;
+
+/**
  * Build request headers
  *
  * Under `maxResponseBytes`, `fetch` is told not to decompress, and then it offers no
@@ -907,13 +984,18 @@ const readBodyText = (
 };
 
 /**
- * Parse response data based on content type
+ * Parse response data based on content type.
+ *
+ * A body that says `application/json` and is empty fails with `RESPONSE_PARSE_ERROR`: a 200 that
+ * promises JSON and sends nothing is a broken answer. With `emptyIsNoContent` it resolves with
+ * `undefined` instead, as a response without content does.
  */
 const parseResponseData = <T>(
   response: Response,
   signal: AbortSignal,
   traceId?: string,
   limit?: number,
+  emptyIsNoContent = false,
 ): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
 
@@ -921,6 +1003,10 @@ const parseResponseData = <T>(
     return pipe(
       readBodyText(response, signal, 'RESPONSE_PARSE_ERROR', traceId, limit),
       Effect.flatMap((text) => {
+        if (!text && emptyIsNoContent) {
+          return Effect.succeed(undefined as T);
+        }
+
         if (!text) {
           return Effect.fail(
             createErrorResponse(
@@ -962,47 +1048,47 @@ const parseResponseData = <T>(
   }
 };
 
-/**
- * Add the `X-OneBun-Signature` header when `onebun` auth is configured, otherwise pass through.
- *
- * Returns the headers rather than mutating them, so a retry signs the request afresh instead of
- * inheriting the previous attempt's timestamp and nonce.
- */
-const signOneBunIfNeeded = (
+/** The `onebun` auth a request is signed with, or `undefined` when it is not signed. */
+const signingAuthOf = (
   config: RequestConfig,
   mergedOptions: RequestsOptions,
-  headers: Record<string, string>,
-  fullUrl: string,
-  body: string | undefined,
-  traceId?: string,
-): Effect.Effect<Record<string, string>, ErrorResponse> => {
+): OneBunAuthConfig | undefined => {
   const authConfig = config.auth ?? mergedOptions.auth;
 
-  // Two statements rather than one disjunction: a type predicate negated inside `||` does not
-  // narrow reliably, and the narrowing is what gives `authConfig.audience` a type here.
-  if (authConfig === undefined) {
-    return Effect.succeed(headers);
-  }
+  return authConfig !== undefined && isSigningAuth(authConfig) ? authConfig : undefined;
+};
 
-  if (!isSigningAuth(authConfig)) {
-    return Effect.succeed(headers);
-  }
-
-  const contentType = Object.entries(headers)
+/**
+ * `hop` with an `X-OneBun-Signature` over its own method, URL, `Content-Type` and body bytes, in
+ * place of any it carried.
+ *
+ * Returns a new hop rather than mutating the headers, so every signing — a retry's, a redirect
+ * hop's — gets its own timestamp and nonce instead of inheriting the previous one's: reusing them
+ * would make the second request a replay of the first, and the callee rejects it as such.
+ */
+const signHop = (
+  auth: OneBunAuthConfig,
+  hop: RedirectHop,
+  traceId?: string,
+): Effect.Effect<RedirectHop, ErrorResponse> => {
+  const contentType = Object.entries(hop.headers)
     .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
 
   return pipe(
-    signOneBunRequest(authConfig, {
-      method: config.method,
-      url: fullUrl,
+    signOneBunRequest(auth, {
+      method: hop.method,
+      url: hop.url,
       contentType,
-      body,
-      audience: authConfig.audience,
+      body: hop.body,
+      audience: auth.audience,
     }),
     Effect.map((signature) => ({
-      ...headers,
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      'X-OneBun-Signature': signature,
+      ...hop,
+      headers: {
+        ...filterHeaders(hop.headers, (name) => name !== SIGNATURE_HEADER),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'X-OneBun-Signature': signature,
+      },
     })),
     Effect.catchAll((error) =>
       Effect.fail(
@@ -1013,10 +1099,32 @@ const signOneBunIfNeeded = (
 };
 
 /**
+ * How a same-origin redirect hop is signed afresh — or `undefined`, and it carries the previous
+ * signature, which the callee rejects for any other path with `signature-mismatch`.
+ *
+ * Only under `onebun` auth that names an `audience`. Re-signing hands whoever answers with the
+ * redirect a fresh, valid signature for a method, path and body of its choosing on that origin —
+ * which is what following it means. With an audience, that signature is good only at the callee
+ * the audience names. Without one it is good at every service that shares the secret, so the hop
+ * fails closed instead, as it did before the policy existed.
+ */
+const resignerFor = (
+  auth: OneBunAuthConfig | undefined,
+  traceId?: string,
+): RedirectChain['resign'] => {
+  if (auth === undefined || !auth.audience) {
+    return undefined;
+  }
+
+  return (hop) => signHop(auth, hop, traceId);
+};
+
+/**
  * Execute single HTTP request attempt.
  *
  * An attempt is the whole redirect chain ({@link fetchFollowingRedirects}): the response it
- * resolves with, and the status the metrics record, are the final hop's.
+ * resolves with, and the status the metrics record, are the final hop's — under
+ * `redirect: 'manual'`, the redirect's.
  *
  * One signal governs the whole attempt, every hop and the body included: `fetch` resolves at the
  * headers and the body is read afterwards under the same signal. It fires on the client-side
@@ -1053,31 +1161,38 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   // ones on the wire is worse than no signature — it reads as protection.
   const body = serializeBody(config);
   const limit = responseByteLimit(config, mergedOptions);
+  const policy = redirectPolicyOf(config, mergedOptions);
+  const signingAuth = signingAuthOf(config, mergedOptions);
+  const firstHop: RedirectHop = {
+    url: fullUrl,
+    method: config.method,
+    headers,
+    body,
+  };
 
   return pipe(
     // Signed HERE, inside the attempt, over the assembled request. Two reasons it cannot move
     // out: the signature has to cover the final URL and the exact body bytes, and each retry
     // needs its own timestamp and nonce — reusing one would make attempt 2 a replay of attempt 1
     // and the callee would reject it as such.
-    signOneBunIfNeeded(config, mergedOptions, headers, fullUrl, body, traceId),
-    Effect.flatMap((signedHeaders) => fetchFollowingRedirects(
-      {
-        url: fullUrl,
-        method: config.method,
-        headers: signedHeaders,
-        body,
-      },
+    signingAuth === undefined ? Effect.succeed(firstHop) : signHop(signingAuth, firstHop, traceId),
+    Effect.flatMap((signedHop) => fetchFollowingRedirects(signedHop, {
       signal,
-      limit === undefined,
+      decompress: limit === undefined,
+      policy,
+      resign: resignerFor(signingAuth, traceId),
       traceId,
-    )),
+    })),
     Effect.flatMap((response) => {
       const noContent = hasNoContent(config.method, response.status);
       // `undefined` rather than `''` for a response that has no content: `head()` is typed
       // `ApiResponse<void>`, and an empty string would claim a body that was never there.
+      // A redirect handed back under 'manual' is wanted for its status and `Location`, not its
+      // body: an empty one typed as JSON (some gateways send that) resolves with `undefined`
+      // rather than failing RESPONSE_PARSE_ERROR, which would take the `Location` down with it.
       const readBody: Effect.Effect<T, ErrorResponse> = noContent
         ? Effect.succeed(undefined as T)
-        : parseResponseData<T>(response, signal, traceId, limit);
+        : parseResponseData<T>(response, signal, traceId, limit, isHandedBackRedirect(response.status, policy));
       const upstreamHeaders = exposedHeaders(
         response,
         limit !== undefined && !noContent && contentCodings(response.headers).length > 0,
@@ -1088,7 +1203,7 @@ const executeSingleRequest = <T, E extends string, R extends string>(
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
 
-          if (isSuccessStatus(response.status)) {
+          if (isSuccessStatus(response.status, policy)) {
             return withUpstreamHeaders(
               createSuccessResponse(responseData, traceId, response.status),
               collectResponseHeaders(upstreamHeaders),

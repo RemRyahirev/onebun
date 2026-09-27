@@ -22,13 +22,16 @@ import {
   createHttpClient,
   getTransportFailureKind,
   isErrorResponse,
+  makeSingleReplicaNonceStore,
   resolveRetryConfig,
   DEFAULT_RETRY_CONFIG,
   DEFAULT_RETRY_DELAY,
   HttpStatusCode,
+  type OneBunAuthResult,
   type RequestMetricsData,
   setTraceContextProvider,
   TRANSPORT_FAILURE_CODE,
+  verifyOneBunRequest,
 } from './';
 
 /** Counts the requests a client really sent, so retry claims can be checked end to end. */
@@ -953,17 +956,15 @@ describe('Requests API Documentation Examples', () => {
     /**
      * @source docs:api/requests.md#redirect-headers
      */
-    it('should carry every header to the same origin, the signature unchanged', async () => {
+    it('should carry every header to the same origin', async () => {
       // From docs: "A hop to the same origin — same scheme, host and port — carries every header of
-      // the original request" and "A same-origin hop carries the signature as it was"
+      // the original request"
       const server = startRedirectServer();
 
       try {
         const client = createHttpClient({
           baseUrl: server.origin,
-          auth: {
-            type: 'onebun', serviceId: 'orders-service', secretKey: 's'.repeat(40), audience: 'billing', 
-          },
+          auth: { type: 'apikey', key: 'X-Api-Key', value: 'secret' },
           // eslint-disable-next-line @typescript-eslint/naming-convention
           headers: { 'X-Request-Id': 'req-1' },
         });
@@ -973,7 +974,115 @@ describe('Requests API Documentation Examples', () => {
         const [original, moved] = server.arrivals;
         expect(moved.path).toBe('/moved');
         expect(Object.fromEntries(moved.headers)).toEqual(Object.fromEntries(original.headers));
-        expect(moved.headers.get('x-onebun-signature')).toStartWith('v=1;svc=orders-service;');
+        expect(moved.headers.get('x-api-key')).toBe('secret');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-signing
+     */
+    it('should re-sign a same-origin hop when the auth names an audience, and only then', async () => {
+      // From docs: "/v1/invoices answers 307 to /v2/invoices. The second request carries a signature
+      // over POST /v2/invoices and the same body, with a fresh timestamp and nonce, so billing
+      // verifies it as it verified the first." and "Without an audience a same-origin hop carries
+      // the original signature unchanged, and the callee rejects it with signature-mismatch"
+      const secretKey = 'b'.repeat(40);
+      const run = async (audience: string | undefined) => {
+        const seen: { path: string; body: string; result: OneBunAuthResult }[] = [];
+        const nonceStore = makeSingleReplicaNonceStore();
+        const server = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          async fetch(req) {
+            const path = new URL(req.url).pathname;
+            const body = await req.text();
+            const result = await Effect.runPromise(verifyOneBunRequest(
+              {
+                method: req.method, url: req.url, headers: req.headers, body,
+              },
+              // The callee checks the audience when the caller binds one
+              { secret: secretKey, audience: audience ?? false, nonceStore },
+            ));
+            seen.push({ path, body, result });
+
+            return path === '/v1/invoices'
+              ? new Response(null, { status: 307, headers: { location: '/v2/invoices' } })
+              : Response.json({ id: 7 }, { status: 201 });
+          },
+        });
+
+        try {
+          const billing = createHttpClient({
+            baseUrl: `http://127.0.0.1:${server.port}`,
+            auth: {
+              type: 'onebun',
+              serviceId: 'orders-service',
+              secretKey,
+              ...(audience === undefined ? {} : { audience }),
+            },
+          });
+          await billing.post('/v1/invoices', { orderId: 42 });
+        } finally {
+          server.stop(true);
+        }
+
+        return seen.map(({ path, body, result }) => [path, body, result.valid, result.reason]);
+      };
+
+      expect(await run('billing')).toEqual([
+        ['/v1/invoices', '{"orderId":42}', true, undefined],
+        ['/v2/invoices', '{"orderId":42}', true, undefined],
+      ]);
+      expect(await run(undefined)).toEqual([
+        ['/v1/invoices', '{"orderId":42}', true, undefined],
+        ['/v2/invoices', '{"orderId":42}', false, 'signature-mismatch'],
+      ]);
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-policy
+     */
+    it('should refuse, hand back or follow a redirect as the policy says', async () => {
+      // From docs: the client refuses redirects; one POST hands its 302 back, one GET follows
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, redirect: 'error' });
+
+        const refused = await Effect.runPromise(Effect.either(client.getEffect('/go/302', { to: '/elsewhere' })));
+        const login = await client.post('/go/302?to=%2Fdashboard', { user: 'ada' }, { redirect: 'manual' });
+        const report = await client.get('/go/302', { to: '/reports/2026' }, { redirect: 'follow' });
+
+        expect(refused._tag === 'Left' && [refused.left.error, refused.left.details?.reason])
+          .toEqual(['REDIRECT_ERROR', 'refused-by-policy']);
+        expect(login.success && login.statusCode).toBe(302);
+        // "relative as the server sent it"
+        expect(login.success && login.headers?.location).toBe('/dashboard');
+        expect(report.success && report.statusCode).toBe(200);
+        expect(server.arrivals.map((arrival) => arrival.path)).toEqual(['/go/302', '/go/302', '/go/302', '/reports/2026']);
+
+        // "redirect is not one of the config markers, so client.get('/login', { redirect: '/home' })
+        // still sends GET /login?redirect=%2Fhome"
+        const urls: string[] = [];
+        const pages = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          fetch(req) {
+            const url = new URL(req.url);
+            urls.push(url.pathname + url.search);
+
+            return new Response('login');
+          },
+        });
+        try {
+          await createHttpClient({ baseUrl: `http://127.0.0.1:${pages.port}`, redirect: 'error' })
+            .get('/login', { redirect: '/home' });
+        } finally {
+          pages.stop(true);
+        }
+        expect(urls).toEqual(['/login?redirect=%2Fhome']);
       } finally {
         server.stop();
       }
@@ -1014,6 +1123,13 @@ describe('Requests API Documentation Examples', () => {
         expect(invalid._tag === 'Left' && [invalid.left.code, invalid.left.details?.reason])
           .toEqual([308, 'invalid-location']);
         expect(server.arrivals).toHaveLength(2);
+
+        // "refused-by-policy — any of the five under redirect: 'error', with or without a Location;
+        // redirects is 0"
+        const refused = await Effect.runPromise(Effect.either(client.getEffect('/go/307', undefined, { redirect: 'error' })));
+        expect(refused._tag === 'Left' && [refused.left.code, refused.left.details?.reason, refused.left.details?.redirects])
+          .toEqual([307, 'refused-by-policy', 0]);
+        expect(server.arrivals).toHaveLength(3);
       } finally {
         server.stop();
       }

@@ -64,6 +64,7 @@ production-grade backend services.
 - createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential, idempotent methods only by default — POST/PATCH must opt in via retries.methods)
 - Typed `ApiResponse<T>` with success/error discrimination; a success carries the upstream status and response headers
 - Optional `maxResponseBytes`: a cap on the decoded response body, checked while it is read, error statuses included
+- Redirect policy `'follow' | 'error' | 'manual'`, on the client or per request; no credential follows a redirect to another origin
 - Transport of the inter-service clients (createServiceClient, untyped arguments and results)
 
 ### Observability
@@ -284,6 +285,9 @@ Full-featured HTTP client with:
 - **Bounded responses**: `maxResponseBytes` caps the decoded body while it is read, so a gzip bomb
   or an oversized error body stops at the limit (see
   [Limiting the response size](/api/requests#max-response-bytes))
+- **Redirects**: followed by the client with no credential crossing to another origin, refused
+  with `redirect: 'error'`, or handed back with `redirect: 'manual'` (see
+  [Redirect policy](/api/requests#redirect-policy))
 
 ### Service Clients
 `createServiceDefinition()` + `createServiceClient()` call another OneBun service by

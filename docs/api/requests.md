@@ -11,7 +11,7 @@ Package: `@onebun/requests`
 OneBun provides a unified HTTP client with:
 - Multiple authentication schemes
 - Automatic retries with configurable strategies
-- Redirects followed without taking credentials to another origin
+- Redirects followed without taking credentials to another origin — or refused, or handed back
 - An optional cap on the decoded size of a response body
 - Integrated tracing and metrics
 - Standardized error handling
@@ -59,8 +59,8 @@ const response = await client.get('/users', undefined, { retries: { max: 0 } });
 `delete`, `head` and `options` take the same three arguments and resolve them by the same rule.
 With two arguments, only the seven names above make the object config: every other key is query
 data, so `client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`.
-`retries` and `query` are deliberately not on the list, so a config that sets only those takes the
-three-argument form, as in the last call above.
+`retries`, `query` and `redirect` are deliberately not on the list, so a config that sets only
+those takes the three-argument form, as in the last call above.
 
 ::: warning Do not wrap the query in a key
 `client.get('/users', { params: { page: 1 } })` — and `{ query: { page: 1 } }` just the same —
@@ -595,10 +595,14 @@ each one. Interrupting the Effect aborts whichever hop is in flight. A retry rep
 the original URL. The metrics sink gets one record for the chain, not one per hop, with the
 original URL and the final status.
 
+That is the default `'follow'` policy. To refuse redirects, or to handle them yourself, see
+[Redirect policy](#redirect-policy).
+
 ### Credentials stay with their origin {#redirect-headers}
 
 A hop to the **same origin** — same scheme, host and port — carries every header of the original
-request. A hop to **any other origin** carries only these:
+request. Only an `onebun` signature may change: see [Signed requests](#redirect-signing). A hop
+to **any other origin** carries only these:
 
 - `User-Agent`, `Accept` and `Accept-Encoding`
 - `traceparent`, `X-Trace-Id` and `X-Span-Id`
@@ -626,17 +630,92 @@ const file = await api.get('/v1/files/42');
 
 If the other origin needs credentials, call it with a client of its own.
 
-`onebun` auth signs the original method, URL and body. A same-origin hop carries the signature as
-it was — it is not re-signed — so the callee rejects it for any other path with
-`signature-mismatch`. Call the final URL directly. An `apikey` with `location: 'query'` is part of
-the URL, so whether it reaches the next hop depends on whether the redirecting server's
-`Location` repeats it.
+An `apikey` with `location: 'query'` is part of the URL, so whether it reaches the next hop depends
+on whether the redirecting server's `Location` repeats it.
+
+### Signed requests {#redirect-signing}
+
+`onebun` auth signs the method, URL and body of a request. A redirect to the same origin changes
+at least the URL, so the original signature does not verify there. When the auth names an
+`audience`, the client signs each same-origin hop afresh, over the method, URL and body that hop
+sends:
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const billing = createHttpClient({
+  baseUrl: 'http://billing:3000',
+  auth: {
+    type: 'onebun',
+    serviceId: 'orders-service',
+    secretKey: process.env.BILLING_SECRET ?? '',
+    audience: 'billing',
+  },
+});
+
+// /v1/invoices answers 307 to /v2/invoices. The second request carries a signature over
+// POST /v2/invoices and the same body, with a fresh timestamp and nonce, so billing verifies
+// it as it verified the first.
+await billing.post('/v1/invoices', { orderId: 42 });
+```
+
+Without an `audience` a same-origin hop carries the original signature unchanged, and the callee
+rejects it with `signature-mismatch`. Set an `audience`, or call the final URL directly. A hop to
+another origin carries no signature at all, re-signed or not, and neither does any hop after it,
+even one that comes back to the first origin.
+
+Following a redirect gives whoever sent it a fresh signature for a method, path and body of its
+choosing on that origin. An `audience` makes that signature valid only at the callee it names, which
+is why a hop is re-signed only when there is one.
+
+### Redirect policy {#redirect-policy}
+
+`redirect` decides what a `301`, `302`, `303`, `307` or `308` leads to. Set it on the client, or
+on one request:
+
+- `'follow'` — the default: follow it, as described above.
+- `'error'` — fail with [`REDIRECT_ERROR`](#redirect-error), `details.reason: 'refused-by-policy'`.
+  The `Location` is not contacted, and the error is never retried.
+- `'manual'` — resolve with the redirect itself: a success whose `statusCode` is the `3xx` and
+  whose `headers.location` is the `Location`, exactly as the server sent it.
+
+The option's type is `RedirectPolicy`, exported by `@onebun/requests`.
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const client = createHttpClient({ baseUrl: 'https://api.example.com', redirect: 'error' });
+
+// Hand this one redirect back instead of failing on it
+const login = await client.post('/login', { user: 'ada' }, { redirect: 'manual' });
+
+if (login.success && login.statusCode === 302) {
+  login.headers?.location; // e.g. '/dashboard', relative as the server sent it
+}
+
+// get, delete, head and options take the policy in their third argument
+const report = await client.get('/reports/latest', undefined, { redirect: 'follow' });
+```
+
+A request's own `redirect` wins over the client's. `redirect` is not one of the config markers, so
+`client.get('/login', { redirect: '/home' })` still sends `GET /login?redirect=%2Fhome`. Pass the
+policy in the third argument, as in the last call above.
+
+Under `'manual'` the body of the `3xx` is read like any other body, under
+[`maxResponseBytes`](#max-response-bytes) too, and becomes `result`. An empty one that says
+`Content-Type: application/json` resolves with `result: undefined` instead of failing, so the
+`Location` is still there to read. A `Location` that is relative stays relative: resolve it
+against the URL you called, for example with `new URL(location, 'https://api.example.com/login')`.
+
+`RequestsService` methods return `result` alone, so under `'manual'` they resolve with the body of
+the `3xx`, and its status and `Location` are out of reach. Read a redirect through `HttpClient`, as
+above.
 
 ### REDIRECT_ERROR {#redirect-error}
 
-A redirect the client cannot follow fails with `REDIRECT_ERROR`, and `code` is the `3xx` that
-could not be followed. It is never retried, whatever `retryOn` lists: asking again gets the same
-redirect.
+A redirect the client cannot follow, or may not, fails with `REDIRECT_ERROR`, and `code` is the
+`3xx` that was not followed. It is never retried, whatever `retryOn` lists: asking again gets the
+same redirect.
 
 ```typescript
 import { Effect } from '@onebun/core';
@@ -644,8 +723,9 @@ import { Effect } from '@onebun/core';
 const outcome = await Effect.runPromise(Effect.either(client.getEffect('/files/42')));
 
 if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
-  outcome.left.code;               // the 3xx that could not be followed, e.g. 302
+  outcome.left.code;               // the 3xx that was not followed, e.g. 302
   outcome.left.details?.reason;    // 'too-many-redirects' | 'missing-location' | 'invalid-location'
+                                   // | 'refused-by-policy'
   outcome.left.details?.location;  // the Location header, when there was one
   outcome.left.details?.redirects; // how many redirects this call had followed
 }
@@ -654,9 +734,12 @@ if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
 - `too-many-redirects` — the answer that would have been the 21st redirect
 - `missing-location` — a `301`, `302`, `303`, `307` or `308` without a `Location`
 - `invalid-location` — a `Location` that is not a URL, or not an `http:` or `https:` one
+- `refused-by-policy` — any of the five under `redirect: 'error'`, with or without a `Location`;
+  `redirects` is `0`
 
-Any other `3xx` is an answer, not a redirect, and its `Location` is not followed — a `304`, for
-one, resolves as a success (see [Responses without a body](#responses-without-a-body)).
+Any other `3xx` is an answer, not a redirect, and its `Location` is not followed, under every
+policy — a `304`, for one, resolves as a success (see
+[Responses without a body](#responses-without-a-body)).
 
 <llm-only>
 
@@ -674,6 +757,36 @@ follows up to 127 redirects, so under the default config a loop cost four attemp
 each — 508 requests. A redirect status without a `Location` was an `HTTP_ERROR` with the 3xx as
 `code`, which `retryOn` could replay. All three are now `REDIRECT_ERROR`, sent once — a loop costs
 21 requests.
+
+Redirect policy, from 0.8.3:
+
+- Up to 0.8.2 there was no policy: every redirect was followed, and the only way to see a `3xx`
+  was a `fetch` of your own. The `'follow'` default keeps that behaviour.
+- Up to 0.8.2 a same-origin hop under `onebun` auth always carried the original signature and
+  failed with `signature-mismatch`. With an `audience` it now verifies. Without one nothing changed.
+- `redirect` is deliberately not a config marker of the two-argument `get`/`delete`/`head`/
+  `options` form: `?redirect=` is a common query parameter (a login flow's return path), and
+  making it a marker would silently turn that query into config.
+- `'error'` refuses before the `Location` is parsed, so a missing or unusable `Location` is
+  `refused-by-policy` too. `details.url` is the URL that answered. The metrics record carries the
+  `3xx` with `success: false`.
+- `'manual'` hands back only the five statuses the client would follow. A `300` or a `304` is
+  treated the same under every policy. The metrics record carries the `3xx` with `success: true`,
+  and `req()` returns the body of the `3xx`.
+- Under `'manual'` a `3xx` with `Content-Type: application/json` and an empty body resolves with
+  `result: undefined`: some gateways answer a redirect that way, and a `RESPONSE_PARSE_ERROR`
+  would carry no headers, so the `Location` would be lost. Only a handed-back redirect is exempt: a
+  `200` or a `300` with the same headers still fails with `RESPONSE_PARSE_ERROR`, and so does a
+  `3xx` whose non-empty body is not the JSON it claims. A server that answers with
+  `Response.redirect()` sends no `Content-Type`, and `result` is `''`.
+- `RequestsService` takes `redirect` from its options like any other `RequestsOptions` field, and
+  per request through the config argument. Its methods return `result` alone, so under `'manual'`
+  a handed-back redirect resolves with the body of the `3xx` (`''` or `undefined` when there is
+  none), and its status and `Location` cannot be read there. Use `HttpClient`, or the service
+  client, which returns the `HttpClient` envelope, to read `statusCode` and `headers.location`.
+  `RequestsService` fails a refused redirect with a `OneBunBaseError` whose `error` is
+  `REDIRECT_ERROR`, with the `3xx` in `details.status`. The service client takes the policy from
+  its options.
 
 </llm-only>
 
@@ -853,6 +966,9 @@ method you call and the path you pass, so only these fields are yours to set:
 
   /** The largest body this request accepts, in decoded bytes; `Infinity` lifts the client's */
   maxResponseBytes?: number;
+
+  /** What a redirect leads to: 'follow' (the default), 'error' or 'manual' */
+  redirect?: 'follow' | 'error' | 'manual';
 }
 ```
 
@@ -1174,7 +1290,7 @@ interface SuccessResponse<T> {
   traceId?: string;
   /** Retries spent before this response was produced; `0` means one request */
   retryCount?: number;
-  /** The HTTP status the upstream returned: 200, 201, 204, 304, ... */
+  /** The HTTP status the upstream returned: 200, 201, 204, 304, ... (a 3xx under 'manual') */
   statusCode?: number;
   /** The headers the upstream answered with, names lower-cased. Not enumerable */
   headers?: Record<string, string>;
@@ -1184,7 +1300,8 @@ interface SuccessResponse<T> {
 `headers` holds the upstream's response headers on every success the client produced: an `etag`,
 a `location`, a rate-limit header. Names are lower-cased. A header sent more than once is joined
 with `, `, as `Headers.get()` joins it, and `set-cookie` is joined the same way. After a redirect,
-they are the final hop's headers. An error's `details.headers` is collected as it always was: there,
+they are the final hop's headers; under [`redirect: 'manual'`](#redirect-policy), the redirect's
+own, `location` included. An error's `details.headers` is collected as it always was: there,
 a `set-cookie` sent more than once keeps only its last value. Under
 [`maxResponseBytes`](#max-response-bytes), both leave out `content-encoding` and `content-length`
 when the client decoded the body.

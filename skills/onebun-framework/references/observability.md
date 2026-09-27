@@ -98,8 +98,9 @@ needs both or a `traceparent`.
   `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
   `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
   are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`; `retries`, `query` and
-  `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data), so a config
-  holding only those takes the three-argument form. A third argument always makes the second the query, `undefined`
+  `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data, even though
+  `redirect` is also the redirect-policy config key), so a config holding only those takes the
+  three-argument form: `get(url, undefined, { redirect: 'error' })`. A third argument always makes the second the query, `undefined`
   included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped).
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
   whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
@@ -131,8 +132,11 @@ needs both or a `traceparent`.
   up to 20, `Location` resolved against the URL that answered. Methods change as in `fetch` (301/302 POST and
   303 non-HEAD become a body-less GET without `Content-Type`; 307/308 keep method and body bytes). One
   `timeout`, one abort signal and one metrics record cover the whole chain. A **same-origin** hop (scheme +
-  host + port) keeps every header, `X-OneBun-Signature` unchanged and not re-signed — so the callee rejects it
-  for another path. A hop to **any other origin** carries only `User-Agent`, `Accept`, `Accept-Encoding`,
+  host + port) keeps every header. Under `onebun` auth WITH an `audience` it is re-signed over its own
+  method/URL/body (fresh ts + nonce), so it verifies at the target; WITHOUT an audience (or `audience: ''`)
+  it carries the original signature and the callee rejects it with `signature-mismatch` (re-signing hands
+  the redirecting server a fresh signature for a path of its choosing; the audience confines it to that
+  callee). A hop to **any other origin** carries only `User-Agent`, `Accept`, `Accept-Encoding`,
   `traceparent`, `X-Trace-Id`, `X-Span-Id`, plus `Content-Type` while a body goes along; `127.0.0.1` and
   `localhost` are different origins, and a dropped header never comes back later in the chain. So no auth
   (bearer, basic, apikey header, custom, onebun) and no header from `RequestsOptions.headers`/`config.headers`
@@ -142,7 +146,21 @@ needs both or a `traceparent`.
   fails `REDIRECT_ERROR` with `code` = that 3xx and `details.reason`
   `'too-many-redirects' | 'missing-location' | 'invalid-location'`; it is never retried, whatever `retryOn`
   says (0.8.1: `FETCH_ERROR` replayed by `retryOnNetworkError` — Bun's own cap is 127 hops, so a loop cost
-  508 requests — or `HTTP_ERROR` 3xx).
+  508 requests — or `HTTP_ERROR` 3xx). No signature is ever made for another origin, nor for a hop back on
+  the first origin after one.
+- **Redirect policy** `redirect: 'follow' | 'error' | 'manual'` (type `RedirectPolicy`) on `RequestsOptions`
+  and per request (`config.redirect` wins; `undefined` = not set; default `'follow'`). Applies only to
+  301/302/303/307/308 — a 300 or 304 is treated the same under every policy. `'error'`: `REDIRECT_ERROR`,
+  `code` = the 3xx, `details { reason: 'refused-by-policy', status, location?, url, redirects: 0 }`, the
+  `Location` never contacted (a POST 307 is not re-sent anywhere), never retried. `'manual'`: resolves a
+  success with `statusCode` = the 3xx and `headers.location` exactly as sent (relative stays relative), the
+  3xx body read as usual (under `maxResponseBytes` too; an empty body with `Content-Type: application/json`
+  resolves `result: undefined` so the `Location` survives — a 200/300 like that is still
+  `RESPONSE_PARSE_ERROR`), metrics record the 3xx with `success: true`; `req()` returns the 3xx body.
+  `RequestsService` returns `result` alone, so under `'manual'` it yields only the 3xx body — no status, no
+  `Location`: read redirects through `HttpClient` (or the service client, which returns the envelope).
+  `RequestsService` fails a refused redirect with a `OneBunBaseError` (`code` 500 as for every non-mapped
+  status, the 3xx in `details.status`). Up to 0.8.2 every redirect was followed.
 - **`maxResponseBytes` caps the DECODED body while it is read** (client option, or per request; the request's
   wins, `Infinity` is the same as unset — that request takes `fetch`'s path). Off by default — an uncapped
   request keeps `fetch`'s path exactly. Set, the request goes out with `decompress: false` and

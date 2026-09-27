@@ -1,6 +1,7 @@
 /**
  * The client follows redirects itself, and a hop to another origin carries only a safelist of
- * headers.
+ * headers. The `redirect` policy and the re-signing of a same-origin hop are in
+ * `redirect-policy.test.ts`.
  *
  * `fetch` followed every 3xx on its own and, on a hop to another origin, stripped only
  * `Authorization`, `Cookie` and `Proxy-Authorization`. Measured on 0.8.1: an `apikey` header,
@@ -300,6 +301,9 @@ describe('redirects', () => {
   });
 
   describe('a hop to the same origin', () => {
+    const withoutSignature = (headers: Record<string, string>) =>
+      Object.fromEntries(Object.entries(headers).filter(([name]) => name !== 'x-onebun-signature'));
+
     for (const credential of CREDENTIAL_CASES) {
       it(`${credential.name}: delivers every original header`, async () => {
         setTraceContextProvider(() => ({ traceId: '4bf92f3577b34da6a3ce929d0e0e4736', spanId: '00f067aa0ba902b7' }));
@@ -308,8 +312,10 @@ describe('redirects', () => {
         await client.get('/redirect/302', { to: `${a.origin}/y` }, configFor(credential));
 
         expect(a.arrivals.map((arrival) => arrival.path.split('?')[0])).toEqual(['/redirect/302', '/y']);
-        // X-OneBun-Signature included: it goes along as it was, not re-signed
-        expect(a.arrivals[1].headers).toEqual(a.arrivals[0].headers);
+        expect(withoutSignature(a.arrivals[1].headers)).toEqual(withoutSignature(a.arrivals[0].headers));
+        // The onebun case names an audience, so its hop carries a signature of its own
+        // (redirect-policy.test.ts checks that it verifies); every other case carries none.
+        expect(a.arrivals[1].headers['x-onebun-signature'] === undefined).toBe(credential.auth?.type !== 'onebun');
       });
     }
 

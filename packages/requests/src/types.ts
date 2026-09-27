@@ -72,10 +72,13 @@ export interface SuccessResponse<T = unknown> {
    * 304 Not Modified, and they are not interchangeable — 201 Created, 202 Accepted, 204 No Content
    * and 304 each mean something a caller may need to branch on, and the metric label is derived
    * from this rather than assumed. For 204, 304 and any answer to HEAD, `result` is `undefined`.
+   * Under `redirect: 'manual'` a `301`, `302`, `303`, `307` or `308` is a success too, and this is
+   * that status.
    */
   statusCode?: number;
   /**
-   * The headers the upstream answered with — after redirects, the final hop's.
+   * The headers the upstream answered with — after redirects, the final hop's. Under
+   * `redirect: 'manual'`, the redirect's own, `location` included.
    *
    * Names are lower-cased, and a header sent more than once is joined with `, `, as
    * `Headers.get()` joins it (`set-cookie` included). Present on responses the HTTP client
@@ -552,6 +555,24 @@ export interface RetryConfig {
 }
 
 /**
+ * What the client does with a `301`, `302`, `303`, `307` or `308`.
+ *
+ * - `'follow'` — the default. The client follows it, up to 20 in one call, and a hop to another
+ *   origin carries no credential.
+ * - `'error'` — fail with `REDIRECT_ERROR`, `details.reason: 'refused-by-policy'`, without
+ *   contacting the `Location`. Never retried.
+ * - `'manual'` — resolve with the redirect itself: a success whose `statusCode` is the 3xx and
+ *   whose `headers.location` is the `Location` as the server sent it. An empty body typed as JSON
+ *   resolves with `result: undefined` rather than failing. `RequestsService` returns `result`
+ *   alone, so read a redirect through `HttpClient`.
+ *
+ * Any other 3xx is an answer rather than a redirect, under every policy.
+ *
+ * @see docs:api/requests.md
+ */
+export type RedirectPolicy = 'follow' | 'error' | 'manual';
+
+/**
  * Request configuration
  */
 export interface RequestConfig {
@@ -571,6 +592,14 @@ export interface RequestConfig {
    * which is then read as without one: decompressed by `fetch`, not by the client.
    */
   maxResponseBytes?: number;
+  /**
+   * What this request does with a redirect. Overrides the client's
+   * {@link RequestsOptions.redirect}.
+   *
+   * Not a config marker: `client.get('/login', { redirect: '/home' })` is query data. `get`,
+   * `delete`, `head` and `options` take the policy in their third argument.
+   */
+  redirect?: RedirectPolicy;
 }
 
 /**
@@ -619,6 +648,13 @@ export interface RequestsOptions {
    * an `HTTP_ERROR`'s `details.headers` alike. `Infinity` is the same as unset.
    */
   maxResponseBytes?: number;
+  /**
+   * What every request of this client does with a redirect ({@link RedirectPolicy}). A request's
+   * own `redirect` overrides it.
+   *
+   * @defaultValue 'follow'
+   */
+  redirect?: RedirectPolicy;
 }
 
 /**
@@ -755,4 +791,5 @@ export const DEFAULT_REQUESTS_OPTIONS: Required<
   tracing: true,
   metrics: true,
   userAgent: 'OneBun-Requests/1.0',
+  redirect: 'follow',
 };

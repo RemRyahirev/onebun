@@ -31,6 +31,10 @@ import {
  * answer to HEAD, a 204 or a 304 — resolves with `undefined`, and a 304 cannot be told from a 204
  * here. Use `HttpClient`, whose `SuccessResponse` carries `statusCode`, for conditional requests.
  *
+ * The same goes for `redirect: 'manual'`: a redirect handed back resolves with the body of the
+ * `3xx` alone, so neither its status nor its `Location` can be read here. Use `HttpClient` (or the
+ * service client, which returns its envelope) to read `statusCode` and `headers.location`.
+ *
  * @see docs:api/requests.md
  */
 export interface RequestsService {
