@@ -601,7 +601,7 @@ module exports only `OneBunFile`, `MimeType`, `matchMimeType`, `validateFile`.
 | Error type | HTTP status | Response body |
 |---|---|---|
 | `HttpException` | exception's statusCode | `{ success: false, error: message, code: statusCode }` |
-| `OneBunBaseError` | error's code | `{ success: false, error: message, code: errorCode }` |
+| `OneBunBaseError` | error's code | `toErrorResponse()`: `{ success: false, error, code, details, originalError }`, minus an HTTP-client error's transport details |
 | Any other `Error` or thrown value | 500 | `{ success: false, error: 'Internal Server Error', code: 500 }` |
 
 The third row does **not** carry the error's own message. That text is written by whatever threw — a
@@ -610,6 +610,12 @@ the password inside a connection string. The first two rows keep their messages 
 author-written and client-facing. The real message goes to the log (`Unhandled error in <Controller>.<handler>`),
 and comes back in the response only under `exposeErrorDetails`, which governs the message and the stack
 together. To say something specific to a client, throw an `HttpException` with your own wording.
+
+The second row sends the error's `details` whole, except the transport details of an error the HTTP client
+produced — the upstream's headers (`set-cookie`), the request URL, a redirect's `Location`, the upstream's
+body — which `withoutTransportDetails` drops at any depth unless `exposeErrorDetails` is on. So an uncaught
+`client.req()` failure no longer forwards the upstream's cookies or the internal URL to your caller; a copy
+of the client's record (`{ ...e.details }`) is yours and is sent whole.
 
 ## Guards, Exception Filters, Security
 

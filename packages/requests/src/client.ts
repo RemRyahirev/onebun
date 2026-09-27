@@ -13,6 +13,7 @@ import {
   formatTraceparent,
   type OutgoingTraceContext,
 } from './trace-context.js';
+import { markTransportDetails } from './transport-details.js';
 import {
   type ApiResponse,
   createErrorResponse,
@@ -222,11 +223,11 @@ const collectResponseHeaders = (headers: Headers): Record<string, string> =>
  * sent more than once keeps only its last value there and a header named `__proto__` is lost.
  *
  * Deliberately not {@link collectResponseHeaders}. `details.headers` is enumerable, and the error
- * `req()` throws carries it: a controller that does not catch that error lets the default exception
- * filter serialize it into the body it sends its own caller, the upstream's headers and the request
- * URL included. Joining every `set-cookie` here would forward all of the upstream's cookies on that
- * path instead of one. The exposure belongs to the thrown path and is to be closed there, not
- * widened here first.
+ * `req()` throws carries it. The default exception filter leaves it out of the body it sends a
+ * controller's caller only because the record is registered as transport details
+ * ({@link markTransportDetails}); under `exposeErrorDetails`, and in any filter of the application's
+ * own that serializes the error whole, it still goes out. Joining every `set-cookie` here would put
+ * all of the upstream's cookies there instead of one, so the record stays as it always was.
  */
 const collectErrorHeaders = (headers: Headers): Record<string, string> => {
   const record: Record<string, string> = {};
@@ -398,11 +399,12 @@ const classifyTransportFailure = (
     TRANSPORT_FAILURE_ERRORS[kind],
     TRANSPORT_FAILURE_CODE,
     traceId,
-    {
+    // `details` is the raw error, and Bun's connection error names the request URL in its `path`.
+    markTransportDetails({
       details: error,
       transport: kind,
       ...(receivedStatus === undefined ? {} : { statusCode: receivedStatus, phase: 'body' }),
-    },
+    }, ['details']),
   );
 };
 
@@ -483,13 +485,13 @@ const redirectError = (
 ): ErrorResponse => {
   const location = response.headers.get('location');
 
-  return createErrorResponse(REDIRECT_ERROR, response.status, traceId, {
+  return createErrorResponse(REDIRECT_ERROR, response.status, traceId, markTransportDetails({
     reason,
     status: response.status,
     url: hop.url,
     redirects,
     ...(location === null ? {} : { location }),
-  });
+  }, ['url', 'location']));
 };
 
 /**
@@ -903,7 +905,7 @@ const bodyReadFailure = (
 ): ErrorResponse =>
   signal.aborted || transportFailureKindOf(error) !== 'network'
     ? classifyTransportFailure(error, signal, traceId, response.status)
-    : createErrorResponse(readFailure, response.status, traceId, { details: error });
+    : createErrorResponse(readFailure, response.status, traceId, markTransportDetails({ details: error }, ['details']));
 
 /**
  * What a body read under `maxResponseBytes` that failed is reported as.
@@ -929,12 +931,12 @@ const cappedBodyFailure = (
     case 'decode':
       return signal.aborted
         ? classifyTransportFailure(failure.error, signal, traceId, statusCode)
-        : createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, {
+        : createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, markTransportDetails({
           reason: 'corrupt-body',
           encoding: response.headers.get('content-encoding'),
           statusCode,
           details: failure.error,
-        });
+        }, ['details']));
     case 'unsupported-encoding':
       return createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, {
         reason: 'unsupported-encoding',
@@ -1027,7 +1029,7 @@ const parseResponseData = <T>(
               'RESPONSE_PARSE_ERROR',
               response.status,
               traceId,
-              { details: text },
+              markTransportDetails({ details: text }, ['details']),
             ),
           );
         }
@@ -1214,13 +1216,13 @@ const executeSingleRequest = <T, E extends string, R extends string>(
             'HTTP_ERROR',
             response.status,
             traceId,
-            {
+            markTransportDetails({
               headers: collectErrorHeaders(upstreamHeaders),
               details: responseData,
               duration,
               url: fullUrl,
               method: config.method,
-            },
+            }, ['headers', 'details', 'url']),
           );
         }),
       );

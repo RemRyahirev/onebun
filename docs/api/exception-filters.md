@@ -35,7 +35,7 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 
 **The default filter** handles:
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
-- `OneBunBaseError` subclasses → `{ success: false, error: message, code: errorCode }` (HTTP status = error's code)
+- `OneBunBaseError` subclasses → `error.toErrorResponse()`: `{ success: false, error, code, details, originalError }` (HTTP status = error's code). Serialized with the `withoutTransportDetails` replacer from `@onebun/requests` unless `exposeErrorDetails` is set: the transport details of an error the HTTP client produced — the upstream's response headers (`set-cookie`), the request URL with its query, a redirect's `Location`, the upstream's body or the raw transport error — are left out, at any depth (`client.req()` nests the client failure under `details.originalError`). Only records the client registered are touched; an author-written `details: { headers, url }` is sent whole. See docs/api/requests.md#uncaught-client-errors
 - Any other `Error` **or thrown value** → `{ success: false, error: 'Internal Server Error', code: 500 }` (HTTP 500). The exported constant is `UNHANDLED_ERROR_MESSAGE`. The thrown value's own message is NOT in the body: it is written by whatever threw it — a driver, a socket, the file system — and routinely names an absolute path, an internal host and port, a service hostname, a failing statement with its bound parameters, or the password inside a connection string. The two branches above keep their messages, because they are author-written and client-facing; this branch has no way to tell a safe message from a leaking one, so it is withheld wholesale rather than filtered. A denylist of shapes would always miss the shape it had not met
 - `createErrorResponse` always emits a `details` key, defaulting to `{}`. Only the unhandled branch ever populated it, and it no longer does unless `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
 - `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
@@ -86,19 +86,25 @@ const myFilter = createExceptionFilter((error, ctx) => {
 
 `ValidationError` is a class from `@onebun/requests`, not from `@onebun/core` — `instanceof` needs the
 runtime value, and the similarly named `ValidationError` in core's validation module is an interface
-with no runtime existence:
+with no runtime existence. A `ValidationError` is also what an upstream's 422 becomes (the
+`RequestsService` Effect API, `OneBunBaseError.fromErrorResponse`), and then its `details` is the
+HTTP client's record: the upstream's headers, its body and the request URL. The
+`withoutTransportDetails` replacer leaves those out, as the default filter does, and leaves the
+`details` of a `ValidationError` you threw yourself as they are:
 
 ```typescript
 import type { ExceptionFilter, HttpExecutionContext } from '@onebun/core';
-import { ValidationError } from '@onebun/requests';
+import { ValidationError, withoutTransportDetails } from '@onebun/requests';
 
 class ValidationExceptionFilter implements ExceptionFilter {
   catch(error: unknown, ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
-      return Response.json(
-        { success: false, error: 'Validation failed', details: error.details },
-        { status: 200 },
-      );
+      const body = { success: false, error: 'Validation failed', details: error.details };
+
+      return new Response(JSON.stringify(body, withoutTransportDetails), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     return undefined; // decline: the next filter outwards gets it
@@ -265,7 +271,7 @@ The `defaultExceptionFilter` is always active. It handles:
 | Error type | Response body | Status |
 |------------|---------------|--------|
 | `HttpException` | `{ success: false, error: message, code: statusCode, details: {} }` | exception's statusCode |
-| `OneBunBaseError` subclass | `{ success: false, error: message, code: errorCode }` | error's code |
+| `OneBunBaseError` subclass | `{ success: false, error, code, details, originalError }` — without an HTTP-client error's transport details, unless `exposeErrorDetails` | error's code |
 | Any other `Error` or value | `{ success: false, error: 'Internal Server Error', code: 500, details: {} }` | 500 |
 
 **An unhandled error does not put its own message in the response.** The first two rows do —
@@ -313,9 +319,39 @@ Off by default, and deliberately **not** tied to `NODE_ENV` — a deployment wit
 mistyped `NODE_ENV` would start disclosing all of it silently, which is the failure this guards
 against. Turn it on knowingly, in a development configuration you can read.
 
-`HttpException` and `OneBunBaseError` bodies are unaffected by the flag: they never carried
-details.
+`HttpException` bodies are unaffected by the flag. A `OneBunBaseError` body carries the error's
+own `details` either way; the flag adds back only the transport details of an HTTP-client error —
+see below.
 :::
+
+**An HTTP-client error keeps its transport details out of the body.** A `OneBunBaseError` is sent
+whole, its `details` and `originalError` included, because the author wrote them for the client.
+An error the HTTP client produced is the exception: `client.req()` throws one, and it carries the
+upstream's response headers (its `set-cookie` among them), the URL the request went to and the
+upstream's body. The upstream sent those to your application, not to its caller, so the
+default filter leaves them out — at any depth, including under `details.originalError` — unless
+`exposeErrorDetails` is on. The status, `error`, `code` and every other field stay. See
+[An uncaught client error and your caller](./requests.md#uncaught-client-errors) for what is left
+out of which error.
+
+A filter of your own that serializes a `OneBunBaseError` can do the same with the replacer the
+default filter uses:
+
+```typescript
+import { createExceptionFilter, OneBunBaseError, withoutTransportDetails } from '@onebun/core';
+
+const auditedFilter = createExceptionFilter((error) => {
+  if (!(error instanceof OneBunBaseError)) {
+    return undefined;
+  }
+
+  // Envelope mode: always 200, the real code in the body
+  return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+});
+```
 
 ## Accessing the Request in a Filter
 

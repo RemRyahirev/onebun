@@ -713,6 +713,12 @@ export interface ApplicationOptions<QA extends QueueAdapterConstructor<any> = Qu
    * Add `details` — the error's class name, its non-HTTP `code`, and its **stack trace** — to
    * the response body for an unhandled error.
    *
+   * It also keeps an HTTP-client error's transport details in the body of a `OneBunBaseError`
+   * answer: the upstream's response headers (`set-cookie` included), the request URL, a
+   * redirect's `Location` and the upstream's body, wherever the error carries them — its own
+   * `details`, or the `originalError` that `client.req()` wraps. Off, the default filter leaves
+   * them out, and the rest of such a body is unchanged.
+   *
    * Off by default, and deliberately not tied to `NODE_ENV`. A stack trace in a public API
    * response discloses absolute filesystem paths, dependency versions and internal module
    * layout, and a deployment with an unset or mistyped `NODE_ENV` would then leak it silently

@@ -24,6 +24,9 @@ export {
   type TraceContextProvider,
 } from './trace-context.js';
 
+// Keeping a client error's transport details out of what the application's caller reads
+export { withoutTransportDetails } from './transport-details.js';
+
 // Service for dependency injection
 export {
   makeRequestsService,

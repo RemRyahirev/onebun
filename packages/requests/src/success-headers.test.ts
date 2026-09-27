@@ -133,10 +133,11 @@ describe('SuccessResponse.headers', () => {
     }
   });
 
-  it('leaves an error\'s details.headers as it was, because the default exception filter serializes it', async () => {
-    // `details.headers` is enumerable, and an error `req()` throws that a controller does not catch
-    // reaches the caller's body through the default exception filter. Joining every set-cookie
-    // there, as a success's headers are joined, would forward all of the upstream's cookies instead of one.
+  it('leaves an error\'s details.headers as it was, because an error serialized whole sends it', async () => {
+    // `details.headers` is enumerable. The default exception filter leaves it out of a caller's body,
+    // but `exposeErrorDetails` and a filter of the application's own serialize the error whole. Joining
+    // every set-cookie there, as a success's headers are joined, would send all of the upstream's
+    // cookies on those paths instead of one.
     const outcome = await Effect.runPromise(Effect.either(client.getEffect('/missing')));
 
     expect(outcome._tag).toBe('Left');

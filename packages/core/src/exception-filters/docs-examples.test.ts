@@ -38,6 +38,8 @@ import {
   UseFilters,
   BaseService,
   Service,
+  createHttpClient,
+  withoutTransportDetails,
 } from '@onebun/core';
 import { LoggerService, type Logger } from '@onebun/logger';
 import { ValidationError } from '@onebun/requests';
@@ -127,15 +129,18 @@ const oneBunErrorFilter = createExceptionFilter((error, _ctx) => {
 
 /** docs "Class-based filter". */
 class ValidationExceptionFilter implements ExceptionFilter {
-  catch(error: unknown, _ctx: HttpExecutionContext): Response {
+  catch(error: unknown, _ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
-      return Response.json(
-        { success: false, error: 'Validation failed', details: error.details },
-        { status: HttpStatusCode.OK },
-      );
+      const body = { success: false, error: 'Validation failed', details: error.details };
+
+      return new Response(JSON.stringify(body, withoutTransportDetails), {
+        status: HttpStatusCode.OK,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
 
-    throw error; // pass to next filter
+    return undefined; // decline: the next filter outwards gets it
   }
 }
 
@@ -234,6 +239,10 @@ describe('docs/api/exception-filters.md', () => {
     age: 'number',
   });
 
+  // An upstream that rejects a payload with 422, its own cookie and a body naming its internals.
+  let rejectingUpstream: ReturnType<typeof Bun.serve>;
+  let rejectingUpstreamOrigin: string;
+
   @Controller('/defaults')
   class DefaultsController extends BaseController {
     @Get('/conflict')
@@ -292,6 +301,20 @@ describe('docs/api/exception-filters.md', () => {
     @Get('/other')
     other(): never {
       throw new HttpException(HttpStatusCode.CONFLICT, 'Conflict');
+    }
+
+    /** The ValidationError an upstream's 422 becomes: its `details` is the HTTP client's record. */
+    @Get('/upstream-invalid')
+    async upstreamInvalid(): Promise<never> {
+      const upstreamClient = createHttpClient({ baseUrl: rejectingUpstreamOrigin, retries: { max: 0 } });
+      const outcome = await Effect.runPromise(Effect.either(upstreamClient.postEffect('/users?token=URL-SECRET', {})));
+
+      if (outcome._tag === 'Left') {
+        // What the RequestsService Effect API fails with for the same answer
+        throw OneBunBaseError.fromErrorResponse(outcome.left);
+      }
+
+      throw new Error('the upstream accepted the payload');
     }
   }
 
@@ -402,6 +425,16 @@ describe('docs/api/exception-filters.md', () => {
   let base: string;
 
   beforeAll(async () => {
+    rejectingUpstream = Bun.serve({
+      port: 0,
+      fetch: () => Response.json({ rule: 'BODY-SECRET' }, {
+        status: HttpStatusCode.UNPROCESSABLE_ENTITY,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'Set-Cookie': 'upstream_session=COOKIE-SECRET' },
+      }),
+    });
+    rejectingUpstreamOrigin = `http://127.0.0.1:${rejectingUpstream.port}`;
+
     app = new OneBunApplication(FiltersModule, {
       port: 0,
       loggerLayer: makeMockLoggerLayer() as never,
@@ -414,6 +447,7 @@ describe('docs/api/exception-filters.md', () => {
 
   afterAll(async () => {
     await app?.stop();
+    rejectingUpstream?.stop(true);
   });
 
   // --------------------------------------------------------------------------
@@ -546,6 +580,24 @@ describe('docs/api/exception-filters.md', () => {
 
     expect(passedOn.status).toBe(HttpStatusCode.CONFLICT);
     expect(passedOnBody.error).toBe('Conflict');
+  });
+
+  /**
+   * @source docs:api/exception-filters.md#class-based-filter
+   */
+  it('leaves the transport details out of a ValidationError an upstream 422 became', async () => {
+    const response = await fetch(`${base}/users/upstream-invalid`);
+    const text = await response.text();
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    expect(text).not.toContain('COOKIE-SECRET');
+    expect(text).not.toContain('BODY-SECRET');
+    expect(text).not.toContain('URL-SECRET');
+    expect(JSON.parse(text)).toEqual({
+      success: false,
+      error: 'Validation failed',
+      details: { duration: expect.any(Number), method: 'POST' },
+    });
   });
 
   // --------------------------------------------------------------------------
@@ -922,7 +974,7 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
   });
 
   it('leaves the HttpException row unaffected by the flag', async () => {
-    // The last sentence of the warning: these bodies never carried details.
+    // The last paragraph of the warning: these bodies never carried details.
     for (const exposeErrorDetails of [false, true]) {
       await withApp({ exposeErrorDetails }, async (base) => {
         const response = await fetch(`${base}/default-filter/http-exception`);
@@ -933,5 +985,141 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
         expect(body.details).toEqual({});
       });
     }
+  });
+});
+
+/**
+ * The `OneBunBaseError` row, the paragraph on an HTTP-client error's transport details beneath the
+ * `exposeErrorDetails` warning, and the filter snippet that uses `withoutTransportDetails`.
+ *
+ * @source docs:api/exception-filters.md#default-filter-behaviour
+ */
+describe('Default Filter Behaviour: an HTTP-client error (docs/api/exception-filters.md)', () => {
+  const COOKIE = 'upstream_session=COOKIE-SECRET';
+  let upstream: ReturnType<typeof Bun.serve>;
+  let upstreamOrigin: string;
+
+  beforeAll(() => {
+    upstream = Bun.serve({
+      port: 0,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      fetch: () => new Response('upstream says BODY-SECRET', { status: 404, headers: { 'Set-Cookie': COOKIE } }),
+    });
+    upstreamOrigin = `http://127.0.0.1:${upstream.port}`;
+  });
+
+  afterAll(() => {
+    upstream.stop(true);
+  });
+
+  function clientErrorModule(): new () => object {
+    const upstreamClient = createHttpClient({ baseUrl: upstreamOrigin });
+
+    const auditedFilter = createExceptionFilter((error) => {
+      if (!(error instanceof OneBunBaseError)) {
+        return undefined;
+      }
+
+      // Envelope mode: always 200, the real code in the body
+      return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+        status: 200,
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    @Controller('/client-error')
+    class ClientErrorController extends BaseController {
+      @Get('/escaped')
+      async escaped() {
+        return await upstreamClient.req('GET', '/internal?token=URL-SECRET');
+      }
+
+      @Get('/audited')
+      @UseFilters(auditedFilter)
+      async audited() {
+        return await upstreamClient.req('GET', '/internal?token=URL-SECRET');
+      }
+
+      @Get('/authored')
+      authored(): never {
+        throw new NotFoundError('NO_SUCH_ORDER', { orderId: 7, url: '/orders/7' });
+      }
+    }
+
+    @Module({ controllers: [ClientErrorController] })
+    class ClientErrorModule {}
+
+    return ClientErrorModule;
+  }
+
+  async function withApp(exposeErrorDetails: boolean, run: (base: string) => Promise<void>): Promise<void> {
+    const app = new OneBunApplication(clientErrorModule(), {
+      port: 0,
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      gracefulShutdown: false,
+      exposeErrorDetails,
+    });
+    await app.start();
+
+    try {
+      await run(app.getHttpUrl());
+    } finally {
+      await app.stop();
+    }
+  }
+
+  it('leaves the transport details out of an escaped client error, and keeps the rest', async () => {
+    await withApp(false, async (base) => {
+      const response = await fetch(`${base}/client-error/escaped`);
+      const text = await response.text();
+
+      expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain('BODY-SECRET');
+      expect(text).not.toContain('URL-SECRET');
+      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: HTTP_INTERNAL_SERVER_ERROR });
+      expect(JSON.parse(text).details.originalError.cause.failure.details).toEqual({
+        duration: expect.any(Number),
+        method: 'GET',
+      });
+    });
+  });
+
+  it('puts them back under exposeErrorDetails', async () => {
+    await withApp(true, async (base) => {
+      const text = await (await fetch(`${base}/client-error/escaped`)).text();
+
+      expect(text).toContain('COOKIE-SECRET');
+      expect(text).toContain('BODY-SECRET');
+      expect(text).toContain('URL-SECRET');
+    });
+  });
+
+  it('sends an author-written OneBunBaseError whole, details included, with the flag off', async () => {
+    await withApp(false, async (base) => {
+      const response = await fetch(`${base}/client-error/authored`);
+
+      expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
+      expect(await response.json()).toEqual({
+        success: false,
+        error: 'NO_SUCH_ORDER',
+        code: HttpStatusCode.NOT_FOUND,
+        details: { orderId: 7, url: '/orders/7' },
+      });
+    });
+  });
+
+  it('lets a filter of your own leave them out with the same replacer', async () => {
+    await withApp(false, async (base) => {
+      const response = await fetch(`${base}/client-error/audited`);
+      const text = await response.text();
+
+      expect(response.status).toBe(HttpStatusCode.OK);
+      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED' });
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain('URL-SECRET');
+    });
   });
 });

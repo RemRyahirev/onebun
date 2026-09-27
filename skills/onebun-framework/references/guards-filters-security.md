@@ -307,6 +307,23 @@ Three things about the last row that a reader will otherwise get wrong:
 Nothing is lost operationally: the application logs the whole error, message and stack included,
 before the filter runs — grep the logs for `Unhandled error in <Controller>.<handler>`.
 
+**The `OneBunBaseError` row leaves an HTTP-client error's transport details out.** A
+`OneBunBaseError` is sent whole, `details` and `originalError` included — except the transport
+details of an error `@onebun/requests` produced: an `HTTP_ERROR`'s `details.headers` (the upstream's
+`set-cookie`), `details.url` and `details.details` (the upstream's body); a `REDIRECT_ERROR`'s
+`details.url` and `details.location`; the raw error in `details.details` of a transport failure
+(Bun's connection error names the URL) and of `RESPONSE_PARSE/READ/DECODE_ERROR`. They are dropped at
+any depth — `client.req()` nests the failure under `details.originalError` — by serializing with the
+`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`).
+`exposeErrorDetails: true` sends them. Only records the client built are touched: an author-written
+`details: { headers, url }` is sent whole, and so is a COPY of a client record
+(`{ ...e.details, extra }`) — rebuild errors from `e.details` by reference, or pick fields. A filter
+of your own that serializes such an error, or puts its `details` into a body of its own (a
+`ValidationError` from an upstream's 422 carries the client's record as `details`):
+`JSON.stringify(body, withoutTransportDetails)`. Filters see only throws: a handler that RETURNS a
+client failure (`return outcome.left`) sends it whole as its `result`. Up to 0.8.2 the default
+filter sent them.
+
 `httpEnvelope: true` overrides the status column: every row answers HTTP 200 and the real status
 lives in `code`.
 

@@ -521,6 +521,154 @@ export class UserService extends BaseService {
 }
 ```
 
+### An uncaught client error and your caller {#uncaught-client-errors}
+
+A client error that a controller does not catch is answered by the
+[default exception filter](./exception-filters.md#default-filter-behaviour). `client.req()` throws a
+`OneBunBaseError`, the `RequestsService` Effect API fails with one, and an error you build from a
+failure's `details`, as in the example above, carries the client's record as its own. The filter sends a
+`OneBunBaseError` whole, `details` included, **except the transport details of an error the client
+produced**: what the upstream answered with and where the request went. The upstream sent those to
+your application, not to its caller.
+
+| Error | Left out of the caller's body |
+|-------|-------------------------------|
+| `HTTP_ERROR` | `details.headers` (the upstream's `set-cookie` among them), `details.url` with its query, `details.details` (the upstream's body) |
+| `REDIRECT_ERROR` | `details.url`, `details.location` |
+| `TIMEOUT_ERROR`, `ABORT_ERROR`, `FETCH_ERROR` | `details.details`, the raw error: Bun's connection error names the request URL |
+| `RESPONSE_PARSE_ERROR`, `RESPONSE_READ_ERROR`, `RESPONSE_DECODE_ERROR` | `details.details`: the upstream's body, or the raw error |
+
+The rest of the body is what it was: the status, `error`, `code`, `details.method`,
+`details.duration`, `details.transport`, and every field of an error you wrote yourself. The error
+object keeps everything too: only the body the filter serializes is shorter.
+
+```typescript
+import { Controller, Get, Param } from '@onebun/core';
+import { createHttpClient } from '@onebun/requests';
+
+const billing = createHttpClient({ baseUrl: 'http://billing.internal:8080' });
+
+@Controller('/invoices')
+export class InvoicesController {
+  @Get('/:id')
+  async findOne(@Param('id') id: string) {
+    // Billing answers 404 with its own cookies: the caller gets a 500 REQUEST_FAILED
+    return await billing.req('GET', `/invoices/${id}`);
+  }
+}
+```
+
+The caller of `GET /invoices/42` reads the failure's name, status, method and duration, and none of
+billing's headers, its body or `http://billing.internal:8080/invoices/42`:
+
+```json
+{
+  "success": false,
+  "error": "REQUEST_FAILED",
+  "code": 500,
+  "details": {
+    "originalError": {
+      "_id": "FiberFailure",
+      "cause": {
+        "_id": "Cause",
+        "_tag": "Fail",
+        "failure": {
+          "success": false,
+          "error": "HTTP_ERROR",
+          "traceId": "4bf92f3577b34da6a3ce929d0e0e4736",
+          "code": 404,
+          "details": { "duration": 12, "method": "GET" },
+          "retryCount": 0
+        }
+      }
+    }
+  }
+}
+```
+
+**`exposeErrorDetails` sends them.** With the application option on, the filter sends such an error
+whole, as it sends the stack of an unhandled one: the upstream's `set-cookie`, the URL and its
+query, the upstream's body. Turn it on knowingly, in a development configuration you can read.
+
+```typescript
+import { OneBunApplication } from '@onebun/core';
+
+const app = new OneBunApplication(AppModule, { exposeErrorDetails: true });
+```
+
+**A copy of the client's record is yours.** The filter recognises the record the client built,
+wherever it sits: an error whose `details` IS that record keeps the transport details out. A spread
+makes a new record, and the filter sends it whole, the upstream's headers and URL included. Pick the
+fields your caller should read instead:
+
+```typescript
+import { Effect } from '@onebun/core';
+import { BadGatewayError } from '@onebun/requests';
+
+const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoices/${id}`)));
+
+if (outcome._tag === 'Left') {
+  // Not `{ ...outcome.left.details, invoiceId: id }`: that copy is sent whole
+  throw new BadGatewayError('BILLING_UNAVAILABLE', { invoiceId: id, upstreamStatus: outcome.left.code });
+}
+```
+
+**A failure you return is not an error.** Filters see only what a handler throws. A handler that
+returns the client's failure (`return outcome.left`) sends it as its result, inside
+`{ success: true, result }`, and sends it whole: the upstream's headers, its body and the URL
+included. Throw it, or map it as above.
+
+**A filter of your own** that serializes a `OneBunBaseError` itself leaves the transport details out
+with the same replacer the default filter uses:
+
+```typescript
+import { createExceptionFilter, OneBunBaseError, withoutTransportDetails } from '@onebun/core';
+
+export const envelopeFilter = createExceptionFilter((error) => {
+  if (!(error instanceof OneBunBaseError)) {
+    return undefined; // not ours: the next filter out answers
+  }
+
+  return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+});
+```
+
+<llm-only>
+
+- The client registers each error record it builds, with the keys that hold transport details, in a
+  `WeakMap` kept on `globalThis` under `Symbol.for('onebun:requests-transport-details')`. Nothing is
+  added to the record: it reads, compares (`toEqual`), prints and snapshots as it did. Two copies of
+  `@onebun/requests` in one process share the registry.
+- `withoutTransportDetails` is a `JSON.stringify` replacer. `JSON.stringify` hands it every value
+  after `toJSON`, so it finds the client's record at any depth: under `details.originalError`, where
+  `req()` puts the `FiberFailure` whose `toJSON` keeps a reference to the failure, and as the
+  `details` of an error built from `outcome.left.details` or by `OneBunBaseError.fromErrorResponse`.
+- It drops only the registered keys of a registered record, and returns every other value as it got
+  it. An error you write yourself with `details: { headers, url }` is sent whole: those are yours.
+- A copy is not registered: `{ ...details }`, `Object.assign({}, details)`, `structuredClone`, a
+  JSON round trip. Code that rebuilds a client failure into another error must pass the record by
+  reference, or pick fields.
+- An upstream OneBun service's own error envelope (`{ success: false, error, code, details }` parsed
+  from its body) is not a transport detail: it is propagated as the error, `details` and all, as
+  before. `RESPONSE_PARSE_ERROR` with `details: 'Response text is empty'` is the client's own text
+  and is not withheld either.
+- Rejections of the Promise API (`client.get()`, `RequestsService.get()`, the service client) are a
+  `FiberFailure`, which is not a `OneBunBaseError`: the default filter answers it as any unhandled
+  error, `'Internal Server Error'` and empty `details`. Under `exposeErrorDetails` its message, the
+  failure's JSON, goes out whole like any unhandled error's message.
+- The application does not log a `OneBunBaseError` before the filter runs, so with the flag off the
+  transport details reach neither the body nor the log. Catch the error and log what you need.
+- Up to 0.8.2 the default filter sent them wherever a `OneBunBaseError` carried them: `req()`'s
+  `REQUEST_FAILED` put the upstream's last `set-cookie`, its other headers, its body and the full
+  request URL under `details.originalError.cause.failure.details`, and an error built from a
+  failure's `details` (the `RequestsService` Effect API, `fromErrorResponse`, the mapping example
+  above) put them at the top of `details`. The Promise API's `FiberFailure` was masked then too.
+
+</llm-only>
+
 ### Timeouts and interruption
 
 `timeout` bounds the whole response, **body included**. `fetch` resolves as soon as the status
@@ -1357,10 +1505,10 @@ To log or snapshot an envelope, use `{ ...response }` or the fields you need.
 - `RequestsService` methods return `result` alone, so they have no headers. Use `HttpClient` (or the
   service client, which returns the `HttpClient` envelope) when a header matters.
 - An `HTTP_ERROR`'s `details.headers` is NOT the same record: it is enumerable, and there a repeated
-  `set-cookie` keeps only its last value. `client.req()` throws a `OneBunBaseError`, and one a
-  controller does not catch is serialized by the default exception filter into the body it sends
-  that controller's caller, the upstream's headers and the request URL included. Catch it and throw
-  your own error when those must not reach your caller.
+  `set-cookie` keeps only its last value. The default exception filter leaves it out of the body it
+  sends a controller's caller, with the request URL and the upstream's body (see
+  [An uncaught client error and your caller](#uncaught-client-errors)). `exposeErrorDetails`, and a
+  filter of your own that serializes the error without `withoutTransportDetails`, send it whole.
 - Up to 0.8.2 a success had no `headers`.
 
 </llm-only>
@@ -1413,6 +1561,9 @@ interface OneBunError<E extends string = string, R extends string = string> {
 ```
 
 There is no `message` field. `error` carries the machine-readable name and `details` the context.
+The context is for your application: when a client error escapes a controller, the default
+exception filter leaves its transport details out of the caller's body (see
+[An uncaught client error and your caller](#uncaught-client-errors)).
 
 ## Complete Example
 

@@ -18,6 +18,8 @@
  */
 
 import {
+  afterAll,
+  beforeAll,
   describe,
   it,
   expect,
@@ -64,6 +66,7 @@ import type {
   ServiceDefinition,
 } from '@onebun/core';
 import { type } from '@onebun/core';
+import { BadGatewayError } from '@onebun/requests';
 
 
 import { registerDependencies } from './decorators/decorators';
@@ -189,6 +192,8 @@ import {
   DependencyResolutionError,
   registerModule,
   resetRegistrations,
+  createHttpClient,
+  withoutTransportDetails,
 } from './';
 
 
@@ -3675,6 +3680,185 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
     } finally {
       await app.stop();
     }
+  });
+});
+
+describe('An uncaught client error and your caller (docs/api/requests.md)', () => {
+  const BILLING_COOKIE = 'billing_session=COOKIE-SECRET; Path=/; HttpOnly';
+  let billingUpstream: ReturnType<typeof Bun.serve>;
+  let billingOrigin: string;
+
+  beforeAll(() => {
+    // Billing answers every request 404, with its own cookie and a body of its own
+    billingUpstream = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ message: 'BODY-SECRET' }), {
+          status: 404,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/json', 'Set-Cookie': BILLING_COOKIE },
+        });
+      },
+    });
+    billingOrigin = `http://127.0.0.1:${billingUpstream.port}`;
+  });
+
+  afterAll(() => {
+    billingUpstream.stop(true);
+  });
+
+  /** The snippet's controller, pointed at the fixture instead of billing.internal. */
+  function invoicesModule(): new () => object {
+    const billing = createHttpClient({ baseUrl: billingOrigin });
+
+    @Controller('/invoices')
+    class InvoicesController extends BaseController {
+      @Get('/:id')
+      async findOne(@Param('id') id: string) {
+        return await billing.req('GET', `/invoices/${id}`);
+      }
+
+      @Get('/:id/picked')
+      async picked(@Param('id') id: string) {
+        const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoices/${id}`)));
+
+        if (outcome._tag === 'Left') {
+          throw new BadGatewayError('BILLING_UNAVAILABLE', { invoiceId: id, upstreamStatus: outcome.left.code });
+        }
+
+        return outcome.right;
+      }
+
+      @Get('/:id/spread')
+      async spread(@Param('id') id: string) {
+        const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoices/${id}`)));
+
+        if (outcome._tag === 'Left') {
+          throw new BadGatewayError('BILLING_UNAVAILABLE', { ...outcome.left.details, invoiceId: id });
+        }
+
+        return outcome.right;
+      }
+
+      @Get('/:id/enveloped')
+      @UseFilters(createExceptionFilter((error) => {
+        if (!(error instanceof OneBunBaseError)) {
+          return undefined;
+        }
+
+        return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+          status: 200,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }))
+      async enveloped(@Param('id') id: string) {
+        return await billing.req('GET', `/invoices/${id}`);
+      }
+    }
+
+    @Module({ controllers: [InvoicesController] })
+    class InvoicesModule {}
+
+    return InvoicesModule;
+  }
+
+  async function withInvoicesApp(options: Partial<ApplicationOptions>, run: (base: string) => Promise<void>): Promise<void> {
+    const app = new OneBunApplication(invoicesModule(), { ...options, port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    try {
+      await run(`http://127.0.0.1:${app.getPort()}`);
+    } finally {
+      await app.stop();
+    }
+  }
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('answers the escaped req() error without billing\'s headers, body or URL', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const response = await fetch(`${base}/invoices/42`);
+      const text = await response.text();
+
+      expect(response.status).toBe(500);
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain('BODY-SECRET');
+      expect(text).not.toContain(billingOrigin);
+      // The body the page prints, field for field
+      expect(JSON.parse(text)).toEqual({
+        success: false,
+        error: 'REQUEST_FAILED',
+        code: 500,
+        details: {
+          originalError: {
+            _id: 'FiberFailure',
+            cause: {
+              _id: 'Cause',
+              _tag: 'Fail',
+              failure: {
+                success: false,
+                error: 'HTTP_ERROR',
+                code: 404,
+                traceId: expect.any(String),
+                details: { duration: expect.any(Number), method: 'GET' },
+                retryCount: 0,
+              },
+            },
+          },
+        },
+      });
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('sends them with exposeErrorDetails on', async () => {
+    await withInvoicesApp({ exposeErrorDetails: true }, async (base) => {
+      const text = await (await fetch(`${base}/invoices/42`)).text();
+
+      expect(text).toContain('COOKIE-SECRET');
+      expect(text).toContain('BODY-SECRET');
+      expect(text).toContain(`${billingOrigin}/invoices/42`);
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('sends the fields you picked, and a spread copy whole', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const picked = await fetch(`${base}/invoices/42/picked`);
+      expect(picked.status).toBe(502);
+      expect(await picked.json()).toEqual({
+        success: false,
+        error: 'BILLING_UNAVAILABLE',
+        code: 502,
+        details: { invoiceId: '42', upstreamStatus: 404 },
+      });
+
+      // The counter-example in the snippet's comment: a copy is the author's record
+      const spread = await (await fetch(`${base}/invoices/42/spread`)).text();
+      expect(spread).toContain('COOKIE-SECRET');
+      expect(spread).toContain(billingOrigin);
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('lets a filter of your own leave them out with withoutTransportDetails', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const response = await fetch(`${base}/invoices/42/enveloped`);
+      const text = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: 500 });
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain(billingOrigin);
+    });
   });
 });
 

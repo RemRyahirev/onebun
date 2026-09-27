@@ -17,6 +17,7 @@ export {
   NotFoundError,
   OneBunBaseError,
   type SuccessResponse,
+  withoutTransportDetails,
 } from '@onebun/requests';
 // Re-export Effect and Layer from effect
 export { Effect, Layer } from 'effect';

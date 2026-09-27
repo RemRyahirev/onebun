@@ -116,9 +116,10 @@ needs both or a `traceparent`.
   `{ ...response }` or the fields you need. `RequestsService` returns `result` only (no headers);
   `HttpClient` and the service client carry them. Up to 0.8.2 a success had no headers at all.
 - **An `HTTP_ERROR`'s `details.headers` is a different record**: enumerable, and a repeated `set-cookie` keeps
-  only its last value. `client.req()` throws a `OneBunBaseError`; uncaught in a controller, the default
-  exception filter serializes it into the caller's body, the upstream's headers and the request URL included.
-  Catch it and throw your own error when those must not reach the caller.
+  only its last value. The error object keeps it, `details.url` and the upstream body; the default exception
+  filter leaves those out of the caller's body when a client error escapes a controller (`withoutTransportDetails`,
+  docs/api/requests.md#uncaught-client-errors), and `exposeErrorDetails` sends them. A copy of the record
+  (`{ ...e.details }`) is not the client's and is sent whole.
 - **`timeout` covers the body, not just the headers.** A body that stalls past it fails `TIMEOUT_ERROR`,
   `code: 0`, `getTransportFailureKind(e) === 'timeout'`, with the status that arrived in
   `details.statusCode` and `details.phase: 'body'`. So a stalled 5xx follows `retryOnTimeout` (off by
