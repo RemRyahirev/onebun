@@ -33,6 +33,10 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `createPostgresContainer` waits for the SECOND `database system is ready to accept connections` line. The image starts a temporary server for its init scripts, logs that line for it, stops it, and only then starts the real one — waiting for the first hands back a URL that is about to stop working
 - NATS supports `enableJetStream: true` option
 - Always call `stop()` in `afterAll` to clean up containers
+- Every call stamps `dev.onebun.testing.owner=<fresh UUID>` on its container BEFORE `create` (via `withLabels`, spread last so a caller label under that key cannot replace it). When `start()` rejects, the helper lists `all: true` containers with exactly that label through `getContainerRuntimeClient().container.dockerode` and force-removes them (`v: true`). Needed because testcontainers cleans up only when the WAIT STRATEGY fails; a failure in `container.start` (OCI runtime error) or in the port inspection after it left the container `created` or `running`, with no handle to stop it. Never filter by `org.testcontainers.session-id` for this: it is process-wide (and shared across processes by a reused Ryuk), so it would take sibling containers down
+- The start error is ALWAYS rethrown unchanged — same object, class and message. `getContainerRuntimeClient()` is resolved first, so "Could not find a working container runtime strategy" (no runtime) passes through as-is with nothing to clean up. If the cleanup's list or remove fails too, the start error gets an enumerable `containerCleanupFailure: { ownerLabel: 'dev.onebun.testing.owner=<uuid>', error }` property (type `ContainerCleanupFailure`) — never an AggregateError in its place
+- `labels?: Record<string, string>` on all three option types, applied before `create`: a Ryuk-less harness sweeps what a killed run left behind with `dockerode.listContainers({ all: true, filters: { label: ['k=v'] } })`
+- Peer range stays `testcontainers >= 10.0.0`; the failed-start cleanup is FEATURE-DETECTED and needs `>= 10.3.0`, the first release exporting `getContainerRuntimeClient`. `container-ownership.ts` (internal, not re-exported) reads it off the namespace (`import * as testcontainers`) and uses it only when it is a function — NOT a named import: a named import of a missing export fails to link (`SyntaxError: Export named 'getContainerRuntimeClient' not found`) and would break ANY import from `@onebun/core/testing`, `createTestService` included. On 10.0–10.2 a failed start behaves exactly as in 0.8.1: no cleanup attempted, the start error rethrown unchanged, no `containerCleanupFailure`, no warning — the container is left behind. Caller and owner labels are still applied there (`withLabels` exists since 10.0), so labelled containers can be swept on every version — through the Docker CLI on 10.0–10.2, since the documented sweep recipe imports `getContainerRuntimeClient` (10.3.0+). The runtime-client shape the cleanup uses is typed structurally for the same reason (10.3.0 ships no dockerode types; `@onebun/core` ships `.ts` sources, so they are type-checked against the consumer's testcontainers)
 
 **Mock Utilities**:
 - `createMockConfig(values, options)` — returns `IConfig` with `get()` returning from values map
@@ -42,7 +46,7 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `useFakeTimers()` — replaces global `setTimeout`/`setInterval`/`Date.now`, returns control object. `runAllTimers()` picks its target times from timeouts only, but reaches them via `advanceTimersByTime`, so intervals DO fire (and survive) — it is not an interval-free mode
 - `FakeTimers` class and `fakeTimers` singleton are also exported for direct use, but `useFakeTimers()` is the recommended API
 
-**Exported types**: `TestInstanceResult<T>`, `TestContainer`, `RedisContainerOptions`, `NatsContainerOptions`, `CompiledTestingModule`
+**Exported types**: `TestInstanceResult<T>`, `TestContainer`, `RedisContainerOptions`, `NatsContainerOptions`, `PostgresContainerOptions`, `ContainerCleanupFailure`, `CompiledTestingModule`
 
 </llm-only>
 
@@ -71,7 +75,7 @@ import {
 
 ## Installation
 
-`@onebun/core/testing` requires `testcontainers` as a peer dependency:
+`@onebun/core/testing` requires `testcontainers` (version 10 or later) as a peer dependency:
 
 ```bash
 bun add -d testcontainers
@@ -89,6 +93,10 @@ in your runtime bundle references it.
 Running the container helpers additionally needs a Docker daemon (or a Podman socket) on the
 machine executing the tests. The rest of `@onebun/core/testing` — `createTestService`,
 `TestingModule`, `useFakeTimers`, the mock helpers — does not.
+
+The helpers remove a container whose start failed only with testcontainers 10.3.0 or later. With
+10.0–10.2 a failed start leaves its container behind, as it did in OneBun 0.8.1; the `labels`
+option works on every version. See [Container labels and cleanup](#container-labels-and-cleanup).
 
 ## Unit Testing — `createTestService` / `createTestController` / `createTestMiddleware`
 
@@ -362,7 +370,12 @@ Stops the test server and releases resources. Always call this in `afterEach` or
 
 ## Testcontainers — `createRedisContainer` / `createNatsContainer` / `createPostgresContainer`
 
-Helpers for spinning up Redis and NATS containers in tests. Requires Docker.
+Helpers for spinning up Redis, NATS and PostgreSQL containers in tests. Requires Docker.
+
+Each helper owns its container from the moment it is created: if the start fails anywhere after
+Docker `create`, the helper removes that container before rethrowing, and every helper accepts
+`labels` to mark what your suite starts — see
+[Container labels and cleanup](#container-labels-and-cleanup).
 
 ### `createRedisContainer`
 
@@ -383,9 +396,10 @@ afterAll(async () => {
 });
 ```
 
-**Options:**
+**Options** (`RedisContainerOptions`):
 - `image` — Docker image (default: `redis:7-alpine`)
-- `startupTimeout` — timeout in ms (default: `30000`)
+- `startupTimeout` — timeout in ms (default: `30000`, `60000` under CI)
+- `labels` — labels to put on the container, applied before it is created
 
 ### `createNatsContainer`
 
@@ -404,10 +418,11 @@ afterAll(async () => {
 });
 ```
 
-**Options:**
+**Options** (`NatsContainerOptions`):
 - `image` — Docker image (default: `nats:2.10-alpine`)
-- `startupTimeout` — timeout in ms (default: `30000`)
+- `startupTimeout` — timeout in ms (default: `30000`, `60000` under CI)
 - `enableJetStream` — enable JetStream (default: `false`)
+- `labels` — labels to put on the container, applied before it is created
 
 ### `createPostgresContainer`
 
@@ -432,6 +447,7 @@ afterAll(async () => {
 - `database` — database to create (default: `onebun_test`)
 - `username` — role to create (default: `onebun`)
 - `password` — its password (default: `onebun`)
+- `labels` — labels to put on the container, applied before it is created
 
 ::: tip It waits for the second "ready" line, deliberately
 The postgres image starts a temporary server to run its initialisation scripts and logs
@@ -439,6 +455,75 @@ The postgres image starts a temporary server to run its initialisation scripts a
 one. Waiting for the first line returns a URL that is about to stop working, and the failure lands
 in whichever test connects first rather than in the helper.
 :::
+
+### Container labels and cleanup
+
+**A failed start cleans up after itself.** testcontainers removes a container on its own only
+when the wait strategy gives up. A failure earlier — the OCI runtime refusing to start the
+process, or the port inspection after the start — used to leave the container behind, `created`
+or even `running`, with no handle to stop it. Every helper call now stamps its container with a
+label of its own, `dev.onebun.testing.owner=<fresh UUID>`, before it is created, and when the
+start fails it removes exactly the containers carrying that label. Containers of other calls,
+other suites and other harnesses are never touched. The cleanup needs testcontainers 10.3.0 or
+later, the first release that exports `getContainerRuntimeClient`; it is used when it is there.
+With 10.0–10.2 a failed start behaves as it did in 0.8.1: the start error is rethrown unchanged
+and the container is left behind. Your `labels` and the owner label are applied on every version.
+
+The error you see is always the start error itself — same object, class and message. With no
+container runtime at all it is still testcontainers' `Could not find a working container runtime
+strategy`. If the cleanup fails as well, the start error carries a `containerCleanupFailure`
+property (`ContainerCleanupFailure`): `ownerLabel` is the `key=value` filter that finds what was
+left behind, and `error` is why listing or removing it failed.
+
+**`labels` mark everything a suite starts.** They are applied before `create`, so a container is
+findable from its first moment — including one a run that was killed half-way through a start
+left behind. Without Ryuk (`TESTCONTAINERS_RYUK_DISABLED=true`) nothing else removes such a
+container, and pruning everything labelled `org.testcontainers` would take other harnesses'
+containers with it. Sweep by your own label instead:
+
+```typescript
+import { afterAll, beforeAll } from 'bun:test';
+import { getContainerRuntimeClient } from 'testcontainers';
+
+import { createPostgresContainer, type TestContainer } from '@onebun/core/testing';
+
+// Everything this suite starts carries these labels from the moment it is created.
+const HARNESS_LABELS = { 'com.example.harness': 'orders-integration' };
+
+/** Force-remove every container, running or not, that carries all of `labels`. */
+async function sweepContainers(labels: Record<string, string>): Promise<number> {
+  const { dockerode } = (await getContainerRuntimeClient()).container;
+  const leftovers = await dockerode.listContainers({
+    all: true, // a container killed mid-start is `created`, not running
+    filters: { label: Object.entries(labels).map(([key, value]) => `${key}=${value}`) },
+  });
+  await Promise.all(leftovers.map(async (info) => {
+    await dockerode.getContainer(info.Id).remove({ force: true, v: true });
+  }));
+
+  return leftovers.length;
+}
+
+let postgres: TestContainer;
+
+beforeAll(async () => {
+  // Whatever an earlier, killed run of this suite left behind — and nothing anyone else started.
+  await sweepContainers(HARNESS_LABELS);
+  postgres = await createPostgresContainer({ labels: HARNESS_LABELS });
+});
+
+afterAll(async () => {
+  await postgres.stop();
+});
+```
+
+Sweeping at start assumes one run of the suite at a time on the host. When runs can overlap,
+give each run its own value (a CI job id, say) and sweep a dead run's value from somewhere that
+knows it died.
+
+The recipe imports `getContainerRuntimeClient`, which testcontainers exports from 10.3.0 on. With
+10.0–10.2 the labels are there all the same; sweep them with the same filter from outside the
+suite, for example `docker ps -aq --filter label=com.example.harness=orders-integration | xargs -r docker rm -f -v`.
 
 ### `TestContainer` interface
 

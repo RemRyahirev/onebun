@@ -1021,21 +1021,33 @@ describe('ItemController', () => {
 
 ### Testcontainers
 
-For integration tests that need real Redis or NATS:
+For integration tests that need real Redis, NATS or PostgreSQL:
 
 ```typescript
-import { createRedisContainer, createNatsContainer } from '@onebun/core/testing';
+import {
+  createNatsContainer,
+  createPostgresContainer,
+  createRedisContainer,
+} from '@onebun/core/testing';
 
 const redis = await createRedisContainer();         // redis:7-alpine
 const nats = await createNatsContainer({
   enableJetStream: true,                             // passes --js flag
 });
+const postgres = await createPostgresContainer();   // postgres:16-alpine, db/user/password onebun_test/onebun/onebun
 
-// Use redis.url / nats.url in test config
+// Use redis.url / nats.url / postgres.url in test config
 // Always call stop() in afterAll:
 await redis.stop();
 await nats.stop();
+await postgres.stop();
 ```
+
+All three accept `labels` (applied before the container is created — sweep a killed run's
+leftovers by them), and a start that fails after Docker `create` removes its own container and
+rethrows the original error unchanged. The removal needs testcontainers >= 10.3.0 and is
+feature-detected (the peer range stays `>=10.0.0`); on 10.0–10.2 a failed start behaves as in
+0.8.1. See `references/testing.md` → "Failed starts, labels and sweeping".
 
 ## Modifying Existing Code
 

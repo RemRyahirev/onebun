@@ -2,6 +2,13 @@ import { GenericContainer, Wait } from 'testcontainers';
 
 import type { StartedTestContainer } from 'testcontainers';
 
+import { startOwned } from './container-ownership';
+
+/**
+ * A started container and the connection details a test needs.
+ *
+ * @see docs:testing.md
+ */
 export interface TestContainer {
   url: string;
   host: string;
@@ -10,15 +17,31 @@ export interface TestContainer {
   stop(): Promise<void>;
 }
 
+/**
+ * @see docs:testing.md
+ */
 export interface RedisContainerOptions {
   image?: string;
   startupTimeout?: number;
+  /**
+   * Labels to put on the container, applied before it is created — so a harness can find
+   * everything it started, even after a run that was killed half-way through a start.
+   */
+  labels?: Record<string, string>;
 }
 
+/**
+ * @see docs:testing.md
+ */
 export interface NatsContainerOptions {
   image?: string;
   startupTimeout?: number;
   enableJetStream?: boolean;
+  /**
+   * Labels to put on the container, applied before it is created — so a harness can find
+   * everything it started, even after a run that was killed half-way through a start.
+   */
+  labels?: Record<string, string>;
 }
 
 /**
@@ -30,6 +53,27 @@ export interface PostgresContainerOptions {
   database?: string;
   username?: string;
   password?: string;
+  /**
+   * Labels to put on the container, applied before it is created — so a harness can find
+   * everything it started, even after a run that was killed half-way through a start.
+   */
+  labels?: Record<string, string>;
+}
+
+/**
+ * What a container helper attaches to its start error, as `containerCleanupFailure`, when it could
+ * not remove the container that failed to start. The start error itself is thrown unchanged.
+ *
+ * @see docs:testing.md
+ */
+export interface ContainerCleanupFailure {
+  /**
+   * The helper's per-call owner label as `key=value` (`dev.onebun.testing.owner=<uuid>`) — the
+   * filter that finds what was left behind: `docker ps -a --filter "label=<ownerLabel>"`.
+   */
+  ownerLabel: string;
+  /** Why listing or removing the owned container failed. */
+  error: unknown;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-magic-numbers
@@ -38,21 +82,29 @@ const REDIS_PORT = 6379;
 const NATS_PORT = 4222;
 const POSTGRES_PORT = 5432;
 
+/**
+ * A throwaway Redis for integration tests.
+ *
+ * @param options - Image, startup timeout and labels to put on the container before it is created.
+ * @returns The started container with a `redis://` URL, and a `stop()` to call in `afterAll`.
+ *
+ * @see docs:testing.md
+ */
 export async function createRedisContainer(
   options?: RedisContainerOptions,
 ): Promise<TestContainer> {
   const image = options?.image ?? 'redis:7-alpine';
   const startupTimeout = options?.startupTimeout ?? DEFAULT_STARTUP_TIMEOUT;
 
-  const container = await new GenericContainer(image)
+  const builder = new GenericContainer(image)
     .withExposedPorts(REDIS_PORT)
     .withWaitStrategy(Wait.forLogMessage(/.*Ready to accept connections.*/))
     .withStartupTimeout(startupTimeout)
     .withLogConsumer(() => {
       // Suppress container logs in tests
-    })
-    .start();
+    });
 
+  const container = await startOwned(builder, options?.labels);
   const host = container.getHost();
   const port = container.getMappedPort(REDIS_PORT);
 
@@ -67,6 +119,15 @@ export async function createRedisContainer(
   };
 }
 
+/**
+ * A throwaway NATS server for integration tests.
+ *
+ * @param options - Image, startup timeout, `enableJetStream` and labels to put on the container
+ * before it is created.
+ * @returns The started container with a `nats://` URL, and a `stop()` to call in `afterAll`.
+ *
+ * @see docs:testing.md
+ */
 export async function createNatsContainer(
   options?: NatsContainerOptions,
 ): Promise<TestContainer> {
@@ -86,7 +147,7 @@ export async function createNatsContainer(
     builder = builder.withCommand(['--js']);
   }
 
-  const container = await builder.start();
+  const container = await startOwned(builder, options?.labels);
   const host = container.getHost();
   const port = container.getMappedPort(NATS_PORT);
 
@@ -114,7 +175,8 @@ export async function createNatsContainer(
  * its initialisation scripts and logs "ready to accept connections" for it, then shuts it down and
  * starts the real one. Waiting for the first line hands back a URL that is about to stop working.
  *
- * @param options - Image, startup timeout and the database/user/password to create.
+ * @param options - Image, startup timeout, the database/user/password to create, and labels to put
+ * on the container before it is created.
  * @returns The started container with a `postgresql://` URL, and a `stop()` to call in `afterAll`.
  *
  * @see docs:testing.md
@@ -128,23 +190,20 @@ export async function createPostgresContainer(
   const username = options?.username ?? 'onebun';
   const password = options?.password ?? 'onebun';
 
-  const container = await new GenericContainer(image)
+  const builder = new GenericContainer(image)
     .withExposedPorts(POSTGRES_PORT)
     .withEnvironment({
-       
       POSTGRES_DB: database,
-       
       POSTGRES_USER: username,
-       
       POSTGRES_PASSWORD: password,
     })
     .withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/, 2))
     .withStartupTimeout(startupTimeout)
     .withLogConsumer(() => {
       // Suppress container logs in tests
-    })
-    .start();
+    });
 
+  const container = await startOwned(builder, options?.labels);
   const host = container.getHost();
   const port = container.getMappedPort(POSTGRES_PORT);
 
