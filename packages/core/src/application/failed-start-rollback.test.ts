@@ -565,6 +565,39 @@ describe('a start() that rejects rolls back what it started (FB-30)', () => {
       expect(adapterCalls.disconnected).toBe(1);
     });
 
+    test('a repeated stop() after the failed start closes nothing again, so a registry shared with a later application survives it', async () => {
+      // Cleanup that stops every application it created calls stop() on the failed one a second
+      // time, after another application was built on the same registry. Every stop() after the
+      // first awaits the first one's outcome, as it did before the rollback existed.
+      const registry = new Registry();
+      const metrics = { enabled: true, registry };
+      const app = new OneBunApplication(WorkerModule, {
+        port: 0,
+        gracefulShutdown: false,
+        loggerLayer: makeRecordingLoggerLayer().layer,
+        queue: { adapter: RefusingSubscribeAdapter },
+        metrics,
+      });
+
+      expect(await startRejection(app)).toBe(subscribeError);
+      await app.stop();
+
+      // What the next application registers on the shared registry
+      Effect.runSync(createMetricsService({
+        registry,
+        prefix: 'next_',
+        collectHttpMetrics: false,
+        collectSystemMetrics: false,
+        collectGcMetrics: false,
+      })).createCounter({ name: 'requests_total', help: 'Registered after the first stop()' }).inc();
+
+      await Promise.all([app.stop(), app.stop()]);
+
+      expect(await registry.metrics()).toContain('next_requests_total');
+      expect(destroyed).toEqual(['WorkerStateService']);
+      expect(adapterCalls.disconnected).toBe(1);
+    });
+
     test('a metrics.registry passed in keeps what is registered on it, and the retry scrapes it', async () => {
       refusalsLeft = 1;
       const registry = new Registry();

@@ -739,6 +739,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   private rollbackPromise: Promise<ShutdownOutcome> | null = null;
   /**
+   * The first `stop()` after a failed start, until the next `start()` begins.
+   *
+   * It closes what the rollback left open for a retry — a `metrics.registry` passed in, the
+   * `tracing.spanProcessors`, the process-wide log transports. Every `stop()` after it awaits the
+   * same outcome instead of closing them again: a second pass would clear a registry, or shut down
+   * log transports, that another application has taken up since.
+   */
+  private closeAfterRollbackPromise: Promise<ShutdownOutcome> | null = null;
+  /**
    * A `start()` resolved and nothing has shut the application down since.
    *
    * A second `start()` on a running application that fails — the listener's port is its own — must
@@ -1202,8 +1211,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * error `start()` caught is rethrown; nothing in the rollback replaces it. A failure in a
    * service's or controller's `onModuleInit` is caught already wrapped by Effect (a
    * `FiberFailure` carrying the original message), so match on the message there. A caller that
-   * catches it does not need `stop()` for the process to exit; calling it anyway runs nothing
-   * again but the process-wide log shutdown every `stop()` ends with.
+   * catches it does not need `stop()` for the process to exit. Calling it anyway runs none of
+   * the rollback's steps again; it closes, once, what the rollback left open for a retry — a
+   * `metrics.registry` and the `tracing.spanProcessors` passed in, and the log transports — as
+   * every `stop()` does.
    *
    * The rollback closes the telemetry this application built — its metrics registry, its trace
    * provider, its OTLP log transport — and leaves open what was passed in: a `loggerLayer`, the
@@ -1242,7 +1253,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
     // restarted after stop() keeps booting exactly as it always has.
     if (this.rollbackPromise) {
       await this.rollbackPromise;
+      await this.closeAfterRollbackPromise;
       this.rollbackPromise = null;
+      this.closeAfterRollbackPromise = null;
       if (!this.shutdownPromise) {
         this.reacquireAfterRollback();
       }
@@ -3468,32 +3481,44 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * The shutdown latch. The first caller runs the sequence; everyone after — a second
    * `stop()`, a second signal, the orchestrator stopping an already-stopped child —
    * awaits that same promise and its outcome. After a failed start with no `start()` since,
-   * the rollback already ran the sequence: the caller awaits that instead, then closes the
-   * telemetry the rollback left open for a retry, and the latch stays clear so a retry can
-   * still be stopped.
+   * the rollback already ran the sequence: the first caller awaits that instead, then closes the
+   * telemetry the rollback left open for a retry, and every caller after it awaits that same
+   * outcome. The terminal latch stays clear so a retry can still be stopped.
    */
   private async runShutdown(
     options?: ShutdownRequest,
   ): Promise<ShutdownOutcome> {
     if (!this.shutdownPromise && this.rollbackPromise) {
-      const rolledBack = await this.rollbackPromise;
-      // The steps the rollback narrowed, so that a retry and the other applications in the
-      // process kept what the caller passed in. A `stop()` is the caller done with this one, and
-      // ends as every `stop()` does. Skipped, what the caller passed in outlived a `stop()` that
-      // had always closed it: an OTLP `loggerLayer`'s flush timer, or a span processor holding a
-      // handle until its `shutdown()`, kept alive a process that used to exit.
-      const closed = await this.executeShutdown({ ...options, afterRollback: true });
+      this.closeAfterRollbackPromise ??= this.closeAfterRollback(this.rollbackPromise, options);
 
-      return {
-        timedOut: rolledBack.timedOut || closed.timedOut,
-        phase: closed.timedOut ? closed.phase : rolledBack.phase,
-        forceClosed: rolledBack.forceClosed,
-        failures: [...rolledBack.failures, ...closed.failures],
-      };
+      return await this.closeAfterRollbackPromise;
     }
     this.shutdownPromise ??= this.executeShutdown(options);
 
     return await this.shutdownPromise;
+  }
+
+  /**
+   * The first `stop()` after a failed start: await the rollback, then close the steps it narrowed,
+   * so that a retry and the other applications in the process kept what the caller passed in. A
+   * `stop()` is the caller done with this one, and ends as every `stop()` does. Skipped, what the
+   * caller passed in outlived a `stop()` that had always closed it: an OTLP `loggerLayer`'s flush
+   * timer, or a span processor holding a handle until its `shutdown()`, kept alive a process that
+   * used to exit.
+   */
+  private async closeAfterRollback(
+    rollback: Promise<ShutdownOutcome>,
+    options?: ShutdownRequest,
+  ): Promise<ShutdownOutcome> {
+    const rolledBack = await rollback;
+    const closed = await this.executeShutdown({ ...options, afterRollback: true });
+
+    return {
+      timedOut: rolledBack.timedOut || closed.timedOut,
+      phase: closed.timedOut ? closed.phase : rolledBack.phase,
+      forceClosed: rolledBack.forceClosed,
+      failures: [...rolledBack.failures, ...closed.failures],
+    };
   }
 
   /**

@@ -1637,7 +1637,8 @@ describe('When start() fails (docs/api/core.md)', () => {
       expect(events).toEqual(['destroy', 'destroy']);
       expect((await fetch(`${app.getHttpUrl()}/nothing-here`)).status).toBe(HttpStatusCode.NOT_FOUND);
 
-      // "Nothing to clean up in the catch": stop() on a failed instance runs nothing again
+      // "Nothing to clean up in the catch": stop() on a failed instance runs none of the
+      // rollback's steps again — no destroy hook twice
       await attempts[0].stop();
       expect(events).toEqual(['destroy', 'destroy']);
     } finally {
