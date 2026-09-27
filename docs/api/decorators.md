@@ -126,7 +126,7 @@ export class UserService extends BaseService {
 - Importing `@onebun/core` installs the complete global Reflect Metadata API (nine functions, per-member keys, prototype walk) unless one is already there; the core has NO dependency on `reflect-metadata`
 - `reflect-metadata` (or a library that imports it: tsyringe, `@simplewebauthn/server`) may be imported before OR after the core; a later 0.2.x joins the registry the core publishes (`Symbol.for('@reflect-metadata:registry')`) and keeps earlier metadata. Recommend `reflect-metadata` >= 0.2.2 to apps that import it
 - DI reads OWN `design:paramtypes` only: a subclass without its own constructor gets no dependencies, an undecorated subclass with its own constructor gets none either — repeat the constructor and keep a decorator
-- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages: `<Class> declares no constructor of its own ...` (fix: declare the constructor) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`). Through 0.8.1, with `reflect-metadata` imported BEFORE the core, both borrowed the parent's types (the second by position, which worked when its parameters matched the parent's); since 0.8.2 neither does in any import order
+- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages, each naming the decorator for the class's kind (`@Middleware()` for middleware, `@Controller()` or `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise): `<Class> declares no constructor of its own ...` (fix: declare the constructor, and give the class a decorator if it has none) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`, or `@Middleware()` to middleware). An undecorated class whose own constructor takes no parameters records nothing either, so it cannot be told from one with no constructor and gets the first message, worded for both (`... (or, without a decorator, one whose parameter types were not recorded) ...`); it is harmless when that constructor passes the parent's dependencies itself. Through 0.8.1, with `reflect-metadata` imported BEFORE the core, both borrowed the parent's types (the second by position, which worked when its parameters matched the parent's); since 0.8.2 neither does in any import order
 
 </llm-only>
 
@@ -1448,10 +1448,15 @@ getConstructorParamTypes(HourlyScheduler);  // [Clock]
 The parent's types are not borrowed because a subclass may take different parameters: a guard
 without a decorator that extends a decorated base guard and declares `constructor(audit: AuditLog)`
 would otherwise receive the base's first dependency in its `audit` slot. An undecorated class emits
-no metadata at all, so it is built with no dependencies — add a decorator (`@Service()`) to have its
-own constructor injected. When such a class declares constructor parameters and extends a class
-that takes dependencies, startup warns about it too:
-`<Class> declares a constructor with parameters, but no types were emitted for them ...`.
+no metadata at all, so it is built with no dependencies — add a decorator (`@Service()`, or
+`@Middleware()` for middleware) to have its own constructor injected. When such a class declares
+constructor parameters and extends a class that takes dependencies, startup warns about it too:
+`<Class> declares a constructor with parameters, but no types were emitted for them ...`. One whose
+constructor takes no parameters — `constructor() { super(new TokenStore()); }` — records nothing
+either, so it cannot be told from a class that declares none: it gets the first warning, worded for
+both (`<Class> declares no constructor of its own (or, without a decorator, one whose parameter types
+were not recorded) ...`), which is harmless when that constructor passes the parent's dependencies
+itself.
 
 **Upgrading from 0.8.1 with `reflect-metadata` imported first.** Through 0.8.1 the core read
 constructor types through whatever `getMetadata` was on the global `Reflect`. When
@@ -1460,13 +1465,16 @@ BEFORE the core, that `getMetadata` walked the prototype chain, so a subclass wi
 types of its own borrowed its parent's. Since 0.8.2 none does, in either import order. The app still
 boots, so look for the two startup warnings above:
 
-- `<Class> declares no constructor of its own ...` — a decorated subclass without a constructor
-  used to inherit its parent's dependencies. Declare the constructor in it and pass them to
-  `super(...)`.
+- `<Class> declares no constructor of its own ...` — a subclass without a constructor used to
+  inherit its parent's dependencies, whether it is decorated or an undecorated guard, interceptor,
+  filter or middleware. Declare the constructor in it and pass them to `super(...)`. An undecorated
+  one needs a decorator as well — `@Service()`, or `@Middleware()` for middleware — or the
+  constructor it now declares records no types either and the next warning takes over.
 - `<Class> declares a constructor with parameters, but no types were emitted ...` — an undecorated
   guard, interceptor, filter or middleware that extends a decorated class and declares its own
   constructor used to receive the parent's types in that import order, by position, which worked
-  when its parameters matched the parent's. It now receives none. Add `@Service()` to it.
+  when its parameters matched the parent's. It now receives none. Add `@Service()` to it, or
+  `@Middleware()` if it is middleware.
 
 ## Complete Example
 

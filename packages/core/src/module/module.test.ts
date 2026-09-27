@@ -3647,8 +3647,9 @@ describe('OneBunModule', () => {
 
       expect(module.getServiceByClass(WelcomeNotifier)!.mailer).toBeUndefined();
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('The constructor it inherits from Notifier takes (Mailer)');
-      expect(warnings[0]).toContain('Declare the constructor in WelcomeNotifier');
+      expect(warnings[0]).toContain('If it inherits the constructor of Notifier, which takes (Mailer)');
+      expect(warnings[0]).toContain('declare the constructor in WelcomeNotifier with those parameters');
+      expect(warnings[0]).toEndWith('give WelcomeNotifier a decorator (@Service()) if it has none.');
     });
 
     test('a subclass that declares its constructor, or whose parents take nothing, is not reported', () => {
@@ -3715,7 +3716,8 @@ describe('OneBunModule', () => {
       expect((module.getControllerInstance(NotifyController) as NotifyController).mailer).toBeInstanceOf(Mailer);
       expect(welcome.mailer).toBeUndefined();
       expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain('The constructor it inherits from NotifyController takes (Mailer)');
+      expect(warnings[0]).toContain('If it inherits the constructor of NotifyController, which takes (Mailer)');
+      expect(warnings[0]).toContain('a decorator (@Controller()) if it has none');
       expect(inheritedWarnings(recorder, 'NotifyController')).toEqual([]);
     });
 
@@ -3741,7 +3743,10 @@ describe('OneBunModule', () => {
       (module as any).resolveGuards([InheritingGuard]);
 
       expect(inheritedWarnings(recorder, 'InheritingGuard')).toHaveLength(1);
-      expect(inheritedWarnings(recorder, 'InheritingGuard')[0]).toContain('inherits from MailingGuard takes (Mailer)');
+      expect(inheritedWarnings(recorder, 'InheritingGuard')[0]).toContain('constructor of MailingGuard, which takes (Mailer)');
+      // Undecorated as well: declaring the constructor alone would still leave its types unrecorded.
+      expect(inheritedWarnings(recorder, 'InheritingGuard')[0])
+        .toContain('pass them to super(...), and give InheritingGuard a decorator (@Service()) if it has none');
     });
 
     /**
@@ -3795,6 +3800,77 @@ describe('OneBunModule', () => {
       expect(declaredWarnings('AuditingGuard')).toHaveLength(1);
       expect(declaredWarnings('DecoratedStrictGuard')).toEqual([]);
       expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
+    });
+
+    /**
+     * Undecorated, so nothing is recorded for the `constructor()` it declares, which looks exactly
+     * like no constructor at all. It supplies its parent's dependency itself and works, so the
+     * warning must neither claim it declares no constructor nor that the dependency is undefined.
+     */
+    test('an undecorated guard whose own constructor() supplies the dependency works, and the warning claims neither', () => {
+      class SelfSupplyingGuard extends MailingGuard {
+        constructor() {
+          super(new Mailer());
+        }
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      const [guard] = (module as any).resolveGuards([SelfSupplyingGuard]);
+      const warnings = inheritedWarnings(recorder, 'SelfSupplyingGuard');
+
+      expect(guard.canActivate({})).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith(
+        'SelfSupplyingGuard declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded)',
+      );
+      expect(warnings[0]).toContain('If it inherits the constructor of MailingGuard, which takes (Mailer), each of them receives undefined');
+      expect(warnings[0]).not.toContain('declares no constructor of its own, so');
+    });
+
+    test('middleware is told to take @Middleware(), the decorator documented for it, by either warning', () => {
+      @Middleware()
+      class MailingMiddleware extends BaseMiddleware {
+        constructor(readonly mailer: Mailer) {
+          super();
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          return await next();
+        }
+      }
+
+      class StrictMiddleware extends MailingMiddleware {
+        // Not useless: it is the shape under test — parameters of its own, and no decorator.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      class InheritingMiddleware extends MailingMiddleware {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class MiddlewareModule {}
+
+      const module = new OneBunModule(MiddlewareModule, recorder.layer);
+      module.resolveMiddleware([StrictMiddleware, InheritingMiddleware]);
+
+      const declaredWarnings = recorder.messages('warn')
+        .filter((message) => message.startsWith('StrictMiddleware declares a constructor with parameters'));
+      const inheriting = inheritedWarnings(recorder, 'InheritingMiddleware');
+
+      expect(declaredWarnings).toHaveLength(1);
+      expect(declaredWarnings[0]).toEndWith('Add @Middleware() to StrictMiddleware to have its constructor injected.');
+      expect(inheriting).toHaveLength(1);
+      expect(inheriting[0]).toEndWith('give InheritingMiddleware a decorator (@Middleware()) if it has none.');
+      expect(recorder.messages('warn').filter((message) => message.includes('@Service()'))).toEqual([]);
     });
   });
 });

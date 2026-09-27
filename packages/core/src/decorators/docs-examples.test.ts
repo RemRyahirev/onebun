@@ -1083,7 +1083,7 @@ describe('Reflect Metadata and Other Libraries (docs/api/decorators.md)', () => 
     const warnings = recorder.messages('warn').filter((message) => message.includes('declares no constructor'));
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toStartWith('NightlyScheduler declares no constructor of its own');
-    expect(warnings[0]).toContain('inherits from Scheduler takes (Clock)');
+    expect(warnings[0]).toContain('If it inherits the constructor of Scheduler, which takes (Clock)');
   });
 });
 

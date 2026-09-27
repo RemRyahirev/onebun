@@ -268,10 +268,30 @@ interface InheritedConstructorDependencies {
   readonly types: readonly (Function | undefined)[];
   /**
    * The class declares a constructor WITH parameters of its own (`length > 0`), yet no types were
-   * emitted for them — it carries no decorator. Otherwise it declares no constructor at all and
-   * runs the one it inherits.
+   * emitted for them — it carries no decorator. Otherwise it declares no constructor and runs the
+   * one it inherits, or it is undecorated and declares one that takes no parameters: nothing is
+   * recorded for either, so the two cannot be told apart.
    */
   readonly declaresParameters: boolean;
+}
+
+/** What DI constructs: a provider, or one of the kinds `resolveConstructorArgs` resolves. */
+type ConstructedKind = 'service' | 'controller' | 'middleware' | 'interceptor' | 'guard' | 'filter';
+
+/**
+ * The decorator the docs prescribe for a class of this kind, which is also what makes TypeScript
+ * emit its constructor types: `@Middleware()` for middleware, the controller's or gateway's own
+ * decorator for those, `@Service()` for everything else.
+ */
+function decoratorFor(target: Function, kind: ConstructedKind): string {
+  switch (kind) {
+    case 'middleware':
+      return '@Middleware()';
+    case 'controller':
+      return isWebSocketGateway(target) ? '@WebSocketGateway()' : '@Controller()';
+    default:
+      return '@Service()';
+  }
 }
 
 /**
@@ -291,7 +311,9 @@ interface InheritedConstructorDependencies {
  *
  * "No constructor types" means no own `design:paramtypes` array at all (Bun records `[]` for an
  * explicit `constructor()` on a decorated class) and no explicit `@Inject` types. Callers pass
- * only a class `getConstructorParamTypes` found nothing for.
+ * only a class `getConstructorParamTypes` found nothing for. An UNDECORATED class that declares a
+ * constructor taking no parameters (`constructor() { super(new Dep()); }`) records nothing either,
+ * so it lands in the first shape although it may work: the warning is worded for both.
  */
 function findInheritedConstructorDependencies(target: Function): InheritedConstructorDependencies | undefined {
   const declaresOwnTypes = Array.isArray(getOwnGlobalMetadata('design:paramtypes', target))
@@ -1052,7 +1074,7 @@ export class OneBunModule implements ModuleInstance {
       }
       this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
       if (detectedDeps === undefined) {
-        this.reportInheritedConstructorDependencies(provider);
+        this.reportInheritedConstructorDependencies(provider, 'service');
       }
 
       // Create service instance with resolved dependencies.
@@ -1783,7 +1805,7 @@ export class OneBunModule implements ModuleInstance {
     const paramTypes = getConstructorParamTypes(target);
 
     if (paramTypes === undefined || paramTypes.length === 0) {
-      this.reportInheritedConstructorDependencies(target);
+      this.reportInheritedConstructorDependencies(target, kind);
 
       return [];
     }
@@ -1865,9 +1887,9 @@ export class OneBunModule implements ModuleInstance {
    * Nothing else would: the class boots, every such field is `undefined`, and the failure shows up
    * at the first request that uses one — as a 500 or a 403, far from its cause. Called only for a
    * class DI found no constructor types for; see {@link findInheritedConstructorDependencies} for
-   * the two shapes that are reported.
+   * the two shapes that are reported. The advice names the decorator of the class's `kind`.
    */
-  private reportInheritedConstructorDependencies(target: Function): void {
+  private reportInheritedConstructorDependencies(target: Function, kind: ConstructedKind): void {
     if (this.inheritedDependenciesReported.has(target)) {
       return;
     }
@@ -1879,24 +1901,29 @@ export class OneBunModule implements ModuleInstance {
     }
 
     const names = inherited.types.map((type) => type?.name ?? 'unresolvable').join(', ');
+    const decorator = decoratorFor(target, kind);
     if (inherited.declaresParameters) {
       this.logger.warn(
         `${target.name} declares a constructor with parameters, but no types were emitted for them, so `
         + 'it is built with no constructor arguments and each parameter receives undefined. TypeScript '
         + 'emits constructor types only for a class that carries a decorator, and DI never borrows a '
-        + `parent's: those of ${inherited.ancestor.name} (${names}) are not used. Add @Service() to `
+        + `parent's: those of ${inherited.ancestor.name} (${names}) are not used. Add ${decorator} to `
         + `${target.name} to have its constructor injected.`,
       );
 
       return;
     }
 
+    // Worded for both shapes that reach here: no constructor at all, and — indistinguishable from
+    // it — an undecorated class whose own constructor takes no parameters and may supply the
+    // parent's dependencies itself.
     this.logger.warn(
-      `${target.name} declares no constructor of its own, so it is built with no constructor `
-      + 'dependencies: DI reads a class\'s OWN constructor types, never its parent\'s. The constructor '
-      + `it inherits from ${inherited.ancestor.name} takes (${names}), and each of them receives `
-      + `undefined. Declare the constructor in ${target.name} with those parameters and pass them to `
-      + 'super(...) to have them injected.',
+      `${target.name} declares no constructor of its own (or, without a decorator, one whose parameter `
+      + 'types were not recorded), so it is built with no constructor arguments: DI reads a class\'s OWN '
+      + `constructor types, never its parent's. If it inherits the constructor of ${inherited.ancestor.name}, `
+      + `which takes (${names}), each of them receives undefined. To have them injected, declare the `
+      + `constructor in ${target.name} with those parameters, pass them to super(...), and give `
+      + `${target.name} a decorator (${decorator}) if it has none.`,
     );
   }
 
