@@ -26,6 +26,10 @@
  * newest, so the newest @types/node major stands in for it. A lib left unset defaults to the full
  * ESNext lib, which includes DOM — that is the tsconfig `docs/getting-started.md` recommends.
  *
+ * The project `bun create @onebun` scaffolds is compiled as well, with the tsconfig it writes and
+ * so with its own lib, under every pinned bun-types its bun-types range installs. Its @onebun/core
+ * range must cover the packed core, or the run fails before compiling anything.
+ *
  * The pins go stale without failing anything: an application picks up a new @types/node major or
  * bun-types minor the day it ships, and these cells keep compiling against the old one. So every
  * run asks npm for the latest of both and warns — a `::warning::` annotation under GitHub
@@ -51,6 +55,8 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { join } from 'node:path';
+
+import { scaffoldFiles } from '../packages/create-onebun/src/template';
 
 const colors = {
   reset: '\x1b[0m',
@@ -136,16 +142,37 @@ interface PackageJson {
   name: string;
   version: string;
   dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
   peerDependencies?: Record<string, string>;
 }
+
+/**
+ * The project `bun create @onebun` writes, whose sources go into the consumer's scaffold/. Its
+ * cells take the scaffold's own compiler options (a lib included, so the lib dimension does not
+ * apply) and only the bun-types pins its bun-types range installs.
+ */
+const SCAFFOLD = (() => {
+  const files = scaffoldFiles('scaffold');
+  const manifest = JSON.parse(files['package.json']) as PackageJson;
+  const { compilerOptions } = JSON.parse(files['tsconfig.json']) as { compilerOptions: { lib?: string[] } };
+
+  return {
+    name: '@onebun/create scaffold',
+    // Only the sources: the scaffold's package.json and tsconfig.json have no say in a cell
+    sources: Object.entries(files).filter(([path]) => path.startsWith('src/')),
+    coreRange: manifest.dependencies?.['@onebun/core'] ?? '',
+    bunTypesRange: manifest.devDependencies?.['bun-types'] ?? '',
+    compilerOptions,
+  };
+})();
 
 interface Cell {
   name: string;
   bunTypes: string;
   nodeTypes: string;
-  lib: string[] | undefined;
   typescript: string;
-  entry: typeof ENTRIES[number];
+  /** Path fragments the program must hold a file under: what the cell claims to compile */
+  required: string[];
   tsconfig: string;
 }
 
@@ -213,7 +240,17 @@ function closure(roots: string[], packages: Map<string, { dir: string; pkg: Pack
 
 async function buildConsumer(workDir: string): Promise<void> {
   const packages = await workspacePackages();
-  const names = closure([...new Set(ENTRIES.map((entry) => entry.pkg))], packages);
+  const names = closure([...new Set([...ENTRIES.map((entry) => entry.pkg), '@onebun/core'])], packages);
+
+  // The scaffold's cells compile it against the packed core, which proves nothing about a new
+  // project unless its range installs that core
+  const coreVersion = packages.get('@onebun/core')!.pkg.version;
+  if (!Bun.semver.satisfies(coreVersion, SCAFFOLD.coreRange)) {
+    throw new Error(
+      `The scaffold depends on @onebun/core "${SCAFFOLD.coreRange}", which does not cover ${coreVersion}: `
+      + 'update CORE_RANGE in packages/create-onebun/src/template.ts',
+    );
+  }
 
   log.step(`Packing ${names.join(', ')}`);
   const packDir = join(workDir, 'packs');
@@ -289,6 +326,9 @@ async function buildConsumer(workDir: string): Promise<void> {
   for (const entry of ENTRIES) {
     await Bun.write(join(workDir, 'src', `${entryFile(entry.specifier)}.ts`), entry.code);
   }
+  for (const [path, content] of SCAFFOLD.sources) {
+    await Bun.write(join(workDir, 'scaffold', path), content);
+  }
 }
 
 /**
@@ -363,9 +403,8 @@ async function writeCells(workDir: string): Promise<Cell[]> {
               name,
               bunTypes,
               nodeTypes,
-              lib,
               typescript,
-              entry,
+              required: [`/node_modules/${entry.pkg}/${entry.sources}`],
               tsconfig: join('cells', file),
             });
           }
@@ -374,12 +413,48 @@ async function writeCells(workDir: string): Promise<Cell[]> {
     }
   }
 
+  const scaffoldBunTypes = BUN_TYPES.filter((version) => Bun.semver.satisfies(version, SCAFFOLD.bunTypesRange));
+  if (scaffoldBunTypes.length === 0) {
+    throw new Error(`No bun-types pin satisfies the scaffold's "${SCAFFOLD.bunTypesRange}": the scaffold would go unchecked`);
+  }
+  const scaffoldLib = SCAFFOLD.compilerOptions.lib?.join('+') ?? 'default';
+  for (const bunTypes of scaffoldBunTypes) {
+    for (const nodeTypes of NODE_TYPES) {
+      for (const typescript of TYPESCRIPT) {
+        const name = `bun-types@${bunTypes} @types/node@${nodeTypes} lib=${scaffoldLib} tsc@${typescript} ${SCAFFOLD.name}`;
+        if (ONLY !== undefined && !name.includes(ONLY)) {
+          continue;
+        }
+        const file = `bt${bunTypes}-node${nodeTypes}-ts${typescript}-scaffold.json`;
+        const tsconfig = {
+          compilerOptions: {
+            ...SCAFFOLD.compilerOptions,
+            typeRoots: [
+              `../roots/${alias.bunTypes(bunTypes)}`,
+              `../roots/${alias.nodeTypes(nodeTypes)}`,
+            ],
+          },
+          include: ['../scaffold/src/**/*'],
+        };
+        await Bun.write(join(workDir, 'cells', file), `${JSON.stringify(tsconfig, null, 2)}\n`);
+        cells.push({
+          name,
+          bunTypes,
+          nodeTypes,
+          typescript,
+          required: ['/node_modules/@onebun/core/src/', '/scaffold/src/'],
+          tsconfig: join('cells', file),
+        });
+      }
+    }
+  }
+
   return cells;
 }
 
 /**
- * Compile one cell. `--listFiles` proves the harness checked what it claims to: the entry's own
- * sources and the intended bun-types and @types/node, and no other copy of either.
+ * Compile one cell. `--listFiles` proves the harness checked what it claims to: the sources it
+ * names and the intended bun-types and @types/node, and no other copy of either.
  */
 async function compile(workDir: string, cell: Cell): Promise<CellResult> {
   const tsc = join(workDir, 'node_modules', alias.typescript(cell.typescript), 'bin', 'tsc');
@@ -408,9 +483,10 @@ async function compile(workDir: string, cell: Cell): Promise<CellResult> {
 
   const harnessProblems: string[] = [];
   const includes = (fragment: string) => files.some((file) => file.includes(fragment));
-  const entrySources = `/node_modules/${cell.entry.pkg}/${cell.entry.sources}`;
-  if (!includes(entrySources)) {
-    harnessProblems.push(`the program holds no file under ${entrySources}`);
+  for (const fragment of cell.required) {
+    if (!includes(fragment)) {
+      harnessProblems.push(`the program holds no file under ${fragment}`);
+    }
   }
   for (const version of BUN_TYPES) {
     const loaded = includes(`/node_modules/${alias.bunTypes(version)}/`);
