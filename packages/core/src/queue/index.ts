@@ -102,7 +102,7 @@ export {
 // Guards
 export {
   MessageExecutionContextImpl,
-  MessageAuthGuard,
+  MessageAuthorizationPresenceGuard,
   MessageServiceGuard,
   MessageHeaderGuard,
   MessageTraceGuard,

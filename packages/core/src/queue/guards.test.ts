@@ -17,7 +17,7 @@ import type {
 
 import {
   MessageExecutionContextImpl,
-  MessageAuthGuard,
+  MessageAuthorizationPresenceGuard,
   MessageServiceGuard,
   MessageHeaderGuard,
   MessageTraceGuard,
@@ -107,23 +107,23 @@ describe('queue-guards', () => {
     });
   });
 
-  describe('MessageAuthGuard', () => {
+  describe('MessageAuthorizationPresenceGuard', () => {
     it('should pass when authorization is present', () => {
-      const guard = new MessageAuthGuard();
+      const guard = new MessageAuthorizationPresenceGuard();
       const context = createContext({ authorization: 'Bearer token123' });
 
       expect(guard.canActivate(context)).toBe(true);
     });
 
     it('should fail when authorization is missing', () => {
-      const guard = new MessageAuthGuard();
+      const guard = new MessageAuthorizationPresenceGuard();
       const context = createContext({});
 
       expect(guard.canActivate(context)).toBe(false);
     });
 
     it('should fail when authorization is empty', () => {
-      const guard = new MessageAuthGuard();
+      const guard = new MessageAuthorizationPresenceGuard();
       const context = createContext({ authorization: '' });
 
       expect(guard.canActivate(context)).toBe(false);
@@ -205,7 +205,7 @@ describe('queue-guards', () => {
 
   describe('MessageAllGuards', () => {
     it('should pass when all guards pass', async () => {
-      const guard = new MessageAllGuards([MessageAuthGuard, MessageTraceGuard]);
+      const guard = new MessageAllGuards([MessageAuthorizationPresenceGuard, MessageTraceGuard]);
       const context = createContext({ authorization: 'Bearer token', traceId: 'trace-123' });
 
       const result = await guard.canActivate(context);
@@ -213,7 +213,7 @@ describe('queue-guards', () => {
     });
 
     it('should fail when any guard fails', async () => {
-      const guard = new MessageAllGuards([MessageAuthGuard, MessageTraceGuard]);
+      const guard = new MessageAllGuards([MessageAuthorizationPresenceGuard, MessageTraceGuard]);
       const context = createContext({ authorization: 'Bearer token' }); // No traceId
 
       const result = await guard.canActivate(context);
@@ -222,7 +222,7 @@ describe('queue-guards', () => {
 
     it('should accept guard instances', async () => {
       const serviceGuard = new MessageServiceGuard(['allowed-service']);
-      const guard = new MessageAllGuards([serviceGuard, MessageAuthGuard]);
+      const guard = new MessageAllGuards([serviceGuard, MessageAuthorizationPresenceGuard]);
       const context = createContext({ serviceId: 'allowed-service', authorization: 'Bearer token' });
 
       const result = await guard.canActivate(context);
@@ -270,7 +270,7 @@ describe('queue-guards', () => {
     });
 
     it('should pass when any guard passes', async () => {
-      const guard = new MessageAnyGuard([MessageAuthGuard, MessageTraceGuard]);
+      const guard = new MessageAnyGuard([MessageAuthorizationPresenceGuard, MessageTraceGuard]);
       const context = createContext({ authorization: 'Bearer token' }); // Only auth, no trace
 
       const result = await guard.canActivate(context);
@@ -278,7 +278,7 @@ describe('queue-guards', () => {
     });
 
     it('should fail when all guards fail', async () => {
-      const guard = new MessageAnyGuard([MessageAuthGuard, MessageTraceGuard]);
+      const guard = new MessageAnyGuard([MessageAuthorizationPresenceGuard, MessageTraceGuard]);
       const context = createContext({}); // No auth, no trace
 
       const result = await guard.canActivate(context);
@@ -289,14 +289,14 @@ describe('queue-guards', () => {
   describe('executeMessageGuards', () => {
     it('should execute all guards and return true when all pass', async () => {
       const context = createContext({ authorization: 'Bearer token' });
-      const result = await executeMessageGuards([MessageAuthGuard], context);
+      const result = await executeMessageGuards([MessageAuthorizationPresenceGuard], context);
 
       expect(result).toBe(true);
     });
 
     it('should return false when any guard fails', async () => {
       const context = createContext({});
-      const result = await executeMessageGuards([MessageAuthGuard], context);
+      const result = await executeMessageGuards([MessageAuthorizationPresenceGuard], context);
 
       expect(result).toBe(false);
     });
@@ -313,7 +313,7 @@ describe('queue-guards', () => {
       }
 
       const context = createContext({}); // Will fail auth guard
-      await executeMessageGuards([MessageAuthGuard, SecondGuard], context);
+      await executeMessageGuards([MessageAuthorizationPresenceGuard, SecondGuard], context);
 
       expect(secondGuardCalled).toBe(false);
     });

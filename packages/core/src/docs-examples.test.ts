@@ -171,7 +171,7 @@ import {
   DEFAULT_SSE_HEARTBEAT_MS,
   DEFAULT_SSE_TIMEOUT,
   UseGuards,
-  AuthGuard,
+  BearerPresenceGuard,
   RolesGuard,
   createHttpGuard,
   HttpExecutionContextImpl,
@@ -10463,16 +10463,16 @@ describe('docs/api/guards.md', () => {
     expect(typeof instance.canActivate).toBe('function');
   });
 
-  it('AuthGuard blocks request without Bearer token', async () => {
-    const guard = new AuthGuard();
+  it('BearerPresenceGuard blocks request without Bearer token', async () => {
+    const guard = new BearerPresenceGuard();
     const req = new Request('http://localhost/') as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(false);
   });
 
-  it('AuthGuard allows request with Bearer token', async () => {
-    const guard = new AuthGuard();
+  it('BearerPresenceGuard allows request with Bearer token', async () => {
+    const guard = new BearerPresenceGuard();
     const req = new Request('http://localhost/', {
       headers: { authorization: 'Bearer my-token' },
     }) as unknown as OneBunRequest;
@@ -10519,7 +10519,7 @@ describe('docs/api/guards.md', () => {
   });
 
   it('@UseGuards applies metadata to controller', () => {
-    @UseGuards(AuthGuard)
+    @UseGuards(BearerPresenceGuard)
     @Controller('/protected')
     class ProtectedController extends BaseController {
       @Get('/')
@@ -10582,7 +10582,7 @@ describe('docs/api/guards.md', () => {
   /**
    * @source docs:api/guards.md#one-decorator-three-transports
    */
-  it('AuthGuard denies a queue context instead of reading a request that is not there', () => {
+  it('BearerPresenceGuard denies a queue context instead of reading a request that is not there', () => {
     const message = {
       id: 'm2',
       pattern: 'orders.created',
@@ -10600,7 +10600,7 @@ describe('docs/api/guards.md', () => {
       class Consumer {},
     );
 
-    expect(new AuthGuard().canActivate(queueCtx)).toBe(false);
+    expect(new BearerPresenceGuard().canActivate(queueCtx)).toBe(false);
   });
 });
 

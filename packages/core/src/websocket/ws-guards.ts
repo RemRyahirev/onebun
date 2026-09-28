@@ -68,7 +68,11 @@ export class WsExecutionContextImpl implements WsExecutionContext {
 // ============================================================================
 
 /**
- * Guard that requires client to be authenticated
+ * Guard that requires the client to be authenticated: `client.auth.authenticated === true`.
+ *
+ * The framework sets that flag only when the gateway's `authenticate` hook accepts the client at
+ * the upgrade, after the application's own verification of the token — so a client that merely
+ * sent a token is denied. Without the hook no client is authenticated and this guard denies everyone.
  *
  * @example
  * ```typescript

@@ -699,19 +699,21 @@ of the client's record (`{ ...e.details }`) is yours and is sent whole.
 
 See `references/guards-filters-security.md` for full details on:
 
-- **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `AuthGuard`/`RolesGuard`
-  — both are primitives, not an authorization scheme: `AuthGuard` only checks that a Bearer header
-  is present, and `RolesGuard` with no `rolesExtractor` trusts the caller-supplied `x-user-roles`
-  header. Always pass a `rolesExtractor` reading a verified identity
+- **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `BearerPresenceGuard`/`RolesGuard`
+  — both are starter examples, not an authorization scheme: `BearerPresenceGuard` only checks that a
+  Bearer header is present, and `RolesGuard` with no `rolesExtractor` trusts the caller-supplied
+  `x-user-roles` header. For production auth, write a `@Service()` guard that injects the verifying
+  service, verifies the token and records the identity with `updateRequestContext({ user })`, then
+  pass `RolesGuard` a `rolesExtractor` reading `getRequestContext()?.user?.roles`
 - **Exception Filters**: `ExceptionFilter`, `@UseFilters()`, `createExceptionFilter()`, `defaultExceptionFilter`
 - **Security Middleware**: `cors`, `rateLimit`, `security` options on `ApplicationOptions`
 
 Quick example — guards + filters:
 
 ```typescript
-import { Controller, Get, UseGuards, UseFilters, AuthGuard, HttpException } from '@onebun/core';
+import { Controller, Get, UseGuards, UseFilters, BearerPresenceGuard, HttpException } from '@onebun/core';
 
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/api/admin')
 class AdminController extends BaseController {
   @Get('/stats')

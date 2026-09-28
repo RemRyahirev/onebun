@@ -14,7 +14,7 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 **Three ways to create a guard:**
 1. `createHttpGuard(fn)` — inline function-based guard (simplest)
 2. Implement `Guard` (any transport) or `HttpGuard` / `WsGuard` / `MessageGuard` (one transport), class-based, for DI
-3. Use built-in `AuthGuard`, `RolesGuard` (HTTP), `WsAuthGuard` & friends (WebSocket), `MessageAuthGuard` & friends (queue)
+3. Use a built-in starter guard: `BearerPresenceGuard`, `RolesGuard` (HTTP), `WsAuthGuard` & friends (WebSocket), `MessageAuthorizationPresenceGuard` & friends (queue). They check that something is present or compare values they are handed; none verifies a credential. Production authentication is option 2 — see **Production Authentication** below
 
 **ONE decorator, three transports.** `@UseGuards` works on HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe` consumers, class-level and method-level. One decorator covers all three transports — each level (class, method) has one metadata key that every transport reads — so a guarded WebSocket or queue handler is enforced exactly as a guarded route is. Guards and interceptors differ only in inheritance by an overriding method, and the rule is the same on every transport: a method-level `@UseGuards` on a base method guards every method that overrides it (HTTP route, WebSocket gateway and queue consumer registration all collect method guards up the prototype chain with `getMethodGuards`, base method first), while a method-level `@UseInterceptors` is read from the method that declares the handler, so an overriding method does not inherit the base method's interceptor list
 
@@ -50,12 +50,20 @@ isHttpContext(ctx)  // → getRequest(): OneBunRequest, getHandler(): string, ge
 isWsContext(ctx)    // → getClient(), getSocket(), getData(), getHandler(), getPatternParams(), getRoomName()
 isQueueContext(ctx) // → getMessage(), getMetadata(), getPattern(), getHandler(), getClass()
 ```
-A guard that lands on a transport it cannot read must return `false`. Every built-in LEAF guard does exactly that, so `@UseGuards(AuthGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw. The four composites — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards`, `WsAnyGuard` — carry NO transport check of their own; they just delegate, so they deny off-transport only for as long as every child does. A hand-written child inside one will reach `getMetadata()` on an HTTP context and throw.
+A guard that lands on a transport it cannot read must return `false`. Every built-in LEAF guard does exactly that, so `@UseGuards(BearerPresenceGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw. The four composites — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards`, `WsAnyGuard` — carry NO transport check of their own; they just delegate, so they deny off-transport only for as long as every child does. A hand-written child inside one will reach `getMetadata()` on an HTTP context and throw.
 
-**Built-in guards:**
-- HTTP: `AuthGuard` (checks `Authorization: Bearer <token>` presence), `RolesGuard` (`new RolesGuard(['admin', 'user'])`; roles come from the `rolesExtractor` argument, and with none from the comma-separated `x-user-roles` request header — a value the CALLER sends, so the default authorizes nothing on its own)
-- WebSocket: `WsAuthGuard`, `WsPermissionGuard`, `WsRoomGuard`, `WsAnyPermissionGuard`, `WsServiceGuard`
-- Queue: `MessageAuthGuard`, `MessageServiceGuard`, `MessageHeaderGuard`, `MessageTraceGuard`
+**Built-in guards** — starter examples, not an authentication scheme:
+- HTTP: `BearerPresenceGuard` (admits any `Authorization` header that starts with `Bearer `; the token is never decoded or verified), `RolesGuard` (`new RolesGuard(['admin', 'user'])`; roles come from the `rolesExtractor` argument, and with none from the comma-separated `x-user-roles` request header — a value the CALLER sends, so the default authorizes nothing on its own)
+- WebSocket: `WsAuthGuard` (requires `client.auth.authenticated === true`, which the framework sets only when the gateway's `authenticate` hook accepts the client), `WsPermissionGuard`, `WsRoomGuard`, `WsAnyPermissionGuard`, `WsServiceGuard`
+- Queue: `MessageAuthorizationPresenceGuard` (admits any message with a non-empty `metadata.authorization`; nothing verifies the value), `MessageServiceGuard`, `MessageHeaderGuard`, `MessageTraceGuard`
+
+**Production authentication (HTTP):**
+- A `@Service()` guard class that injects the service doing the verification (signature, expiry, session lookup), verifies the Bearer token in `canActivate`, and writes the verified identity with `updateRequestContext({ user })`. Register the injected service in the module's `providers`
+- Declare the identity by augmenting `RequestContext` (`user?: AuthenticatedUser` — the member MUST be optional)
+- `new RolesGuard(['admin'], () => getRequestContext()?.user?.roles ?? [])` — the extractor reads the verified identity, never a request header
+- The verifying guard must run BEFORE `RolesGuard`: put it at class level (class guards run first) or earlier in the same `@UseGuards(...)` list. Where it did not run, the extractor returns `[]` and `RolesGuard` denies
+- Handlers and services read the same identity with `getRequestContext()?.user`
+- WebSocket verifies once per connection in the gateway's `authenticate` hook; queue metadata is publisher-written, so verify a signature in a guard of your own
 
 </llm-only>
 
@@ -173,9 +181,9 @@ const jwtGuard = createHttpGuard(async (ctx) => {
 
 ```typescript
 import { Controller, Get, UseGuards } from '@onebun/core';
-import { AuthGuard } from '@onebun/core';
+import { BearerPresenceGuard } from '@onebun/core';
 
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/protected')
 class ProtectedController extends BaseController {
   @Get('/')
@@ -190,7 +198,7 @@ class ProtectedController extends BaseController {
 ```typescript
 @Controller('/resources')
 class ResourceController extends BaseController {
-  @UseGuards(AuthGuard, new RolesGuard(['admin']))
+  @UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
   @Delete('/:id')
   async delete(@Param('id') id: string) {
     // reached only when a Bearer header is present AND the extracted roles include 'admin'
@@ -206,7 +214,7 @@ Decorator source order does not matter — `@UseGuards` above or below the route
 A class-level guard is inherited by every controller that extends the class, so a shared protected base can carry it once. The base does not need to be a `@Controller`.
 
 ```typescript
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 class ProtectedController extends BaseController {}
 
 @Controller('/admin')
@@ -250,7 +258,7 @@ The order is class guards, then the base method's guards, then the override's ow
 Guards from both levels are merged and run sequentially — controller guards first, then route guards.
 
 ```typescript
-@UseGuards(AuthGuard)                  // applied to every route
+@UseGuards(BearerPresenceGuard)        // applied to every route
 @Controller('/admin')
 class AdminController extends BaseController {
 
@@ -329,7 +337,7 @@ class TenantActiveGuard implements Guard {
 | Identity | request headers / cookies | `getClient()` — `auth`, `rooms`, `metadata` | `getMetadata()` — `authorization`, `serviceId`, `headers`, `traceId` |
 | Routing | `getHandler()`, `getController()` — strings | `getHandler()` — handler metadata, `getPatternParams()`; `getRoomName()` — the room a join or leave changes, `undefined` elsewhere; for a room join no `@OnJoinRoom` handler matches, a handler with an empty `handler` name and no `pattern` | `getPattern()` — the SUBSCRIPTION pattern, `getHandler()`, `getClass()`; the captured values are on the message, `getMessage().params` |
 
-A guard written for one transport must **deny** on the others, not fall through. Every built-in leaf guard already does: `@UseGuards(AuthGuard)` on a `@Subscribe` handler denies every message rather than reading `getRequest()` off a context that has none. So do the guards produced by `createHttpGuard()`, `createGuard()` (WebSocket) and `createMessageGuard()` (queue).
+A guard written for one transport must **deny** on the others, not fall through. Every built-in leaf guard already does: `@UseGuards(BearerPresenceGuard)` on a `@Subscribe` handler denies every message rather than reading `getRequest()` off a context that has none. So do the guards produced by `createHttpGuard()`, `createGuard()` (WebSocket) and `createMessageGuard()` (queue).
 
 The composites are the exception — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards` and `WsAnyGuard` check nothing themselves, they only delegate to their children. Wrapping built-ins, that inherits their denial; wrapping a hand-written child, it does not, and the child reaches for an accessor the context does not have. Put the `isQueueContext()` / `isWsContext()` check in the child, as the built-ins do.
 
@@ -378,23 +386,25 @@ The composite helpers `MessageAllGuards` / `MessageAnyGuard` / `WsAllGuards` / `
 
 ## Built-in Guards
 
-`AuthGuard` and `RolesGuard` are HTTP-only: both read the request. On a WebSocket or queue handler they deny. Use `WsAuthGuard` / `WsPermissionGuard` and `MessageAuthGuard` / `MessageServiceGuard` there — see [WebSocket](/api/websocket) and [Queue](/api/queue).
+The built-in guards are **starter examples**. Each one checks that something is present, or compares a value it is handed; none of them verifies a credential. They get a route guarded while a project is young. Before a check has to hold against a caller who lies, replace the presence check with a guard that verifies the credential, and hand `RolesGuard` the identity that guard verified — see [Production Authentication](#production-authentication).
 
-### AuthGuard
+`BearerPresenceGuard` and `RolesGuard` are HTTP-only: both read the request. On a WebSocket or queue handler they deny. Use `WsAuthGuard` / `WsPermissionGuard` and `MessageAuthorizationPresenceGuard` / `MessageServiceGuard` there — see [WebSocket](/api/websocket) and [Queue](/api/queue).
 
-Checks for a `Authorization: Bearer <token>` header. Returns `false` if the header is missing or does not start with `Bearer `, and `false` on any non-HTTP context.
+### BearerPresenceGuard {#authguard}
+
+Checks for an `Authorization: Bearer <token>` header. Returns `false` if the header is missing or does not start with `Bearer `, and `false` on any non-HTTP context.
 
 ```typescript
-import { AuthGuard } from '@onebun/core';
+import { BearerPresenceGuard } from '@onebun/core';
 
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/secure')
 class SecureController extends BaseController { /* ... */ }
 ```
 
 ::: warning Not a Token Validator
-`AuthGuard` checks only that an `Authorization: Bearer ...` header is present.
-It does **not** validate or decode the token. Combine with a custom guard or middleware for JWT verification, token expiry checks, etc.
+`BearerPresenceGuard` checks only that an `Authorization: Bearer ...` header is present.
+It does **not** validate or decode the token: `Authorization: Bearer anything` passes. Verify the token in a guard of your own, as in [Production Authentication](#production-authentication).
 :::
 
 ### RolesGuard
@@ -404,7 +414,7 @@ Verifies that **all** required roles are present (AND logic). The roles come fro
 ::: danger The default trusts a header the caller controls
 Pass a `rolesExtractor` that reads a **verified** identity — the claims of a token your own code decoded — as in the example below. It is the second constructor argument, and it is the supported way to use this guard.
 
-Without one, `RolesGuard` falls back to the `x-user-roles` request header. That header arrives from the caller and nothing verifies it, so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` satisfies `AuthGuard` and `RolesGuard` together. On the default extractor the guard reports what the caller claims to be, not what the caller is.
+Without one, `RolesGuard` falls back to the `x-user-roles` request header. That header arrives from the caller and nothing verifies it, so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` satisfies `BearerPresenceGuard` and `RolesGuard` together. On the default extractor the guard reports what the caller claims to be, not what the caller is.
 
 If an already-deployed application depends on the header, the stop-gap is a middleware that **overwrites** `x-user-roles` on every request — `headers.set(...)`, never "set it if absent", because an absent-only write leaves a forged value in place. Bun's incoming `Headers` are mutable, so this does work. It is remediation and not the supported answer: the trust decision stays in a channel the client can write, guarded only by an ordering convention nothing enforces. Attach the middleware to one controller, forget it on another, and the bypass is back with no type error.
 :::
@@ -430,6 +440,113 @@ const guard = new RolesGuard(
   },
 );
 ```
+
+Decoding a payload is not verifying it. This extractor is sound only behind a guard that has already checked that token's signature; without one, a caller writes whatever roles it likes into the payload and nothing checks the signature beside it. [Production Authentication](#production-authentication) hands the extractor the identity that guard verified, so nothing is decoded twice.
+
+## Production Authentication
+
+Authentication is checking a credential against something the caller cannot forge: a signature, a session store, an identity provider. That check belongs to your application, in a guard that injects the service doing it. The setup has three parts — the identity type, the guard that verifies and records it, and a `RolesGuard` whose `rolesExtractor` reads the recorded identity.
+
+### The verified identity
+
+The identity lives on the [request context](/api/request-context), the per-request store the framework opens for every routed request. Declare it by declaration merging:
+
+<!-- typecheck: skip -->
+```typescript
+// auth.types.ts
+export interface AuthenticatedUser {
+  id: string;
+  roles: string[];
+}
+
+declare module '@onebun/core' {
+  interface RequestContext {
+    user?: AuthenticatedUser;   // must be optional
+  }
+}
+```
+
+The request context is backed by `AsyncLocalStorage`, so two requests in flight together never see each other's identity, and the next guard, the handler and every service below them read the same value. The alternatives fail on one of those counts: a request header is written by the caller, so an identity put there is trusted only as long as every route overwrites it first; a field on the guard is visible to neither `RolesGuard` nor the handler, and a guard instance passed to `@UseGuards` is shared by every concurrent request.
+
+### The verifying guard
+
+```typescript
+import type { HttpExecutionContext, HttpGuard } from '@onebun/core';
+import {
+  BaseService,
+  HttpException,
+  Service,
+  updateRequestContext,
+} from '@onebun/core';
+
+@Service()
+class TokenService extends BaseService {
+  // Check the signature and expiry against your signing key or identity provider,
+  // and answer null for anything that fails.
+  async verify(token: string): Promise<AuthenticatedUser | null> {
+    return await verifyJwt(token);
+  }
+}
+
+@Service()
+class VerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: TokenService) {}
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
+    const header = ctx.getRequest().headers.get('authorization');
+    if (!header?.startsWith('Bearer ')) {
+      return false;                                              // 403 Forbidden
+    }
+
+    const user = await this.tokens.verify(header.slice('Bearer '.length));
+    if (!user) {
+      throw new HttpException(401, 'Invalid or expired token');  // 401, through the filters
+    }
+
+    updateRequestContext({ user });
+
+    return true;
+  }
+}
+```
+
+Register `TokenService` in the module's `providers`; the guard itself is not a provider. `@Service()` on the guard is what makes the constructor injection work — see [Class-based guard](#class-based-guard). Passing the guard as a class gives every request its own instance.
+
+### Roles from the verified identity
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  Delete,
+  Get,
+  getRequestContext,
+  Param,
+  RolesGuard,
+  UseGuards,
+} from '@onebun/core';
+
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+
+@UseGuards(VerifiedTokenGuard)                    // class level: runs first on every route
+@Controller('/admin')
+class AdminController extends BaseController {
+  @Get('/me')
+  me() {
+    return getRequestContext()?.user;             // the identity the guard verified
+  }
+
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Delete('/users/:id')
+  deleteUser(@Param('id') id: string) { /* reached only by a verified admin */ }
+}
+```
+
+Order is what makes this sound. Class-level guards run before route-level ones, so the identity is written before `RolesGuard` reads it; inside one `@UseGuards(...)` list guards run left to right, so `@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))` works on a single route too. On a route where the verifying guard did not run, the context carries no `user`, the extractor returns `[]` and `RolesGuard` denies.
+
+The one `RolesGuard` instance serves every request, which is safe: it reads only its constructor arguments and the request context.
+
+The other transports verify elsewhere. A WebSocket client is verified once, at the upgrade, by the gateway's [`authenticate`](/api/websocket#authentication) hook, and `WsAuthGuard` / `WsPermissionGuard` read what it attached. Queue metadata is written by the publisher, so a consumer that has to trust the sender verifies a signature in a guard of its own — see [Queue](/api/queue).
 
 ## Guard Response
 

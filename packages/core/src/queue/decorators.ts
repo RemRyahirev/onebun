@@ -275,16 +275,16 @@ export function Timeout(milliseconds: number, options: TimeoutDecoratorOptions):
  *
  * @example
  * ```typescript
- * @UseMessageGuards(MessageAuthGuard)
+ * @UseMessageGuards(MessageAuthorizationPresenceGuard)
  * @Subscribe('orders.*')
  * async handleOrder(message: Message<OrderData>) {
- *   // Only messages with authorization token will be processed
+ *   // Only messages that carry a non-empty `metadata.authorization` reach here
  * }
  *
- * @UseMessageGuards(MessageAuthGuard, new MessageServiceGuard(['payment-service']))
+ * @UseMessageGuards(MessageAuthorizationPresenceGuard, new MessageServiceGuard(['payment-service']))
  * @Subscribe('payments.*')
  * async handlePayment(message: Message<PaymentData>) {
- *   // Requires both auth and service check
+ *   // Requires both the authorization value and the service check
  * }
  * ```
  * @see docs:api/queue.md

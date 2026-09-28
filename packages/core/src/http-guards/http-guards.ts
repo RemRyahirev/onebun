@@ -159,24 +159,27 @@ export function createHttpGuard(
 // ============================================================================
 
 /**
- * Guard that requires a valid Bearer token in the Authorization header.
- * Does NOT validate the token — only checks that the header is present.
- * Combine with a custom middleware or guard to validate the token itself.
+ * Guard that admits a request whose `Authorization` header starts with `Bearer `.
+ *
+ * It checks presence only: the token after the scheme is never decoded, verified or checked for
+ * expiry, so `Authorization: Bearer anything` passes. It is a starter example, not authentication —
+ * production code verifies the token in a guard of its own that injects the verifying service; see
+ * docs:api/guards.md, "Production Authentication".
  *
  * @see docs:api/guards.md
  *
  * @example
  * ```typescript
- * @UseGuards(AuthGuard)
+ * @UseGuards(BearerPresenceGuard)
  * @Get('/profile')
  * getProfile() { ... }
  * ```
  */
-export class AuthGuard implements Guard {
+export class BearerPresenceGuard implements Guard {
   canActivate(context: ExecutionContext): boolean {
     // HTTP-only: on a queue or WebSocket handler there is no request to read a header from,
-    // so this denies rather than passing or throwing. Use `MessageAuthGuard` / `WsAuthGuard`
-    // there — see docs:api/guards.md, "One decorator, three transports".
+    // so this denies rather than passing or throwing. Use `MessageAuthorizationPresenceGuard` /
+    // `WsAuthGuard` there — see docs:api/guards.md, "One decorator, three transports".
     if (!isHttpContext(context)) {
       return false;
     }
@@ -240,7 +243,7 @@ export class RolesGuard implements Guard {
   }
 
   canActivate(context: ExecutionContext): boolean {
-    // HTTP-only, same rule as AuthGuard: the extractor takes a request.
+    // HTTP-only, same rule as BearerPresenceGuard: the extractor takes a request.
     if (!isHttpContext(context)) {
       return false;
     }

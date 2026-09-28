@@ -464,10 +464,10 @@ instead of throwing once per delivered message and dropping each one.
 
 <!-- typecheck: skip -->
 ```typescript
-import { UseGuards, MessageAuthGuard, createMessageGuard } from '@onebun/core';
+import { UseGuards, MessageAuthorizationPresenceGuard, createMessageGuard } from '@onebun/core';
 
 // Built-in guards — method-level here; the same decorator on the class covers every @Subscribe in it
-@UseGuards(MessageAuthGuard)
+@UseGuards(MessageAuthorizationPresenceGuard)
 @Subscribe('events.admin')
 async handleAdmin(message: Message<unknown>) { ... }
 
@@ -503,7 +503,7 @@ chain, and failing open would be a silent authorization bypass).
 **The merge deduplicates by identity**: a guard listed under both decorators on the same consumer
 runs once per message — guard lists are deduplicated the same way on every transport.
 
-Built-in message guards: `MessageAuthGuard`, `MessageServiceGuard`, `MessageHeaderGuard`,
+Built-in message guards: `MessageAuthorizationPresenceGuard`, `MessageServiceGuard`, `MessageHeaderGuard`,
 `MessageTraceGuard`, `MessageAllGuards`, `MessageAnyGuard`. The four leaf guards — and anything from
 `createMessageGuard()` — return `false` (deny) when handed a non-queue context, since `@UseGuards` can put
 them on an HTTP route where `getMetadata()` does not exist. The two combinators, `MessageAllGuards` and

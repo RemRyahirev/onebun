@@ -309,11 +309,11 @@ export class UserController extends BaseController {
 Class-level pipeline decorators are inherited: a controller that extends a base carrying `@UseGuards`, `@UseMiddleware`, `@UseInterceptors` or `@UseFilters` gets them. The base does not need to be a `@Controller` itself. Base entries run first, then the subclass's own — the same order in which controller-level and route-level entries merge.
 
 ```typescript
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 class ProtectedController extends BaseController {}
 
-// inherits AuthGuard — every route below requires an `Authorization: Bearer` header
-// (presence only; AuthGuard does not validate the token)
+// inherits BearerPresenceGuard — every route below requires an `Authorization: Bearer` header
+// (presence only; BearerPresenceGuard does not validate the token)
 @Controller('/admin')
 class AdminController extends ProtectedController {
   @Get('/stats')

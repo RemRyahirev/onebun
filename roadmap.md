@@ -10,7 +10,7 @@
 ### HTTP Guards / Auth
 - [x] Интерфейс `CanActivate` для HTTP
 - [x] Декоратор `@UseGuards(...guards)` для контроллеров и роутов
-- [x] Встроенные guards: `AuthGuard`, `RolesGuard` (RBAC)
+- [x] Встроенные guards: `BearerPresenceGuard`, `RolesGuard` (RBAC)
 - [x] Фабрика `createHttpGuard(fn)`
 - [x] Интеграция в request pipeline между middleware и handler
 

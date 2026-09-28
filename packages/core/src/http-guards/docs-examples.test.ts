@@ -27,12 +27,14 @@ import type {
   WsHandlerMetadata,
 } from '@onebun/core';
 import {
-  AuthGuard,
+  BearerPresenceGuard,
   BaseController,
+  BaseService,
   Controller,
   createHttpGuard,
   Delete,
   Get,
+  getRequestContext,
   HttpException,
   HttpExecutionContextImpl,
   HttpStatusCode,
@@ -44,6 +46,8 @@ import {
   OneBunApplication,
   Param,
   RolesGuard,
+  Service,
+  updateRequestContext,
   UseGuards,
   WsExecutionContextImpl,
   WsHandlerType,
@@ -243,7 +247,7 @@ class AsyncGuardController extends BaseController {
 // docs:api/guards.md#on-a-controller-all-routes
 // ============================================================================
 
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/protected')
 class ProtectedController extends BaseController {
   @Get('/')
@@ -274,7 +278,7 @@ class ResourceController extends BaseController {
     return { items: [] };
   }
 
-  @UseGuards(AuthGuard, new RolesGuard(['admin']))
+  @UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
   @Delete('/:id')
   remove(@Param('id') id: string) {
     handlerHits.push('resources:remove');
@@ -287,7 +291,7 @@ class ResourceController extends BaseController {
 // docs:api/guards.md#combining-controller-route-guards
 // ============================================================================
 
-class TracingAuthGuard extends AuthGuard {
+class TracingBearerPresenceGuard extends BearerPresenceGuard {
   override canActivate(ctx: ExecutionContext): boolean {
     guardTrace.push('controller:auth');
 
@@ -303,7 +307,7 @@ class TracingRolesGuard extends RolesGuard {
   }
 }
 
-@UseGuards(TracingAuthGuard)
+@UseGuards(TracingBearerPresenceGuard)
 @Controller('/admin-combined')
 class AdminCombinedController extends BaseController {
   @Get('/stats')
@@ -326,7 +330,7 @@ class AdminCombinedController extends BaseController {
 // docs:api/guards.md#on-an-overriding-method
 // ============================================================================
 
-class BaseMethodAuthGuard extends AuthGuard {
+class BaseMethodAuthGuard extends BearerPresenceGuard {
   override canActivate(ctx: ExecutionContext): boolean {
     guardTrace.push('base-method:auth');
 
@@ -404,7 +408,7 @@ class GuardResponseController extends BaseController {
 }
 
 // Deliberately guarded by RolesGuard ALONE. Every other RolesGuard fixture here pairs it with
-// AuthGuard, so a request forging only `x-user-roles` is refused by the Bearer check and the
+// BearerPresenceGuard, so a request forging only `x-user-roles` is refused by the Bearer check and the
 // hazard the page documents stays invisible. This route has nothing else in front of it.
 @Controller('/roles-only')
 class RolesOnlyController extends BaseController {
@@ -417,7 +421,112 @@ class RolesOnlyController extends BaseController {
   }
 }
 
+// ============================================================================
+// docs:api/guards.md#production-authentication
+// ============================================================================
+
+interface DocsVerifiedUser {
+  id: string;
+  roles: string[];
+}
+
+// The augmentation the page documents as `user?: AuthenticatedUser`. An application writes
+// `declare module '@onebun/core'`; inside the package the module path is the same interface. The
+// member gets its own name because an augmentation in a test file is global to the typecheck
+// program, and `request-context.test.ts` already declares `user` with a different shape.
+declare module '../request-context' {
+  interface RequestContext {
+    guardsDocsUser?: DocsVerifiedUser;
+  }
+}
+
+/**
+ * Stands in for the page's `TokenService`: the only place the verdict can come from, so a 200 from
+ * the guarded routes proves the guard received it through constructor injection.
+ */
+@Service()
+class DocsTokenService extends BaseService {
+  private readonly issued = new Map<string, DocsVerifiedUser>([
+    ['admin-token', { id: 'u-admin', roles: ['admin'] }],
+    ['viewer-token', { id: 'u-viewer', roles: ['viewer'] }],
+  ]);
+
+  async verify(token: string): Promise<DocsVerifiedUser | null> {
+    // Asynchronous like a real verification, so the guard's await is exercised.
+    await Promise.resolve();
+
+    return this.issued.get(token) ?? null;
+  }
+}
+
+@Service()
+class VerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: DocsTokenService) {}
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
+    const header = ctx.getRequest().headers.get('authorization');
+    if (!header?.startsWith('Bearer ')) {
+      return false;
+    }
+
+    const user = await this.tokens.verify(header.slice('Bearer '.length));
+    if (!user) {
+      throw new HttpException(HttpStatusCode.UNAUTHORIZED, 'Invalid or expired token');
+    }
+
+    updateRequestContext({ guardsDocsUser: user });
+
+    return true;
+  }
+}
+
+const rolesOfVerifiedUser = (): string[] => getRequestContext()?.guardsDocsUser?.roles ?? [];
+
+@UseGuards(VerifiedTokenGuard)
+@Controller('/prod-auth')
+class ProductionAuthController extends BaseController {
+  @Get('/me')
+  me() {
+    handlerHits.push('prod-auth:me');
+
+    return getRequestContext()?.guardsDocsUser ?? null;
+  }
+
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Delete('/users/:id')
+  deleteUser(@Param('id') id: string) {
+    handlerHits.push('prod-auth:deleteUser');
+
+    return { deleted: id };
+  }
+}
+
+// The same extractor with NO verifying guard in front: nothing wrote an identity, so it must deny.
+@Controller('/prod-auth-unverified')
+class UnverifiedRolesController extends BaseController {
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Get('/area')
+  area() {
+    handlerHits.push('prod-auth-unverified:area');
+
+    return { reached: true };
+  }
+}
+
+// The single-route form: both guards in ONE list, verifying guard first.
+@Controller('/prod-auth-single')
+class SingleListAuthController extends BaseController {
+  @UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Get('/area')
+  area() {
+    handlerHits.push('prod-auth-single:area');
+
+    return { reached: true };
+  }
+}
+
 @Module({
+  providers: [DocsTokenService],
   controllers: [
     QuickReferenceController,
     InterfaceController,
@@ -429,6 +538,9 @@ class RolesOnlyController extends BaseController {
     AdminAccountController,
     GuardResponseController,
     RolesOnlyController,
+    ProductionAuthController,
+    UnverifiedRolesController,
+    SingleListAuthController,
   ],
 })
 class GuardsDocsModule {}
@@ -672,7 +784,7 @@ describe('docs/api/guards.md', () => {
         headers: { authorization: 'Bearer any-token' },
       });
 
-      // AuthGuard passes, RolesGuard does not: both are required, they are ANDed.
+      // BearerPresenceGuard passes, RolesGuard does not: both are required, they are ANDed.
       expect(tokenOnly.status).toBe(HttpStatusCode.FORBIDDEN);
       expect(tokenOnly.hits).toEqual([]);
 
@@ -776,12 +888,12 @@ describe('docs/api/guards.md', () => {
     });
   });
 
-  describe('AuthGuard', () => {
+  describe('BearerPresenceGuard', () => {
     /**
      * @source docs:api/guards.md#authguard
      */
     it('should accept only a header that starts with "Bearer ", without validating the token', () => {
-      const guard = new AuthGuard();
+      const guard = new BearerPresenceGuard();
 
       expect(guard.canActivate(makeHttpContext([['authorization', 'Bearer real-looking-token']]))).toBe(true);
       // "Not a Token Validator": any garbage after the scheme is accepted.
@@ -814,8 +926,8 @@ describe('docs/api/guards.md', () => {
 
       // Documented: HTTP-only guards DENY off-transport — they neither pass nor throw,
       // even when the message itself carries an authorization token.
-      expect(new AuthGuard().canActivate(queueCtx)).toBe(false);
-      expect(new AuthGuard().canActivate(wsCtx)).toBe(false);
+      expect(new BearerPresenceGuard().canActivate(queueCtx)).toBe(false);
+      expect(new BearerPresenceGuard().canActivate(wsCtx)).toBe(false);
       expect(new RolesGuard(['admin']).canActivate(queueCtx)).toBe(false);
       expect(new RolesGuard(['admin']).canActivate(wsCtx)).toBe(false);
     });
@@ -890,9 +1002,9 @@ describe('docs/api/guards.md', () => {
       expect(forged.body).toEqual({ success: true, result: { reached: true } });
       expect(forged.hits).toEqual(['roles-only:adminArea']);
 
-      // And the other half of the documented curl: AuthGuard accepts any Bearer string, so
+      // And the other half of the documented curl: BearerPresenceGuard accepts any Bearer string, so
       // adding it in front changes nothing about who gets in.
-      expect(new AuthGuard().canActivate(makeHttpContext([['authorization', 'Bearer anything']]))).toBe(true);
+      expect(new BearerPresenceGuard().canActivate(makeHttpContext([['authorization', 'Bearer anything']]))).toBe(true);
 
       // Sending nothing is still refused — the guard does compare, it just compares a claim.
       const anonymous = await call('/roles-only/admin-area');
@@ -900,6 +1012,112 @@ describe('docs/api/guards.md', () => {
       expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
       expect(anonymous.hits).toEqual([]);
     });
+  });
+
+  describe('Built-in Guards', () => {
+    /**
+     * The rename ships without aliases: the old names are gone from the public barrel, so an
+     * import of either is a compile error rather than a silent pass-through. `WsAuthGuard` keeps
+     * its name because it requires the flag only the gateway's `authenticate` hook sets.
+     *
+     * @source docs:api/guards.md#built-in-guards
+     */
+    it('should export the starter guards under the names that say what they check', async () => {
+      const core = await import('@onebun/core') as Record<string, unknown>;
+
+      expect(typeof core.BearerPresenceGuard).toBe('function');
+      expect(typeof core.MessageAuthorizationPresenceGuard).toBe('function');
+      expect(typeof core.WsAuthGuard).toBe('function');
+      expect(core.AuthGuard).toBeUndefined();
+      expect(core.MessageAuthGuard).toBeUndefined();
+    });
+  });
+
+  describe('Production Authentication', () => {
+    const bearer = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}` });
+
+    /**
+     * @source docs:api/guards.md#production-authentication
+     */
+    it('should deny a missing Bearer header with 403 and an unverifiable token with 401', async () => {
+      const anonymous = await call('/prod-auth/me');
+
+      expect(anonymous.status).toBe(403);
+      expect(anonymous.hits).toEqual([]);
+
+      // The token is PRESENT — BearerPresenceGuard would have passed it. The verifying guard
+      // throws, and the filters turn that into the page's 401.
+      const forged = await call('/prod-auth/me', { headers: bearer('forged-token') });
+
+      expect(forged.status).toBe(401);
+      expect(forged.body.error).toBe('Invalid or expired token');
+      expect(forged.hits).toEqual([]);
+    });
+
+    /**
+     * @source docs:api/guards.md#production-authentication
+     */
+    it('should hand the verified identity to the handler through the request context', async () => {
+      const viewer = await call('/prod-auth/me', { headers: bearer('viewer-token') });
+
+      expect(viewer.status).toBe(200);
+      expect(viewer.body).toEqual({ success: true, result: { id: 'u-viewer', roles: ['viewer'] } });
+      expect(viewer.hits).toEqual(['prod-auth:me']);
+    });
+
+    /**
+     * @source docs:api/guards.md#production-authentication
+     */
+    it('should let RolesGuard decide on the verified roles and ignore x-user-roles', async () => {
+      const viewer = await call('/prod-auth/users/7', { method: 'DELETE', headers: bearer('viewer-token') });
+
+      expect(viewer.status).toBe(403);
+      expect(viewer.hits).toEqual([]);
+
+      // The header the fallback extractor would read claims admin. The extractor here reads the
+      // verified identity instead, so the claim changes nothing.
+      const claimsAdmin = await call('/prod-auth/users/7', {
+        method: 'DELETE',
+        headers: { ...bearer('viewer-token'), ...headersOf(['x-user-roles', 'admin']) },
+      });
+
+      expect(claimsAdmin.status).toBe(403);
+      expect(claimsAdmin.hits).toEqual([]);
+
+      const admin = await call('/prod-auth/users/7', { method: 'DELETE', headers: bearer('admin-token') });
+
+      expect(admin.status).toBe(200);
+      expect(admin.body).toEqual({ success: true, result: { deleted: '7' } });
+      expect(admin.hits).toEqual(['prod-auth:deleteUser']);
+    });
+
+    /**
+     * @source docs:api/guards.md#production-authentication
+     */
+    it('should run one @UseGuards list left to right, so the verifying guard can precede RolesGuard', async () => {
+      const viewer = await call('/prod-auth-single/area', { headers: bearer('viewer-token') });
+
+      expect(viewer.status).toBe(403);
+      expect(viewer.hits).toEqual([]);
+
+      const admin = await call('/prod-auth-single/area', { headers: bearer('admin-token') });
+
+      expect(admin.status).toBe(200);
+      expect(admin.hits).toEqual(['prod-auth-single:area']);
+    });
+
+    /**
+     * @source docs:api/guards.md#production-authentication
+     */
+    it('should deny on the verified-identity extractor when no verifying guard ran', async () => {
+      const unverified = await call('/prod-auth-unverified/area', {
+        headers: { ...bearer('admin-token'), ...headersOf(['x-user-roles', 'admin']) },
+      });
+
+      expect(unverified.status).toBe(403);
+      expect(unverified.hits).toEqual([]);
+    });
+
   });
 
   describe('Guard Response', () => {

@@ -302,7 +302,7 @@ type MigratedUser = typeof userSchema.infer;
 
 // src/users/auth.guard.ts — function-based (simplest)
 // eslint-disable-next-line @typescript-eslint/naming-convention
-const AuthGuard = createHttpGuard(async (context) => {
+const AuthorizationHeaderGuard = createHttpGuard(async (context) => {
   const req = context.getRequest();
 
   return !!req.headers.get('Authorization');
@@ -416,14 +416,14 @@ class MigrationUserController extends BaseController {
   }
 
   @Post('/')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   @ApiResponse(201, { schema: userSchema })
   async create(@Body(createUserSchema) body: CreateUserBody) {
     return await this.userService.create(body);
   }
 
   @Put('/:id')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   async update(
     @Param('id') id: string,
     @Body(updateUserSchema) body: UpdateUserBody,
@@ -432,7 +432,7 @@ class MigrationUserController extends BaseController {
   }
 
   @Delete('/:id')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   async remove(@Param('id') id: string) {
     await this.userService.remove(id);
 
@@ -452,7 +452,7 @@ class MigrationUserModule {}
 @Controller('/guarded')
 class GuardStyleController extends BaseController {
   @Get('/fn')
-  @UseGuards(AuthGuard)
+  @UseGuards(AuthorizationHeaderGuard)
   async viaFunctionGuard() {
     return { reached: 'fn' };
   }
@@ -597,7 +597,7 @@ describe('docs/migration-nestjs.md — Side-by-Side Examples', () => {
       expect(missingBody.error).toBe('User not found');
       expect(missingBody.code).toBe(404);
 
-      // @UseGuards(AuthGuard) — the write routes are closed without the header
+      // @UseGuards(AuthorizationHeaderGuard) — the write routes are closed without the header
       const unauthorized = await module.inject('POST', '/users', {
         body: { name: 'Grace', email: 'grace@example.com' },
       });

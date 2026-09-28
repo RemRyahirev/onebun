@@ -35,7 +35,7 @@ import {
   OnMessageReceived,
   OnMessageProcessed,
   OnMessageFailed,
-  MessageAuthGuard,
+  MessageAuthorizationPresenceGuard,
   MessageServiceGuard,
   MessageHeaderGuard,
   MessageTraceGuard,
@@ -353,7 +353,7 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
     // From docs/api/queue.md: Built-in Guards section
     class SecureService {
       // Require authorization token
-      @UseMessageGuards(MessageAuthGuard)
+      @UseMessageGuards(MessageAuthorizationPresenceGuard)
       @Subscribe('secure.events')
       async handleSecure(_message: Message<unknown>) {}
 
@@ -383,14 +383,14 @@ describe('Message Guards Examples (docs/api/queue.md)', () => {
     class StrictService {
       // All guards must pass
       @UseMessageGuards(
-        new MessageAllGuards([MessageAuthGuard, new MessageServiceGuard(['allowed-service'])]),
+        new MessageAllGuards([MessageAuthorizationPresenceGuard, new MessageServiceGuard(['allowed-service'])]),
       )
       @Subscribe('strict.events')
       async handleStrict(_message: Message<unknown>) {}
 
       // Any guard can pass
       @UseMessageGuards(
-        new MessageAnyGuard([new MessageServiceGuard(['internal-service']), MessageAuthGuard]),
+        new MessageAnyGuard([new MessageServiceGuard(['internal-service']), MessageAuthorizationPresenceGuard]),
       )
       @Subscribe('flexible.events')
       async handleFlexible(_message: Message<unknown>) {}

@@ -1381,7 +1381,7 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  * @example Class-level (all routes)
  * ```typescript
  * \@Controller('/admin')
- * \@UseGuards(AuthGuard)
+ * \@UseGuards(BearerPresenceGuard)
  * class AdminController extends BaseController { ... }
  * ```
  *
@@ -1402,10 +1402,10 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  * @example Combined (class guard + route guard)
  * ```typescript
  * \@Controller('/api')
- * \@UseGuards(AuthGuard)                      // runs on every route
+ * \@UseGuards(BearerPresenceGuard)            // runs on every route
  * class ApiController extends BaseController {
  *   \@Get('/admin')
- *   \@UseGuards(new RolesGuard(['admin']))     // runs only here, after AuthGuard
+ *   \@UseGuards(new RolesGuard(['admin']))     // runs only here, after BearerPresenceGuard
  *   getAdmin() { ... }
  * }
  * ```

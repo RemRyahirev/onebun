@@ -36,8 +36,8 @@ interface HttpExecutionContext {
 `HttpExecutionContext | WsExecutionContext | MessageExecutionContext`, and `isHttpContext(ctx)` is
 literally `ctx.type === 'http'`. `type` is a required member, so a context hand-rolled without it —
 typically in a unit test — does not typecheck as `HttpExecutionContext` at all. At runtime it
-additionally makes every guard that *narrows* — each `createHttpGuard()` guard, plus `AuthGuard` and
-`RolesGuard` — return `false`, which reads as a real denial. A class guard that calls `getRequest()`
+additionally makes every guard that *narrows* — each `createHttpGuard()` guard, plus `BearerPresenceGuard`
+and `RolesGuard` — return `false`, which reads as a real denial. A class guard that calls `getRequest()`
 directly (like `ApiKeyGuard` below) never narrows and will not notice, which is what makes the
 omission easy to ship. Use `isWsContext` / `isQueueContext` for the other two.
 
@@ -73,17 +73,17 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 <!-- typecheck: skip -->
 ```typescript
 // Controller-level (all routes)
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/protected')
 class ProtectedController extends BaseController { ... }
 
 // Method-level (single route)
-@UseGuards(AuthGuard, new RolesGuard(['admin']))
+@UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
 @Delete('/:id')
 async delete(@Param('id') id: string) { ... }
 
 // Combined: controller guards run first, then route guards
-@UseGuards(AuthGuard)
+@UseGuards(BearerPresenceGuard)
 @Controller('/admin')
 class AdminController extends BaseController {
   @UseGuards(new RolesGuard(['admin']))
@@ -208,7 +208,12 @@ Function-based guards from `createHttpGuard(fn)` have no DI by design.
 
 ### Built-in Guards
 
-- **`AuthGuard`** — checks `Authorization: Bearer <token>` header presence
+The built-in guards are **starter examples**: each checks that something is present or compares a
+value it is handed, and none verifies a credential. Production auth is the setup under
+"Production Authentication" below.
+
+- **`BearerPresenceGuard`** — checks `Authorization: Bearer <token>` header presence; the token is
+  never decoded or verified, so `Bearer anything` passes
 - **`RolesGuard`** — compares required roles against whatever its `rolesExtractor` returns. It
   requires **ALL** listed roles (`roles.every(...)`), not any of them:
   `new RolesGuard(['admin', 'moderator'])` admits only a caller holding both. For an OR, pass a
@@ -220,24 +225,24 @@ so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` passes bo
 Always pass a `rolesExtractor` that reads a verified identity. If an already-deployed app depends
 on the header, its middleware must OVERWRITE the header on every request (`headers.set`), never
 fill it in only when absent — an absent-only write leaves a forged value in place. The same shape
-applies on the queue side: `MessageAuthGuard` and `MessageServiceGuard` trust `metadata.authorization`
+applies on the queue side: `MessageAuthorizationPresenceGuard` and `MessageServiceGuard` trust `metadata.authorization`
 and `metadata.serviceId`, which the publisher writes and the broker does not authenticate.
 
 Both are **HTTP-only and deny everywhere else**: each begins with
 `if (!isHttpContext(context)) return false`, because both read a request. Guards created by
 `createHttpGuard(fn)` behave identically — the wrapper denies rather than calling `getRequest()` on
-a context that has none. This turns a class-level `@UseGuards(AuthGuard)` on a class that also
+a context that has none. This turns a class-level `@UseGuards(BearerPresenceGuard)` on a class that also
 carries `@Subscribe` handlers into an outage: every message is denied and nacked with
 `requeue: false`. Use `WsAuthGuard` / `WsPermissionGuard` (from `@onebun/core` WebSocket) and
-`MessageAuthGuard` / `MessageServiceGuard` (queue) on those transports, or write a `Guard` that
+`MessageAuthorizationPresenceGuard` / `MessageServiceGuard` (queue) on those transports, or write a `Guard` that
 narrows with `isHttpContext` / `isWsContext` / `isQueueContext` itself.
 
 <!-- typecheck: skip -->
 ```typescript
-import { AuthGuard, RolesGuard } from '@onebun/core';
+import { BearerPresenceGuard, RolesGuard } from '@onebun/core';
 
 // admin AND moderator — both roles must be present
-@UseGuards(AuthGuard, new RolesGuard(['admin', 'moderator']))
+@UseGuards(BearerPresenceGuard, new RolesGuard(['admin', 'moderator']))
 
 // Custom role extractor
 new RolesGuard(['admin'], (ctx) => {
@@ -245,6 +250,61 @@ new RolesGuard(['admin'], (ctx) => {
   return payload?.roles ?? [];
 });
 ```
+
+Decoding a payload is not verifying it: that extractor is sound only behind a guard that already
+checked the token's signature.
+
+### Production Authentication
+
+Verification belongs to the application, in a guard that injects the service doing it. The verified
+identity goes on the request context (`AsyncLocalStorage`, per request), and `RolesGuard` reads it
+from there — never from a header, which the caller writes, and never from a field on a guard, which
+`RolesGuard` and the handler cannot see.
+
+<!-- typecheck: skip -->
+```typescript
+import type { HttpExecutionContext, HttpGuard } from '@onebun/core';
+import { getRequestContext, HttpException, RolesGuard, Service, updateRequestContext } from '@onebun/core';
+
+interface AuthenticatedUser { id: string; roles: string[] }
+
+declare module '@onebun/core' {
+  interface RequestContext {
+    user?: AuthenticatedUser;   // MUST be optional
+  }
+}
+
+@Service()
+class VerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: TokenService) {}   // TokenService goes in `providers`
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
+    const header = ctx.getRequest().headers.get('authorization');
+    if (!header?.startsWith('Bearer ')) return false;                         // 403
+    const user = await this.tokens.verify(header.slice('Bearer '.length));   // signature + expiry
+    if (!user) throw new HttpException(401, 'Invalid or expired token');     // 401
+    updateRequestContext({ user });
+    return true;
+  }
+}
+
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+
+@UseGuards(VerifiedTokenGuard)                                   // class level: runs first
+@Controller('/admin')
+class AdminController extends BaseController {
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
+  @Delete('/users/:id')
+  deleteUser(@Param('id') id: string) { ... }
+}
+```
+
+The verifying guard must run before `RolesGuard` — class level, or earlier in the same
+`@UseGuards(...)` list. Where it did not run, the context has no `user`, the extractor returns `[]`
+and `RolesGuard` denies. Handlers and services read the identity with `getRequestContext()?.user`.
+WebSocket verifies once per connection in the gateway's `authenticate` hook (`WsAuthGuard` and
+`WsPermissionGuard` read what it attached); queue metadata is publisher-written, so verify a
+signature in a guard of your own.
 
 ### Guard Response
 

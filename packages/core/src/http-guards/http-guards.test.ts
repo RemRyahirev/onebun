@@ -31,7 +31,7 @@ import { BaseService, Service } from '../module/service';
 import { makeMockLoggerLayer } from '../testing/test-utils';
 
 import {
-  AuthGuard,
+  BearerPresenceGuard,
   createHttpGuard,
   executeHttpGuards,
   HttpExecutionContextImpl,
@@ -176,26 +176,26 @@ describe('createHttpGuard', () => {
 });
 
 // ============================================================================
-// AuthGuard
+// BearerPresenceGuard
 // ============================================================================
 
-describe('AuthGuard', () => {
+describe('BearerPresenceGuard', () => {
   it('allows request with Bearer token', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext([['authorization', 'Bearer my-token']]);
 
     expect(guard.canActivate(ctx)).toBe(true);
   });
 
   it('blocks request without Authorization header', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext();
 
     expect(guard.canActivate(ctx)).toBe(false);
   });
 
   it('blocks request with non-Bearer Authorization header', () => {
-    const guard = new AuthGuard();
+    const guard = new BearerPresenceGuard();
     const ctx = makeContext([['authorization', 'Basic dXNlcjpwYXNz']]);
 
     expect(guard.canActivate(ctx)).toBe(false);

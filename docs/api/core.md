@@ -53,7 +53,7 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 **Guards, Interceptors, and Filters**:
-- Use `@UseGuards(SomeGuard)` on a controller or route method to decide whether a request reaches the handler. The built-in `AuthGuard` and `RolesGuard` are primitives, not an authorization scheme: one checks that an `Authorization: Bearer` header is present, the other compares a list of roles it was handed — see [Guards](./guards.md) for what you must hand it
+- Use `@UseGuards(SomeGuard)` on a controller or route method to decide whether a request reaches the handler. The built-in `BearerPresenceGuard` and `RolesGuard` are starter examples, not an authorization scheme: one checks that an `Authorization: Bearer` header is present, the other compares a list of roles it was handed — see [Guards — Production Authentication](./guards.md#production-authentication) for the guard that verifies and the identity it hands `RolesGuard`
 - Use `@UseInterceptors(LoggingInterceptor)` to wrap handler execution (logging, caching, timeouts)
 - Use `@UseFilters(myFilter)` on a controller or route method to add error handling
 - All three decorators merge with parent-level (controller + route, global + controller + route)
