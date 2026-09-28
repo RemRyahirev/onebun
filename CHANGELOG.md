@@ -2,6 +2,62 @@
 
 ## 0.8.2 — 2026-09-28
 
+### Package Versions
+
+Eight packages move to 0.8.2; `@onebun/cache`, `@onebun/docs` and `@onebun/envs` stay at 0.8.0.
+Patches are released per package, but ATM prepares one version per release and 0.8.1 is already
+taken, so the packages that were at 0.8.0 go straight to 0.8.2. `workspace:^` is rewritten to
+`^<version>` at publish time, so the moved packages depend on each other at `^0.8.2`:
+`@onebun/core` needs `@onebun/logger`, `@onebun/trace`, `@onebun/requests` and `@onebun/metrics`
+0.8.2, and `@onebun/nats` and `@onebun/drizzle` need `@onebun/core` 0.8.2. Update the `@onebun/*`
+packages together.
+
+| Package | Previous | New | Why |
+|---------|----------|-----|-----|
+| `@onebun/core` | 0.8.1 | 0.8.2 | DI ordering, Reflect Metadata interop, failed-start rollback, service-client fixes, test-container cleanup |
+| `@onebun/nats` | 0.8.1 | 0.8.2 | workqueue streams, concurrent replica boot, a failed connect closes its socket |
+| `@onebun/requests` | 0.8.0 | 0.8.2 | redirect credential safelist, error-body exposure, timeouts, new transport options |
+| `@onebun/drizzle` | 0.8.0 | 0.8.2 | `jsonbParam()` / `jsonParam()` |
+| `@onebun/logger` | 0.8.0 | 0.8.2 | `shutdownLoggerLayer()`, used by the core's failed-start rollback |
+| `@onebun/trace` | 0.8.0 | 0.8.2 | `TraceService.shutdown({ spanProcessors })`, used by the same rollback |
+| `@onebun/metrics` | 0.8.0 | 0.8.2 | documentation comments only |
+| `@onebun/create` | 0.8.0 | 0.8.2 | the scaffold's bootstrap `catch` exits with code 1 |
+
+### Read This First
+
+Nothing here is breaking: every entry fixes a defect or adds an option that stays off until you set
+it. The breaking follow-ups found in the same reports (full path encoding in the service client, one
+response envelope, one error contract for the HTTP client) are held for 0.9.0.
+
+Most entries answer seven reports from one consumer (FB-30…FB-36); the rest are defects found while
+reproducing them. Three are security fixes, and they are the ones to read first if you use
+`@onebun/requests` or the service client: a redirect to another origin carried API keys, custom auth
+headers and the HMAC signature along; a service-client path value could send the call — with the
+client's credentials — to a different controller; and an HTTP-client error that escaped a controller
+put the upstream's headers, body and the request URL into the caller's response. Security advisories
+for the affected versions follow the npm publication.
+
+Visible differences to expect, none of which needs a code change:
+
+- `@onebun/requests`: a cross-origin redirect hop keeps only a header safelist, so a non-credential
+  custom header such as `X-Request-Id` stays with its origin too; a 3xx without `Location` fails with
+  `REDIRECT_ERROR`; a timeout while reading the body is a `TIMEOUT_ERROR` and follows `retryOnTimeout`;
+  HEAD, 204 and 304 answers resolve without a body.
+- `@onebun/nats`: `@Subscribe` works on a stream declared `retention: 'workqueue'`; on such a stream a
+  subscription must name a `group`, and `ackMode: 'none'` and partial-token patterns are refused when
+  it subscribes.
+- `@onebun/core`: a `start()` that rejects releases what the boot acquired and runs the destroy hooks
+  of what was built, so a hook must not assume `onModuleInit` completed; provider order in `@Module` no
+  longer matters, and `CircularDependencyError` means a real cycle.
+
+One case to check: if your application imports `reflect-metadata` BEFORE `@onebun/core` and has a
+decorated subclass with no constructor of its own that relied on inheriting its parent's constructor
+dependencies, that subclass now receives none, and a startup warning names it. Declare the
+constructor and pass the dependencies to `super(...)`.
+
+The documentation diff is large: pages now describe current behaviour only, and several statements
+that did not match the code were corrected.
+
 ### Added
 
 - `jsonbParam()` and `jsonParam()` in `@onebun/drizzle/pg` — a JSON value for raw SQL on PostgreSQL that needs no column metadata. The json/jsonb fix from 0.6.0 lives in the column encoders, so a value interpolated straight into ``db.execute(sql`...`)`` never reached it, and every obvious hand-written form was wrong for some shape. Measured against `postgres:16`: `${JSON.stringify(v)}::jsonb` always stores a jsonb **string** (Bun JSON-encodes a parameter it infers as jsonb, so the text is encoded twice); a raw `${['x']}` renders as `($1)` and silently stores the array's ELEMENT (`"x"`; `[{a:1}]` stores the object without its array, `[null]` stores SQL NULL); `${['x','y']}` fails with `type record`, `${[]}` with a syntax error, `${42}`/`${true}` with `type integer`/`boolean`; and drizzle's own `sql.param(v)::jsonb` is no equivalent. The helpers render `$n::text::jsonb` / `$n::text::json` with `JSON.stringify(value)` bound as ONE text parameter, which is correct for objects, arrays (`[]` and one-element arrays included), strings, numbers, booleans, quotes and Unicode, in any expression — `@>`, `->`, `jsonb_set`, `jsonb_build_object`, INSERT/UPDATE values. `null` is JSON `null` (`IS NULL` is false; write `NULL` for SQL NULL). They accept `sql.placeholder('name')` for prepared statements — the value handed to `execute()` is serialized and checked the same way (`null` there is JSON null too), and the cast is added once. `undefined`, functions, symbols, BigInt, circular values and drizzle objects (an `sql` fragment, a column, a placeholder passed at `execute()`) throw a `TypeError` naming the helper instead of binding nothing or a drizzle object's internals — a placeholder handed to a hand-rolled `JSON.stringify` helper is silently stored as `{"name":"p"}`. That holds for a drizzle object nested anywhere inside the value as well: `jsonbParam({ kind: sql.placeholder('k') })` throws and names the key, because a placeholder must be the whole value — serialized, it would bind `{"kind":{"name":"k"}}` and a prepared `@>` built from it would match nothing, silently. They are exported from the `/pg` subpath only, not from the package root, and they share one SQL builder with the column encoders, so for every non-null value `jsonbParam(v)` renders byte-identical SQL to an ORM column write of `v` (for `null` the column binds SQL NULL, the helper JSON null). ORM column writes keep the column path and do not need the helper. The docs are corrected along the way: `docs/api/drizzle.md` and the `onebun-framework` skill called a raw `${payload}` "WRONG — stores a jsonb string", which is false for the object shown (it stores an object); what actually breaks is arrays, numbers, booleans and null. The raw-SQL section is rewritten helper-first, with a table of the measured failure modes (each pinned by an integration test against a real PostgreSQL), and gains a SQLite paragraph: SQLite has no helper — `json(${JSON.stringify(v)})` is the one way inside `json_set()`/`json_object()` — and there a plain object as the FIRST bound parameter silently binds NULL for EVERY positional parameter of the statement (bun:sqlite's named-binding mode), on the default `DB_TYPE` and with no error. A `${JSON.stringify(v)}::text::jsonb` helper you already have is correct and keeps working; `jsonbParam()` is the same SQL plus the placeholder support and the checks. (FB-25) (FB-25)
