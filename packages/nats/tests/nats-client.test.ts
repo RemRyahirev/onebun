@@ -5,6 +5,7 @@
  * They test the client's properties and error handling.
  */
 
+import { headers } from '@nats-io/transport-node';
 import {
   describe,
   it,
@@ -16,6 +17,7 @@ import {
   NatsClient,
   createNatsClient,
   toDriverOptions,
+  toHeaderMap,
 } from '../src/nats-client';
 
 describe('NatsClient', () => {
@@ -169,6 +171,47 @@ describe('NatsClient', () => {
       toDriverOptions(options);
 
       expect(options).toEqual({ servers: 'nats://localhost:4222', driverOptions: { noEcho: true } });
+    });
+  });
+
+  /**
+   * Driven with the driver's own `headers()` object rather than a stand-in, because the defect
+   * this guards against was a method the real object does not have. A plain `Map` passed here
+   * would have satisfied `.entries()` and hidden it. The same conversion against messages that
+   * crossed a real server is in `nats.adapter.integration.test.ts`.
+   */
+  describe('toHeaderMap', () => {
+    it('keeps every name in the case it was set with', () => {
+      const source = headers();
+      source.set('X-Probe', 'yes');
+      source.set('x-api-key', 'k-1');
+
+      const map = toHeaderMap(source);
+
+      expect([...map.entries()]).toEqual([['X-Probe', ['yes']], ['x-api-key', ['k-1']]]);
+      expect(map.has('x-probe')).toBe(false);
+      expect(map.has('X-Api-Key')).toBe(false);
+    });
+
+    it('keeps every value of a repeated name, in the order it was appended', () => {
+      const source = headers();
+      source.append('X-Multi', 'a');
+      source.append('X-Multi', 'b');
+
+      expect(toHeaderMap(source).get('X-Multi')).toEqual(['a', 'b']);
+    });
+
+    it('returns arrays of its own, so changing one does not reach the driver\'s message', () => {
+      const source = headers();
+      source.append('X-Multi', 'a');
+
+      toHeaderMap(source).get('X-Multi')!.push('added-by-a-callback');
+
+      expect(source.values('X-Multi')).toEqual(['a']);
+    });
+
+    it('returns an empty map for headers that carry no names', () => {
+      expect(toHeaderMap(headers()).size).toBe(0);
     });
   });
 });

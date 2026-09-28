@@ -483,6 +483,8 @@ const app = new OneBunApplication(AppModule, {
 - No persistence — messages are fire-and-forget
 - Consumer groups via NATS queue groups
 - Pattern conversion via `toNatsSubject`: OneBun's `#` wildcard → NATS `>`, and a `{name}` parameter → NATS `*` (automatic)
+- `metadata.headers` travels twice: in the envelope (what the handler's `message.metadata` holds) and as NATS wire headers, so `nats sub` sees them too. Names keep their published case on both paths — look them up (`metadata.headers[...]`, `MessageHeaderGuard`) spelled exactly as published. Headers a message brings on its own (`Nats-Msg-Id` from a JetStream `messageId`, a name another client repeated) are delivered but never merged into `metadata`
+- Wire headers are readable through `NatsClient.subscribe()` / `request()`: `NatsMessage.headers` is a `Map<string, string[]>` (every value in arrival order, absent when none). Inside the package, read driver headers only through `toHeaderMap()` (`MsgHdrs.keys()` + `values()`) — `MsgHdrs` has no `entries()`, and any throw inside `NatsClient`'s consume loop ends the subscription for good
 
 ### Connection options (both adapters)
 

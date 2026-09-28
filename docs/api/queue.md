@@ -1193,6 +1193,36 @@ so a dropped message is visible to metrics and tracing instead of being counted 
 The message itself is still gone: `requeue` cannot be honoured by a protocol that never
 redelivers.
 
+#### Message headers {#nats-headers}
+
+A publish's `metadata.headers` travels twice. It is part of the envelope a handler's
+`message.metadata` is read from, and the adapter also sends each entry as a NATS message header,
+so a subscriber that is not OneBun — `nats sub`, another client — sees it on the wire. Names keep
+the case they were published with on both paths: `X-Probe` arrives as `X-Probe`, neither
+lower-cased nor canonicalised. A lookup such as `metadata.headers['x-probe']` or
+`MessageHeaderGuard('x-probe')` therefore has to spell the name exactly as the publisher did.
+
+A message carrying headers the envelope does not describe — the `Nats-Msg-Id` a JetStream publish
+with `messageId` adds, a name another client repeated — is delivered like any other. Its handler's
+`metadata` is still the envelope's alone: wire headers are not merged into it.
+
+To read the wire headers themselves, subscribe with `NatsClient`, the connection wrapper
+`@onebun/nats` exports. Its `subscribe()` and `request()` hand back a `NatsMessage` whose `headers`
+is a `Map` from each name to all of its values in arrival order, and absent when the message
+carried none.
+
+<llm-only>
+
+**Technical details for AI agents — NATS message headers:**
+- Received headers are converted in one place, `toHeaderMap()` in `packages/nats/src/nats-client.ts`, which both `NatsClient.subscribe()` and `NatsClient.request()` call. It reads through `keys()` and `values(name)`, both declared on the driver's `MsgHdrs`. `MsgHdrs` has NO `entries()` — it is `Iterable<[string, string[]]>` plus `get`/`set`/`append`/`has`/`keys`/`values`/`delete`/`last` — and calling it throws `TypeError: … is not a function` on the first message that carries headers
+- The connection is typed `any` (the driver is imported dynamically), so the consume loop's subscription is annotated `Subscription` and the request's reply `Msg`. Those annotations are what type-check a header read off a delivered message; `toHeaderMap(headers: MsgHdrs)` makes a call to a method the interface lacks a compile error
+- A throw inside `NatsClient.subscribe()`'s `for await` loop ends the loop for good: every later message on that subscription is lost, and the throw surfaces only as an unhandled rejection. Nothing in the per-message conversion may throw, and `NatsQueueAdapter.processMessage()` catches everything its path can raise for the same reason
+- `values()` builds a fresh array per name, so `NatsMessage.headers` shares nothing with the driver's message. The driver stores and matches names exactly by default, which is why their case survives the wire
+- `NatsQueueAdapter.publish()` writes `metadata.headers` into the JSON envelope and hands the same record to `NatsClient.publish()` as wire headers. `processMessage()` builds `Message.metadata` from the envelope only and never reads `NatsMessage.headers`. `JetStreamQueueAdapter` reads no message headers at all; the only one it causes is the `Nats-Msg-Id` the driver sends for `messageId`
+- The `toHeaderMap` unit cases in `tests/nats-client.test.ts` use the driver's real `headers()` object, because a `Map` stand-in has `entries()` and would hide exactly this defect. The cases over a real server are `message headers` in `tests/nats.adapter.integration.test.ts` and the JetStream-producer / core-observer case in `tests/jetstream.adapter.integration.test.ts`
+
+</llm-only>
+
 ### JetStreamQueueAdapter
 
 NATS JetStream for persistent, reliable messaging. Pass the adapter class in application options:

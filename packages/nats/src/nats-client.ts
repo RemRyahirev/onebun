@@ -5,7 +5,12 @@
  */
 
 import type { NatsConnectionOptions } from './types';
-import type { NodeConnectionOptions } from '@nats-io/transport-node';
+import type {
+  Msg,
+  MsgHdrs,
+  NodeConnectionOptions,
+  Subscription,
+} from '@nats-io/transport-node';
 
 const DEFAULT_TIMEOUT = 5_000; // 5 seconds
 
@@ -73,6 +78,31 @@ export function toDriverOptions(options: NatsConnectionOptions): NodeConnectionO
   };
 }
 
+/**
+ * Copies a received message's headers into the `Map` that `NatsMessage.headers` exposes.
+ *
+ * Reads them through `keys()` and `values()`, both declared on the driver's `MsgHdrs` interface.
+ * That interface has no `entries()` — a `Map` method, and the driver's headers are not a `Map`.
+ * The connection is typed `any`, so the typed parameter here is what turns such a call into a
+ * compile error. Untyped, it compiles and throws on the first message that carries headers,
+ * inside the consume loop — which the throw ends, losing every later message on the subscription.
+ *
+ * Names come back exactly as the publisher wrote them. The driver compares names exactly unless
+ * asked otherwise, and stores them as given, so `X-Probe` arrives as `X-Probe`, not lower-cased
+ * and not canonicalised. `values()` builds a new array per name, so what a callback receives is
+ * its own and changing it cannot reach back into the driver's message.
+ *
+ * Package-internal: deliberately not re-exported from `src/index.ts`.
+ *
+ * @param headers - The headers of a message the driver delivered.
+ * @returns One entry per header name, holding every value for that name in arrival order.
+ *
+ * @see docs:api/queue.md
+ */
+export function toHeaderMap(headers: MsgHdrs): Map<string, string[]> {
+  return new Map(headers.keys().map((name) => [name, headers.values(name)]));
+}
+
 // Import NATS types dynamically to handle potential import issues
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let natsModule: any = null;
@@ -105,7 +135,10 @@ export interface NatsMessage {
   data: string;
   /** Reply subject if request-reply pattern */
   reply?: string;
-  /** Message headers */
+  /**
+   * Message headers: one entry per name, every value for it in arrival order, names in the case
+   * the publisher wrote them. Absent when the message carried none.
+   */
   headers?: Map<string, string[]>;
 }
 
@@ -191,7 +224,9 @@ export class NatsClient {
     }
 
     const decoder = new TextDecoder();
-    const sub = this.nc.subscribe(subject, { queue: options?.queue });
+    // Typed although the connection is not, so what the loop reads off each message is checked
+    // against the driver's declarations rather than trusted.
+    const sub: Subscription = this.nc.subscribe(subject, { queue: options?.queue });
 
     // Start consuming messages
     (async () => {
@@ -200,7 +235,7 @@ export class NatsClient {
           subject: msg.subject,
           data: decoder.decode(msg.data),
           reply: msg.reply,
-          headers: msg.headers ? new Map(msg.headers.entries()) : undefined,
+          headers: msg.headers ? toHeaderMap(msg.headers) : undefined,
         };
         await callback(natsMsg);
       }
@@ -227,8 +262,7 @@ export class NatsClient {
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
 
-     
-    const response = await this.nc.request(subject, encoder.encode(data), {
+    const response: Msg = await this.nc.request(subject, encoder.encode(data), {
       timeout: options?.timeout ?? DEFAULT_TIMEOUT,
     });
 
@@ -236,7 +270,7 @@ export class NatsClient {
       subject: response.subject,
       data: decoder.decode(response.data),
       reply: response.reply,
-      headers: response.headers ? new Map(response.headers.entries()) : undefined,
+      headers: response.headers ? toHeaderMap(response.headers) : undefined,
     };
   }
 

@@ -23,6 +23,7 @@ import { createNatsContainer, type TestContainer } from '@onebun/core/testing';
 
 import { hashReconcileConfig } from '../src/config-stamp';
 import { JetStreamQueueAdapter } from '../src/jetstream.adapter';
+import { NatsQueueAdapter } from '../src/nats.adapter';
 import { toNatsSubject } from '../src/subject';
 
 /** Mirrors the adapter's durable naming so the test does not hardcode a digest. */
@@ -730,6 +731,35 @@ describe('JetStreamQueueAdapter Integration', () => {
     await new Promise((resolve) => setTimeout(resolve, 500));
 
     expect(received.map(d => d.n).sort((a, b) => a - b)).toEqual([1, 3, 4, 5, 6]);
+  }, CASE_TIMEOUT_MS);
+
+  it('publishes a messageId that a core-NATS observer of the same subject still receives', async () => {
+    // onebun-FB-39. The id travels as the Nats-Msg-Id header, and a NatsQueueAdapter watching the
+    // subject — a way to observe a workqueue without a second, overlapping consumer — receives
+    // the message with that header on it. Such a message used to end the observer's
+    // subscription, so the id-less publish after it is the one that proves the observer lived.
+    const js = makeAdapter('ITEST_OBSERVED', ['observed.>']);
+    await js.connect();
+    const observer = new NatsQueueAdapter({ servers: nats.url });
+
+    try {
+      await observer.connect();
+      const seen: number[] = [];
+      await observer.subscribe<{ n: number }>('observed.#', async (message) => {
+        seen.push(message.data.n);
+      }, { ackMode: 'none' });
+      // subscribe() only queues the SUB on the observer's connection. The publishes below travel
+      // on another one, so without this round trip they can reach the server first and miss it.
+      await asAny(observer).client.getConnection().flush();
+
+      await js.publish('observed.one', { n: 1 }, { messageId: 'outbox-1' });
+      await js.publish('observed.two', { n: 2 });
+      await pollUntil(() => seen.length === 2);
+
+      expect(seen).toEqual([1, 2]);
+    } finally {
+      await observer.disconnect();
+    }
   }, CASE_TIMEOUT_MS);
 
   it('counts attempts across real redeliveries', async () => {
