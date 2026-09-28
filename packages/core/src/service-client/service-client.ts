@@ -102,10 +102,10 @@ function isClientParam(param: ParamMetadata): param is ClientParam {
  * nothing for them, so they take no argument. An undecorated parameter is not in the metadata at
  * all, and takes none either.
  *
- * Through 0.8 the call walked every decorated parameter against `args[i]`, so a server-only one
- * declared before a client one took an argument too, and shifted the rest: `(@Header a, @Query q)`
- * called as `m('hello')` sent no query. Counting only these three types is what makes the call's
- * arguments the list a caller can see, and the list a typed contract would expose.
+ * Counting only these three types is what makes the call's arguments the list a caller can see,
+ * and the list a typed contract would expose: walking every decorated parameter against `args[i]`
+ * would let a server-only one declared before a client one take an argument and shift the rest, so
+ * `(@Header a, @Query q)` called as `m('hello')` would send no query.
  */
 function clientParams(endpoint: EndpointMetadata): ClientParam[] {
   return (endpoint.params ?? []).filter(isClientParam).sort((a, b) => a.index - b.index);
@@ -115,15 +115,16 @@ function clientParams(endpoint: EndpointMetadata): ClientParam[] {
  * The query string of a call, `?` included, or `''` when it sends no query value.
  *
  * Built here rather than handed to the HTTP client as a record, because that client appends
- * `String(value)` once per key: `['a', 'b']` went out as `tags=a%2Cb` and the handler received
- * `'a,b'`. An array is sent as one `name[]` key per element instead, which the server's query
+ * `String(value)` once per key: `['a', 'b']` would go out as `tags=a%2Cb` and the handler would
+ * receive `'a,b'`. An array is sent as one `name[]` key per element instead, which the server's query
  * parser reads back as an array. The `[]` suffix is what keeps a one-element array an array: a
  * repeated key alone gives an array only from the second value on, so `['a']` would arrive as `'a'`.
  *
  * Every other value is sent as the HTTP client sends it, one key with `String(value)`. `null` and
  * `undefined` are not sent, and neither are the `null` and `undefined` elements of an array, so an
  * empty array sends nothing and the handler receives `undefined`. Values are encoded with
- * `URLSearchParams`, as the HTTP client encodes them, so a single value goes out exactly as before.
+ * `URLSearchParams`, as the HTTP client encodes them, so a single value goes out exactly as the HTTP
+ * client would send it.
  */
 function queryStringFor(query: ReadonlyMap<string, unknown>): string {
   const search = new URLSearchParams();
@@ -148,13 +149,13 @@ function queryStringFor(query: ReadonlyMap<string, unknown>): string {
 /**
  * The bytes of a call's body: the `@Body` value as JSON, or `undefined` when it sends none.
  *
- * Serialized here, because the HTTP client sends a string as it is and skips a falsy value: through
- * 0.8 `'hello'` went out as the bare text `hello`, which the server's `req.json()` cannot parse, so
- * the handler received `undefined`, and `0`, `false`, `''` and `null` sent no body at all. As JSON,
- * every one of them reaches `@Body()` as it was passed. The text is handed on as a string, so the
+ * Serialized here, because the HTTP client sends a string as it is and skips a falsy value: it
+ * would send `'hello'` as the bare text `hello`, which the server's `req.json()` cannot parse, so
+ * the handler would receive `undefined`, and it would send no body at all for `0`, `false`, `''` or
+ * `null`. As JSON, every one of them reaches `@Body()` as it was passed. The text is handed on as a string, so the
  * HTTP client sends (and signs) exactly these bytes, under its default
  * `Content-Type: application/json`. A `custom` auth interceptor therefore sees this text as
- * `config.data`, not the value (through 0.8 it saw the value).
+ * `config.data`, not the value.
  *
  * `undefined` sends no body, and so does any value `JSON.stringify` has no text for (a function, a
  * symbol). A value it throws on, a BigInt or a cyclic object, is refused with a `TypeError` naming
@@ -225,7 +226,7 @@ function buildRequestParams(
 
   // A GET, DELETE, HEAD, OPTIONS or ALL call sends no body, whatever it is handed, so it is handed
   // none. The value is not serialized: one JSON cannot represent (a BigInt) must not fail a call
-  // that never sends it, as it did not through 0.8. And a `custom` auth interceptor sees
+  // that never sends it. And a `custom` auth interceptor sees
   // `config.data` as `undefined`, which is what is sent.
   const sent = BODY_CARRYING_METHODS.has(endpoint.httpMethod) ? jsonBodyFor(endpoint, body) : undefined;
 
@@ -307,9 +308,6 @@ function isSuccessEnvelope(body: unknown): body is { success: true; result?: unk
  * on every route, so that `result` is the value. A handler that returned a `Response` of its own
  * sent its body as it is: a success envelope (`this.success(value, 201)`) resolves its `result`,
  * and any other body resolves whole.
- *
- * The call used to resolve the HTTP client's envelope around the server's, so the value sat at
- * `response.result.result`.
  */
 function handlerValue(response: ApiResponse<unknown>): unknown {
   const body = response.success ? response.result : undefined;
@@ -357,7 +355,7 @@ function createControllerProxy(
  *   `(...args: any[]) => Promise<unknown>`. The arguments are the handler's `@Param`, `@Query` and
  *   `@Body` parameters, one each, in the order the handler declares them. A `@Header`, `@Cookie`,
  *   `@Req`, custom-extractor, file or form-field parameter takes no argument, wherever it is
- *   declared (through 0.8 it took one and dropped it, shifting every later argument). Extra
+ *   declared. Extra
  *   arguments are dropped. Path values are sent as encoded text, and a missing one is refused;
  *   a query array arrives as an array, and the body as JSON (see below).
  * - The promise resolves with the value the handler returned. A failure rejects with the
@@ -394,15 +392,14 @@ function createControllerProxy(
  * `null`, `undefined`, `''`, `.`, `..`, and a string with an unpaired UTF-16 surrogate.
  *
  * A `@Query` array is sent as one `name[]=element` key per element, so the handler receives an
- * array, a one-element one included (through 0.8 `['a', 'b']` arrived as `'a,b'`). An empty array,
+ * array, a one-element one included. An empty array,
  * `null` and `undefined` send no value. On a `POST`, `PUT` or `PATCH` endpoint the `@Body` value is
  * always sent as JSON, so a string, `0`, `false`, `''` and `null` reach the handler as they were
- * passed (through 0.8 a string was sent as bare text and the falsy ones sent no body); `undefined`
+ * passed; `undefined`
  * sends no body, and a value `JSON.stringify` throws on is refused with a `TypeError` before any
  * request is made. With any other method no body is sent, and the value is neither serialized nor
  * checked. A `custom` auth interceptor sees what is sent: the query string in `config.url`, and in
- * `config.data` the JSON text of the body, or `undefined` (through 0.8 it saw the query record in
- * `config.query` and the `@Body` value in `config.data`).
+ * `config.data` the JSON text of the body, or `undefined`.
  *
  * The client and each `client.<Controller>` behave as plain values: they can be awaited and
  * returned from an `async` factory (`then` reads as `undefined`), serialized, converted to a

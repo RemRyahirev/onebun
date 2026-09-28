@@ -79,8 +79,7 @@ export type ServiceClient<TDef extends ServiceDefinition> = {
  * arrives as it was passed. The method name itself is checked at run time: reading one the
  * controller does not have throws.
  *
- * The result was `any` up to 0.8, when the call resolved the HTTP client's envelope: `unknown`
- * makes code that still reads `.result.result`, `.statusCode` or `.retryCount` fail to compile
+ * `unknown` makes a property read on the unasserted value (`.result`, `.statusCode`) fail to compile
  * instead of reading `undefined`.
  *
  * @see docs:api/requests.md

@@ -2072,9 +2072,9 @@ const toRequestError = (failure: ErrorResponse | OneBunBaseError): OneBunBaseErr
  * Run a request's Effect for the Promise API: resolve with its success, reject with the
  * `OneBunBaseError` its failure maps to ({@link toRequestError}).
  *
- * `Effect.runPromise` rejected with Effect's `FiberFailure`, which no `instanceof` recognises: the
- * failure was reachable only through `Runtime.isFiberFailure` and `Cause.squash`. A defect — a
- * throw inside the client, not a failed request — rejects with what was thrown.
+ * Not `Effect.runPromise`, which rejects with Effect's `FiberFailure`: no `instanceof` recognises
+ * it, and the failure is reachable only through `Runtime.isFiberFailure` and `Cause.squash`. A
+ * defect — a throw inside the client, not a failed request — rejects with what was thrown.
  *
  * @internal
  */

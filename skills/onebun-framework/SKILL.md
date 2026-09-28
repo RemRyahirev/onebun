@@ -195,33 +195,30 @@ Controllers are keyed by class name and arguments are positional, **one per `@Pa
 `@Body` parameter** of the handler, in declaration order: `client.UsersController.findById(id)`.
 Only those values are sent. A `@Header`, `@Cookie`, `@Req`, `@Res`, custom-extractor, file or
 form-field parameter takes **no** argument wherever it is declared, so
-`findById(@Header('x-tenant') t, @Param('id') id)` is called as `findById(id)`. Through 0.8 it took
-one and dropped it (`findById(undefined, id)`); when upgrading, remove such placeholders: a leftover
-one is read as the first client value, which only a `null`/`undefined` path value refuses — any
-other value (a tenant id, a token 0.8 dropped) is silently sent as that path, query or body value,
-so it can land in URLs and logs; send such values via the client's `headers`/`auth` option. See
-`docs/api/requests.md#service-client-arguments`
-(the `-upgrade` subsection lists the affected endpoints from `_endpoints`). Since 0.9 the client
-**percent-encodes every path argument itself** (`encodeURIComponent`), and the router decodes it
-once, so the handler receives exactly what was passed, `/`, `?`, `#`, `\` and `%` included: pass
-user input raw, `findById(input)`, and never encode it yourself — a caller-encoded `'a%2Fb'`
-arrives as `'a%2Fb'`. When upgrading from 0.8, remove every `encodeURIComponent` around service
-client arguments (typecheck cannot find them). Refused with a `TypeError` before anything is sent,
+`findById(@Header('x-tenant') t, @Param('id') id)` is called as `findById(id)`. A value passed in
+such a parameter's place (`findById(undefined, id)`) is read as the first client value, which only a
+`null`/`undefined` path value refuses — any other value (a tenant id, a token) is silently sent as
+that path, query or body value, so it can land in URLs and logs; send such values via the client's
+`headers`/`auth` option. See `docs/api/requests.md#service-client-arguments`
+(`#service-client-arguments-upgrade` lists, from `_endpoints`, the endpoints whose call skips a
+parameter). The client **percent-encodes every path argument itself** (`encodeURIComponent`), and
+the router decodes it once, so the handler receives exactly what was passed, `/`, `?`, `#`, `\` and
+`%` included: pass user input raw, `findById(input)`, and never encode it yourself — a
+caller-encoded `'a%2Fb'` arrives as `'a%2Fb'`, and typecheck cannot find such a call. Refused with a `TypeError` before anything is sent,
 because no encoding can send them as one segment: `null`, `undefined`, `''`, `.`, `..` and a string
 with an unpaired surrogate; send such a value as a query parameter or in the body. On the callee,
 read the value through `@Param`: the raw request path carries it encoded (`@` as `%40`, `:` as
 `%3A`). See `docs/api/requests.md#service-client-path-values`.
-Since 0.9 **query and body values arrive as passed**: a `@Query` array is sent as one `name[]` key per
+**Query and body values arrive as passed**: a `@Query` array is sent as one `name[]` key per
 element and the handler receives an array, a one-element one included (`[]`, `null`, `undefined`
 send nothing); on `POST`/`PUT`/`PATCH` the `@Body` value is always sent as JSON, so a string, `0`,
 `false`, `''` and `null` reach `@Body()` unchanged and only `undefined` sends no body (other methods
 send no body and do not serialize it). Pass values, never `JSON.stringify(dto)` (it arrives as a
 string) or `tags.join(',')` (it arrives as one string). A BigInt or cyclic body of a
-`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. When upgrading from 0.8: a handler
-that split `'a,b'` now receives an array (type it `string | string[]` while 0.8 callers remain, and
-widen a `type('string')` query schema, which answers the array with a 400), callers that serialized
-the body themselves must pass the value, and a `custom` auth `interceptor` sees `config.data` as the
-JSON text that is sent (a string, or `undefined` with no body), not the value: sign it as it is, or
+`POST`/`PUT`/`PATCH` rejects with a `TypeError`, nothing sent. A handler that other HTTP clients
+call too gets a plain `?tags=a,b` as one string: type it `string | string[]`; a `type('string')`
+query schema answers a service client's array with a 400. A `custom` auth `interceptor` sees
+`config.data` as the JSON text that is sent (a string, or `undefined` with no body), not the value: sign it as it is, or
 `JSON.parse` it, change it and `JSON.stringify` it again; the query is in `config.url`, not
 `config.query`. See `docs/api/requests.md#service-client-query-body`.
 The client is a plain value: an `async` factory may return it, and `await`, `JSON.stringify` and
@@ -251,10 +248,7 @@ A body's `code` counts only when it is 400–599: a OneBun service relaying its 
 answers 500 with `code: 0` in the body, and that rejects as an `InternalServerError` 500 retried under
 `retryOn`, never a `TransportError`. A callee's `details` are for the caller's code; if the error escapes
 a controller, the default filter sends status and `error` with `details: {}` (and the app logs it).
-`retryCount`/`traceId` of a failure are on the Effect API's `ErrorResponse` only. Up to 0.8 the
-result was the double envelope (`response.result.result`, `.statusCode`, `.retryCount`) and a
-rejection needed `Runtime.isFiberFailure` + `Cause.squash`; `req()` threw `InternalServerError`
-`REQUEST_FAILED` 500. See `docs/api/requests.md#service-client-results` and
+`retryCount`/`traceId` of a failure are on the Effect API's `ErrorResponse` only. See `docs/api/requests.md#service-client-results` and
 `#a-failed-request-rejects`.
 
 **WebSocket clients: untyped, and Bun-only.** `createWsClient(createWsServiceDefinition(Module), { url })`
@@ -440,11 +434,8 @@ fields. That holds whatever injects the provider, `@Optional()` and nothing at a
 under `TestingModule`'s silent logger too (it is the rejection, not a log line). A throw from the
 framework's step right after the constructor (an `initializeService()` the provider defines, applying
 `tracing.traceAll`) is reported the same way. A framework error thrown from a constructor
-(`DependencyResolutionError`, a `OneBun*`-named one) is not wrapped.
-Through 0.8.x the error was only logged and the provider dropped, so it surfaced as a
-`DependencyResolutionError` on the consumer (0.8.1 same-module: `CircularDependencyError`), as
-`undefined` for an `@Optional()` one (0.8.2), or not at all — an app that booted that way now fails
-`start()`: fix the constructor or drop the provider.
+(`DependencyResolutionError`, a `OneBun*`-named one) is not wrapped. An app does not boot with such
+a provider: fix the constructor or drop the provider.
 
 ## Services
 
@@ -509,13 +500,13 @@ Key rules:
   `createTestService` supports this — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
-- **`onModuleInit` runs imported modules first** (0.9.0): every imported module's services before
-  those of the module importing it, the root module's (and `TestingModule.create({ providers })`'s)
+- **`onModuleInit` runs imported modules first** (since 0.9.0): every imported module's services
+  before those of the module importing it, the root module's (and `TestingModule.create({ providers })`'s)
   last, and within a module in dependency order — a hook always finds the hooks of what it injects
-  completed. Through 0.8.x the root module's services went first. A root hook that an imported
-  module's hook relied on is now too late: do that work in the constructor, or read it in
-  `onApplicationInit`. An imported hook that throws at boot now leaves every root-module service
-  with `onModuleDestroy` called but `onModuleInit` never run — guard destroy (`if (this.pool)`)
+  completed. A root hook therefore cannot prepare what an imported module's hook reads: do that work
+  in the constructor, or read it in `onApplicationInit`. An imported hook that throws at boot leaves
+  every root-module service with `onModuleDestroy` called but `onModuleInit` never run — guard
+  destroy (`if (this.pool)`)
 - `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
   is held until the handlers are registered and then delivered, and the shutdown message goes out
   before the transport closes. Everything else on `QueueService` (subscribe, the scheduler, the
@@ -600,7 +591,7 @@ export class ItemController extends BaseController {
   equals `@Controller('/users')`, `@Get(':id')` equals `@Get('/:id')`. NestJS-style paths work as-is.
 - Return plain data from controller methods — auto-wrapped to `{ success: true, result: data }`.
   Every non-`Response` value is wrapped on every route, including one with its own `success` key
-  (0.9.0+); a custom body needs `Response.json(body, { status })` — `this.json()` wraps too
+  (since 0.9.0); a custom body needs `Response.json(body, { status })` — `this.json()` wraps too
 - Throw `HttpException` for errors — auto-converted to `{ success: false, error: message, code: statusCode }`
 - Use `OneBunRequest` (not `Request`) with `@Req()` decorator
 - ArkType schema `infer` types should be exported from the validation file as named types,
@@ -1090,10 +1081,7 @@ For a full boot, `TestingModule` also sets the init context — hand it the sche
 `TestingModule.create({ ... }).setOptions({ envSchema }).compile()`. Without `envSchema` the
 constructor's `this.config.get()` throws `Configuration not initialized`, and `compile()` rejects
 with `ServiceConstructionError: Failed to create service <Service> in module _TestingAppModule:
-Error: Configuration not initialized. ...` (the stub's error as `cause`), consumer or not. Through
-0.8.x DI logged it to the silent test logger and dropped the service, so the boot failed with a
-misleading `DependencyResolutionError: Could not resolve dependency <Service> for controller <Ctrl>`,
-or not at all when nothing injected the service.
+Error: Configuration not initialized. ...` (the stub's error as `cause`), consumer or not.
 
 ### Integration testing — `TestingModule`
 
@@ -1206,11 +1194,11 @@ at least in the areas you're modifying.
 | `await app.stop()` "to clean up" in the catch of a failed `start()`, and no exit | The failed `start()` already released everything, so that `stop()` runs no step again and only closes what you passed in (log transports, `spanProcessors`, `metrics.registry`) — end the bootstrap catch with `process.exit(1)`. To retry instead, build a new `OneBunApplication` per attempt (calling `start()` again on the same instance also works) |
 | `error` without type annotation in `.catch()` | Always type as `(error: unknown)` and wrap: `error instanceof Error ? error : new Error(String(error))` |
 | `bun add effect arktype @onebun/logger @onebun/envs` | These are transitive dependencies of `@onebun/core` — only install `@onebun/core`. The one exception is `testcontainers`, a required (not optional) peer: `bun add -d testcontainers` |
-| `client.UsersController.findById(undefined, id)` for `findById(@Header('x-tenant') t, @Param('id') id)` | `findById(id)`. Since 0.9 only `@Param`, `@Query` and `@Body` take arguments; the placeholder is read as `id` and refused. A non-null one (`findById('acme', id)`) is sent as `id`, so the call reaches `/users/acme` with no error; with a `@Query`/`@Body` first it is sent as that value. A token or tenant id goes in the client's `headers`/`auth` option |
-| `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. Since 0.9 the service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'` instead of `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
-| `client.UsersController.create(JSON.stringify(dto))`, or `findByTags(tags.join(','))` with a handler that splits `'a,b'` | `create(dto)` and `findByTags(tags)`. Since 0.9 the service client serializes every `@Body` value as JSON itself (a pre-serialized body arrives as a string) and sends a query array as `tags[]` keys, so the handler receives the array. Strings, `0`, `false`, `''` and `null` are valid bodies and arrive unchanged |
-| A service client `auth: { type: 'custom', interceptor: (c) => ({ ...c, data: { ...c.data, tenantId } }) }` | Since 0.9 `c.data` is the JSON text that is sent, not the value, so the spread sends the string's characters as keys. `if (typeof c.data === 'string') data = JSON.stringify({ ...JSON.parse(c.data), tenantId })`; sign `c.data` as it is, never `JSON.stringify(c.data)` |
-| `response.result.result` / `.statusCode` on a service-client call, or `Runtime.isFiberFailure` + `Cause.squash` on a client rejection | 0.9: the call resolves the handler's value itself (`unknown`), and rejects with the error class (`e instanceof ConflictError`, `e.code`, `e.details`) |
+| `client.UsersController.findById(undefined, id)` for `findById(@Header('x-tenant') t, @Param('id') id)` | `findById(id)`. Only `@Param`, `@Query` and `@Body` take arguments; the placeholder is read as `id` and refused. A non-null one (`findById('acme', id)`) is sent as `id`, so the call reaches `/users/acme` with no error; with a `@Query`/`@Body` first it is sent as that value. A token or tenant id goes in the client's `headers`/`auth` option |
+| `client.UsersController.findById(encodeURIComponent(input))` | `findById(input)`. The service client percent-encodes every path value itself, so a caller-encoded value is encoded twice and the handler receives `'a%2Fb'`, not `'a/b'`. Only `null`, `undefined`, `''`, `.`, `..` and an unpaired surrogate reject (with a `TypeError`, nothing sent) |
+| `client.UsersController.create(JSON.stringify(dto))`, or `findByTags(tags.join(','))` with a handler that splits `'a,b'` | `create(dto)` and `findByTags(tags)`. The service client serializes every `@Body` value as JSON itself (a pre-serialized body arrives as a string) and sends a query array as `tags[]` keys, so the handler receives the array. Strings, `0`, `false`, `''` and `null` are valid bodies and arrive unchanged |
+| A service client `auth: { type: 'custom', interceptor: (c) => ({ ...c, data: { ...c.data, tenantId } }) }` | `c.data` is the JSON text that is sent, not the value, so the spread sends the string's characters as keys. `if (typeof c.data === 'string') data = JSON.stringify({ ...JSON.parse(c.data), tenantId })`; sign `c.data` as it is, never `JSON.stringify(c.data)` |
+| `response.result.result` / `.statusCode` on a service-client call, or `Runtime.isFiberFailure` + `Cause.squash` on a client rejection | The call resolves the handler's value itself (`unknown`), and rejects with the error class (`e instanceof ConflictError`, `e.code`, `e.details`) |
 | Calling the service client or the WebSocket client "type-safe" / expecting a renamed server route or event to fail compilation | Both are untyped: names are checked at run time (service client: throws on read; WS client: an unknown gateway reads as `undefined`, an unknown event times out). Annotate expected shapes at the call site |
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |

@@ -92,7 +92,7 @@ await app.start();
 - `app.getHttpUrl()` - get listening URL
 
 **Lifecycle Hooks** (implement via `implements OnModuleInit`, etc.):
-- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree, every imported module's services before those of the module importing it, the root module's last — since 0.9.0; through 0.8.x the root module's went first. See [Initialization Across Modules](./services.md#initialization-across-modules))
+- `onModuleInit()` - after service/controller created (sequential, in dependency order; called for all providers including standalone services; works across the entire module import tree, every imported module's services before those of the module importing it, the root module's last. See [Initialization Across Modules](./services.md#initialization-across-modules))
 - `onApplicationInit()` - after all modules, before HTTP starts
 - `beforeApplicationDestroy(signal?)` - FIRST destroy hook, but NOT the start of shutdown: it runs after new requests are refused with 503, after the in-flight drain, and after the HTTP listener is closed. A request issued from inside it is refused (connection refused, not 503)
 - `onModuleDestroy()` - after `beforeApplicationDestroy`, WebSocket close, queue stop and trace flush; before `onApplicationDestroy`
@@ -699,8 +699,8 @@ the process to exit.
   that fails while the providers are still being constructed — a constructor that throws
   ([`ServiceConstructionError`](./services.md#when-a-constructor-throws)), or a provider's
   dependency that is missing or circular: the application does not hold the module tree yet, so no
-  destroy hook runs,
-  and a provider constructed before the failure keeps whatever its constructor opened. Open
+  destroy hook runs, and a provider constructed before the failure keeps whatever its constructor
+  opened. Open
   resources in `onModuleInit`, not in a constructor.
 - **Retry with a new instance — or the same one.** A new `OneBunApplication` per attempt is the
   simplest retry: the next attempt shares nothing with the failed one except what you pass to

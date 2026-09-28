@@ -538,15 +538,13 @@ function methodNotAllowedResponse(allow: string, httpEnvelope: boolean): Respons
  * The response for a value a handler returned that is not a `Response`: the value, whatever it
  * is, as the `result` of `{ success: true, result }`.
  *
- * This is the one success-envelope rule, and both dispatch arms call it so they cannot drift
- * apart again. They had: the fast arm wrapped every value, while `executeHandler` sent any object
- * with a `success` key as it was. The same return value therefore had two wire forms, and which
- * one a caller saw depended only on whether the route had a decorated parameter or an
- * `@ApiResponse` (a description-only one included). A domain object shaped
- * `{ success: false, error, code }` answered 200 went out raw on the full arm, where every client
- * reading the envelope took it for a failed request — the service client rejected it as a 500. A
- * body the handler wants sent exactly as it built it is a `Response`, and that is the only thing
- * passed through.
+ * This is the one success-envelope rule, and both dispatch arms call it — the fast arm and
+ * `executeHandler`, which a route with a decorated parameter or any `@ApiResponse` (a
+ * description-only one included) takes — so the same return value has one wire form on every
+ * route. An object with a `success` key is wrapped like any other: a domain object shaped
+ * `{ success: false, error, code }` answered 200 and sent raw would read as a failed request to
+ * every client that reads the envelope. A body the handler wants sent exactly as it built it is a
+ * `Response`, and that is the only thing passed through.
  */
 function successEnvelopeResponse(result: unknown, status: number): Response {
   return new Response(JSON.stringify(createSuccessResponse(result)), {
@@ -2994,11 +2992,11 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       // HttpException and OneBunBaseError carry a deliberate status and are not incidents
       // either. Except a failure of the HTTP client the handler let escape — a refused
       // connection, an upstream 5xx or 401: it is a OneBunBaseError, but nobody here chose its
-      // status. It was logged here while the client rejected with a FiberFailure, and the
-      // client's error keeps it logged. The logger writes an error's message, only its name here,
-      // and its stack, so its code and the details its caller may read go along as context; its
-      // transport details do not. After a misbehaving filter this line follows that filter's own,
-      // so the error it was handed is not lost behind the filter's failure.
+      // status, so it is logged like an unexpected error. The logger writes an error's message,
+      // only its name here, and its stack, so its code and the details its caller may read go
+      // along as context; its transport details do not. After a misbehaving filter this line
+      // follows that filter's own, so the error it was handed is not lost behind the filter's
+      // failure.
       if (isHttpClientFailure(error)) {
         appLogger.error(
           `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
@@ -3350,10 +3348,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         }
       }
 
-      // Every value that is not a Response is wrapped, the same way the fast arm wraps it. An
-      // object with a `success` key used to be sent as it was here, and only here — see
-      // successEnvelopeResponse. A declared response schema validated the value above, so it
-      // describes the `result` inside the envelope, not the envelope.
+      // Every value that is not a Response is wrapped, the same way the fast arm wraps it, an
+      // object with a `success` key included — see successEnvelopeResponse. A declared response
+      // schema validated the value above, so it describes the `result` inside the envelope, not
+      // the envelope.
       let serializeMark: ProfileMark | undefined;
       if (profiler) {
         serializeMark = profiler.start('framework', 'response:serialize');

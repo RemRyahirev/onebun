@@ -26,7 +26,7 @@ through it 500s with no hint (a decorator on a method does not count).
 
 All four are **inherited** by a subclass controller (base entries first, then the subclass's own).
 Routes are not — a `@Get` on a base class is a 404 under the subclass. Constructor dependencies are
-(0.9.0): a `@Controller()` subclass that declares no constructor runs the base's and is injected
+(since 0.9.0): a `@Controller()` subclass that declares no constructor runs the base's and is injected
 with its dependencies, `@Inject`/`@Optional()` included, when the base that declares it is
 decorated and so is every class in between. One that declares its own constructor gets only its own.
 
@@ -93,8 +93,7 @@ at a time, or take `@Req()` and validate `new URL(req.url).searchParams` yoursel
 Return plain data from controller methods — the framework auto-wraps it to `{ success: true, result: data }`.
 The rule has one exception, a returned `Response`, and it is the same on every route: a value with its
 own `success` key is wrapped too, whether or not the handler has parameter decorators or an
-`@ApiResponse` of any kind, a description-only one included (from 0.9.0; through 0.8.x such routes
-sent a `success`-keyed object raw). Never return a hand-built `{ success, result }` or
+`@ApiResponse` of any kind, a description-only one included. Never return a hand-built `{ success, result }` or
 `{ success: false, error, code }` — it lands inside `result` with HTTP 200. The same goes for an
 `HttpClient` success envelope relayed as is: return `response.result`, not `response`.
 `this.success(v)`/`this.json(v)` wrap `v` as well; for a body of your own shape return

@@ -3651,16 +3651,16 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs, before: encoded by the caller, so it is encoded twice
+      // From docs: encoded by the caller, so it is encoded twice
       await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
 
-      // From docs, after: the raw value
+      // From docs: the raw value
       await usersClient.UsersController.findById('team/alice');
 
       expect(sent).toEqual(['GET /users/team%252Falice', 'GET /users/team%2Falice']);
       expect(received).toEqual(['team%2Falice', 'team/alice']);
 
-      // From docs: values 0.8.2 refused are sent as data now
+      // From docs: sent as data, not refused
       const refusedIn082 = ['a/b', 'a\\b', 'a?b', 'a#b', '%2e', '%2e%2e', '.%2E', '%2E.', '.\t.', '.\n.', '.. '];
       for (const value of refusedIn082) {
         await usersClient.UsersController.findById(value);
@@ -3668,7 +3668,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
 
       expect(received.slice(2)).toEqual(refusedIn082);
 
-      // From docs: the request path changes for a value the handler receives as before
+      // From docs: `encodeURIComponent` also escapes characters a path segment may carry as they are
       await usersClient.UsersController.findById('user@example.com');
 
       expect(sent.at(-1)).toBe('GET /users/user%40example.com');
@@ -3800,7 +3800,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       const user = (await usersClient.UsersController.findById('123')) as User;
       expect(user).toEqual({ id: '123', name: 'Ada' });
 
-      // From the llm-only notes: a stale read of the 0.8 envelope no longer compiles
+      // From docs: a property read on the unasserted value fails `tsc`
       const found = await usersClient.UsersController.findById('123');
       // @ts-expect-error `found` is unknown: `.result.result` was the 0.8 envelope
       expect(found.result).toBeUndefined();
@@ -4102,7 +4102,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
         url: `http://127.0.0.1:${app.getPort()}`,
       });
 
-      // From docs, "Before": the placeholder is now the path value, so the call is refused
+      // From docs: a value in the header's place is read as the path value, so `undefined` is refused
       await expect(usersClient.UsersController.findById(undefined, '123', 'name')).rejects.toThrow(
         'UsersController.findById: path parameter "id" is undefined',
       );
@@ -4112,7 +4112,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       );
       expect(wire).toEqual([]);
 
-      // From docs, "After"
+      // From docs: the @Param and @Query values only
       await usersClient.UsersController.findById('123', 'name');
       expect(wire).toEqual(['GET /users/123?fields=name']);
 
@@ -4317,7 +4317,7 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
     class PostsController extends BaseController {
       @Get('/')
       findByTags(@Query('tags') tags?: string | string[]) {
-        // From docs: an array from a 0.9 caller, the joined text from a caller still on 0.8
+        // From docs: an array from a service client, the joined text from a plain HTTP client
         const list = Array.isArray(tags) ? tags : (tags?.split(',') ?? []);
 
         return { tags: list };
@@ -4373,11 +4373,11 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       const widenedText = await client.PostsController.widened('news');
       expect(widenedText).toEqual({ tags: 'news' });
 
-      // From docs, "Before": serialized by the caller, so @Body() receives the JSON text as a string
+      // From docs: serialized by the caller, so @Body() receives the JSON text as a string
       const before = await client.UsersController.create(JSON.stringify({ name: 'Ada' }));
       expect(before).toEqual({ body: '{"name":"Ada"}' });
 
-      // From docs, "After": the value
+      // From docs: the value
       const after = await client.UsersController.create({ name: 'Ada' });
       expect(after).toEqual({ body: { name: 'Ada' } });
 

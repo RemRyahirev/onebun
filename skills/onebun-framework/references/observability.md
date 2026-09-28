@@ -188,8 +188,8 @@ needs both or a `traceparent`.
   the wait for the headers, then each read's wait for the next chunk (restarted per read, stopped while nobody
   reads — the stream is pulled on demand), so a flowing SSE lives on and a stalled one errors `TIMEOUT_ERROR`
   (`code: 0`, `phase: 'body'`) with the connection closed. A failed read rejects with the `OneBunBaseError` the
-  Promise API rejects with for that failure, whichever API made the call (0.9; the 0.8 line errored the stream with
-  the plain `ErrorResponse`, so `isErrorResponse(e)` is now false): `TIMEOUT_ERROR` is a `TransportError`
+  Promise API rejects with for that failure, whichever API made the call (`isErrorResponse(e)` is false for
+  it): `TIMEOUT_ERROR` is a `TransportError`
   (`getTransportFailureKind(e) === 'timeout'`); `RESPONSE_TOO_LARGE` (under `maxResponseBytes`, counted as read;
   the crossing chunk is not handed out), `RESPONSE_DECODE_ERROR` and `RESPONSE_READ_ERROR` carry the status that
   arrived as `code` (a 200 is an `HttpStatusError`); `e.error` and `e.details` are the record's. An

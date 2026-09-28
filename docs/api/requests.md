@@ -654,13 +654,11 @@ the `ErrorResponse` of the Effect API, below.
 - A failure's `details` on the rejection is the client's own record, by reference: the default
   exception filter recognises it and leaves its transport details out (see
   [An uncaught client error and your caller](#uncaught-client-errors)).
-- Up to 0.8 the Promise methods rejected with Effect's `FiberFailure`: `instanceof` recognised
-  nothing, the failure was reachable only by unwrapping the fiber's cause with `Runtime` and `Cause`
-  from `effect`, and `error.message` held the failure as JSON. `req()` wrapped it into an `InternalServerError`
-  `REQUEST_FAILED` with code 500 whatever the status was. `OneBunBaseError.fromErrorResponse`
-  turned every code without a class of its own into an `InternalServerError` with code 500, so a
-  418 read as a 500 and a timeout as a server error; that was also what the `RequestsService`
-  Effect API failed with.
+- The rejection is a real class, not an Effect `FiberFailure`: no unwrapping with `Runtime` or
+  `Cause` from `effect`, and `error.message` is the `error` name, not the failure as JSON.
+  `OneBunBaseError.fromErrorResponse` picks the class the same way, so a 418 is an `HttpStatusError`
+  with code 418 and a timeout a `TransportError`, and the `RequestsService` Effect API fails with
+  that same class.
 - A defect — a throw inside the client, not a failed request — rejects with what was thrown.
   `req()` wraps it into `InternalServerError` `REQUEST_FAILED`.
 - A body `{ success: false, error, code }` fails the request whatever its HTTP status, so a OneBun
@@ -671,26 +669,24 @@ the `ErrorResponse` of the Effect API, below.
   `RESPONSE_TOO_LARGE` or `RESPONSE_DECODE_ERROR` does not exempt it from `retryOn`. Read as a
   `TransportError`, a relayed `code: 0` would make the caller of a service whose upstream is down
   take the failure for its own network error, retry it under `retryOnNetworkError` and skip
-  `retryOn`. Up to 0.8 such a body, as every code without a class of its own, was an
-  `InternalServerError` with code 500.
+  `retryOn`.
 
 </llm-only>
 
-### Upgrading from 0.8 {#rejection-upgrade}
+### Catching a rejection {#rejection-upgrade}
 
-| 0.8 | 0.9 |
-|-----|-----|
-| unwrapping a `FiberFailure` rejection with `Runtime` and `Cause` from `effect` | `e instanceof OneBunBaseError`, or the subclass: `e.code`, `e.error`, `e.details` |
-| `rejects.toThrow(/"code":503/)`: the failure's JSON in `message` | `rejects.toBeInstanceOf(ServiceUnavailableError)`, or a check of `e.code` |
-| `req()` rejected with `InternalServerError` `REQUEST_FAILED`, code 500, the failure in `details.originalError` | `req()` rejects with the failure's own class: a 404 is a `NotFoundError` with code 404 |
-| a code without a class (418, 405, a 3xx `REDIRECT_ERROR`) and a timeout were an `InternalServerError`, code 500 | an `HttpStatusError` with that code; a `TransportError` with code 0 |
+- Test the class with `instanceof` — `e instanceof OneBunBaseError`, or the subclass — and read
+  `e.code`, `e.error` and `e.details`. In a test, assert `rejects.toBeInstanceOf(ServiceUnavailableError)`
+  or check `e.code`: the `message` is the `error` name, not the failure as JSON.
+- `req()` rejects with the failure's own class as well: a 404 is a `NotFoundError` with code 404.
+- A code without a class of its own (418, 405, the 3xx of a `REDIRECT_ERROR`) is an
+  `HttpStatusError` with that code, and a timeout is a `TransportError` with code 0.
 
-A client error a controller does not catch now reaches the default exception filter as a
-`OneBunBaseError`, so the caller gets its status and `error` instead of a 500
-`Internal Server Error`, and the application still logs it as an unhandled error. That includes the
-client's own `AUTH_ERROR` (a request it could not sign), which is an `UnauthorizedError`, 401: map
-it if your caller must not read it as a failure of its own credentials. See
-[An uncaught client error and your caller](#uncaught-client-errors).
+A client error a controller does not catch reaches the default exception filter as a
+`OneBunBaseError`, so the caller gets its status and `error`, and the application logs it as an
+unhandled error. That includes the client's own `AUTH_ERROR` (a request it could not sign), which is
+an `UnauthorizedError`, 401: map it if your caller must not read it as a failure of its own
+credentials. See [An uncaught client error and your caller](#uncaught-client-errors).
 
 ### Reading the ErrorResponse
 
@@ -1197,8 +1193,8 @@ Redirect policy:
   none), and its status and `Location` cannot be read there. Use `HttpClient` to read `statusCode`
   and `headers.location`; the service client resolves the handler's value alone as well.
   `RequestsService` fails a refused redirect with an `HttpStatusError` whose `error` is
-  `REDIRECT_ERROR` and whose `code` is the `3xx`, also in `details.status` (up to 0.8 an
-  `InternalServerError` with code 500). The service client takes the policy from its options.
+  `REDIRECT_ERROR` and whose `code` is the `3xx`, also in `details.status`. The service client
+  takes the policy from its options.
 
 </llm-only>
 
@@ -1533,8 +1529,7 @@ the coding, and those two describe the compressed bytes.
   `details.phase: 'body'`, `details.statusCode` and `getTransportFailureKind()` `'timeout'`;
   `RESPONSE_TOO_LARGE` has `details.limit`, `details.received` and `details.statusCode`. It is the
   same for a stream from the `*Effect` API, whose call fails with an `ErrorResponse`: the stream's
-  reads are promises. In the 0.8 line the stream errored with the plain `ErrorResponse` record, which
-  `isErrorResponse(error)` narrowed; that is now `false`, and `instanceof` or
+  reads are promises. `isErrorResponse(error)` is `false` for it: `instanceof` or
   `getTransportFailureKind(error)` reads the error. Its `details` is the client's record, so the
   default exception filter leaves its transport details out if it escapes a controller.
 - Under `'stream'` a timeout during an error status's body read is still `TIMEOUT_ERROR`: that
@@ -1975,19 +1970,11 @@ Retries follow the client's `retries` option as on any `HttpClient`, so a POST i
 unless its method is listed: a POST whose response is lost to the timeout reaches the callee once,
 with `retries: { max: 0 }` and with no retry configuration at all.
 
-#### Upgrading from 0.8 {#service-client-upgrade}
+#### The result type {#service-client-upgrade}
 
-| 0.8 | 0.9 |
-|-----|-----|
-| `const response = await client.C.m()`, then `response.result.result` | `const value = await client.C.m()`: the handler's value itself |
-| `response.statusCode`, `response.retryCount`, `response.success` | not on the result; use `createHttpClient` for a status or a header |
-| unwrapping the `FiberFailure` with `Runtime` and `Cause` to read a 409's details | `e instanceof ConflictError`, then `e.error`, `e.code`, `e.details` |
-| a 418 rejected as code 500 | an `HttpStatusError` with code 418 |
-| method result `Promise<any>` | `Promise<unknown>` |
-
-The result type is `unknown` so that a stale `.result.result`, `.statusCode` or `.retryCount` read
-fails `tsc` instead of turning into `undefined` at run time. Run the type checker after the upgrade
-and replace each flagged read with the value itself.
+A call's result is typed `Promise<unknown>`: assert (`as User`) or validate the value before you
+read it. Reading a property of the unasserted value, such as `.result` or `.statusCode`, fails `tsc`
+rather than reading `undefined` at run time.
 
 <llm-only>
 
@@ -2007,7 +1994,7 @@ and replace each flagged read with the value itself.
 - A callee's `details` reach the calling code whole. If the error escapes a controller, the default
   exception filter sends the callee's status and `error` with `details: {}`; the same filter leaves
   the transport details of an `HTTP_ERROR` from a non-OneBun upstream out.
-- A `TypeError` rejection still means a refused argument, a path value or a body `JSON.stringify`
+- A `TypeError` rejection means a refused argument, a path value or a body `JSON.stringify`
   throws on: nothing was sent.
 
 </llm-only>
@@ -2060,40 +2047,36 @@ A missing `@Query` or `@Body` argument is not sent, and extra arguments are drop
 sent as its text, percent-encoded: `findById(42)` requests `/users/42`. A parameter with no
 decorator is not in the route metadata, so it takes no argument either.
 
-#### Upgrading from 0.8 {#service-client-arguments-upgrade}
+#### Endpoints whose call skips a parameter {#service-client-arguments-upgrade}
 
-Through 0.8 every decorated parameter took an argument, and the client dropped the ones it does not
-send. A parameter such as `@Header` declared before a `@Param`, `@Query` or `@Body` therefore
-shifted it. The handler above had to be called as `findById(undefined, '123', 'name')`. The natural
-`findById('123')` was refused, because `id` read `undefined`, and with a `@Query` or a `@Body` in
-that place the request went out without the value. From 0.9, remove the placeholder:
+When a parameter the client does not send, such as a `@Header`, is declared before a `@Param`,
+`@Query` or `@Body`, the call's argument positions differ from the handler's parameter positions.
+The handler above is called with its `@Param` and `@Query` values only:
 
 ```typescript
-// Before: a placeholder in the header's place
-await usersClient.UsersController.findById(undefined, '123', 'name');
+// A value in the header's place is read as the @Param: this requests /users/acme?fields=123
+await usersClient.UsersController.findById('acme', '123', 'name');
 
-// After
+// The @Param and @Query values only: this requests /users/123?fields=name
 await usersClient.UsersController.findById('123', 'name');
 ```
 
-A call that keeps the placeholder does not always fail. The placeholder is now read as the value of
-the first `@Param`, `@Query` or `@Body` parameter, each real value as the value of the parameter
-after its own, and the last one is dropped as an extra argument. When that first parameter is a
-`@Param`, an `undefined` or `null` placeholder is refused with a `TypeError` and nothing is sent.
-Any other placeholder, such as a tenant id, is sent as the path value, so the call reaches a
-different resource with no error: `findById('acme', '123', 'name')` requests `/users/acme?fields=123`.
-When the first parameter is a `@Query` or a `@Body`, the request is sent with the wrong values and no
-error: `undefined` sends no value, and any other placeholder is sent as the value. Typecheck cannot
-find these calls.
+A value passed in the place of a server-only parameter is not skipped: it is read as the value of
+the first `@Param`, `@Query` or `@Body` parameter, each following value as the value of the
+parameter after its own, and the last one is dropped as an extra argument. When that first
+parameter is a `@Param`, an `undefined` or `null` there is refused with a `TypeError` and nothing is
+sent. Any other value is sent as the path value, so the call reaches a different resource with no
+error: `findById('acme', '123', 'name')` requests `/users/acme?fields=123`. When the first parameter
+is a `@Query` or a `@Body`, the request is sent with the wrong values and no error: `undefined`
+sends no value, and any other value is sent as the value. Typecheck cannot find these calls.
 
-A real value passed in the place of a header, such as an `Authorization` token or a tenant id, was
-never sent through 0.8. From 0.9 it is sent as the first path, query or body value, so it can end up
-in a URL and in the access logs of the callee and of every proxy in between. Send such a value
-through the client's `headers` or `auth` option instead, or let the callee derive it with its own
-middleware or guard.
+A value meant for a header, such as an `Authorization` token or a tenant id, passed as an argument
+is therefore sent as a path, query or body value, where it can end up in a URL and in the access
+logs of the callee and of every proxy in between. Send such a value through the client's `headers`
+or `auth` option instead, or let the callee derive it with its own middleware or guard.
 
-The calls that change are the calls to endpoints with such a parameter declared before a `@Param`,
-`@Query` or `@Body`. This lists those endpoints from the callee's module:
+This lists the endpoints of a callee's module that declare such a parameter before a `@Param`,
+`@Query` or `@Body`:
 
 ```typescript
 import { createServiceDefinition, ParamType } from '@onebun/core';
@@ -2113,7 +2096,7 @@ const changed = createServiceDefinition(UsersModule)._endpoints
 ```
 
 An endpoint without such parameters, or with them only after its last `@Param`, `@Query` and
-`@Body`, is called exactly as before.
+`@Body`, takes its arguments in the order the handler declares its parameters.
 
 <llm-only>
 
@@ -2121,13 +2104,11 @@ An endpoint without such parameters, or with them only after its last `@Param`, 
   declaration order, and nothing else. Never pass a placeholder for a `@Header`, `@Cookie`, `@Req`,
   `@Res`, custom-extractor (`createHttpParamDecorator`), file or form-field parameter: the call
   would read it as the first `@Param`/`@Query`/`@Body` value.
-- Through 0.8 every decorated parameter took an argument, so code written for 0.8 against a handler
-  that declares such a parameter first may pass `undefined` in its place. Remove it when moving to
-  0.9. A leftover placeholder fails loudly only when the first `@Param`/`@Query`/`@Body` parameter
-  is a path parameter and the placeholder is `undefined` or `null` (`TypeError`, nothing sent);
-  otherwise every value lands one parameter later and the request goes out with no error. A real
-  value in that place (a token, a tenant id), which 0.8 silently dropped, is now sent in the path,
-  the query string or the body.
+- A value passed in the place of a server-only parameter is read as the first
+  `@Param`/`@Query`/`@Body` value. It fails loudly only when that first parameter is a path
+  parameter and the value is `undefined` or `null` (`TypeError`, nothing sent); otherwise every
+  value lands one parameter later and the request goes out with no error. A token or a tenant id
+  passed there is sent in the path, the query string or the body.
 - Server-only values reach the callee by other means: a header through the client's `headers`
   option or `auth`, a user or tenant through the callee's own middleware or guard.
 
@@ -2172,32 +2153,29 @@ second time, and the handler receives the encoded text. Pass the raw value, with
 `encodeURIComponent`:
 
 ```typescript
-// Before: encoded by the caller. From 0.9 this sends GET /users/team%252Falice,
-// and the handler receives 'team%2Falice'
+// Encoded by the caller: sent as GET /users/team%252Falice, and the handler receives 'team%2Falice'
 await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
 
-// After: the raw value. Sent as GET /users/team%2Falice; the handler receives 'team/alice'
+// The raw value: sent as GET /users/team%2Falice; the handler receives 'team/alice'
 await usersClient.UsersController.findById('team/alice');
 ```
 
-Values 0.8.2 refused and 0.9 sends as data: anything containing `/`, `\`, `?` or `#`, the `%2e`
-spellings of a dot (`%2e`, `%2e%2e`, `.%2E`, `%2E.`), and dots with a tab, a newline or trailing
-whitespace (`'.\t.'`, `'.. '`). A `TypeError` from a service client call now means one of the values
-in the table above.
+Sent as data, not refused: anything containing `/`, `\`, `?` or `#`, the `%2e` spellings of a dot
+(`%2e`, `%2e%2e`, `.%2E`, `%2E.`), and dots with a tab, a newline or trailing whitespace
+(`'.\t.'`, `'.. '`). A `TypeError` for a path value means one of the values in the table above.
 
-The request path changes as well, even for values the handler receives exactly as before.
-`encodeURIComponent` also escapes characters that 0.8 sent as they were, among them `@`, `:`, `$`,
-`&`, `=`, `+`, `,` and `;`: `'user@example.com'` went out as `/users/user@example.com` and now goes
-out as `/users/user%40example.com`. `@Param('id')` receives `'user@example.com'` either way. Only
-code on the callee that reads the raw path from the request URL, such as a middleware, a log line or
-a proxy rule, sees the encoded form.
+`encodeURIComponent` also escapes characters that a path segment may carry as they are, among them
+`@`, `:`, `$`, `&`, `=`, `+`, `,` and `;`: `'user@example.com'` goes out as
+`/users/user%40example.com`, and `@Param('id')` receives `'user@example.com'`. Only code on the
+callee that reads the raw path from the request URL, such as a middleware, a log line or a proxy
+rule, sees the encoded form.
 
 <llm-only>
 
 - Pass path arguments raw: `findById(input)`. Never wrap them in `encodeURIComponent` — the client
   encodes every path value, so a caller-encoded `'a%2Fb'` reaches the handler as `'a%2Fb'`, not
-  `'a/b'`. Code written for 0.8 that encodes path arguments must drop the call when it moves to 0.9;
-  typecheck cannot catch it, because both spellings are strings.
+  `'a/b'`. Typecheck cannot catch a caller-side `encodeURIComponent`, because both spellings are
+  strings.
 - On the callee, read a path value through `@Param`, which decodes it. The raw request path carries
   the encoded text: `'user@example.com'` appears as `user%40example.com` in
   `new URL(req.url).pathname`.
@@ -2296,26 +2274,25 @@ a function, sends no body, as `undefined` does. The HTTP client sends a body onl
 and `PATCH`, so a `@Body` of a `GET` or `DELETE` handler is not sent. It is not serialized either: a
 BigInt there does not fail the call.
 
-#### Upgrading from 0.8 {#service-client-query-body-upgrade}
+The service client builds the query string and the JSON body itself, before the HTTP client sees
+them. `HttpClient` from `@onebun/requests`, called directly, keeps its own rules: it sends
+`String(value)` once per query key, so an array goes out joined (`tags=news%2Ctech`) and arrives as
+`'news,tech'`; it sends a string body as bare text, which `req.json()` on a OneBun callee cannot
+parse; and it sends no body for `0`, `false`, `''` or `null`.
 
-Through 0.8 the client handed both values to the HTTP client as they were. That client joins an
-array into one key, `tags=news%2Ctech`, so the handler received `'news,tech'`. It also sends a string
-body as bare text, which the callee cannot parse as JSON, so `@Body()` received `undefined`, and it
-skips a falsy body, so `0`, `false`, `''` and `null` sent no body and `@Body()` received `undefined`
-as well.
+#### Handlers, schemas and interceptors {#service-client-query-body-upgrade}
 
-A handler that split the joined text receives an array from 0.9. Callers on 0.8 keep sending the
-text until they are upgraded, so accept both until then:
+A handler that other HTTP clients call too receives a plain `?tags=news,tech` as one string, while
+a service client sends an array. Accept both:
 
 ```typescript
 import { BaseController, Controller, Get, Query } from '@onebun/core';
 
 @Controller('/posts')
 class PostsController extends BaseController {
-  // Before: @Query('tags') tags?: string, split with tags.split(',')
   @Get('/')
   findByTags(@Query('tags') tags?: string | string[]) {
-    // An array from a 0.9 caller, the joined text from a caller still on 0.8
+    // An array from a service client, the joined text from a plain HTTP client
     const list = Array.isArray(tags) ? tags : (tags?.split(',') ?? []);
 
     return { tags: list };
@@ -2324,33 +2301,28 @@ class PostsController extends BaseController {
 ```
 
 A `@Query('tags', schema)` whose schema accepts only a string, such as `type('string')`, answers the
-array with a 400. Widen it to `type('string[]')`, or `type('string | string[]')` while 0.8 callers
-remain.
+array with a 400. Declare it as `type('string[]')`, or `type('string | string[]')` when other
+clients send a single string.
 
-A caller that serialized the body itself now sends it serialized twice, and the handler receives the
+A caller that serializes the body itself sends it serialized twice, and the handler receives the
 JSON text as a string. Pass the value:
 
 ```typescript
-// Before: serialized by the caller. From 0.9 the body is "{\"name\":\"Ada\"}",
-// and @Body() receives the string '{"name":"Ada"}'
+// Serialized by the caller: the body is "{\"name\":\"Ada\"}", and @Body() receives the string '{"name":"Ada"}'
 await usersClient.UsersController.create(JSON.stringify({ name: 'Ada' }));
 
-// After: the value. The body is {"name":"Ada"}, and @Body() receives the object
+// The value: the body is {"name":"Ada"}, and @Body() receives the object
 await usersClient.UsersController.create({ name: 'Ada' });
 ```
 
-A handler that relied on `undefined` for a falsy body now receives the value itself: `false`, `0`,
-`''` or `null`. Code on the callee that reads the raw request instead of `@Param`, `@Query` and
-`@Body` sees the new wire format: the query keys of an array end in `[]`
-(`url.searchParams.getAll('tags[]')`), and a string body arrives in quotes (`await req.text()` gives
-`"Hello"`).
+A falsy body of a `POST`, `PUT` or `PATCH` reaches the handler as the value itself — `false`, `0`,
+`''` or `null` — never as `undefined`. Code on the callee that reads the raw request instead of `@Param`, `@Query` and `@Body`
+sees the wire format: the query keys of an array end in `[]` (`url.searchParams.getAll('tags[]')`),
+and a string body arrives in quotes (`await req.text()` gives `"Hello"`).
 
-Calls that pass a single query value, and a body that is an object, an array, a non-zero number or
-`true`, go out exactly as before. A BigInt or cyclic body of a `POST`, `PUT` or `PATCH`, which
-through 0.8 rejected with an Effect `FiberFailure` around the error of `JSON.stringify`, now rejects
-with a `TypeError` whose message names the call, and whose `cause` is that error. With the other
-methods the body is not sent, so it is not serialized either, and such a value still does not fail
-the call.
+A BigInt or cyclic body of a `POST`, `PUT` or `PATCH` rejects with a `TypeError` whose message names
+the call, and whose `cause` is the error of `JSON.stringify`. With the other methods the body is not
+sent, so it is not serialized either, and such a value does not fail the call.
 
 A `custom` auth interceptor (`auth: { type: 'custom', interceptor }`) on a service client sees the
 request as it will be sent. `config.data` is the JSON text of the body, a string such as
@@ -2367,8 +2339,8 @@ const usersClient = createServiceClient(usersDefinition, {
   auth: {
     type: 'custom',
     interceptor: (config) => {
-      // Before: { ...config, data: { ...config.data, tenantId: 'acme' } }. From 0.9 config.data
-      // is a string, so that spread would send its characters as keys "0", "1", ...
+      // config.data is a string: { ...config, data: { ...config.data, tenantId: 'acme' } }
+      // would send its characters as keys "0", "1", ...
       if (typeof config.data !== 'string') {
         return config;
       }
@@ -2389,11 +2361,11 @@ const usersClient = createServiceClient(usersDefinition, {
 - Pass the body as a value, never `JSON.stringify(value)`: the client serializes it, so a
   pre-serialized body arrives as a string. Strings, `0`, `false`, `''` and `null` are valid bodies
   and arrive unchanged; only `undefined` sends none.
-- Type a handler's array query as `string[]` (or `string | string[]` while callers on 0.8 remain):
-  from a service client call it is an array. Plain HTTP clients that send `?tags=a` without `[]`
-  still produce a string, so a public endpoint should keep accepting both.
+- Type a handler's array query as `string[]`, or `string | string[]` when other HTTP clients call it
+  too: from a service client call it is an array, while a plain HTTP client that sends `?tags=a`
+  without `[]` produces a string, so a public endpoint accepts both.
 - The service client builds the query string itself and hands the HTTP client a finished URL with
-  no `query` record. An API key in query mode is still appended after it; a `custom` auth
+  no `query` record. An API key in query mode is appended after it; a `custom` auth
   interceptor sees the query in `config.url`, not in `config.query`.
 - A `custom` auth interceptor on a service client sees `config.data` as the JSON text that will be
   sent (a string), not the `@Body` value, and `undefined` when no body is sent (`GET`, `DELETE`,

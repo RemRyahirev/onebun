@@ -976,7 +976,7 @@ describe('Requests API Documentation Examples', () => {
      * @source docs:api/requests.md#rejection-upgrade
      */
     it('should reject req() with the failure\'s own class, not a 500 REQUEST_FAILED', async () => {
-      // From the upgrade table: `req()` rejects with the failure's own class
+      // From docs: `req()` rejects with the failure's own class as well
       const server = startEchoServer();
 
       try {

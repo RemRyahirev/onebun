@@ -226,8 +226,8 @@ interface ProviderWait {
  * Whether an error a provider's constructor threw is one the framework raised for its own reasons
  * and that already names what is wrong, so it propagates unwrapped: a `OneBunBootstrapError`
  * (`DependencyResolutionError`, `CircularDependencyError`, ...) or a registration or configuration
- * error, whose `name` starts with `OneBun` — the rule through 0.8.x, which the name check keeps
- * for such an error from a second copy of `@onebun/core` as well, where `instanceof` fails.
+ * error, whose `name` starts with `OneBun` — a check that also recognises such an error from a
+ * second copy of `@onebun/core`, where `instanceof` fails.
  */
 function isFrameworkBootstrapError(error: unknown): boolean {
   return error instanceof OneBunBootstrapError || (error instanceof Error && error.name.startsWith('OneBun'));
@@ -350,9 +350,9 @@ function describeParamTypes(types: readonly (Function | undefined)[]): string {
  * constructor it inherits from <Parent> (<Types>)` — the start of every error note about a parameter
  * `target` never names itself — and that parent; `undefined` when `target` declares its own.
  *
- * Such a class is injected with its parent's constructor dependencies since 0.9.0, so each way a
- * parameter can fail to resolve — missing, in a cycle, ambiguous, an unselected registration — is a
- * boot failure it can hit, and one that used to boot with the field `undefined`.
+ * Such a class is injected with its parent's constructor dependencies, so each way a parameter can
+ * fail to resolve — missing, in a cycle, ambiguous, an unselected registration — is a boot failure
+ * it can hit, for a dependency its own source never mentions.
  */
 function describeInheritedConstructor(target: Function): { text: string; source: Function } | undefined {
   const { source } = traceConstructorMetadata(target);
@@ -1098,14 +1098,14 @@ export class OneBunModule implements ModuleInstance {
     // counts: a class is not injected into itself. Without this second branch a consumer listed
     // before the only implementation of its abstract-typed parameter failed at once.
     //
-    // A parameter typed as the consumer's OWN class waits for the consumer itself, as through
-    // 0.8.x: meanwhile the queue builds a listed subclass, which the parameter then resolves to by
-    // `instanceof`, and with no subclass the stall reports the cycle `A -> A`. That needs a
-    // subclass that is built without the consumer. When every one still to be built injects the
-    // consumer back — since 0.9.0 a subclass that declares no constructor inherits the parameter,
-    // as in `Node(@Optional() next?: Node)` + `Leaf extends Node {}` — waiting for itself would
-    // turn that into `Node -> Node`, so the parameter goes to such a subclass instead: a required
-    // one reports the real cycle, an @Optional() one does not wait and gets `undefined`.
+    // A parameter typed as the consumer's OWN class waits for the consumer itself: meanwhile the
+    // queue builds a listed subclass, which the parameter then resolves to by `instanceof`, and
+    // with no subclass the stall reports the cycle `A -> A`. That needs a subclass that is built
+    // without the consumer. When every one still to be built injects the consumer back — a
+    // subclass that declares no constructor inherits the parameter, as in
+    // `Node(@Optional() next?: Node)` + `Leaf extends Node {}` — waiting for itself would turn that
+    // into `Node -> Node`, so the parameter goes to such a subclass instead: a required one reports
+    // the real cycle, an @Optional() one does not wait and gets `undefined`.
     const providerToWaitFor = (depType: Function, consumer: Function): Function | undefined => {
       if (availableServiceClasses.has(depType) && depType !== consumer) {
         return createdServices.has(depType) ? undefined : depType;
@@ -1297,10 +1297,10 @@ export class OneBunModule implements ModuleInstance {
           throw error;
         }
         // Anything else is the provider's own failure, and it ends the boot here — whether or not
-        // anything injects the provider. It used to be logged and the provider dropped: a consumer
-        // then failed with a DependencyResolutionError about a dependency that IS registered (under
-        // TestingModule's silent logger, with no trace of the real error), an @Optional() consumer
-        // got undefined, and with no consumer the application booted without the service.
+        // anything injects the provider. Logging it and dropping the provider instead would surface
+        // as a DependencyResolutionError about a dependency that IS registered (under
+        // TestingModule's silent logger, with no trace of the real error), as `undefined` for an
+        // @Optional() consumer, or as an application that boots without the service.
         throw new ServiceConstructionError(provider.name, this.moduleClass.name, error);
       }
     }
@@ -2279,8 +2279,6 @@ export class OneBunModule implements ModuleInstance {
     // Services' onModuleInit: every imported module first, leaves first, and this module last.
     // A service here may inject one an import exports, and its hook must find that dependency's
     // hook already completed — within a module `pendingServiceInits` gives the same guarantee.
-    // Through 0.8.x this module went first, so a root service's hook ran before the hooks of
-    // everything it imported.
     return Effect.forEach(allDescendants, (mod) => mod.callServicesOnModuleInit(), {
       discard: true,
     }).pipe(

@@ -153,9 +153,8 @@ export abstract class OneBunBaseError<
    * `error`, `details` (the same record, not a copy) and `originalError`.
    *
    * A `code` without a class of its own keeps its value: `0`, a transport failure, becomes a
-   * {@link TransportError}, and any other code a {@link HttpStatusError} with that code. Up to 0.8
-   * both became an `InternalServerError` with code 500, so a 418 read as a 500 and a timeout as a
-   * server failure.
+   * {@link TransportError}, and any other code a {@link HttpStatusError} with that code, so a 418
+   * reads as a 418 and a timeout as a transport failure, not as a server failure.
    */
   static fromErrorResponse<U extends string, V extends string>(
     errorResponse: ErrorResponse<U, V>,

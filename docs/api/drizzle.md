@@ -1207,9 +1207,7 @@ and every provider is constructed before `DrizzleService` has opened one — so 
 carrying `@Service()` fails to construct with `Database not initialized. Call initialize()
 first.`, and `app.start()` rejects with a `ServiceConstructionError` naming the repository, with
 that error as its `cause` — whether or not anything injects it (see
-[When a Constructor Throws](./services.md#when-a-constructor-throws)). Up to 0.8.x an injected
-repository surfaced as a `DependencyResolutionError` on its consumer, and one that nothing injected
-let the application boot with the repository silently absent from DI. Construct it after the
+[When a Constructor Throws](./services.md#when-a-constructor-throws)). Construct it after the
 database is up instead — lazily on first use, or in `onApplicationInit()` — from a service that
 holds `DrizzleService`.
 

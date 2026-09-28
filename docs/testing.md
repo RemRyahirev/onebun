@@ -262,10 +262,7 @@ ServiceConstructionError: Failed to create service UserService in module _Testin
 ```
 
 `error.cause` is the stub's error. It does not depend on the logger, so the silent one
-`TestingModule` installs hides nothing. Up to 0.8.x the constructor's error went only to that
-silent logger, and what surfaced was the dependent's failure — `DependencyResolutionError: Could not
-resolve dependency UserService for controller UserController` — for a service that *is* decorated
-and *is* in `providers`; with no dependent, `compile()` succeeded without the service. See
+`TestingModule` installs hides nothing. See
 [When a Constructor Throws](./api/services.md#when-a-constructor-throws).
 
 A service that reads `this.config` only inside a method is unaffected at boot and throws into a 500

@@ -658,7 +658,7 @@ tenant(@Claim('tid') tid: string) { return tid; }
 `@UseGuards` is the same decorator on all three transports; parameter decorators are not. A WebSocket handler reads its own metadata key with its own parameter types, and a queue handler has no parameter machinery at all — so a decorator built here on an `@OnMessage` or `@Subscribe` method is not an error, it is simply never read, and the parameter arrives `undefined`. The name says `Http` for that reason.
 :::
 
-A custom parameter carries no schema and is never required: it is not validated, it does not appear in the OpenAPI document, and the generated service client does not take it as an argument (through 0.8 it did take one and dropped it, which shifted every later argument; see [service client arguments](/api/requests#service-client-arguments)). Validate inside the extractor if you need to. The extractor must be a pure view over data the request already carries — it runs on the request path and nothing unwinds what it allocates.
+A custom parameter carries no schema and is never required: it is not validated, it does not appear in the OpenAPI document, and the generated service client does not take it as an argument (see [service client arguments](/api/requests#service-client-arguments)). Validate inside the extractor if you need to. The extractor must be a pure view over data the request already carries — it runs on the request path and nothing unwinds what it allocates.
 
 ## File Upload Decorators
 
@@ -1094,7 +1094,7 @@ parameter, so each of these errors says it comes from the inherited constructor,
 - **The parent names a registration with `@Inject(TOKEN)` that the subclass's module did not
   select**: `OneBunUnselectedRegistrationError` naming the subclass, ending `..., and that is where
   the token comes from. Select it in this module, or declare a constructor in <Class> that does not
-  take it.`
+  take it.` Selecting it means adding `forFeature(TOKEN)` to that module's `imports`.
 
 A class that gets no constructor arguments although an ancestor takes dependencies is named at
 startup, once, with the fix for its shape:
@@ -1110,36 +1110,11 @@ startup, once, with the fix for its shape:
   declares parameters ...` — a decorated class stopped by an undecorated class in between. Decorate
   `<Base>`, or declare the constructor in `<Class>`.
 
-::: warning Upgrading to 0.9.0
-Before 0.9.0 a class that declared no constructor got no constructor arguments, decorated or not
-(since 0.8.2 with a startup warning, `<Class> declares no constructor of its own ...`; for 0.8.1
-see [below](#reflect-metadata-interop)). Since 0.9.0 a decorated one is injected, which changes two
-things at boot:
-
-- A parameter of the inherited constructor that cannot be resolved now fails `app.start()` and
-  `TestingModule.compile()` for the subclass, where the subclass used to boot with the field
-  `undefined`. Each error says the parameter is inherited ([above](#inherited-constructors)):
-  - no module provides it — `DependencyResolutionError`: provide it, or mark the parameter
-    `@Optional()` in the parent;
-  - it injects the subclass back — `CircularDependencyError`: break the cycle;
-  - the subclass's module selects two registrations of its type —
-    `OneBunAmbiguousRegistrationError`: name one with `@Inject(TOKEN)` in the parent;
-  - the parent's `@Inject(TOKEN)` names a registration the subclass's module did not select —
-    `OneBunUnselectedRegistrationError`: add `forFeature(TOKEN)` to that module's imports.
-
-  In every case, declaring a constructor in the subclass that does not take the parameter builds
-  it as before.
-- A subclass that relied on such a field being `undefined` — to skip work when it is absent — now
-  receives the instance. Declare the constructor in the subclass to keep it out.
-- A parent whose `@Optional()` parameter is typed as its own class, `Node(@Optional() next?: Node)`
-  with `@Service() class Leaf extends Node {}`, no longer receives the `Leaf` there: the `Leaf` now
-  takes that parameter too and receives the `Node`, so `Node` is built first and gets `undefined`,
-  with a warning. Declare the constructor in `Leaf` (`constructor() { super(); }`) to give `Node`
-  the `Leaf` again.
-
-Apart from such a parent, a class that declares its own constructor, and every undecorated class,
-is built exactly as before.
-:::
+To keep a parent's dependency out of a subclass, declare a constructor in the subclass that does
+not take it: the subclass then gets its own parameters only, and passes the parent what it chooses
+through `super(...)`. That is also how `Node` gets the `Leaf` in the example above: with
+`constructor() { super(); }` in `Leaf`, `Leaf` does not inject `Node`, so `Node`'s optional
+parameter waits for it and receives the `Leaf`.
 
 ## Middleware Decorators
 

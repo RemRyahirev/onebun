@@ -149,7 +149,7 @@ The error message searches all registered modules and reports:
 - Whether the dependency exists but is not exported from its module
 - Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
 - Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
-- Whether it is a parameter of a constructor the class INHERITS: a `@Service()` class that declares no constructor is injected with the dependencies of its parent's (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the first suggestion says so and names the parent — `NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Scheduler (Clock, ReportSink). ...`. Since 0.9.0; such a class used to boot with the field `undefined`
+- Whether it is a parameter of a constructor the class INHERITS: a `@Service()` class that declares no constructor is injected with the dependencies of its parent's (see [Inherited Constructors](/api/decorators#inherited-constructors)), so the first suggestion says so and names the parent — `NightlyScheduler declares no constructor of its own, so it is injected with the parameters of the constructor it inherits from Scheduler (Clock, ReportSink). ...`
 
 Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it does not suppress the "decorate it with `@Service()` and list it in a module's providers" advice, which prints whenever nothing else matched.
 
@@ -215,7 +215,7 @@ inherits (see [Inherited Constructors](/api/decorators#inherited-constructors)),
 it for a dependency it never mentions. The error then carries a note for it in `notes`, printed
 after the unresolved services: `- UserRepo declares no constructor of its own, so it is injected
 with the parameters of the constructor it inherits from RepoBase (EventBus): that is where it needs
-EventBus (EventBusImpl). ...`. Since 0.9.0.
+EventBus (EventBusImpl). ...`.
 
 A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
 with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of
@@ -298,24 +298,9 @@ The most common trigger is `this.config.get()` in a constructor of an applicatio
 `envSchema`: the configuration is then a stub whose every `get()` throws. See
 [Accessing Configuration](#accessing-configuration).
 
-::: warning Changed in 0.9.0
-Up to 0.8.x the error was logged as `Failed to create service <Name>` and the service was dropped.
-What surfaced was a failure elsewhere, and the real error was only in the log — under
-`TestingModule`, the silent logger, where it never showed:
-
-- a consumer in another module, or a controller, failed with `DependencyResolutionError: Could not
-  resolve dependency <Name>`, although the dependency is decorated and listed;
-- a consumer in the same module failed with a `CircularDependencyError` through 0.8.1, and from
-  0.8.2 with a `DependencyResolutionError` whose hint pointed at the log;
-- from 0.8.2, an `@Optional()` consumer got `undefined`, with a warning;
-- with no consumer, the application booted without the service.
-
-**Migration:** an application that booted with a provider whose constructor throws — nothing
-injects it, or only an `@Optional()` parameter — now fails `start()`. Fix what the constructor
-throws on (for `Configuration not initialized`, pass `envSchema`), or remove the provider from
-`providers`. Code that caught `DependencyResolutionError` to detect a failing constructor should
-catch `ServiceConstructionError` and read `cause`.
-:::
+An application does not boot with a provider whose constructor throws, even when nothing injects
+it or only an `@Optional()` parameter does: fix what the constructor throws on, or remove the
+provider from `providers`.
 
 ### Optional Dependencies
 
@@ -562,25 +547,15 @@ export class AppModule {}
 - `TestingModule.create({ providers, imports })` builds its root module from `providers`, so those
   providers are initialized after everything in `imports`.
 
-::: warning Changed in 0.9.0
-Up to 0.8.x the **root module's** own services were initialized first, before any imported
-module's; below the root, imports already went first. `CatalogService` above, declared in the root
-module, queried a connection whose hook had not run yet.
+Because the root module's hooks run last, a root-module hook cannot prepare state that an imported
+service's `onModuleInit` reads: do that work in the constructor, or move the reading side to
+`onApplicationInit`, which runs after every `onModuleInit`. The same holds for the `providers`
+passed to `TestingModule.create()`.
 
-**Migration:** only the hooks of the root module's services move — they now run last. The same
-holds for the `providers` passed to `TestingModule.create()`. Check a root-module hook that an
-imported module relied on having run first, for example one that prepares state an imported
-service's `onModuleInit` reads: do that work in the constructor instead, or move the reading side
-to `onApplicationInit`, which runs after every `onModuleInit`. Code that worked around the old
-order, such as waiting inside a root service's hook for an imported service to finish
-initializing, can be removed.
-
-Check the root module's `onModuleDestroy` hooks too. When an imported module's `onModuleInit`
-throws — typically a database or cache unreachable at boot — no root-module hook has run yet, but
-the failed `start()` still runs `onModuleDestroy` on every service it built. Up to 0.8.x the root's services had been
-initialized by then; now their destroy hooks find nothing set up, so guard them on the state the
-init hook creates, as `DatabaseService` above does with `if (this.pool)`.
-:::
+When an imported module's `onModuleInit` throws — typically a database or cache unreachable at
+boot — no root-module hook has run yet, but the failed `start()` still runs `onModuleDestroy` on
+every service it built. Guard a destroy hook on the state its init hook creates, as
+`DatabaseService` above does with `if (this.pool)`.
 
 ### Lifecycle Order
 

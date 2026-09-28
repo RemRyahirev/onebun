@@ -393,10 +393,10 @@ details of an error `@onebun/requests` produced: an `HTTP_ERROR`'s `details.head
 `details.url` and `details.location`; the raw error in `details.details` of a transport failure
 (Bun's connection error names the URL) and of `RESPONSE_PARSE/READ/DECODE_ERROR`. They are dropped at
 any depth — `client.req()` with an `errors` map nests the failure under `details.originalError` — by serializing with the
-`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`). Since 0.9 every
-Promise method of the HTTP client and the service client reject with such a `OneBunBaseError` (the class
+`withoutTransportDetails` replacer (exported from `@onebun/requests` and `@onebun/core`). Every
+Promise method of the HTTP client and the service client rejects with such a `OneBunBaseError` (the class
 the status names, the client's record as `details` by reference), so an escaped client call answers with
-the upstream's status minus the transport details — not an unhandled 500 as with 0.8's `FiberFailure`. A
+the upstream's status minus the transport details, not an unhandled 500. A
 code outside 400–599 (a `TransportError`'s `0`, a `REDIRECT_ERROR`'s 3xx, a `RESPONSE_PARSE_ERROR`'s 2xx)
 answers HTTP 500 and keeps the `code` in the body; a OneBun client reading such a body takes the HTTP
 status (500), never a `TransportError` — a body's `code` counts only when it is 400–599. A OneBun

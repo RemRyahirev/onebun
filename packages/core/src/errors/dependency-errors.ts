@@ -102,7 +102,7 @@ function stackFrames(value: unknown): string[] {
  * Thrown when the constructor of a `@Service()` provider throws while its module is initialized.
  * A throw from the step the framework runs on the new instance right after its constructor — the
  * `initializeService()` it calls on a provider that defines one, or applying auto-tracing — is
- * reported the same way; 0.8.x swallowed those as well.
+ * reported the same way.
  *
  * The boot ends at the throw, whether or not anything injects the provider — an `@Optional()`
  * consumer included. The message names the service and its module, then gives the original
@@ -110,9 +110,8 @@ function stackFrames(value: unknown): string[] {
  * its frames, so the first frame points at the line of the constructor that threw rather than
  * at the framework.
  *
- * Before 0.9.0 the error was logged and the service dropped: a consumer then failed with a
- * `DependencyResolutionError` naming a dependency that is registered correctly, an `@Optional()`
- * consumer got `undefined`, and with no consumer the application booted without the service.
+ * The failure is this error, never a `DependencyResolutionError` on a consumer: a dependency that
+ * is missing or undecorated stays a `DependencyResolutionError`, so the two cases are told apart.
  *
  * A framework bootstrap error thrown from a constructor — a `OneBunBootstrapError`, or an error
  * whose `name` starts with `OneBun` — is not wrapped: it already names what is wrong.

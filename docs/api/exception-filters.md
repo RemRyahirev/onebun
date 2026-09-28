@@ -43,7 +43,7 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | un
 - `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
 - The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
 - The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
-- A filter of your own that answers with `error.code` as the HTTP status must map a code outside 400–599 to 500 (`error.code >= 400 && error.code <= 599 ? error.code : 500`). Since 0.9 the HTTP client rejects with a `OneBunBaseError` coded `0` (`TransportError`), a 3xx (`REDIRECT_ERROR`) or a 2xx (`RESPONSE_PARSE_ERROR`); `new Response(body, { status: 0 })` throws RangeError, and the filter is then reported as buggy and the default filter answers. Up to 0.8 the client rejected with a `FiberFailure`, which `instanceof OneBunBaseError` did not match
+- A filter of your own that answers with `error.code` as the HTTP status must map a code outside 400–599 to 500 (`error.code >= 400 && error.code <= 599 ? error.code : 500`). The HTTP client rejects with a `OneBunBaseError` coded `0` (`TransportError`), a 3xx (`REDIRECT_ERROR`) or a 2xx (`RESPONSE_PARSE_ERROR`); `new Response(body, { status: 0 })` throws RangeError, and the filter is then reported as buggy and the default filter answers
 - The stack still reaches the operator: an error that reaches the default filter's unhandled branch is always logged as `'Unhandled error in ...'` with the error object first, so withholding it from the response costs no debuggability. A `HttpException` or `OneBunBaseError` is not logged there — except a failure of the HTTP client a handler let escape (`isHttpClientFailure(error)`: a refused connection, an upstream 5xx or 401), which no filter answered: it is logged the same way with `{ code, details }`, `details` without the transport details (see docs/api/requests.md#uncaught-client-errors)
 
 </llm-only>
@@ -423,9 +423,7 @@ a `OneBunBaseError` whose `code` need not be an error status: `0` for a `Transpo
 a refused connection), a 3xx for a redirect it refused, the 2xx of a body it could not parse.
 `new Response(body, { status: 0 })` throws `RangeError`, so the filter fails and the default filter
 answers in its place; a 2xx or 3xx would tell the caller the request succeeded, or send a redirect
-without a `Location`. Up to 0.8 a failed request rejected with a `FiberFailure`, which no
-`instanceof OneBunBaseError` matched. Answer a code outside 400–599 with 500, as the default filter
-does:
+without a `Location`. Answer a code outside 400–599 with 500, as the default filter does:
 
 ```typescript
 import { createExceptionFilter, OneBunBaseError, withoutTransportDetails } from '@onebun/core';

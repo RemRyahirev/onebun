@@ -155,27 +155,21 @@ A schema declared with `@ApiResponse(status, { schema })` validates the value th
 before it is wrapped. It describes the `result`, not the envelope around it — see
 [@ApiResponse()](./decorators.md#apiresponse).
 
-::: warning Upgrading from 0.8.x
-Through 0.8.x a route with at least one parameter decorator or any `@ApiResponse()` — with or
-without a `schema`, a `description` alone was enough — sent a returned object that had a `success`
-key as it was, while a route with neither wrapped it. From 0.9.0 every route wraps it. A handler
-that returns an envelope, one it built itself or one an HTTP client handed it, now sends it inside
-`result`, with status 200:
+**A returned envelope is wrapped like any other value.** A handler that returns an envelope, one
+it built itself or one an HTTP client handed it, sends it inside `result`, with status 200:
 
-- `return { success: true, result: user }`, written to avoid a double wrap, now answers
+- `return { success: true, result: user }` answers
   `{ success: true, result: { success: true, result: user } }`. Return `user`.
-- `return { success: false, error, code }`, written to report a failure, is now a success whose
-  `result` is that object. Throw an `HttpException` (or `NotFoundError`, `ConflictError`, …)
-  instead, so the status and the error envelope come from the exception filter.
-- `return await this.api.get(...)`, relaying an `HttpClient` success envelope as it is, now
-  answers `{ success: true, result: { success: true, result, statusCode, retryCount } }`.
-  Return `response.result`: callers then find at `result` what they found there before, and only
-  the top-level `statusCode` and `retryCount` are no longer sent.
-- To keep sending a body you build yourself, return `Response.json(body, { status })`. Returning
+- `return { success: false, error, code }` is a success whose `result` is that object. To report a
+  failure, throw an `HttpException` (or `NotFoundError`, `ConflictError`, …), so the status and the
+  error envelope come from the exception filter.
+- `return await this.api.get(...)`, an `HttpClient` success envelope returned as it is, answers
+  `{ success: true, result: { success: true, result, statusCode, retryCount } }`. Return
+  `response.result` to send the upstream's value as your `result`.
+- To send a body you build yourself, return `Response.json(body, { status })`. Returning
   `this.json(body)` is not the same: it wraps `body` like a plain return.
-:::
 
-<!-- llm-only: One success-envelope rule on every route: a handler's return value that is not a Response is sent as JSON {"success":true,"result":<value>} (result omitted when the value is undefined), with status 200 or the status of the matching @ApiResponse schema. This includes values that have their own `success` key — {success:false,error,code} returned by a handler is a 200 success whose result is that object. The rule is identical on the fast dispatch arm (no decorated params, no @ApiResponse at all) and on the full arm (executeHandler; any decorated param or any @ApiResponse, including a description-only one without a schema). A returned Response (Response.json, new Response, this.text, this.sse) is sent untouched; this.success(v)/this.json(v) are Responses that already contain {success:true,result:v}. Custom envelope → return Response.json(body, { status }). Failure → throw HttpException or an OneBunBaseError subclass. Through 0.8.x the full arm passed through any object with a `success` key; that was removed in 0.9.0 (breaking). A relayed HttpClient success envelope ({success:true,result,statusCode,retryCount}) returned as is is now nested under `result` on every route; return response.result to keep callers' `result` unchanged. An @ApiResponse schema validates the handler's value, i.e. the `result`, not the wire body. -->
+<!-- llm-only: One success-envelope rule on every route: a handler's return value that is not a Response is sent as JSON {"success":true,"result":<value>} (result omitted when the value is undefined), with status 200 or the status of the matching @ApiResponse schema. This includes values that have their own `success` key — {success:false,error,code} returned by a handler is a 200 success whose result is that object. The rule is identical on the fast dispatch arm (no decorated params, no @ApiResponse at all) and on the full arm (executeHandler; any decorated param or any @ApiResponse, including a description-only one without a schema). A returned Response (Response.json, new Response, this.text, this.sse) is sent untouched; this.success(v)/this.json(v) are Responses that already contain {success:true,result:v}. Custom envelope → return Response.json(body, { status }). Failure → throw HttpException or an OneBunBaseError subclass. A relayed HttpClient success envelope ({success:true,result,statusCode,retryCount}) returned as is is nested under `result` like any value; return response.result to send the upstream's value as `result`. An @ApiResponse schema validates the handler's value, i.e. the `result`, not the wire body. -->
 
 ## Response Methods (Alternative)
 
