@@ -701,10 +701,11 @@ See `references/guards-filters-security.md` for full details on:
 
 - **Guards**: `HttpGuard`, `@UseGuards()`, `createHttpGuard()`, built-in `BearerPresenceGuard`/`RolesGuard`
   — both are starter examples, not an authorization scheme: `BearerPresenceGuard` only checks that a
-  Bearer header is present, and `RolesGuard` with no `rolesExtractor` trusts the caller-supplied
-  `x-user-roles` header. For production auth, write a `@Service()` guard that injects the verifying
-  service, verifies the token and records the identity with `updateRequestContext({ user })`, then
-  pass `RolesGuard` a `rolesExtractor` reading `getRequestContext()?.user?.roles`
+  Bearer header is present, and `RolesGuard` only compares roles against what its REQUIRED second
+  argument, `rolesExtractor`, returns (`new RolesGuard(['admin'], rolesExtractor)`, always an
+  instance). For production auth, write a `@Service()` guard that injects the verifying service,
+  verifies the token and records the identity with `updateRequestContext({ user })`, then pass
+  `RolesGuard` a `rolesExtractor` reading `getRequestContext()?.user?.roles` — never a request header
 - **Exception Filters**: `ExceptionFilter`, `@UseFilters()`, `createExceptionFilter()`, `defaultExceptionFilter`
 - **Security Middleware**: `cors`, `rateLimit`, `security` options on `ApplicationOptions`
 

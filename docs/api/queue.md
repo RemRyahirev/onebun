@@ -1068,7 +1068,7 @@ async handleTraced(message: Message) {}
 ```
 
 ::: danger These guards trust what the publisher sent
-`MessageAuthorizationPresenceGuard` passes any message whose `metadata.authorization` is non-empty, and `MessageServiceGuard` compares `metadata.serviceId` against its allow-list. Both fields are written by the publisher and travel with the message. Neither the broker nor the framework authenticates them, so anything able to publish to the subject can set them to whatever it likes — the queue-side twin of the `x-user-roles` hazard described under [RolesGuard](/api/guards#rolesguard).
+`MessageAuthorizationPresenceGuard` passes any message whose `metadata.authorization` is non-empty, and `MessageServiceGuard` compares `metadata.serviceId` against its allow-list. Both fields are written by the publisher and travel with the message. Neither the broker nor the framework authenticates them, so anything able to publish to the subject can set them to whatever it likes — the queue-side twin of a `RolesGuard` extractor that reads a request header, described under [RolesGuard](/api/guards#rolesguard).
 
 They earn their keep as a filter — "this consumer only handles messages that claim to come from `payment-service`" — and as a defence-in-depth check behind a broker that already authenticates publishers per subject. They are not an authorization decision on their own. If the sender's identity has to be trusted, sign the payload and verify the signature in a guard of your own — or, on a NATS broker that grants each publisher its own subjects, check `message.subject`, which the server assigns (see [where `pattern`, `params` and `subject` come from](#message-subject)).
 :::

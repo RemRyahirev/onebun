@@ -136,6 +136,68 @@ function resetObservations(): void {
 }
 
 // ============================================================================
+// docs:api/guards.md#production-authentication — the verifying guard and the extractor.
+// Defined ahead of every controller: the Applying Guards examples use them too.
+// ============================================================================
+
+interface DocsVerifiedUser {
+  id: string;
+  roles: string[];
+}
+
+// The augmentation the page documents as `user?: AuthenticatedUser`. An application writes
+// `declare module '@onebun/core'`; inside the package the module path is the same interface. The
+// member gets its own name because an augmentation in a test file is global to the typecheck
+// program, and `request-context.test.ts` already declares `user` with a different shape.
+declare module '../request-context' {
+  interface RequestContext {
+    guardsDocsUser?: DocsVerifiedUser;
+  }
+}
+
+/**
+ * Stands in for the page's `TokenService`: the only place the verdict can come from, so a 200 from
+ * the guarded routes proves the guard received it through constructor injection.
+ */
+@Service()
+class DocsTokenService extends BaseService {
+  private readonly issued = new Map<string, DocsVerifiedUser>([
+    ['admin-token', { id: 'u-admin', roles: ['admin'] }],
+    ['viewer-token', { id: 'u-viewer', roles: ['viewer'] }],
+  ]);
+
+  async verify(token: string): Promise<DocsVerifiedUser | null> {
+    // Asynchronous like a real verification, so the guard's await is exercised.
+    await Promise.resolve();
+
+    return this.issued.get(token) ?? null;
+  }
+}
+
+@Service()
+class VerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: DocsTokenService) {}
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
+    const header = ctx.getRequest().headers.get('authorization');
+    if (!header?.startsWith('Bearer ')) {
+      return false;
+    }
+
+    const user = await this.tokens.verify(header.slice('Bearer '.length));
+    if (!user) {
+      throw new HttpException(HttpStatusCode.UNAUTHORIZED, 'Invalid or expired token');
+    }
+
+    updateRequestContext({ guardsDocsUser: user });
+
+    return true;
+  }
+}
+
+const rolesOfVerifiedUser = (): string[] => getRequestContext()?.guardsDocsUser?.roles ?? [];
+
+// ============================================================================
 // docs:api/guards.md#quick-reference-for-ai
 // ============================================================================
 
@@ -278,7 +340,7 @@ class ResourceController extends BaseController {
     return { items: [] };
   }
 
-  @UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
+  @UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/:id')
   remove(@Param('id') id: string) {
     handlerHits.push('resources:remove');
@@ -291,14 +353,22 @@ class ResourceController extends BaseController {
 // docs:api/guards.md#combining-controller-route-guards
 // ============================================================================
 
-class TracingBearerPresenceGuard extends BearerPresenceGuard {
-  override canActivate(ctx: ExecutionContext): boolean {
+/**
+ * Records its turn, then decides exactly as the page's `VerifiedTokenGuard` does. It wraps the guard
+ * rather than extending it so that its own constructor, which DI reads, is the one it declares.
+ */
+@Service()
+class TracingVerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: DocsTokenService) {}
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
     guardTrace.push('controller:auth');
 
-    return super.canActivate(ctx);
+    return await new VerifiedTokenGuard(this.tokens).canActivate(ctx);
   }
 }
 
+/** A subclass of the exported guard, a pattern the page invites: it inherits the two-argument constructor. */
 class TracingRolesGuard extends RolesGuard {
   override canActivate(ctx: ExecutionContext): boolean {
     guardTrace.push('route:roles');
@@ -307,7 +377,7 @@ class TracingRolesGuard extends RolesGuard {
   }
 }
 
-@UseGuards(TracingBearerPresenceGuard)
+@UseGuards(TracingVerifiedTokenGuard)
 @Controller('/admin-combined')
 class AdminCombinedController extends BaseController {
   @Get('/stats')
@@ -317,7 +387,7 @@ class AdminCombinedController extends BaseController {
     return { visits: 1 };
   }
 
-  @UseGuards(new TracingRolesGuard(['admin']))
+  @UseGuards(new TracingRolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/user/:id')
   deleteUser(@Param('id') id: string) {
     handlerHits.push('admin:deleteUser');
@@ -330,11 +400,15 @@ class AdminCombinedController extends BaseController {
 // docs:api/guards.md#on-an-overriding-method
 // ============================================================================
 
-class BaseMethodAuthGuard extends BearerPresenceGuard {
-  override canActivate(ctx: ExecutionContext): boolean {
+/** Records its turn, then decides exactly as the page's `VerifiedTokenGuard` does. */
+@Service()
+class BaseMethodVerifiedTokenGuard implements HttpGuard {
+  constructor(private readonly tokens: DocsTokenService) {}
+
+  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
     guardTrace.push('base-method:auth');
 
-    return super.canActivate(ctx);
+    return await new VerifiedTokenGuard(this.tokens).canActivate(ctx);
   }
 }
 
@@ -347,7 +421,7 @@ class OverrideRolesGuard extends RolesGuard {
 }
 
 class AccountHandlers extends BaseController {
-  @UseGuards(BaseMethodAuthGuard)
+  @UseGuards(BaseMethodVerifiedTokenGuard)
   remove(id: string) {
     handlerHits.push('account-handlers:remove');
 
@@ -357,7 +431,7 @@ class AccountHandlers extends BaseController {
 
 @Controller('/accounts')
 class AdminAccountController extends AccountHandlers {
-  @UseGuards(new OverrideRolesGuard(['admin']))
+  @UseGuards(new OverrideRolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/:id')
   override remove(@Param('id') id: string) {
     handlerHits.push('accounts:remove');
@@ -407,15 +481,30 @@ class GuardResponseController extends BaseController {
   }
 }
 
-// Deliberately guarded by RolesGuard ALONE. Every other RolesGuard fixture here pairs it with
-// BearerPresenceGuard, so a request forging only `x-user-roles` is refused by the Bearer check and the
-// hazard the page documents stays invisible. This route has nothing else in front of it.
-@Controller('/roles-only')
-class RolesOnlyController extends BaseController {
-  @UseGuards(new RolesGuard(['admin']))
-  @Get('/admin-area')
-  adminArea() {
-    handlerHits.push('roles-only:adminArea');
+// ============================================================================
+// docs:api/guards.md#rolesguard
+// ============================================================================
+
+// The extractor the danger box warns about: it reads a request header, so the caller decides.
+const rolesFromHeader = (ctx: HttpExecutionContext): string[] => (
+  ctx.getRequest().headers.get('x-user-roles')?.split(',') ?? []
+);
+
+@Controller('/roles')
+class RolesController extends BaseController {
+  @UseGuards(new RolesGuard(['admin'], rolesFromHeader))
+  @Get('/header-extractor')
+  headerExtractor() {
+    handlerHits.push('roles:headerExtractor');
+
+    return { reached: true };
+  }
+
+  // The class instead of an instance: the framework constructs it with no arguments per request.
+  @UseGuards(RolesGuard)
+  @Get('/class-form')
+  classForm() {
+    handlerHits.push('roles:classForm');
 
     return { reached: true };
   }
@@ -424,63 +513,6 @@ class RolesOnlyController extends BaseController {
 // ============================================================================
 // docs:api/guards.md#production-authentication
 // ============================================================================
-
-interface DocsVerifiedUser {
-  id: string;
-  roles: string[];
-}
-
-// The augmentation the page documents as `user?: AuthenticatedUser`. An application writes
-// `declare module '@onebun/core'`; inside the package the module path is the same interface. The
-// member gets its own name because an augmentation in a test file is global to the typecheck
-// program, and `request-context.test.ts` already declares `user` with a different shape.
-declare module '../request-context' {
-  interface RequestContext {
-    guardsDocsUser?: DocsVerifiedUser;
-  }
-}
-
-/**
- * Stands in for the page's `TokenService`: the only place the verdict can come from, so a 200 from
- * the guarded routes proves the guard received it through constructor injection.
- */
-@Service()
-class DocsTokenService extends BaseService {
-  private readonly issued = new Map<string, DocsVerifiedUser>([
-    ['admin-token', { id: 'u-admin', roles: ['admin'] }],
-    ['viewer-token', { id: 'u-viewer', roles: ['viewer'] }],
-  ]);
-
-  async verify(token: string): Promise<DocsVerifiedUser | null> {
-    // Asynchronous like a real verification, so the guard's await is exercised.
-    await Promise.resolve();
-
-    return this.issued.get(token) ?? null;
-  }
-}
-
-@Service()
-class VerifiedTokenGuard implements HttpGuard {
-  constructor(private readonly tokens: DocsTokenService) {}
-
-  async canActivate(ctx: HttpExecutionContext): Promise<boolean> {
-    const header = ctx.getRequest().headers.get('authorization');
-    if (!header?.startsWith('Bearer ')) {
-      return false;
-    }
-
-    const user = await this.tokens.verify(header.slice('Bearer '.length));
-    if (!user) {
-      throw new HttpException(HttpStatusCode.UNAUTHORIZED, 'Invalid or expired token');
-    }
-
-    updateRequestContext({ guardsDocsUser: user });
-
-    return true;
-  }
-}
-
-const rolesOfVerifiedUser = (): string[] => getRequestContext()?.guardsDocsUser?.roles ?? [];
 
 @UseGuards(VerifiedTokenGuard)
 @Controller('/prod-auth')
@@ -537,7 +569,7 @@ class SingleListAuthController extends BaseController {
     AdminCombinedController,
     AdminAccountController,
     GuardResponseController,
-    RolesOnlyController,
+    RolesController,
     ProductionAuthController,
     UnverifiedRolesController,
     SingleListAuthController,
@@ -773,37 +805,38 @@ describe('docs/api/guards.md', () => {
     /**
      * @source docs:api/guards.md#on-a-single-route
      */
-    it('should require the Bearer token AND the admin role, and only on the decorated route', async () => {
-      const anonymous = await call('/resources/:id'.replace(':id', '7'), { method: 'DELETE' });
+    it('should require a verified token AND the verified admin role, and only on the decorated route', async () => {
+      const anonymous = await call('/resources/7', { method: 'DELETE' });
 
       expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
       expect(anonymous.hits).toEqual([]);
 
-      const tokenOnly = await call('/resources/7', {
+      // Verified, but not an admin: the first guard passes, RolesGuard does not — they are ANDed.
+      const viewer = await call('/resources/7', {
         method: 'DELETE',
-        headers: { authorization: 'Bearer any-token' },
+        headers: { authorization: 'Bearer viewer-token' },
       });
 
-      // BearerPresenceGuard passes, RolesGuard does not: both are required, they are ANDed.
-      expect(tokenOnly.status).toBe(HttpStatusCode.FORBIDDEN);
-      expect(tokenOnly.hits).toEqual([]);
+      expect(viewer.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(viewer.hits).toEqual([]);
 
-      const roleOnly = await call('/resources/7', {
+      // A header claiming the role changes nothing: the extractor reads the verified identity.
+      const claimsAdmin = await call('/resources/7', {
         method: 'DELETE',
-        headers: headersOf(['x-user-roles', 'admin']),
+        headers: headersOf(['authorization', 'Bearer viewer-token'], ['x-user-roles', 'admin']),
       });
 
-      expect(roleOnly.status).toBe(HttpStatusCode.FORBIDDEN);
-      expect(roleOnly.hits).toEqual([]);
+      expect(claimsAdmin.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(claimsAdmin.hits).toEqual([]);
 
-      const both = await call('/resources/7', {
+      const admin = await call('/resources/7', {
         method: 'DELETE',
-        headers: headersOf(['authorization', 'Bearer any-token'], ['x-user-roles', 'admin']),
+        headers: { authorization: 'Bearer admin-token' },
       });
 
-      expect(both.status).toBe(HttpStatusCode.OK);
-      expect(both.body).toEqual({ success: true, result: { removed: '7' } });
-      expect(both.hits).toEqual(['resources:remove']);
+      expect(admin.status).toBe(HttpStatusCode.OK);
+      expect(admin.body).toEqual({ success: true, result: { removed: '7' } });
+      expect(admin.hits).toEqual(['resources:remove']);
 
       // Route-level guards stay on their route: the sibling GET is untouched.
       const sibling = await call('/resources/');
@@ -818,10 +851,10 @@ describe('docs/api/guards.md', () => {
      * @source docs:api/guards.md#combining-controller-route-guards
      */
     it('should merge the two lists and run the controller guards before the route guards', async () => {
-      const token = { authorization: 'Bearer any-token' };
+      const viewer = { authorization: 'Bearer viewer-token' };
 
       // /stats carries only the controller guard.
-      const stats = await call('/admin-combined/stats', { headers: token });
+      const stats = await call('/admin-combined/stats', { headers: viewer });
 
       expect(stats.status).toBe(HttpStatusCode.OK);
       expect(stats.body).toEqual({ success: true, result: { visits: 1 } });
@@ -835,22 +868,22 @@ describe('docs/api/guards.md', () => {
       expect(anonymous.trace).toEqual(['controller:auth']);
       expect(anonymous.hits).toEqual([]);
 
-      // Token but no role: the controller guard passes, then the route guard denies.
-      const tokenOnly = await call('/admin-combined/user/7', { method: 'DELETE', headers: token });
+      // Verified but no admin role: the controller guard passes, then the route guard denies.
+      const notAdmin = await call('/admin-combined/user/7', { method: 'DELETE', headers: viewer });
 
-      expect(tokenOnly.status).toBe(HttpStatusCode.FORBIDDEN);
-      expect(tokenOnly.trace).toEqual(['controller:auth', 'route:roles']);
-      expect(tokenOnly.hits).toEqual([]);
+      expect(notAdmin.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(notAdmin.trace).toEqual(['controller:auth', 'route:roles']);
+      expect(notAdmin.hits).toEqual([]);
 
-      const both = await call('/admin-combined/user/7', {
+      const admin = await call('/admin-combined/user/7', {
         method: 'DELETE',
-        headers: { ...token, ...headersOf(['x-user-roles', 'admin']) },
+        headers: { authorization: 'Bearer admin-token' },
       });
 
-      expect(both.status).toBe(HttpStatusCode.OK);
-      expect(both.body).toEqual({ success: true, result: { deleted: '7' } });
-      expect(both.trace).toEqual(['controller:auth', 'route:roles']);
-      expect(both.hits).toEqual(['admin:deleteUser']);
+      expect(admin.status).toBe(HttpStatusCode.OK);
+      expect(admin.body).toEqual({ success: true, result: { deleted: '7' } });
+      expect(admin.trace).toEqual(['controller:auth', 'route:roles']);
+      expect(admin.hits).toEqual(['admin:deleteUser']);
     });
   });
 
@@ -867,9 +900,9 @@ describe('docs/api/guards.md', () => {
       expect(anonymous.trace).toEqual(['base-method:auth']);
       expect(anonymous.hits).toEqual([]);
 
-      // Token but no role: the inherited guard passes, then the override's guard denies.
-      const token = { authorization: 'Bearer any-token' };
-      const tokenOnly = await call('/accounts/7', { method: 'DELETE', headers: token });
+      // Verified but no admin role: the inherited guard passes, then the override's guard denies.
+      const viewer = { authorization: 'Bearer viewer-token' };
+      const tokenOnly = await call('/accounts/7', { method: 'DELETE', headers: viewer });
 
       expect(tokenOnly.status).toBe(HttpStatusCode.FORBIDDEN);
       expect(tokenOnly.trace).toEqual(['base-method:auth', 'override:roles']);
@@ -877,7 +910,7 @@ describe('docs/api/guards.md', () => {
 
       const both = await call('/accounts/7', {
         method: 'DELETE',
-        headers: { ...token, ...headersOf(['x-user-roles', 'admin']) },
+        headers: { authorization: 'Bearer admin-token' },
       });
 
       expect(both.status).toBe(HttpStatusCode.OK);
@@ -928,8 +961,9 @@ describe('docs/api/guards.md', () => {
       // even when the message itself carries an authorization token.
       expect(new BearerPresenceGuard().canActivate(queueCtx)).toBe(false);
       expect(new BearerPresenceGuard().canActivate(wsCtx)).toBe(false);
-      expect(new RolesGuard(['admin']).canActivate(queueCtx)).toBe(false);
-      expect(new RolesGuard(['admin']).canActivate(wsCtx)).toBe(false);
+      // RolesGuard denies there even with an extractor that would admit: the check comes first.
+      expect(new RolesGuard(['admin'], () => ['admin']).canActivate(queueCtx)).toBe(false);
+      expect(new RolesGuard(['admin'], () => ['admin']).canActivate(wsCtx)).toBe(false);
     });
   });
 
@@ -937,7 +971,76 @@ describe('docs/api/guards.md', () => {
     /**
      * @source docs:api/guards.md#rolesguard
      */
-    it('should read roles from a custom extractor instead of the x-user-roles header', () => {
+    it('should require ALL listed roles in what the extractor returns, and read nothing else', () => {
+      let roles: string[] = [];
+      const guard = new RolesGuard(['admin', 'moderator'], () => roles);
+      // The header the page warns about is on every request here; the guard never looks at it.
+      const ctx = makeHttpContext([['x-user-roles', 'admin, moderator']]);
+
+      roles = ['admin', 'moderator', 'viewer'];
+      expect(guard.canActivate(ctx)).toBe(true);
+
+      roles = ['admin'];
+      expect(guard.canActivate(ctx)).toBe(false);
+
+      roles = [];
+      expect(guard.canActivate(ctx)).toBe(false);
+    });
+
+    /**
+     * @source docs:api/guards.md#rolesguard
+     */
+    it('should deny on the verified-identity extractor when no identity was recorded', () => {
+      // Outside any request context — nothing recorded a user — the page's extractor returns [].
+      expect(rolesOfVerifiedUser()).toEqual([]);
+      expect(new RolesGuard(['admin'], rolesOfVerifiedUser).canActivate(makeHttpContext())).toBe(false);
+    });
+
+    /**
+     * @source docs:api/guards.md#rolesguard
+     */
+    it('should refuse to be built without an extractor, and answer 500 when passed as a class', async () => {
+      // @ts-expect-error — the extractor is required; this line has to stay a compile error
+      expect(() => new RolesGuard(['admin'])).toThrow(TypeError);
+      // @ts-expect-error — and it has to be a function
+      expect(() => new RolesGuard(['admin'], 'x-user-roles')).toThrow(/requires a rolesExtractor/);
+
+      const classForm = await call('/roles/class-form');
+
+      expect(classForm.status).toBe(500);
+      expect(classForm.hits).toEqual([]);
+    });
+
+    /**
+     * Pins the hazard in "::: danger An extractor that reads a request header trusts the caller":
+     * it asserts a BYPASS, not a protection. The route has nothing in front of RolesGuard.
+     *
+     * @source docs:api/guards.md#rolesguard
+     */
+    it('should let a caller who merely SENDS x-user-roles through a RolesGuard whose extractor reads it', async () => {
+      const forged = await call('/roles/header-extractor', {
+        headers: headersOf(['x-user-roles', 'admin']),
+      });
+
+      expect(forged.status).toBe(HttpStatusCode.OK);
+      expect(forged.body).toEqual({ success: true, result: { reached: true } });
+      expect(forged.hits).toEqual(['roles:headerExtractor']);
+
+      // BearerPresenceGuard accepts any Bearer string, so putting it in front changes nothing
+      // about who gets in.
+      expect(new BearerPresenceGuard().canActivate(makeHttpContext([['authorization', 'Bearer anything']]))).toBe(true);
+
+      // Sending nothing is still refused — the guard does compare, it just compares a claim.
+      const anonymous = await call('/roles/header-extractor');
+
+      expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
+      expect(anonymous.hits).toEqual([]);
+    });
+
+    /**
+     * @source docs:api/guards.md#rolesguard
+     */
+    it('should read roles off the token payload when the extractor decodes it', () => {
       const parseJwtPayload = (header: string): { roles?: string[] } | undefined => {
         const segments = header.replace('Bearer ', '').split('.');
         if (segments.length !== 3) {
@@ -961,56 +1064,19 @@ describe('docs/api/guards.md', () => {
         },
       );
 
+      // "Decoding a payload is not verifying it": the signature segment is never checked, so this
+      // unsigned, caller-written payload passes. That is why the page puts a verifying guard in front.
       expect(guard.canActivate(makeHttpContext([['authorization', jwtWith(['admin', 'ops'])]]))).toBe(true);
       expect(guard.canActivate(makeHttpContext([['authorization', jwtWith(['viewer'])]]))).toBe(false);
       expect(guard.canActivate(makeHttpContext())).toBe(false);
 
-      // The custom extractor REPLACES the default one: the header the default reads is ignored.
+      // Only the payload counts: a header claiming the role is ignored.
       const contradicting = makeHttpContext([
         ['authorization', jwtWith(['viewer'])],
         ['x-user-roles', 'admin'],
       ]);
 
       expect(guard.canActivate(contradicting)).toBe(false);
-    });
-
-    /**
-     * @source docs:api/guards.md#rolesguard
-     */
-    it('should require ALL configured roles from the comma-separated x-user-roles header', () => {
-      const guard = new RolesGuard(['admin', 'moderator']);
-
-      expect(guard.canActivate(makeHttpContext([['x-user-roles', 'admin, moderator, viewer']]))).toBe(true);
-      expect(guard.canActivate(makeHttpContext([['x-user-roles', 'admin']]))).toBe(false);
-      expect(guard.canActivate(makeHttpContext([['x-user-roles', '']]))).toBe(false);
-    });
-
-    /**
-     * Pins the hazard the "::: danger The default trusts a header the caller controls" box
-     * describes. It asserts a BYPASS, not a protection: if this test ever starts failing because
-     * the request is refused, the default extractor changed and the danger box is stale — which
-     * is the state WI-376 deliberately moves to.
-     *
-     * @source docs:api/guards.md#rolesguard
-     */
-    it('should let a caller who merely SENDS x-user-roles reach a RolesGuard-only route', async () => {
-      const forged = await call('/roles-only/admin-area', {
-        headers: headersOf(['x-user-roles', 'admin']),
-      });
-
-      expect(forged.status).toBe(HttpStatusCode.OK);
-      expect(forged.body).toEqual({ success: true, result: { reached: true } });
-      expect(forged.hits).toEqual(['roles-only:adminArea']);
-
-      // And the other half of the documented curl: BearerPresenceGuard accepts any Bearer string, so
-      // adding it in front changes nothing about who gets in.
-      expect(new BearerPresenceGuard().canActivate(makeHttpContext([['authorization', 'Bearer anything']]))).toBe(true);
-
-      // Sending nothing is still refused — the guard does compare, it just compares a claim.
-      const anonymous = await call('/roles-only/admin-area');
-
-      expect(anonymous.status).toBe(HttpStatusCode.FORBIDDEN);
-      expect(anonymous.hits).toEqual([]);
     });
   });
 
@@ -1074,8 +1140,8 @@ describe('docs/api/guards.md', () => {
       expect(viewer.status).toBe(403);
       expect(viewer.hits).toEqual([]);
 
-      // The header the fallback extractor would read claims admin. The extractor here reads the
-      // verified identity instead, so the claim changes nothing.
+      // The header claims admin. The extractor reads the verified identity, so the claim changes
+      // nothing.
       const claimsAdmin = await call('/prod-auth/users/7', {
         method: 'DELETE',
         headers: { ...bearer('viewer-token'), ...headersOf(['x-user-roles', 'admin']) },

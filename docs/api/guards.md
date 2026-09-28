@@ -27,7 +27,7 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 - `@UseWsGuards` (WebSocket) and `@UseMessageGuards` (queue) are the narrower spelling for a guard that only makes sense on one transport; guards from both decorators are merged, shared `@UseGuards` first, and deduplicated by identity — a guard written under both decorators runs once
 - **Deduplication is by identity, at every level and on every transport.** Method-level guards are collected up the prototype chain and deduplicated on the way (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited from a base method and re-declared on the override runs once; the merge of the class-level list with the method-level list is deduplicated too, so the same guard named at BOTH levels runs once per request or message — a guard that hits a database does that work once, and a denial is logged once
 - Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@OnMessage`/`@Subscribe` behaves identically. The same holds for `@UseInterceptors` and `@UseFilters`
-- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
+- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))` — shares that one object across every concurrent request: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
 - **The guard class must carry a decorator for constructor DI to work at all** — `@Service()` is the conventional one. TypeScript only emits the `design:paramtypes` metadata the DI reads for a class that has at least one decorator; an undecorated guard class with constructor parameters receives `undefined` for each and throws inside `canActivate`. This applies on HTTP too, and to an undecorated subclass of a decorated guard: it never receives the base's types (startup warns `<Guard> declares a constructor with parameters, but no types were emitted ...`, or `<Guard> declares no constructor of its own ...` when it declares none). A DECORATED subclass that declares no constructor is injected with the base guard's constructor dependencies, `@Inject` and `@Optional()` included (since 0.9.0) — see [Inherited Constructors](/api/decorators#inherited-constructors)
 - A DECORATED guard whose constructor dependency cannot be resolved fails the application at STARTUP with `DependencyResolutionError`, instead of being constructed with `undefined`. Register the DEPENDENCY in the module's `providers` — registering the guard itself does not help
 - A class-level `@UseGuards` is INHERITED by a subclass controller, base first then the subclass's own. `@UseMiddleware`, `@UseInterceptors` and `@UseFilters` inherit the same way; routes do not
@@ -53,7 +53,7 @@ isQueueContext(ctx) // → getMessage(), getMetadata(), getPattern(), getHandler
 A guard that lands on a transport it cannot read must return `false`. Every built-in LEAF guard does exactly that, so `@UseGuards(BearerPresenceGuard)` on a `@Subscribe` handler DENIES — it does not pass and does not throw. The four composites — `MessageAllGuards`, `MessageAnyGuard`, `WsAllGuards`, `WsAnyGuard` — carry NO transport check of their own; they just delegate, so they deny off-transport only for as long as every child does. A hand-written child inside one will reach `getMetadata()` on an HTTP context and throw.
 
 **Built-in guards** — starter examples, not an authentication scheme:
-- HTTP: `BearerPresenceGuard` (admits any `Authorization` header that starts with `Bearer `; the token is never decoded or verified), `RolesGuard` (`new RolesGuard(['admin', 'user'])`; roles come from the `rolesExtractor` argument, and with none from the comma-separated `x-user-roles` request header — a value the CALLER sends, so the default authorizes nothing on its own)
+- HTTP: `BearerPresenceGuard` (admits any `Authorization` header that starts with `Bearer `; the token is never decoded or verified), `RolesGuard` (`new RolesGuard(['admin', 'user'], rolesExtractor)` — BOTH arguments are required; it admits only when the extractor's result contains ALL listed roles and reads nothing from the request on its own, so it is exactly as trustworthy as the extractor: read a verified identity, never a request header. Always pass an INSTANCE: a missing extractor is a compile error and a `TypeError` at construction, and the class form `@UseGuards(RolesGuard)` is constructed with no arguments on every request and answers 500)
 - WebSocket: `WsAuthGuard` (requires `client.auth.authenticated === true`, which the framework sets only when the gateway's `authenticate` hook accepts the client), `WsPermissionGuard`, `WsRoomGuard`, `WsAnyPermissionGuard`, `WsServiceGuard`
 - Queue: `MessageAuthorizationPresenceGuard` (admits any message with a non-empty `metadata.authorization`; nothing verifies the value), `MessageServiceGuard`, `MessageHeaderGuard`, `MessageTraceGuard`
 
@@ -136,12 +136,12 @@ Constructor dependencies are injected the same way a service's are, and `this.co
 `this.config` is the application's own config object, which exists only when the application was created with an `envSchema`. Without one the framework installs a `NotInitializedConfig` stub, and every `get()` on it throws `Configuration not initialized. Provide envSchema in ApplicationOptions.` — so the guard above answers 500 rather than 403 on an app that never declared a schema. Declare the schema, or read the value from `process.env` as the function-based example does.
 
 ::: danger An instance passed to `@UseGuards` is shared
-`@UseGuards(new RolesGuard(['admin']))` hands the framework an already-built object, and that ONE
+`@UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))` hands the framework an already-built object, and that ONE
 instance serves every concurrent request — it is constructed once, at decoration time, not per
 invocation. A guard written that way that stores the caller on `this`, awaits, and then reads
 `this` back will read whatever the LAST request wrote: two overlapping requests can let the
 denied one through. Keep per-request state in locals inside `canActivate` there, never on `this`.
-Stateless instances — `new RolesGuard(['admin'])` reads only its constructor argument — are
+Stateless instances — `RolesGuard` keeps nothing but its constructor arguments — are
 unaffected; every instance-form example on this page is stateless for that reason.
 :::
 
@@ -177,6 +177,8 @@ const jwtGuard = createHttpGuard(async (ctx) => {
 
 ## Applying Guards
 
+The examples below use `VerifiedTokenGuard`, a guard that verifies the Bearer token and records the caller on the request context, and `rolesOfVerifiedUser`, the `RolesGuard` extractor that reads it back. Both are defined under [Production Authentication](#production-authentication).
+
 ### On a controller (all routes)
 
 ```typescript
@@ -198,16 +200,15 @@ class ProtectedController extends BaseController {
 ```typescript
 @Controller('/resources')
 class ResourceController extends BaseController {
-  @UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
+  @UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/:id')
   async delete(@Param('id') id: string) {
-    // reached only when a Bearer header is present AND the extracted roles include 'admin'
-    // — see the RolesGuard warning below for what "extracted" must mean
+    // reached only when the token verifies AND the verified roles include 'admin'
   }
 }
 ```
 
-Decorator source order does not matter — `@UseGuards` above or below the route decorator behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`.
+Guards in one list run left to right, so the identity is recorded before `RolesGuard` reads it. Decorator source order does not matter — `@UseGuards` above or below the route decorator behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`.
 
 ### On a base controller
 
@@ -258,16 +259,16 @@ The order is class guards, then the base method's guards, then the override's ow
 Guards from both levels are merged and run sequentially — controller guards first, then route guards.
 
 ```typescript
-@UseGuards(BearerPresenceGuard)        // applied to every route
+@UseGuards(VerifiedTokenGuard)         // applied to every route
 @Controller('/admin')
 class AdminController extends BaseController {
 
   @Get('/stats')
-  getStats() { /* needs Bearer token only */ }
+  getStats() { /* needs a verified token only */ }
 
-  @UseGuards(new RolesGuard(['admin'])) // additionally checks for the 'admin' role
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser)) // additionally checks for the 'admin' role
   @Delete('/user/:id')
-  deleteUser(@Param('id') id: string) { /* Bearer header + extracted roles include 'admin' */ }
+  deleteUser(@Param('id') id: string) { /* verified token + verified roles include 'admin' */ }
 }
 ```
 
@@ -284,7 +285,7 @@ class OrderController extends BaseController {
   @Get('/:id')
   find(@Param('id') id: string) { /* ... */ }
 
-  @UseGuards(new RolesGuard(['admin']))
+  @UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/:id')
   remove(@Param('id') id: string) { /* ... */ }
 
@@ -409,26 +410,30 @@ It does **not** validate or decode the token: `Authorization: Bearer anything` p
 
 ### RolesGuard
 
-Verifies that **all** required roles are present (AND logic). The roles come from the `rolesExtractor` passed as the second constructor argument; with no extractor, from a comma-separated `x-user-roles` request header.
-
-::: danger The default trusts a header the caller controls
-Pass a `rolesExtractor` that reads a **verified** identity — the claims of a token your own code decoded — as in the example below. It is the second constructor argument, and it is the supported way to use this guard.
-
-Without one, `RolesGuard` falls back to the `x-user-roles` request header. That header arrives from the caller and nothing verifies it, so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` satisfies `BearerPresenceGuard` and `RolesGuard` together. On the default extractor the guard reports what the caller claims to be, not what the caller is.
-
-If an already-deployed application depends on the header, the stop-gap is a middleware that **overwrites** `x-user-roles` on every request — `headers.set(...)`, never "set it if absent", because an absent-only write leaves a forged value in place. Bun's incoming `Headers` are mutable, so this does work. It is remediation and not the supported answer: the trust decision stays in a channel the client can write, guarded only by an ordering convention nothing enforces. Attach the middleware to one controller, forget it on another, and the bypass is back with no type error.
-:::
+Verifies that **all** required roles are present (AND logic) in the list its `rolesExtractor` returns. Both constructor arguments are required: the roles to require, and the extractor that says which roles the current caller holds. `RolesGuard` compares the two and reads nothing from the request on its own.
 
 <!-- typecheck: skip -->
 ```typescript
-import { RolesGuard, UseGuards } from '@onebun/core';
+import { getRequestContext, RolesGuard, UseGuards } from '@onebun/core';
 
-@UseGuards(new RolesGuard(['admin', 'moderator']))
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+
+@UseGuards(new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser))
 @Delete('/post/:id')
 async deletePost(@Param('id') id: string) { /* ... */ }
 ```
 
-**Custom role extractor:**
+This extractor reads the identity a verifying guard recorded on the request context; [Production Authentication](#production-authentication) shows that guard, which has to run ahead of `RolesGuard`. Where nothing recorded an identity, the extractor returns `[]` and the guard denies.
+
+Pass `RolesGuard` as an instance. Leaving out the extractor is a compile error, and a call that gets past the type checker throws a `TypeError` that names the fix. The class form, `@UseGuards(RolesGuard)`, makes the framework construct the guard with no arguments on every request, and each such request answers 500 without reaching the handler.
+
+::: danger An extractor that reads a request header trusts the caller
+`RolesGuard` is exactly as trustworthy as its extractor. An extractor that reads a request header — `x-user-roles` or any other — returns whatever the caller wrote, so with `(ctx) => ctx.getRequest().headers.get('x-user-roles')?.split(',') ?? []` a plain `curl -H 'x-user-roles: admin'` passes `new RolesGuard(['admin'], ...)`. Putting `BearerPresenceGuard` in front changes nothing: `Authorization: Bearer anything` satisfies it.
+
+A header is a sound source only when something you control overwrites it on every request before the guard runs: a middleware calling `headers.set(...)`, never "set it if absent", because an absent-only write leaves a forged value in place. Bun's incoming `Headers` are mutable, so the overwrite does work. The trust decision then rests on an ordering convention nothing enforces — attach the middleware to one controller, forget it on another, and the caller decides again with no type error. The request context has no such gap, because the caller cannot write it.
+:::
+
+**Roles from the token payload:**
 
 ```typescript
 const guard = new RolesGuard(

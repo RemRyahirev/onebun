@@ -10481,27 +10481,26 @@ describe('docs/api/guards.md', () => {
     expect(await guard.canActivate(ctx)).toBe(true);
   });
 
-  it('RolesGuard checks x-user-roles header', async () => {
-    const guard = new RolesGuard(['admin']);
-    const h = new Headers();
-    h.set('x-user-roles', 'admin,user');
-    const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
+  it('RolesGuard admits when its extractor returns every required role', async () => {
+    const guard = new RolesGuard(['admin'], () => ['admin', 'user']);
+    const req = new Request('http://localhost/') as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(true);
   });
 
   it('RolesGuard rejects when role not present', async () => {
-    const guard = new RolesGuard(['admin']);
+    const guard = new RolesGuard(['admin'], () => ['user']);
     const h = new Headers();
-    h.set('x-user-roles', 'user');
+    // The guard reads only what its extractor returns, never this header.
+    h.set('x-user-roles', 'admin');
     const req = new Request('http://localhost/', { headers: h }) as unknown as OneBunRequest;
     const ctx = new HttpExecutionContextImpl(req, 'handler', 'Controller');
 
     expect(await guard.canActivate(ctx)).toBe(false);
   });
 
-  it('RolesGuard with custom role extractor', async () => {
+  it('RolesGuard hands its extractor the request', async () => {
     const guard = new RolesGuard(
       ['admin'],
       (ctx) => {

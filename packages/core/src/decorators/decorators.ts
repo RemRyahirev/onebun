@@ -1385,10 +1385,10 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  * class AdminController extends BaseController { ... }
  * ```
  *
- * @example Method-level (single route)
+ * @example Method-level (single route) — guards in one list run left to right
  * ```typescript
  * \@Get('/dashboard')
- * \@UseGuards(new RolesGuard(['admin']))
+ * \@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
  * getDashboard() { ... }
  * ```
  *
@@ -1401,11 +1401,13 @@ export function getMethodGuards(target: Function, propertyKey: string | symbol):
  *
  * @example Combined (class guard + route guard)
  * ```typescript
+ * // VerifiedTokenGuard verifies the token and records the caller on the request context;
+ * // rolesOfVerifiedUser reads it back: () => getRequestContext()?.user?.roles ?? []
  * \@Controller('/api')
- * \@UseGuards(BearerPresenceGuard)            // runs on every route
+ * \@UseGuards(VerifiedTokenGuard)                                    // runs on every route
  * class ApiController extends BaseController {
  *   \@Get('/admin')
- *   \@UseGuards(new RolesGuard(['admin']))     // runs only here, after BearerPresenceGuard
+ *   \@UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))       // runs only here, after it
  *   getAdmin() { ... }
  * }
  * ```

@@ -1649,7 +1649,7 @@ export class OneBunModule implements ModuleInstance {
    * `this.logger`, and the documented `this.config.get('auth.apiKey')` works at request time.
    *
    * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through as it
-   * is, so `@UseGuards(new RolesGuard(['admin']))` runs that one instance.
+   * is, so `@UseGuards(new RolesGuard(['admin'], rolesExtractor))` runs that one instance.
    *
    * Transport-agnostic: WebSocket gateways and queue consumers run their guards through this
    * same method, via the binding `createControllersWithDI` attaches to each instance, so

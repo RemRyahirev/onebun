@@ -70,6 +70,9 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 
 ### Applying Guards
 
+`VerifiedTokenGuard` and `rolesOfVerifiedUser` below are the verifying guard and the `RolesGuard`
+extractor from "Production Authentication" further down.
+
 <!-- typecheck: skip -->
 ```typescript
 // Controller-level (all routes)
@@ -77,16 +80,16 @@ class ApiKeyGuard extends BaseService implements HttpGuard {
 @Controller('/protected')
 class ProtectedController extends BaseController { ... }
 
-// Method-level (single route)
-@UseGuards(BearerPresenceGuard, new RolesGuard(['admin']))
+// Method-level (single route) — one list runs left to right, so the identity exists before RolesGuard
+@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin'], rolesOfVerifiedUser))
 @Delete('/:id')
 async delete(@Param('id') id: string) { ... }
 
 // Combined: controller guards run first, then route guards
-@UseGuards(BearerPresenceGuard)
+@UseGuards(VerifiedTokenGuard)
 @Controller('/admin')
 class AdminController extends BaseController {
-  @UseGuards(new RolesGuard(['admin']))
+  @UseGuards(new RolesGuard(['admin'], rolesOfVerifiedUser))
   @Delete('/user/:id')
   deleteUser() { ... }
 }
@@ -198,8 +201,8 @@ undecorated subclass (`<Guard> declares a constructor with parameters, but no ty
 
 **An INSTANCE passed to `@UseGuards` is shared, a CLASS is not.** `@UseGuards(new SomeGuard(...))`
 hands over one object built at decoration time, and that single object serves every concurrent
-request. Stateless instances are fine — `new RolesGuard(['admin'])` only reads its constructor
-argument, which is why every instance-form example here is stateless. A guard that writes the
+request. Stateless instances are fine — `RolesGuard` keeps nothing but its constructor arguments,
+which is why every instance-form example here is stateless. A guard that writes the
 caller onto `this`, awaits, then reads `this` back will read whatever the LAST request wrote: two
 overlapping requests measurably let the denied one through. Keep per-request state in locals inside
 `canActivate`, or pass the class and let the framework construct it.
@@ -214,21 +217,26 @@ value it is handed, and none verifies a credential. Production auth is the setup
 
 - **`BearerPresenceGuard`** — checks `Authorization: Bearer <token>` header presence; the token is
   never decoded or verified, so `Bearer anything` passes
-- **`RolesGuard`** — compares required roles against whatever its `rolesExtractor` returns. It
-  requires **ALL** listed roles (`roles.every(...)`), not any of them:
-  `new RolesGuard(['admin', 'moderator'])` admits only a caller holding both. For an OR, pass a
-  custom `rolesExtractor` or use a single role.
+- **`RolesGuard`** — `new RolesGuard(roles, rolesExtractor)`, **both arguments required**. It
+  compares the required roles against whatever the extractor returns and reads nothing from the
+  request on its own. It requires **ALL** listed roles (`roles.every(...)`), not any of them:
+  `new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser)` admits only a caller holding both.
+  For an OR, require a single role, or have the extractor add one when any accepted role is held.
 
-**`RolesGuard`'s default extractor is not an authorization decision.** With no `rolesExtractor`
-it comma-splits the `x-user-roles` request header — a value the CALLER sends and nothing verifies,
-so `curl -H 'Authorization: Bearer anything' -H 'x-user-roles: admin'` passes both built-in guards.
-Always pass a `rolesExtractor` that reads a verified identity. If an already-deployed app depends
-on the header, its middleware must OVERWRITE the header on every request (`headers.set`), never
-fill it in only when absent — an absent-only write leaves a forged value in place. The same shape
-applies on the queue side: `MessageAuthorizationPresenceGuard` and `MessageServiceGuard` trust `metadata.authorization`
-and `metadata.serviceId`, which the publisher writes and the broker does not authenticate.
+**`RolesGuard` is exactly as trustworthy as its extractor.** Read a verified identity —
+`() => getRequestContext()?.user?.roles ?? []`, written by a verifying guard that ran first — never
+a request header: an extractor reading `x-user-roles` returns what the caller wrote, so
+`curl -H 'x-user-roles: admin'` passes, with `BearerPresenceGuard` in front or not. A header is
+sound only when a middleware you control OVERWRITES it on every request (`headers.set`), never
+fills it in only when absent — an absent-only write leaves a forged value in place — and that rests
+on an ordering convention nothing enforces. Always pass an **instance**: a missing extractor is a
+compile error and a `TypeError` at construction, and the class form `@UseGuards(RolesGuard)` is
+constructed with no arguments on every request and answers 500 without reaching the handler. The
+same trust problem applies on the queue side: `MessageAuthorizationPresenceGuard` and
+`MessageServiceGuard` trust `metadata.authorization` and `metadata.serviceId`, which the publisher
+writes and the broker does not authenticate.
 
-Both are **HTTP-only and deny everywhere else**: each begins with
+`BearerPresenceGuard` and `RolesGuard` are **HTTP-only and deny everywhere else**: each begins with
 `if (!isHttpContext(context)) return false`, because both read a request. Guards created by
 `createHttpGuard(fn)` behave identically — the wrapper denies rather than calling `getRequest()` on
 a context that has none. This turns a class-level `@UseGuards(BearerPresenceGuard)` on a class that also
@@ -239,12 +247,13 @@ narrows with `isHttpContext` / `isWsContext` / `isQueueContext` itself.
 
 <!-- typecheck: skip -->
 ```typescript
-import { BearerPresenceGuard, RolesGuard } from '@onebun/core';
+import { getRequestContext, RolesGuard } from '@onebun/core';
 
-// admin AND moderator — both roles must be present
-@UseGuards(BearerPresenceGuard, new RolesGuard(['admin', 'moderator']))
+// admin AND moderator — both roles must be present on the identity VerifiedTokenGuard recorded
+const rolesOfVerifiedUser = () => getRequestContext()?.user?.roles ?? [];
+@UseGuards(VerifiedTokenGuard, new RolesGuard(['admin', 'moderator'], rolesOfVerifiedUser))
 
-// Custom role extractor
+// Roles from the token payload
 new RolesGuard(['admin'], (ctx) => {
   const payload = parseJwt(ctx.getRequest().headers.get('authorization') ?? '');
   return payload?.roles ?? [];
