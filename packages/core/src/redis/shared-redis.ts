@@ -137,10 +137,9 @@ export class SharedRedisProvider {
    *
    * There is ONE shared connection per process, so there is one configuration. A second call
    * that asks for a different target is refused rather than accepted: it cannot be honoured,
-   * and accepting it was silent — measured, two applications pointing at different Redis
-   * databases both ended up on whichever connection existed first, and one application's
-   * `clear()` then wiped the other's keys. Re-stating the same target is fine; `reset()` gives
-   * the configuration up.
+   * and accepting it silently would put two applications pointing at different Redis databases
+   * both on whichever connection existed first, so that one application's `clear()` wipes the
+   * other's keys. Re-stating the same target is fine; `reset()` gives the configuration up.
    */
   static configure(options: SharedRedisOptions): void {
     const current = SharedRedisProvider.options;
@@ -302,11 +301,11 @@ export class SharedRedisProvider {
    * Give back one hold taken with {@link getClient}, disconnecting when it was the last.
    *
    * This is what a CONSUMER calls when it closes — not what an application calls on shutdown.
-   * An application used to call it once per `stop()` whether or not anything in it had ever
-   * acquired, which is how a service that never touched Redis took a sibling's connection down.
+   * An application calling it once per `stop()`, whether or not anything in it had ever
+   * acquired, would let a service that never touched Redis take a sibling's connection down.
    *
-   * With nothing outstanding this does nothing. It used to fall through to `disconnect()`,
-   * so a stray release force-closed a client another consumer had just acquired.
+   * With nothing outstanding this does nothing: it never falls through to `disconnect()`, so a
+   * stray release cannot force-close a client another consumer has just acquired.
    */
   static async release(): Promise<void> {
     const oldest = SharedRedisProvider.anonymousHolds[0];
@@ -367,7 +366,7 @@ export class SharedRedisProvider {
    * Exists so a test that must repoint the process-global provider can put back exactly what
    * it found. Without it, "restore" means "configure to something of my own", which leaves
    * every suite whose `beforeAll` already ran pointing at an address that is about to
-   * disappear — measured as an indefinite hang in an unrelated suite.
+   * disappear — which shows up as an indefinite hang in an unrelated suite.
    * @internal
    */
   static getOptions(): SharedRedisOptions | null {

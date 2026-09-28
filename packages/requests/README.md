@@ -67,7 +67,7 @@ const users = await client.get<User[], UserQuery>('/users', queryParams, {
   timeout: 10000
 });
 
-// Method 3: Traditional config-only approach (still supported)
+// Method 3: Config only, with the query inside it (`timeout` makes the object config)
 const users = await client.get<User[]>('/users', {
   query: { name: 'John' },
   timeout: 10000

@@ -39,7 +39,7 @@ export type IsPg<TTable> = DialectOf<TTable> extends 'pg' ? true : false;
  *
  * Instantiated to match `BunSQLDatabase.select().from()` exactly, so the whole PostgreSQL
  * chain — `.where()`, `.limit()`, `.offset()`, `.orderBy()`, `.for()`, `.$dynamic()` — is
- * reachable. The previous hand-written `Promise & { where }` shape ended the chain after one
+ * reachable, where a hand-written `Promise & { where }` shape would end the chain after one
  * call.
  */
 export type PgSelectQueryResult<TTable extends PgTable<any>> = PgSelectBase<

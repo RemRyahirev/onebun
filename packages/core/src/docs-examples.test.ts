@@ -18,6 +18,8 @@
  */
 
 import {
+  afterAll,
+  beforeAll,
   describe,
   it,
   expect,
@@ -59,14 +61,18 @@ import type {
   HttpGuard,
   ValidationSchema,
   ApplicationOptions,
+  ControllerClient,
+  ServiceClient,
+  ServiceDefinition,
 } from '@onebun/core';
 import { type } from '@onebun/core';
+import { BadGatewayError } from '@onebun/requests';
 
 
 import { registerDependencies } from './decorators/decorators';
 import { createGlobalScope, OneBunModule } from './module/module';
 import { MessageExecutionContextImpl } from './queue/guards';
-import { makeMockLoggerLayer } from './testing';
+import { makeMockLoggerLayer, makeRecordingLoggerLayer } from './testing';
 
 import {
   All,
@@ -184,8 +190,11 @@ import {
   Optional,
   CircularDependencyError,
   DependencyResolutionError,
+  OneBunBootstrapError,
   registerModule,
   resetRegistrations,
+  createHttpClient,
+  withoutTransportDetails,
 } from './';
 
 
@@ -281,9 +290,10 @@ describe('Minimal Working Example (docs/index.md)', () => {
   });
 
   /**
-   * The sample's `.catch()` ends in `process.exit(1)` because a failed boot leaves a live
-   * process that never binds a port. Pins the half a test can assert: `start()` rejects,
-   * and nothing is listening afterwards.
+   * The sample's `.catch()` ends in `process.exit(1)` because a rejected `start()` has already
+   * released everything, so without it the process ends with code 0 — a failed boot reported as
+   * a success. Pins the half a test can assert: `start()` rejects, and nothing is listening
+   * afterwards. That the process really ends is `application/failed-start-exit.test.ts`.
    *
    * @source docs:index.md#minimal-working-example
    */
@@ -3376,6 +3386,481 @@ describe('Service Definition and Client (docs/api/requests.md)', () => {
       server.stop(true);
     }
   });
+
+  /**
+   * @source docs:api/requests.md#service-client-path-values
+   */
+  it('should deliver a percent-encoded path value decoded, and refuse the raw one before sending', async () => {
+    const received: string[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, { port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    const originalFetch = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      sent.push(`${init?.method} ${new URL(String(input)).pathname}`);
+
+      return await originalFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: sent as GET /users/team%2Falice; the handler's @Param('id') receives 'team/alice'
+      await usersClient.UsersController.findById(encodeURIComponent('team/alice'));
+
+      expect(sent).toEqual(['GET /users/team%2Falice']);
+      expect(received).toEqual(['team/alice']);
+
+      // From docs: rejects with a TypeError and sends nothing
+      const refused = await usersClient.UsersController.findById('team/alice').then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      expect(refused).toBeInstanceOf(TypeError);
+      expect((refused as TypeError).message).toStartWith(
+        'UsersController.findById: path parameter "id" contains "/", which ends a path segment, ',
+      );
+
+      // From the table: each of these would have reached a different route, so none is sent.
+      for (const value of [null, undefined, '', '.', '..', '%2e%2e', '.%2E', 'a\\b', 'a?b', 'a#b', '.\t.', '.. ']) {
+        const error = await usersClient.UsersController.findById(value).then(
+          () => undefined,
+          (thrown: unknown) => thrown,
+        );
+
+        expect(error).toBeInstanceOf(TypeError);
+      }
+
+      // `encodeURIComponent` leaves dots alone, which is why `..` has no path spelling at all.
+      expect(encodeURIComponent('..')).toBe('..');
+
+      expect(sent).toEqual(['GET /users/team%2Falice']);
+      expect(received).toEqual(['team/alice']);
+    } finally {
+      globalThis.fetch = originalFetch;
+      await app.stop();
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-as-value
+   */
+  it('should resolve an async factory to the client, answer `in`, and still throw on a missing name', async () => {
+    const seen: string[] = [];
+
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        seen.push(`${request.method} ${new URL(request.url).pathname}`);
+
+        return Response.json({ success: true, result: { id: '123' } });
+      },
+    });
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        return { id };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const UsersServiceDefinition = createServiceDefinition(UsersModule);
+
+    try {
+      // From docs: an async factory resolves to the client itself. Its `then` used to throw
+      // 'Controller "then" not found', so this await rejected.
+      async function connectUsers(url: string) {
+        return createServiceClient(UsersServiceDefinition, { url });
+      }
+
+      const usersClient = await connectUsers(`http://127.0.0.1:${server.port}`);
+      await usersClient.UsersController.findById('123');
+
+      expect(seen).toEqual(['GET /users/123']);
+
+      expect('UsersController' in usersClient).toBe(true);
+      expect('findById' in usersClient.UsersController).toBe(true);
+      expect('OrdersController' in usersClient).toBe(false);
+
+      // From docs: JSON.stringify, String and string templates accept it
+      expect(JSON.stringify(usersClient)).toBe('{}');
+      expect(String(usersClient)).toBe('[object Object]');
+      expect(`${usersClient.UsersController}`).toBe('[object Object]');
+
+      // From docs: a name the definition does not have throws where it is read
+      expect(() => usersClient.OrdersController).toThrow(
+        'Controller "OrdersController" not found in service definition. Available controllers: UsersController',
+      );
+      expect(() => usersClient.UsersController.remove).toThrow(
+        'Method "remove" not found in controller "UsersController"',
+      );
+      expect(seen).toEqual(['GET /users/123']);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  /**
+   * @source docs:api/requests.md#service-client-typing
+   */
+  it('should check controller and method names at run time only, and resolve an untyped envelope', async () => {
+    const received: unknown[] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Param('id') id: string) {
+        received.push(id);
+
+        return { id, name: 'Ada' };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const UsersServiceDefinition = createServiceDefinition(UsersModule);
+      const usersClient = createServiceClient(UsersServiceDefinition, {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From the table, compile time: the client is `Record<string, ControllerClient>`, the
+      // exported `ServiceClient<TDef>` is the same string index, and the result is `any`. These
+      // lines are checked by `bun run typecheck`, which covers this file.
+      type IsAny<T> = 0 extends 1 & T ? true : false;
+      const asRecord: Record<string, ControllerClient> = usersClient;
+      const asServiceClient: ServiceClient<ServiceDefinition> = usersClient;
+      const resultIsAny: IsAny<Awaited<ReturnType<ControllerClient[string]>>> = true;
+      expect(asRecord).toBe(usersClient);
+      expect(asServiceClient).toBe(usersClient);
+      expect(resultIsAny).toBe(true);
+
+      interface User {
+        id: string;
+        name: string;
+      }
+
+      // From docs: the envelope, exactly as the comment on the page shows it
+      const response = await usersClient.UsersController.findById('123');
+      expect(response).toEqual({
+        success: true,
+        result: { success: true, result: { id: '123', name: 'Ada' } },
+        statusCode: 200,
+        retryCount: 0,
+      });
+
+      // From docs: the annotation is an assertion, and the handler's value is two levels down
+      const user: User = response.result.result;
+      expect(user).toEqual({ id: '123', name: 'Ada' });
+
+      // From docs: extra arguments are dropped without an error, and a path value is sent as text
+      await usersClient.UsersController.findById('123', 'extra', 42);
+      await usersClient.UsersController.findById(42);
+      expect(received).toEqual(['123', '123', '42']);
+
+      // From the table, run time: a name the definition lacks compiles and throws when it is read
+      expect(() => usersClient.UserController).toThrow(
+        'Controller "UserController" not found in service definition. Available controllers: UsersController',
+      );
+      expect(() => usersClient.UsersController.findByld).toThrow(
+        'Method "findByld" not found in controller "UsersController"',
+      );
+      expect(received).toEqual(['123', '123', '42']);
+    } finally {
+      await app.stop();
+    }
+  });
+
+  /**
+   * Arguments fill every decorated parameter by position, but only path, query and body values
+   * are sent; the one run-time check on the arguments is the refusal of a missing path value.
+   *
+   * @source docs:api/requests.md#service-client-typing
+   */
+  it('should match arguments to every decorated parameter, and send only @Param, @Query and @Body values', async () => {
+    const received: unknown[][] = [];
+
+    @Controller('/users')
+    class UsersController extends BaseController {
+      @Get('/:id')
+      findById(@Header('x-tenant') tenant: string | undefined, @Param('id') id: string) {
+        received.push(['findById', tenant ?? null, id]);
+
+        return { id };
+      }
+
+      @Get('/')
+      list(@Query('page') page: string | undefined) {
+        received.push(['list', page ?? null]);
+
+        return [];
+      }
+
+      @Post('/')
+      create(@Body() body: unknown) {
+        received.push(['create', body ?? null]);
+
+        return { created: true };
+      }
+    }
+
+    @Module({ controllers: [UsersController] })
+    class UsersModule {}
+
+    const app = new OneBunApplication(UsersModule, {
+      port: 0,
+      host: '127.0.0.1',
+      loggerLayer: makeMockLoggerLayer(),
+      metrics: { enabled: false },
+      tracing: { enabled: false },
+      gracefulShutdown: false,
+    });
+    await app.start();
+
+    try {
+      const usersClient = createServiceClient(createServiceDefinition(UsersModule), {
+        url: `http://127.0.0.1:${app.getPort()}`,
+      });
+
+      // From docs: the header's position must be filled, and its value is not sent
+      await usersClient.UsersController.findById(undefined, '123');
+      await usersClient.UsersController.findById('acme', '123');
+      expect(received).toEqual([
+        ['findById', null, '123'],
+        ['findById', null, '123'],
+      ]);
+
+      // From docs: `findById('123')` puts '123' in the header's position, so `id` is undefined and
+      // the call is refused before anything is sent. So is a null path value
+      await expect(usersClient.UsersController.findById('123')).rejects.toThrow(
+        'UsersController.findById: path parameter "id" is undefined',
+      );
+      await expect(usersClient.UsersController.findById(undefined, null)).rejects.toThrow(TypeError);
+      expect(received).toHaveLength(2);
+
+      // From the table: a missing @Query or @Body argument is not sent
+      await usersClient.UsersController.list();
+      await usersClient.UsersController.create();
+      expect(received.slice(2)).toEqual([
+        ['list', null],
+        ['create', null],
+      ]);
+    } finally {
+      await app.stop();
+    }
+  });
+});
+
+describe('An uncaught client error and your caller (docs/api/requests.md)', () => {
+  const BILLING_COOKIE = 'billing_session=COOKIE-SECRET; Path=/; HttpOnly';
+  let billingUpstream: ReturnType<typeof Bun.serve>;
+  let billingOrigin: string;
+
+  beforeAll(() => {
+    // Billing answers every request 404, with its own cookie and a body of its own
+    billingUpstream = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(JSON.stringify({ message: 'BODY-SECRET' }), {
+          status: 404,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/json', 'Set-Cookie': BILLING_COOKIE },
+        });
+      },
+    });
+    billingOrigin = `http://127.0.0.1:${billingUpstream.port}`;
+  });
+
+  afterAll(() => {
+    billingUpstream.stop(true);
+  });
+
+  /** The snippet's controller, pointed at the fixture instead of billing.internal. */
+  function invoicesModule(): new () => object {
+    const billing = createHttpClient({ baseUrl: billingOrigin });
+
+    @Controller('/invoices')
+    class InvoicesController extends BaseController {
+      @Get('/:id')
+      async findOne(@Param('id') id: string) {
+        return await billing.req('GET', `/invoices/${id}`);
+      }
+
+      @Get('/:id/picked')
+      async picked(@Param('id') id: string) {
+        const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoices/${id}`)));
+
+        if (outcome._tag === 'Left') {
+          throw new BadGatewayError('BILLING_UNAVAILABLE', { invoiceId: id, upstreamStatus: outcome.left.code });
+        }
+
+        return outcome.right;
+      }
+
+      @Get('/:id/spread')
+      async spread(@Param('id') id: string) {
+        const outcome = await Effect.runPromise(Effect.either(billing.getEffect(`/invoices/${id}`)));
+
+        if (outcome._tag === 'Left') {
+          throw new BadGatewayError('BILLING_UNAVAILABLE', { ...outcome.left.details, invoiceId: id });
+        }
+
+        return outcome.right;
+      }
+
+      @Get('/:id/enveloped')
+      @UseFilters(createExceptionFilter((error) => {
+        if (!(error instanceof OneBunBaseError)) {
+          return undefined;
+        }
+
+        return new Response(JSON.stringify(error.toErrorResponse(), withoutTransportDetails), {
+          status: 200,
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }))
+      async enveloped(@Param('id') id: string) {
+        return await billing.req('GET', `/invoices/${id}`);
+      }
+    }
+
+    @Module({ controllers: [InvoicesController] })
+    class InvoicesModule {}
+
+    return InvoicesModule;
+  }
+
+  async function withInvoicesApp(options: Partial<ApplicationOptions>, run: (base: string) => Promise<void>): Promise<void> {
+    const app = new OneBunApplication(invoicesModule(), { ...options, port: 0, loggerLayer: makeMockLoggerLayer() });
+    await app.start();
+
+    try {
+      await run(`http://127.0.0.1:${app.getPort()}`);
+    } finally {
+      await app.stop();
+    }
+  }
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('answers the escaped req() error without billing\'s headers, body or URL', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const response = await fetch(`${base}/invoices/42`);
+      const text = await response.text();
+
+      expect(response.status).toBe(500);
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain('BODY-SECRET');
+      expect(text).not.toContain(billingOrigin);
+      // The body the page prints, field for field
+      expect(JSON.parse(text)).toEqual({
+        success: false,
+        error: 'REQUEST_FAILED',
+        code: 500,
+        details: {
+          originalError: {
+            _id: 'FiberFailure',
+            cause: {
+              _id: 'Cause',
+              _tag: 'Fail',
+              failure: {
+                success: false,
+                error: 'HTTP_ERROR',
+                code: 404,
+                traceId: expect.any(String),
+                details: { duration: expect.any(Number), method: 'GET' },
+                retryCount: 0,
+              },
+            },
+          },
+        },
+      });
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('sends them with exposeErrorDetails on', async () => {
+    await withInvoicesApp({ exposeErrorDetails: true }, async (base) => {
+      const text = await (await fetch(`${base}/invoices/42`)).text();
+
+      expect(text).toContain('COOKIE-SECRET');
+      expect(text).toContain('BODY-SECRET');
+      expect(text).toContain(`${billingOrigin}/invoices/42`);
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('sends the fields you picked, and a spread copy whole', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const picked = await fetch(`${base}/invoices/42/picked`);
+      expect(picked.status).toBe(502);
+      expect(await picked.json()).toEqual({
+        success: false,
+        error: 'BILLING_UNAVAILABLE',
+        code: 502,
+        details: { invoiceId: '42', upstreamStatus: 404 },
+      });
+
+      // The counter-example in the snippet's comment: a copy is the author's record
+      const spread = await (await fetch(`${base}/invoices/42/spread`)).text();
+      expect(spread).toContain('COOKIE-SECRET');
+      expect(spread).toContain(billingOrigin);
+    });
+  });
+
+  /**
+   * @source docs:api/requests.md#uncaught-client-errors
+   */
+  it('lets a filter of your own leave them out with withoutTransportDetails', async () => {
+    await withInvoicesApp({}, async (base) => {
+      const response = await fetch(`${base}/invoices/42/enveloped`);
+      const text = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED', code: 500 });
+      expect(text).not.toContain('COOKIE-SECRET');
+      expect(text).not.toContain(billingOrigin);
+    });
+  });
 });
 
 // The augmentation the Request Context page documents, declared here so the docs examples below
@@ -3853,6 +4338,27 @@ describe('OneBunApplication (docs/api/core.md)', () => {
 
     expect(() => new OneBunModule(AppModule, makeMockLoggerLayer()))
       .toThrow(/exports the module CoreModule/);
+  });
+
+  /**
+   * @source docs:api/decorators.md#module
+   */
+  it('should fail the boot naming the module when a module imports itself', () => {
+    // From docs: a self-import throws OneBunModuleImportCycleError instead of overflowing the stack
+    @Module({ imports: [UsersModule] })
+    class UsersModule {}
+
+    let thrown: unknown;
+    try {
+      new OneBunModule(UsersModule, makeMockLoggerLayer(), undefined, undefined, undefined, createGlobalScope());
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(OneBunBootstrapError);
+    expect((thrown as Error).name).toBe('OneBunModuleImportCycleError');
+    expect((thrown as Error).message).toStartWith('Module import cycle: UsersModule -> UsersModule. ');
+    expect((thrown as Error).message).toEndWith('Remove UsersModule from its own imports.');
   });
 
   /**
@@ -6541,9 +7047,9 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
   describe('WebSocket Client', () => {
     /**
-     * @source docs:api/websocket.md#typed-client-native
+     * @source docs:api/websocket.md#client-from-a-definition-native
      */
-    it('should exchange messages with the gateway through the typed client', async () => {
+    it('should exchange messages with the gateway through the client built from its definition', async () => {
       @WebSocketGateway({ path: '/chat' })
       class ChatGateway extends BaseWebSocketGateway {
         @OnConnect()
@@ -6562,8 +7068,8 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
 
       const definition = createWsServiceDefinition(ChatModule);
 
-      // The definition is what makes the client typed: one entry per gateway, carrying the path
-      // clients connect to and the events the gateway handles
+      // The definition gives the client its gateway names: one entry per gateway, carrying the path
+      // clients connect to and the events the gateway handles. It carries no types
       expect([...definition._gateways.keys()]).toEqual(['ChatGateway']);
       expect(definition._gateways.get('ChatGateway')?.path).toBe('/chat');
       expect([...(definition._gateways.get('ChatGateway')?.events.keys() ?? [])]).toContain('chat:message');
@@ -6580,7 +7086,7 @@ describe('WebSocket Gateway API Documentation (docs/api/websocket.md)', () => {
       try {
         await app.start();
 
-        // From docs: Typed client (native) — connect to the gateway path
+        // From docs: Client from a definition (native) — connect to the gateway path
         const client = createWsClient(definition, {
           url: `ws://127.0.0.1:${app.getPort()}/chat`,
           protocol: 'native',
@@ -9522,6 +10028,219 @@ describe('Dependency Resolution Errors (docs/api/services.md)', () => {
 });
 
 /**
+ * @source docs:api/services.md#circular-dependencies
+ */
+describe('Circular Dependencies (docs/api/services.md)', () => {
+  const mockLoggerLayer = makeMockLoggerLayer();
+
+  const bootError = (moduleClass: Function): Error => {
+    try {
+      new OneBunModule(moduleClass, mockLoggerLayer);
+    } catch (error) {
+      return error as Error;
+    }
+    throw new Error('expected the module to fail');
+  };
+
+  it('constructs providers listed consumer-first, dependencies first', () => {
+    // From docs: providers: [UserService, UserRepository, Database]
+    const constructed: string[] = [];
+
+    @Service()
+    class Database extends BaseService {
+      constructor() {
+        super();
+        constructed.push('Database');
+      }
+    }
+
+    @Service()
+    class UserRepository extends BaseService {
+      constructor(readonly database: Database) {
+        super();
+        constructed.push('UserRepository');
+      }
+    }
+
+    @Service()
+    class UserService extends BaseService {
+      constructor(readonly repository: UserRepository) {
+        super();
+        constructed.push('UserService');
+      }
+    }
+
+    @Module({
+      providers: [UserService, UserRepository, Database],
+    })
+    class UserModule {}
+
+    const module = new OneBunModule(UserModule, mockLoggerLayer);
+
+    expect(constructed).toEqual(['Database', 'UserRepository', 'UserService']);
+    expect(module.getServiceByClass(UserService)!.repository.database).toBe(module.getServiceByClass(Database)!);
+  });
+
+  it('reports a real cycle with a chain that names only the cycle', () => {
+    // From docs: "Dependency chain: ServiceA -> ServiceB -> ServiceA",
+    // "Unresolved services: ServiceA, ServiceB"
+    @Service()
+    class ServiceA extends BaseService {}
+
+    @Service()
+    class ServiceB extends BaseService {}
+
+    registerDependencies(ServiceA, [ServiceB]);
+    registerDependencies(ServiceB, [ServiceA]);
+
+    @Module({ providers: [ServiceA, ServiceB] })
+    class AppModule {}
+
+    const error = bootError(AppModule);
+
+    expect(error).toBeInstanceOf(CircularDependencyError);
+    expect(error.message).toBe(
+      'Circular dependency detected in module AppModule!\n' +
+        'Dependency chain: ServiceA -> ServiceB -> ServiceA\n' +
+        'Unresolved services: ServiceA, ServiceB',
+    );
+  });
+
+  it('keeps a provider that only waits on the cycle out of the chain', () => {
+    // From docs: "`X` in `X -> Y -> Z -> Y` is listed among the unresolved services, not in the chain"
+    @Service()
+    class X extends BaseService {}
+
+    @Service()
+    class Y extends BaseService {}
+
+    @Service()
+    class Z extends BaseService {}
+
+    registerDependencies(X, [Y]);
+    registerDependencies(Y, [Z]);
+    registerDependencies(Z, [Y]);
+
+    @Module({ providers: [X, Y, Z] })
+    class TailModule {}
+
+    const error = bootError(TailModule) as CircularDependencyError;
+
+    expect(error).toBeInstanceOf(CircularDependencyError);
+    expect(error.chain).toBe('Y -> Z -> Y');
+    expect(error.unresolvedServices).toContain('X');
+  });
+
+  it('reports a provider that was never constructed as DependencyResolutionError, not as a cycle', () => {
+    // From docs: "Could not resolve dependency UserRepository for service UserService."
+    @Service()
+    class UserRepository extends BaseService {
+      constructor() {
+        super();
+        throw new Error('Database not initialized. Call initialize() first.');
+      }
+    }
+
+    @Service()
+    class UserService extends BaseService {
+      constructor(readonly repository: UserRepository) {
+        super();
+      }
+    }
+
+    @Module({ providers: [UserService, UserRepository] })
+    class UserModule {}
+
+    const error = bootError(UserModule);
+
+    expect(error).toBeInstanceOf(DependencyResolutionError);
+    expect(error.message).toBe(
+      'Could not resolve dependency UserRepository for service UserService.\n' +
+        '  - UserRepository is listed in the providers of UserModule, but was never constructed: ' +
+        'creating it threw, and the error was logged as "Failed to create service UserRepository".',
+    );
+  });
+
+  /**
+   * @source docs:api/services.md#circular-dependencies
+   * @source docs:architecture.md#explicit-injection-edge-cases
+   */
+  it('boots a consumer of an abstract-typed parameter listed before the implementation and its dependency', () => {
+    // From docs: "the consumer waits until a provider of its module that extends the type is built,
+    // so it may be listed before that implementation and before the implementation's own dependencies"
+    abstract class PaymentGateway extends BaseService {
+      abstract charge(amount: number): string;
+    }
+
+    @Service()
+    class GatewayConfig extends BaseService {
+      readonly currency = 'EUR';
+    }
+
+    @Service()
+    class StripeGateway extends PaymentGateway {
+      constructor(readonly gatewayConfig: GatewayConfig) {
+        super();
+      }
+
+      charge(amount: number): string {
+        return `${amount} ${this.gatewayConfig.currency}`;
+      }
+    }
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(readonly gateway: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, StripeGateway, GatewayConfig] })
+    class CheckoutModule {}
+
+    const module = new OneBunModule(CheckoutModule, mockLoggerLayer);
+    const checkout = module.getServiceByClass(CheckoutService)!;
+
+    expect(checkout.gateway).toBe(module.getServiceByClass(StripeGateway)!);
+    expect(checkout.gateway.charge(5)).toBe('5 EUR');
+  });
+
+  it('names the never-constructed implementation of an abstract-typed parameter', () => {
+    // From docs: "the dependency named is the parameter's type, and the hint names the provider
+    // extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`"
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class StripeGateway extends PaymentGateway {
+      constructor() {
+        super();
+        throw new Error('STRIPE_KEY is not set');
+      }
+    }
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(readonly gateway: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, StripeGateway] })
+    class CheckoutModule {}
+
+    const error = bootError(CheckoutModule);
+
+    expect(error).toBeInstanceOf(DependencyResolutionError);
+    expect(error.message).toBe(
+      'Could not resolve dependency PaymentGateway for service CheckoutService.\n' +
+        '  - StripeGateway (it extends PaymentGateway) is listed in the providers of CheckoutModule, ' +
+        'but was never constructed: creating it threw, and the error was logged as ' +
+        '"Failed to create service StripeGateway".',
+    );
+  });
+});
+
+/**
  * @source docs:api/decorators.md#optional
  */
 describe('@Optional() decorator (docs/api/decorators.md)', () => {
@@ -9588,6 +10307,100 @@ describe('@Optional() decorator (docs/api/decorators.md)', () => {
     expect(withEmail.emailService).toBeInstanceOf(EmailService);
     expect(withEmail.notify('u-2', 'hello')).toBe('emailed');
     expect(withEmail.emailService!.sent).toEqual(['u-2:hello']);
+  });
+
+  it('injects undefined, with a warning, for a listed provider that was never constructed', () => {
+    // From docs: "A dependency listed in the module's own `providers` that was never constructed
+    // [...] counts as not available too: the parameter receives `undefined`, and a warning names
+    // the dependency and why it has no instance."
+    @Service()
+    class EmailService extends BaseService {
+      constructor() {
+        super();
+        throw new Error('SMTP_URL is not set');
+      }
+    }
+
+    @Service()
+    class NotificationService extends BaseService {
+      constructor(@Optional() readonly emailService?: EmailService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [NotificationService, EmailService] })
+    class NotifModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const mod = new OneBunModule(NotifModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('NotificationService'));
+
+    expect(mod.getServiceByClass(NotificationService)!.emailService).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('Failed to create service EmailService');
+  });
+
+  it('does not wait for the implementation of an abstract-typed parameter', () => {
+    // From docs: "it receives the subclass only if that is already built when its consumer is
+    // constructed, and `undefined` with a warning otherwise"
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class StripeGateway extends PaymentGateway {}
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(@Optional() readonly gateway?: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Module({ providers: [StripeGateway, CheckoutService] })
+    class ImplementationFirstModule {}
+
+    const implementationFirst = new OneBunModule(ImplementationFirstModule, mockLoggerLayer);
+    expect(implementationFirst.getServiceByClass(CheckoutService)!.gateway)
+      .toBe(implementationFirst.getServiceByClass(StripeGateway)!);
+
+    @Module({ providers: [CheckoutService, StripeGateway] })
+    class ConsumerFirstModule {}
+
+    const recorder = makeRecordingLoggerLayer();
+    const consumerFirst = new OneBunModule(ConsumerFirstModule, recorder.layer);
+    const warnings = recorder.messages('warn').filter((message) => message.includes('CheckoutService'));
+
+    expect(consumerFirst.getServiceByClass(CheckoutService)!.gateway).toBeUndefined();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('StripeGateway, which extends it, is not built yet');
+  });
+
+  it('boots an implementation that injects its optional consumer back, with undefined', () => {
+    // From docs: "Waiting would turn an implementation that injects its consumer back — which
+    // boots, with `undefined` — into a `CircularDependencyError`."
+    abstract class PaymentGateway extends BaseService {}
+
+    @Service()
+    class CheckoutService extends BaseService {
+      constructor(@Optional() readonly gateway?: PaymentGateway) {
+        super();
+      }
+    }
+
+    @Service()
+    class CallbackGateway extends PaymentGateway {
+      constructor(readonly checkout: CheckoutService) {
+        super();
+      }
+    }
+
+    @Module({ providers: [CheckoutService, CallbackGateway] })
+    class CallbackModule {}
+
+    const mod = new OneBunModule(CallbackModule, mockLoggerLayer);
+    const checkout = mod.getServiceByClass(CheckoutService)!;
+
+    expect(checkout.gateway).toBeUndefined();
+    expect(mod.getServiceByClass(CallbackGateway)!.checkout).toBe(checkout);
   });
 });
 

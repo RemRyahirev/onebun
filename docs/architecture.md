@@ -7,8 +7,8 @@ description: System architecture overview. Module hierarchy, DI container, reque
 ## Internal Architecture Notes
 
 **DI Resolution Order**:
-1. Module imports resolved first (depth-first)
-2. Providers instantiated in dependency order (dependencies first)
+1. Module imports resolved first (depth-first). A module is published as built only when its own initialization finishes, so one met again while it is still being built — an import cycle, a self-import included — throws `OneBunModuleImportCycleError` naming the cycle in import order. See [Decorators — @Module()](/api/decorators#module)
+2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core, or creating it threw). A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all, because waiting would turn an implementation that injects its consumer into a cycle. It gets `undefined`, with a warning, when a provider of the module could have filled it
 3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
@@ -19,7 +19,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 4. Shutdown signal (or `app.stop()`) → every route answers `503 Service Unavailable` while the listener deliberately stays open, in-flight requests are drained (budget: half of `shutdownTimeout`, 7500ms by default), then the HTTP listener is closed
 5. Listener already closed → `beforeApplicationDestroy(signal?)` called
 6. WebSocket cleanup → queue service stop → queue adapter disconnect → trace flush → `onModuleDestroy()` called (no signal argument)
-7. Shared Redis released (refcounted) → `onApplicationDestroy(signal?)` called → DI scope disposed → logger transport flushed
+7. Remaining shared-Redis holders logged at debug level (the application releases nothing; each consumer gave its hold back when it closed) → `onApplicationDestroy(signal?)` called → DI scope disposed → logger transport flushed
 
 The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry the phase still running is named in the error log, and on the signal path the process exits with code 1 instead of 0. Full order: [Core — Graceful Shutdown](/api/core#graceful-shutdown)
 
@@ -47,7 +47,9 @@ The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry 
 12. Trace span ended
 
 **Module Metadata Storage**:
-- Custom WeakMap-based metadata system (polyfill in `packages/core/src/decorators/metadata.ts`)
+- Custom WeakMap-based metadata system in `packages/core/src/decorators/metadata.ts`, two layers: a module-private store for the framework's own keys, and the GLOBAL Reflect Metadata API
+- The global polyfill is a complete Reflect Metadata API (all nine functions, per-property keys, prototype walk) plus reflect-metadata's provider registry under `Symbol.for('@reflect-metadata:registry')`. It is installed only when no implementation is there; one already present (reflect-metadata imported first, an older copy of core) is kept as is. A reflect-metadata 0.2.x loaded LATER by a third-party library (tsyringe, `@simplewebauthn/server`) registers its store in that registry and keeps reading what was decorated before it; a later 0.1.x fills nothing. No dependency on reflect-metadata
+- DI reads OWN `design:paramtypes` (`getOwnMetadata`, no prototype walk) in `getConstructorParamTypes`, `diagnoseDecoratorMetadata` and the `@Controller` wrapper copy. A class that declares no constructor (`length === 0` and no own `design:paramtypes` array) under an ancestor that takes dependencies is built without them, and the module logs a warning once per class naming the ancestor and its types. An explicit `constructor()` records `[]` only on a DECORATED class; an undecorated class with a zero-length constructor (`constructor() { super(new Dep()); }`, or parameters that all have defaults) records nothing and cannot be told from one with no constructor, so the warning is worded for both ("declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded)") and the fix it gives is to declare the constructor and, on an undecorated class, add a decorator too. So is an UNDECORATED class that declares constructor parameters under such an ancestor (`length > 0`, no types emitted, e.g. a guard subclass): it gets its own warning telling it to add a decorator, and is never handed the ancestor's types. Both warnings name the decorator of the class's kind: `@Middleware()` for middleware, `@Controller()` / `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise
 - `META_CONTROLLERS` Map — controller metadata (routes, path, middleware, guards)
 - `META_CONSTRUCTOR_PARAMS` Map — explicit constructor dependencies (@Inject, @Service)
 - String keys via `defineMetadata()`: `onebun:params`, `onebun:middleware`, `onebun:http_guards`, `onebun:controller_http_guards`, `onebun:interceptors`, `onebun:controller_interceptors`, `onebun:exception_filters`, `onebun:controller_exception_filters`, `onebun:responseSchemas`, `onebun:sse`
@@ -88,7 +90,7 @@ OneBunApplication
 1. **Service Registration**: `@Service()` decorator registers class with Effect.js Context tag
 2. **Module Assembly**: `@Module()` collects controllers and providers
 3. **Dependency Resolution**: Framework analyzes constructor parameters
-4. **Instance Creation**: Services created in dependency order, then controllers
+4. **Instance Creation**: Services created in dependency order — the order of `providers` does not matter, except for an [`@Optional()` parameter typed as an abstract class](/api/decorators#optional), which does not wait for its implementation — then controllers
 
 ### DI Resolution Flow
 
@@ -125,8 +127,9 @@ export class UserModule {}
 The framework uses TypeScript metadata to detect dependencies:
 
 ```typescript
-// Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true)
-const designTypes = Reflect.getMetadata('design:paramtypes', target);
+// Primary: TypeScript design:paramtypes (when emitDecoratorMetadata is true),
+// the class's OWN entry — a subclass never borrows its parent's
+const designTypes = Reflect.getOwnMetadata('design:paramtypes', target);
 
 // Fallback: Custom metadata storage (WeakMap-based, in decorators/metadata.ts)
 // Populated by @Service(), @Inject(), and other decorators via META_CONSTRUCTOR_PARAMS Map
@@ -134,6 +137,14 @@ const designTypes = Reflect.getMetadata('design:paramtypes', target);
 // Note: Classes MUST have a decorator (@Service, @Controller, etc.) for
 // design:paramtypes to be emitted. Without a decorator, DI will not work.
 ```
+
+Bun emits that metadata through the global `Reflect.metadata`, so `@onebun/core` installs a complete
+Reflect Metadata API on the global `Reflect` — all nine functions of the proposal, with per-member
+keys and the prototype walk — unless an implementation is already there. It interoperates with a
+`reflect-metadata` loaded later by a third-party library (tsyringe, `@simplewebauthn/server`): a
+0.2.x copy registers its own store in the provider registry the core publishes and still reads
+everything decorated before it loaded, and a 0.1.x copy finds nothing to fill in. Any import order
+works; see [Reflect Metadata and Other Libraries](/api/decorators#reflect-metadata-interop).
 
 ### Automatic DI (Recommended)
 
@@ -179,8 +190,12 @@ export class UserController extends BaseController {
 - **An abstract-class-typed parameter needs no `@Inject` at all.** DI resolves it to a
   registered subclass automatically (`instance instanceof type`), while `@Inject(AbstractClass)`
   is `error TS2345` — an abstract constructor is not assignable to `new (...args: any[]) => T`.
-  This works only when exactly one subclass is registered; with two, the first one listed in
-  `providers` wins silently.
+  The consumer may be listed before the subclass, and before the subclass's own dependencies: it
+  waits until the subclass is built. An `@Optional()` parameter does not wait — it gets
+  `undefined`, with a warning, unless the subclass is already built — so list the subclass before
+  that consumer. This works only when exactly one subclass is registered; with two, whichever is
+  constructed first wins silently — the first one listed in `providers`, unless it waits for a
+  dependency listed after it.
 - **There is no `{ provide, useClass }` binding form.** An object provider throws
   `OneBunInvalidProviderError` at startup; substitute implementations with
   `TestingModule.overrideProvider()`.
@@ -375,8 +390,8 @@ await this.callBeforeApplicationDestroy(signal);
 // Phase 6: Call onModuleDestroy() on all services and controllers
 await this.callOnModuleDestroy();
 
-// Phase 7: Release the shared Redis connection, then
-//          call onApplicationDestroy(signal) on all services and controllers
+// Phase 7: Call onApplicationDestroy(signal) on all services and controllers
+//          (the shared Redis client is not released here: each consumer gave its hold back)
 await this.callOnApplicationDestroy(signal);
 ```
 
@@ -641,12 +656,54 @@ const multiApp = new OneBunApplication({
 
 ### Service Communication
 
+One service calls another through a client built from the callee's module. The definition reflects
+the routes out of the controllers' decorator metadata, and the client reaches each endpoint as
+`client.<ControllerClassName>.<handlerName>(...)`:
+
 ```typescript
-// Generate typed client from service definition
+import {
+  BaseController,
+  Controller,
+  createServiceClient,
+  createServiceDefinition,
+  Get,
+  Module,
+  Param,
+} from '@onebun/core';
+
+@Controller('/users')
+class UsersController extends BaseController {
+  @Get('/:id')
+  findById(@Param('id') id: string) {
+    return { id, name: 'Ada' };
+  }
+}
+
+@Module({ controllers: [UsersController] })
+class UsersModule {}
+
+const UsersServiceDefinition = createServiceDefinition(UsersModule);
+
 const usersClient = createServiceClient(UsersServiceDefinition, {
-  baseUrl: 'http://localhost:3001',
+  url: 'http://localhost:3001',
 });
 
-// Call with full type safety
-const user = await usersClient.users.findById('123');
+// Sends GET /users/123. The key is the controller class name
+const response = await usersClient.UsersController.findById('123');
+
+// `response` is `any`: the HTTP client's envelope around the server's `{ success, result }` body
+const user = response.result.result;
 ```
+
+The client checks controller and method names at run time: a name the definition lacks throws when
+it is read. It does not check types. Any name compiles, arguments are `any[]`, and the result is
+`any`. See [What the client checks](/api/requests#service-client-typing).
+
+<llm-only>
+
+- The option is `url`, not `baseUrl` (`ServiceClientOptions` omits `baseUrl`), and controllers are
+  keyed by class name: `usersClient.users` throws `Controller "users" not found in service definition`.
+- Only the option is caught by the compiler. The client is typed `any`, so `usersClient.users.findById('123')`
+  compiles and fails only at run time, and no call on it is type safe.
+
+</llm-only>

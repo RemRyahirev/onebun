@@ -9,7 +9,7 @@ import {
 } from '@opentelemetry/sdk-trace-base';
 import { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } from '@opentelemetry/semantic-conventions';
 
-import type { TraceOptions } from './types.js';
+import type { TraceOptions, TraceShutdownOptions } from './types.js';
 
 import { installContextManager, releaseContextManager } from './context-manager.js';
 import { DEFAULT_RETRY_BUDGET, OtlpFetchSpanExporter } from './otlp-exporter.js';
@@ -38,9 +38,13 @@ export interface TracerProviderResult {
   contextPropagates: boolean;
 
   /**
-   * Shutdown function that flushes pending spans and shuts down the provider
+   * Shutdown function that flushes pending spans and shuts down the provider.
+   *
+   * With `{ spanProcessors: 'flush' }` the processors passed in `TraceOptions.spanProcessors` are
+   * flushed and left running; a later call without it shuts them down, and does nothing else. See
+   * {@link TraceShutdownOptions}.
    */
-  shutdown: () => Promise<void>;
+  shutdown: (options?: TraceShutdownOptions) => Promise<void>;
 }
 
 /**
@@ -144,13 +148,15 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
   });
 
   const spanProcessors: SpanProcessor[] = [];
+  // Kept apart because they have different owners: the caller's may outlive this provider, the
+  // ones built here may not. See `shutdown({ spanProcessors: 'flush' })`.
+  const callerProcessors = (options.spanProcessors ?? []) as SpanProcessor[];
+  const ownProcessors: SpanProcessor[] = [];
 
   // Appended, not replacing: a caller wanting to observe or fan out this application's spans
   // has to be able to do so alongside the configured OTLP export, and a processor on the
   // process-global provider would not see them — every application's spans come from its own.
-  if (options.spanProcessors) {
-    spanProcessors.push(...options.spanProcessors as SpanProcessor[]);
-  }
+  spanProcessors.push(...callerProcessors);
 
   if (options.exportOptions?.endpoint) {
     const retryBudget = options.exportOptions.retryBudget ?? DEFAULT_RETRY_BUDGET;
@@ -165,7 +171,7 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
       onExportFailure: options.exportOptions.onExportFailure,
     });
 
-    spanProcessors.push(
+    ownProcessors.push(
       new BatchSpanProcessor(exporter, {
         maxExportBatchSize: options.exportOptions.batchSize,
         scheduledDelayMillis: options.exportOptions.batchTimeout,
@@ -177,6 +183,7 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
       }),
     );
   }
+  spanProcessors.push(...ownProcessors);
 
   const provider = new BasicTracerProvider({
     resource,
@@ -217,14 +224,26 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
   const contextPropagates = installContextManager();
 
   let shutdownStarted = false;
+  // Set by a `'flush'` shutdown, which left the caller's processors running. The one thing a later
+  // plain shutdown still has to do.
+  let callerProcessorsLeftRunning = false;
 
   return {
     provider,
     contextPropagates,
-    async shutdown() {
+    async shutdown(shutdownOptions?: TraceShutdownOptions) {
       // Idempotent: `app.stop()` can be reached more than once, and a second pass must not
       // re-enter the handover and move the global for a provider already gone.
       if (shutdownStarted) {
+        // Except for what a `'flush'` pass deliberately left running. A plain shutdown after it is
+        // the owner done with them after all — an application's `stop()` after a failed start()
+        // — and skipping them here left a processor that holds a handle until its `shutdown()`
+        // keeping the process alive, where that `stop()` had always shut them down.
+        if (callerProcessorsLeftRunning && shutdownOptions?.spanProcessors !== 'flush') {
+          callerProcessorsLeftRunning = false;
+          await Promise.all(callerProcessors.map(async (processor) => await processor.shutdown()));
+        }
+
         return;
       }
       shutdownStarted = true;
@@ -234,7 +253,21 @@ export function initTracerProvider(options: TraceOptions): TracerProviderResult 
       liveProviders.delete(provider);
 
       try {
-        await provider.shutdown();
+        if (shutdownOptions?.spanProcessors === 'flush' && callerProcessors.length > 0) {
+          // `provider.shutdown()` shuts down every processor the provider holds, the caller's
+          // included. A caller that passes the same processor to the next application — or to a
+          // retry of this one — then watches it drop every span. So flush them all, close only
+          // what was built here, and leave the provider to be dropped with its owner. Closed even
+          // when the flush fails, as `provider.shutdown()` would have closed them.
+          callerProcessorsLeftRunning = true;
+          try {
+            await provider.forceFlush();
+          } finally {
+            await Promise.all(ownProcessors.map(async (processor) => await processor.shutdown()));
+          }
+        } else {
+          await provider.shutdown();
+        }
       } finally {
         // In the `finally` because a failed flush is still a dead provider: leaving it
         // installed as the global would accept spans and silently drop them.

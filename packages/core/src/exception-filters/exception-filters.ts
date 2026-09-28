@@ -12,6 +12,7 @@ import {
   createErrorResponse,
   HttpStatusCode,
   OneBunBaseError,
+  withoutTransportDetails,
 } from '@onebun/requests';
 
 import { HttpException } from './http-exception';
@@ -158,7 +159,10 @@ export const UNHANDLED_ERROR_MESSAGE = 'Internal Server Error';
  * @param options.httpEnvelope - Always answer HTTP 200 and carry the real code in the body.
  * @param options.exposeErrorDetails - Disclose an unhandled error to the caller: its real
  *   `message` in place of {@link UNHANDLED_ERROR_MESSAGE}, plus `details` — the error's class
- *   name, its non-HTTP `code`, and its **stack trace**. Off by default, and deliberately not
+ *   name, its non-HTTP `code`, and its **stack trace**. For a `OneBunBaseError` it also keeps
+ *   the transport details of an HTTP-client error in the body — the upstream's response headers,
+ *   the request URL, a redirect's `Location`, the upstream's body — which are otherwise left out
+ *   (`withoutTransportDetails` from `@onebun/requests`). Off by default, and deliberately not
  *   tied to `NODE_ENV`: a deployment with an unset or mistyped `NODE_ENV` would then disclose
  *   all of it publicly, which is the failure mode this guards against. Turn it on knowingly,
  *   in a development configuration you can read. One knob, not two — a message that names an
@@ -189,7 +193,18 @@ export function createDefaultExceptionFilter(
       }
 
       if (error instanceof OneBunBaseError) {
-        return new Response(JSON.stringify(error.toErrorResponse()), {
+        // Serialized whole — `details` and `originalError` included — because the author wrote
+        // them for the client. Except the transport details of an error the HTTP client made:
+        // the upstream's response headers (its `set-cookie` among them), the request URL with its
+        // query, a redirect's `Location`, the upstream's body. Those reach this branch whenever a
+        // controller lets a client error escape — `client.req()` throws one, and an error built
+        // from a client failure's `details` carries them as its own — and the upstream sent them
+        // to this application, not to its caller. `exposeErrorDetails` sends them as well.
+        const body = exposeErrorDetails
+          ? JSON.stringify(error.toErrorResponse())
+          : JSON.stringify(error.toErrorResponse(), withoutTransportDetails);
+
+        return new Response(body, {
           status: httpEnvelope ? HttpStatusCode.OK : toHttpStatus(error.code),
           headers: {
             // eslint-disable-next-line @typescript-eslint/naming-convention

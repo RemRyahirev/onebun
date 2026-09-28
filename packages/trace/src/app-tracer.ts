@@ -34,11 +34,9 @@ export function currentAppTracer(): Tracer | undefined {
  * for every application in the process, since the wrapper marks the method as already traced —
  * so they cannot capture an owner and must ask at call time.
  *
- * Falls back to the process-global tracer, which is byte-for-byte what those three sites did
- * before. In a single-application process the global IS that application's provider, so the
- * fallback is the correct answer and nothing changes; in a multi-application process outside
- * any framework boundary it is the first-registered provider, which is today's behaviour and
- * the documented residue rather than a regression.
+ * Falls back to the process-global tracer. In a single-application process the global IS that
+ * application's provider, so the fallback is the correct answer; in a multi-application process
+ * outside any framework boundary it is the first-registered provider, a documented limitation.
  *
  * @see docs:api/trace.md
  */

@@ -273,6 +273,8 @@ The `@Service` decorator automatically creates a Context tag for the service and
 
 OneBun includes a lightweight metadata system that powers its decorators and dependency injection. Unlike many TypeScript frameworks, OneBun doesn't rely on external dependencies like reflect-metadata, making it more lightweight and easier to use in client applications.
 
+Importing `@onebun/core` installs a complete Reflect Metadata API on the global `Reflect` (unless one is already there), which is where Bun's `emitDecoratorMetadata` output is recorded. Libraries that bring their own `reflect-metadata` — tsyringe, `@simplewebauthn/server` — work alongside it in any import order; if your application imports `reflect-metadata` itself, use 0.2.2 or later. See [Reflect Metadata and Other Libraries](https://onebun.dev/api/decorators#reflect-metadata-interop).
+
 The metadata system provides:
 
 - Storage for controller route definitions
@@ -426,9 +428,12 @@ handleAdmin(@Client() client: WsClientData) {
 }
 ```
 
-### Typed Client
+### Client
 
-Generate a type-safe WebSocket client:
+Connect to a gateway from Bun (another service, a test, a script). Gateways are reached by class
+name from the module's definition; event names are strings and payloads are `unknown` unless you
+pass a type argument, and nothing checks either against the gateway. `@onebun/core` cannot
+currently be bundled for a browser: there, use `WebSocket` or `socket.io-client`.
 
 ```typescript
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
@@ -442,12 +447,12 @@ const client = createWsClient(definition, {
 
 await client.connect();
 
-// Type-safe event emission
+// Event names and payloads are not checked against the gateway
 await client.ChatGateway.emit('chat:message', { text: 'Hello!' });
 
-// Subscribe to events
-client.ChatGateway.on('chat:message', (data) => {
-  console.log('Received:', data);
+// Subscribe to events; the type argument asserts the payload shape
+client.ChatGateway.on<{ text: string }>('chat:message', (data) => {
+  console.log('Received:', data.text);
 });
 
 client.disconnect();
@@ -545,10 +550,10 @@ app.enableGracefulShutdown();
 
 // Option 2: Stop programmatically
 await app.stop();
-
-// Option 3: Stop but keep shared Redis connection open (for other consumers)
-await app.stop({ closeSharedRedis: false });
 ```
+
+`stop({ closeSharedRedis })` is deprecated and ignored: `stop()` releases no shared Redis hold on
+anyone's behalf (see [Shared Redis Connection](#shared-redis-connection)).
 
 ### What Gets Cleaned Up
 
@@ -556,11 +561,11 @@ When the application stops, the following resources are cleaned up:
 
 1. **HTTP Server** - Bun server is stopped
 2. **WebSocket Handler** - All WebSocket connections are closed
-3. **Shared Redis** - If using SharedRedisProvider, the connection is closed (unless `closeSharedRedis: false`)
+3. **Shared Redis holds** - The application's own consumers give back the holds they took: the cache in its `close()`, the queue adapter in its `disconnect()`. The application itself releases nothing on the shared client
 
 ### Shared Redis Connection
 
-When using `SharedRedisProvider` for cache, WebSocket storage, or other features, the connection is automatically closed on shutdown:
+When using `SharedRedisProvider` for cache, the queue or other features, every consumer takes a hold on the one shared client and gives it back when it closes. The connection closes when the last holder in the process lets go, so an application that stops while another application or your own code still holds the client leaves the connection open. Code that called `SharedRedisProvider.getClient()` itself calls `await SharedRedisProvider.release()` on shutdown:
 
 ```typescript
 import { SharedRedisProvider, OneBunApplication } from '@onebun/core';
@@ -576,7 +581,8 @@ const app = new OneBunApplication(AppModule, {
 });
 
 await app.start();
-// Shared Redis will be closed when app receives SIGTERM/SIGINT
+// On SIGTERM/SIGINT the app's cache and queue release their holds;
+// the connection closes when the last holder in the process lets go
 ```
 
 ## License

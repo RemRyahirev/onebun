@@ -100,8 +100,8 @@ export class OneBunContextManager implements ContextManager {
    *
    * Deliberately does NOT call `storage.disable()`. Tearing down an `AsyncLocalStorage` under
    * code that is inside it breaks async continuation for the whole process — awaits stop
-   * resuming, with no error, and everything downstream simply hangs. Measured: with the call in
-   * place, a test file that disabled a context manager made every async test in every later file
+   * resuming, with no error, and everything downstream simply hangs: with the call in place, a
+   * test file that disabled a context manager would make every async test in every later file
    * time out.
    *
    * Nothing needs it either. The flag alone makes `active()` answer `ROOT_CONTEXT`, and requests

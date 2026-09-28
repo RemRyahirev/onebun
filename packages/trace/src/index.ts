@@ -85,6 +85,7 @@ export type {
   TraceExportOptions,
   TraceHeaders,
   TraceOptions,
+  TraceShutdownOptions,
   TraceSpan,
 } from './types.js';
 export { SpanStatusCode } from './types.js';

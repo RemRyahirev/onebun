@@ -30,6 +30,7 @@ import type { BunSQLDatabase } from 'drizzle-orm/bun-sql';
 
 import { createPostgresContainer, type TestContainer } from '@onebun/core/testing';
 
+import { jsonbParam, jsonParam } from '../src/pg';
 import { applyBunSqlJsonEncodingFix } from '../src/pg-json-encoding';
 
 const CONTAINER_BOOT_MS = 120_000;
@@ -60,6 +61,68 @@ async function writeAndRead(value: unknown): Promise<{ ty: string | null; raw: s
   const inserted = await db.insert(table).values({ data: value }).returning({ id: table.id });
 
   return await stored(inserted[0].id);
+}
+
+/** Every shape `jsonbParam()` must store as what it is — plus quotes and non-ASCII text. */
+const HELPER_MATRIX: unknown[] = [
+  { a: 1 },
+  ['x', 'y'],
+  ['x'],
+  [],
+  {},
+  'hello',
+  '{"a":1}',
+  42,
+  1.5,
+  true,
+  false,
+  null,
+  { q: 'he said "hi" and a backslash \\', s: 'it\'s' },
+  { u: 'Привет, 世界 🌍\u2028' },
+];
+
+/** What `jsonb_typeof` must answer for a JS value. `null` is JSON null, not SQL NULL. */
+function expectedJsonType(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+  if (Array.isArray(value)) {
+    return 'array';
+  }
+
+  return typeof value;
+}
+
+/** Run a raw statement through drizzle and hand back its rows. */
+async function rawRows<T>(query: ReturnType<typeof sql>): Promise<T[]> {
+  return await db.execute(query) as unknown as T[];
+}
+
+/**
+ * The PostgreSQL message behind a failed drizzle query. drizzle wraps it in a
+ * `DrizzleQueryError` whose own message is only the query text, so the reason is the `cause`.
+ */
+async function failureOf(query: ReturnType<typeof sql>): Promise<string> {
+  try {
+    await db.execute(query);
+  } catch (error) {
+    const cause = (error as Error).cause;
+
+    return cause instanceof Error ? cause.message : (error as Error).message;
+  }
+
+  return '<the query succeeded>';
+}
+
+/** Insert a raw fragment into `data` and report what the server holds, SQL NULL included. */
+async function insertRaw(fragment: unknown): Promise<{ ty: string | null; raw: string | null; isNull: boolean }> {
+  const inserted = await rawRows<{ id: number }>(sql`INSERT INTO payloads (data) VALUES (${fragment}) RETURNING id`);
+  const row = await stored(inserted[0].id);
+  const nulls = await client`
+    SELECT (data IS NULL) AS is_null FROM payloads WHERE id = ${inserted[0].id}
+  ` as Array<{ is_null: boolean }>;
+
+  return { ...row, isNull: nulls[0].is_null };
 }
 
 beforeAll(async () => {
@@ -332,5 +395,140 @@ describe('repairing rows written before the fix', () => {
         UPDATE payloads SET data = (data #>> '{}')::jsonb WHERE jsonb_typeof(data) = 'string'
       `);
     })()).rejects.toThrow(/invalid input syntax for type json/);
+  }, CASE_TIMEOUT_MS);
+});
+
+describe('jsonbParam() and jsonParam() in raw SQL', () => {
+  it('stores every shape as what it is, via INSERT, and reads it back unchanged', async () => {
+    for (const value of HELPER_MATRIX) {
+      const inserted = await rawRows<{ id: number }>(
+        sql`INSERT INTO payloads (data) VALUES (${jsonbParam(value)}) RETURNING id`,
+      );
+      const row = await stored(inserted[0].id);
+      const read = await db.select().from(table).where(eq(table.id, inserted[0].id));
+
+      // Never 'string' for a non-string — the double encoding this helper exists to avoid.
+      expect(row.ty, `jsonb_typeof for ${JSON.stringify(value)}`).toBe(expectedJsonType(value));
+      expect(JSON.parse(row.raw!)).toEqual(value);
+      expect(read[0].data).toEqual(value);
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('is the value it holds in an expression, for every shape', async () => {
+    for (const value of HELPER_MATRIX) {
+      const result = await rawRows<{ ty: string; json_ty: string }>(sql`
+        SELECT jsonb_typeof(${jsonbParam(value)}) AS ty, json_typeof(${jsonParam(value)}) AS json_ty
+      `);
+
+      expect(result[0], `typeof for ${JSON.stringify(value)}`).toEqual({
+        ty: expectedJsonType(value),
+        json_ty: expectedJsonType(value),
+      });
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('matches with @>, on a whole document and on a nested array', async () => {
+    await db.insert(table).values({ data: { kind: 'signup', tags: ['a', 'b'] } });
+
+    const count = async (where: ReturnType<typeof sql>): Promise<number> =>
+      (await rawRows<{ n: number }>(sql`SELECT count(*)::int AS n FROM payloads WHERE ${where}`))[0].n;
+
+    expect(await count(sql`data @> ${jsonbParam({ kind: 'signup' })}`)).toBe(1);
+    expect(await count(sql`data->'tags' @> ${jsonbParam(['a'])}`)).toBe(1);
+    expect(await count(sql`data->'tags' @> ${jsonbParam(['a', 'b'])}`)).toBe(1);
+    expect(await count(sql`data @> ${jsonbParam({ kind: 'other' })}`)).toBe(0);
+  }, CASE_TIMEOUT_MS);
+
+  it('sets an array with jsonb_set, and nests an object in jsonb_build_object', async () => {
+    await db.insert(table).values({ data: { tags: ['a'] } });
+
+    const set = await rawRows<{ tags: unknown; ty: string }>(sql`
+      SELECT jsonb_set(data, '{tags}', ${jsonbParam([1, 2])}) -> 'tags' AS tags,
+             jsonb_typeof(jsonb_set(data, '{tags}', ${jsonbParam([1, 2])}) -> 'tags') AS ty
+      FROM payloads
+    `);
+    const built = await rawRows<{ ty: string }>(sql`
+      SELECT jsonb_typeof(jsonb_build_object('k', ${jsonbParam({ n: 1 })}) -> 'k') AS ty
+    `);
+
+    expect(set[0]).toEqual({ tags: [1, 2], ty: 'array' });
+    expect(built[0].ty).toBe('object');
+  }, CASE_TIMEOUT_MS);
+
+  it('binds null as JSON null, which IS NULL is false for', async () => {
+    const result = await rawRows<{ is_null: boolean; ty: string }>(sql`
+      SELECT (${jsonbParam(null)}) IS NULL AS is_null, jsonb_typeof(${jsonbParam(null)}) AS ty
+    `);
+
+    expect(result[0]).toEqual({ is_null: false, ty: 'null' });
+  }, CASE_TIMEOUT_MS);
+
+  it('writes a json column with jsonParam', async () => {
+    const result = await rawRows<{ ty: string }>(sql`
+      INSERT INTO payloads (doc) VALUES (${jsonParam({ a: 1 })}) RETURNING json_typeof(doc) AS ty
+    `);
+
+    expect(result[0].ty).toBe('object');
+  }, CASE_TIMEOUT_MS);
+});
+
+describe('jsonbParam(sql.placeholder()) through .prepare()', () => {
+  it('stores every shape as what it is from one prepared insert, null as JSON null', async () => {
+    const prepared = db.insert(table)
+      .values({ data: jsonbParam(sql.placeholder('v')) })
+      .returning({ id: table.id })
+      .prepare('ins_json_param');
+
+    for (const value of HELPER_MATRIX) {
+      const inserted = await prepared.execute({ v: value });
+      const row = await stored(inserted[0].id);
+
+      expect(row.ty, `jsonb_typeof for ${JSON.stringify(value)}`).toBe(expectedJsonType(value));
+      expect(JSON.parse(row.raw!)).toEqual(value);
+    }
+  }, CASE_TIMEOUT_MS);
+
+  it('matches with a prepared @>, executed with different values', async () => {
+    await db.insert(table).values({ data: { kind: 'signup', tags: ['a', 'b'] } });
+
+    const prepared = db.select({ n: sql<number>`count(*)::int` })
+      .from(table)
+      .where(sql`${table.data} @> ${jsonbParam(sql.placeholder('q'))}`)
+      .prepare('sel_json_param');
+
+    expect(await prepared.execute({ q: { kind: 'signup' } })).toEqual([{ n: 1 }]);
+    expect(await prepared.execute({ q: { tags: ['b'] } })).toEqual([{ n: 1 }]);
+    expect(await prepared.execute({ q: { kind: 'other' } })).toEqual([{ n: 0 }]);
+  }, CASE_TIMEOUT_MS);
+});
+
+describe('the raw forms jsonbParam() replaces — pinned so the docs stay true', () => {
+  it('binds the element of a one-element array, whatever the element is', async () => {
+    // drizzle renders `${['x']}` as `($1)`: a parenthesized single value, not an array.
+    expect((await insertRaw(['x'])).ty).toBe('string');
+    expect((await insertRaw([{ a: 1 }])).ty).toBe('object');
+    expect(await insertRaw([null])).toMatchObject({ ty: null, isNull: true });
+  }, CASE_TIMEOUT_MS);
+
+  it('fails for a longer or an empty array', async () => {
+    expect(await failureOf(sql`INSERT INTO payloads (data) VALUES (${['x', 'y']})`)).toMatch(/type record/);
+    expect(await failureOf(sql`INSERT INTO payloads (data) VALUES (${[]})`)).toMatch(/syntax error/);
+  }, CASE_TIMEOUT_MS);
+
+  it('fails for a number and a boolean, and binds null as SQL NULL', async () => {
+    expect(await failureOf(sql`INSERT INTO payloads (data) VALUES (${42})`)).toMatch(/type integer/);
+    expect(await failureOf(sql`INSERT INTO payloads (data) VALUES (${true})`)).toMatch(/type boolean/);
+    expect(await insertRaw(null)).toMatchObject({ ty: null, isNull: true });
+  }, CASE_TIMEOUT_MS);
+
+  it('stores a pre-stringified value cast ::jsonb as a jsonb string', async () => {
+    const row = await insertRaw(sql`${JSON.stringify({ a: 1 })}::jsonb`);
+
+    expect(row.ty).toBe('string');
+  }, CASE_TIMEOUT_MS);
+
+  it('stores a plain object correctly — the one raw form that works', async () => {
+    // The docs used to call this WRONG. It is not, for an object; it is for everything above.
+    expect((await insertRaw({ a: 1 })).ty).toBe('object');
   }, CASE_TIMEOUT_MS);
 });

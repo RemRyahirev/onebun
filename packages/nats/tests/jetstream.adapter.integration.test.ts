@@ -6,7 +6,7 @@
  * the convention in `nats.adapter.integration.test.ts`.
  */
 
-import { AckPolicy } from '@nats-io/jetstream';
+import { AckPolicy, DeliverPolicy } from '@nats-io/jetstream';
 import {
   afterAll,
   afterEach,
@@ -1086,4 +1086,321 @@ describe('JetStreamQueueAdapter Integration', () => {
       }
     }
   }, CASE_TIMEOUT_MS);
+
+  it('closes the connection when connect() fails after opening it', async () => {
+    // A single-node server refuses `replicas: 3` from stream reconciliation, which runs after the
+    // socket is open and before the adapter counts itself connected. `disconnect()` returns early
+    // for an adapter that never connected, so this connection used to stay open with nothing able
+    // to close it — a process that caught the error never exited.
+    const js = new JetStreamQueueAdapter({
+      servers: nats.url,
+      streams: [{ name: 'ITEST_REPLICAS', subjects: ['replicas.>'], replicas: 3 }],
+    });
+    adapter = js;
+
+    await expect(js.connect()).rejects.toThrow('ITEST_REPLICAS');
+
+    expect(js.isConnected()).toBe(false);
+    expect(asAny(js).client.isConnected()).toBe(false);
+    expect(asAny(js).js).toBeNull();
+    // The rollback's own disconnect() still resolves, with nothing left to release.
+    await expect(js.disconnect()).resolves.toBeUndefined();
+  }, CASE_TIMEOUT_MS);
+
+  // ==========================================================================
+  // Workqueue streams (FB-30)
+  //
+  // Only a real server enforces the workqueue consumer rules — deliver_policy all (10101)
+  // and one consumer per subject (10100) — and only a real server deletes an acknowledged
+  // task. The mock harness emulates neither, which is how `deliver_policy: new` shipped
+  // unconditionally with a green suite. Every case uses a stream and subjects of its own:
+  // on a workqueue a leftover consumer from another case would hold the subject.
+  // ==========================================================================
+
+  describe('workqueue streams', () => {
+    const opened: JetStreamQueueAdapter[] = [];
+
+    afterEach(async () => {
+      for (const created of opened.splice(0)) {
+        if (created.isConnected()) {
+          await created.disconnect();
+        }
+      }
+    });
+
+    function makeStreamAdapter(
+      streamName: string,
+      subjects: string[],
+      retention: 'workqueue' | 'limits' | undefined = 'workqueue',
+    ): JetStreamQueueAdapter {
+      const created = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects, retention }],
+      });
+      opened.push(created);
+
+      return created;
+    }
+
+    /** Stored message count, read through an adapter that stays connected for the whole case. */
+    async function storedMessages(observer: JetStreamQueueAdapter, streamName: string): Promise<number> {
+      const info = await (asAny(observer).jsm as AnyRecord).streams.info(streamName);
+
+      return info.state.messages as number;
+    }
+
+    it('delivers a task published before the first grouped subscription, and the ack deletes it', async () => {
+      // The reporter's first acceptance point. Under `deliver_policy: new` the consumer could
+      // not be created at all; and had the server accepted it, the task would have been skipped.
+      const streamName = 'ITEST_WQ_BACKLOG';
+      const group = 'itest-wq-backlog';
+      const producer = makeStreamAdapter(streamName, ['wqbacklog.>']);
+      await producer.connect();
+
+      await producer.publish('wqbacklog.run', { id: 'before-subscribe' });
+      expect(await storedMessages(producer, streamName)).toBe(1);
+
+      const worker = makeStreamAdapter(streamName, ['wqbacklog.>']);
+      await worker.connect();
+
+      const received: string[] = [];
+      await worker.subscribe<{ id: string }>('wqbacklog.run', async (message) => {
+        received.push(message.data.id);
+        await message.ack();
+      }, { group, ackMode: 'manual' });
+
+      await pollUntil(() => received.length === 1);
+      expect(received).toEqual(['before-subscribe']);
+
+      // Workqueue retention: the acknowledgement removed the task from the stream.
+      await pollUntil(async () => await storedMessages(producer, streamName) === 0);
+      expect(await storedMessages(producer, streamName)).toBe(0);
+
+      const consumer = await (asAny(producer).jsm as AnyRecord).consumers.info(
+        streamName,
+        durableNameFor(group, 'wqbacklog.run'),
+      );
+      expect(consumer.config.deliver_policy).toBe(DeliverPolicy.All);
+    }, CASE_TIMEOUT_MS);
+
+    it('hands a restarted worker of the same group what was published while it was offline', async () => {
+      const streamName = 'ITEST_WQ_OFFLINE';
+      const group = 'itest-wq-offline';
+      const producer = makeStreamAdapter(streamName, ['wqoffline.>']);
+      await producer.connect();
+
+      const first = makeStreamAdapter(streamName, ['wqoffline.>']);
+      await first.connect();
+      await first.subscribe('wqoffline.run', async (message) => {
+        await message.ack();
+      }, { group, ackMode: 'manual' });
+      await first.disconnect();
+
+      for (const id of ['off-1', 'off-2', 'off-3']) {
+        await producer.publish('wqoffline.run', { id });
+      }
+      expect(await storedMessages(producer, streamName)).toBe(3);
+
+      const restarted = makeStreamAdapter(streamName, ['wqoffline.>']);
+      await restarted.connect();
+
+      const received: string[] = [];
+      await restarted.subscribe<{ id: string }>('wqoffline.run', async (message) => {
+        received.push(message.data.id);
+        await message.ack();
+      }, { group, ackMode: 'manual' });
+
+      await pollUntil(() => received.length === 3);
+      expect([...received].sort()).toEqual(['off-1', 'off-2', 'off-3']);
+
+      await pollUntil(async () => await storedMessages(producer, streamName) === 0);
+      expect(await storedMessages(producer, streamName)).toBe(0);
+    }, CASE_TIMEOUT_MS);
+
+    it('splits the tasks between replicas of one group, each exactly once', async () => {
+      // Sequential on purpose: this case is about the workqueue sharing one durable between
+      // replicas. Replicas that start at the same instant race on the create (10148); that race
+      // has its own cases under "replicas booting at the same time".
+      const streamName = 'ITEST_WQ_REPLICAS';
+      const group = 'itest-wq-replicas';
+      const total = 20;
+      const producer = makeStreamAdapter(streamName, ['wqreplicas.>']);
+      await producer.connect();
+
+      const received: string[] = [];
+      const replica = async (): Promise<void> => {
+        const created = makeStreamAdapter(streamName, ['wqreplicas.>']);
+        await created.connect();
+        await created.subscribe<{ id: string }>('wqreplicas.run', async (message) => {
+          received.push(message.data.id);
+          await message.ack();
+        }, { group, ackMode: 'manual' });
+      };
+
+      await replica();
+      await replica();
+
+      for (let n = 0; n < total; n += 1) {
+        await producer.publish('wqreplicas.run', { id: `task-${n}` });
+      }
+
+      await pollUntil(() => received.length >= total);
+      await pollUntil(async () => await storedMessages(producer, streamName) === 0);
+
+      expect(received).toHaveLength(total);
+      expect(new Set(received).size).toBe(total);
+    }, CASE_TIMEOUT_MS);
+
+    it('refuses a second group on the same subject with the one-consumer-per-subject message', async () => {
+      const streamName = 'ITEST_WQ_UNIQUE';
+      const worker = makeStreamAdapter(streamName, ['wqunique.>']);
+      await worker.connect();
+      await worker.subscribe('wqunique.run', async () => undefined, { group: 'itest-wq-first' });
+
+      const attempt = async (on: JetStreamQueueAdapter, group: string): Promise<Error> => {
+        try {
+          await on.subscribe('wqunique.run', async () => undefined, { group });
+        } catch (error) {
+          return error as Error;
+        }
+
+        throw new Error(`a second group "${group}" was accepted on a workqueue subject`);
+      };
+
+      // In the same application: the message names the subscription that holds the subject.
+      const inProcess = await attempt(worker, 'itest-wq-second');
+      expect(inProcess.message).toContain('one consumer per subject');
+      expect(inProcess.message).toContain('"wqunique.run" (group "itest-wq-first")');
+      expect(inProcess.message).toContain('group "itest-wq-second"');
+      expect((inProcess.cause as AnyRecord).code).toBe(10_100);
+
+      // From another process: nothing local overlaps, so the message points at a stale durable.
+      const elsewhere = makeStreamAdapter(streamName, ['wqunique.>']);
+      await elsewhere.connect();
+      const outOfProcess = await attempt(elsewhere, 'itest-wq-third');
+      expect(outOfProcess.message).toContain('one consumer per subject');
+      expect(outOfProcess.message).toContain('deleteDurableConsumer');
+    }, CASE_TIMEOUT_MS);
+
+    it('names the missing declaration when the server holds a workqueue the application does not declare', async () => {
+      const streamName = 'ITEST_WQ_UNDECLARED';
+      const owner = makeStreamAdapter(streamName, ['wqundeclared.>']);
+      await owner.connect();
+
+      // Declared for resolution only, with no retention: the policy falls back to `new`.
+      const guest = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects: ['wqundeclared.>'], manage: false }],
+      });
+      opened.push(guest);
+      await guest.connect();
+
+      let thrown: Error | undefined;
+      try {
+        await guest.subscribe('wqundeclared.run', async () => undefined, { group: 'itest-wq-guest' });
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown!.message).toContain("retention: 'workqueue'");
+      expect(thrown!.message).toContain(`"${streamName}"`);
+      expect((thrown!.cause as AnyRecord).code).toBe(10_101);
+    }, CASE_TIMEOUT_MS);
+
+    it('still starts a new durable on a limits stream at the subscription, not at the backlog', async () => {
+      // The other half of the rule: `all` is for workqueues only. A limits stream keeps what
+      // was published before the durable existed, and a new durable must not replay it.
+      const streamName = 'ITEST_WQ_LIMITS';
+      const producer = makeStreamAdapter(streamName, ['wqlimits.>'], 'limits');
+      await producer.connect();
+
+      await producer.publish('wqlimits.run', { id: 'before-subscribe' });
+
+      const worker = makeStreamAdapter(streamName, ['wqlimits.>'], 'limits');
+      await worker.connect();
+
+      const received: string[] = [];
+      await worker.subscribe<{ id: string }>('wqlimits.run', async (message) => {
+        received.push(message.data.id);
+        await message.ack();
+      }, { group: 'itest-wq-limits', ackMode: 'manual' });
+
+      await producer.publish('wqlimits.run', { id: 'after-subscribe' });
+
+      // Delivery is in stream order, so a replayed 'before-subscribe' would arrive first.
+      await pollUntil(() => received.includes('after-subscribe'));
+      expect(received).toEqual(['after-subscribe']);
+      // And a limits stream keeps both after the ack.
+      expect(await storedMessages(producer, streamName)).toBe(2);
+    }, CASE_TIMEOUT_MS);
+  });
+
+  describe('replicas booting at the same time', () => {
+    // The race is timing-dependent: two released 0.8.1 adapters lost it in about 3 rounds of 10.
+    // Every round runs on a stream no earlier round touched, so each one starts from absence and
+    // both replicas miss the probe before either creates.
+    const ROUNDS = 10;
+    const REPLICAS = 2;
+    const opened: JetStreamQueueAdapter[] = [];
+
+    afterEach(async () => {
+      for (const created of opened.splice(0)) {
+        if (created.isConnected()) {
+          await created.disconnect();
+        }
+      }
+    });
+
+    async function consumerNames(observer: JetStreamQueueAdapter, streamName: string): Promise<string[]> {
+      const names: string[] = [];
+      for await (const info of await (asAny(observer).jsm as AnyRecord).consumers.list(streamName)) {
+        names.push(info.name);
+      }
+
+      return names;
+    }
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      it(`starts every replica of one (group, pattern) on a ${retention} stream, round after round`, async () => {
+        const group = `itest-race-${retention}`;
+        const rejections: string[] = [];
+
+        for (let round = 0; round < ROUNDS; round += 1) {
+          const streamName = `ITEST_RACE_${retention.toUpperCase()}_${round}`;
+          const pattern = `race${retention}${round}.run`;
+          const replicas = Array.from({ length: REPLICAS }, () => {
+            const created = new JetStreamQueueAdapter({
+              servers: nats.url,
+              streams: [{ name: streamName, subjects: [`race${retention}${round}.>`], retention }],
+            });
+            opened.push(created);
+
+            return created;
+          });
+
+          // Connected at once as well: a first rollout finds no stream either, and the stream
+          // create races the same way, refused with 10058 "stream name already in use".
+          await Promise.all(replicas.map(async (replica) => await replica.connect()));
+
+          const results = await Promise.allSettled(replicas.map(async (replica) =>
+            await replica.subscribe(pattern, async () => undefined, { group })));
+
+          for (const result of results) {
+            if (result.status === 'rejected') {
+              rejections.push(`round ${round}: ${(result.reason as Error).message}`);
+            }
+          }
+
+          // One durable, shared by both: the replica that lost the create adopted its peer's consumer.
+          expect(await consumerNames(replicas[0], streamName)).toEqual([durableNameFor(group, pattern)]);
+
+          for (const replica of replicas) {
+            await replica.disconnect();
+          }
+        }
+
+        expect(rejections).toEqual([]);
+      }, CASE_TIMEOUT_MS);
+    }
+  });
 });

@@ -476,9 +476,9 @@ export function getTimeoutMetadata(target: object): TimeoutMetadata[] {
  * Get guards for a message handler method.
  *
  * Merges the shared `@UseGuards` list — the same `onebun:guards` key HTTP routes and WebSocket
- * handlers read — with the queue-specific `@UseMessageGuards` list, shared first. Before this
- * merge, `@UseGuards` on a `@Subscribe` handler wrote a key nothing on the queue path ever
- * read: no type error, no warning, and the consumer ran completely unguarded.
+ * handlers read — with the queue-specific `@UseMessageGuards` list, shared first. So
+ * `@UseGuards` on a `@Subscribe` handler guards the consumer, rather than writing a key nothing
+ * on the queue path reads and leaving the consumer unguarded with no type error and no warning.
  *
  * @param target - Consumer class (constructor), NOT its prototype
  * @param propertyKey - Handler method name

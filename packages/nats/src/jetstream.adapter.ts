@@ -53,13 +53,14 @@ import {
 import {
   CONFIG_CYCLE_WINDOW_MS,
   decideStamp,
+  hasApiErrorCode,
   hashReconcileConfig,
   isNotFoundError,
   stampMetadata,
   type StampMetadata,
 } from './config-stamp';
 import { NatsClient } from './nats-client';
-import { toNatsSubject } from './subject';
+import { toNatsSubject, widensOnTranslation } from './subject';
 import {
   natsSubjectCovers,
   natsSubjectsOverlap,
@@ -87,6 +88,32 @@ const RELEASE_TIMEOUT_MS = 5_000;
  * prevent the duplicate it exists to prevent.
  */
 const HANDLER_DRAIN_TIMEOUT_MS = 30_000;
+/**
+ * nats-server's rejection of a consumer on a workqueue stream whose `deliver_policy` is not `all`.
+ * Neither this code nor the next is named by the client's `JetStreamApiCodes`.
+ */
+const CONSUMER_WQ_NOT_DELIVER_ALL_CODE = 10101;
+/**
+ * nats-server's rejection of a consumer on a workqueue stream whose filter equals or overlaps the
+ * filter of any other consumer on that stream — checked stream-wide, on create and on update.
+ */
+const CONSUMER_WQ_NOT_UNIQUE_CODE = 10100;
+/**
+ * nats-server's refusal of a create whose consumer name is taken by a consumer with a different
+ * configuration. The client's `JetStreamApiCodes` does not name it either.
+ *
+ * Between replicas of one `(group, pattern)` it means a peer created the consumer first: both probed
+ * before either created, and the two create payloads never match, because each stamps its own
+ * `reconciled-at`. An identical create would have been idempotent; this one is a conflict.
+ */
+const CONSUMER_ALREADY_EXISTS_CODE = 10148;
+/**
+ * The same refusal one level up: "stream name already in use with a different configuration".
+ * Replicas that declare one stream the server does not have yet race on its create exactly as
+ * they race on a consumer's, and for the same reason — the stamps differ. `JetStreamApiCodes`
+ * does not name it either.
+ */
+const STREAM_NAME_IN_USE_CODE = 10058;
 
 /** A value that may appear in a hashed stream subset. */
 type HashableStreamValue = string | number | readonly string[] | undefined;
@@ -135,6 +162,9 @@ interface ResolvedConsumerConfig {
  *   `'none'` is the one mode that decides WHETHER the server tracks acknowledgements at
  *   all; it maps to the client's none policy, and `ack_wait`, `max_deliver` and `max_ack_pending`
  *   are then omitted rather than sent, because they govern a redelivery that cannot occur.
+ * - `deliver_policy`: `all` when the resolved stream declares `retention: 'workqueue'` — the only
+ *   policy nats-server accepts there — and `new` for every other retention, so a consumer created
+ *   against a stream that retains messages starts at the subscription instead of replaying it.
  *
  * `ackPolicy` and `deliverPolicy` arrive as parameters so this stays synchronous and needs
  * no access to the dynamically imported client module.
@@ -258,6 +288,88 @@ function validateDeadLetterQueue(queue: string, pattern: string): void {
   }
 }
 
+/**
+ * Why a subscription cannot exist on a workqueue stream, or `undefined` when it can.
+ *
+ * Three shapes, each refused at `subscribe()` because the server would refuse it later or, worse,
+ * accept it and lose tasks:
+ * - no `group`. A workqueue allows one consumer per subject, so the group-less contract — a
+ *   consumer per process, never shared — is impossible there: the second replica is refused, and
+ *   so is a restart within seconds of a crash, while the dead process's consumer still holds the
+ *   subject;
+ * - `ackMode: 'none'`. A workqueue removes a task only when it is acknowledged, and the server
+ *   refuses `ack_policy: none` on it;
+ * - a pattern whose translation widens (`jobs.v{version}` filters `jobs.*`). The consume loop
+ *   acknowledges a delivered message the pattern does not match, and on a workqueue that ack
+ *   deletes the task — silently, and no other consumer could have received it instead.
+ *
+ * Pure, so it runs before any server call; `subscribe()` turns the answer into a `failConsumer`.
+ */
+function workQueueRefusal(
+  pattern: string,
+  filterSubject: string,
+  streamName: string,
+  options: SubscribeOptions | undefined,
+): string | undefined {
+  const where = `"${pattern}" resolves to stream "${streamName}", which this application declares with retention: 'workqueue'`;
+
+  if (!options?.group) {
+    return `Cannot subscribe without a group: ${where}. A workqueue hands each task to exactly one consumer and allows one consumer per subject, so a group-less subscription — a consumer of its own in every process, never shared — cannot exist there: nats-server refuses the second replica, and a restart within seconds of a crash too, while the dead process's consumer still holds the subject. Pass a group. Every replica subscribing the same pattern with the same group shares one durable consumer, and the tasks are split between them.`;
+  }
+
+  if (resolveAckMode(options) === 'none') {
+    return `Cannot subscribe with ackMode 'none': ${where}. A workqueue removes a task only when it is acknowledged, so nats-server requires an explicit acknowledgement policy on it and refuses ack_policy none. Use ackMode 'auto' or 'manual'.`;
+  }
+
+  if (widensOnTranslation(pattern)) {
+    return `Cannot subscribe to a partial-token parameter pattern: ${where}. The parameter covers only part of a token, so the consumer filter "${filterSubject}" is wider than the pattern, and the adapter acknowledges every delivered message the pattern does not match. On a workqueue that acknowledgement deletes the task — silently, and for good, because no other consumer may filter an overlapping subject to receive it instead. Make the parameter a whole token and check its value in the handler, or publish these tasks to a subject of their own.`;
+  }
+
+  return undefined;
+}
+
+/**
+ * The server holds a workqueue stream this application does not declare as one.
+ *
+ * The declaration is the only input the deliver policy is derived from — nothing probes the
+ * server's retention — so the fix is the declaration, and it has to match the owner's exactly.
+ */
+function undeclaredWorkQueueRemedy(streamName: string, declared: StreamDefinition['retention']): string {
+  const declaration = declared === undefined
+    ? 'declares no retention for it, which means \'limits\''
+    : `declares it with retention: '${declared}'`;
+
+  return `Stream "${streamName}" is a workqueue stream on the server, but this application ${declaration}, so the consumer was created with deliver_policy new — and a workqueue accepts only consumers that deliver everything it holds. Declare retention: 'workqueue' on "${streamName}", exactly as the stream's owner declares it, and OneBun creates its consumers there with deliver_policy all.`;
+}
+
+/**
+ * Another consumer already filters an overlapping subject on a workqueue stream.
+ *
+ * `overlapping` lists the subscriptions in THIS adapter that collide, which is the answer when
+ * there are any. When there are none the other consumer lives outside this process, and the likely
+ * owner is a durable an earlier deployment left behind — harmless on a limits stream, blocking here.
+ */
+function workQueueNotUniqueRemedy(
+  streamName: string,
+  pattern: string,
+  filterSubject: string,
+  group: string | undefined,
+  overlapping: readonly JetStreamSubscriptionEntry[],
+): string {
+  const subscriber = `"${pattern}" (${group === undefined ? 'no group' : `group "${group}"`})`;
+  const rule = `Stream "${streamName}" is a workqueue stream, which allows exactly one consumer per subject, and another consumer already filters a subject overlapping "${filterSubject}".`;
+
+  if (overlapping.length > 0) {
+    const others = overlapping
+      .map(entry => `"${entry.pattern}" (${entry.options?.group === undefined ? 'no group' : `group "${entry.options.group}"`})`)
+      .join(', ');
+
+    return `${rule} In this application that is ${others}, so ${subscriber} cannot consume beside it. Make the patterns disjoint, or receive these subjects through one subscription; a subject several groups must each receive needs a limits or interest stream, because a workqueue cannot fan out.`;
+  }
+
+  return `${rule} No subscription in this application overlaps ${subscriber}, so the other consumer lives elsewhere — most often a durable an earlier deployment left behind when its group was renamed or its pattern changed, otherwise another service consuming the same subject. List them with nats consumer ls ${streamName}. Remove a stale OneBun durable with deleteDurableConsumer(oldPattern, oldGroup) on this adapter, or nats consumer rm ${streamName} <consumer>. On a workqueue that loses no tasks: unacknowledged messages stay in the stream, and the consumer OneBun creates next, with deliver_policy all, receives them.`;
+}
+
 function deadLetterRepublishError(queue: string, pattern: string, cause: unknown): Error {
   return new Error(
     `Failed to republish a message from "${pattern}" to the dead-letter queue "${queue}". `
@@ -354,6 +466,10 @@ function consumerAttemptContext(
   return `OneBun pattern "${pattern}" translated to filter_subject "${filterSubject}" and resolved to stream "${streamName}". This application declares ${describeDeclarations(streams)}.`;
 }
 
+/**
+ * `remedy`, when given, is the rejection-specific advice — the workqueue rules — placed right after
+ * the server's own words, where a reader looks for what to do about them.
+ */
 function addFailureMessage(
   consumerName: string,
   streamName: string,
@@ -361,10 +477,18 @@ function addFailureMessage(
   filterSubject: string,
   streams: ResolvedStream[],
   cause: unknown,
+  remedy?: string,
 ): string {
-  return `Failed to create JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} The underlying rejection is attached as the cause of this error.`;
+  const advice = remedy === undefined ? '' : ` ${remedy}`;
+
+  return `Failed to create JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}.${advice} ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} The underlying rejection is attached as the cause of this error.`;
 }
 
+/**
+ * Without a `remedy` the advice is to delete and recreate the consumer. With one, the remedy replaces
+ * it: a rejection the remedy explains — a workqueue subject another consumer holds — would refuse the
+ * recreated consumer exactly as it refused the update.
+ */
 function updateFailureMessage(
   consumerName: string,
   streamName: string,
@@ -372,8 +496,11 @@ function updateFailureMessage(
   filterSubject: string,
   streams: ResolvedStream[],
   cause: unknown,
+  remedy?: string,
 ): string {
-  return `Failed to update JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}. The underlying rejection is attached as the cause of this error.`;
+  const advice = remedy ?? `Delete it and let OneBun recreate it: nats consumer rm ${streamName} ${consumerName}.`;
+
+  return `Failed to update JetStream consumer "${consumerName}" on stream "${streamName}": ${describeCause(cause)}. ${consumerAttemptContext(pattern, filterSubject, streamName, streams)} ${advice} The underlying rejection is attached as the cause of this error.`;
 }
 
 /**
@@ -878,9 +1005,28 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
       this.emit('onReady');
     } catch (error) {
+      await this.releaseFailedConnect();
       this.emit('onError', error as Error);
       throw error;
     }
+  }
+
+  /**
+   * Close the connection a failed `connect()` opened, before its error reaches the caller.
+   *
+   * `disconnect()` returns early while `connected` is false, and `connected` is set only once the
+   * streams are reconciled. So without this, a failure after the connection opened — a declared
+   * stream the server refuses (`replicas: 3` on a single node, a narrowing or create-only change),
+   * or a server without JetStream — would leave the socket open with nothing able to close it: the
+   * adapter would say it was disconnected, and the process would never exit. Nothing was subscribed
+   * yet, so there is nothing to wait for; bounded all the same, and never thrown, so the connect
+   * error stays the one the caller sees.
+   */
+  private async releaseFailedConnect(): Promise<void> {
+    this.js = null;
+    this.jsm = null;
+    this.jsmPending = null;
+    await awaitBounded(this.client.disconnect(), RELEASE_TIMEOUT_MS);
   }
 
   async disconnect(): Promise<void> {
@@ -999,6 +1145,22 @@ export class JetStreamQueueAdapter implements QueueAdapter {
       validateDeadLetterQueue(options.deadLetter.queue, pattern);
     }
 
+    // Resolved before anything about the consumer is decided: the stream's declared retention
+    // picks the delivery policy and brings the workqueue rules with it. The declaration is the
+    // single input — the constructor already folded `streamDefaults` into it, and nothing probes
+    // the server, which a tenant without STREAM.INFO could not do anyway.
+    const stream = this.resolveDeclaredStream(pattern);
+    const streamName = stream.name;
+    const workQueue = stream.retention === 'workqueue';
+
+    if (workQueue) {
+      const refusal = workQueueRefusal(pattern, filterSubject, streamName, options);
+
+      if (refusal !== undefined) {
+        throw this.failConsumer(refusal);
+      }
+    }
+
     // A durable is identified per (group, pattern), not per group: two subscriptions
     // sharing a group but filtering different subjects are two different consumers, and
     // naming them both after the group made the second silently steal the first's.
@@ -1008,25 +1170,26 @@ export class JetStreamQueueAdapter implements QueueAdapter {
 
     // Acknowledgements are always tracked server-side; `ackMode` only decides whether
     // the adapter acks on the handler's behalf or the handler acks for itself.
-    // deliver_policy is set explicitly: the server default is not part of any contract, and
-    // a durable created before this release would otherwise replay the whole stream once.
     // The ONLY site in the package that selects the none policy: `'none'` is the one mode that turns
     // server-side acknowledgement tracking off entirely.
+    //
+    // deliver_policy is set explicitly, and it is the ONLY site that picks it. `new` everywhere the
+    // stream retains messages: the server default is not part of any contract, and a consumer
+    // created before this release would otherwise replay the whole stream once. `all` on a
+    // workqueue, which refuses anything else — and has nothing to replay, since an acknowledged
+    // task is deleted. It stays creation-only and out of the reconcile hash either way.
     const resolved = resolveConsumerConfig(
       resolveAckMode(options) === 'none' ? jsModule.AckPolicy.None : jsModule.AckPolicy.Explicit,
-      jsModule.DeliverPolicy.New,
+      workQueue ? jsModule.DeliverPolicy.All : jsModule.DeliverPolicy.New,
       options,
       this.options.consumerConfig,
     );
-
-    // Resolve which stream this subject belongs to
-    const streamName = this.resolveStreamForSubject(pattern);
 
     await this.ensureConsumer(
       jsModule,
       streamName,
       consumerName,
-      Boolean(options?.group),
+      options?.group,
       filterSubject,
       resolved,
       pattern,
@@ -1154,17 +1317,25 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * strength of an unclassified error is how a permissions problem turns into a
    * "consumer not found" three lines later.
    *
+   * Replicas of one `(group, pattern)` that boot together all see absence, and all but one create
+   * is refused as "already exists". That refusal re-enters this method once, with
+   * `afterPeerCreate` set, and the late replica reconciles against its peer's consumer the way a
+   * sequential boot would. The flag is what bounds it: a second refusal surfaces, it never loops.
+   *
    * @see docs:api/queue.md
    */
   private async ensureConsumer(
     jsModule: JetStreamModule,
     streamName: string,
     consumerName: string,
-    isDurable: boolean,
+    group: string | undefined,
     filterSubject: string,
     resolved: ResolvedConsumerConfig,
     pattern: string,
+    afterPeerCreate = false,
   ): Promise<void> {
+    // The same predicate `subscribe()` stores on the entry, so the two cannot disagree.
+    const isDurable = Boolean(group);
     const desiredHash = hashReconcileConfig({
       ack_wait: resolved.tracksDelivery ? resolved.ackWait : undefined,
       filter_subject: filterSubject,
@@ -1183,15 +1354,32 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         throw error;
       }
 
-      await this.addConsumer(
+      const created = await this.addConsumer(
         streamName,
         consumerName,
-        isDurable,
+        group,
         filterSubject,
         resolved,
         desiredHash,
         pattern,
+        !afterPeerCreate,
       );
+
+      if (!created) {
+        // A peer created the consumer between this probe and this create. What it wrote goes
+        // through the same checks as any consumer found on the first probe: identity, the ack
+        // policy, then the stamp, which is a noop when the peer runs this same configuration.
+        await this.ensureConsumer(
+          jsModule,
+          streamName,
+          consumerName,
+          group,
+          filterSubject,
+          resolved,
+          pattern,
+          true,
+        );
+      }
 
       return;
     }
@@ -1256,27 +1444,36 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           filterSubject,
           this.resolvedStreams,
           cause,
+          this.workQueueRemedy(cause, streamName, consumerName, pattern, filterSubject, group),
         ),
         cause,
       );
     }
   }
 
-  /** Creates the consumer, stamping the hash that the next boot compares against. */
+  /**
+   * Creates the consumer, stamping the hash that the next boot compares against.
+   *
+   * Resolves `true` once the consumer is created. Resolves `false`, reporting nothing, only when
+   * `yieldToPeer` is set and the server refuses the create as "consumer already exists": a peer
+   * created it after this process probed, and the caller reconciles against the peer's consumer.
+   * Every other rejection, and that one once `yieldToPeer` is spent, fails the subscription.
+   */
   private async addConsumer(
     streamName: string,
     consumerName: string,
-    isDurable: boolean,
+    group: string | undefined,
     filterSubject: string,
     resolved: ResolvedConsumerConfig,
     desiredHash: string,
     pattern: string,
-  ): Promise<void> {
+    yieldToPeer: boolean,
+  ): Promise<boolean> {
     const jsm = await this.getJsm();
 
     try {
       await jsm.consumers.add(streamName, {
-        durable_name: isDurable ? consumerName : undefined,
+        durable_name: group ? consumerName : undefined,
         name: consumerName,
         ack_policy: resolved.ackPolicy,
         deliver_policy: resolved.deliverPolicy,
@@ -1285,6 +1482,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         ...redeliveryConfig(resolved),
       });
     } catch (cause) {
+      // Classified by numeric code, like every other rejection here. Neither `onError` nor the
+      // throw: the replica that lost the create has not failed, it was only second.
+      if (yieldToPeer && hasApiErrorCode(cause, CONSUMER_ALREADY_EXISTS_CODE)) {
+        return false;
+      }
+
       throw this.failConsumer(
         addFailureMessage(
           consumerName,
@@ -1293,10 +1496,53 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           filterSubject,
           this.resolvedStreams,
           cause,
+          this.workQueueRemedy(cause, streamName, consumerName, pattern, filterSubject, group),
         ),
         cause,
       );
     }
+
+    return true;
+  }
+
+  /**
+   * The advice for a rejection that one of nats-server's workqueue rules issued, or `undefined`.
+   *
+   * Classified by numeric API code, never by the description, whose wording differs between server
+   * versions. Two codes, the two that name a fix:
+   * - deliver policy not `all` — the server holds a workqueue this application does not declare as
+   *   one, since a declared one gets `all`;
+   * - consumer filter not unique — another consumer holds the subject. The subscriptions in THIS
+   *   adapter are checked for the culprit locally, with the same overlap predicate stream resolution
+   *   uses; no server call is made, and none is needed to name a collision inside one application.
+   *   That is also the only overlap check there is: a pre-flight rule could not see other processes,
+   *   and the server's answer is deterministic within this one.
+   */
+  private workQueueRemedy(
+    cause: unknown,
+    streamName: string,
+    consumerName: string,
+    pattern: string,
+    filterSubject: string,
+    group: string | undefined,
+  ): string | undefined {
+    if (hasApiErrorCode(cause, CONSUMER_WQ_NOT_DELIVER_ALL_CODE)) {
+      const declared = this.resolvedStreams.find(stream => stream.name === streamName)?.retention;
+
+      return undeclaredWorkQueueRemedy(streamName, declared);
+    }
+
+    if (hasApiErrorCode(cause, CONSUMER_WQ_NOT_UNIQUE_CODE)) {
+      // Replicas of one (group, pattern) share a consumer, so an entry with this consumer's name is
+      // this subscription — or its twin — and never the collision.
+      const overlapping = this.subscriptions.filter(entry => entry.streamName === streamName
+        && entry.consumerName !== consumerName
+        && natsSubjectsOverlap(entry.filterSubject, filterSubject));
+
+      return workQueueNotUniqueRemedy(streamName, pattern, filterSubject, group, overlapping);
+    }
+
+    return undefined;
   }
 
   /**
@@ -1358,11 +1604,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * and must: a delete has to name exactly the stream the subscription bound to, or it cannot
    * decommission what `subscribe()` created.
    *
-   * It used to have a private strict twin, `requireStreamForSubject`, byte-identical except for
-   * the no-match branch — the twin threw, the public one fell back to the first declaration. Two
-   * copies of one predicate, and neither handled ambiguity: both returned whichever candidate
-   * came first. Now that the public resolver refuses instead of guessing, the twin had no reason
-   * to exist, and one implementation cannot drift from itself.
+   * There is no strict twin of the resolver for this path: `resolveStreamForSubject` refuses a
+   * pattern that no declared stream binds, or that more than one does, instead of guessing, so
+   * the one implementation serves both and cannot drift from itself.
    *
    * @param pattern - The subscription pattern the consumer was created for.
    * @param group - The `group` the subscription declared.
@@ -1456,12 +1700,23 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * @see docs:api/queue.md
    */
   resolveStreamForSubject(subject: string): string {
+    return this.resolveDeclaredStream(subject).name;
+  }
+
+  /**
+   * The resolver itself, answering with the whole declaration rather than its name.
+   *
+   * `subscribe()` needs the declaration — its `retention` decides the consumer's deliver policy —
+   * and `resolveStreamForSubject` needs the name. Both go through this one body, so there is still
+   * exactly one resolver and the two answers cannot drift apart.
+   */
+  private resolveDeclaredStream(subject: string): ResolvedStream {
     const natsSubject = toNatsSubject(subject);
 
     const covering = this.matchingStreams(natsSubject, this.natsSubjectCovers);
 
     if (covering.length === 1) {
-      return covering[0].name;
+      return covering[0];
     }
 
     if (covering.length > 1) {
@@ -1471,7 +1726,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     const overlapping = this.matchingStreams(natsSubject, this.natsSubjectsOverlap);
 
     if (overlapping.length === 1) {
-      return overlapping[0].name;
+      return overlapping[0];
     }
 
     if (overlapping.length > 1) {
@@ -1551,8 +1806,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    *
    * An undeclared key must be absent, never present-and-undefined: the client merges an
    * update with a shallow `Object.assign`, so `max_msgs: undefined` overwrites whatever the
-   * server had. That is how a stream pre-provisioned with limits used to be wiped on every
-   * connect. The `retention`/`storage`/`num_replicas` fallbacks are create-only — `update`
+   * server had, and would wipe the limits of a pre-provisioned stream on every connect. The
+   * `retention`/`storage`/`num_replicas` fallbacks are create-only — `update`
    * cannot change the first two, and applying a default on update would rewrite a value the
    * application never asked about.
    */
@@ -1614,9 +1869,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * divergence guard runs next, for the same reason the consumer path checks its ack policy
    * before its hash: a matching hash must never mask a field that cannot be updated.
    *
+   * A create refused because a peer created the stream first re-enters once with
+   * `afterPeerCreate` set, exactly as `ensureConsumer()` does, and a second refusal surfaces.
+   *
    * @see docs:api/queue.md
    */
-  private async ensureStream(stream: ResolvedStream): Promise<void> {
+  private async ensureStream(stream: ResolvedStream, afterPeerCreate = false): Promise<void> {
     const jsModule = await getJetStreamModule();
     const desired = this.buildStreamConfig(stream, false);
     const desiredHash = hashReconcileConfig(this.hashableStreamSubset(desired));
@@ -1632,7 +1890,13 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         throw error;
       }
 
-      await this.addStream(stream, desiredHash);
+      const created = await this.addStream(stream, desiredHash, !afterPeerCreate);
+
+      if (!created) {
+        // The peer's stream meets the same guards as one found on the first probe: coverage,
+        // the create-only fields, then the stamp.
+        await this.ensureStream(stream, true);
+      }
 
       return;
     }
@@ -1675,8 +1939,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     }
   }
 
-  /** Creates the stream, stamping the hash the next connect compares against. */
-  private async addStream(stream: ResolvedStream, desiredHash: string): Promise<void> {
+  /**
+   * Creates the stream, stamping the hash the next connect compares against.
+   *
+   * Resolves `false`, reporting nothing, only when `yieldToPeer` is set and the server refuses the
+   * create because the name is in use: a peer created the stream after this process probed. The
+   * same contract as `addConsumer()`.
+   */
+  private async addStream(stream: ResolvedStream, desiredHash: string, yieldToPeer: boolean): Promise<boolean> {
     const jsm = await this.getJsm();
 
     try {
@@ -1688,8 +1958,14 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         metadata: stampMetadata(undefined, desiredHash),
       });
     } catch (cause) {
+      if (yieldToPeer && hasApiErrorCode(cause, STREAM_NAME_IN_USE_CODE)) {
+        return false;
+      }
+
       throw this.failStream(streamWriteFailureMessage(stream.name, 'create', cause), cause);
     }
+
+    return true;
   }
 
   /** Builds a stream error, emitting it before it is thrown. */
@@ -1911,7 +2187,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * Routed through `ensureConsumer()` rather than a second `consumers.add`, so the ack
    * policy, delivery policy, naming and consumerConfig precedence are decided in exactly one
    * place. A re-creation that re-derived them could differ from the original — losing
-   * `deliver_policy` alone would replay the entire retained stream.
+   * `deliver_policy: new` would replay the entire retained stream, and losing `all` on a
+   * workqueue would be refused outright. `entry.resolved` carries whichever the stream's
+   * declared retention selected at subscribe time.
    */
   private async recreateConsumer(entry: JetStreamSubscriptionEntry): Promise<void> {
     try {
@@ -1921,7 +2199,7 @@ export class JetStreamQueueAdapter implements QueueAdapter {
         jsModule,
         entry.streamName,
         entry.consumerName,
-        entry.durable,
+        entry.options?.group,
         entry.filterSubject,
         entry.resolved,
         entry.pattern,
@@ -2018,6 +2296,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           // does not match is not the handler's to acknowledge, and under explicit acks
           // an unacked stray holds a max_ack_pending slot and redelivers until
           // max_deliver. Enough of them wedge the consumer permanently.
+          // On a workqueue stream this ack DELETES the message. That is why subscribe()
+          // refuses there every pattern whose filter is wider than the pattern itself
+          // (`widensOnTranslation`): a whole-token pattern produces no strays to delete.
           msg.ack();
           continue;
         }

@@ -120,9 +120,11 @@ Default mode. Clients connect to the gateway path (e.g. `ws://host:port/ws`). Me
 - **Client → Server**: `{ "event": "eventName", "data": payload, "ack"?: number }`
 - **Server → Client**: same shape; `ack` used for request-response.
 
-### Typed client (native)
+### Client from a definition (native)
 
-Use `createWsClient` with `protocol: 'native'` (or omit; it is the default). Connect to the gateway path.
+Use `createWsClient` with a definition from `createWsServiceDefinition` and `protocol: 'native'` (or
+omit it; it is the default). Connect to the gateway path. Gateways are reached by class name; event
+names and payloads are not checked, see [What the WebSocket clients check](#ws-client-typing).
 
 ```typescript
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
@@ -143,7 +145,7 @@ client.disconnect();
 
 ### Standalone client (no definition)
 
-When you do not want to depend on backend modules (e.g. frontend in a monorepo), use `createNativeWsClient`. Same message format and API (emit, send, on, off), but no gateway proxies and no `createWsServiceDefinition`.
+When you do not want to import the backend module (a script, a test, another service), use `createNativeWsClient`. Same message format and API (emit, send, on, off), but no gateway proxies and no `createWsServiceDefinition`. It runs in Bun, not in a browser: see [Browser clients](#browser-clients).
 
 ```typescript
 import { createNativeWsClient } from '@onebun/core';
@@ -169,6 +171,108 @@ client.send('typing', {});
 
 client.disconnect();
 ```
+
+### What the WebSocket clients check {#ws-client-typing}
+
+Neither client type-checks events. `WsGatewayClient` (`client.AppGateway`) and `NativeWsClient` take
+the event name as a `string` and the payload as `unknown`, and nothing ties either to the gateway's
+handlers:
+
+- The type argument of `emit<T>()` and `on<T>()` is an assertion about the payload. Without one, the
+  payload is `unknown`.
+- What `emit()` resolves depends on the protocol. Over the native protocol it is the `data` of the
+  handler's `{ event, data }` reply; over Socket.IO it is the whole `{ event, data }`. The same call
+  therefore needs a different type argument: `emit<PongPayload>('ping', {})` natively,
+  `emit<{ event: string; data: PongPayload }>('ping', {})` over Socket.IO.
+- A renamed or misspelled event compiles. An `emit` that no handler answers rejects with
+  `Request timeout` after `timeout` (default 5000 ms). An `on` for it never fires.
+- The definition (`WsServiceDefinition`) gives `createWsClient` its gateway names, looked up at run
+  time. The client's type, `TypedWsClient`, is a string index despite its name: any name compiles,
+  and a name the definition lacks reads as `undefined`, so `client.AppGatewy.emit(...)` throws a
+  `TypeError`.
+
+```typescript
+import {
+  BaseWebSocketGateway,
+  createWsClient,
+  createWsServiceDefinition,
+  Module,
+  OnMessage,
+  WebSocketGateway,
+} from '@onebun/core';
+
+// The server's gateway, running in an application that listens on port 3000
+@WebSocketGateway({ path: '/ws' })
+class AppGateway extends BaseWebSocketGateway {
+  @OnMessage('ping')
+  ping() {
+    return { event: 'pong', data: { at: Date.now() } };
+  }
+}
+
+@Module({ controllers: [AppGateway] })
+class AppModule {}
+
+// Declared by the client: nothing derives it from `ping()` above
+interface PongPayload {
+  at: number;
+}
+
+const client = createWsClient(createWsServiceDefinition(AppModule), {
+  url: 'ws://localhost:3000/ws',
+});
+await client.connect();
+
+// The type argument is what you expect the handler to reply with; nothing checks it
+const reply = await client.AppGateway.emit<PongPayload>('ping', {});
+console.log(reply.at);
+
+// Compiles, and rejects with `Request timeout`: no handler answers 'pnig'
+await client.AppGateway.emit('pnig', {});
+
+// Compiles, and throws a TypeError: the definition has no `AppGatewy`, so it reads as `undefined`
+client.AppGatewy.emit('ping', {});
+```
+
+### Browser clients {#browser-clients}
+
+`createNativeWsClient` and `createWsClient` cannot currently be bundled for the browser from
+`@onebun/core`. The package root also exports the server, and a browser build stops on the Node
+builtins that the metrics dependency requires:
+`Browser build cannot require() Node.js builtin: "cluster"`, then the same for `"v8"`. Use these
+clients from Bun: other services, tests, scripts.
+
+In a browser, use the built-in `WebSocket` with the native message format, or enable Socket.IO and
+use `socket.io-client` ([Using socket.io-client](#using-socket-io-client)). A browser cannot set an
+`Authorization` header on a WebSocket, so pass the token as `?token=`:
+
+```typescript
+const socket = new WebSocket('ws://localhost:3000/ws?token=user-jwt');
+
+socket.addEventListener('open', () => {
+  // `ack` asks the server to send the handler's reply back with the same id
+  socket.send(JSON.stringify({ event: 'ping', data: {}, ack: 1 }));
+});
+
+socket.addEventListener('message', (message) => {
+  const { event, data, ack } = JSON.parse(message.data);
+  console.log(event, data, ack); // ack is 1 on the reply to the message above
+});
+```
+
+<llm-only>
+
+- Do not recommend `createNativeWsClient` or `createWsClient` for a frontend bundle. `import { … }
+  from '@onebun/core'` pulls the whole server graph (prom-client, envs, trace), and `bun build
+  --target browser` fails on `cluster` and `v8`. That holds for a frontend in a monorepo too.
+- The WebSocket clients are not type-checked against the gateway. The client is not generated from
+  the gateway decorators, and a changed server event does not break the client's build:
+  `createWsClient` reads gateway names at run time, and event names and payloads are untyped.
+- All gateway clients of one `createWsClient` share its single connection to `url`. The server
+  chooses the gateway from that connection (its path, or the Socket.IO namespace), not from the name
+  used on the client.
+
+</llm-only>
 
 ## Socket.IO
 
@@ -209,9 +313,11 @@ socket.emit('ping', {}, (ack) => console.log('Pong', ack));
 socket.disconnect();
 ```
 
-### Typed client (Socket.IO)
+### Client from a definition (Socket.IO) {#client-from-a-definition-socket-io}
 
-Use `createWsClient` with `protocol: 'socketio'` and a URL that includes the Socket.IO path.
+Use `createWsClient` with `protocol: 'socketio'` and a URL that includes the Socket.IO path. The API
+is the native client's, with one difference: `emit()` resolves the handler's whole
+`{ event, data }` reply, not only its `data` (see [What the WebSocket clients check](#ws-client-typing)).
 
 ```typescript
 const client = createWsClient(definition, {
@@ -259,7 +365,7 @@ An upgrade goes to the gateway whose declared `path` covers the request most spe
 `/chat` serves `/chat` and `/chat/room1`, and does NOT serve `/chatterbox`.
 
 The default path — `@WebSocketGateway()` with no options — is `/`, and `/` covers every path. An
-application that declares no path keeps accepting clients on whatever URL they connect to.
+application that declares no path accepts clients on whatever URL they connect to.
 
 Two gateways declared at the same path are told apart by `namespace`; a client that states none
 is bound to the first and a warning names the gateway that took it.
@@ -287,13 +393,13 @@ With the Redis storage adapter, a remote event reaches the gateway that publishe
 other: the published payload carries the publishing gateway's key, exactly as a stored client
 record does.
 
-A payload or a record that carries NO key — written by an instance running a build from before
-the key existed — is accepted only where it cannot be ambiguous: an application that registered
-exactly one gateway. There is nothing for it to be confused with there, so a rolling deploy keeps
-working. With more than one gateway it is refused and the receiving gateway says so once:
-delivering it would reach clients of a gateway that did not publish it, which is the thing the
-key exists to prevent. This is the same rule the upgrade path already applies — a connection
-whose gateway cannot be established is refused rather than guessed at.
+Payloads and records carry the key since 0.7.0. One that carries NO key — written by an instance
+running an older build — is accepted only where it cannot be ambiguous: an application that
+registered exactly one gateway. There is nothing for it to be confused with there, so a rolling
+deploy keeps working. With more than one gateway it is refused and the receiving gateway says so
+once: delivering it would reach clients of a gateway that did not publish it, which is the thing
+the key exists to prevent. This is the same rule the upgrade path applies — a connection whose
+gateway cannot be established is refused rather than guessed at.
 
 For a room fan-out through Bun's native pub/sub — one call, fan-out in the runtime rather than
 a send per socket — use `publishToRoom(room, event, data)`. It addresses a topic scoped to this
@@ -302,9 +408,9 @@ gateway, so a room name used by two gateways does not collide.
 ::: warning
 `getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are a process-wide
 namespace and sockets are subscribed to the raw room name, so a message published that way
-reaches any socket subscribed to that topic regardless of which gateway admitted it. That is
-unchanged on purpose — existing `publish('lobby', …)` calls keep working exactly as they did.
-Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
+reaches any socket subscribed to that topic regardless of which gateway admitted it. That is on
+purpose: `publish('lobby', …)` addresses the raw topic `lobby`, whatever gateway its subscribers
+belong to. Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
 :::
 
 `namespace` distinguishes two gateways that would otherwise share a path. A client selects one by
@@ -339,9 +445,8 @@ transport stays open, so the client may name another namespace.
 :::
 
 Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
-gateway's `authenticate` hook runs for it. It did not before: no gateway was resolved on the
-Socket.IO branch, so the hook was skipped. A hook that returns `false` will now refuse a
-Socket.IO connection that previously succeeded.
+gateway's `authenticate` hook runs for it, exactly as for a native client: a hook that returns
+`false` refuses the Socket.IO connection.
 
 ### Authentication
 
@@ -371,8 +476,8 @@ Three outcomes, because a gateway usually needs all of them:
 
 The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, headers, the peer address. A hook that throws refuses the upgrade.
 
-::: warning Upgrading from 0.4.4 or earlier
-`WsAuthGuard` could never pass: the framework parsed the token and then marked every client `authenticated: false`, and nothing anywhere set it to `true`. A handler guarded with it was unreachable for every client. If you worked around that by setting `client.auth.authenticated` in an `@OnConnect` handler, that still works — `authenticate` is the supported way to do it now.
+::: tip Setting `client.auth` in `@OnConnect`
+Without `authenticate`, the framework parses the token into `client.auth` as `{ authenticated: false, token }`, and nothing else sets `authenticated` to `true`. Setting `client.auth.authenticated` yourself in an `@OnConnect` handler also lets the client past `WsAuthGuard`, but `authenticate` is the supported way to do it.
 :::
 
 ## Event decorators
@@ -516,7 +621,7 @@ Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissio
 
 `WsAuthGuard` and `WsPermissionGuard` read what the gateway's [`authenticate`](#authentication) hook attached to the client. Without that hook no client is authenticated and no client has permissions, so both deny everyone — the guards check an identity, they do not establish one.
 
-Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically. Before 0.4.5 a guard written above the handler decorator was silently discarded and the handler ran unguarded.
+Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically.
 
 ## Interceptors
 
@@ -562,9 +667,8 @@ application's own so that `prefix` applies.
 
 ::: warning
 `type: 'redis'` makes Redis a startup dependency: a connection that cannot be opened fails
-`start()` rather than falling back to memory. Falling back is what the option did for its whole
-life before this — it was read by no code at all, so an application configured for Redis ran in
-memory and said nothing.
+`start()` rather than falling back to memory, so an application configured for Redis never runs
+in memory without saying so.
 :::
 
 Shutdown removes the clients THIS instance was serving. It does not clear the namespace, so a

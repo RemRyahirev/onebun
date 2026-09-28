@@ -17,17 +17,23 @@ import {
   Runtime,
 } from 'effect';
 
+import { runPinnedRequest } from './connect-address-fixtures/fixture-protocol';
+
 import {
   calculateRetryDelay,
   createHttpClient,
   getTransportFailureKind,
   isErrorResponse,
+  makeSingleReplicaNonceStore,
   resolveRetryConfig,
   DEFAULT_RETRY_CONFIG,
   DEFAULT_RETRY_DELAY,
   HttpStatusCode,
+  type OneBunAuthResult,
+  type RequestMetricsData,
   setTraceContextProvider,
   TRANSPORT_FAILURE_CODE,
+  verifyOneBunRequest,
 } from './';
 
 /** Counts the requests a client really sent, so retry claims can be checked end to end. */
@@ -57,11 +63,62 @@ const jsonStatus = (code: number, body: unknown = { ok: code < 400 }): Response 
     headers: new Headers([['content-type', 'application/json']]),
   });
 
+/**
+ * Answers every request with `status` and one chunk of body, then stalls; records the paths it
+ * was asked for and the ones whose body stream the client cancelled.
+ */
+function startStallingServer(
+  status = 200,
+): { baseUrl: string; paths: string[]; cancelled: string[]; stop(): void } {
+  const paths: string[] = [];
+  const cancelled: string[] = [];
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const path = new URL(req.url).pathname;
+      paths.push(path);
+
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('{"rows":['));
+          },
+          cancel() {
+            cancelled.push(path);
+          },
+        }),
+        { status, headers: new Headers([['content-type', 'application/json']]) },
+      );
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    paths,
+    cancelled,
+    stop: () => server.stop(true),
+  };
+}
+
+/** Wait until `condition` holds or `withinMs` passes; the caller asserts on what it observed. */
+async function waitFor(condition: () => boolean, withinMs: number): Promise<void> {
+  const deadline = performance.now() + withinMs;
+  while (!condition() && performance.now() < deadline) {
+    await Bun.sleep(5);
+  }
+}
+
 interface EchoedCall {
   method: string;
   path: string;
   body: string;
   headers: Headers;
+}
+
+/** The two callbacks of a fixture's body stream that produce its chunks. */
+interface BodySource {
+  start?(controller: ReadableStreamDefaultController<Uint8Array>): void | Promise<void>;
+  pull?(controller: ReadableStreamDefaultController<Uint8Array>): void | Promise<void>;
 }
 
 /** Records what the client really put on the wire, so call-shape claims can be checked. */
@@ -227,7 +284,8 @@ describe('Requests API Documentation Examples', () => {
      * @source docs:api/requests.md#get
      */
     it('should read an object carrying headers as config, not as query', async () => {
-      // From docs: "an object carrying `headers`, `timeout`, `auth` or `method` is read as config"
+      // From docs: "an object carrying `method`, `headers`, `timeout`, `auth`, `tracing` or `metrics`
+      // is read as per-request config"
       const server = startEchoServer();
 
       try {
@@ -257,6 +315,96 @@ describe('Requests API Documentation Examples', () => {
         await client.get('/users', { page: 1, limit: 10 }, { timeout: 5000 });
 
         expect(server.calls[0]?.path).toBe('/users?page=1&limit=10');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should honour a config given third when the query is undefined', async () => {
+      // From docs: "a third argument makes the second one the query, even `undefined`"
+      const server = startCountingServer(() => jsonStatus(503));
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 2, delay: 1 } });
+
+        await expect(client.get('/users', undefined, { retries: { max: 0 } })).rejects.toThrow(/"code":503/);
+
+        // One arrival: the per-request `retries: { max: 0 }` reached the request. Dropped, the
+        // client's own `max: 2` would have sent three.
+        expect(server.methods).toEqual(['GET']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should resolve delete, head and options by the same rule as get', async () => {
+      // From docs: "`delete`, `head` and `options` take the same three arguments and resolve
+      // them by the same rule"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.delete('/d', { tracing: false });
+        await client.head('/h', { metrics: false });
+        await client.options('/o', { tracing: false });
+        await client.delete('/d', { reason: 'expired' });
+
+        expect(server.calls.map((call) => `${call.method} ${call.path}`)).toEqual([
+          'DELETE /d',
+          'HEAD /h',
+          'OPTIONS /o',
+          'DELETE /d?reason=expired',
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should send a key outside the six config names as query data', async () => {
+      // From docs: "`client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        await client.get('/login', { redirect: '/home' });
+
+        expect(server.calls[0]?.path).toBe('/login?redirect=%2Fhome');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#get
+     */
+    it('should keep a record with a config name query data only as the second of three arguments', async () => {
+      // From docs (warning): "A record someone else wrote goes second of three"
+      const server = startEchoServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        const query = { q: 'shoes', tracing: 'x', url: '/admin' };
+
+        await client.get('/search', query);
+        await client.get('/search', query, undefined);
+        await client.get('/search', query, {});
+
+        expect(server.calls.map((call) => call.path)).toEqual([
+          '/admin',
+          '/admin',
+          '/search?q=shoes&tracing=x&url=%2Fadmin',
+        ]);
       } finally {
         server.stop();
       }
@@ -498,27 +646,1287 @@ describe('Requests API Documentation Examples', () => {
         server.stop();
       }
     });
+
+    /**
+     * @source docs:api/requests.md#success-response
+     */
+    it('should carry the upstream headers on a success, out of reach of serialization', async () => {
+      // From docs: "`headers` holds the upstream's response headers on every success the client
+      // produced ... `headers` is **not enumerable**. `JSON.stringify`, `Object.keys`, a spread
+      // (`{ ...response }`) and `structuredClone` skip it."
+      const report = JSON.stringify({ pages: 3 });
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          if (req.method === 'POST') {
+            return Response.json({ id: 42 }, { status: 201, headers: { Location: '/files/42' } });
+          }
+
+          // Answers HEAD as well: Bun drops the body and keeps the etag and the content-length
+          return new Response(report, {
+            headers: { 'content-type': 'application/json', ETag: '"v7"', 'Set-Cookie': 'session=upstream' },
+          });
+        },
+      });
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, retries: { max: 0 } });
+
+        const head = await client.head('/files/report.pdf');
+
+        expect(head.success).toBe(true);
+        if (head.success) {
+          expect(head.headers?.etag).toBe('"v7"');
+          expect(head.headers?.['content-length']).toBe(String(report.length));
+          // Present, and invisible to every serialization
+          expect('headers' in head).toBe(true);
+          expect(Object.keys(head)).not.toContain('headers');
+          expect(JSON.stringify(head)).not.toContain('session=upstream');
+          expect({ ...head }).not.toHaveProperty('headers');
+          expect(structuredClone(head)).not.toHaveProperty('headers');
+        }
+
+        const created = await client.post('/files', { name: 'report.pdf' });
+
+        expect(created).toMatchObject({ success: true, statusCode: 201 });
+        if (created.success) {
+          const location = created.headers?.location;
+          expect(location).toBe('/files/42');
+        }
+      } finally {
+        server.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#responses-without-a-body
+     */
+    it('should resolve HEAD, 204 and 304 answers without reading a body', async () => {
+      // From docs: "An answer to `HEAD`, and every `204 No Content` and `304 Not Modified`, has no
+      // content by definition ... A `304` resolves as a success"
+      const etag = '"v1"';
+      /* eslint-disable @typescript-eslint/naming-convention */
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          if (req.method === 'DELETE') {
+            // A 204 that keeps its JSON content type — it used to reach the JSON parser
+            return new Response(null, { status: 204, headers: { 'content-type': 'application/json' } });
+          }
+          if (req.headers.get('if-none-match') === etag) {
+            return new Response(null, { status: 304, headers: { etag, 'content-type': 'application/json' } });
+          }
+
+          // Answers HEAD as well: Bun drops the body and keeps `content-type: application/json`
+          return Response.json({ id: '123' }, { headers: { etag } });
+        },
+      });
+      /* eslint-enable @typescript-eslint/naming-convention */
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, retries: { max: 0 } });
+
+        const head = await client.head('/users/123');
+        expect(head).toMatchObject({ success: true, statusCode: 200 });
+        expect(head.success && head.result).toBeUndefined();
+
+        const removed = await client.delete('/users/123');
+        expect(removed).toMatchObject({ success: true, statusCode: 204 });
+        expect(removed.success && removed.result).toBeUndefined();
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const response = await client.get<{ id: string }>('/users/123', undefined, { headers: { 'If-None-Match': etag } });
+        expect(response).toMatchObject({ success: true, statusCode: 304 });
+        expect(response.success && response.result).toBeUndefined();
+
+        // A request without the condition still gets, and parses, the body
+        const fresh = await client.get<{ id: string }>('/users/123');
+        expect(fresh.success && fresh.result).toEqual({ id: '123' });
+      } finally {
+        server.stop(true);
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should report a body that outlives the timeout as TIMEOUT_ERROR with the status that arrived', async () => {
+      // From docs: "Whichever part it catches, the call fails with TIMEOUT_ERROR and code: 0. When
+      // the headers had already arrived, details.phase is 'body' and details.statusCode is the
+      // status they carried" — and "The upstream sees the connection close when the timeout fires"
+      const server = startStallingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl });
+
+        const outcome = await Effect.runPromise(
+          Effect.either(client.getEffect('/reports/export', { timeout: 100 })),
+        );
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(getTransportFailureKind(outcome.left)).toBe('timeout');
+          expect(outcome.left.error).toBe('TIMEOUT_ERROR');
+          expect(outcome.left.code).toBe(0);
+          expect(outcome.left.details?.phase).toBe('body');
+          expect(outcome.left.details?.statusCode).toBe(200);
+        }
+
+        await waitFor(() => server.cancelled.length > 0, 500);
+        expect(server.cancelled).toEqual(['/reports/export']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should leave a stalled 500 to retryOnTimeout, not to retryOn', async () => {
+      // From docs: "A 500 whose body stalls is therefore a timeout, not a 500: ... retryOnTimeout —
+      // off by default — decides whether it is replayed"
+      const server = startStallingServer(500);
+
+      try {
+        const byDefault = createHttpClient({ baseUrl: server.baseUrl, timeout: 100 });
+        const outcome = await Effect.runPromise(Effect.either(byDefault.getEffect('/reports')));
+
+        expect(server.paths).toEqual(['/reports']);
+        expect(outcome._tag === 'Left' && outcome.left.details?.statusCode).toBe(500);
+
+        server.paths.length = 0;
+        const optedIn = createHttpClient({
+          baseUrl: server.baseUrl,
+          timeout: 100,
+          retries: { max: 1, delay: 1, retryOnTimeout: true },
+        });
+        await Effect.runPromise(Effect.either(optedIn.getEffect('/reports')));
+
+        expect(server.paths).toEqual(['/reports', '/reports']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#timeouts-and-interruption
+     */
+    it('should abort the fetch when the Effect is interrupted', async () => {
+      // From docs: "Aborted after 2 s, although the client's own timeout is 10 s" — scaled down
+      const aborted: number[] = [];
+      const server = Bun.serve({
+        port: 0,
+        fetch(req) {
+          req.signal.addEventListener('abort', () => aborted.push(performance.now()));
+
+          return new Promise<Response>(() => undefined);
+        },
+      });
+
+      try {
+        const client = createHttpClient({ baseUrl: `http://localhost:${server.port}`, timeout: 10000 });
+        const startedAt = performance.now();
+
+        const outcome = await Effect.runPromise(
+          Effect.either(Effect.timeout(client.getEffect('/reports'), '100 millis')),
+        );
+        await waitFor(() => aborted.length > 0, 500);
+
+        // The interruption, not an ErrorResponse
+        expect(outcome._tag === 'Left' && Cause.isTimeoutException(outcome.left)).toBe(true);
+        expect(aborted.length).toBe(1);
+        expect(aborted[0]! - startedAt).toBeLessThan(1000);
+      } finally {
+        server.stop(true);
+      }
+    });
+  });
+
+  describe('Redirects (docs/api/requests.md)', () => {
+    interface Arrival {
+      method: string;
+      path: string;
+      body: string;
+      headers: Headers;
+    }
+
+    /**
+     * `/go/<status>?to=<url>` answers `<status>` with that `Location` (none without `to`), `/loop`
+     * redirects to itself,
+     * `/chain/<n>` redirects `n` times and then answers 201; anything else answers 200.
+     */
+    function startRedirectServer(): { origin: string; port: number; arrivals: Arrival[]; stop(): void } {
+      const arrivals: Arrival[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          arrivals.push({
+            method: req.method, path: url.pathname, body: await req.text(), headers: req.headers, 
+          });
+          const [, route, arg] = url.pathname.split('/');
+
+          if (route === 'go') {
+            const to = url.searchParams.get('to');
+
+            return new Response(null, { status: Number(arg), headers: to === null ? {} : { location: to } });
+          }
+          if (route === 'loop') {
+            return new Response(null, { status: 302, headers: { location: '/loop' } });
+          }
+          if (route === 'chain' && Number(arg) > 0) {
+            return new Response(null, { status: 302, headers: { location: `/chain/${Number(arg) - 1}` } });
+          }
+
+          return Response.json({ at: url.pathname }, { status: route === 'chain' ? 201 : 200 });
+        },
+      });
+
+      return {
+        origin: `http://127.0.0.1:${server.port}`,
+        port: server.port!,
+        arrivals,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#redirects
+     */
+    it('should follow a redirect and change the method the way fetch does', async () => {
+      // From docs: "301 or 302 to a POST → GET, without the body and without Content-Type ...
+      // 307 or 308 → the same method with the same body bytes"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin });
+
+        const moved = await client.post('/go/302?to=%2Ftarget', { n: 1 });
+        const kept = await client.post('/go/307?to=%2Ftarget', { n: 1 });
+        // "Any other method answered 301 or 302 keeps its method and body"
+        await client.put('/go/301?to=%2Ftarget', { n: 1 });
+
+        expect(moved.success && moved.statusCode).toBe(200);
+        expect(kept.success && kept.statusCode).toBe(200);
+        const targets = server.arrivals.filter((arrival) => arrival.path === '/target');
+        expect(targets.map((arrival) => [arrival.method, arrival.body])).toEqual([
+          ['GET', ''],
+          ['POST', '{"n":1}'],
+          ['PUT', '{"n":1}'],
+        ]);
+        expect(targets[0].headers.get('content-type')).toBeNull();
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirects
+     */
+    it('should record the chain once, with the original URL and the final status', async () => {
+      // From docs: "The metrics sink gets one record for the chain, not one per hop, with the
+      // original URL and the final status"
+      const server = startRedirectServer();
+      const records: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, metricsSink: (data) => records.push(data) });
+
+        await client.get('/chain/2');
+
+        expect(server.arrivals).toHaveLength(3);
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({ url: `${server.origin}/chain/2`, statusCode: 201 });
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-headers
+     */
+    it('should take no credential to another origin, and only the safelisted headers', async () => {
+      // From docs: "/v1/files/42 answers 302 to https://cdn.example.net/files/42. The CDN request
+      // carries User-Agent, Accept and the trace headers, never X-Api-Key." — `localhost` is
+      // another origin than `127.0.0.1`, on the same socket.
+      const traceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const spanId = '00f067aa0ba902b7';
+      setTraceContextProvider(() => ({ traceId, spanId }));
+      const server = startRedirectServer();
+
+      try {
+        const api = createHttpClient({
+          baseUrl: server.origin,
+          auth: { type: 'apikey', key: 'X-Api-Key', value: 'secret' },
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'X-Request-Id': 'req-1', 'Accept-Language': 'en' },
+        });
+
+        await api.get('/go/302', { to: `http://localhost:${server.port}/files/42` });
+
+        const [original, cdn] = server.arrivals;
+        expect(original.headers.get('x-api-key')).toBe('secret');
+        expect(cdn.path).toBe('/files/42');
+        expect(cdn.headers.get('x-api-key')).toBeNull();
+        // "credential or not, such as Accept-Language or X-Request-Id"
+        expect(cdn.headers.get('x-request-id')).toBeNull();
+        expect(cdn.headers.get('accept-language')).toBeNull();
+        expect(cdn.headers.get('user-agent')).toBe('OneBun-Requests/1.0');
+        expect(cdn.headers.get('accept')).toBe('application/json');
+        expect(cdn.headers.get('traceparent')).toBe(`00-${traceId}-${spanId}-01`);
+        expect(cdn.headers.get('x-trace-id')).toBe(traceId);
+        expect(cdn.headers.get('x-span-id')).toBe(spanId);
+      } finally {
+        setTraceContextProvider(null);
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-headers
+     */
+    it('should carry every header to the same origin', async () => {
+      // From docs: "A hop to the same origin — same scheme, host and port — carries every header of
+      // the original request"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.origin,
+          auth: { type: 'apikey', key: 'X-Api-Key', value: 'secret' },
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'X-Request-Id': 'req-1' },
+        });
+
+        await client.get('/go/307', { to: `${server.origin}/moved` });
+
+        const [original, moved] = server.arrivals;
+        expect(moved.path).toBe('/moved');
+        expect(Object.fromEntries(moved.headers)).toEqual(Object.fromEntries(original.headers));
+        expect(moved.headers.get('x-api-key')).toBe('secret');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-signing
+     */
+    it('should re-sign a same-origin hop when the auth names an audience, and only then', async () => {
+      // From docs: "/v1/invoices answers 307 to /v2/invoices. The second request carries a signature
+      // over POST /v2/invoices and the same body, with a fresh timestamp and nonce, so billing
+      // verifies it as it verified the first." and "Without an audience a same-origin hop carries
+      // the original signature unchanged, and the callee rejects it with signature-mismatch"
+      const secretKey = 'b'.repeat(40);
+      const run = async (audience: string | undefined) => {
+        const seen: { path: string; body: string; result: OneBunAuthResult }[] = [];
+        const nonceStore = makeSingleReplicaNonceStore();
+        const server = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          async fetch(req) {
+            const path = new URL(req.url).pathname;
+            const body = await req.text();
+            const result = await Effect.runPromise(verifyOneBunRequest(
+              {
+                method: req.method, url: req.url, headers: req.headers, body,
+              },
+              // The callee checks the audience when the caller binds one
+              { secret: secretKey, audience: audience ?? false, nonceStore },
+            ));
+            seen.push({ path, body, result });
+
+            return path === '/v1/invoices'
+              ? new Response(null, { status: 307, headers: { location: '/v2/invoices' } })
+              : Response.json({ id: 7 }, { status: 201 });
+          },
+        });
+
+        try {
+          const billing = createHttpClient({
+            baseUrl: `http://127.0.0.1:${server.port}`,
+            auth: {
+              type: 'onebun',
+              serviceId: 'orders-service',
+              secretKey,
+              ...(audience === undefined ? {} : { audience }),
+            },
+          });
+          await billing.post('/v1/invoices', { orderId: 42 });
+        } finally {
+          server.stop(true);
+        }
+
+        return seen.map(({ path, body, result }) => [path, body, result.valid, result.reason]);
+      };
+
+      expect(await run('billing')).toEqual([
+        ['/v1/invoices', '{"orderId":42}', true, undefined],
+        ['/v2/invoices', '{"orderId":42}', true, undefined],
+      ]);
+      expect(await run(undefined)).toEqual([
+        ['/v1/invoices', '{"orderId":42}', true, undefined],
+        ['/v2/invoices', '{"orderId":42}', false, 'signature-mismatch'],
+      ]);
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-policy
+     */
+    it('should refuse, hand back or follow a redirect as the policy says', async () => {
+      // From docs: the client refuses redirects; one POST hands its 302 back, one GET follows
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, redirect: 'error' });
+
+        const refused = await Effect.runPromise(Effect.either(client.getEffect('/go/302', { to: '/elsewhere' })));
+        const login = await client.post('/go/302?to=%2Fdashboard', { user: 'ada' }, { redirect: 'manual' });
+        const report = await client.get('/go/302', { to: '/reports/2026' }, { redirect: 'follow' });
+
+        expect(refused._tag === 'Left' && [refused.left.error, refused.left.details?.reason])
+          .toEqual(['REDIRECT_ERROR', 'refused-by-policy']);
+        expect(login.success && login.statusCode).toBe(302);
+        // "relative as the server sent it"
+        expect(login.success && login.headers?.location).toBe('/dashboard');
+        expect(report.success && report.statusCode).toBe(200);
+        expect(server.arrivals.map((arrival) => arrival.path)).toEqual(['/go/302', '/go/302', '/go/302', '/reports/2026']);
+
+        // "redirect is not one of the config markers, so client.get('/login', { redirect: '/home' })
+        // still sends GET /login?redirect=%2Fhome"
+        const urls: string[] = [];
+        const pages = Bun.serve({
+          hostname: '127.0.0.1',
+          port: 0,
+          fetch(req) {
+            const url = new URL(req.url);
+            urls.push(url.pathname + url.search);
+
+            return new Response('login');
+          },
+        });
+        try {
+          await createHttpClient({ baseUrl: `http://127.0.0.1:${pages.port}`, redirect: 'error' })
+            .get('/login', { redirect: '/home' });
+        } finally {
+          pages.stop(true);
+        }
+        expect(urls).toEqual(['/login?redirect=%2Fhome']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#redirect-error
+     */
+    it('should fail a redirect it cannot follow with REDIRECT_ERROR, sent once', async () => {
+      // From docs: "code is the 3xx that could not be followed. It is never retried, whatever
+      // retryOn lists"
+      const server = startRedirectServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.origin, retries: { retryOn: [302] } });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/loop')));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left' && outcome.left.error === 'REDIRECT_ERROR') {
+          expect(outcome.left.code).toBe(302);
+          expect(outcome.left.details?.reason).toBe('too-many-redirects');
+          expect(outcome.left.details?.location).toBe('/loop');
+          expect(outcome.left.details?.redirects).toBe(20);
+        }
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('REDIRECT_ERROR');
+        // "the answer that would have been the 21st redirect": 21 requests, no retry
+        expect(server.arrivals).toHaveLength(21);
+
+        server.arrivals.length = 0;
+        const missing = await Effect.runPromise(Effect.either(client.getEffect('/go/303')));
+        const invalid = await Effect.runPromise(
+          Effect.either(client.getEffect('/go/308', { to: 'ftp://127.0.0.1/file' })),
+        );
+
+        expect(missing._tag === 'Left' && [missing.left.code, missing.left.details?.reason])
+          .toEqual([303, 'missing-location']);
+        expect(invalid._tag === 'Left' && [invalid.left.code, invalid.left.details?.reason])
+          .toEqual([308, 'invalid-location']);
+        expect(server.arrivals).toHaveLength(2);
+
+        // "refused-by-policy — any of the five under redirect: 'error', with or without a Location;
+        // redirects is 0"
+        const refused = await Effect.runPromise(Effect.either(client.getEffect('/go/307', undefined, { redirect: 'error' })));
+        expect(refused._tag === 'Left' && [refused.left.code, refused.left.details?.reason, refused.left.details?.redirects])
+          .toEqual([307, 'refused-by-policy', 0]);
+        expect(server.arrivals).toHaveLength(3);
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('Limiting the response size (docs/api/requests.md)', () => {
+    const EXPORT_TEXT = 'row,value\n'.repeat(10_000);
+
+    /**
+     * `/status` answers a small JSON body; `/exports/latest` answers `EXPORT_TEXT` (100 KB) gzip-
+     * compressed, `/exports/plain` the same text uncompressed with its `Content-Length`;
+     * `/legacy/feed` answers in a coding nobody decodes, `/broken` a corrupt gzip body,
+     * `/failing` a 500 with a JSON body, and `/failing-gzip` a 500 with a gzip-compressed JSON body.
+     * Records each request's path and `Accept-Encoding`.
+     */
+    function startSizedServer(): {
+      baseUrl: string;
+      arrivals: { path: string; acceptEncoding: string | null }[];
+      stop(): void;
+    } {
+      const arrivals: { path: string; acceptEncoding: string | null }[] = [];
+      const exportGzip = Bun.gzipSync(new TextEncoder().encode(EXPORT_TEXT));
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          arrivals.push({ path, acceptEncoding: req.headers.get('accept-encoding') });
+          const encoded = (body: string | Uint8Array, encoding: string) => new Response(body, {
+            headers: new Headers([['content-type', 'text/csv'], ['content-encoding', encoding]]),
+          });
+
+          switch (path) {
+            case '/status':
+              return jsonStatus(200, { status: 'ok' });
+            case '/exports/latest':
+              return encoded(exportGzip, 'gzip');
+            case '/exports/plain':
+              return new Response(EXPORT_TEXT, { headers: new Headers([['content-type', 'text/csv']]) });
+            case '/legacy/feed':
+              return encoded('abc', 'x-foo');
+            case '/broken':
+              return encoded(new Uint8Array([0x1f, 0x8b, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8]), 'gzip');
+            case '/failing':
+              return jsonStatus(500, { error: 'db down', trace: 'x'.repeat(8192) });
+            case '/failing-gzip':
+              return new Response(Bun.gzipSync(new TextEncoder().encode(JSON.stringify({ error: 'db down' }))), {
+                status: 500,
+                headers: new Headers([['content-type', 'application/json'], ['content-encoding', 'gzip']]),
+              });
+            default:
+              return jsonStatus(404);
+          }
+        },
+      });
+
+      return {
+        baseUrl: server.url.origin,
+        arrivals,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#max-response-bytes
+     */
+    it('should cap the decoded body per client, tighten or lift it per call, and decode it itself', async () => {
+      // From docs: "A request's own maxResponseBytes wins over the client's. Infinity means no
+      // limit: that request is read exactly as one without the option, and fetch decompresses it."
+      // and "A limited request sends Accept-Encoding: gzip, deflate, br, zstd"
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 1024 * 1024 });
+
+        const archive = await client.get('/exports/latest');
+        const status = await client.get('/status', undefined, { maxResponseBytes: 4096 });
+        const tooBig = await Effect.runPromise(
+          Effect.either(client.getEffect('/exports/latest', undefined, { maxResponseBytes: 4096 })),
+        );
+        const twoArgument = await Effect.runPromise(
+          Effect.either(client.getEffect('/exports/latest', { maxResponseBytes: 4096 })),
+        );
+        const unlimited = await createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 16 })
+          .get('/exports/latest', undefined, { maxResponseBytes: Number.POSITIVE_INFINITY });
+
+        expect(archive.success && archive.result).toBe(EXPORT_TEXT);
+        // "those describe the compressed bytes, not result"
+        expect(archive.success && archive.headers?.['content-encoding']).toBeUndefined();
+        expect(archive.success && archive.headers?.['content-length']).toBeUndefined();
+        expect(server.arrivals[0].acceptEncoding).toBe('gzip, deflate, br, zstd');
+        expect(status.success && status.result).toEqual({ status: 'ok' });
+        expect(tooBig._tag === 'Left' && tooBig.left.error).toBe('RESPONSE_TOO_LARGE');
+        expect(twoArgument._tag === 'Left' && twoArgument.left.error).toBe('RESPONSE_TOO_LARGE');
+        expect(unlimited.success && unlimited.result).toBe(EXPORT_TEXT);
+        // fetch decompressed it, and fetch keeps the wire headers
+        expect(unlimited.success && unlimited.headers?.['content-encoding']).toBe('gzip');
+        // "A request's own Accept-Encoding header is sent instead"
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await client.get('/status', undefined, { headers: { 'Accept-Encoding': 'identity' } });
+        expect(server.arrivals.at(-1)?.acceptEncoding).toBe('identity');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#max-response-bytes
+     */
+    it('should read an error status that fits into details.details, and drop the compressed-size headers it decoded', async () => {
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, maxResponseBytes: 1024 * 1024 });
+
+        const outcome = await Effect.runPromise(
+          Effect.either(client.getEffect('/failing', undefined, { retries: { max: 0 } })),
+        );
+        const compressed = await Effect.runPromise(
+          Effect.either(client.getEffect('/failing-gzip', undefined, { retries: { max: 0 } })),
+        );
+
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('HTTP_ERROR');
+        expect(outcome._tag === 'Left' && outcome.left.details?.details)
+          .toEqual({ error: 'db down', trace: 'x'.repeat(8192) });
+        expect(compressed._tag).toBe('Left');
+        if (compressed._tag === 'Left') {
+          expect(compressed.left.details?.details).toEqual({ error: 'db down' });
+          // "When the client decoded the body, neither a success's headers nor an HTTP_ERROR's
+          // details.headers has content-encoding or content-length"
+          expect(compressed.left.details?.headers).toHaveProperty('content-type', 'application/json');
+          expect(compressed.left.details?.headers).not.toHaveProperty('content-encoding');
+          expect(compressed.left.details?.headers).not.toHaveProperty('content-length');
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-too-large
+     */
+    it('should fail a body over the limit with RESPONSE_TOO_LARGE, never retried', async () => {
+      // From docs: "Its code is the status that arrived" and "It is never retried, whatever
+      // retryOn lists"
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: 4096,
+          retries: { max: 3, retryOn: [500], delay: 1 },
+        });
+
+        const decoded = await Effect.runPromise(Effect.either(client.getEffect('/exports/latest')));
+        const declared = await Effect.runPromise(Effect.either(client.getEffect('/exports/plain')));
+        const failing = await Effect.runPromise(Effect.either(client.getEffect('/failing')));
+
+        expect(decoded._tag).toBe('Left');
+        if (decoded._tag === 'Left') {
+          expect(decoded.left.error).toBe('RESPONSE_TOO_LARGE');
+          expect(decoded.left.code).toBe(200);
+          expect(decoded.left.details?.limit).toBe(4096);
+          expect(decoded.left.details?.received).toBeGreaterThan(4096);
+          expect(decoded.left.details?.statusCode).toBe(200);
+          expect(decoded.left.details?.contentLength).toBeUndefined();
+        }
+        // "the declared size, when refused before reading"
+        expect(declared._tag === 'Left' && declared.left.details).toEqual({
+          limit: 4096,
+          received: 0,
+          statusCode: 200,
+          contentLength: EXPORT_TEXT.length,
+        });
+        expect(failing._tag === 'Left' && [failing.left.error, failing.left.code])
+          .toEqual(['RESPONSE_TOO_LARGE', 500]);
+        // "The error carries no part of the body"
+        expect(JSON.stringify(failing)).not.toContain('db down');
+        expect(server.arrivals.filter((arrival) => arrival.path === '/failing')).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-decode-error
+     */
+    it('should fail a body it cannot decode with RESPONSE_DECODE_ERROR, never retried', async () => {
+      const server = startSizedServer();
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          maxResponseBytes: 1024 * 1024,
+          retries: { max: 3, retryOn: [200], delay: 1 },
+        });
+
+        const unknown = await Effect.runPromise(Effect.either(client.getEffect('/legacy/feed')));
+        const corrupt = await Effect.runPromise(Effect.either(client.getEffect('/broken')));
+        const uncapped = await createHttpClient({ baseUrl: server.baseUrl }).get('/legacy/feed');
+
+        expect(unknown._tag === 'Left' && unknown.left.error).toBe('RESPONSE_DECODE_ERROR');
+        expect(unknown._tag === 'Left' && unknown.left.code).toBe(200);
+        expect(unknown._tag === 'Left' && unknown.left.details?.reason).toBe('unsupported-encoding');
+        expect(unknown._tag === 'Left' && unknown.left.details?.encoding).toBe('x-foo');
+        expect(corrupt._tag === 'Left' && corrupt.left.details?.reason).toBe('corrupt-body');
+        expect(corrupt._tag === 'Left' && corrupt.left.details?.encoding).toBe('gzip');
+        // "A request without a limit is decoded by fetch, which hands a body in an unknown coding
+        // over as it is"
+        expect(uncapped.success && uncapped.result).toBe('abc');
+        expect(server.arrivals.filter((arrival) => arrival.path === '/legacy/feed')).toHaveLength(2);
+        expect(server.arrivals.filter((arrival) => arrival.path === '/broken')).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('Response types (docs/api/requests.md)', () => {
+    /** A body that is not UTF-8: every byte value, backwards. */
+    const FONT = Uint8Array.from({ length: 256 }, (_, index) => 255 - index);
+    const textEncoder = new TextEncoder();
+    const textDecoder = new TextDecoder();
+
+    /**
+     * `/fonts/inter.woff2` answers `FONT` gzip-compressed as `font/woff2`; `/doc` a JSON document;
+     * `/events` an event every 50 ms for as long as it is read, and `/quiet` one event and then
+     * nothing; `/missing` a 404 and `/busy` a 503, each with a JSON body; `/empty` a 204. Records
+     * each request's URL and `Accept`, and the paths whose body stream the client cancelled.
+     */
+    function startStreamingServer(): {
+      baseUrl: string;
+      requests: { url: string; accept: string | null }[];
+      cancelled: string[];
+      stop(): void;
+    } {
+      const requests: { url: string; accept: string | null }[] = [];
+      const cancelled: string[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const path = new URL(req.url).pathname;
+          requests.push({ url: req.url, accept: req.headers.get('accept') });
+          const events = (source: BodySource) => new Response(
+            new ReadableStream<Uint8Array>({
+              ...source,
+              cancel() {
+                cancelled.push(path);
+              },
+            }),
+            { headers: new Headers([['content-type', 'text/event-stream']]) },
+          );
+
+          switch (path) {
+            case '/fonts/inter.woff2':
+              return new Response(Bun.gzipSync(FONT), {
+                headers: new Headers([['content-type', 'font/woff2'], ['content-encoding', 'gzip']]),
+              });
+            case '/doc':
+              return jsonStatus(200, { title: 'Report' });
+            case '/events': {
+              let sent = 0;
+
+              return events({
+                async pull(controller) {
+                  if (sent > 0) {
+                    await Bun.sleep(50);
+                  }
+                  controller.enqueue(textEncoder.encode(`data: ${sent++}\n\n`));
+                },
+              });
+            }
+            case '/quiet':
+              return events({
+                start(controller) {
+                  controller.enqueue(textEncoder.encode('data: hello\n\n'));
+                },
+              });
+            case '/missing':
+              return jsonStatus(404, { reason: 'gone' });
+            case '/busy':
+              return jsonStatus(503, { reason: 'busy' });
+            case '/empty':
+              return new Response(null, { status: 204 });
+            default:
+              return jsonStatus(500);
+          }
+        },
+      });
+
+      return {
+        baseUrl: server.url.origin,
+        requests,
+        cancelled,
+        stop: () => server.stop(true),
+      };
+    }
+
+    /**
+     * @source docs:api/requests.md#response-types
+     */
+    it('should resolve parsed JSON, bytes or a stream as asked, and read everything else the same in every mode', async () => {
+      // From docs: "responseType changes only what a success resolves with"
+      const server = startStreamingServer();
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+
+        const auto = await client.get('/doc');
+        const bytes = await client.get<Uint8Array>('/doc', undefined, { responseType: 'bytes' });
+        const stream = await client.get<ReadableStream<Uint8Array>>('/doc', undefined, { responseType: 'stream' });
+
+        expect(auto.success && auto.result).toEqual({ title: 'Report' });
+        expect(bytes.success && bytes.result).toBeInstanceOf(Uint8Array);
+        expect(bytes.success && JSON.parse(textDecoder.decode(bytes.result))).toEqual({ title: 'Report' });
+        expect(stream.success && stream.result).toBeInstanceOf(ReadableStream);
+        if (stream.success) {
+          expect(JSON.parse(textDecoder.decode(await Bun.readableStreamToBytes(stream.result))))
+            .toEqual({ title: 'Report' });
+        }
+
+        // "An error status's body is read as under 'auto'", and "a 204 ... result: undefined in every mode"
+        for (const responseType of ['auto', 'bytes', 'stream'] as const) {
+          const failure = await Effect.runPromise(
+            Effect.either(client.getEffect('/missing', undefined, { responseType })),
+          );
+          const empty = await client.get('/empty', undefined, { responseType });
+
+          expect(failure._tag === 'Left' && [failure.left.error, failure.left.code, failure.left.details?.details])
+            .toEqual(['HTTP_ERROR', 404, { reason: 'gone' }]);
+          expect(empty.success && empty.statusCode).toBe(204);
+          expect(empty.success && empty.result).toBeUndefined();
+        }
+
+        // "responseType is one of the config markers"
+        const marker = await client.get<ReadableStream<Uint8Array>>('/doc', { responseType: 'stream' });
+        expect(marker.success && marker.result).toBeInstanceOf(ReadableStream);
+        expect(server.requests.at(-1)?.url).toBe(`${server.baseUrl}/doc`);
+        if (marker.success) {
+          await marker.result.cancel();
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-bytes
+     */
+    it('should hand a binary body over byte for byte, decompressed, where auto corrupts it', async () => {
+      const server = startStreamingServer();
+
+      try {
+        const cdn = createHttpClient({ baseUrl: server.baseUrl });
+
+        const font = await cdn.get<Uint8Array>('/fonts/inter.woff2', undefined, { responseType: 'bytes' });
+        const asText = await cdn.get<string>('/fonts/inter.woff2');
+
+        expect(font.success).toBe(true);
+        if (font.success) {
+          expect(font.result).toBeInstanceOf(Uint8Array);
+          // "The content coding is undone first"
+          expect(font.result).toEqual(FONT);
+          expect(font.headers?.['content-type']).toBe('font/woff2');
+        }
+        // "Decoding a body as text replaces every byte sequence that is not valid UTF-8 with U+FFFD"
+        expect(asText.success && asText.result).toContain('�');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should resolve at the headers and read the events as they come, closing the connection on break', async () => {
+      const server = startStreamingServer();
+
+      try {
+        const api = createHttpClient({ baseUrl: server.baseUrl, timeout: 30_000 });
+
+        const feed = await api.get<ReadableStream<Uint8Array>>('/events', undefined, {
+          responseType: 'stream',
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { Accept: 'text/event-stream' },
+        });
+
+        const events: string[] = [];
+        if (feed.success) {
+          const decoder = new TextDecoder();
+
+          for await (const chunk of feed.result) {
+            events.push(decoder.decode(chunk, { stream: true }));
+            if (events.length === 3) {
+              break;
+            }
+          }
+        }
+
+        expect(feed.success).toBe(true);
+        expect(server.requests[0]?.accept).toBe('text/event-stream');
+        expect(events).toEqual(['data: 0\n\n', 'data: 1\n\n', 'data: 2\n\n']);
+        // "a break out of a for await loop, closes the connection"
+        await waitFor(() => server.cancelled.includes('/events'), 1000);
+        expect(server.cancelled).toContain('/events');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should bound each wait on the upstream, erroring a stalled stream with a TIMEOUT_ERROR ErrorResponse', async () => {
+      const server = startStreamingServer();
+      const outcomes: string[] = [];
+
+      async function readFeed(feed: ReadableStream<Uint8Array>): Promise<void> {
+        try {
+          for await (const chunk of feed) {
+            outcomes.push(textDecoder.decode(chunk));
+          }
+        } catch (error) {
+          if (isErrorResponse(error) && getTransportFailureKind(error) === 'timeout') {
+            outcomes.push(`timeout: ${error.error} ${error.code} ${String(error.details?.phase)}`);
+          }
+        }
+      }
+
+      try {
+        const client = createHttpClient({ baseUrl: server.baseUrl, timeout: 150 });
+
+        // "A stream whose chunks keep coming lives as long as they do": 50 ms apart, read for 500 ms
+        const flowing = await client.get<ReadableStream<Uint8Array>>('/events', undefined, { responseType: 'stream' });
+        let flowed = 0;
+        if (flowing.success) {
+          const reader = flowing.result.getReader();
+          const started = performance.now();
+          while (performance.now() - started < 500) {
+            await reader.read();
+            flowed++;
+          }
+          await reader.cancel();
+        }
+
+        // "one that stalls is cut off timeout after its last chunk"
+        const quiet = await client.get<ReadableStream<Uint8Array>>('/quiet', undefined, { responseType: 'stream' });
+        if (quiet.success) {
+          await readFeed(quiet.result);
+        }
+
+        expect(flowed).toBeGreaterThanOrEqual(5);
+        expect(outcomes).toEqual(['data: hello\n\n', 'timeout: TIMEOUT_ERROR 0 body']);
+        // "and the connection is closed"
+        await waitFor(() => server.cancelled.includes('/quiet'), 1000);
+        expect(server.cancelled).toContain('/quiet');
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should retry an error status before the hand-over, and record the time to the headers', async () => {
+      // From docs: "Up to the headers, a streamed request is an ordinary one" and "The metrics
+      // record the time to the headers"
+      const server = startStreamingServer();
+      const records: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({
+          baseUrl: server.baseUrl,
+          retries: { max: 1, retryOn: [503], delay: 1 },
+          metricsSink: (data) => records.push(data),
+        });
+
+        const busy = await Effect.runPromise(
+          Effect.either(client.getEffect('/busy', undefined, { responseType: 'stream' })),
+        );
+        const endless = await client.get<ReadableStream<Uint8Array>>('/events', undefined, { responseType: 'stream' });
+
+        expect(busy._tag === 'Left' && [busy.left.error, busy.left.retryCount]).toEqual(['HTTP_ERROR', 1]);
+        expect(server.requests.filter((request) => request.url.endsWith('/busy'))).toHaveLength(2);
+        // The body of /events never ends, and its record is already there
+        expect(records.at(-1)?.url).toBe(`${server.baseUrl}/events`);
+        expect(records.at(-1)?.statusCode).toBe(200);
+        if (endless.success) {
+          await endless.result.cancel();
+        }
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#response-stream
+     */
+    it('should pass a stream on in a Response, and cancel the upstream when the caller disconnects', async () => {
+      const storage = startStreamingServer();
+      const proxy = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        async fetch(req) {
+          const client = createHttpClient({ baseUrl: storage.baseUrl });
+          const file = await client.get<ReadableStream<Uint8Array>>(new URL(req.url).pathname, undefined, {
+            responseType: 'stream',
+          });
+
+          if (isErrorResponse(file)) {
+            throw new Error(file.error);
+          }
+
+          return new Response(file.result, {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            headers: { 'Content-Type': file.headers?.['content-type'] ?? 'application/octet-stream' },
+          });
+        },
+      });
+
+      try {
+        const download = await fetch(`${proxy.url.origin}/fonts/inter.woff2`);
+        const body = new Uint8Array(await download.arrayBuffer());
+
+        expect(body).toEqual(FONT);
+        expect(download.headers.get('content-type')).toBe('font/woff2');
+
+        const caller = new AbortController();
+        const events = await fetch(`${proxy.url.origin}/events`, { signal: caller.signal });
+        await events.body?.getReader().read();
+        caller.abort();
+
+        await waitFor(() => storage.cancelled.includes('/events'), 1000);
+        expect(storage.cancelled).toContain('/events');
+      } finally {
+        proxy.stop(true);
+        storage.stop();
+      }
+    });
+  });
+
+  describe('Connecting to a validated address (docs/api/requests.md)', () => {
+    /**
+     * On 127.0.0.1. `/redirect?to=<url>` answers 302 with that `Location`; anything else answers
+     * 200 with the `Host` it got. Records each request's `Host` and path.
+     */
+    function startAddressServer(): { port: number; arrivals: { host: string | null; path: string }[]; stop(): void } {
+      const arrivals: { host: string | null; path: string }[] = [];
+      const server = Bun.serve({
+        hostname: '127.0.0.1',
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          arrivals.push({ host: req.headers.get('host'), path: url.pathname });
+
+          return url.pathname === '/redirect'
+            ? new Response(null, { status: 302, headers: { location: url.searchParams.get('to') ?? '' } })
+            : Response.json({ host: req.headers.get('host') });
+        },
+      });
+
+      return { port: server.port!, arrivals, stop: () => server.stop(true) };
+    }
+
+    /**
+     * @source docs:api/requests.md#connect-address
+     */
+    it('should connect to the validated address, with the host name in Host', async () => {
+      // From docs: "Pass the IP address you validated, and the request connects to that address
+      // without a lookup" — the snippet with `lookup` answering for a name that resolves nowhere,
+      // so reaching the server at all proves no lookup of it was made
+      const server = startAddressServer();
+      const answers = new Map([['preview.test', '127.0.0.1'], ['internal.test', '10.0.0.5']]);
+      const lookup = async (hostname: string) => await Promise.resolve({ address: answers.get(hostname) ?? '' });
+      const isAllowedAddress = (address: string) => address === '127.0.0.1';
+
+      try {
+        const client = createHttpClient({ timeout: 5000 });
+
+        async function fetchPreview(url: string) {
+          const { address } = await lookup(new URL(url).hostname);
+
+          if (!isAllowedAddress(address)) {
+            throw new Error(`${url} resolves to an address this service may not call`);
+          }
+
+          return await client.get(url, undefined, { connectAddress: address });
+        }
+
+        const preview = await fetchPreview(`http://preview.test:${server.port}/page`);
+
+        // "Host is the URL's host, with its port when that is not the scheme's default"
+        expect(preview.success && preview.result).toEqual({ host: `preview.test:${server.port}` });
+        expect(server.arrivals).toEqual([{ host: `preview.test:${server.port}`, path: '/page' }]);
+
+        await expect(fetchPreview(`http://internal.test:${server.port}/admin`)).rejects.toThrow('may not call');
+        expect(server.arrivals).toHaveLength(1);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-redirects
+     */
+    it('should follow a redirect to the same host and refuse one to another host', async () => {
+      // From docs: "A redirect to another host fails with REDIRECT_ERROR, details.reason:
+      // 'other-host', before that host is contacted ... an IP literal in the Location included"
+      const a = startAddressServer();
+      const b = startAddressServer();
+
+      try {
+        const client = createHttpClient();
+        const via = (location: string) =>
+          `http://a.test:${a.port}/redirect?to=${encodeURIComponent(location)}`;
+
+        const same = await client.get(via(`http://a.test:${b.port}/moved`), undefined, { connectAddress: '127.0.0.1' });
+        expect(same.success && same.result).toEqual({ host: `a.test:${b.port}` });
+
+        b.arrivals.length = 0;
+        const other = await Effect.runPromise(Effect.either(
+          client.getEffect(via(`http://127.0.0.1:${b.port}/x`), undefined, { connectAddress: '127.0.0.1' }),
+        ));
+        expect(other._tag === 'Left' && [other.left.error, other.left.code, other.left.details?.reason])
+          .toEqual(['REDIRECT_ERROR', 302, 'other-host']);
+        expect(b.arrivals).toHaveLength(0);
+      } finally {
+        a.stop();
+        b.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-refused
+     */
+    it('should refuse a value that is not an IP address before sending anything', async () => {
+      // From docs: "Anything else fails with REQUEST_CONFIG_ERROR before anything is sent" and
+      // "It is never retried and no metrics are recorded"
+      const originalFetch = globalThis.fetch;
+      const sent: string[] = [];
+      globalThis.fetch = ((input: string) => {
+        sent.push(input);
+
+        return Promise.resolve(Response.json({}));
+      }) as unknown as typeof fetch;
+      const metrics: RequestMetricsData[] = [];
+
+      try {
+        const client = createHttpClient({ metricsSink: (data) => metrics.push(data) });
+
+        const outcome = await Effect.runPromise(Effect.either(
+          client.getEffect('https://a.example.com/x', undefined, { connectAddress: 'a.example.com' }),
+        ));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left' && outcome.left.error === 'REQUEST_CONFIG_ERROR') {
+          expect(outcome.left.code).toBe(500);
+          expect(outcome.left.details?.option).toBe('connectAddress');
+          expect(outcome.left.details?.reason).toBe('not-an-ip');
+          expect(outcome.left.details?.value).toBe('a.example.com');
+        }
+        expect(outcome._tag === 'Left' && outcome.left.error).toBe('REQUEST_CONFIG_ERROR');
+
+        // "`not-an-http-url` — the URL is not an http: or https: one, or is not absolute"
+        const relative = await Effect.runPromise(Effect.either(
+          client.getEffect('/x', undefined, { connectAddress: '127.0.0.1' }),
+        ));
+        expect(relative._tag === 'Left' && relative.left.details?.reason).toBe('not-an-http-url');
+
+        // "only undefined means no connectAddress"
+        const empty = await Effect.runPromise(Effect.either(
+          client.getEffect('https://a.example.com/x', undefined, { connectAddress: '' }),
+        ));
+        expect(empty._tag === 'Left' && empty.left.details?.reason).toBe('not-an-ip');
+
+        expect(sent).toHaveLength(0);
+        expect(metrics).toHaveLength(0);
+
+        // "client.get(url, { connectAddress }) is config, not query data"
+        await client.get('https://a.example.com/x', { connectAddress: '127.0.0.1' });
+        expect(sent).toEqual(['https://127.0.0.1/x']);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#connect-address-proxy
+     */
+    it('should hand an HTTPS proxy a CONNECT to the address, and match NO_PROXY against it', async () => {
+      // From docs: "the proxy receives CONNECT <address>:<port>, the IP literal, never the host
+      // name" and "NO_PROXY is matched against the address, not the host name". `fetch` reads the
+      // proxy variables from the environment, so each request runs in a fresh process.
+      const connects: string[] = [];
+      const proxy = Bun.listen({
+        hostname: '127.0.0.1',
+        port: 0,
+        socket: {
+          data(socket, chunk) {
+            connects.push(chunk.toString().split('\r\n')[0]);
+            socket.end('HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n');
+          },
+        },
+      });
+      // A port nothing listens on: where a request that skips the proxy goes, and is refused
+      const closed = Bun.listen({ hostname: '127.0.0.1', port: 0, socket: { data: () => undefined } });
+      const closedPort = closed.port;
+      closed.stop(true);
+      const viaProxy = (env: Record<string, string>) =>
+        runPinnedRequest(`https://a.test:${closedPort}/x`, '127.0.0.1', { env, killAfterMs: 20_000 });
+
+      try {
+        const proxyUrl = `http://127.0.0.1:${proxy.port}`;
+         
+        const runs = [
+          await viaProxy({ HTTPS_PROXY: proxyUrl }),
+          await viaProxy({ HTTPS_PROXY: proxyUrl, NO_PROXY: 'a.test' }),
+          await viaProxy({ HTTPS_PROXY: proxyUrl, NO_PROXY: '127.0.0.1' }),
+        ];
+         
+
+        expect(runs.map((run) => run.result?.success), runs.map((run) => run.output).join('\n')).toEqual([false, false, false]);
+        // The first two went through the proxy, as CONNECT to the address; the third did not
+        expect(connects).toEqual([`CONNECT 127.0.0.1:${closedPort} HTTP/1.1`, `CONNECT 127.0.0.1:${closedPort} HTTP/1.1`]);
+      } finally {
+        proxy.stop(true);
+      }
+    });
   });
 
   describe('Request Configuration (docs/api/requests.md)', () => {
     /**
      * @source docs:api/requests.md#request-configuration
      */
-    it('should drop the third argument of get when the second is undefined', async () => {
-      // From docs (warning): "get, delete, head and options drop the third argument
-      // when the second is undefined"
+    it('should apply a config given third whatever the second argument is', async () => {
+      // From docs: "`client.get('/x', undefined, { headers: { … } })` sends the headers. That holds
+      // for all seven methods". It used to be a warning: get, delete, head and options dropped the
+      // third argument when the second was `undefined`, and this test pinned the drop.
       const server = startEchoServer();
 
       try {
         const client = createHttpClient({ baseUrl: server.baseUrl, retries: { max: 0 } });
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const config = { headers: { 'x-a': '1' } };
 
-        /* eslint-disable @typescript-eslint/naming-convention */
-        await client.get('/users', undefined, { headers: { 'X-Request-ID': 'rid-1' } });
-        await client.post('/users', undefined, { headers: { 'X-Request-ID': 'rid-2' } });
-        /* eslint-enable @typescript-eslint/naming-convention */
+        await client.get('/g', undefined, config);
+        await client.delete('/d', undefined, config);
+        await client.head('/h', undefined, config);
+        await client.options('/o', undefined, config);
+        await client.post('/p', undefined, config);
+        await client.put('/u', undefined, config);
+        await client.patch('/pa', undefined, config);
 
-        expect(server.calls[0]?.headers.get('x-request-id')).toBeNull();
-        expect(server.calls[1]?.headers.get('x-request-id')).toBe('rid-2');
+        expect(server.calls.map((call) => `${call.method} ${call.path} ${call.headers.get('x-a')}`)).toEqual([
+          'GET /g 1',
+          'DELETE /d 1',
+          'HEAD /h 1',
+          'OPTIONS /o 1',
+          'POST /p 1',
+          'PUT /u 1',
+          'PATCH /pa 1',
+        ]);
       } finally {
         server.stop();
       }
@@ -716,7 +2124,7 @@ describe('Requests API Documentation Examples', () => {
      * @source docs:api/requests.md#retry-configuration
      */
     it('should retry a request that never reached the server, keeping code 0', async () => {
-      // From docs: "retryOnNetworkError: true — connection refused / DNS / TLS" is a default,
+      // From docs: "retryOnNetworkError: true — Refused / DNS / TLS / reset" is a default,
       // and the failure "is never reported as a server 500"
       const dead = startCountingServer(() => jsonStatus(200));
       const { baseUrl } = dead;
@@ -733,6 +2141,49 @@ describe('Requests API Documentation Examples', () => {
         expect(outcome.left.code).toBe(TRANSPORT_FAILURE_CODE);
         expect(outcome.left.error).toBe('FETCH_ERROR');
         expect(getTransportFailureKind(outcome.left)).toBe('network');
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#retry-configuration
+     */
+    it('should report a reset after the request was sent as the same network failure', async () => {
+      // From docs: "a connection reset after the request was sent is reported the same way
+      // (FETCH_ERROR), and that request may have been processed. retryOnNetworkError replays both"
+      let received = 0;
+      const listener = Bun.listen({
+        hostname: '127.0.0.1',
+        port: 0,
+        socket: {
+          data(socket, chunk) {
+            // The request arrived whole; the connection closes without an answer
+            if (chunk.toString().startsWith('GET /reports')) {
+              received++;
+              socket.end();
+            }
+          },
+        },
+      });
+
+      try {
+        const client = createHttpClient({
+          baseUrl: `http://127.0.0.1:${listener.port}`,
+          retries: { max: 1, delay: 1 },
+        });
+
+        const outcome = await Effect.runPromise(Effect.either(client.getEffect('/reports')));
+
+        expect(outcome._tag).toBe('Left');
+
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('FETCH_ERROR');
+          expect(getTransportFailureKind(outcome.left)).toBe('network');
+          expect(outcome.left.retryCount).toBe(1);
+        }
+        // Both attempts reached the server
+        expect(received).toBe(2);
+      } finally {
+        listener.stop(true);
       }
     });
 

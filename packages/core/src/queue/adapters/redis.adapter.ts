@@ -535,9 +535,9 @@ export class RedisQueueAdapter implements QueueAdapter {
   /**
    * One `case` per member of `QueueFeature`, never a blanket `return true`.
    *
-   * The blanket form advertised every feature the union would ever gain, which is how this
-   * adapter came to report `dead-letter-queue` and `retry` as available while reading neither
-   * option. An explicit switch means the next feature added to the union arrives as a
+   * The blanket form would advertise every feature the union ever gains — `dead-letter-queue`
+   * and `retry` as available whether or not the adapter reads their options. An explicit switch
+   * means the next feature added to the union arrives as a
    * compile-time gap here rather than as a claim nobody made.
    */
   supports(feature: QueueFeature): boolean {

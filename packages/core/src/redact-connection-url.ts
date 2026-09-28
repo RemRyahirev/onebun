@@ -45,13 +45,14 @@ function findUserinfoEnd(url: string, authorityStart: number): number {
  * inside that target — so the password must not survive into the message, the log line or the
  * exception, not even when the connection failed and the string is "only" a diagnostic.
  *
- * **It does not parse.** Two earlier versions of this did, and both failed OPEN on exactly the
- * passwords that need it most:
+ * **It does not parse.** Both parsing approaches fail OPEN on exactly the passwords that need
+ * redaction most:
  *
- * - `new URL(...)` REJECTS a URL whose password contains a raw `/`, so the `catch` printed the
- *   string as given — credential included.
- * - A single regex classed the password as `[^@/]*`, so a `/` made it match nothing and emit the
- *   credential verbatim, while a raw `@` ended the match at the first one and leaked the rest.
+ * - `new URL(...)` REJECTS a URL whose password contains a raw `/`, so a `catch` that prints the
+ *   string as given prints the credential with it.
+ * - A single regex that classes the password as `[^@/]*` matches nothing when the password holds a
+ *   `/` and emits the credential verbatim, and a raw `@` ends the match at the first one and leaks
+ *   the rest.
  *
  * Cloud providers emit both characters routinely. Here the authority is found by position and the
  * userinfo is cut at its last `@`, so no character inside a password can end the match early.

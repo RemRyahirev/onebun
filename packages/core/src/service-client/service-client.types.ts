@@ -42,22 +42,38 @@ type ExtractControllerNames<TDef extends ServiceDefinition> =
   TDef['_controllers'] extends Map<infer K, ControllerDefinition> ? K : never;
 
 /**
- * Typed service client interface.
- * Provides type-safe access to service endpoints through controller.method() pattern.
+ * A service client keyed by controller name.
+ *
+ * The names are not known to the type system. `ServiceDefinition['_controllers']` is a
+ * `Map<string, ControllerDefinition>`, so this resolves to a string index of `ControllerClient`:
+ * any controller name compiles. `createServiceClient` does not return this type; it returns
+ * `Record<string, ControllerClient>`, which is the same shape.
+ *
+ * Controllers are keyed by their class name, and a name the definition lacks throws when it is
+ * read (at run time, not at compile time).
  *
  * @example
  * ```typescript
  * const client = createServiceClient(usersDefinition, { url: 'http://localhost:3001' });
- * const result = await client.users.getById('123');
+ * const response = await client.UsersController.getById('123'); // `any`
  * ```
+ *
+ * @see docs:api/requests.md
  */
 export type ServiceClient<TDef extends ServiceDefinition> = {
   [K in ExtractControllerNames<TDef> & string]: ControllerClient;
 };
 
 /**
- * Client interface for a single controller.
- * Methods are accessed by their handler names.
+ * Client interface for a single controller. Methods are accessed by their handler names.
+ *
+ * Every method is `(...args: any[]) => Promise<any>`. Nothing checks the order or types of the
+ * arguments against the handler, and the resolved value is not typed by the handler's return type.
+ * At run time only a missing (`undefined`) or `null` path parameter value is refused; extra
+ * arguments, and those in the position of a parameter the client does not send, are dropped. The
+ * method name itself is checked at run time: reading one the controller does not have throws.
+ *
+ * @see docs:api/requests.md
  */
 export interface ControllerClient {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any

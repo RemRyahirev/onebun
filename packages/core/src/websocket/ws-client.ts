@@ -1,8 +1,12 @@
 /**
  * WebSocket Client
  *
- * Typed WebSocket client for connecting to OneBun WebSocket gateways.
+ * WebSocket client for connecting to OneBun WebSocket gateways.
  * Supports both native WebSocket and Socket.IO protocols.
+ *
+ * Event names are strings and payloads are `unknown`: nothing ties them to the gateway's
+ * handlers. The module is reached through `@onebun/core`, which cannot currently be bundled for a
+ * browser, so this client runs in Bun.
  */
 
 /* eslint-disable @typescript-eslint/no-magic-numbers */
@@ -607,11 +611,25 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
 }
 
 /**
- * Create a typed WebSocket client for a service
+ * Create a WebSocket client for a service from its gateway definition. Gateways are reached as
+ * `client.<GatewayClassName>`.
+ *
+ * What the definition gives you is the gateway names, looked up at run time: a name the definition
+ * lacks reads as `undefined`. The type is a string index, so any name compiles. Every gateway
+ * client shares the one connection to `options.url`, and the server picks the gateway from that
+ * connection (the URL's path, or the Socket.IO namespace), not from the name used here.
+ *
+ * Events are not checked. `emit`, `send`, `on` and `off` take the event name as a `string` and the
+ * payload as `unknown`. The type argument of `emit<T>()` and `on<T>()` is an assertion about the
+ * payload, not something derived from the handler. `emit` resolves the `data` of the handler's
+ * reply over the native protocol, and the whole `{ event, data }` reply over Socket.IO. An `emit`
+ * of an event no handler answers rejects with `Request timeout` after `options.timeout`.
+ *
+ * Runs in Bun. `@onebun/core` cannot currently be bundled for a browser.
  *
  * @param definition - Service definition created by createWsServiceDefinition()
  * @param options - Client options
- * @returns Typed WebSocket client
+ * @returns The client, with one gateway client per gateway name
  *
  * @example
  * ```typescript
@@ -628,17 +646,19 @@ class WsClientImpl<TDef extends WsServiceDefinition> implements WsClient<TDef> {
  * // Connect
  * await client.connect();
  *
- * // Use typed gateway methods
+ * // Event names and payloads are not checked against the gateway
  * await client.ChatGateway.emit('chat:message', { text: 'Hello' });
  *
- * // Subscribe to events
- * client.ChatGateway.on('chat:message', (message) => {
- *   console.log('Received:', message);
+ * // Subscribe to events; the type argument asserts the payload shape
+ * client.ChatGateway.on<{ text: string }>('chat:message', (message) => {
+ *   console.log('Received:', message.text);
  * });
  *
  * // Disconnect
  * client.disconnect();
  * ```
+ *
+ * @see docs:api/websocket.md
  */
 export function createWsClient<TDef extends WsServiceDefinition>(
   definition: TDef,
@@ -678,8 +698,13 @@ export function createWsClient<TDef extends WsServiceDefinition>(
 
 /**
  * Create a standalone WebSocket client without a service definition.
- * Uses the same native message format and API (emit, send, on, off) as the typed client.
- * Use in frontend or when you do not want to depend on backend modules.
+ * Uses the same message format and API (emit, send, on, off) as `createWsClient`, with the same
+ * untyped events. Use it where the backend module cannot or should not be imported: a script, a
+ * test, another service.
+ *
+ * Runs in Bun. It is not a browser client: `@onebun/core` cannot currently be bundled for a
+ * browser (the build stops on Node builtins such as `cluster` and `v8`). In a browser, use the
+ * built-in `WebSocket` with the native `{ event, data, ack }` JSON frames, or `socket.io-client`.
  *
  * @param options - Client options (url, protocol, auth, reconnect, etc.)
  * @returns Standalone client with connect, disconnect, on, off, emit, send
@@ -702,6 +727,8 @@ export function createWsClient<TDef extends WsServiceDefinition>(
  * client.send('typing', {});
  * client.disconnect();
  * ```
+ *
+ * @see docs:api/websocket.md
  */
 export function createNativeWsClient(options: WsClientOptions): NativeWsClient {
   const typed = createWsClient(NATIVE_WS_DUMMY_DEFINITION, options);

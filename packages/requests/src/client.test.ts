@@ -320,8 +320,11 @@ describe('HttpClient more wrappers', () => {
       }
       expect((r as any).result.ok).toBe(true);
     }
-    // head returns ApiResponse<void>
+    // head returns ApiResponse<void>. The stub attaches a JSON body to HEAD, which no real server
+    // does — that is how this test stayed green while head() failed against every JSON endpoint.
+    // The body of a HEAD answer is never read now, so the stubbed one is ignored.
     expect(head.success).toBe(true);
+    expect(head.success && head.result).toBeUndefined();
   });
 });
 
@@ -1144,3 +1147,229 @@ describe('outgoing request metrics', () => {
     expect(response.statusCode).toBe(HTTP_CREATED);
   });
 });
+
+/**
+ * onebun-FB-31: `get`, `delete`, `head` and `options` share one overload resolver, and an answer
+ * that has no content (HEAD, 204, 304) is not parsed.
+ *
+ * Driven against a real `Bun.serve` so the assertions are on what reached the wire, not on what the
+ * client handed a stubbed fetch.
+ */
+/* eslint-disable @typescript-eslint/naming-convention -- HTTP header names as object keys */
+describe('HttpClient query/config overload and bodyless answers', () => {
+  interface Arrival {
+    method: string;
+    path: string;
+    headers: Headers;
+  }
+
+  let server: ReturnType<typeof Bun.serve>;
+  let arrivals: Arrival[];
+  let client: HttpClient;
+
+  beforeEach(() => {
+    arrivals = [];
+    server = Bun.serve({
+      hostname: '127.0.0.1',
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        arrivals.push({ method: req.method, path: url.pathname + url.search, headers: req.headers });
+
+        switch (url.pathname) {
+          case '/204json':
+            return new Response(null, { status: 204, headers: { 'content-type': 'application/json' } });
+          case '/304':
+            return new Response(null, { status: 304, headers: { etag: '"v1"', 'content-type': 'application/json' } });
+          case '/missing':
+            return Response.json({ reason: 'gone' }, { status: 404 });
+          case '/text':
+            return new Response('plain', { headers: { 'content-type': 'text/plain' } });
+          default:
+            return Response.json({ a: 1 });
+        }
+      },
+    });
+    client = new HttpClient({ baseUrl: `http://127.0.0.1:${server.port}`, retries: { max: 0 } });
+  });
+
+  afterEach(() => {
+    server.stop(true);
+    setTraceContextProvider(null);
+  });
+
+  const paths = (): string[] => arrivals.map((arrival) => `${arrival.method} ${arrival.path}`);
+
+  it('reads tracing and metrics as config on delete, head and options, not as query data', async () => {
+    // 0.8.1 sent `?tracing=false` / `?metrics=false`: these three kept an inline copy of an older
+    // four-name marker list after `get` had been moved to the shared one.
+    await client.delete('/d', { tracing: false });
+    await client.delete('/d', { metrics: false });
+    await client.head('/h', { metrics: false });
+    await client.head('/h', { tracing: false });
+    await client.options('/o', { tracing: false });
+    await client.options('/o', { metrics: false });
+
+    expect(paths()).toEqual([
+      'DELETE /d',
+      'DELETE /d',
+      'HEAD /h',
+      'HEAD /h',
+      'OPTIONS /o',
+      'OPTIONS /o',
+    ]);
+  });
+
+  it('applies the config it recognised: tracing: false on delete sends no trace headers', async () => {
+    setTraceContextProvider(() => ({
+      traceId: '4bf92f3577b34da6a3ce929d0e0e4736',
+      spanId: '00f067aa0ba902b7',
+    }));
+
+    await client.delete('/traced');
+    await client.delete('/untraced', { tracing: false });
+
+    expect(arrivals[0]?.headers.get('traceparent')).not.toBeNull();
+    expect(arrivals[1]?.path).toBe('/untraced');
+    expect(arrivals[1]?.headers.get('traceparent')).toBeNull();
+    expect(arrivals[1]?.headers.get('x-trace-id')).toBeNull();
+  });
+
+  it('honours (url, undefined, config) on all four methods, Promise and Effect forms alike', async () => {
+    const config = { headers: { 'x-a': '1' } };
+
+    await client.get('/g', undefined, config);
+    await client.delete('/d', undefined, config);
+    await client.head('/h', undefined, config);
+    await client.options('/o', undefined, config);
+    await Effect.runPromise(client.getEffect('/ge', undefined, config));
+    await Effect.runPromise(client.deleteEffect('/de', undefined, config));
+    await Effect.runPromise(client.headEffect('/he', undefined, config));
+    await Effect.runPromise(client.optionsEffect('/oe', undefined, config));
+
+    expect(arrivals.map((arrival) => `${arrival.path} ${arrival.headers.get('x-a')}`)).toEqual([
+      '/g 1',
+      '/d 1',
+      '/h 1',
+      '/o 1',
+      '/ge 1',
+      '/de 1',
+      '/he 1',
+      '/oe 1',
+    ]);
+  });
+
+  it('keeps every non-marker key on the query side', async () => {
+    // `redirect`, `retries` and `query` are deliberately not markers: each is a plausible query
+    // parameter, and flipping one would silently turn working query data into config.
+    await client.get('/login', { redirect: '/home' });
+    await client.delete('/d', { retries: 3 });
+    await client.options('/o', { page: 2 });
+
+    expect(paths()).toEqual([
+      'GET /login?redirect=%2Fhome',
+      'DELETE /d?retries=3',
+      'OPTIONS /o?page=2',
+    ]);
+  });
+
+  it('reads the second argument as query data whenever a third is given, even if it looks like config', async () => {
+    await client.get('/q', { timeout: 5 }, {});
+    await client.head('/q', { page: 1 }, { headers: { 'x-a': '2' } });
+
+    expect(paths()).toEqual(['GET /q?timeout=5', 'HEAD /q?page=1']);
+    expect(arrivals[1]?.headers.get('x-a')).toBe('2');
+  });
+
+  it('resolves HEAD against a JSON endpoint without reading a body', async () => {
+    // 0.8.1: RESPONSE_PARSE_ERROR code 200 "Response text is empty" — Bun keeps the JSON
+    // content type on the HEAD answer and the client sent the empty text to JSON.parse.
+    const head = await client.head('/x');
+
+    expect(head).toMatchObject({ success: true, statusCode: 200 });
+    expect(head.success && head.result).toBeUndefined();
+    expect(await client.head('/text')).toMatchObject({ success: true, statusCode: 200 });
+    // The method is compared case-insensitively, as fetch does when it puts it on the wire
+    expect(await client.reqRaw('head', '/x')).toMatchObject({ success: true, statusCode: 200 });
+    expect(arrivals.map((arrival) => arrival.method)).toEqual(['HEAD', 'HEAD', 'HEAD']);
+  });
+
+  it('resolves a 204 that carries a JSON content type', async () => {
+    const removed = await client.delete<{ ignored: true }>('/204json');
+
+    expect(removed).toMatchObject({ success: true, statusCode: 204 });
+    expect(removed.success && removed.result).toBeUndefined();
+  });
+
+  it('resolves a 304 as a success and records it as one', async () => {
+    let recorded: { statusCode: number; success: boolean } | undefined;
+    const observed = new HttpClient({
+      baseUrl: `http://127.0.0.1:${server.port}`,
+      retries: { max: 0 },
+      metricsSink(data) {
+        recorded = { statusCode: data.statusCode, success: data.success };
+      },
+    });
+
+    const cached = await observed.get('/304', undefined, { headers: { 'If-None-Match': '"v1"' } });
+
+    expect(cached).toMatchObject({ success: true, statusCode: 304 });
+    expect(cached.success && cached.result).toBeUndefined();
+    expect(arrivals[0]?.headers.get('if-none-match')).toBe('"v1"');
+    expect(recorded).toEqual({ statusCode: 304, success: true });
+  });
+
+  it('fails a HEAD 404 as HTTP_ERROR 404, not as a parse error', async () => {
+    const outcome = await Effect.runPromise(Effect.either(client.headEffect('/missing')));
+
+    expect(outcome._tag).toBe('Left');
+    if (outcome._tag === 'Left') {
+      expect(outcome.left.error).toBe('HTTP_ERROR');
+      expect(outcome.left.code).toBe(404);
+    }
+  });
+
+  it('sends GET when the method is explicitly undefined, and settles both outcomes as responses', async () => {
+    // `{ method: undefined }` spreads over the GET default and type-checks while
+    // `exactOptionalPropertyTypes` is off. fetch sends it as GET; the client then called
+    // `toUpperCase()` on the undefined method and died with a TypeError defect — on the success
+    // path too once HEAD detection ran on every answer — with no ErrorResponse and no metrics.
+    const methods: string[] = [];
+    const observed = new HttpClient({
+      baseUrl: `http://127.0.0.1:${server.port}`,
+      retries: { max: 0 },
+      metricsSink(data) {
+        methods.push(data.method);
+      },
+    });
+
+    const ok = await observed.request({ url: '/ok', method: undefined });
+    const viaOverload = await observed.get('/ok', { method: undefined });
+    const failed = await Effect.runPromise(Effect.either(observed.requestEffect({ url: '/missing', method: undefined })));
+
+    expect(ok).toEqual({
+      success: true,
+      result: { a: 1 },
+      statusCode: 200,
+      retryCount: 0,
+    });
+    expect(viaOverload).toMatchObject({ success: true, result: { a: 1 }, statusCode: 200 });
+    expect(failed._tag).toBe('Left');
+    if (failed._tag === 'Left') {
+      expect(failed.left).toMatchObject({ error: 'HTTP_ERROR', code: 404 });
+    }
+    expect(paths()).toEqual(['GET /ok', 'GET /ok', 'GET /missing']);
+    expect(methods).toEqual(['GET', 'GET', 'GET']);
+  });
+
+  it('still reads the body of a GET error answer into the error details', async () => {
+    const missing = await Effect.runPromise(Effect.either(client.getEffect('/missing')));
+
+    expect(missing._tag).toBe('Left');
+    if (missing._tag === 'Left') {
+      expect(missing.left.error).toBe('HTTP_ERROR');
+      expect(missing.left.details).toMatchObject({ details: { reason: 'gone' } });
+    }
+  });
+});
+/* eslint-enable @typescript-eslint/naming-convention */

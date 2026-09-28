@@ -575,9 +575,9 @@ export class RedisClient {
    * Execute a raw command.
    *
    * Dispatched through the driver's `send(command, args)`, which is how Bun's client takes an
-   * arbitrary command. This used to index the driver by the command name instead, so every
-   * uppercase name rejected with "is not a function", and the whole Redis queue adapter, which
-   * reached Redis only through here, could not write a single message.
+   * arbitrary command. Indexing the driver by the command name instead would reject every
+   * uppercase name with "is not a function", and the Redis queue adapter, which reaches Redis only
+   * through here, could not write a single message.
    *
    * The key is NOT prefixed: a raw command may take keys in any position, or none, so the caller
    * gives fully-qualified names. Prefer the typed methods below where one exists.

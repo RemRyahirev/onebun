@@ -23,12 +23,12 @@ production-grade backend services.
 ### WebSocket
 - WebSocket Gateway with @WebSocketGateway, @OnMessage decorators
 - Socket.IO adapter support (rooms, namespaces, broadcasting)
-- Auto-generated typed WebSocket client for frontend integration
+- WebSocket client for Bun (createWsClient, createNativeWsClient): event names and payloads are untyped, and @onebun/core cannot currently be bundled for a browser
 
 ### Microservices
 - OneBunApplication multi-service mode: run multiple services from single codebase/image
 - Dev: all services in one process. Prod: ONEBUN_SERVICES=name selects services
-- Typed inter-service HTTP clients with createServiceDefinition/createServiceClient
+- Inter-service HTTP clients with createServiceDefinition/createServiceClient: routes reflected from the callee's module, controller and method names checked at run time, arguments and results untyped (`any`)
 - HMAC authentication for service-to-service communication
 
 ### Validation (ArkType)
@@ -44,6 +44,7 @@ production-grade backend services.
 ### Database (@onebun/drizzle)
 - Drizzle ORM with PostgreSQL and SQLite (bun:sqlite) support
 - Schema-first approach with full type inference from schema
+- `json`/`jsonb` stored as values, not JSON strings — through the ORM, and in raw PostgreSQL SQL via `jsonbParam()`/`jsonParam()` from `@onebun/drizzle/pg`
 - CLI migrations (onebun-drizzle generate/push/studio)
 - Auto-migrate on startup (enabled by default)
 - Configured means required: an unreachable database or a failing migration rejects `app.start()` with `DrizzleStartupError` (stage `open`/`connect`/`migrate`); opt out via `allowDegradedStart: true` in `forRoot()`, or `DB_ALLOW_DEGRADED_START=true` on the environment path
@@ -62,8 +63,12 @@ production-grade backend services.
 
 ### HTTP Client (@onebun/requests)
 - createHttpClient() with auth (Bearer, API Key, Basic, HMAC), retries (fixed/linear/exponential, idempotent methods only by default — POST/PATCH must opt in via retries.methods)
-- Typed `ApiResponse<T>` with success/error discrimination
-- Typed service clients for inter-service communication
+- Typed `ApiResponse<T>` with success/error discrimination; a success carries the upstream status and response headers
+- Optional `maxResponseBytes`: a cap on the decoded response body, checked while it is read, error statuses included
+- Redirect policy `'follow' | 'error' | 'manual'`, on the client or per request; no credential follows a redirect to another origin
+- `responseType: 'bytes' | 'stream'`: binary bodies as a `Uint8Array`, or a `ReadableStream` that resolves at the headers, with `timeout` bounding each wait on the upstream
+- `connectAddress`: connect to an IP address the application validated, with `Host`, TLS SNI and the certificate check kept on the URL's host name (DNS-rebinding defence)
+- Transport of the inter-service clients (createServiceClient, untyped arguments and results)
 
 ### Observability
 - **Prometheus Metrics** (@onebun/metrics): auto HTTP/system/GC metrics, @Timed, @Counted, @Gauged, custom counters/gauges/histograms
@@ -86,7 +91,7 @@ production-grade backend services.
 | @onebun/logger | Structured logging, JSON/pretty, child loggers, trace context |
 | @onebun/metrics | Prometheus metrics, auto HTTP/system metrics, @Timed, @Counted, @Gauged |
 | @onebun/trace | OpenTelemetry, @Span decorator, configurable sampling/export |
-| @onebun/requests | HTTP client, auth schemes, retries, typed service clients |
+| @onebun/requests | HTTP client, auth schemes, retries; transport of the inter-service clients |
 | @onebun/nats | NATS + JetStream integration for queues |
 
 ---
@@ -109,7 +114,7 @@ It provides everything needed to build production-grade TypeScript services
 - **Built-in Prometheus metrics and OpenTelemetry tracing** — no community packages needed
 - **Redis / in-memory caching** with decorator-driven TTL
 - **Typed environment variables** with validation and defaults
-- **WebSocket support** — Socket.IO protocol, rooms, guards, typed clients
+- **WebSocket support** — Socket.IO protocol, rooms, guards, and a client for Bun
 - **Queue system** — `@Cron`, `@Interval`, `@Timeout` and `@Subscribe` decorators
 - **Drizzle ORM integration** — database access with migrations
 - **NATS / JetStream** — message bus for microservices
@@ -175,10 +180,13 @@ Built on Bun's native WebSocket support for maximum performance.
 Optional Socket.IO adapter for browser compatibility,
 rooms and broadcasting.
 
-### Typed WebSocket Client
-Auto-generated typed client for type-safe frontend ↔ backend
-WebSocket communication.
-→ [API Reference](/api/websocket)
+### WebSocket Client
+`createWsClient` (gateways found by name from your module's definition) and
+`createNativeWsClient` (no definition) speak the native and Socket.IO protocols, with
+reconnection and acknowledgements. Event names and payloads are not type-checked. The clients
+run in Bun; `@onebun/core` cannot currently be bundled for a browser, which uses `WebSocket` or
+`socket.io-client` instead.
+→ [API Reference](/api/websocket#ws-client-typing)
 
 ## Microservices (@onebun/core)
 
@@ -189,7 +197,7 @@ Run multiple services from a single codebase and Docker image:
 - **Flexible**: any combination via environment variables
 
 ### Inter-Service Communication
-Typed HTTP clients with `createServiceDefinition` + `createServiceClient`.
+HTTP clients built from the callee's module with `createServiceDefinition` + `createServiceClient`.
 HMAC authentication for service-to-service calls.
 
 ### Kubernetes-Ready
@@ -275,12 +283,28 @@ Full-featured HTTP client with:
 - **Authentication**: Bearer, API Key, Basic, HMAC (inter-service)
 - **Retries**: fixed, linear, exponential backoff — idempotent methods only by default;
   POST and PATCH must opt in via `retries.methods`. See the [defaults table](/api/requests#defaults).
-- **Typed responses**: `ApiResponse<T>` with success/error discrimination
+- **Typed responses**: `ApiResponse<T>` with success/error discrimination; a success carries the
+  upstream `statusCode` and response `headers` (see [Success Response](/api/requests#success-response))
+- **Bounded responses**: `maxResponseBytes` caps the decoded body while it is read, so a gzip bomb
+  or an oversized error body stops at the limit (see
+  [Limiting the response size](/api/requests#max-response-bytes))
+- **Redirects**: followed by the client with no credential crossing to another origin, refused
+  with `redirect: 'error'`, or handed back with `redirect: 'manual'` (see
+  [Redirect policy](/api/requests#redirect-policy))
+- **Binary and streamed bodies**: `responseType: 'bytes'` hands a body over as a `Uint8Array`, and
+  `responseType: 'stream'` resolves at the headers with a `ReadableStream`, so a server-sent event
+  stream or a long download is read as it arrives (see
+  [Response types](/api/requests#response-types))
+- **Validated addresses**: `connectAddress` connects a request to an IP address the application
+  looked up and checked itself, so a second lookup cannot answer differently; `Host`, the TLS SNI
+  and the certificate check keep the URL's host name (see
+  [Connecting to a validated address](/api/requests#connect-address))
 
-### Typed Service Clients
-`createServiceDefinition()` + `createServiceClient()` for
-type-safe inter-service REST communication without code generation.
-→ [API Reference](/api/requests)
+### Service Clients
+`createServiceDefinition()` + `createServiceClient()` call another OneBun service by
+controller and method name, with the routes reflected from its module at run time. The names
+are checked when they are read; arguments and results are untyped (`any`).
+→ [API Reference](/api/requests#service-client-typing)
 
 ## Observability
 
@@ -321,8 +345,8 @@ type-safe inter-service REST communication without code generation.
 ### Graceful Shutdown
 Enabled by default. On SIGTERM/SIGINT the application first refuses new requests with
 `503` while the listener stays open, drains the requests already being served, and only
-then closes the listener and runs the destroy hooks — so a rolling deploy stops cutting
-responses that were mid-flight. Bounded by `shutdownTimeout` (default 15s), idempotent,
+then closes the listener and runs the destroy hooks — so a rolling deploy does not cut
+responses that are mid-flight. Bounded by `shutdownTimeout` (default 15s), idempotent,
 and in multi-service mode a single parent handler stops every service.
 
 ### Shared Redis Connection

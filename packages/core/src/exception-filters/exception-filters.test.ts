@@ -6,7 +6,11 @@ import {
 
 import type { OneBunRequest } from '../types';
 
-import { NotFoundError, HttpStatusCode } from '@onebun/requests';
+import {
+  HttpStatusCode,
+  InternalServerError,
+  NotFoundError,
+} from '@onebun/requests';
 
 import { HttpExecutionContextImpl } from '../http-guards/http-guards';
 
@@ -300,6 +304,93 @@ describe('createDefaultExceptionFilter({ exposeErrorDetails })', () => {
       // populating a body that was never carrying details in the first place.
       expect(body.details).toEqual({});
     }
+  });
+});
+
+// ============================================================================
+// A OneBunBaseError that carries an HTTP-client error's transport details
+// ============================================================================
+
+/**
+ * A `details` record as the HTTP client builds it for an `HTTP_ERROR`, registered the way the
+ * client registers it: in the registry `@onebun/requests` keeps on `globalThis`, which every copy
+ * of the package shares. Registering it here, from outside the package, is what a second copy does.
+ */
+/** What the filter answers with, as far as these tests read it. */
+interface ErrorBody {
+  details?: Record<string, unknown>;
+}
+
+function clientErrorDetails(): Record<string, unknown> {
+  const details: Record<string, unknown> = {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    headers: { 'set-cookie': 'session=COOKIE-SECRET', server: 'billing/1.2' },
+    details: { message: 'BODY-SECRET' },
+    duration: 7,
+    url: 'http://billing.internal:8080/invoices/42?token=URL-SECRET',
+    method: 'GET',
+  };
+  const registry = (globalThis as unknown as Record<symbol, WeakMap<object, readonly string[]>>)[
+    Symbol.for('onebun:requests-transport-details')
+  ];
+  registry.set(details, ['headers', 'details', 'url']);
+
+  return details;
+}
+
+describe('createDefaultExceptionFilter and an HTTP-client error\'s transport details', () => {
+  it('leaves them out by default and keeps the rest of the body', async () => {
+    const response = await defaultExceptionFilter.catch(
+      new NotFoundError('HTTP_ERROR', clientErrorDetails()),
+      makeContext(),
+    );
+
+    expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
+    expect(await response.json()).toEqual({
+      success: false,
+      error: 'HTTP_ERROR',
+      code: HttpStatusCode.NOT_FOUND,
+      details: { duration: 7, method: 'GET' },
+    });
+  });
+
+  it('finds them nested, where client.req() puts the client failure', async () => {
+    const wrapped = new InternalServerError('REQUEST_FAILED', {
+      originalError: { error: 'HTTP_ERROR', code: 404, details: clientErrorDetails() },
+    });
+
+    const text = await (await defaultExceptionFilter.catch(wrapped, makeContext())).text();
+
+    expect(text).not.toContain('SECRET');
+    expect(text).not.toContain('billing.internal');
+    expect(JSON.parse(text).details.originalError.details).toEqual({ duration: 7, method: 'GET' });
+  });
+
+  it('sends them under exposeErrorDetails, as it sent them before', async () => {
+    const filter = createDefaultExceptionFilter({ exposeErrorDetails: true });
+    const details = clientErrorDetails();
+
+    const body = await (await filter.catch(new NotFoundError('HTTP_ERROR', details), makeContext())).json() as ErrorBody;
+
+    expect(body.details).toEqual(details);
+  });
+
+  it('leaves them out in envelope mode too', async () => {
+    const filter = createDefaultExceptionFilter({ httpEnvelope: true });
+
+    const response = await filter.catch(new NotFoundError('HTTP_ERROR', clientErrorDetails()), makeContext());
+
+    expect(response.status).toBe(HttpStatusCode.OK);
+    expect((await response.json() as ErrorBody).details).toEqual({ duration: 7, method: 'GET' });
+  });
+
+  it('sends an author-written error whole, even with keys named like transport details', async () => {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const details = { headers: { 'x-mine': '1' }, url: '/documented', details: 'mine' };
+
+    const body = await (await defaultExceptionFilter.catch(new NotFoundError('MINE', details), makeContext())).json() as ErrorBody;
+
+    expect(body.details).toEqual(details);
   });
 });
 

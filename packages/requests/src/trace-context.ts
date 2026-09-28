@@ -37,11 +37,10 @@ let provider: TraceContextProvider | null = null;
  * Tell the HTTP client where to read the ambient trace context from.
  *
  * `OneBunApplication` calls this at construction, pointing it at the per-request context it
- * already keeps in `AsyncLocalStorage`. It exists as a seam rather than a direct import because
- * an ambient process-global was the previous answer and it never worked: nothing assigned
- * `globalThis.__onebunCurrentTraceContext`, so every outgoing call went out untraced and silent —
- * and had anything assigned it, one global cell shared by every in-flight request would have
- * attributed calls to whichever request wrote last.
+ * already keeps in `AsyncLocalStorage`. It is a seam rather than a direct import because
+ * `@onebun/requests` cannot import the core, and rather than an ambient process-global because
+ * one global cell shared by every in-flight request would attribute calls to whichever request
+ * wrote last.
  *
  * Pass `null` to unregister. Registering is idempotent; the last caller wins.
  *

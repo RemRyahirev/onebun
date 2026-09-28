@@ -53,11 +53,8 @@ expect(response).toBeDefined();
 
 ### createTestMiddleware
 
-Same API again, for a `@Middleware()`. Added in 0.8.1 — before it, a middleware built with
-`createTestService` had `this.config` and `this.logger` undefined for its whole life, and the
-`config` option went to a mock the instance never received. A middleware that reads config
-defensively (`try { this.config.get(…) } catch`) hid that completely: every read took the catch
-branch, so the suite asserted fallback behaviour and passed.
+Same API again, for a `@Middleware()` (since 0.8.1). The instance gets `this.config` and
+`this.logger`, and the `config` option is what its `this.config.get()` reads.
 
 ```typescript
 import { createTestMiddleware } from '@onebun/core/testing';
@@ -80,13 +77,12 @@ does — and then call whichever fallback the instance exposes (`initializeServi
 consequences:
 
 - A class that reads `this.config` or `this.logger` in its constructor (right after `super()`)
-  builds correctly. Before 0.8.1 it died with
-  `TypeError: undefined is not an object (evaluating 'this.config.get')`.
+  builds correctly.
 - Any of the three initialises any framework kind, including interceptors and WebSocket gateways.
   The names exist so a test reads as what it builds.
 
 A `config` option given to a class that extends no framework base and exposes no `initialize*`
-method now throws, naming the class. Configuration that goes nowhere used to be accepted silently.
+method throws, naming the class, so configuration never goes silently nowhere.
 
 ### Return type: TestInstanceResult<T>
 
@@ -180,9 +176,14 @@ For integration tests that need real external services.
 
 **`testcontainers` must be installed for ANY import from `@onebun/core/testing`, not just the
 container helpers** — `bun add -d testcontainers`. It is declared in `@onebun/core`'s
-`peerDependencies` with no `peerDependenciesMeta.optional`, and the testing barrel does
-`export * from './containers'` while `containers.ts` value-imports `{ GenericContainer, Wait }` at
-module top level. So even a file that only pulls `createTestService` resolves the whole
+`peerDependencies` (`>=10.0.0`) with no `peerDependenciesMeta.optional`, and the testing barrel does
+`export * from './containers'` while `containers.ts` value-imports `{ GenericContainer, Wait }`
+(and its internal `container-ownership.ts` the `testcontainers` namespace) at module top level.
+The failed-start cleanup needs 10.3.0+, the first release that exports `getContainerRuntimeClient`,
+but it is feature-detected, not a floor: the function is read off the namespace and used only when
+it is a function, never imported by name (a named import of a missing export fails to link and
+would take the whole barrel down). On 10.0–10.2 the barrel loads and a failed start gets no
+cleanup. So even a file that only pulls `createTestService` resolves the whole
 testcontainers graph, and without the peer the import fails outright. This is deliberate: the
 subpath is the boundary that keeps a Docker client out of a production install, and integration
 tests against real services are the framework's default way to test.
@@ -202,6 +203,7 @@ beforeAll(async () => {
   redis = await createRedisContainer({
     image: 'redis:7-alpine',          // default
     startupTimeout: 30_000,           // ms; default is 60_000 under CI, 30_000 locally
+    labels: { 'com.example.harness': 'orders' }, // optional; applied before create
   });
   // redis.url  — e.g., 'redis://localhost:55001'
   // redis.host — e.g., 'localhost'
@@ -230,9 +232,74 @@ beforeAll(async () => {
 afterAll(() => nats.stop());
 ```
 
+### createPostgresContainer
+
+```typescript
+import { createPostgresContainer } from '@onebun/core/testing';
+
+let postgres: TestContainer;
+
+beforeAll(async () => {
+  postgres = await createPostgresContainer({
+    image: 'postgres:16-alpine',      // default
+    database: 'onebun_test',          // default
+    username: 'onebun',               // default
+    password: 'onebun',               // default
+  });
+  // postgres.url — e.g., 'postgresql://onebun:onebun@localhost:55231/onebun_test'
+});
+
+afterAll(() => postgres.stop());
+```
+
+It waits for the SECOND `database system is ready to accept connections` line: the image logs it
+once for the temporary server that runs the init scripts, stops that server, and only then starts
+the real one. The returned URL accepts queries immediately.
+
 The startup-timeout default is `process.env.CI ? 60_000 : 30_000` — passing a flat `30_000`
 explicitly *shortens* the timeout on CI, which is the environment where image pulls are slowest.
 Omit the option unless you actually need a different budget.
+
+### Failed starts, labels and sweeping
+
+- **A failed start removes its own container.** testcontainers itself cleans up only when the
+  wait strategy fails; an OCI start error or a failed port inspection leaves the container
+  `created` or `running`. So every helper call stamps `dev.onebun.testing.owner=<fresh UUID>`
+  before `create` and, if `start()` rejects, force-removes exactly the containers with that label.
+  Sibling containers — same process, same testcontainers session — are never touched. Needs
+  testcontainers >= 10.3.0 (feature-detected; the peer range stays `>=10.0.0`). On 10.0–10.2 a
+  failed start gets no cleanup: the start error is rethrown unchanged, with no
+  `containerCleanupFailure`, and the container is left behind. Labels are applied on every version.
+- **The error is the start error, unchanged** — same object, class and message; with no runtime it
+  is still `Could not find a working container runtime strategy`. If the cleanup fails too, the
+  error carries `containerCleanupFailure: { ownerLabel, error }` (`ContainerCleanupFailure`);
+  `ownerLabel` is the `key=value` filter that finds the leftover. Do not expect an AggregateError.
+- **`labels`** (all three helpers) are applied before `create`. A caller label under the owner key
+  does not replace the owner label. Without Ryuk, sweep what a killed run left behind by YOUR label,
+  never by `org.testcontainers` or the session id (shared across harnesses):
+
+```typescript
+import { getContainerRuntimeClient } from 'testcontainers';
+
+async function sweepContainers(labels: Record<string, string>): Promise<number> {
+  const { dockerode } = (await getContainerRuntimeClient()).container;
+  const leftovers = await dockerode.listContainers({
+    all: true, // a container killed mid-start is `created`, not running
+    filters: { label: Object.entries(labels).map(([key, value]) => `${key}=${value}`) },
+  });
+  await Promise.all(leftovers.map(async (info) => {
+    await dockerode.getContainer(info.Id).remove({ force: true, v: true });
+  }));
+
+  return leftovers.length;
+}
+
+// beforeAll: await sweepContainers(HARNESS_LABELS); then createPostgresContainer({ labels: HARNESS_LABELS })
+```
+
+Sweeping at start assumes one run of the suite per host; overlapping runs need a per-run value.
+The recipe imports `getContainerRuntimeClient` (testcontainers >= 10.3.0); on 10.0–10.2 sweep the
+same label filter from outside: `docker ps -aq --filter label=k=v | xargs -r docker rm -f -v`.
 
 ### TestContainer interface
 
@@ -367,6 +434,7 @@ describe('MyService', () => {
 | `toBeTruthy()` / `toBeFalsy()` | Use specific matchers: `toBe(true)`, `toBeNull()`, etc. |
 | Test takes >10ms with fake timers | Fake timer mock is likely used incorrectly |
 | Not calling `close()` / `stop()` | Always clean up in `afterEach`/`afterAll` to prevent leaks |
+| `expect(error).toBe(thrown)` / `instanceof MyError` on what `app.start()` rejects with, when `onModuleInit` threw it | Service and controller `onModuleInit` run inside Effect, so the rejection is a `FiberFailure` carrying the MESSAGE, not the object: `await expect(app.start()).rejects.toThrow('backend down')`. Identity holds only for failures outside Effect (`onApplicationInit`, a queue subscribe, a taken port) |
 | Mocking fetch for integration tests | `TestingModule.inject()` uses `undici.fetch` — bypasses global mocks |
 | Manual mock loggers | Use `createTestService`/`createTestController`/`createTestMiddleware` — mocks are built in |
 | `createMockSyncLogger().info.mock.calls` | That logger is plain no-ops — build the subject with `createTestService` to get an instrumented one |

@@ -77,27 +77,27 @@ interface MetricsOptions {
 ### One registry per application
 
 Each application owns its own Prometheus `Registry`. Two applications in one process — which is
-what multi-service mode is — no longer collide on metric names and no longer serve each other's
+what multi-service mode is — do not collide on metric names and do not serve each other's
 series: a scrape of one service returns that service's metrics, stamped with that service's
 `defaultLabels`.
 
-Before, everything went into prom-client's process-global `register`. With the default prefix the
-second application threw on a duplicate metric name, its metrics service was never built, and its
-`/metrics` answered 404 — while the first application's series had already been restamped with
-the second one's labels. With a distinct `prefix` per service, as this page recommends for
-multi-service, there was no error and both endpoints served everything, all labelled with
-whichever service started last.
+Applications that share one registry — prom-client's process-global `register`, through the
+`registry` option below — do collide. With the default prefix the second application throws on a
+duplicate metric name, its metrics service is never built, and its `/metrics` answers 404 — while
+the first application's series have already been restamped with the second one's labels. With a
+distinct `prefix` per service, as this page recommends for multi-service, there is no error and
+both endpoints serve everything, all labelled with whichever service started last.
 
 Two consequences worth knowing:
 
 - **Process-level series are replicated per service.** `process_cpu_*`, memory and event-loop
-  metrics describe the process, and every service in it now exposes them. Summing across targets
+  metrics describe the process, and every service in it exposes them. Summing across targets
   double-counts them; aggregate with `max` or scrape one service for process-level data.
-- **`register` is no longer what an application scrapes.** A metric built as
-  `new Counter({ ..., registers: [register] })` still registers, but never appears in any
+- **`register` is not what an application scrapes.** A metric built as
+  `new Counter({ ..., registers: [register] })` registers, but never appears in any
   `/metrics` body. The framework names such metrics once, on the first scrape, in a WARN. Reach
-  the application's registry with `metricsService.getRegistry().register`, or opt an application
-  back onto the global one:
+  the application's registry with `metricsService.getRegistry().register`, or put an application
+  on the global one:
 
 ```typescript
 import { register } from '@onebun/metrics';
@@ -108,8 +108,7 @@ const app = new OneBunApplication(AppModule, {
 ```
 
 Metrics created through `this.metrics` in a service or controller, and through
-`metricsService.createCounter()` and friends, always land in the owning application's registry —
-nothing to change there.
+`metricsService.createCounter()` and friends, always land in the owning application's registry.
 
 **Decorators record into the application that built the instance.** A method decorator has no
 application at decoration time, but it has `this` at call time, and the framework stamps every
@@ -145,12 +144,10 @@ Calls land in `<prefix>http_client_requests_total` and
 `<prefix>http_client_request_duration_seconds`, labelled `method`, `host` and `status_code`.
 Without a sink nothing is recorded — `metrics: true` alone is not enough.
 
-Two things changed here and both were deliberate. Outgoing calls used to be written into the
-SERVER's own `http_requests_total` with `controller="requests-client"`, so a service's request
-rate counted the calls it made as well as the ones it served; they now have their own family.
-And the route label used to be the full URL — measured,
-`route="http://127.0.0.1:35379/alpha/ping"` — which mints a fresh series per path, per query
-string and per ephemeral port; the label is the host.
+Outgoing calls have their own family, separate from the server's `http_requests_total`, so a
+service's request rate counts only the requests it served, not the calls it made. The label is
+the `host`, not the full URL: a URL label such as `route="http://127.0.0.1:35379/alpha/ping"`
+would mint a fresh series per path, per query string and per ephemeral port.
 
 ## Built-in Metrics
 
@@ -275,9 +272,7 @@ processingHistogram.observe({ order_type: 'standard' }, duration);
 ## Decorator-based Metrics
 
 The decorator creates its metric on first use, so applying one is enough — there is no
-`createHistogram()` to write first. It used to only look the name up and do nothing when it was
-absent, which meant a decorator copied from this page recorded nothing at all: the method ran, the
-scrape answered, and the series never appeared.
+`createHistogram()` to write first.
 
 ::: warning The name you pass is unprefixed; the scrape shows it prefixed
 `@Counted('emails_sent_total')` with `metrics: { prefix: 'myapp_' }` appears in `/metrics` as
@@ -285,8 +280,9 @@ scrape answered, and the series never appeared.
 wrote is its own source of "my metric is missing".
 :::
 
-Registering the metric yourself still wins, and is worth doing when you want real help text or
-histogram buckets chosen for your latencies — the decorator's generated ones are generic:
+A metric you register yourself before the first call takes precedence. Register it when you want
+real help text or histogram buckets chosen for your latencies — the decorator's generated ones are
+generic:
 
 ```typescript
 // In onModuleInit, before the first decorated call

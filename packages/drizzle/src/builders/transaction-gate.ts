@@ -106,7 +106,7 @@ export class SQLiteTransactionGate {
    *
    * This is what makes `repository.create()` — or any service query — work inside
    * `transaction()`: rather than refusing it for lack of a `tx` argument, it is issued ON the
-   * open transaction, which is what the caller meant and what the old code did by accident.
+   * open transaction, which is what the caller meant.
    * `null` for everyone else, including work that outlived the transaction it started in.
    */
   activeTransactionDatabase(): object | null {

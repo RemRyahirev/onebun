@@ -20,18 +20,18 @@ import { isHttpContext } from '../types';
 /**
  * Universal Guard interface — ONE guard contract across HTTP, WebSocket and queue handlers.
  *
- * `@UseGuards()` accepts anything shaped like this on all three transports, mirroring
- * `@UseInterceptors()`, which has always shared one metadata key across them. The context is
- * the discriminated union `ExecutionContext`: narrow it with `isHttpContext()`,
- * `isWsContext()` or `isQueueContext()` before touching transport-specific accessors.
+ * `@UseGuards()` accepts anything shaped like this on all three transports, class-level and
+ * method-level; each level has one metadata key that all three transports read. The context is the discriminated union
+ * `ExecutionContext`: narrow it with `isHttpContext()`, `isWsContext()` or `isQueueContext()`
+ * before touching transport-specific accessors.
  *
  * A guard that reaches a transport it was not written for MUST return `false` rather than
  * fall through to `undefined` — that is what the narrowing is for. On WebSocket and queue a
- * guard that throws is treated as a denial and logged; on HTTP a throw still travels to the
- * route's exception filters, so `throw new HttpException(401, ...)` keeps its meaning.
+ * guard that throws is treated as a denial and logged; on HTTP a throw travels to the route's
+ * exception filters, so `throw new HttpException(401, ...)` answers with that exception.
  *
  * `HttpGuard`, `WsGuard` and `MessageGuard` all satisfy this interface — method parameters
- * are checked bivariantly — so existing single-transport guards keep compiling unchanged.
+ * are checked bivariantly — so a single-transport guard compiles wherever a `Guard` is expected.
  *
  * @see docs:api/guards.md
  *

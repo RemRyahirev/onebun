@@ -1,7 +1,8 @@
 /**
  * Service Client Module
  *
- * Type-safe service definitions and clients for inter-service communication.
+ * Service definitions reflected from a module, and the HTTP clients built from them, for
+ * inter-service communication.
  */
 
 export * from './service-client.types';

@@ -208,8 +208,8 @@ export class WsHandler {
     /**
      * The owning application's tracer, so a `@Traced` method reached from a socket callback is
      * recorded by THIS application's provider rather than by whichever application happened to
-     * register its provider with OpenTelemetry first. Optional: a handler constructed without
-     * one behaves exactly as before.
+     * register its provider with OpenTelemetry first. Optional: without one, such a method is
+     * recorded by the process-global provider.
      */
     private ownerTracer?: Tracer,
     /**
@@ -1303,14 +1303,12 @@ export class WsHandler {
   /**
    * Close every open socket and wait for the disconnect path to finish.
    *
-   * `app.stop()` used to leave connections established and let `server.stop(true)` drop them at
-   * the end, so a client saw no close frame at all — measured, `readyState` still 1 and no close
-   * event — and was cut only when the process died, as an abnormal 1006 at an arbitrary moment
-   * instead of a clean going-away at a controlled one.
+   * Left to `server.stop(true)` at the end of `app.stop()`, a client would see no close frame at
+   * all — `readyState` still 1 and no close event — and be cut only when the process died, as an
+   * abnormal 1006 at an arbitrary moment instead of a clean going-away at a controlled one.
    *
    * Bounded, because a socket whose close callback never arrives must not turn shutdown into a
-   * hang. A connection still open when the bound expires is dropped by `server.stop(true)` as
-   * before.
+   * hang. A connection still open when the bound expires is dropped by `server.stop(true)`.
    *
    * The code reaches the wire but not necessarily the client's report of it: measured against a
    * bare `Bun.serve`, a server-side `close(1001, 'bye')` arrives at the server's own close

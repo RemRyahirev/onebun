@@ -105,6 +105,8 @@ app
       'Failed to start application:',
       error instanceof Error ? error : new Error(String(error)),
     );
+    // A failed start() has already released everything, so without this the process exits 0
+    process.exit(1);
   });
 `;
 

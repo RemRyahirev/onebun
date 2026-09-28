@@ -70,7 +70,19 @@ export interface StreamDefinition {
   name: string;
   /** Subjects stored in this stream */
   subjects: string[];
-  /** Retention policy */
+  /**
+   * Retention policy. `'limits'` when the stream is created without one.
+   *
+   * It also decides how every consumer on this stream is created. `'workqueue'` makes them
+   * `deliver_policy: all` — the only policy nats-server accepts on a workqueue — and brings the
+   * workqueue rules with it: a subscription needs a `group`, may not use `ackMode: 'none'`, and may
+   * not use a parameter that covers part of a token (`jobs.v{version}`); each is refused at
+   * `subscribe()`. Every other value, and none at all, keeps `deliver_policy: new`.
+   *
+   * The declaration is trusted, never probed — declare exactly the retention the stream's owner
+   * declares. A managed stream whose declared retention differs from the server's fails `connect()`;
+   * a `manage: false` one is not checked. See the work-queue streams section of docs/api/queue.md.
+   */
   retention?: 'limits' | 'interest' | 'workqueue';
   /** Maximum messages */
   maxMsgs?: number;
@@ -108,8 +120,8 @@ export interface StreamDefinition {
    * reconciles its CONSUMER on that stream, which is a separate grant
    * (`$JS.API.CONSUMER.*.<stream>.>`) and the one a consuming tenant is normally given.
    *
-   * The cost is that a stream that is missing or bound to different subjects is no longer caught
-   * at `app.start()`; it surfaces at the first `publish()` or `subscribe()` instead.
+   * The cost is that a stream that is missing or bound to different subjects is not caught at
+   * `app.start()`; it surfaces at the first `publish()` or `subscribe()` instead.
    *
    * @see docs:api/queue.md
    */

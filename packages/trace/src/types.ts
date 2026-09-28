@@ -3,11 +3,10 @@ import type { Span as OtelSpan } from '@opentelemetry/api';
 /**
  * Where a `TraceSpan` keeps the OpenTelemetry span it was started from.
  *
- * The OTel span used to be created and then dropped, with `endHttpTraceSync` trying to recover it
- * through `trace.getActiveSpan()` — which is `undefined`, because nothing ever makes the span
- * active. So `.end()` never ran, `BatchSpanProcessor.onEnd` never fired, and the collector stayed
- * empty however it was configured. The span object survives the whole request already; carrying
- * the OTel span on it means ending never depends on ambient state.
+ * The span object survives the whole request, so carrying the OTel span on it means ending it
+ * never depends on ambient state. Recovering it through `trace.getActiveSpan()` instead fails
+ * wherever nothing has made the span active: `.end()` would never run, `BatchSpanProcessor.onEnd`
+ * would never fire, and the collector would stay empty however it was configured.
  *
  * A SYMBOL key, not a field. `JSON.stringify` and `Object.keys` skip own symbol properties, so a
  * user logging a span cannot serialize the live span graph — which reaches the
@@ -239,6 +238,28 @@ export interface TraceOptions {
    * @see docs:api/trace.md
    */
   spanProcessors?: unknown[];
+}
+
+/**
+ * How `shutdown()` treats the processors passed in `TraceOptions.spanProcessors`.
+ *
+ * @see docs:api/trace.md
+ */
+export interface TraceShutdownOptions {
+  /**
+   * `'shutdown'` shuts them down with the provider, as OpenTelemetry does with every processor a
+   * provider holds. `'flush'` flushes them and leaves them running, for a caller that goes on
+   * using them — with the next application built from the same options, or a retry of this one.
+   * What this package built from `exportOptions` is shut down either way, and the provider hands
+   * back the process-global slot and the context manager either way.
+   *
+   * A later `shutdown()` without `'flush'` shuts down the processors a `'flush'` call left
+   * running, and does nothing else: the provider is already released. Every other repeated call
+   * is a no-op.
+   *
+   * @defaultValue 'shutdown'
+   */
+  spanProcessors?: 'shutdown' | 'flush';
 }
 
 /**

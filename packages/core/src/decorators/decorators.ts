@@ -25,7 +25,9 @@ import {
 
 import {
   copyAllMetadata,
+  defineGlobalMetadata,
   getConstructorParamTypes as getDesignParamTypes,
+  getOwnGlobalMetadata,
   Reflect,
 } from './metadata';
 
@@ -225,12 +227,13 @@ export function controllerDecorator(basePath: string = '') {
     injectable()(WrappedController);
 
     // Copy design:paramtypes from original class to wrapped class
-    // This enables automatic DI without @Inject when emitDecoratorMetadata is enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const designParamTypes = (globalThis as any).Reflect?.getMetadata?.('design:paramtypes', target);
+    // This enables automatic DI without @Inject when emitDecoratorMetadata is enabled.
+    // The copy is required, not a convenience: DI reads OWN paramtypes only, and the wrapper is a
+    // subclass that emitted none. It reads the original's OWN array too — a controller that
+    // declares no constructor must not pick up its parent's through a prototype walk.
+    const designParamTypes = getOwnGlobalMetadata('design:paramtypes', target);
     if (designParamTypes) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (globalThis as any).Reflect?.defineMetadata?.('design:paramtypes', designParamTypes, WrappedController);
+      defineGlobalMetadata('design:paramtypes', designParamTypes, WrappedController);
     }
 
     // Copy constructor params metadata from original class to wrapped class
@@ -1027,10 +1030,9 @@ const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 /**
  * Metadata key for method-level guards (shared across HTTP, WS, Queue).
  *
- * One key, three transports — the same shape `INTERCEPTORS_METADATA` has always had. It used
- * to be `'onebun:http_guards'`, read only by HTTP route registration, so `@UseGuards` on a
- * `@Subscribe` or `@OnMessage` handler was a silent no-op: no type error, no warning,
- * and the handler ran completely unguarded.
+ * One key, three transports: HTTP route registration, WebSocket gateways and queue consumers all
+ * read it, so `@UseGuards` on a `@Subscribe` or `@OnMessage` handler guards that handler exactly
+ * as it guards a route.
  *
  * @see docs:api/guards.md
  */

@@ -19,6 +19,7 @@ import {
   spyOn,
 } from 'bun:test';
 import { Effect } from 'effect';
+import { getContainerRuntimeClient } from 'testcontainers';
 
 import {
   BaseController,
@@ -116,6 +117,36 @@ async function isReachable(host: string, port: number, payload = ''): Promise<bo
   return await readLine(host, port, payload).then(() => true, () => false);
 }
 
+/**
+ * The sweep from docs/testing.md#container-labels-and-cleanup, verbatim: force-remove every
+ * container, running or not, that carries all of `labels`.
+ */
+async function sweepContainers(labels: Record<string, string>): Promise<number> {
+  const { dockerode } = (await getContainerRuntimeClient()).container;
+  const leftovers = await dockerode.listContainers({
+    all: true, // a container killed mid-start is `created`, not running
+    filters: { label: Object.entries(labels).map(([key, value]) => `${key}=${value}`) },
+  });
+  await Promise.all(leftovers.map(async (info) => {
+    await dockerode.getContainer(info.Id).remove({ force: true, v: true });
+  }));
+
+  return leftovers.length;
+}
+
+/** A container's state as the runtime reports it, or `gone` once it no longer exists. */
+async function containerState(id: string): Promise<string> {
+  const { dockerode } = (await getContainerRuntimeClient()).container;
+  try {
+    return (await dockerode.getContainer(id).inspect()).State.Status;
+  } catch (error) {
+    if ((error as { statusCode?: number }).statusCode === 404) {
+      return 'gone';
+    }
+    throw error;
+  }
+}
+
 /** Parse the `INFO {...}` line a NATS server sends on connect. */
 function parseNatsInfo(line: string): { jetstream?: boolean; version?: string } {
   const json = line.slice('INFO '.length, line.indexOf('\r\n'));
@@ -188,7 +219,7 @@ class PingService extends BaseService {
 describe('docs/testing.md — the @onebun/core/testing barrel', () => {
   /**
    * The page opens with "All testing utilities are exported from `@onebun/core/testing`" and
-   * then lists ten names. A barrel that drops one — or a subpath export that stops resolving —
+   * then lists twelve names. A barrel that drops one — or a subpath export that stops resolving —
    * breaks every consumer's test file, so the list is pinned and the helpers that need no
    * Docker are called through the namespace itself: they must be values, not just types.
    *
@@ -208,6 +239,8 @@ describe('docs/testing.md — the @onebun/core/testing barrel', () => {
       'createMockSyncLogger',
       'createRedisContainer',
       'createNatsContainer',
+      'createPostgresContainer',
+      'createTestMiddleware',
     ];
 
     expect(documented.filter(name => !(name in barrel))).toEqual([]);
@@ -452,6 +485,52 @@ describe('docs/testing.md — createNatsContainer', () => {
       expect(info.version?.startsWith('2.10.')).toBe(true);
     } finally {
       await nats.stop();
+    }
+  }, CONTAINER_TEST_TIMEOUT_MS);
+});
+
+// ============================================================================
+// Container labels and cleanup
+// ============================================================================
+
+describe('docs/testing.md — container labels and cleanup', () => {
+  /**
+   * The section's recipe: label everything a suite starts, and sweep by that label what a killed
+   * run left behind. Three containers stand in for the cases the prose names — one a killed run
+   * left RUNNING, one it left `created` (killed between create and start), and one belonging to
+   * another harness that must survive. The harness values are unique to this test run, so the sweep
+   * cannot reach a container this test did not create.
+   *
+   * @source docs:testing.md#container-labels-and-cleanup
+   */
+  it('the sweep removes what this harness left behind, running or only created, and nothing else', async () => {
+    const run = crypto.randomUUID();
+    /* eslint-disable @typescript-eslint/naming-convention -- label keys are reverse-DNS */
+    const harnessLabels = { 'com.example.harness': `docs-sweep-${run}` };
+    const otherHarness = { 'com.example.harness': `docs-other-${run}` };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    const leftRunning = await createRedisContainer({ labels: harnessLabels });
+    const other = await createRedisContainer({ labels: otherHarness });
+    const { dockerode } = (await getContainerRuntimeClient()).container;
+    const image = (await dockerode.getContainer(leftRunning.container.getId()).inspect()).Image;
+    // Docker's create options are PascalCase.
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    const leftCreated = await dockerode.createContainer({ Image: image, Labels: harnessLabels });
+
+    try {
+      // The label went on at create: the started container carries it.
+      expect(leftRunning.container.getLabels()).toMatchObject(harnessLabels);
+      expect(await containerState(leftCreated.id)).toBe('created');
+
+      expect(await sweepContainers(harnessLabels)).toBe(2);
+
+      expect(await containerState(leftRunning.container.getId())).toBe('gone');
+      expect(await containerState(leftCreated.id)).toBe('gone');
+      expect(await containerState(other.container.getId())).toBe('running');
+    } finally {
+      await sweepContainers(harnessLabels);
+      await other.stop();
     }
   }, CONTAINER_TEST_TIMEOUT_MS);
 });

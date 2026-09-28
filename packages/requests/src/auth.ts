@@ -109,10 +109,10 @@ export const applyAuth = (
  * Whether this scheme SIGNS the request rather than shaping it.
  *
  * The distinction drives the pipeline order: shaping schemes (`bearer`, `apikey`, `basic`,
- * `custom`) run before the URL is built, signing runs after, over what is final. Getting that
- * backwards is what made `apikey` in query mode a silent no-op — the key was added to
- * `config.query` one line after the URL had already been assembled from it — and what left the
- * HMAC signature covering neither the query string nor the body.
+ * `custom`) run before the URL is built, signing runs after, over what is final. Run the other way
+ * round, `apikey` in query mode would be a silent no-op — the key would be added to `config.query`
+ * after the URL had already been assembled from it — and the HMAC signature would cover neither
+ * the query string nor the body.
  *
  * A type predicate, so a caller that branches on it gets the narrowed config rather than
  * re-checking `type` and hoping the two checks stay in step.

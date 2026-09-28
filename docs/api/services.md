@@ -150,18 +150,78 @@ The error message searches all registered modules and reports:
 - Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
 - Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
 
-Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it no longer suppresses the "decorate it with `@Service()` and list it in a module's providers" advice, which prints when nothing else matched.
+Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it does not suppress the "decorate it with `@Service()` and list it in a module's providers" advice, which prints whenever nothing else matched.
 
 ### Circular Dependencies
 
-Circular dependencies (A → B → A) are detected and throw `CircularDependencyError` with the full chain:
+The order of `providers` does not matter. Each provider is constructed after the providers of its
+own module that it injects, whatever order the array lists them in — a consumer may come first:
+
+```typescript
+import { BaseService, Module, Service } from '@onebun/core';
+
+@Service()
+export class Database extends BaseService {}
+
+@Service()
+export class UserRepository extends BaseService {
+  constructor(private database: Database) {
+    super();
+  }
+}
+
+@Service()
+export class UserService extends BaseService {
+  constructor(private repository: UserRepository) {
+    super();
+  }
+}
+
+@Module({
+  // Consumers first: Database is still constructed first, then UserRepository, then UserService
+  providers: [UserService, UserRepository, Database],
+})
+export class UserModule {}
+```
+
+A parameter typed as an abstract or base class, which DI resolves to a registered subclass (see
+[Architecture](/architecture#explicit-injection-edge-cases)), follows the same rule: the consumer
+waits until a provider of its module that extends the type is built, so it may be listed before
+that implementation and before the implementation's own dependencies. The one exception is an
+`@Optional()` parameter of that kind: it does not wait, so list the implementation first — see
+[@Optional()](/api/decorators#optional).
+
+The construction order is deterministic: providers are taken in the listed order, and one whose
+dependency is not built yet goes to the back of the queue. A list that already puts dependencies
+first is therefore built exactly in the listed order, and `onModuleInit` runs in that order too. A
+consumer-first list boots however long its chain is — `CircularDependencyError` is reserved for a
+real cycle (below).
+
+A real cycle (A → B → A) is detected and throws `CircularDependencyError`. The chain names only the
+cycle: a provider that merely waits on it — `X` in `X -> Y -> Z -> Y` — is listed among the
+unresolved services, not in the chain.
 
 ```
 CircularDependencyError: Circular dependency detected in module AppModule!
 Dependency chain: ServiceA -> ServiceB -> ServiceA
+Unresolved services: ServiceA, ServiceB
 ```
 
 Restructure your code to break the cycle — e.g., extract the shared logic into a third service.
+
+A provider waiting for a provider of its module that was never constructed is not a cycle. It fails
+with `DependencyResolutionError` naming that dependency and why it has no instance: this copy of
+`@onebun/core` sees no `@Service()` on it (it is undecorated, or decorated by a second copy of the
+framework), or creating it threw — the original error is logged as `Failed to create service <Name>`:
+
+```
+DependencyResolutionError: Could not resolve dependency UserRepository for service UserService.
+  - UserRepository is listed in the providers of UserModule, but was never constructed: creating it threw, and the error was logged as "Failed to create service UserRepository".
+```
+
+For an abstract-typed parameter the dependency named is the parameter's type, and the hint names the
+provider extending it that was never constructed — `StripeGateway (it extends PaymentGateway)`. An
+`@Optional()` parameter does not fail here: see [@Optional()](/api/decorators#optional).
 
 ### Optional Dependencies
 
@@ -192,13 +252,18 @@ Services can implement lifecycle hooks to execute code at specific points in the
 | `BeforeApplicationDestroy` | `beforeApplicationDestroy(signal?)` | After the drain and listener close — first hook of the teardown |
 | `OnApplicationDestroy` | `onApplicationDestroy(signal?)` | At the very end of shutdown |
 
+The destroy hooks also run when `start()` fails: the failed boot runs the shutdown sequence over
+every instance it built before rethrowing — including one whose `onModuleInit` never ran or threw
+halfway. Release what exists, as `DatabaseService` below does with `if (this.pool)`. See
+[When `start()` fails](./core.md#when-start-fails).
+
 ::: warning Destroy hooks run after the server is gone
 `beforeApplicationDestroy` is the first *hook*, not the first act of shutdown. Three phases precede
 it: new requests are answered `503`, the in-flight ones are drained (force-closed once the drain
 budget — half of `shutdownTimeout`, 7.5s by default — expires), and the HTTP listener is closed. A
 request issued from inside a destroy hook to the application's own server fails to connect, so these
 hooks are for cleanup, not for serving or self-calling. See
-[Graceful Shutdown](./core.md#graceful-shutdown) for the full 11-step sequence.
+[Graceful Shutdown](./core.md#graceful-shutdown) for the full sequence.
 :::
 
 ::: tip Eager Instantiation & Standalone Services
@@ -360,12 +425,20 @@ SHUTDOWN:
 4. Before destroy hook → beforeApplicationDestroy(signal)
 5. WebSockets closed, queue stopped and disconnected, traces flushed
 6. Module destroy hook → onModuleDestroy()
-7. Shared Redis released
+7. Shared Redis: the application releases nothing — the cache and the queue adapter gave their holds back when they closed; a debug line names any remaining holder
 8. Application destroy hook → onApplicationDestroy(signal)
 9. Logger transport flushed
+
+FAILED START (a startup step threw):
+1. The error is logged
+2. The SHUTDOWN sequence runs over what was built; steps with nothing to release are skipped,
+   and a loggerLayer, spanProcessors or metrics registry passed in options is left open
+3. start() rejects with the error it caught (an onModuleInit failure arrives wrapped by
+   Effect as a FiberFailure, message intact) — a stop() before the next start() runs no
+   step again; it only closes what step 2 left open, as every stop() does
 ```
 
-A destroy hook can no longer serve or reach the application's own HTTP server: the listener is
+A destroy hook cannot serve or reach the application's own HTTP server: the listener is
 closed at step 3, before hook 4, and a request to it from inside a hook is refused at the socket.
 
 ## Accessing Logger

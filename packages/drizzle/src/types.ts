@@ -59,10 +59,10 @@ export interface SQLiteConnectionOptions {
 /**
  * Connection pool options, shared by both PostgreSQL connection shapes.
  *
- * Every option here reaches the driver. `min` used to sit alongside them and is gone: Bun's
- * `SQL` opens connections on demand and has no minimum-pool concept, so the option could only
- * ever be accepted and discarded. An option the framework silently drops is worse than an
- * absent one, because nothing tells the operator their tuning did nothing.
+ * Every option here reaches the driver. There is no `min`: Bun's `SQL` opens connections on
+ * demand and has no minimum-pool concept, so such an option could only be accepted and
+ * discarded — and an option the framework silently drops is worse than an absent one, because
+ * nothing tells the operator their tuning did nothing.
  *
  * @see docs:api/drizzle.md
  */

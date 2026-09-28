@@ -30,9 +30,14 @@ import {
   Controller as CtrlDeco,
   Middleware,
   Module,
+  Optional,
 } from '../decorators/decorators';
 import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
-import { createMockLogger, makeMockLoggerLayer } from '../testing/test-utils';
+import {
+  createMockLogger,
+  makeMockLoggerLayer,
+  makeRecordingLoggerLayer,
+} from '../testing/test-utils';
 import { BaseWebSocketGateway } from '../websocket/ws-base-gateway';
 import { WebSocketGateway } from '../websocket/ws-decorators';
 
@@ -373,7 +378,7 @@ describe('OneBunModule', () => {
     });
 
     test('should allow @Optional() dependency to resolve as undefined', () => {
-      const { registerDependencies, Optional } = require('../decorators/decorators');
+      const { registerDependencies } = require('../decorators/decorators');
 
       @Service()
       class OptionalDep {
@@ -403,6 +408,686 @@ describe('OneBunModule', () => {
       // Should NOT throw — optional dependency is allowed to be undefined
       const mod = new OneBunModule(OptionalModule, mockLoggerLayer);
       expect(mod).toBeInstanceOf(OneBunModule);
+    });
+  });
+
+  /**
+   * The provider pass used to give up after `providers.length * 2` attempts. A graph listed
+   * consumer-first needs up to N(N+1)/2 — a reversed chain of four already crossed the cap — and
+   * the leftovers were reported as a CircularDependencyError whose "chain" was not a cycle.
+   */
+  describe('Provider order independence (FB-24)', () => {
+    const { registerDependencies } = require('../decorators/decorators');
+
+    interface GraphNode {
+      readonly args: unknown[];
+    }
+    type GraphNodeClass = new (...args: unknown[]) => GraphNode;
+
+    /** Park–Miller minimal standard generator: a seeded PRNG, so a failing graph is reproducible. */
+    const seededRandom = (seed: number): (() => number) => {
+      let state = seed;
+
+      return () => {
+        state = (state * 48271) % 2147483647;
+
+        return state / 2147483647;
+      };
+    };
+
+    const shuffle = <T>(items: T[], random: () => number): T[] => {
+      const result = [...items];
+      for (let i = result.length - 1; i > 0; i--) {
+        const j = Math.floor(random() * (i + 1));
+        [result[i], result[j]] = [result[j], result[i]];
+      }
+
+      return result;
+    };
+
+    const permutations = (items: number[]): number[][] => (items.length <= 1
+      ? [items]
+      : items.flatMap((item, i) => permutations([...items.slice(0, i), ...items.slice(i + 1)])
+        .map((rest) => [item, ...rest])));
+
+    /**
+     * One @Service() class per node: node `i` injects the nodes in `deps[i]`, in that parameter
+     * order, and appends `i` to `constructed` when its constructor runs.
+     */
+    const buildGraph = (deps: number[][], name: (i: number) => string) => {
+      const constructed: number[] = [];
+      const classes: GraphNodeClass[] = deps.map((_, i) => {
+        const holder = {
+          [name(i)]: class {
+            readonly args: unknown[];
+
+            constructor(...args: unknown[]) {
+              this.args = args;
+              constructed.push(i);
+            }
+          },
+        };
+
+        return holder[name(i)];
+      });
+      deps.forEach((nodeDeps, i) => {
+        registerDependencies(classes[i], nodeDeps.map((dep) => classes[dep]));
+        Service()(classes[i]);
+      });
+
+      return { classes, constructed };
+    };
+
+    const bootProviders = (providers: Function[]): OneBunModule => {
+      @Module({ providers })
+      class OrderModule {}
+
+      return new OneBunModule(OrderModule, mockLoggerLayer);
+    };
+
+    /** Every injected argument is THE instance the module holds for that class. */
+    const wiringErrors = (module: OneBunModule, deps: number[][], classes: GraphNodeClass[]): string[] =>
+      deps.flatMap((nodeDeps, i) => {
+        const instance = module.getServiceByClass(classes[i]);
+        if (instance === undefined) {
+          return [`${i} was not constructed`];
+        }
+
+        return nodeDeps.flatMap((dep, k) => (instance.args[k] === module.getServiceByClass(classes[dep])
+          ? []
+          : [`${i}.args[${k}] is not the ${dep} singleton`]));
+      });
+
+    /**
+     * The order a FIFO queue constructs in when a provider blocked on an unbuilt dependency goes
+     * back to the TAIL — the order every graph that booted on 0.8.1 was constructed in.
+     */
+    const fifoConstructionOrder = (deps: number[][], order: number[]): number[] => {
+      const queue = [...order];
+      const built = new Set<number>();
+      const constructed: number[] = [];
+      let deferred = 0;
+      while (queue.length > 0 && deferred < queue.length) {
+        const node = queue.shift()!;
+        if (deps[node].some((dep) => !built.has(dep))) {
+          queue.push(node);
+          deferred++;
+          continue;
+        }
+        built.add(node);
+        constructed.push(node);
+        deferred = 0;
+      }
+
+      return constructed;
+    };
+
+    const bootError = (boot: () => unknown): Error => {
+      try {
+        boot();
+      } catch (error) {
+        return error as Error;
+      }
+      throw new Error('expected the boot to fail');
+    };
+
+    test('boots providers listed consumer-first [F, E, D, C, B, A] (0.8.1: CircularDependencyError)', () => {
+      @Service()
+      class ChainA {}
+
+      @Service()
+      class ChainB {
+        constructor(readonly a: ChainA) {}
+      }
+
+      @Service()
+      class ChainC {
+        constructor(readonly b: ChainB) {}
+      }
+
+      @Service()
+      class ChainD {
+        constructor(readonly c: ChainC) {}
+      }
+
+      @Service()
+      class ChainE {
+        constructor(readonly d: ChainD) {}
+      }
+
+      @Service()
+      class ChainF {
+        constructor(readonly e: ChainE) {}
+      }
+
+      @Module({ providers: [ChainF, ChainE, ChainD, ChainC, ChainB, ChainA] })
+      class ReversedChainModule {}
+
+      const module = new OneBunModule(ReversedChainModule, mockLoggerLayer);
+      const top = module.getServiceByClass(ChainF);
+
+      expect(top).toBeInstanceOf(ChainF);
+      expect(top!.e.d.c.b.a).toBe(module.getServiceByClass(ChainA)!);
+    });
+
+    test('boots every one of the 720 orders of a six-service chain (461 of them failed on 0.8.1)', () => {
+      const deps = [[], [0], [1], [2], [3], [4]];
+      const { classes } = buildGraph(deps, (i) => `Chain6_${i}`);
+      const failures: string[] = [];
+
+      for (const order of permutations([0, 1, 2, 3, 4, 5])) {
+        try {
+          const module = bootProviders(order.map((i) => classes[i]));
+          failures.push(...wiringErrors(module, deps, classes).map((e) => `${order.join(',')}: ${e}`));
+        } catch (error) {
+          failures.push(`${order.join(',')}: ${(error as Error).name}`);
+        }
+      }
+
+      expect(failures).toEqual([]);
+    });
+
+    test('boots a chain of 40 providers listed in reverse', () => {
+      const deps = Array.from({ length: 40 }, (_, i) => (i === 0 ? [] : [i - 1]));
+      const { classes, constructed } = buildGraph(deps, (i) => `Chain40_${i}`);
+
+      const module = bootProviders([...classes].reverse());
+
+      expect(wiringErrors(module, deps, classes)).toEqual([]);
+      expect(constructed).toEqual(Array.from({ length: 40 }, (_, i) => i));
+    });
+
+    test('boots a reversed chain inside an IMPORTED module', () => {
+      @Service()
+      class InnerA {}
+
+      @Service()
+      class InnerB {
+        constructor(readonly a: InnerA) {}
+      }
+
+      @Service()
+      class InnerC {
+        constructor(readonly b: InnerB) {}
+      }
+
+      @Service()
+      class InnerD {
+        constructor(readonly c: InnerC) {}
+      }
+
+      @Module({ providers: [InnerD, InnerC, InnerB, InnerA], exports: [InnerD] })
+      class InnerChainModule {}
+
+      @Service()
+      class OuterConsumer {
+        constructor(readonly d: InnerD) {}
+      }
+
+      @Module({ imports: [InnerChainModule], providers: [OuterConsumer] })
+      class OuterModule {}
+
+      const module = new OneBunModule(OuterModule, mockLoggerLayer);
+
+      expect(module.getServiceByClass(OuterConsumer)!.d.c.b.a).toBeInstanceOf(InnerA);
+    });
+
+    test('constructs in FIFO order, a blocked provider requeued at the tail (200 seeded random DAGs)', () => {
+      const random = seededRandom(20260926);
+      const mismatches: string[] = [];
+
+      for (let graph = 0; graph < 200; graph++) {
+        const size = 3 + Math.floor(random() * 10);
+        // Edges only point to lower indices, so every graph is acyclic.
+        const deps = Array.from({ length: size }, (_, i) => shuffle(
+          Array.from({ length: i }, (_unused, j) => j).filter(() => random() < 0.35),
+          random,
+        ));
+        const order = shuffle(Array.from({ length: size }, (_, i) => i), random);
+        const { classes, constructed } = buildGraph(deps, (i) => `Dag${graph}_${i}`);
+        const label = `graph ${graph} deps=${JSON.stringify(deps)} order=${order.join(',')}`;
+
+        try {
+          const module = bootProviders(order.map((i) => classes[i]));
+          const expected = fifoConstructionOrder(deps, order);
+          if (constructed.join(',') !== expected.join(',')) {
+            mismatches.push(`${label}: constructed ${constructed.join(',')}, FIFO model ${expected.join(',')}`);
+          }
+          mismatches.push(...wiringErrors(module, deps, classes).map((e) => `${label}: ${e}`));
+        } catch (error) {
+          mismatches.push(`${label}: ${(error as Error).name}`);
+        }
+      }
+
+      expect(mismatches).toEqual([]);
+    });
+
+    test('keeps the construction order of a graph that already booted: [B(A), X, A] builds X, A, B', () => {
+      const constructed: string[] = [];
+
+      @Service()
+      class KeepA {
+        constructor() {
+          constructed.push('A');
+        }
+      }
+
+      @Service()
+      class KeepX {
+        constructor() {
+          constructed.push('X');
+        }
+      }
+
+      @Service()
+      class KeepB {
+        constructor(readonly a: KeepA) {
+          constructed.push('B');
+        }
+      }
+
+      @Module({ providers: [KeepB, KeepX, KeepA] })
+      class KeepOrderModule {}
+
+      new OneBunModule(KeepOrderModule, mockLoggerLayer);
+
+      expect(constructed).toEqual(['X', 'A', 'B']);
+    });
+
+    test('a reversed chain whose TOP needs an unprovided class throws DependencyResolutionError (0.8.1: a false cycle)', () => {
+      const { classes } = buildGraph([[], [0], [1], [2], [3]], (i) => `TopMissing${i}`);
+
+      @Service()
+      class NeverProvided {}
+
+      // The top provider is deferred on TopMissing3 before it ever reaches the missing class.
+      registerDependencies(classes[4], [classes[3], NeverProvided]);
+
+      const error = bootError(() => bootProviders([...classes].reverse()));
+
+      expect(error).toBeInstanceOf(DependencyResolutionError);
+      expect((error as DependencyResolutionError).targetName).toBe('TopMissing4');
+      expect((error as DependencyResolutionError).dependencyName).toBe('NeverProvided');
+    });
+
+    test('a cycle reached through a consumer reports only the cycle: X -> Y -> Z -> Y gives "Y -> Z -> Y"', () => {
+      const names = ['CycleX', 'CycleY', 'CycleZ'];
+      const { classes } = buildGraph([[1], [2], [1]], (i) => names[i]);
+
+      const error = bootError(() => bootProviders(classes));
+
+      expect(error).toBeInstanceOf(CircularDependencyError);
+      expect((error as CircularDependencyError).chain).toBe('CycleY -> CycleZ -> CycleY');
+      expect([...(error as CircularDependencyError).unresolvedServices].sort()).toEqual(names);
+    });
+
+    test('a 2-cycle next to an unrelated reversed chain: unresolvedServices are exactly the cycle', () => {
+      // 0 <-> 1 is the cycle; 2 <- 3 <- 4 <- 5 <- 6 is a chain, listed consumer-first.
+      const names = ['Ping', 'Pong', 'Link2', 'Link3', 'Link4', 'Link5', 'Link6'];
+      const { classes } = buildGraph([[1], [0], [], [2], [3], [4], [5]], (i) => names[i]);
+
+      const error = bootError(() => bootProviders([0, 1, 6, 5, 4, 3, 2].map((i) => classes[i])));
+
+      expect(error).toBeInstanceOf(CircularDependencyError);
+      expect((error as CircularDependencyError).chain).toBe('Ping -> Pong -> Ping');
+      expect([...(error as CircularDependencyError).unresolvedServices].sort()).toEqual(['Ping', 'Pong']);
+    });
+
+    test('a same-module dependency without @Service() is named, not reported as a cycle (0.8.1: "chain: NeedsPlain")', () => {
+      class PlainDependency {}
+
+      @Service()
+      class NeedsPlain {}
+
+      registerDependencies(NeedsPlain, [PlainDependency]);
+
+      for (const providers of [[PlainDependency, NeedsPlain], [NeedsPlain, PlainDependency]]) {
+        const error = bootError(() => bootProviders(providers));
+
+        expect(error.name).not.toBe('CircularDependencyError');
+        expect(error).toBeInstanceOf(DependencyResolutionError);
+        expect((error as DependencyResolutionError).targetName).toBe('NeedsPlain');
+        expect((error as DependencyResolutionError).dependencyName).toBe('PlainDependency');
+        expect(error.message).toContain('PlainDependency');
+        expect(error.message).toContain('@Service()');
+      }
+    });
+
+    test('a same-module dependency whose constructor threw is named, not reported as a cycle', () => {
+      @Service()
+      class ExplodingDependency {
+        constructor() {
+          throw new Error('db url not set');
+        }
+      }
+
+      @Service()
+      class NeedsExploding {
+        constructor(readonly dep: ExplodingDependency) {}
+      }
+
+      for (const providers of [[ExplodingDependency, NeedsExploding], [NeedsExploding, ExplodingDependency]]) {
+        const error = bootError(() => bootProviders(providers));
+
+        expect(error.name).not.toBe('CircularDependencyError');
+        expect(error).toBeInstanceOf(DependencyResolutionError);
+        expect((error as DependencyResolutionError).targetName).toBe('NeedsExploding');
+        expect((error as DependencyResolutionError).dependencyName).toBe('ExplodingDependency');
+        expect(error.message).toContain('Failed to create service ExplodingDependency');
+      }
+    });
+
+    /**
+     * A parameter typed as an abstract class resolves by `instanceof` to a built subclass. The
+     * abstract class itself is never a provider, so until the pass learned to wait for a provider
+     * extending it, a consumer listed before its implementation failed at once — and one listed
+     * before the implementation's own dependencies did too, so only a full dependencies-first
+     * sort booted.
+     */
+    describe('a parameter typed as an abstract class', () => {
+      abstract class PaymentGateway {
+        abstract charge(amount: number): string;
+      }
+
+      @Service()
+      class GatewayConfig {
+        readonly key = 'k';
+      }
+
+      @Service()
+      class StripeGateway extends PaymentGateway {
+        constructor(readonly config: GatewayConfig) {
+          super();
+        }
+
+        charge(amount: number): string {
+          return `${this.config.key}:${amount}`;
+        }
+      }
+
+      @Service()
+      class CheckoutService {
+        constructor(readonly gateway: PaymentGateway) {}
+      }
+
+      test('boots every order of [GatewayConfig, StripeGateway(GatewayConfig), CheckoutService(PaymentGateway)]', () => {
+        const classes = [GatewayConfig, StripeGateway, CheckoutService];
+        const failures: string[] = [];
+
+        for (const order of permutations([0, 1, 2])) {
+          const label = order.map((i) => classes[i].name).join(',');
+          try {
+            const module = bootProviders(order.map((i) => classes[i]));
+            if (module.getServiceByClass(CheckoutService)!.gateway !== module.getServiceByClass(StripeGateway)) {
+              failures.push(`${label}: CheckoutService holds no StripeGateway singleton`);
+            }
+          } catch (error) {
+            failures.push(`${label}: ${(error as Error).name}`);
+          }
+        }
+
+        expect(failures).toEqual([]);
+      });
+
+      test('with two implementations, the first one listed wins whether the consumer comes before or after them', () => {
+        @Service()
+        class AdyenGateway extends PaymentGateway {
+          charge(amount: number): string {
+            return `adyen:${amount}`;
+          }
+        }
+
+        @Service()
+        class PaypalGateway extends PaymentGateway {
+          charge(amount: number): string {
+            return `paypal:${amount}`;
+          }
+        }
+
+        const winners = [
+          [CheckoutService, AdyenGateway, PaypalGateway],
+          [AdyenGateway, PaypalGateway, CheckoutService],
+          [CheckoutService, PaypalGateway, AdyenGateway],
+          [PaypalGateway, AdyenGateway, CheckoutService],
+        ].map((providers) => bootProviders(providers).getServiceByClass(CheckoutService)!.gateway.constructor.name);
+
+        expect(winners).toEqual(['AdyenGateway', 'AdyenGateway', 'PaypalGateway', 'PaypalGateway']);
+      });
+
+      test('an implementation whose constructor threw is named, as the implementation of the parameter type', () => {
+        @Service()
+        class BrokenGateway extends PaymentGateway {
+          constructor() {
+            super();
+            throw new Error('no api key');
+          }
+
+          charge(): string {
+            return 'never';
+          }
+        }
+
+        for (const providers of [[BrokenGateway, CheckoutService], [CheckoutService, BrokenGateway]]) {
+          const error = bootError(() => bootProviders(providers));
+
+          expect(error).toBeInstanceOf(DependencyResolutionError);
+          expect((error as DependencyResolutionError).targetName).toBe('CheckoutService');
+          expect((error as DependencyResolutionError).dependencyName).toBe('PaymentGateway');
+          expect(error.message).toContain('BrokenGateway (it extends PaymentGateway)');
+          expect(error.message).toContain('Failed to create service BrokenGateway');
+        }
+      });
+
+      test('with no implementation listed, it still fails at once with DependencyResolutionError', () => {
+        // A subclass that injects its own base class is no implementation for itself.
+        @Service()
+        class SelfReferencingGateway extends PaymentGateway {
+          constructor(readonly inner: PaymentGateway) {
+            super();
+          }
+
+          charge(): string {
+            return 'self';
+          }
+        }
+
+        for (const providers of [[CheckoutService], [SelfReferencingGateway]]) {
+          const error = bootError(() => bootProviders(providers));
+
+          expect(error).toBeInstanceOf(DependencyResolutionError);
+          expect((error as DependencyResolutionError).dependencyName).toBe('PaymentGateway');
+        }
+      });
+
+      test('a cycle through it is a CircularDependencyError', () => {
+        @Service()
+        class LoopingGateway extends PaymentGateway {
+          constructor(readonly checkout: CheckoutService) {
+            super();
+          }
+
+          charge(): string {
+            return 'loop';
+          }
+        }
+
+        const error = bootError(() => bootProviders([CheckoutService, LoopingGateway]));
+
+        expect(error).toBeInstanceOf(CircularDependencyError);
+        expect((error as CircularDependencyError).chain).toBe('CheckoutService -> LoopingGateway -> CheckoutService');
+      });
+
+      /**
+       * The one exception, kept on purpose: an optional parameter typed as an abstract class
+       * resolves to whatever is built when its consumer's turn comes, exactly as on 0.8.1. Waiting
+       * would turn an implementation that injects its consumer back into a cycle.
+       */
+      test('an @Optional() one does not wait: listed before its implementation it is undefined, with a warning', () => {
+        @Service()
+        class OptionalCheckout {
+          constructor(@Optional() readonly gateway?: PaymentGateway) {}
+        }
+
+        const boot = (providers: Function[]) => {
+          const recorder = makeRecordingLoggerLayer();
+
+          @Module({ providers })
+          class OptionalGatewayModule {}
+
+          const module = new OneBunModule(OptionalGatewayModule, recorder.layer);
+          const warnings = recorder.messages('warn').filter((message) => message.includes('OptionalCheckout'));
+
+          return { module, warnings };
+        };
+
+        const consumerFirst = boot([OptionalCheckout, GatewayConfig, StripeGateway]);
+        expect(consumerFirst.module.getServiceByClass(OptionalCheckout)!.gateway).toBeUndefined();
+        expect(consumerFirst.warnings).toHaveLength(1);
+        expect(consumerFirst.warnings[0]).toContain('StripeGateway, which extends it, is not built yet');
+
+        const implementationFirst = boot([GatewayConfig, StripeGateway, OptionalCheckout]);
+        expect(implementationFirst.module.getServiceByClass(OptionalCheckout)!.gateway)
+          .toBe(implementationFirst.module.getServiceByClass(StripeGateway)!);
+        expect(implementationFirst.warnings).toEqual([]);
+      });
+
+      /**
+       * The optional parameter is reached before a later one defers the consumer. By the retry the
+       * implementation is built and injected, as on 0.8.1, so a warning logged on the first attempt
+       * would claim an `undefined` the consumer never received.
+       */
+      test('an @Optional() one is not warned about when a later parameter defers the consumer until it is built', () => {
+        @Service()
+        class InstantGateway extends PaymentGateway {
+          charge(amount: number): string {
+            return `instant:${amount}`;
+          }
+        }
+
+        @Service()
+        class Ledger {}
+
+        @Service()
+        class LedgerCheckout {
+          constructor(
+            @Optional() readonly gateway: PaymentGateway | undefined,
+            readonly ledger: Ledger,
+          ) {}
+        }
+
+        const recorder = makeRecordingLoggerLayer();
+
+        @Module({ providers: [LedgerCheckout, InstantGateway, Ledger] })
+        class LedgerCheckoutModule {}
+
+        const module = new OneBunModule(LedgerCheckoutModule, recorder.layer);
+        const checkout = module.getServiceByClass(LedgerCheckout)!;
+
+        expect(checkout.gateway).toBe(module.getServiceByClass(InstantGateway)!);
+        expect(checkout.ledger).toBe(module.getServiceByClass(Ledger)!);
+        expect(recorder.messages('warn').filter((message) => message.includes('LedgerCheckout'))).toEqual([]);
+      });
+
+      test('an @Optional() one whose implementation injects the consumer back still boots, in either order', () => {
+        @Service()
+        class OptionalCheckout {
+          constructor(@Optional() readonly gateway?: PaymentGateway) {}
+        }
+
+        @Service()
+        class CallbackGateway extends PaymentGateway {
+          constructor(readonly checkout: OptionalCheckout) {
+            super();
+          }
+
+          charge(): string {
+            return 'callback';
+          }
+        }
+
+        for (const providers of [[OptionalCheckout, CallbackGateway], [CallbackGateway, OptionalCheckout]]) {
+          const module = bootProviders(providers);
+          const checkout = module.getServiceByClass(OptionalCheckout)!;
+
+          expect(checkout.gateway).toBeUndefined();
+          expect(module.getServiceByClass(CallbackGateway)!.checkout).toBe(checkout);
+        }
+      });
+    });
+
+    test('an @Optional() same-module dependency that was never constructed is undefined, with a warning', () => {
+      @Service()
+      class FailingDependency {
+        constructor() {
+          throw new Error('db url not set');
+        }
+      }
+
+      class UndecoratedDependency {}
+
+      @Service()
+      class TolerantConsumer {
+        constructor(
+          @Optional() readonly failing?: FailingDependency,
+          @Optional() readonly undecorated?: UndecoratedDependency,
+        ) {}
+      }
+
+      for (const providers of [
+        [FailingDependency, UndecoratedDependency, TolerantConsumer],
+        [TolerantConsumer, FailingDependency, UndecoratedDependency],
+      ]) {
+        const recorder = makeRecordingLoggerLayer();
+
+        @Module({ providers })
+        class TolerantModule {}
+
+        const consumer = new OneBunModule(TolerantModule, recorder.layer).getServiceByClass(TolerantConsumer);
+        const warnings = recorder.messages('warn').filter((message) => message.includes('TolerantConsumer'));
+
+        expect(consumer).toBeInstanceOf(TolerantConsumer);
+        expect(consumer!.failing).toBeUndefined();
+        expect(consumer!.undecorated).toBeUndefined();
+        expect(warnings).toHaveLength(2);
+        expect(warnings[0]).toContain('Failed to create service FailingDependency');
+        expect(warnings[1]).toContain('UndecoratedDependency is listed in the providers of TolerantModule');
+      }
+    });
+
+    test('a consumer deferred after its @Optional() parameter was left undefined is warned about once, not per attempt', () => {
+      @Service()
+      class FailingDependency {
+        constructor() {
+          throw new Error('db url not set');
+        }
+      }
+
+      @Service()
+      class LaterDependency {}
+
+      @Service()
+      class RetriedConsumer {
+        constructor(
+          @Optional() readonly failing: FailingDependency | undefined,
+          readonly later: LaterDependency,
+        ) {}
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      // RetriedConsumer reaches `failing` on both of its attempts: the first one defers on LaterDependency.
+      @Module({ providers: [FailingDependency, RetriedConsumer, LaterDependency] })
+      class RetriedModule {}
+
+      const module = new OneBunModule(RetriedModule, recorder.layer);
+      const consumer = module.getServiceByClass(RetriedConsumer)!;
+      const warnings = recorder.messages('warn').filter((message) => message.includes('RetriedConsumer'));
+
+      expect(consumer.failing).toBeUndefined();
+      expect(consumer.later).toBe(module.getServiceByClass(LaterDependency)!);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith('RetriedConsumer gets undefined for its @Optional() parameter #0 (FailingDependency)');
+      expect(warnings[0]).toContain('Failed to create service FailingDependency');
     });
   });
 
@@ -2909,6 +3594,283 @@ describe('OneBunModule', () => {
       (module as any).resolveGuards([PlainGuard]);
 
       expect(warnings).toEqual([]);
+    });
+  });
+
+  /**
+   * DI reads a class's OWN constructor types, never its parent's (FB-23), so a subclass that
+   * declares no constructor is built without its parent's dependencies. It boots, and with
+   * reflect-metadata imported before the core 0.8.1 borrowed the parent's types instead — so the
+   * warning is what stops that difference from surfacing only as a 500 at request time.
+   */
+  describe('a class that declares no constructor under a parent with dependencies', () => {
+    const { clearGlobalModules } = require('../decorators/decorators');
+    const { clearGlobalServicesRegistry } = require('./module');
+    const { BaseService: BaseServiceClass } = require('./service');
+
+    beforeEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    afterEach(() => {
+      clearGlobalModules();
+      clearGlobalServicesRegistry();
+    });
+
+    @Service()
+    class Mailer {
+      send(): string {
+        return 'sent';
+      }
+    }
+
+    @Service()
+    class Notifier {
+      constructor(readonly mailer: Mailer) {}
+    }
+
+    const inheritedWarnings = (recorder: ReturnType<typeof makeRecordingLoggerLayer>, name: string): string[] =>
+      recorder.messages('warn').filter((message) => message.startsWith(`${name} declares no constructor`));
+
+    test('a @Service() subclass gets none of them, and the module says so once', () => {
+      @Service()
+      class WelcomeNotifier extends Notifier {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer, Notifier, WelcomeNotifier] })
+      class NotifierModule {}
+
+      const module = new OneBunModule(NotifierModule, recorder.layer);
+      const warnings = inheritedWarnings(recorder, 'WelcomeNotifier');
+
+      expect(module.getServiceByClass(WelcomeNotifier)!.mailer).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('If it inherits the constructor of Notifier, which takes (Mailer)');
+      expect(warnings[0]).toContain('declare the constructor in WelcomeNotifier with those parameters');
+      expect(warnings[0]).toEndWith('give WelcomeNotifier a decorator (@Service()) if it has none.');
+    });
+
+    test('a subclass that declares its constructor, or whose parents take nothing, is not reported', () => {
+      @Service()
+      class RedeclaredNotifier extends Notifier {
+        // Not useless: declaring it is what makes Bun emit this class's own design:paramtypes.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      // `constructor()` is a declaration too: Bun records `[]` for it, not nothing.
+      @Service()
+      class SelfSufficientNotifier extends Notifier {
+        constructor() {
+          super(new Mailer());
+        }
+      }
+
+      @Service()
+      class LoudMailer extends Mailer {}
+
+      @Service()
+      class PlainService extends BaseServiceClass {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({
+        providers: [Mailer, Notifier, RedeclaredNotifier, SelfSufficientNotifier, LoudMailer, PlainService],
+      })
+      class DeclaringModule {}
+
+      const module = new OneBunModule(DeclaringModule, recorder.layer);
+
+      expect(module.getServiceByClass(RedeclaredNotifier)!.mailer).toBe(module.getServiceByClass(Mailer)!);
+      expect(module.getServiceByClass(SelfSufficientNotifier)!.mailer).toBeInstanceOf(Mailer);
+      expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
+    });
+
+    test('a @Controller() subclass is reported through the controller wrapper', async () => {
+      @CtrlDeco('/notify')
+      class NotifyController extends CtrlBase {
+        constructor(readonly mailer: Mailer) {
+          super();
+        }
+      }
+
+      @CtrlDeco('/welcome')
+      class WelcomeController extends NotifyController {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer], controllers: [NotifyController, WelcomeController] })
+      class ControllerModule {}
+
+      const module = new OneBunModule(ControllerModule, recorder.layer);
+      module.getLayer();
+      await Effect.runPromise(module.setup() as Effect.Effect<unknown, never, never>);
+
+      const welcome = module.getControllerInstance(WelcomeController) as WelcomeController;
+      const warnings = inheritedWarnings(recorder, 'WelcomeController');
+
+      expect((module.getControllerInstance(NotifyController) as NotifyController).mailer).toBeInstanceOf(Mailer);
+      expect(welcome.mailer).toBeUndefined();
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('If it inherits the constructor of NotifyController, which takes (Mailer)');
+      expect(warnings[0]).toContain('a decorator (@Controller()) if it has none');
+      expect(inheritedWarnings(recorder, 'NotifyController')).toEqual([]);
+    });
+
+    @Service()
+    class MailingGuard {
+      constructor(readonly mailer: Mailer) {}
+
+      canActivate(): boolean {
+        return this.mailer instanceof Mailer;
+      }
+    }
+
+    test('a guard is reported once however many routes name it', () => {
+      class InheritingGuard extends MailingGuard {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      (module as any).resolveGuards([InheritingGuard]);
+      (module as any).resolveGuards([InheritingGuard]);
+
+      expect(inheritedWarnings(recorder, 'InheritingGuard')).toHaveLength(1);
+      expect(inheritedWarnings(recorder, 'InheritingGuard')[0]).toContain('constructor of MailingGuard, which takes (Mailer)');
+      // Undecorated as well: declaring the constructor alone would still leave its types unrecorded.
+      expect(inheritedWarnings(recorder, 'InheritingGuard')[0])
+        .toContain('pass them to super(...), and give InheritingGuard a decorator (@Service()) if it has none');
+    });
+
+    /**
+     * Undecorated, so Bun emits no types for its own parameters. It is never handed its parent's
+     * — that is the positional defect own-only reading avoids — but with reflect-metadata imported
+     * before the core 0.8.1 did hand them over, and a subclass whose parameters match its parent's
+     * worked there. It now denies every request, so it is reported too, with the other fix.
+     */
+    test('an undecorated guard that declares its own parameters is told to take a decorator, once', () => {
+      class AuditLog {}
+
+      class StrictGuard extends MailingGuard {
+        // Not useless: it is the shape under test — parameters of its own, and no decorator.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      class AuditingGuard extends MailingGuard {
+        constructor(readonly audit: AuditLog) {
+          super(new Mailer());
+        }
+      }
+
+      @Service()
+      class DecoratedStrictGuard extends MailingGuard {
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      (module as any).resolveGuards([StrictGuard, AuditingGuard]);
+      const [strict, decorated] = (module as any).resolveGuards([StrictGuard, DecoratedStrictGuard]);
+
+      const declaredWarnings = (name: string): string[] => recorder.messages('warn')
+        .filter((message) => message.startsWith(`${name} declares a constructor with parameters`));
+
+      expect(strict.canActivate({})).toBe(false);
+      expect(decorated.canActivate({})).toBe(true);
+      expect(declaredWarnings('StrictGuard')).toHaveLength(1);
+      expect(declaredWarnings('StrictGuard')[0]).toContain('those of MailingGuard (Mailer) are not used');
+      expect(declaredWarnings('StrictGuard')[0]).toContain('Add @Service() to StrictGuard');
+      expect(declaredWarnings('AuditingGuard')).toHaveLength(1);
+      expect(declaredWarnings('DecoratedStrictGuard')).toEqual([]);
+      expect(recorder.messages('warn').filter((message) => message.includes('declares no constructor'))).toEqual([]);
+    });
+
+    /**
+     * Undecorated, so nothing is recorded for the `constructor()` it declares, which looks exactly
+     * like no constructor at all. It supplies its parent's dependency itself and works, so the
+     * warning must neither claim it declares no constructor nor that the dependency is undefined.
+     */
+    test('an undecorated guard whose own constructor() supplies the dependency works, and the warning claims neither', () => {
+      class SelfSupplyingGuard extends MailingGuard {
+        constructor() {
+          super(new Mailer());
+        }
+      }
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class GuardModule {}
+
+      const module = new OneBunModule(GuardModule, recorder.layer);
+      const [guard] = (module as any).resolveGuards([SelfSupplyingGuard]);
+      const warnings = inheritedWarnings(recorder, 'SelfSupplyingGuard');
+
+      expect(guard.canActivate({})).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toStartWith(
+        'SelfSupplyingGuard declares no constructor of its own (or, without a decorator, one whose parameter types were not recorded)',
+      );
+      expect(warnings[0]).toContain('If it inherits the constructor of MailingGuard, which takes (Mailer), each of them receives undefined');
+      expect(warnings[0]).not.toContain('declares no constructor of its own, so');
+    });
+
+    test('middleware is told to take @Middleware(), the decorator documented for it, by either warning', () => {
+      @Middleware()
+      class MailingMiddleware extends BaseMiddleware {
+        constructor(readonly mailer: Mailer) {
+          super();
+        }
+
+        async use(_req: OneBunRequest, next: () => Promise<OneBunResponse>): Promise<OneBunResponse> {
+          return await next();
+        }
+      }
+
+      class StrictMiddleware extends MailingMiddleware {
+        // Not useless: it is the shape under test — parameters of its own, and no decorator.
+        // eslint-disable-next-line @typescript-eslint/no-useless-constructor
+        constructor(mailer: Mailer) {
+          super(mailer);
+        }
+      }
+
+      class InheritingMiddleware extends MailingMiddleware {}
+
+      const recorder = makeRecordingLoggerLayer();
+
+      @Module({ providers: [Mailer] })
+      class MiddlewareModule {}
+
+      const module = new OneBunModule(MiddlewareModule, recorder.layer);
+      module.resolveMiddleware([StrictMiddleware, InheritingMiddleware]);
+
+      const declaredWarnings = recorder.messages('warn')
+        .filter((message) => message.startsWith('StrictMiddleware declares a constructor with parameters'));
+      const inheriting = inheritedWarnings(recorder, 'InheritingMiddleware');
+
+      expect(declaredWarnings).toHaveLength(1);
+      expect(declaredWarnings[0]).toEndWith('Add @Middleware() to StrictMiddleware to have its constructor injected.');
+      expect(inheriting).toHaveLength(1);
+      expect(inheriting[0]).toEndWith('give InheritingMiddleware a decorator (@Middleware()) if it has none.');
+      expect(recorder.messages('warn').filter((message) => message.includes('@Service()'))).toEqual([]);
     });
   });
 });

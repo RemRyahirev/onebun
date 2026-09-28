@@ -1,7 +1,8 @@
 /**
  * WebSocket Client Types
  *
- * Type definitions for the typed WebSocket client.
+ * Type definitions for the WebSocket client. Event names are strings and payloads are `unknown`:
+ * none of these types is derived from a gateway's handlers.
  */
 
 import type { WsServiceDefinition, WsGatewayDefinition } from './ws-service-definition';
@@ -79,10 +80,18 @@ export interface WsClientEventListeners {
 }
 
 /**
- * Gateway client interface
+ * Gateway client interface.
+ *
+ * The event name is any `string` and the payload is `unknown`. The type argument of `emit<T>()` and
+ * `on<T>()` asserts what the payload is; nothing checks it against the gateway.
+ *
+ * @see docs:api/websocket.md
  */
 export interface WsGatewayClient {
-  /** Send an event and wait for acknowledgement */
+  /**
+   * Send an event and wait for acknowledgement. Resolves the `data` of the handler's reply over the
+   * native protocol, and the whole `{ event, data }` reply over Socket.IO.
+   */
   emit<T = unknown>(event: string, data?: unknown): Promise<T>;
   /** Subscribe to events */
   on<T = unknown>(event: string, listener: WsEventListener<T>): void;
@@ -120,7 +129,13 @@ export type ExtractGatewayNames<TDef extends WsServiceDefinition> =
   TDef['_gateways'] extends Map<infer K, WsGatewayDefinition> ? K : never;
 
 /**
- * Typed service client
+ * The client `createWsClient` returns: `WsClient` plus one `WsGatewayClient` per gateway name.
+ *
+ * Despite the name, the gateway names are not known to the type system. `_gateways` is a
+ * `Map<string, WsGatewayDefinition>`, so any name compiles, and at run time a name the definition
+ * lacks reads as `undefined`.
+ *
+ * @see docs:api/websocket.md
  */
 export type TypedWsClient<TDef extends WsServiceDefinition> = WsClient<TDef> & {
   [K in ExtractGatewayNames<TDef> & string]: WsGatewayClient;
@@ -137,8 +152,11 @@ export interface PendingRequest {
 
 /**
  * Standalone WebSocket client (no service definition).
- * Same message format and API as the typed client, but without gateway proxies.
- * Use in frontend or when you do not want to depend on backend module/definitions.
+ * Same message format and API as the `createWsClient` client, but without gateway proxies.
+ * Use it where the backend module cannot or should not be imported. It runs in Bun:
+ * `@onebun/core` cannot currently be bundled for a browser.
+ *
+ * @see docs:api/websocket.md
  */
 export interface NativeWsClient {
   connect(): Promise<void>;
@@ -151,7 +169,10 @@ export interface NativeWsClient {
   on<T = unknown>(event: string, listener: WsEventListener<T>): void;
   off<E extends WsClientEvent>(event: E, listener?: WsClientEventListeners[E]): void;
   off(event: string, listener?: WsEventListener): void;
-  /** Send event and wait for acknowledgement */
+  /**
+   * Send event and wait for acknowledgement. Resolves the `data` of the handler's reply over the
+   * native protocol, and the whole `{ event, data }` reply over Socket.IO.
+   */
   emit<T = unknown>(event: string, data?: unknown): Promise<T>;
   /** Send event without waiting for response */
   send(event: string, data?: unknown): void;

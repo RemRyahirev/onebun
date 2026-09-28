@@ -26,9 +26,9 @@ type PassthroughKey = Exclude<keyof NatsConnectionOptions, 'tls' | 'driverOption
  * `connect()` cannot see the object at all — the driver is resolved through a module-level
  * dynamic import, and `mock.module` is banned in this repo.
  *
- * The `satisfies Record<PassthroughKey, unknown>` is the guard, not decoration. This mapping was
- * an inline allow-list, and an allow-list drops whatever nobody remembered to add to it: that is
- * how `inboxPrefix` came to be undeliverable while sitting in the type. Now a new field on
+ * The `satisfies Record<PassthroughKey, unknown>` is the guard, not decoration. An inline
+ * allow-list would drop whatever nobody remembered to add to it, leaving an option such as
+ * `inboxPrefix` undeliverable while it sits in the type. With the guard, a new field on
  * `NatsConnectionOptions` fails to compile until it is forwarded or deliberately excluded above.
  *
  * Package-internal: deliberately not re-exported from `src/index.ts`.

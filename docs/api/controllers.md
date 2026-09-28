@@ -262,7 +262,7 @@ class AdminController extends ProtectedController {
 **A wrong verb answers 405, not 404.** A path that some route declares answers `405 Method Not
 Allowed` with an `Allow` header listing what it does declare, so a client that sent `POST` to a
 `@Get` route is told exactly that instead of being sent hunting for a route that exists. A path no
-route declares still answers 404. `HEAD` is answered from the matching `@Get` handler — same status,
+route declares answers 404. `HEAD` is answered from the matching `@Get` handler — same status,
 same headers, no body — unless the controller declares its own `@Head`, which wins. When `cors` is
 configured the `OPTIONS` verb is left to the CORS preflight rather than answering 405.
 
@@ -272,19 +272,7 @@ name it declared, so the `@Patch` above reads `@Param('beta')`. The framework wa
 two templates differ only there, because the endpoint then has two names for one parameter and
 anything generated from the routes has to pick one.
 
-::: warning Upgrading from 0.7.0
-In 0.7.0 exactly this pair made the earlier verb answer **405**: the 405 filler claimed every
-undeclared verb on each template separately, so whichever template the router tried first answered
-for verbs the other one declared. A route that was declared, shipped and in daily use stopped
-existing, with no compile error and no log line. If you have templates that differ only by parameter
-name, they worked on 0.6.0, broke on 0.7.0, and work again now.
-:::
-
 **Routes are not inherited.** A method carrying `@Get`/`@Post`/… on a base class is not mounted under the subclass — the request is a 404. Declare route methods on the controller that mounts them; use the base for the pipeline decorators and shared helpers.
-
-::: warning Upgrading from 0.4.4 or earlier
-Class-level decorators were NOT inherited: a subclass of a guarded base answered as if unprotected, with no error. If you use a shared protected base controller, treat its subclasses' routes as having been exposed.
-:::
 
 ## Lifecycle Hooks
 
@@ -408,15 +396,14 @@ async logout(@Req() req: OneBunRequest) {
 
 To return custom headers, return a `Response` object directly from your handler. **What you build is
 what the client receives** — the framework does not read, re-parse or re-serialize it, so the bytes,
-the headers and a streaming body all arrive as written. Through 0.6.0 that was true only for a route
-with no decorated parameters: one `@Param`, `@Body`, `@Query` or `@Req` sent the response through a
-`JSON.parse`/`JSON.stringify` round trip, which rounded 64-bit numbers and buffered streams until
-the producer finished.
+the headers and a streaming body all arrive as written. That holds whether or not the handler
+declares `@Param`, `@Body`, `@Query` or `@Req`: a 64-bit number sent as a JSON number is not
+rounded, and a stream reaches the client as it is produced, not when the producer finishes.
 
 The one consequence: an `@ApiResponse` schema on such a route documents the endpoint but does not
-validate or reshape what the handler built — reading the body to check it is what caused both of
-those defects. The framework logs that once per route at startup-time granularity. Return a plain
-object instead if you want the schema enforced.
+validate or reshape what the handler built — checking it would mean reading the body, which rounds
+64-bit numbers and buffers a stream until the producer finishes. The framework logs that once per
+route at startup-time granularity. Return a plain object instead if you want the schema enforced.
 
 ```typescript
 @Controller('/api')

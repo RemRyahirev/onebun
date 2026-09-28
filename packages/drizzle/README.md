@@ -278,11 +278,11 @@ See `tests/integration/` for complete examples including:
 works, and `jsonb_typeof` answers with the real type. `sql.placeholder()` on such a column works
 through `.prepare()` as well.
 
-Versions up to 0.5.0 stored every one of them double-encoded, as a jsonb string. Existing rows are
-not migrated automatically — see
+A row that holds a jsonb string of JSON text is, as a rule, double-encoded; the read path decodes
+once, so it reads back as that string, and nothing rewrites such rows automatically — see
 [JSON and JSONB columns](../../docs/api/drizzle.md#json-and-jsonb-columns) and
 [Repairing double-encoded JSON](../../docs/api/drizzle.md#repairing-double-encoded-json), and run
-the repair **before** deploying this version.
+the repair **before** deploying code that reads them as values.
 
 ## Environment Variables
 

@@ -200,9 +200,11 @@ logger.info(`Native WebSocket: ws://localhost:${app.getPort()}/chat`);
 
 ## Client implementation
 
-You can use: **typed client** (with definition), **standalone client** (no definition, same API), or **Socket.IO** (enable `socketio` in app config).
+You can use: **a client from the gateway definition** (`createWsClient`), **a standalone client** (`createNativeWsClient`: no definition, same API), or **Socket.IO** (enable `socketio` in app config).
 
-### Option A: Typed client (native WebSocket, with definition)
+The first two run in Bun (other services, tests, scripts). `@onebun/core` cannot currently be bundled for a browser, so a browser connects with `WebSocket` or `socket.io-client`: see [Browser clients](/api/websocket#browser-clients). Neither client type-checks events: the payload shapes below are declared on the client side and asserted with a type argument ([what the clients check](/api/websocket#ws-client-typing)).
+
+### Option A: Client from the definition (native WebSocket)
 
 Connect to the gateway path. Default `protocol` is `'native'`.
 
@@ -210,6 +212,26 @@ Connect to the gateway path. Default `protocol` is `'native'`.
 // client-native.ts
 import { createWsServiceDefinition, createWsClient } from '@onebun/core';
 import { ChatModule } from './chat.module';
+
+// Declared by the client: nothing checks these shapes against the gateway's handlers
+interface ChatMessage {
+  id: string;
+  roomId: string;
+  userId: string;
+  text: string;
+  timestamp: number;
+}
+
+interface RoomJoined {
+  room: string;
+  history: ChatMessage[];
+  users: string[];
+}
+
+interface Membership {
+  userId: string;
+  room: string;
+}
 
 const definition = createWsServiceDefinition(ChatModule);
 const client = createWsClient(definition, {
@@ -241,33 +263,33 @@ client.on('error', (error) => {
 // Connect
 await client.connect();
 
-// Subscribe to events
-client.ChatGateway.on('welcome', (data) => {
+// Subscribe to events. Without a type argument the payload is `unknown`
+client.ChatGateway.on<{ message: string }>('welcome', (data) => {
   console.log('Welcome message:', data.message);
 });
 
-client.ChatGateway.on('chat:message', (message) => {
+client.ChatGateway.on<ChatMessage>('chat:message', (message) => {
   console.log(`[${message.userId}]: ${message.text}`);
 });
 
-client.ChatGateway.on('user:joined', (data) => {
+client.ChatGateway.on<Membership>('user:joined', (data) => {
   console.log(`User ${data.userId} joined ${data.room}`);
 });
 
-client.ChatGateway.on('user:left', (data) => {
+client.ChatGateway.on<Membership>('user:left', (data) => {
   console.log(`User ${data.userId} left ${data.room}`);
 });
 
-client.ChatGateway.on('typing', (data) => {
+client.ChatGateway.on<{ userId: string }>('typing', (data) => {
   console.log(`${data.userId} is typing...`);
 });
 
 // Join a room
-const roomInfo = await client.ChatGateway.emit('join', 'room:general');
+const roomInfo = await client.ChatGateway.emit<RoomJoined>('join', 'room:general');
 console.log('Joined room with history:', roomInfo.history);
 
 // Send a message
-const ack = await client.ChatGateway.emit('chat:general:message', {
+const ack = await client.ChatGateway.emit<{ messageId: string }>('chat:general:message', {
   text: 'Hello everyone!',
 });
 console.log('Message sent, id:', ack.messageId);
@@ -284,11 +306,16 @@ client.disconnect();
 
 ### Option B: Standalone client (no definition)
 
-Use when the frontend does not depend on the backend module (e.g. in a monorepo). Same message format and API as the typed client.
+Use when the client does not import the backend module: a script, a test, another service. Same message format and API as Option A. It runs in Bun, not in a browser.
 
 ```typescript
 // client-standalone.ts
 import { createNativeWsClient } from '@onebun/core';
+
+interface ChatMessage {
+  userId: string;
+  text: string;
+}
 
 const client = createNativeWsClient({
   url: 'ws://localhost:3000/chat',
@@ -298,10 +325,10 @@ const client = createNativeWsClient({
 });
 
 client.on('connect', () => console.log('Connected to chat'));
-client.on('welcome', (data) => console.log('Welcome:', data.message));
-client.on('chat:message', (msg) => console.log(`[${msg.userId}]: ${msg.text}`));
-client.on('user:joined', (data) => console.log(`User ${data.userId} joined`));
-client.on('user:left', (data) => console.log(`User ${data.userId} left`));
+client.on<{ message: string }>('welcome', (data) => console.log('Welcome:', data.message));
+client.on<ChatMessage>('chat:message', (msg) => console.log(`[${msg.userId}]: ${msg.text}`));
+client.on<{ userId: string }>('user:joined', (data) => console.log(`User ${data.userId} joined`));
+client.on<{ userId: string }>('user:left', (data) => console.log(`User ${data.userId} left`));
 
 await client.connect();
 
@@ -355,9 +382,9 @@ socket.emit('chat:general:message', { text: 'Hello!' }, (ack) => {
 socket.disconnect();
 ```
 
-### Option D: Typed client with Socket.IO
+### Option D: Client from the definition with Socket.IO {#option-d-client-from-the-definition-with-socket-io}
 
-If Socket.IO is enabled on the server, you can use the typed client with `protocol: 'socketio'` and the Socket.IO path:
+If Socket.IO is enabled on the server, you can use the `createWsClient` client of Option A with `protocol: 'socketio'` and the Socket.IO path:
 
 ```typescript
 const client = createWsClient(definition, {
@@ -367,6 +394,9 @@ const client = createWsClient(definition, {
 });
 await client.connect();
 // Same API: client.ChatGateway.emit(...), client.ChatGateway.on(...)
+// One difference: over Socket.IO, emit() resolves the handler's whole { event, data } reply
+const joined = await client.ChatGateway.emit<{ event: string; data: RoomJoined }>('join', 'room:general');
+console.log('Joined room with history:', joined.data.history);
 ```
 
 ## Authentication
@@ -412,7 +442,7 @@ async handleConnect(@Client() client: WsClientData) {
 bun run src/index.ts
 ```
 
-2. Connect clients using the typed client or socket.io-client.
+2. Connect clients: `createWsClient` or `createNativeWsClient` from Bun, `WebSocket` or socket.io-client from a browser.
 
 ---
 

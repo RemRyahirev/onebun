@@ -141,11 +141,10 @@ export function updateRequestContext(patch: RequestContextPatch): boolean {
  * The context a nested boundary should start from: a shallow COPY of the enclosing one, or a fresh
  * empty context when there is none.
  *
- * The copy is what makes entering a scope here safe to add. Before this, the untraced entry branch
- * entered no scope at all, so background work simply read the enclosing store — a queue handler
- * dispatched from inside an HTTP request kept reading that request's values. Copying preserves
- * every read exactly as it was, and isolates WRITES, which previously reached back into the
- * enclosing request and outlived the work that made them.
+ * The copy is what makes entering a scope here safe. A queue handler dispatched from inside an
+ * HTTP request still reads that request's values, since the copy preserves every read of the
+ * enclosing store; its WRITES stay in the copy, rather than reaching back into the enclosing
+ * request and outliving the work that made them.
  *
  * @internal
  */
@@ -160,16 +159,16 @@ export function inheritRequestContext(): RequestContext {
  *
  * The OpenTelemetry active span comes FIRST, and that ordering is the whole point:
  *
- * - **It is the span that exists.** The request store used to be filled with a trace context
- *   generated separately from the span — `generateTraceContextSync()` alongside
- *   `startHttpTraceSync()` — so every log line carried ids belonging to no span at all, and a
- *   trace id copied out of the logs found nothing in the backend. That is fixed at the source
- *   too, but reading the span first means the two can no longer drift apart.
+ * - **It is the span that exists.** A trace context generated separately from the span — as
+ *   `generateTraceContextSync()` alongside `startHttpTraceSync()` would give — carries ids that
+ *   belong to no span at all, so a trace id copied out of the logs finds nothing in the backend.
+ *   The request store is filled from the span, and reading the span first means the two cannot
+ *   drift apart.
  * - **It is what outgoing calls already use.** `wireOutgoingTraceContext` resolves the same
  *   way, so a downstream service and this service's own logs name the same span instead of
  *   disagreeing.
  * - **It covers work whose store carries nothing.** A queue handler, a scheduled job and a
- *   WebSocket callback all enter the store now, but an untraced one enters it with a `null` trace
+ *   WebSocket callback all enter the store, but an untraced one enters it with a `null` trace
  *   context — there is no span to name. Reading the active span first means they still log with a
  *   trace id whenever one is open, which is whenever the handler is traced.
  * - **It is the innermost span.** A line logged inside a `@Traced` method names that method's

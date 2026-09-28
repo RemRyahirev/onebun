@@ -119,8 +119,8 @@ export class QueueServiceProxy {
    * Why the queue is unavailable right now, in the words the DI path would use.
    *
    * Public so `OneBunApplication.getQueueService()` reports the same thing an injected
-   * `QueueService` would: the accessor used to hand back `null` instead, and the caller met a
-   * `TypeError` on the next line rather than the explanation that already existed.
+   * `QueueService` would: the accessor throws this explanation rather than handing back `null`
+   * for the caller to meet as a `TypeError` on the next line.
    */
   unavailableReason(): string {
     return this.unavailableMessage();

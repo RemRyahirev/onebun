@@ -1,12 +1,18 @@
 /* eslint-disable @typescript-eslint/naming-convention */
 import { trace } from '@opentelemetry/api';
-import { BasicTracerProvider } from '@opentelemetry/sdk-trace-base';
+import {
+  BasicTracerProvider,
+  BatchSpanProcessor,
+  type ReadableSpan,
+  type SpanProcessor,
+} from '@opentelemetry/sdk-trace-base';
 import {
   describe,
   test,
   expect,
   afterEach,
   beforeEach,
+  spyOn,
 } from 'bun:test';
 
 import { initTracerProvider, installedTracerProvider } from '../src/provider';
@@ -162,6 +168,113 @@ describe('initTracerProvider', () => {
 
       await result.shutdown();
       await expect(result.shutdown()).resolves.toBeUndefined();
+    });
+  });
+
+  /**
+   * The processors passed in `spanProcessors` belong to the caller, who may hand the same ones to
+   * the next provider — an application retrying a failed start does exactly that. A plain
+   * `shutdown()` shuts them down with the provider, and the next provider then recorded into a
+   * processor that dropped every span.
+   */
+  describe('shutdown({ spanProcessors: \'flush\' })', () => {
+    /** A processor that counts what it was asked to do and records the names of ended spans. */
+    function countingProcessor(): { processor: SpanProcessor; ended: string[]; flushed: number[]; shutdown: number[] } {
+      const ended: string[] = [];
+      const flushed: number[] = [];
+      const shutdown: number[] = [];
+      const processor: SpanProcessor = {
+        onStart(): void {
+          // Nothing to do on start
+        },
+        onEnd(span: ReadableSpan): void {
+          ended.push(span.name);
+        },
+        async forceFlush(): Promise<void> {
+          flushed.push(1);
+        },
+        async shutdown(): Promise<void> {
+          shutdown.push(1);
+        },
+      };
+
+      return {
+        processor, ended, flushed, shutdown,
+      };
+    }
+
+    test('flushes the caller\'s processors and leaves them running for the next provider', async () => {
+      const counting = countingProcessor();
+      const first = initTracerProvider({ serviceName: 'attempt-1', spanProcessors: [counting.processor] });
+
+      await first.shutdown({ spanProcessors: 'flush' });
+
+      expect(counting.flushed.length).toBe(1);
+      expect(counting.shutdown.length).toBe(0);
+      // The global slot is handed back all the same
+      expect(installedTracerProvider()).not.toBe(first.provider);
+
+      const second = initTracerProvider({ serviceName: 'attempt-2', spanProcessors: [counting.processor] });
+      second.provider.getTracer('test').startSpan('recorded-by-the-next-provider').end();
+      expect(counting.ended).toEqual(['recorded-by-the-next-provider']);
+
+      await second.shutdown();
+      // Without the option, a shutdown still shuts them down, as OpenTelemetry does
+      expect(counting.shutdown.length).toBe(1);
+    });
+
+    /**
+     * An application's `stop()` after a failed start() is the caller done with this provider.
+     * It used to return early on the idempotence flag, so a processor that holds a handle until its
+     * `shutdown()` kept the process alive where that `stop()` had always shut it down.
+     */
+    test('a later plain shutdown() shuts down what the flush left running, and nothing else', async () => {
+      const counting = countingProcessor();
+      const first = initTracerProvider({ serviceName: 'failed-start', spanProcessors: [counting.processor] });
+
+      await first.shutdown({ spanProcessors: 'flush' });
+      // A repeated flush is the no-op every repeated shutdown is
+      await first.shutdown({ spanProcessors: 'flush' });
+      expect(counting.shutdown.length).toBe(0);
+
+      // Built after the first let go of the global slot: a second pass must not move the slot,
+      // whoever holds it — another file's provider may, in a full run
+      const next = initTracerProvider({ serviceName: 'next' });
+      const installed = installedTracerProvider();
+      const releaseAgain = spyOn(trace, 'disable');
+
+      try {
+        await first.shutdown();
+        await first.shutdown();
+
+        expect(counting.flushed.length).toBe(1);
+        expect(counting.shutdown.length).toBe(1);
+        expect(releaseAgain).not.toHaveBeenCalled();
+        expect(installedTracerProvider()).toBe(installed);
+      } finally {
+        releaseAgain.mockRestore();
+        await next.shutdown();
+      }
+    });
+
+    test('still shuts down the export pipeline built from exportOptions', async () => {
+      const counting = countingProcessor();
+      const batchShutdown = spyOn(BatchSpanProcessor.prototype, 'shutdown');
+
+      try {
+        const result = initTracerProvider({
+          serviceName: 'with-export',
+          spanProcessors: [counting.processor],
+          exportOptions: { endpoint: 'http://127.0.0.1:1', batchTimeout: 60_000 },
+        });
+
+        await result.shutdown({ spanProcessors: 'flush' });
+
+        expect(batchShutdown).toHaveBeenCalledTimes(1);
+        expect(counting.shutdown.length).toBe(0);
+      } finally {
+        batchShutdown.mockRestore();
+      }
     });
   });
 

@@ -33,7 +33,7 @@ export function resolveAckMode(options?: SubscribeOptions): AckMode {
  *
  * True for `'auto'` only. `'manual'` hands the decision to the handler and `'none'`
  * removes acknowledgement altogether, so both answer false — but for opposite reasons,
- * which is exactly why the old `!== 'manual'` test could not express this.
+ * which is exactly why a `!== 'manual'` test cannot express this.
  *
  * @see docs:api/queue.md
  */
@@ -73,9 +73,9 @@ export interface NackAwareMessage {
  * Whether the handler explicitly nacked this message.
  *
  * A handler that catches its own exception and calls `nack()` returns NORMALLY, so control
- * flow alone cannot tell it apart from a success — which is how every adapter came to emit
+ * flow alone cannot tell it apart from a success: an adapter going by control flow would emit
  * `onMessageProcessed` for a message it had just dropped or requeued, and every metric built
- * on queue events came to count that as a success.
+ * on queue events would count that as a success.
  *
  * Structural rather than an `instanceof`: the four message classes live in two packages and
  * share no base class, and an adapter that has no nack state at all correctly answers false.

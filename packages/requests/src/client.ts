@@ -1,12 +1,23 @@
+import { isIP } from 'node:net';
+
 import { Effect, pipe } from 'effect';
 
 import { applyAuth, isSigningAuth } from './auth.js';
+import {
+  type BodyReadFailure,
+  bodyStream,
+  cappedAcceptEncoding,
+  contentCodings,
+  openBodyReader,
+  readCappedBody,
+} from './body.js';
 import { signOneBunRequest } from './onebun-auth.js';
 import {
   currentOutgoingTraceContext,
   formatTraceparent,
   type OutgoingTraceContext,
 } from './trace-context.js';
+import { markTransportDetails } from './transport-details.js';
 import {
   type ApiResponse,
   createErrorResponse,
@@ -20,12 +31,15 @@ import {
   InternalServerError,
   isErrorResponse,
   isRetryableMethod,
+  type OneBunAuthConfig,
   OneBunBaseError,
+  type RedirectPolicy,
   type ReqConfig,
   type RequestConfig,
   type RequestMetricsData,
   type RequestsOptions,
   resolveRetryConfig,
+  type ResponseType,
   type RetryConfig,
   type SuccessResponse,
   TRANSPORT_FAILURE_CODE,
@@ -36,18 +50,78 @@ import {
 /** Methods whose body is sent, and therefore signed. */
 const BODY_CARRYING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH'];
 
+/** The statuses the client follows: the five that name a `Location` to repeat the request at. */
+const REDIRECT_STATUSES: readonly number[] = [
+  HttpStatusCode.MOVED_PERMANENTLY,
+  HttpStatusCode.FOUND,
+  HttpStatusCode.SEE_OTHER,
+  HttpStatusCode.TEMPORARY_REDIRECT,
+  HttpStatusCode.PERMANENT_REDIRECT,
+];
+
 /**
- * Fields that mark the second argument of `get`/`delete` as a config rather than query data.
+ * How many redirects one attempt follows. The response that would be the 21st fails with
+ * `REDIRECT_ERROR` — the Fetch Standard's limit. Bun's own `fetch` allows 127 (measured on
+ * 1.4.2), and left to it a loop would be a network error that `retryOnNetworkError` replays:
+ * 508 requests.
+ */
+const MAX_REDIRECTS = 20;
+
+/**
+ * The only headers a redirect to ANOTHER origin carries, lower-cased. `content-type` joins them
+ * while the hop still sends a body (307/308).
+ *
+ * A safelist rather than a list of what to strip, because what to strip cannot be known: `fetch`
+ * drops only `Authorization`, `Cookie` and `Proxy-Authorization` on a cross-origin hop, while an
+ * `apikey` header can have any name, `custom` auth adds any headers its config or interceptor
+ * likes, and a credential passed through `RequestsOptions.headers` or `config.headers` is
+ * indistinguishable from any other header. Forwarded as they are, all of those — and
+ * `X-OneBun-Signature` — would reach the other origin.
+ *
+ * What stays is what the new origin needs to answer and to join the trace.
+ */
+const CROSS_ORIGIN_HEADER_SAFELIST: readonly string[] = [
+  'user-agent',
+  'accept',
+  'accept-encoding',
+  'traceparent',
+  'x-trace-id',
+  'x-span-id',
+];
+
+/** Headers that describe a request body, lower-cased: they go when a redirect drops the body. */
+const REQUEST_BODY_HEADERS: readonly string[] = [
+  'content-type',
+  'content-encoding',
+  'content-language',
+  'content-location',
+];
+
+/**
+ * Fields that mark the second argument of `get`/`delete`/`head`/`options` as a config rather than
+ * query data.
  *
  * The overload is ambiguous by construction — both arms take a plain object — so this list is the
- * whole of the decision. It used to name four fields, which left `tracing` on the wrong side:
- * `client.get(url, { tracing: false })` was read as query data and went out as `?tracing=false`,
- * with the header it was meant to suppress still attached.
+ * whole of the decision. `tracing` is on it: off the list, `client.get(url, { tracing: false })`
+ * would be read as query data and go out as `?tracing=false`, with the header it was meant to
+ * suppress still attached. {@link resolveQueryOverload} is the only reader, so `get`, `delete`,
+ * `head` and `options` all decide the same way.
  *
  * `retries` and `query` are deliberately NOT here. `query` is documented as producing a literal
  * `?query=[object Object]` — the page warns against wrapping the query in a key and a test pins
  * it — and a `?retries=3` is a plausible query param in a way that `?tracing=` is not. Both still
  * need the three-argument form, as does any caller whose query really contains one of these names.
+ *
+ * Adding a name moves every query record that uses it to the config side, so a new config key
+ * does not join by default. `redirect` is a config key and stays off: `client.get('/login',
+ * { redirect: '/home' })` is query data — a login flow's return path — and a test pins it, so the
+ * redirect policy takes the three-argument form. `maxResponseBytes` is on it: nothing names a
+ * query parameter that, and a cap that went out as `?maxResponseBytes=1048576` would leave the
+ * body it was meant to bound unbounded. `responseType` is on it for the same reason: sent as
+ * `?responseType=stream`, it would leave a caller waiting for a stream with a string that arrives
+ * only once the whole body has. `connectAddress` is on it because the other side fails open: sent as
+ * `?connectAddress=203.0.113.7`, the request would go wherever DNS says the host is — the lookup
+ * the address was validated to replace.
  */
 const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'method',
@@ -56,7 +130,181 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
   'auth',
   'tracing',
   'metrics',
+  'maxResponseBytes',
+  'responseType',
+  'connectAddress',
 ];
+
+/**
+ * Resolve the `(url, queryOrConfig?, config?)` shape shared by `get`, `delete`, `head` and
+ * `options` into one request config.
+ *
+ * - A third argument makes the second one query data, whatever it holds — `undefined` included —
+ *   so `get(url, undefined, { headers })` sends the config rather than a bare request.
+ * - With two arguments, a plain object carrying any of {@link REQUEST_CONFIG_MARKERS} is config
+ *   and any other plain object is query data.
+ *
+ * Shared by `HttpClient` and the `RequestsService` layer, so the rule cannot drift between them
+ * or between the four methods.
+ *
+ * @internal
+ */
+export const resolveQueryOverload = (
+  method: HttpMethod,
+  url: string,
+  queryOrConfig: object | undefined,
+  config: Partial<RequestConfig> | undefined,
+): RequestConfig => {
+  if (config !== undefined) {
+    return {
+      method,
+      url,
+      ...(queryOrConfig === undefined || queryOrConfig === null
+        ? {}
+        : { query: queryOrConfig as Record<string, unknown> }),
+      ...config,
+    };
+  }
+
+  if (typeof queryOrConfig !== 'object' || queryOrConfig === null || Array.isArray(queryOrConfig)) {
+    return { method, url };
+  }
+
+  if (REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig)) {
+    return { method, url, ...(queryOrConfig as Partial<RequestConfig>) };
+  }
+
+  return { method, url, query: queryOrConfig as Record<string, unknown> };
+};
+
+/**
+ * Whether a response carries no content by definition (RFC 9110 §6.4.1): every answer to HEAD,
+ * and every 204 No Content and 304 Not Modified.
+ *
+ * Their body is not read. Read by content type, a HEAD to any JSON endpoint (`Response.json` sets
+ * the header on HEAD too) and a 204 or 304 that kept its `content-type: application/json` would all
+ * go to the JSON parser, which rejects the empty text with `RESPONSE_PARSE_ERROR` — so
+ * `client.head()` would fail against every JSON endpoint there is.
+ *
+ * Case-insensitive on the method, as `fetch` is: `req('head', url)` reaches the wire as HEAD.
+ */
+const hasNoContent = (method: string, status: number): boolean =>
+  method.toUpperCase() === HttpMethod.HEAD ||
+  status === HttpStatusCode.NO_CONTENT ||
+  status === HttpStatusCode.NOT_MODIFIED;
+
+/**
+ * Whether a response is a redirect handed back as the answer: one of the five statuses the client
+ * follows, under `redirect: 'manual'`. Under the other two policies such a status never reaches
+ * the caller — it was followed, or it failed `REDIRECT_ERROR`.
+ */
+const isHandedBackRedirect = (status: number, policy: RedirectPolicy): boolean =>
+  policy === 'manual' && REDIRECT_STATUSES.includes(status);
+
+/**
+ * Whether an upstream status resolves as a success.
+ *
+ * 304 Not Modified is one. A server sends it only in answer to a conditional request
+ * (`If-None-Match`, `If-Modified-Since`), so it is the outcome the caller asked about — "your copy
+ * is current" — not a failure to recover from, so it resolves rather than rejects.
+ *
+ * A redirect handed back under `redirect: 'manual'` is one as well: the redirect is what the
+ * caller asked for ({@link isHandedBackRedirect}).
+ */
+const isSuccessStatus = (status: number, policy: RedirectPolicy): boolean =>
+  (status >= HttpStatusCode.OK && status < HttpStatusCode.MOVED_PERMANENTLY) ||
+  status === HttpStatusCode.NOT_MODIFIED ||
+  isHandedBackRedirect(status, policy);
+
+/**
+ * A success's headers as a record: names lower-cased, as `Headers` iterates them, and a header
+ * sent more than once joined with `, `, as `Headers.get()` joins it.
+ *
+ * `set-cookie` is joined as well. `Headers.forEach` hands every `set-cookie` over on its own, so
+ * assigning them one after another, as {@link collectErrorHeaders} does, keeps only the last
+ * cookie. `Object.fromEntries` also keeps a header named `__proto__` as an own property, where an
+ * assignment goes to the prototype setter and is lost.
+ */
+const collectResponseHeaders = (headers: Headers): Record<string, string> =>
+  Object.fromEntries([...new Set(headers.keys())].map((name) => [name, headers.get(name) ?? '']));
+
+/**
+ * An error answer's headers, for `details.headers`: collected by assignment, so a `set-cookie`
+ * sent more than once keeps only its last value there and a header named `__proto__` is lost.
+ *
+ * Deliberately not {@link collectResponseHeaders}. `details.headers` is enumerable, and the error
+ * `req()` throws carries it. The default exception filter leaves it out of the body it sends a
+ * controller's caller only because the record is registered as transport details
+ * ({@link markTransportDetails}); under `exposeErrorDetails`, and in any filter of the application's
+ * own that serializes the error whole, it still goes out. Joining every `set-cookie` here would put
+ * all of the upstream's cookies there instead of one, so the record keeps only the last.
+ */
+const collectErrorHeaders = (headers: Headers): Record<string, string> => {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key.toLowerCase()] = value;
+  });
+
+  return record;
+};
+
+/**
+ * The upstream's headers as the caller gets them — a success's `headers` and an `HTTP_ERROR`'s
+ * `details.headers` alike: as they arrived, except that `content-encoding` and `content-length`
+ * are left out once the client has undone a content coding itself (`maxResponseBytes`). Both
+ * describe the bytes on the wire, and neither `result` nor `details.details` is those bytes.
+ *
+ * `fetch` keeps both on a body it decompressed, the compressed `content-length` included, so an
+ * uncapped response still carries them.
+ */
+const exposedHeaders = (response: Response, clientDecoded: boolean): Headers => {
+  if (!clientDecoded) {
+    return response.headers;
+  }
+
+  const headers = new Headers(response.headers);
+  headers.delete('content-encoding');
+  headers.delete('content-length');
+
+  return headers;
+};
+
+/**
+ * `response` with the upstream's headers attached as its `headers` property — NOT enumerable.
+ *
+ * Core serializes whatever a handler returns, on both dispatch arms: the full arm sends an object
+ * with a `success` key as it is, the fast arm wraps it into `result`. A controller that returned a
+ * client envelope unchanged would therefore send the upstream's `set-cookie`, `server` and every
+ * other header to its own caller, in the body. `JSON.stringify` skips a non-enumerable property,
+ * so this one place covers both arms, a nested envelope and any other JSON payload, where
+ * stripping the headers in core would need every serializer there to know about them.
+ */
+const withUpstreamHeaders = <S extends SuccessResponse<unknown>>(
+  response: S,
+  headers: Record<string, string>,
+): S => Object.defineProperty(response, 'headers', {
+  value: headers,
+  enumerable: false,
+  writable: true,
+  configurable: true,
+});
+
+/**
+ * `response` with `retryCount` set. Not a bare spread for a success: a spread copies only the
+ * enumerable properties, so it would drop the `headers` {@link withUpstreamHeaders} attached.
+ */
+const withRetryCount = <T, E extends string, R extends string>(
+  response: ApiResponse<T, E, R>,
+  retryCount: number,
+): ApiResponse<T, E, R> => {
+  if (!response.success) {
+    return { ...response, retryCount };
+  }
+
+  const counted: SuccessResponse<T> = { ...response, retryCount };
+
+  return response.headers === undefined ? counted : withUpstreamHeaders(counted, response.headers);
+};
 
 /**
  * Build full URL from base URL and request URL
@@ -112,33 +360,462 @@ const mergeRequestsOptions = (options: RequestsOptions): RequestsOptions => ({
   retries: resolveRetryConfig(options.retries),
 });
 
+/** The `error` name each transport failure kind is reported under. */
+const TRANSPORT_FAILURE_ERRORS: Record<TransportFailureKind, string> = {
+  timeout: 'TIMEOUT_ERROR',
+  abort: 'ABORT_ERROR',
+  network: 'FETCH_ERROR',
+};
+
 /**
- * Classify a failure that happened before any HTTP response existed.
- *
- * `AbortSignal.timeout` rejects with a `TimeoutError`, an explicit abort with an `AbortError`,
- * and everything else (connection refused, DNS, TLS) is a network failure. None of them are a
- * server 500, so none of them carry an HTTP status code.
+ * Which transport failure an error is: `AbortSignal.timeout` rejects with a `TimeoutError`, an
+ * explicit abort with an `AbortError`, and everything else (connection refused, DNS, TLS, a reset
+ * connection) is a network failure.
  */
-const classifyTransportFailure = (error: unknown, traceId?: string): ErrorResponse => {
+const transportFailureKindOf = (error: unknown): TransportFailureKind => {
   const name = error instanceof Error ? error.name : '';
-  let kind: TransportFailureKind = 'network';
-  let code = 'FETCH_ERROR';
 
   if (name === 'TimeoutError') {
-    kind = 'timeout';
-    code = 'TIMEOUT_ERROR';
-  } else if (name === 'AbortError') {
-    kind = 'abort';
-    code = 'ABORT_ERROR';
+    return 'timeout';
   }
 
+  return name === 'AbortError' ? 'abort' : 'network';
+};
+
+/**
+ * Classify a failure that happened before the response was complete.
+ *
+ * None of them are a server 500, so none of them carry an HTTP status code: `code` is
+ * {@link TRANSPORT_FAILURE_CODE} and `getTransportFailureKind` reads the kind back.
+ *
+ * Once the attempt's signal has fired, its reason decides between a timeout and an abort, not
+ * whatever `fetch` or the body reader rejected with — the signal is the one that knows which of
+ * the two it was.
+ *
+ * `receivedStatus` is set when the failure hit while the body was being read: the status line had
+ * arrived and is kept in `details.statusCode`, with `details.phase: 'body'`. It is not the `code`:
+ * as the `code` of a `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR`, a 500 whose body stalled would
+ * be retried by `retryOn` as a server 500, and `retryOnTimeout: false` would never see it.
+ */
+const classifyTransportFailure = (
+  error: unknown,
+  signal: AbortSignal,
+  traceId?: string,
+  receivedStatus?: number,
+): ErrorResponse => {
+  const kind = transportFailureKindOf(signal.aborted ? signal.reason : error);
+
   return createErrorResponse(
-    code,
+    TRANSPORT_FAILURE_ERRORS[kind],
     TRANSPORT_FAILURE_CODE,
     traceId,
-    { details: error, transport: kind },
+    // `details` is the raw error, and Bun's connection error names the request URL in its `path`.
+    markTransportDetails({
+      details: error,
+      transport: kind,
+      ...(receivedStatus === undefined ? {} : { statusCode: receivedStatus, phase: 'body' }),
+    }, ['details']),
   );
 };
+
+/** The `error` name of a redirect the client could not follow. */
+const REDIRECT_ERROR = 'REDIRECT_ERROR';
+
+/** The `error` name of a body larger than `maxResponseBytes`. */
+const RESPONSE_TOO_LARGE = 'RESPONSE_TOO_LARGE';
+
+/** The `error` name of a body the client could not decode under `maxResponseBytes`. */
+const RESPONSE_DECODE_ERROR = 'RESPONSE_DECODE_ERROR';
+
+/**
+ * Failures that are never retried, whatever `retryOn` lists: their `code` is a status the server
+ * did send, but asking it again gets the same redirect, the same oversized body or the same
+ * encoding back.
+ */
+const NEVER_RETRIED_ERRORS: readonly string[] = [
+  REDIRECT_ERROR,
+  RESPONSE_TOO_LARGE,
+  RESPONSE_DECODE_ERROR,
+];
+
+/** One request of a redirect chain: what is sent, and where. */
+interface RedirectHop {
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  body: string | undefined;
+}
+
+/** `new URL(input, base)`, or `undefined` where the constructor throws. */
+const parseUrl = (input: string, base?: string): URL | undefined => {
+  try {
+    return new URL(input, base);
+  } catch {
+    return undefined;
+  }
+};
+
+/** The `error` name of a request the client refuses to send as configured. */
+const REQUEST_CONFIG_ERROR = 'REQUEST_CONFIG_ERROR';
+
+/** What `isIP` from `node:net` returns for an IPv6 address. */
+const IPV6 = 6;
+
+/**
+ * `connectAddress` as a URL names a host — an IPv4 address as it is, an IPv6 address in brackets
+ * and in its canonical form — or `undefined` when it is not an IP address a URL can name.
+ *
+ * `isIP` alone is not enough. It accepts an IPv6 address with a zone (`fe80::1%eth0`), which a URL
+ * cannot hold, and the `URL` hostname setter ignores a value it cannot hold without a word: the
+ * request would have gone to the host name after all, through the lookup `connectAddress` exists
+ * to replace. So the address is parsed as a URL host here, where a failure can be refused, and
+ * what comes out is a host the setter always takes.
+ *
+ * `isIP` is also what keeps the dialled address the validated one: it refuses every IPv4 form but
+ * four decimal parts, where a URL would read `010.0.0.1` as octal (`8.0.0.1`) and `127.1` as
+ * `127.0.0.1`.
+ */
+const connectHostOf = (address: unknown): string | undefined => {
+  if (typeof address !== 'string') {
+    return undefined;
+  }
+
+  const version = isIP(address);
+
+  if (version === 0) {
+    return undefined;
+  }
+
+  return parseUrl(`http://${version === IPV6 ? `[${address}]` : address}/`)?.hostname;
+};
+
+/** The `REQUEST_CONFIG_ERROR` for a `connectAddress` the client refuses. */
+const connectAddressError = (
+  reason: 'not-an-ip' | 'not-an-http-url',
+  address: unknown,
+  url: string,
+  traceId?: string,
+): ErrorResponse => createErrorResponse(
+  REQUEST_CONFIG_ERROR,
+  HttpStatusCode.INTERNAL_SERVER_ERROR,
+  traceId,
+  markTransportDetails({
+    option: 'connectAddress',
+    reason,
+    value: address,
+    url,
+  }, ['url']),
+);
+
+/**
+ * The host every hop of the request connects to — `connectAddress` as a URL names it — or
+ * `undefined` when the request has no `connectAddress` and connects wherever its URL says.
+ *
+ * Checked once, before the first attempt and before anything is sent: a value that is not an IP
+ * address, and a URL that is not http(s), fail `REQUEST_CONFIG_ERROR`, which is never retried and
+ * records no metrics — no request was made. `undefined` is the only value that means "none"; an
+ * empty string or a `null` is refused rather than read as none, since reading it so would send the
+ * request through the lookup the caller meant to skip.
+ */
+const connectHostFor = (
+  config: RequestConfig,
+  fullUrl: string,
+  traceId?: string,
+): Effect.Effect<string | undefined, ErrorResponse> => {
+  const address: unknown = config.connectAddress;
+
+  if (address === undefined) {
+    return Effect.succeed(undefined);
+  }
+
+  const host = connectHostOf(address);
+
+  if (host === undefined) {
+    return Effect.fail(connectAddressError('not-an-ip', address, fullUrl, traceId));
+  }
+
+  const protocol = parseUrl(fullUrl)?.protocol;
+
+  if (protocol !== 'http:' && protocol !== 'https:') {
+    return Effect.fail(connectAddressError('not-an-http-url', address, fullUrl, traceId));
+  }
+
+  return Effect.succeed(host);
+};
+
+/**
+ * The config auth produced, with the caller's `connectAddress` put back when auth left none.
+ *
+ * A `custom` auth interceptor returns the whole config, and one that builds a fresh object —
+ * `({ method, url, headers })` — instead of spreading the one it got drops every key it does not
+ * name. For `connectAddress` that fails open without a word: the request goes to the host name,
+ * through the lookup the address was validated to replace. So an interceptor may set
+ * `connectAddress` or replace the caller's, but a config it returns without one — the key left out,
+ * or `undefined` — keeps the caller's.
+ */
+const keepCallerConnectAddress = (authConfig: RequestConfig, callerConfig: RequestConfig): RequestConfig =>
+  authConfig.connectAddress === undefined && callerConfig.connectAddress !== undefined
+    ? { ...authConfig, connectAddress: callerConfig.connectAddress }
+    : authConfig;
+
+/** What `fetch` is given for one hop: where it connects, what it sends, and the TLS name. */
+interface Dial {
+  url: string;
+  headers: Record<string, string>;
+  tls?: { serverName: string };
+}
+
+/**
+ * The `fetch` target for `hop`: the hop's own URL, or — under `connectAddress` — the same URL with
+ * `connectHost` in place of its host, so `fetch` connects there without a lookup.
+ *
+ * What the server sees stays what it would see without `connectAddress`: the `Host` header is the
+ * hop URL's `host` (with its port, when it is not the scheme's default), and over TLS the SNI is the
+ * hop URL's host name, against which the certificate is verified (`tls.serverName`) — without it,
+ * `fetch` verifies against the IP and sends no SNI. A `Host` header the caller set is sent as it
+ * is, as it would be without `connectAddress`; adding a second one in another letter case would
+ * send both, joined.
+ *
+ * `fetch` keys its pooled TLS connections by `serverName`, so a connection opened for one name is
+ * never reused for another (measured on Bun 1.4.2).
+ */
+const dialFor = (hop: RedirectHop, connectHost: string | undefined): Dial => {
+  if (connectHost === undefined) {
+    return { url: hop.url, headers: hop.headers };
+  }
+
+  const target = new URL(hop.url);
+  const { host, hostname, protocol } = target;
+  // A host `connectHostOf` produced, which the setter always takes
+  target.hostname = connectHost;
+  const setsHost = Object.keys(hop.headers).some((name) => name.toLowerCase() === 'host');
+
+  return {
+    url: target.href,
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    headers: setsHost ? hop.headers : { ...hop.headers, Host: host },
+    ...(protocol === 'https:' ? { tls: { serverName: hostname.replace(/^\[(.*)\]$/, '$1') } } : {}),
+  };
+};
+
+/** The headers whose lower-cased name passes `keep`. */
+const filterHeaders = (
+  headers: Record<string, string>,
+  keep: (lowerCaseName: string) => boolean,
+): Record<string, string> =>
+  Object.fromEntries(Object.entries(headers).filter(([name]) => keep(name.toLowerCase())));
+
+/**
+ * Whether a redirect turns the request into a body-less GET — the rewrite `fetch` applies
+ * (Fetch Standard, HTTP-redirect fetch, step 12): a POST answered 301 or 302, and anything but
+ * GET or HEAD answered 303. 307 and 308 exist precisely to keep the method and the body.
+ */
+const redirectBecomesGet = (status: number, method: string): boolean => {
+  const normalized = method.toUpperCase();
+
+  if (status === HttpStatusCode.MOVED_PERMANENTLY || status === HttpStatusCode.FOUND) {
+    return normalized === HttpMethod.POST;
+  }
+
+  return status === HttpStatusCode.SEE_OTHER &&
+    normalized !== HttpMethod.GET &&
+    normalized !== HttpMethod.HEAD;
+};
+
+/** Why a redirect was not followed: the `details.reason` of its `REDIRECT_ERROR`. */
+type RedirectRefusal =
+  | 'refused-by-policy'
+  | 'missing-location'
+  | 'invalid-location'
+  | 'other-host'
+  | 'too-many-redirects';
+
+/**
+ * The `REDIRECT_ERROR` for a redirect that is not followed. `code` is its 3xx, `details.url` the
+ * URL that answered with it, and `details.redirects` how many redirects the attempt had followed.
+ */
+const redirectError = (
+  hop: RedirectHop,
+  response: Response,
+  redirects: number,
+  reason: RedirectRefusal,
+  traceId?: string,
+): ErrorResponse => {
+  const location = response.headers.get('location');
+
+  return createErrorResponse(REDIRECT_ERROR, response.status, traceId, markTransportDetails({
+    reason,
+    status: response.status,
+    url: hop.url,
+    redirects,
+    ...(location === null ? {} : { location }),
+  }, ['url', 'location']));
+};
+
+/**
+ * The request a redirect asks for, or a `REDIRECT_ERROR` when it cannot be followed: no
+ * `Location`, a `Location` that is not an http(s) URL, a `Location` on another host under
+ * `connectAddress` (`pinned`), or {@link MAX_REDIRECTS} already followed. `code` is the 3xx that
+ * could not be followed.
+ *
+ * `connectAddress` is an address the caller validated for ONE host name. Another host — a name, or
+ * an IP literal, which needs no lookup but was not validated either — would be connected to
+ * through a lookup or at an address nobody checked, so a hop there is refused before it is made. A
+ * hop to the same host name, on any port or scheme, connects to the same address.
+ *
+ * The `Location` is resolved against the URL that answered. A hop to the SAME origin (scheme, host
+ * and port) keeps every header; one to another origin keeps only
+ * {@link CROSS_ORIGIN_HEADER_SAFELIST}, plus `content-type` while the body goes along. What a hop
+ * dropped stays dropped, so a chain that comes back to the first origin does not bring the
+ * credentials back with it.
+ *
+ * An `X-OneBun-Signature` travels on a same-origin hop as it was. It covers the previous method,
+ * URL and body, so the callee rejects it for any other path — unless {@link RedirectChain.resign}
+ * signs the hop afresh.
+ */
+const nextRedirectHop = (
+  hop: RedirectHop,
+  response: Response,
+  redirects: number,
+  pinned: boolean,
+  traceId?: string,
+): Effect.Effect<RedirectHop, ErrorResponse> => {
+  const location = response.headers.get('location');
+  const refuse = (reason: RedirectRefusal) => Effect.fail(redirectError(hop, response, redirects, reason, traceId));
+
+  if (location === null) {
+    return refuse('missing-location');
+  }
+
+  const target = parseUrl(location, hop.url);
+
+  if (target === undefined || (target.protocol !== 'http:' && target.protocol !== 'https:')) {
+    return refuse('invalid-location');
+  }
+
+  if (pinned && target.hostname !== parseUrl(hop.url)?.hostname) {
+    return refuse('other-host');
+  }
+
+  if (redirects >= MAX_REDIRECTS) {
+    return refuse('too-many-redirects');
+  }
+
+  const becomesGet = redirectBecomesGet(response.status, hop.method);
+  const body = becomesGet ? undefined : hop.body;
+  const withBodyHeaders = becomesGet
+    ? filterHeaders(hop.headers, (name) => !REQUEST_BODY_HEADERS.includes(name))
+    : hop.headers;
+  const sameOrigin = target.origin === parseUrl(hop.url)?.origin;
+  const headers = sameOrigin
+    ? withBodyHeaders
+    : filterHeaders(withBodyHeaders, (name) =>
+      CROSS_ORIGIN_HEADER_SAFELIST.includes(name) || (body !== undefined && name === 'content-type'));
+
+  return Effect.succeed({
+    url: target.href,
+    method: becomesGet ? HttpMethod.GET : hop.method,
+    headers,
+    body,
+  });
+};
+
+/** The name of the `onebun` auth header, lower-cased. */
+const SIGNATURE_HEADER = 'x-onebun-signature';
+
+/** Whether a hop still carries an `X-OneBun-Signature`, in any letter case. */
+const carriesSignature = (hop: RedirectHop): boolean =>
+  Object.keys(hop.headers).some((name) => name.toLowerCase() === SIGNATURE_HEADER);
+
+/** What stays the same across the redirect chain of one attempt. */
+interface RedirectChain {
+  /** The attempt's one signal: the client-side timeout and an interruption, for every hop. */
+  signal: AbortSignal;
+  /** `false` under `maxResponseBytes`: the final body is handed over as it came off the wire. */
+  decompress: boolean;
+  policy: RedirectPolicy;
+  /**
+   * Signs a same-origin hop afresh, over its own method, URL and body. Set only under `onebun`
+   * auth that names an `audience` ({@link resignerFor}).
+   *
+   * Applied to a hop that still carries `X-OneBun-Signature` — one whose every redirect so far
+   * stayed on the first origin, since a hop to another origin drops the header for good. So it
+   * never signs anything for another origin.
+   */
+  resign?: (hop: RedirectHop) => Effect.Effect<RedirectHop, ErrorResponse>;
+  /**
+   * Under `connectAddress`, the host every hop connects to, as a URL names it
+   * ({@link connectHostFor}); a hop to another host name is refused.
+   */
+  connectHost?: string;
+  traceId?: string;
+}
+
+/**
+ * Send a request, handling redirects in the client rather than in `fetch`.
+ *
+ * `fetch` follows a 3xx itself unless told otherwise, and on a hop to another origin it strips only
+ * `Authorization`, `Cookie` and `Proxy-Authorization`. Everything else went along: an `apikey`
+ * header, `custom` auth headers, `X-OneBun-Signature`, and any credential passed through
+ * `RequestsOptions.headers` or `config.headers` — a POST answered 307 re-sent its body to the other
+ * origin together with the key. So each hop is fetched with `redirect: 'manual'`, and the policy
+ * decides what a redirect status leads to:
+ *
+ * - `'follow'` — {@link nextRedirectHop} works out the next hop and what it carries.
+ * - `'error'` — `REDIRECT_ERROR` with `reason: 'refused-by-policy'`. The `Location` is not
+ *   contacted, and the error is excluded from retries by name ({@link NEVER_RETRIED_ERRORS}).
+ * - `'manual'` — the redirect is the response, and its body is read as any other.
+ *
+ * Every hop runs under the attempt's one `signal`, so the client-side timeout bounds the whole
+ * chain rather than each hop, and an interruption aborts whichever hop is in flight. The body of a
+ * 3xx that is followed or refused is discarded unread.
+ *
+ * `decompress: false` — set for a request under `maxResponseBytes` — hands the final body over as
+ * it came off the wire, for the client to decode and count ({@link readCappedBody}).
+ *
+ * Under `connectAddress` each hop is dialled at that address ({@link dialFor}); the hop itself —
+ * what is signed, followed and reported — keeps the URL's host name.
+ */
+const fetchFollowingRedirects = (
+  hop: RedirectHop,
+  chain: RedirectChain,
+  redirects: number = 0,
+): Effect.Effect<Response, ErrorResponse> => pipe(
+  Effect.tryPromise({
+    try() {
+      const dial = dialFor(hop, chain.connectHost);
+
+      return fetch(dial.url, {
+        method: hop.method,
+        headers: dial.headers,
+        signal: chain.signal,
+        redirect: 'manual',
+        ...(dial.tls === undefined ? {} : { tls: dial.tls }),
+        ...(chain.decompress ? {} : { decompress: false }),
+        ...(hop.body === undefined ? {} : { body: hop.body }),
+      });
+    },
+    catch: (error) => classifyTransportFailure(error, chain.signal, chain.traceId),
+  }),
+  Effect.flatMap((response) => {
+    if (!REDIRECT_STATUSES.includes(response.status) || chain.policy === 'manual') {
+      return Effect.succeed(response);
+    }
+
+    return pipe(
+      Effect.sync(() => {
+        response.body?.cancel().catch(() => undefined);
+      }),
+      Effect.flatMap(() => (chain.policy === 'error'
+        ? Effect.fail(redirectError(hop, response, redirects, 'refused-by-policy', chain.traceId))
+        : nextRedirectHop(hop, response, redirects, chain.connectHost !== undefined, chain.traceId))),
+      Effect.flatMap((next) => (chain.resign !== undefined && carriesSignature(next)
+        ? chain.resign(next)
+        : Effect.succeed(next))),
+      Effect.flatMap((next) => fetchFollowingRedirects(next, chain, redirects + 1)),
+    );
+  }),
+);
 
 /**
  * Decide whether a failed attempt may be retried.
@@ -146,6 +823,10 @@ const classifyTransportFailure = (error: unknown, traceId?: string): ErrorRespon
  * The method gate comes first: a method outside the allowlist is never retried, whatever the
  * status code. Transport failures are then decided by their own flags, so `retryOn` only ever
  * matches statuses a server actually returned.
+ *
+ * A `REDIRECT_ERROR`, a `RESPONSE_TOO_LARGE` and a `RESPONSE_DECODE_ERROR` are never retried,
+ * whatever `retryOn` lists ({@link NEVER_RETRIED_ERRORS}): each carries the status the server sent
+ * as its `code`, and asking the same server again gets the same answer.
  */
 const shouldRetryRequest = (
   error: unknown,
@@ -153,6 +834,10 @@ const shouldRetryRequest = (
   retryConfig: RetryConfig,
 ): boolean => {
   if (!isErrorResponse(error) || !isRetryableMethod(method, retryConfig)) {
+    return false;
+  }
+
+  if (NEVER_RETRIED_ERRORS.includes(error.error)) {
     return false;
   }
 
@@ -311,7 +996,34 @@ const applyAuthIfNeeded = (
 };
 
 /**
+ * The body cap a request runs under: its own `maxResponseBytes`, else the client's, else none.
+ *
+ * `Infinity` is none. A cap that can never be reached gains nothing from the client's decoder and
+ * would still pay for it: lower throughput, a `RESPONSE_DECODE_ERROR` for a coding `fetch` hands
+ * over as it is, and headers without `content-encoding`. So a request that lifts the client's cap
+ * takes `fetch`'s path, exactly as a request of a client without one.
+ */
+const responseByteLimit = (config: RequestConfig, mergedOptions: RequestsOptions): number | undefined => {
+  const limit = config.maxResponseBytes ?? mergedOptions.maxResponseBytes;
+
+  return limit === Number.POSITIVE_INFINITY ? undefined : limit;
+};
+
+/**
+ * The redirect policy a request runs under: its own `redirect`, else the client's, else `'follow'`.
+ *
+ * Resolved with `??` rather than trusted to the spread defaults: `{ redirect: undefined }` in the
+ * client's options spreads over the default, and the same on a request means "the client's".
+ */
+const redirectPolicyOf = (config: RequestConfig, mergedOptions: RequestsOptions): RedirectPolicy =>
+  config.redirect ?? mergedOptions.redirect ?? DEFAULT_REQUESTS_OPTIONS.redirect;
+
+/**
  * Build request headers
+ *
+ * Under `maxResponseBytes`, `fetch` is told not to decompress, and then it offers no
+ * `Accept-Encoding` at all. The client offers the codings it decodes instead
+ * ({@link cappedAcceptEncoding}), unless the caller chose an `Accept-Encoding` of its own.
  */
 const buildHeaders = (
   config: RequestConfig,
@@ -328,6 +1040,13 @@ const buildHeaders = (
     ...mergedOptions.headers,
     ...config.headers,
   };
+
+  if (
+    responseByteLimit(config, mergedOptions) !== undefined &&
+    !Object.keys(headers).some((name) => name.toLowerCase() === 'accept-encoding')
+  ) {
+    headers['Accept-Encoding'] = cappedAcceptEncoding();
+  }
 
   if (traceContext && config.tracing !== false && mergedOptions.tracing) {
     // W3C `traceparent` first, because it is the only one a collector, a service mesh or a
@@ -347,27 +1066,257 @@ const buildHeaders = (
 };
 
 /**
- * Parse response data based on content type
+ * What a failed body read is reported as.
+ *
+ * `fetch` resolves at the headers; the body streams in afterwards under the same signal, so the
+ * client-side timeout — or an interruption of the attempt — can fire here too. Such a failure is a
+ * transport failure like one before the headers, and is classified as one: `TIMEOUT_ERROR`, code
+ * `0`, retried only under `retryOnTimeout`. Reported as `readFailure` (a `RESPONSE_READ_ERROR` or
+ * `RESPONSE_PARSE_ERROR`) with the status as its code, a stalled 200 would look like a malformed
+ * body, and a stalled 500 would be replayed by `retryOn` as if the server had answered 500 in
+ * full.
+ *
+ * Any other read failure keeps `readFailure` and the status.
+ */
+const bodyReadFailure = (
+  error: unknown,
+  response: Response,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+): ErrorResponse =>
+  signal.aborted || transportFailureKindOf(error) !== 'network'
+    ? classifyTransportFailure(error, signal, traceId, response.status)
+    : createErrorResponse(readFailure, response.status, traceId, markTransportDetails({ details: error }, ['details']));
+
+/**
+ * What a failed body read through {@link openBodyReader} is reported as — under
+ * `maxResponseBytes`, and every read of a `'stream'` result.
+ *
+ * A failure reading the connection goes through {@link bodyReadFailure}, like an uncapped read. A
+ * body the decoder rejects is a `RESPONSE_DECODE_ERROR` — unless the attempt's signal had fired,
+ * which cuts the compressed stream short and is the timeout or abort it looks like. `code` is the
+ * status that arrived, as for `RESPONSE_PARSE_ERROR`, and `details.statusCode` repeats it.
+ */
+const cappedBodyFailure = (
+  failure: BodyReadFailure,
+  response: Response,
+  limit: number | undefined,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+): ErrorResponse => {
+  const statusCode = response.status;
+
+  switch (failure.reason) {
+    case 'read':
+      return bodyReadFailure(failure.error, response, signal, readFailure, traceId);
+    case 'decode':
+      return signal.aborted
+        ? classifyTransportFailure(failure.error, signal, traceId, statusCode)
+        : createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, markTransportDetails({
+          reason: 'corrupt-body',
+          encoding: response.headers.get('content-encoding'),
+          statusCode,
+          details: failure.error,
+        }, ['details']));
+    case 'unsupported-encoding':
+      return createErrorResponse(RESPONSE_DECODE_ERROR, statusCode, traceId, {
+        reason: 'unsupported-encoding',
+        encoding: failure.encoding,
+        statusCode,
+      });
+    case 'too-large':
+      return createErrorResponse(RESPONSE_TOO_LARGE, statusCode, traceId, {
+        limit,
+        received: failure.received,
+        statusCode,
+        ...(failure.contentLength === undefined ? {} : { contentLength: failure.contentLength }),
+      });
+  }
+};
+
+/** UTF-8, as `Response.text()` decodes: a byte order mark is dropped, a malformed sequence replaced. */
+const utf8 = new TextDecoder();
+
+/**
+ * Read the body of a response whose status line and headers have arrived, as text.
+ *
+ * Every body the client reads goes through here, so the one classification of a failed read
+ * applies to all of them ({@link bodyReadFailure}). Without a `limit` the body is
+ * `response.text()`, read whole and decompressed by `fetch`. With one it is
+ * {@link readCappedBody}: decoded by the client and refused as soon as it grows past `limit`.
+ */
+const readBodyText = (
+  response: Response,
+  signal: AbortSignal,
+  readFailure: 'RESPONSE_READ_ERROR' | 'RESPONSE_PARSE_ERROR',
+  traceId?: string,
+  limit?: number,
+): Effect.Effect<string, ErrorResponse> => {
+  if (limit === undefined) {
+    return Effect.tryPromise({
+      try: () => response.text(),
+      catch: (error) => bodyReadFailure(error, response, signal, readFailure, traceId),
+    });
+  }
+
+  return pipe(
+    readCappedBody(response, limit),
+    Effect.map((bytes) => utf8.decode(bytes)),
+    Effect.mapError((failure) => cappedBodyFailure(failure, response, limit, signal, readFailure, traceId)),
+  );
+};
+
+/**
+ * Read the body of a response whose headers have arrived as bytes, exactly as they are once the
+ * content coding is undone — `responseType: 'bytes'`.
+ *
+ * The same read as {@link readBodyText}, without the UTF-8 decoding that turned every byte of a
+ * binary body outside UTF-8 into U+FFFD, and a failed read is reported the same way.
+ */
+const readBodyBytes = (
+  response: Response,
+  signal: AbortSignal,
+  traceId?: string,
+  limit?: number,
+): Effect.Effect<Uint8Array, ErrorResponse> => {
+  if (limit === undefined) {
+    return Effect.tryPromise({
+      try: () => response.arrayBuffer().then((buffer) => new Uint8Array(buffer)),
+      catch: (error) => bodyReadFailure(error, response, signal, 'RESPONSE_READ_ERROR', traceId),
+    });
+  }
+
+  return pipe(
+    readCappedBody(response, limit),
+    Effect.mapError((failure) => cappedBodyFailure(failure, response, limit, signal, 'RESPONSE_READ_ERROR', traceId)),
+  );
+};
+
+/**
+ * A countdown that aborts its signal with a `TimeoutError` — the reason `AbortSignal.timeout`
+ * aborts with — and that can be stopped and started again.
+ *
+ * A `'stream'` result needs it: its body outlives the call, so no single deadline set when the
+ * attempt starts can bound it. The countdown bounds each wait instead — the wait for the headers,
+ * then every wait of the caller's reads for the next chunk.
+ */
+interface RestartableTimeout {
+  readonly signal: AbortSignal;
+  /** Start counting `timeout` from now, dropping whatever was counted before. */
+  start(): void;
+  /** Stop counting. */
+  stop(): void;
+}
+
+/**
+ * The longest delay `setTimeout` keeps, 2^31 - 1 ms (about 24.8 days). The runtime sets a longer
+ * one to 1 ms, with a `TimeoutOverflowWarning`.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * A countdown is counted in stretches of at most {@link MAX_TIMER_DELAY_MS}, each re-arming the
+ * next for what is left. `AbortSignal.timeout`, which bounds a request under `'auto'` and
+ * `'bytes'`, takes any delay up to 2^53 - 1 ms. A single `setTimeout` does not: a `timeout` past
+ * 2^31 - 1, the obvious way to say "no idle limit" on a long-lived stream, would fire after 1 ms,
+ * and every `'stream'` call under it would fail `TIMEOUT_ERROR` at the headers while the same call
+ * under `'auto'` goes through.
+ */
+const restartableTimeout = (timeout: number): RestartableTimeout => {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const stop = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  const countDown = (left: number): void => {
+    const stretch = Math.min(left, MAX_TIMER_DELAY_MS);
+    timer = setTimeout(() => {
+      if (left > stretch) {
+        countDown(left - stretch);
+      } else {
+        controller.abort(new DOMException('The operation timed out.', 'TimeoutError'));
+      }
+    }, stretch);
+  };
+
+  return {
+    signal: controller.signal,
+    start() {
+      stop();
+      countDown(timeout);
+    },
+    stop,
+  };
+};
+
+/**
+ * Open the body of a success as the `ReadableStream` a `responseType: 'stream'` call resolves with.
+ *
+ * The call resolves at the headers; the body is read only as the caller reads the stream. Every
+ * read that waits on the upstream restarts `waitTimeout`, and the read that waits past it errors
+ * the stream with `TIMEOUT_ERROR` and closes the connection: a stream whose chunks keep coming
+ * lives as long as they do, a stalled one does not. The time the caller spends between reads
+ * counts for nothing.
+ *
+ * Under `maxResponseBytes` the body is decoded by the client and counted as the stream is read
+ * ({@link bodyStream}); a body refused before reading fails the call itself. Whatever the stream
+ * errors with is the `ErrorResponse` the same failure of an ordinary read would have produced.
+ */
+const openBodyStream = (
+  response: Response,
+  signal: AbortSignal,
+  waitTimeout: RestartableTimeout,
+  traceId?: string,
+  limit?: number,
+): Effect.Effect<ReadableStream<Uint8Array>, ErrorResponse> => {
+  const errorFor = (failure: BodyReadFailure): ErrorResponse =>
+    cappedBodyFailure(failure, response, limit, signal, 'RESPONSE_READ_ERROR', traceId);
+
+  return pipe(
+    openBodyReader(response, limit),
+    Effect.mapError(errorFor),
+    Effect.map((reader) => bodyStream(reader, limit, {
+      waiting: waitTimeout.start,
+      settled: waitTimeout.stop,
+      errorFor,
+    })),
+  );
+};
+
+/**
+ * The shape a request's success `result` takes: `'bytes'` and `'stream'` as asked, and anything
+ * else — `undefined`, or a value no caller typed in TypeScript — as `'auto'`.
+ */
+const responseTypeOf = (config: RequestConfig): ResponseType =>
+  config.responseType === 'bytes' || config.responseType === 'stream' ? config.responseType : 'auto';
+
+/**
+ * Parse response data based on content type.
+ *
+ * A body that says `application/json` and is empty fails with `RESPONSE_PARSE_ERROR`: a 200 that
+ * promises JSON and sends nothing is a broken answer. With `emptyIsNoContent` it resolves with
+ * `undefined` instead, as a response without content does.
  */
 const parseResponseData = <T>(
   response: Response,
+  signal: AbortSignal,
   traceId?: string,
+  limit?: number,
+  emptyIsNoContent = false,
 ): Effect.Effect<T, ErrorResponse> => {
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('application/json')) {
     return pipe(
-      Effect.tryPromise({
-        try: () => response.text(),
-        catch: (error) =>
-          createErrorResponse(
-            'RESPONSE_PARSE_ERROR',
-            response.status,
-            traceId,
-            { details: error },
-          ),
-      }),
+      readBodyText(response, signal, 'RESPONSE_PARSE_ERROR', traceId, limit),
       Effect.flatMap((text) => {
+        if (!text && emptyIsNoContent) {
+          return Effect.succeed(undefined as T);
+        }
+
         if (!text) {
           return Effect.fail(
             createErrorResponse(
@@ -388,7 +1337,7 @@ const parseResponseData = <T>(
               'RESPONSE_PARSE_ERROR',
               response.status,
               traceId,
-              { details: text },
+              markTransportDetails({ details: text }, ['details']),
             ),
           );
         }
@@ -405,60 +1354,51 @@ const parseResponseData = <T>(
       }),
     );
   } else {
-    return Effect.tryPromise({
-      try: () => response.text() as Promise<T>,
-      catch: (error) =>
-        createErrorResponse(
-          'RESPONSE_READ_ERROR',
-          response.status,
-          traceId,
-          { details: error },
-        ),
-    });
+    return readBodyText(response, signal, 'RESPONSE_READ_ERROR', traceId, limit) as Effect.Effect<T, ErrorResponse>;
   }
 };
 
-/**
- * Add the `X-OneBun-Signature` header when `onebun` auth is configured, otherwise pass through.
- *
- * Returns the headers rather than mutating them, so a retry signs the request afresh instead of
- * inheriting the previous attempt's timestamp and nonce.
- */
-const signOneBunIfNeeded = (
+/** The `onebun` auth a request is signed with, or `undefined` when it is not signed. */
+const signingAuthOf = (
   config: RequestConfig,
   mergedOptions: RequestsOptions,
-  headers: Record<string, string>,
-  fullUrl: string,
-  body: string | undefined,
-  traceId?: string,
-): Effect.Effect<Record<string, string>, ErrorResponse> => {
+): OneBunAuthConfig | undefined => {
   const authConfig = config.auth ?? mergedOptions.auth;
 
-  // Two statements rather than one disjunction: a type predicate negated inside `||` does not
-  // narrow reliably, and the narrowing is what gives `authConfig.audience` a type here.
-  if (authConfig === undefined) {
-    return Effect.succeed(headers);
-  }
+  return authConfig !== undefined && isSigningAuth(authConfig) ? authConfig : undefined;
+};
 
-  if (!isSigningAuth(authConfig)) {
-    return Effect.succeed(headers);
-  }
-
-  const contentType = Object.entries(headers)
+/**
+ * `hop` with an `X-OneBun-Signature` over its own method, URL, `Content-Type` and body bytes, in
+ * place of any it carried.
+ *
+ * Returns a new hop rather than mutating the headers, so every signing — a retry's, a redirect
+ * hop's — gets its own timestamp and nonce instead of inheriting the previous one's: reusing them
+ * would make the second request a replay of the first, and the callee rejects it as such.
+ */
+const signHop = (
+  auth: OneBunAuthConfig,
+  hop: RedirectHop,
+  traceId?: string,
+): Effect.Effect<RedirectHop, ErrorResponse> => {
+  const contentType = Object.entries(hop.headers)
     .find(([name]) => name.toLowerCase() === 'content-type')?.[1];
 
   return pipe(
-    signOneBunRequest(authConfig, {
-      method: config.method,
-      url: fullUrl,
+    signOneBunRequest(auth, {
+      method: hop.method,
+      url: hop.url,
       contentType,
-      body,
-      audience: authConfig.audience,
+      body: hop.body,
+      audience: auth.audience,
     }),
     Effect.map((signature) => ({
-      ...headers,
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      'X-OneBun-Signature': signature,
+      ...hop,
+      headers: {
+        ...filterHeaders(hop.headers, (name) => name !== SIGNATURE_HEADER),
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        'X-OneBun-Signature': signature,
+      },
     })),
     Effect.catchAll((error) =>
       Effect.fail(
@@ -469,80 +1409,173 @@ const signOneBunIfNeeded = (
 };
 
 /**
- * Execute single HTTP request attempt
+ * How a same-origin redirect hop is signed afresh — or `undefined`, and it carries the previous
+ * signature, which the callee rejects for any other path with `signature-mismatch`.
+ *
+ * Only under `onebun` auth that names an `audience`. Re-signing hands whoever answers with the
+ * redirect a fresh, valid signature for a method, path and body of its choosing on that origin —
+ * which is what following it means. With an audience, that signature is good only at the callee
+ * the audience names. Without one it is good at every service that shares the secret, so the hop
+ * fails closed instead.
+ */
+const resignerFor = (
+  auth: OneBunAuthConfig | undefined,
+  traceId?: string,
+): RedirectChain['resign'] => {
+  if (auth === undefined || !auth.audience) {
+    return undefined;
+  }
+
+  return (hop) => signHop(auth, hop, traceId);
+};
+
+/**
+ * Execute single HTTP request attempt.
+ *
+ * An attempt is the whole redirect chain ({@link fetchFollowingRedirects}): the response it
+ * resolves with, and the status the metrics record, are the final hop's — under
+ * `redirect: 'manual'`, the redirect's.
+ *
+ * One signal governs the whole attempt, every hop and the body included: `fetch` resolves at the
+ * headers and the body is read afterwards under the same signal. It fires on the client-side
+ * timeout, and on an interruption of the Effect running the attempt (`Effect.timeout`,
+ * `Effect.race`, `Fiber.interrupt`). The interruption aborts the `fetch` rather than abandoning
+ * it, which would leave the connection open and the server holding it until the client's own
+ * timeout.
+ *
+ * The interruption is wired through `Effect.onInterrupt` around the whole attempt rather than
+ * through the signal `Effect.tryPromise` hands to `fetch`: that signal is only live while the
+ * `fetch` promise is pending, so an interruption during the body read would not reach it.
+ *
+ * Under `maxResponseBytes` the body is fetched raw and read by {@link readCappedBody}, for a
+ * success and an error status alike: an error status's body ends up in `details.details`, so it
+ * is bounded by the same cap.
+ *
+ * `responseType` shapes a success's `result` only: `'bytes'` reads the body as bytes
+ * ({@link readBodyBytes}), and `'stream'` resolves at the headers with the body still to be read
+ * ({@link openBodyStream}). An error status's body is read as under `'auto'` in every mode, so an
+ * `HTTP_ERROR` carries the same `details.details` whichever was asked for. Under `'stream'` the
+ * timeout is a {@link RestartableTimeout} rather than one deadline for the whole attempt: it bounds
+ * the wait for the headers — and an error status's body, as it would anyway — and is stopped once
+ * the stream is handed over, which restarts it for each read. The attempt ends at the headers, so
+ * nothing read from the stream is ever retried, and the metrics record the time to the headers.
+ *
+ * `connectHost` is the validated `connectAddress` ({@link connectHostFor}): every hop of every
+ * attempt connects there, and `fullUrl` — the URL signed, logged, recorded and reported — keeps the
+ * host name.
+ *
+ * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
   config: RequestConfig,
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
+  connectHost: string | undefined,
   traceId?: string,
-): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => {
+): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => Effect.suspend(() => {
   const requestStartTime = Date.now();
-
-  // Create fetch request
-  const requestInit: RequestInit = {
-    method: config.method,
-    headers,
-    signal: AbortSignal.timeout(config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS),
-  };
+  const interruption = new AbortController();
+  const timeout = config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS;
+  const responseType = responseTypeOf(config);
+  const waitTimeout = responseType === 'stream' ? restartableTimeout(timeout) : undefined;
+  const signal = AbortSignal.any([
+    waitTimeout?.signal ?? AbortSignal.timeout(timeout),
+    interruption.signal,
+  ]);
+  waitTimeout?.start();
 
   // One serialization, used both for the body that is sent and for the body that is signed.
   // Serializing twice would let the two diverge, and a signature over different bytes than the
   // ones on the wire is worse than no signature — it reads as protection.
   const body = serializeBody(config);
-  if (body !== undefined) {
-    requestInit.body = body;
-  }
+  const limit = responseByteLimit(config, mergedOptions);
+  const policy = redirectPolicyOf(config, mergedOptions);
+  const signingAuth = signingAuthOf(config, mergedOptions);
+  const firstHop: RedirectHop = {
+    url: fullUrl,
+    method: config.method,
+    headers,
+    body,
+  };
 
   return pipe(
     // Signed HERE, inside the attempt, over the assembled request. Two reasons it cannot move
     // out: the signature has to cover the final URL and the exact body bytes, and each retry
     // needs its own timestamp and nonce — reusing one would make attempt 2 a replay of attempt 1
     // and the callee would reject it as such.
-    signOneBunIfNeeded(config, mergedOptions, headers, fullUrl, body, traceId),
-    Effect.flatMap((signedHeaders) => Effect.tryPromise({
-      try: () => fetch(fullUrl, { ...requestInit, headers: signedHeaders }),
-      catch: (error) => classifyTransportFailure(error, traceId),
+    signingAuth === undefined ? Effect.succeed(firstHop) : signHop(signingAuth, firstHop, traceId),
+    Effect.flatMap((signedHop) => fetchFollowingRedirects(signedHop, {
+      signal,
+      decompress: limit === undefined,
+      policy,
+      resign: resignerFor(signingAuth, traceId),
+      connectHost,
+      traceId,
     })),
     Effect.flatMap((response) => {
-      const responseHeaders: Record<string, string> = {};
-      response.headers.forEach((value, key) => {
-        responseHeaders[key.toLowerCase()] = value;
-      });
+      const noContent = hasNoContent(config.method, response.status);
+      const success = isSuccessStatus(response.status, policy);
+      // `undefined` rather than `''` for a response that has no content: `head()` is typed
+      // `ApiResponse<void>`, and an empty string would claim a body that was never there.
+      // A redirect handed back under 'manual' is wanted for its status and `Location`, not its
+      // body: an empty one typed as JSON (some gateways send that) resolves with `undefined`
+      // rather than failing RESPONSE_PARSE_ERROR, which would take the `Location` down with it.
+      const readBody = (): Effect.Effect<T, ErrorResponse> => {
+        if (noContent) {
+          return Effect.succeed(undefined as T);
+        }
+
+        if (success && responseType === 'bytes') {
+          return readBodyBytes(response, signal, traceId, limit) as Effect.Effect<T, ErrorResponse>;
+        }
+
+        if (success && responseType === 'stream' && waitTimeout !== undefined) {
+          return openBodyStream(response, signal, waitTimeout, traceId, limit) as Effect.Effect<T, ErrorResponse>;
+        }
+
+        return parseResponseData<T>(response, signal, traceId, limit, isHandedBackRedirect(response.status, policy));
+      };
+      const upstreamHeaders = exposedHeaders(
+        response,
+        limit !== undefined && !noContent && contentCodings(response.headers).length > 0,
+      );
 
       return pipe(
-        parseResponseData<T>(response, traceId),
+        readBody(),
         Effect.map((responseData) => {
           const duration = Date.now() - requestStartTime;
-          const success =
-            response.status >= HttpStatusCode.OK &&
-            response.status < HttpStatusCode.MOVED_PERMANENTLY;
 
           if (success) {
-            return createSuccessResponse(responseData, traceId, response.status);
+            return withUpstreamHeaders(
+              createSuccessResponse(responseData, traceId, response.status),
+              collectResponseHeaders(upstreamHeaders),
+            );
           }
 
           return createErrorResponse(
             'HTTP_ERROR',
             response.status,
             traceId,
-            {
-              headers: responseHeaders,
+            markTransportDetails({
+              headers: collectErrorHeaders(upstreamHeaders),
               details: responseData,
               duration,
               url: fullUrl,
               method: config.method,
-            },
+            }, ['headers', 'details', 'url']),
           );
         }),
       );
     }),
+    Effect.onInterrupt(() => Effect.sync(() => interruption.abort())),
+    // The attempt is over: a `'stream'` result restarts the countdown for each read of its own
+    Effect.ensuring(Effect.sync(() => waitTimeout?.stop())),
     Effect.catchAll((error) => {
       return Effect.succeed(error);
     }),
   );
-};
+});
 
 /**
  * Execute request with retry logic
@@ -552,14 +1585,15 @@ const executeWithRetry = <T, E extends string, R extends string>(
   mergedOptions: RequestsOptions,
   headers: Record<string, string>,
   fullUrl: string,
+  connectHost: string | undefined,
   traceId?: string,
   attemptNumber: number = 1,
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const requestStartTime = Date.now();
 
   return pipe(
-    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, traceId),
-    Effect.map((result) => ({ ...result, retryCount: attemptNumber - 1 })),
+    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, connectHost, traceId),
+    Effect.map((result) => withRetryCount(result, attemptNumber - 1)),
     Effect.flatMap((result) => {
       const duration = Date.now() - requestStartTime;
       // Record metrics if enabled
@@ -622,6 +1656,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
               mergedOptions,
               headers,
               fullUrl,
+              connectHost,
               traceId,
               attemptNumber + 1,
             ),
@@ -635,6 +1670,26 @@ const executeWithRetry = <T, E extends string, R extends string>(
 };
 
 /**
+ * The config with its method filled in: `GET` when the caller left it `undefined`.
+ *
+ * `RequestConfig.method` is required, but a spread puts an explicit `undefined` back over the
+ * default: `client.request({ url, method: undefined })` overrides the `GET` that
+ * `HttpClient.requestEffect` sets, and `client.get(url, { method: undefined })` does the same
+ * through {@link resolveQueryOverload}. Both type-check while `exactOptionalPropertyTypes` is off.
+ * `fetch` sends such a request as GET, but the client's own string operations on the method would
+ * throw a TypeError on it: HEAD detection on every answer, the retry allowlist on every failure.
+ * Thrown there, it would be a defect rather than a failure — it passes every `catchAll`, so the
+ * caller would get no `ErrorResponse` and no metrics would be recorded, after the request had
+ * already gone out. With `onebun` auth the signer would throw on it first, so a signed request
+ * would never be sent at all.
+ *
+ * Done here, once, because {@link executeRequest} is the one path every caller takes — `HttpClient`
+ * and the `RequestsService` layer alike.
+ */
+const withDefaultMethod = (config: RequestConfig): RequestConfig =>
+  config.method === undefined ? { ...config, method: HttpMethod.GET } : config;
+
+/**
  * Execute HTTP request with full configuration
  */
 export const executeRequest = <
@@ -642,9 +1697,10 @@ export const executeRequest = <
   E extends string = string,
   R extends string = string,
 >(
-  config: RequestConfig,
+  requestConfig: RequestConfig,
   requestOptions: RequestsOptions = {},
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
+  const config = withDefaultMethod(requestConfig);
   const mergedOptions = mergeRequestsOptions(requestOptions);
   // Resolved once, before the first attempt: a retry belongs to the same trace as the attempt it
   // replaces, and re-reading the ambient context per attempt would let a slow retry pick up
@@ -654,6 +1710,7 @@ export const executeRequest = <
 
   return pipe(
     applyAuthIfNeeded(config, mergedOptions, traceId),
+    Effect.map((authConfig) => keepCallerConnectAddress(authConfig, config)),
     Effect.map((finalConfig) => {
       // The URL is built AFTER auth, from the config auth produced. It used to be built one line
       // before, so `apikey` with `location: 'query'` added its key to a `config.query` the URL had
@@ -663,9 +1720,14 @@ export const executeRequest = <
 
       return { finalConfig, headers, fullUrl };
     }),
-    Effect.flatMap(({ finalConfig, headers, fullUrl }) =>
-      executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, traceId),
-    ),
+    // `connectAddress` is checked against the config auth produced — a `custom` auth interceptor
+    // may set or replace it ({@link keepCallerConnectAddress}) — and before the first attempt, so a
+    // refused one sends nothing and is not retried.
+    Effect.flatMap(({ finalConfig, headers, fullUrl }) => pipe(
+      connectHostFor(finalConfig, fullUrl, traceId),
+      Effect.flatMap((connectHost) =>
+        executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, connectHost, traceId)),
+    )),
   );
 };
 
@@ -715,44 +1777,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads: either query data as second param, or config as second param
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      // queryOrConfig is query data, config is request config
-      finalConfig = {
-        method: HttpMethod.GET,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      // Check if it's a RequestConfig (has method, url, etc.) or query data
-      const hasConfigFields = REQUEST_CONFIG_MARKERS.some((field) => field in queryOrConfig);
-      if (hasConfigFields) {
-        // It's config
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        // It's query data
-        finalConfig = {
-          method: HttpMethod.GET,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.GET, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.GET, url, queryOrConfig, config));
   }
 
   /**
@@ -867,44 +1892,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.DELETE,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.DELETE,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.DELETE, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.DELETE, url, queryOrConfig, config));
   }
 
   /**
@@ -931,44 +1919,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<void>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.HEAD,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.HEAD,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.HEAD, url };
-    }
-
-    return this.requestEffect<void>(finalConfig);
+    return this.requestEffect<void>(resolveQueryOverload(HttpMethod.HEAD, url, queryOrConfig, config));
   }
 
   /**
@@ -995,44 +1946,7 @@ export class HttpClient {
     queryOrConfig?: Q | Partial<RequestConfig>,
     config?: Partial<RequestConfig>,
   ): Effect.Effect<ApiResponse<T>, ErrorResponse> {
-    // Handle overloads similar to GET
-    let finalConfig: Partial<RequestConfig>;
-
-    if (queryOrConfig && config) {
-      finalConfig = {
-        method: HttpMethod.OPTIONS,
-        url,
-        query: queryOrConfig as Q,
-        ...config,
-      };
-    } else if (
-      queryOrConfig &&
-      typeof queryOrConfig === 'object' &&
-      !Array.isArray(queryOrConfig)
-    ) {
-      const hasConfigFields =
-        'method' in queryOrConfig ||
-        'headers' in queryOrConfig ||
-        'timeout' in queryOrConfig ||
-        'auth' in queryOrConfig;
-      if (hasConfigFields) {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          ...(queryOrConfig as Partial<RequestConfig>),
-        };
-      } else {
-        finalConfig = {
-          method: HttpMethod.OPTIONS,
-          url,
-          query: queryOrConfig as Q,
-        };
-      }
-    } else {
-      finalConfig = { method: HttpMethod.OPTIONS, url };
-    }
-
-    return this.requestEffect<T>(finalConfig);
+    return this.requestEffect<T>(resolveQueryOverload(HttpMethod.OPTIONS, url, queryOrConfig, config));
   }
 
   /**

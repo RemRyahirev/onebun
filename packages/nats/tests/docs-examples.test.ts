@@ -9,6 +9,8 @@
 
 import { DeliverPolicy } from '@nats-io/jetstream';
 import {
+  afterAll,
+  beforeAll,
   describe,
   it,
   expect,
@@ -23,13 +25,25 @@ import type { NatsAdapterOptions, JetStreamAdapterOptions } from '../src/types';
 
 import type { Message } from '@onebun/core';
 import {
+  BaseController,
+  BaseService,
+  Controller,
+  Module,
   OnQueueReady,
+  OneBunApplication,
+  QueueService,
+  Service,
   Subscribe,
   createQueuePatternMatcher,
   getLifecycleHandlers,
   getSubscribeMetadata,
   resolveAckMode,
 } from '@onebun/core';
+import {
+  createNatsContainer,
+  makeMockLoggerLayer,
+  type TestContainer,
+} from '@onebun/core/testing';
 
 
 import {
@@ -1271,5 +1285,183 @@ describe('Subscribe Options (docs/api/queue.md)', () => {
     // `requeue` is not honoured, so the drop is visible only through this error.
     expect(failures[0].message).toContain('nacked by its handler');
     expect(failures[0].message).toContain('readme-1');
+  });
+});
+
+/**
+ * A JetStream adapter with the transport replaced on the instance, subscribing against the
+ * documented TASKS workqueue. Returns what reached `consumers.add`, or the refusal.
+ */
+async function subscribeOnDocumentedWorkQueue(
+  pattern: string,
+  subscribeOptions: Record<string, unknown>,
+): Promise<{ added: AnyRecord[]; error?: Error }> {
+  const adapter = new JetStreamQueueAdapter({
+    servers: 'nats://localhost:4222',
+    streams: [{ name: 'TASKS', subjects: ['tasks.>'], retention: 'workqueue' }],
+  });
+  const a = adapter as unknown as AnyRecord;
+  a.connected = true;
+  a.client = { isConnected: mock(() => true), disconnect: mock(() => Promise.resolve()) };
+  a.jsm = {
+    consumers: {
+      add: mock(() => Promise.resolve()),
+      info: mock(() => Promise.reject(Object.assign(new Error('consumer not found'), { code: 10014 }))),
+      update: mock(() => Promise.resolve()),
+    },
+  };
+  a.js = {
+    consumers: {
+      get: mock(() => Promise.resolve({
+        consume: mock(() => Promise.resolve({
+          async *[Symbol.asyncIterator] () {
+            await new Promise(() => undefined);
+          },
+        })),
+      })),
+    },
+  };
+
+  let error: Error | undefined;
+  try {
+    await adapter.subscribe(pattern, async () => undefined, subscribeOptions);
+  } catch (thrown) {
+    error = thrown as Error;
+  }
+  const added = (a.jsm.consumers.add.mock.calls as AnyRecord[][]).map(call => call[1]);
+  await adapter.disconnect();
+
+  return { added, error };
+}
+
+/** Polls instead of sleeping, so a slow container costs latency rather than a flake. */
+async function waitUntil(predicate: () => boolean | Promise<boolean>, deadlineMs = 10_000): Promise<void> {
+  const startedAt = Date.now();
+
+  while (!(await predicate())) {
+    if (Date.now() - startedAt > deadlineMs) {
+      throw new Error(`waitUntil: predicate did not hold within ${deadlineMs}ms`);
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
+
+/**
+ * @source docs:api/queue.md#work-queue-streams
+ */
+describe('Work-queue streams (docs/api/queue.md)', () => {
+  let nats: TestContainer;
+
+  beforeAll(async () => {
+    nats = await createNatsContainer({ enableJetStream: true });
+  }, 120_000);
+
+  afterAll(async () => {
+    await nats.stop();
+  }, 120_000);
+
+  it('hands the documented worker a task a producer app published before the worker existed', async () => {
+    // The reporter's shape, end to end through QueueService and @Subscribe: the task predates
+    // the first subscription, so under deliver_policy new it would never arrive — and on a
+    // workqueue the consumer could not even be created.
+    const received: string[] = [];
+
+    @Service()
+    class TaskProducer extends BaseService {
+      constructor(private readonly queue: QueueService) {
+        super();
+      }
+
+      async send(id: string): Promise<string> {
+        return await this.queue.publish('tasks.run', { id });
+      }
+    }
+
+    @Module({ providers: [TaskProducer] })
+    class ProducerModule {}
+
+    @Controller('/tasks')
+    class TaskWorker extends BaseController {
+      @Subscribe('tasks.run', { group: 'workers', ackMode: 'manual' })
+      async run(message: Message<{ id: string }>): Promise<void> {
+        received.push(message.data.id);
+        await message.ack();
+      }
+    }
+
+    @Module({ controllers: [TaskWorker] })
+    class WorkerModule {}
+
+    const start = async (module: new (...args: unknown[]) => object): Promise<OneBunApplication> => {
+      const app = new OneBunApplication(module, {
+        port: 0,
+        loggerLayer: makeMockLoggerLayer(),
+        metrics: { enabled: false },
+        gracefulShutdown: false,
+        queue: {
+          adapter: JetStreamQueueAdapter,
+          options: {
+            servers: nats.url,
+            streams: [{ name: 'TASKS', subjects: ['tasks.>'], retention: 'workqueue' }],
+          },
+        },
+      });
+      await app.start();
+
+      return app;
+    };
+
+    const producer = await start(ProducerModule);
+    try {
+      await producer.getService(TaskProducer).send('before-the-worker');
+    } finally {
+      await producer.stop();
+    }
+
+    const worker = await start(WorkerModule);
+    try {
+      await waitUntil(() => received.length === 1);
+      expect(received).toEqual(['before-the-worker']);
+
+      // "On a workqueue, this deletes the task": the stream is empty once the ack lands.
+      const adapter = worker.getQueueService().getAdapter() as JetStreamQueueAdapter;
+      const jsm = (adapter as unknown as AnyRecord).jsm as AnyRecord;
+      const stored = async (): Promise<number> => (await jsm.streams.info('TASKS')).state.messages;
+
+      await waitUntil(async () => await stored() === 0);
+      expect(await stored()).toBe(0);
+    } finally {
+      await worker.stop();
+    }
+  }, 30_000);
+
+  it('creates the consumer deliver-all, from the retention alone', async () => {
+    const { added, error } = await subscribeOnDocumentedWorkQueue('tasks.run', { group: 'workers', ackMode: 'manual' });
+
+    expect(error).toBeUndefined();
+    expect(added[0].deliver_policy).toBe(DeliverPolicy.All);
+  });
+
+  it('refuses the three shapes the section lists, before any server call', async () => {
+    const cases: Array<[string, Record<string, unknown>, RegExp]> = [
+      ['tasks.run', {}, /without a group/],
+      ['tasks.run', { group: 'workers', ackMode: 'none' }, /ackMode 'none'/],
+      ['tasks.v{version}', { group: 'workers' }, /partial-token/],
+    ];
+
+    for (const [pattern, options, says] of cases) {
+      const { added, error } = await subscribeOnDocumentedWorkQueue(pattern, options);
+
+      expect(error?.message).toMatch(says);
+      expect(added).toHaveLength(0);
+    }
+  });
+
+  it('accepts a whole-token parameter, which translates exactly', async () => {
+    const { added, error } = await subscribeOnDocumentedWorkQueue('tasks.{kind}', { group: 'workers' });
+
+    expect(error).toBeUndefined();
+    expect(added[0].filter_subject).toBe('tasks.*');
   });
 });

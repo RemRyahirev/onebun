@@ -17,21 +17,21 @@ const SAMPLED = 1;
 /**
  * Stamp the publishing side's trace onto a message, so the consumer can join it.
  *
- * Nothing wrote `metadata.traceId` before this. The field was declared, documented, and read by
- * `MessageTraceGuard` — which therefore refused every message ever published, since the value it
- * required could only be set by hand at every call site.
+ * This is what writes `metadata.traceId`, the field `MessageTraceGuard` requires; without it the
+ * value could only be set by hand at every call site, and the guard would refuse every message
+ * published without it.
  *
- * The source is `getCurrentTraceContext()`, which since the boundary spans landed answers inside
- * an HTTP request, a `@Traced` method, a queue handler, a scheduler tick and a WebSocket handler.
- * A publish from any of those carries that unit of work as the cause.
+ * The source is `getCurrentTraceContext()`, which answers inside an HTTP request, a `@Traced`
+ * method, a queue handler, a scheduler tick and a WebSocket handler. A publish from any of those
+ * carries that unit of work as the cause.
  *
  * **An explicit `traceId` is never overwritten.** A caller relaying a message on behalf of
  * something else is stating the causal trace, and the ambient one is not it.
  *
  * **No ambient trace means no ids, and that is deliberate.** Minting one here would put an id in
- * the message that names no span — the defect this framework spent WI-355 removing from its own
- * log lines. A publish from `onModuleInit` genuinely has no trace to join, and `MessageTraceGuard`
- * refusing it is the guard doing its stated job rather than the silent drop it used to be.
+ * the message that names no span — the same defect the framework keeps out of its own log lines.
+ * A publish from `onModuleInit` genuinely has no trace to join, and `MessageTraceGuard` refusing
+ * it is the guard doing its stated job, not a silent drop.
  *
  * @see docs:api/queue.md
  */

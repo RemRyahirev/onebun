@@ -26,9 +26,9 @@ export const QUEUE_DISABLED_WITH_ADAPTER_WARNING =
  * Warning emitted when a class registered in `providers` carries queue decorators.
  *
  * Handler discovery walks controllers only, so those decorators are metadata nothing reads and
- * the handler never runs. Naming the class AND the method is the point: before this, the single
- * line such an application printed was "no handlers detected", three lines below a handler the
- * user had just written.
+ * the handler never runs. Naming the class AND the method is the point: otherwise the one line
+ * such an application prints is "no handlers detected", three lines below a handler the user has
+ * just written.
  *
  * A function rather than a constant, because the text has to carry the offending names. Exported
  * so tests assert against it rather than duplicating its wording.
@@ -123,18 +123,18 @@ export function resolveQueueEnablement(
 /**
  * Which adapter the application's queue options select.
  *
- * `queue.redis` used to enable the queue without selecting the Redis adapter — the choice was
- * `queue.adapter ?? 'memory'` and never consulted `redis`. So `queue: { redis: { url } }` booted
- * an in-memory queue, logged "in-memory adapter", and discarded every Redis setting silently.
- * Messages stayed in-process; nothing reached the broker and nothing said so. Enablement and
- * selection were two decisions where the configuration reads like one.
+ * A `queue.redis` block selects the Redis adapter as well as enabling the queue: enablement and
+ * selection are one decision, as the configuration reads. Were the choice
+ * `queue.adapter ?? 'memory'` alone, `queue: { redis: { url } }` would boot an in-memory queue,
+ * log "in-memory adapter" and discard every Redis setting silently — messages would stay
+ * in-process, nothing would reach the broker, and nothing would say so.
  *
  * An explicit `adapter` always wins, including `adapter: 'memory'` alongside a `redis` block —
  * that is a legible choice (Redis settings staged for later, or a local override) and inference
  * must not overrule what the caller wrote.
  *
  * Pure, and exported, so the selection is provable without constructing an adapter or reaching a
- * broker: the reason this stayed broken is that the only way to observe it was to boot Redis.
+ * broker; otherwise the only way to observe it would be to boot Redis.
  *
  * @see docs:api/queue.md
  */

@@ -146,10 +146,11 @@ export function createTestController<T>(
 /**
  * Build a middleware with a mock logger and mock config, initialised as the framework would.
  *
- * The third of the three kinds, and until 0.8.1 the one with no helper: a middleware built with
- * `createTestService` had `this.config` and `this.logger` undefined, and the `config` option went
- * to a mock the instance never received. A middleware that reads config defensively hid that —
- * every read took its catch branch, so the suite asserted the fallback behaviour and passed.
+ * The third of the three kinds, beside `createTestService` and `createTestController`, and built
+ * the same way: the ambient init context is set before `new`, so `this.config` and `this.logger`
+ * are defined from the constructor on and the `config` option reaches the instance. That matters
+ * most for a middleware that reads config defensively: with `this.config` undefined every read
+ * would take its catch branch, and the suite would assert the fallback behaviour and pass.
  *
  * @example
  * ```typescript

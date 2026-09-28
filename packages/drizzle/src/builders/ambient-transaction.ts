@@ -30,16 +30,16 @@ interface AmbientTransactionContext {
  * Carries the open PostgreSQL transaction to everything called from inside its callback.
  *
  * `db.transaction(cb)` hands `cb` a transaction client, and statements issued **through that
- * client** are in the transaction. Nothing else is: a repository holds
- * `drizzleService.getDatabase()` from its constructor, so `repository.create()` called from
- * inside the callback took another pooled connection and its writes survived the ROLLBACK.
- * Measured against `postgres:16-alpine` — of two rows written inside one callback that then
- * threw, the one written through `tx` was gone and the one written through a repository
- * remained.
+ * client** are in the transaction. Nothing else is on its own: a repository holds
+ * `drizzleService.getDatabase()` from its constructor, so without this carrier
+ * `repository.create()` called from inside the callback would take another pooled connection and
+ * its writes would survive the ROLLBACK — of two rows written inside one callback that then
+ * throws, the one written through `tx` would be gone and the one written through a repository
+ * would remain.
  *
- * That made atomicity dialect-dependent, which is the sharpest edge a database layer can
- * have: SQLite has one connection, so there the same code was already correct — by design,
- * through {@link SQLiteTransactionGate}, which carries the transaction the same way.
+ * Atomicity would then be dialect-dependent, which is the sharpest edge a database layer can
+ * have: SQLite has one connection, so there the same code is correct by design, through
+ * {@link SQLiteTransactionGate}, which carries the transaction the same way.
  *
  * This is the PostgreSQL half of that mechanism. It is deliberately the smaller half: there
  * is no gate and no queue, because a pool has connections to spare and only the routing

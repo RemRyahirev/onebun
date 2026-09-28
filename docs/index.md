@@ -1,6 +1,6 @@
 ---
 layout: home
-description: "A complete, batteries-included TypeScript backend framework for Bun.js. NestJS-style architecture, full ecosystem: WebSocket, Drizzle, queues, cache, metrics, tracing, ArkType validation, typed clients."
+description: "A complete, batteries-included TypeScript backend framework for Bun.js. NestJS-style architecture, full ecosystem: WebSocket, Drizzle, queues, cache, metrics, tracing, ArkType validation, inter-service clients."
 
 hero:
   name: OneBun Framework
@@ -32,7 +32,7 @@ features:
     details: NestJS-inspired module system with decorators, controllers, and services. Familiar patterns, modern implementation.
   - icon: 🔌
     title: WebSocket Gateway
-    details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and type-safe clients.
+    details: Real-time communication with Socket.IO protocol support, room management, pattern matching, and guards.
   - icon: 🧪
     title: Battle-Tested
     details: Comprehensive test suite with high coverage — verified on every commit
@@ -41,7 +41,7 @@ features:
 
 **A complete, batteries-included TypeScript backend framework for Bun.js.**
 
-OneBun brings NestJS-style architecture — modules, dependency injection, decorators — to the Bun.js runtime, with a full ecosystem of built-in packages: WebSocket (+ Socket.IO + typed client), microservices with single-image deployment, database integration (Drizzle ORM), message queues (Redis, NATS, JetStream), caching, Prometheus metrics, OpenTelemetry tracing, ArkType validation with auto-generated OpenAPI documentation, and typed inter-service HTTP clients.
+OneBun brings NestJS-style architecture — modules, dependency injection, decorators — to the Bun.js runtime, with a full ecosystem of built-in packages: WebSocket (+ Socket.IO), microservices with single-image deployment, database integration (Drizzle ORM), message queues (Redis, NATS, JetStream), caching, Prometheus metrics, OpenTelemetry tracing, ArkType validation with auto-generated OpenAPI documentation, and inter-service HTTP clients.
 
 One framework. One runtime. Everything you need for production backend services.
 
@@ -273,9 +273,11 @@ app
 `start()` rejects when a configured backend cannot be reached at boot — for example
 `CacheModule.forRoot({ type: REDIS })` against an unreachable Redis raises
 `CacheBackendUnavailableError` (set `allowDegradedStart: true` / `CACHE_ALLOW_DEGRADED_START=true`
-to start degraded instead). **Exit non-zero from the catch.** Without it the process either
-exits `0` — reporting a failed boot to your supervisor as a success — or stays alive holding
-the failed backend's handles while never binding a port.
+to start degraded instead). **Exit non-zero from the catch.** A rejected `start()` has already
+released everything the boot acquired — see [When `start()` fails](./api/core.md#when-start-fails) —
+so without the exit the process ends with code `0`, reporting a failed boot to your supervisor as a
+success. The catch needs no `stop()`. To retry, build a new `OneBunApplication` per attempt, or
+call `start()` again on the same one.
 
 ## Key Patterns
 
@@ -355,7 +357,7 @@ Only `@onebun/core` is required — it includes `logger`, `envs`, `requests`, `m
 ```json
 {
   "dependencies": {
-    "@onebun/core": "^0.4.0"
+    "@onebun/core": "^0.8.0"
   }
 }
 ```
@@ -364,9 +366,9 @@ Add optional packages as needed:
 
 ```json
 {
-  "@onebun/drizzle": "^0.4.0",
-  "@onebun/cache": "^0.4.0",
-  "@onebun/nats": "^0.4.0",
-  "@onebun/docs": "^0.4.0"
+  "@onebun/drizzle": "^0.8.0",
+  "@onebun/cache": "^0.8.0",
+  "@onebun/nats": "^0.8.0",
+  "@onebun/docs": "^0.8.0"
 }
 ```

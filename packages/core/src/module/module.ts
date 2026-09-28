@@ -30,9 +30,15 @@ import {
 import {
   buildDecoratorMetadataDiagnosticMessage,
   diagnoseDecoratorMetadata,
+  getMetadata,
+  getOwnGlobalMetadata,
   isInjectableParamType,
 } from '../decorators/metadata';
-import { CircularDependencyError, DependencyResolutionError } from '../errors/dependency-errors';
+import {
+  CircularDependencyError,
+  DependencyResolutionError,
+  OneBunBootstrapError,
+} from '../errors/dependency-errors';
 import { attachGuardBinding } from '../http-guards/guard-binding';
 import { BaseInterceptor } from '../interceptors/interceptors';
 import {
@@ -77,11 +83,11 @@ import {
 /**
  * The DI state that a single application owns for the whole of its module tree.
  *
- * Everything here used to live on `globalThis` behind `Symbol.for()`, which meant one
- * process held exactly one copy no matter how many applications ran in it: a second
- * `DrizzleModule.forRoot()` silently reused the first application's connection, and a test
- * suite could talk to — and drop — the wrong database. The scope is threaded BY REFERENCE
- * through module construction instead, so two applications never see each other's services.
+ * The scope is threaded BY REFERENCE through module construction rather than kept on
+ * `globalThis` behind `Symbol.for()`, so a process holds one copy per application and two
+ * applications never see each other's services: a second `DrizzleModule.forRoot()` does not
+ * reuse the first application's connection, and a test suite cannot talk to — and drop — the
+ * wrong database.
  *
  * In multi-service mode each sub-application gets its own scope: one global service instance
  * per sub-application, not one per process.
@@ -100,20 +106,21 @@ export interface GlobalScope {
   /**
    * Modules already constructed in this application, keyed by module class.
    *
-   * A module class is built ONCE per application and `imports` decides VISIBILITY only.
-   * Before this, deduplication existed for `@Global()` modules alone, so the documented
-   * remedy for a non-global module — every submodule importing it via `forFeature()` — gave
-   * each submodule its OWN instance: three CacheService instances for a root plus two
-   * leaves, three initializations, and state written in one invisible in another.
+   * A module class is built ONCE per application and `imports` decides VISIBILITY only — for a
+   * non-global module as much as for a `@Global()` one. So the documented remedy for a
+   * non-global module, every submodule importing it via `forFeature()`, shares one instance: a
+   * root plus two leaves get one CacheService, initialized once, and state written through one
+   * importer is visible to the others.
    */
   sharedModules: Map<Function, OneBunModule>;
   /**
    * This application's metrics service, when it has one.
    *
-   * `BaseService.metrics` and `BaseController.metrics` used to read a single `globalThis` slot
-   * that every application overwrote as it started, so a custom counter created in one service
-   * landed in whichever application booted last. Typed as `unknown` because `@onebun/core` does
-   * not depend on `@onebun/metrics`; the base classes narrow it at the getter.
+   * `BaseService.metrics` and `BaseController.metrics` read it from here rather than from a single
+   * `globalThis` slot that every application would overwrite as it starts, so a custom counter
+   * created in one service lands in that service's own application, not in whichever application
+   * booted last. Typed as `unknown` because `@onebun/core` does not depend on `@onebun/metrics`;
+   * the base classes narrow it at the getter.
    */
   metrics?: unknown;
 }
@@ -201,6 +208,137 @@ export function getGlobalServicesRegistry(): Map<Context.Tag<unknown, unknown>, 
   return new Map(processDefaultScope.services);
 }
 
+/** Why a provider left the resolution queue without an instance. */
+type NeverConstructedReason = 'undecorated' | 'constructor-threw';
+
+/** What a deferred provider waits for. */
+interface ProviderWait {
+  /** The provider of the same module that has to be built first. */
+  readonly provider: Function;
+  /** The declared parameter type: `provider` itself, or an abstract or base class it extends. */
+  readonly parameterType: Function;
+}
+
+/**
+ * Whether instances of `candidate` pass `instanceof type` — the test by which a parameter typed
+ * as an abstract or base class resolves to a built subclass (see `resolveDependencyByType`).
+ */
+function constructsInstanceOf(candidate: Function, type: Function): boolean {
+  const typePrototype: unknown = type.prototype;
+
+  // `instanceof` throws on a right-hand side without an object prototype, e.g. an arrow function.
+  return typeof typePrototype === 'object' && typePrototype !== null && candidate.prototype instanceof type;
+}
+
+/**
+ * The cycle among the providers a stalled resolution loop left pending, if there is one.
+ *
+ * `waits` maps each pending provider to the one in-module class it waits for, so walking it from
+ * any provider either returns to a provider already on the walk — a cycle, returned closed and
+ * WITHOUT the walk's lead-in (`X -> Y -> Z -> Y` yields `[Y, Z, Y]`) — or reaches a class that is
+ * not pending at all.
+ */
+function findStalledCycle(waits: ReadonlyMap<Function, Function>): Function[] | undefined {
+  // Walks from these reached a class outside `waits`, so no cycle is reachable from them.
+  const leadsOut = new Set<Function>();
+
+  for (const start of waits.keys()) {
+    const walk: Function[] = [];
+    const positionOnWalk = new Map<Function, number>();
+    let current: Function | undefined = start;
+
+    while (current !== undefined && waits.has(current) && !leadsOut.has(current)) {
+      const seenAt = positionOnWalk.get(current);
+      if (seenAt !== undefined) {
+        return [...walk.slice(seenAt), current];
+      }
+      positionOnWalk.set(current, walk.length);
+      walk.push(current);
+      current = waits.get(current);
+    }
+
+    for (const provider of walk) {
+      leadsOut.add(provider);
+    }
+  }
+
+  return undefined;
+}
+
+/** A parent whose constructor dependencies a class with no constructor types of its own does not get. */
+interface InheritedConstructorDependencies {
+  /** The nearest ancestor DI would inject. */
+  readonly ancestor: Function;
+  /** Its constructor types, as `getConstructorParamTypes` reports them. */
+  readonly types: readonly (Function | undefined)[];
+  /**
+   * The class declares a constructor WITH parameters of its own (`length > 0`), yet no types were
+   * emitted for them — it carries no decorator. Otherwise it declares no constructor and runs the
+   * one it inherits, or it is undecorated and declares one that takes no parameters: nothing is
+   * recorded for either, so the two cannot be told apart.
+   */
+  readonly declaresParameters: boolean;
+}
+
+/** What DI constructs: a provider, or one of the kinds `resolveConstructorArgs` resolves. */
+type ConstructedKind = 'service' | 'controller' | 'middleware' | 'interceptor' | 'guard' | 'filter';
+
+/**
+ * The decorator the docs prescribe for a class of this kind, which is also what makes TypeScript
+ * emit its constructor types: `@Middleware()` for middleware, the controller's or gateway's own
+ * decorator for those, `@Service()` for everything else.
+ */
+function decoratorFor(target: Function, kind: ConstructedKind): string {
+  switch (kind) {
+    case 'middleware':
+      return '@Middleware()';
+    case 'controller':
+      return isWebSocketGateway(target) ? '@WebSocketGateway()' : '@Controller()';
+    default:
+      return '@Service()';
+  }
+}
+
+/**
+ * The nearest ancestor whose constructor DI would inject, for a class DI finds no constructor
+ * types for — or `undefined`.
+ *
+ * DI reads a class's OWN constructor types, never its parent's, so such a class is built with no
+ * arguments. It boots, and fails at the first call that uses a dependency. Two shapes get here:
+ * - it declares no constructor, so the one it inherits hands its parent `undefined` for each;
+ * - it declares a constructor with parameters but carries no decorator, so TypeScript emitted no
+ *   types for them and each parameter is `undefined` (typically a guard, interceptor, filter or
+ *   middleware that extends a decorated base).
+ * Neither is HANDED the parent's types, even with `reflect-metadata` imported before the core,
+ * whose walking `getMetadata` would offer them: for the second shape that is the positional
+ * defect own-only reading exists to avoid. Both are only reported.
+ *
+ * "No constructor types" means no own `design:paramtypes` array at all (Bun records `[]` for an
+ * explicit `constructor()` on a decorated class) and no explicit `@Inject` types. Callers pass
+ * only a class `getConstructorParamTypes` found nothing for. An UNDECORATED class that declares a
+ * constructor taking no parameters (`constructor() { super(new Dep()); }`) records nothing either,
+ * so it lands in the first shape although it may work: the warning is worded for both.
+ */
+function findInheritedConstructorDependencies(target: Function): InheritedConstructorDependencies | undefined {
+  const declaresOwnTypes = Array.isArray(getOwnGlobalMetadata('design:paramtypes', target))
+    || Array.isArray(getMetadata('design:paramtypes', target))
+    || getConstructorParamTypes(target) !== undefined;
+  if (declaresOwnTypes) {
+    return undefined;
+  }
+
+  let ancestor: unknown = Object.getPrototypeOf(target);
+  while (typeof ancestor === 'function' && ancestor !== Function.prototype) {
+    const types = getConstructorParamTypes(ancestor);
+    if (types !== undefined) {
+      return { ancestor, types, declaresParameters: target.length > 0 };
+    }
+    ancestor = Object.getPrototypeOf(ancestor);
+  }
+
+  return undefined;
+}
+
 /**
  * OneBun Module implementation
  */
@@ -253,6 +391,23 @@ export class OneBunModule implements ModuleInstance {
    */
   private readonly isTreeRoot: boolean;
 
+  /**
+   * The module whose initialization is building this one, if any.
+   *
+   * A module builds its imports inside its own constructor, so this module and its `parent`
+   * chain are exactly the modules still under construction — the ones an import cycle meets
+   * again (see `assertNotUnderConstruction`).
+   */
+  private readonly parent: OneBunModule | undefined;
+
+  /**
+   * The imports by which `parent` reached this module, ending with this module's class:
+   * `[moduleClass]` for a direct import and for the tree root, and the whole route for a
+   * `@Global()` module the tree root builds ahead of its import loop — the root does not
+   * necessarily import it, and an import-cycle report must not print an import nobody wrote.
+   */
+  private readonly importedVia: readonly Function[];
+
   constructor(
     private moduleClass: Function,
     private loggerLayer?: Layer.Layer<never, never, unknown>,
@@ -261,9 +416,12 @@ export class OneBunModule implements ModuleInstance {
     tracingOptions?: { traceAll?: boolean; traceFilter?: TraceFilterOptions },
     scope?: GlobalScope,
     parent?: OneBunModule,
+    importedVia?: readonly Function[],
   ) {
     this.scope = scope ?? processDefaultScope;
     this.isTreeRoot = parent === undefined;
+    this.parent = parent;
+    this.importedVia = importedVia ?? [moduleClass];
     // Initialize logger with module class name as context
     const effectLogger = Effect.runSync(
       Effect.provide(
@@ -323,10 +481,10 @@ export class OneBunModule implements ModuleInstance {
    * Middleware and interceptor instances this module built for the pipeline.
    *
    * They are constructed by `resolveMiddleware` / `resolveInterceptors` and live in neither
-   * `serviceInstances` nor `controllerInstances`, so every lifecycle pass walked straight past
-   * them: a middleware that opened a pool in `onModuleInit` never had the hook run on the object
-   * that serves requests. Registering the class in `providers` did not help — that produced a
-   * SECOND instance which got the hook and never saw a request.
+   * `serviceInstances` nor `controllerInstances`, so without this set every lifecycle pass would
+   * walk straight past them: a middleware that opens a pool in `onModuleInit` would never have the
+   * hook run on the object that serves requests. Registering the class in `providers` is no
+   * substitute — that produces a SECOND instance which gets the hook and never sees a request.
    *
    * A Set keyed by identity, so a class registered at several sites is initialized once.
    */
@@ -340,6 +498,12 @@ export class OneBunModule implements ModuleInstance {
 
   /** Guard classes already reported as carrying a lifecycle hook that cannot run. */
   private readonly guardHookReported = new Set<Function>();
+
+  /**
+   * Classes already reported as having no constructor types of their own under a parent that takes
+   * dependencies. A guard or middleware class is resolved once per route that names it.
+   */
+  private readonly inheritedDependenciesReported = new Set<Function>();
 
   /**
    * Global modules this module constructed in the pre-pass, so the import loop can merge
@@ -463,12 +627,16 @@ export class OneBunModule implements ModuleInstance {
           continue;
         }
 
+        // Neither shared nor processed, so it is either new or still being built above us —
+        // and building it again would never end.
+        this.assertNotUnderConstruction(importModule, [importModule]);
+
         // Pass the logger layer, config, accumulated middleware class refs and — by
         // reference — this application's scope to child modules
         const accumulatedMiddleware = [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses];
         const childModule = new OneBunModule(
           importModule, this.loggerLayer, this.config,
-          accumulatedMiddleware, this.tracingOptions, this.scope, this,
+          accumulatedMiddleware, this.tracingOptions, this.scope, this, [importModule],
         );
         this.childModules.push(childModule);
 
@@ -550,21 +718,28 @@ export class OneBunModule implements ModuleInstance {
 
     const globals: Function[] = [];
     const visited = new Set<Function>();
+    // The imports by which the walk first reached each global, from one of this module's own
+    // imports down to the global. Only an import-cycle report reads it.
+    const routes = new Map<Function, Function[]>();
+    const route: Function[] = [];
 
     const walk = (moduleClass: Function): void => {
       if (visited.has(moduleClass)) {
         return;
       }
       visited.add(moduleClass);
+      route.push(moduleClass);
 
       if (isGlobalModule(moduleClass) && !this.scope.processedModules.has(moduleClass)) {
         globals.push(moduleClass);
+        routes.set(moduleClass, [...route]);
       }
 
       const childMetadata = getModuleMetadata(moduleClass);
       for (const imported of childMetadata?.imports ?? []) {
         walk(imported);
       }
+      route.pop();
     };
 
     for (const imported of metadata.imports ?? []) {
@@ -581,10 +756,15 @@ export class OneBunModule implements ModuleInstance {
         continue;
       }
 
+      // The tree root is the only module under construction here, and it is on the route
+      // back to itself when a global it reaches imports it.
+      const via = routes.get(globalModule) ?? [globalModule];
+      this.assertNotUnderConstruction(globalModule, via);
+
       const childModule = new OneBunModule(
         globalModule, this.loggerLayer, this.config,
         [...this.ancestorMiddlewareClasses, ...this.ownMiddlewareClasses],
-        this.tracingOptions, this.scope, this,
+        this.tracingOptions, this.scope, this, via,
       );
       this.childModules.push(childModule);
       this.preRegisteredModules.set(globalModule, childModule);
@@ -601,6 +781,60 @@ export class OneBunModule implements ModuleInstance {
 
     // Make them visible to THIS module too, since PHASE 0 already ran.
     this.seedGlobalServices();
+  }
+
+  /**
+   * Refuse to build a module that this construction is already building.
+   *
+   * Every import is built before its importer, and a module is published to
+   * `scope.sharedModules` only when its own initialization finishes. So a module met again while
+   * it is still under construction — it imports itself, directly or through its imports — would
+   * be built again from scratch, which would meet it again, without end, until `start()` died with
+   * a `RangeError: Maximum call stack size exceeded` that names no module.
+   *
+   * Only a real cycle gets here: the callers first take a module that finished building, or a
+   * `@Global()` module already processed, from the scope.
+   *
+   * @param importModule - The module about to be built as a child of this one
+   * @param via - The imports from this module to `importModule`, ending with it
+   * @throws OneBunBootstrapError named `OneBunModuleImportCycleError`, whose message lists the
+   *   cycle in import order and, when the cycle does not start at the tree root, the import path
+   *   from the root
+   */
+  private assertNotUnderConstruction(importModule: Function, via: readonly Function[]): void {
+    const building = this.findUnderConstruction(importModule);
+    if (building === undefined) {
+      return;
+    }
+
+    const path = [...this.importRoute(), ...via];
+    // `building` is on this module's route, so its own route is a prefix of `path`.
+    const cycleStart = building.importRoute().length - 1;
+    const cycle = path.slice(cycleStart);
+    const names = (modules: readonly Function[]): string => modules.map((module) => module.name).join(' -> ');
+    const fromRoot = cycleStart > 0 ? ` (import path from the root: ${names(path)})` : '';
+    const remedy = cycle.length === 2
+      ? `Remove ${importModule.name} from its own imports.`
+      : 'Move what the modules on the cycle share into a module that imports none of them, and ' +
+        'import that one instead.';
+
+    const error = new OneBunBootstrapError(
+      `Module import cycle: ${names(cycle)}${fromRoot}. A module cannot import itself, directly or ` +
+      'through the modules it imports: each imported module is built before its importer, so a ' +
+      `cycle leaves no module to build first. ${remedy}`,
+    );
+    error.name = 'OneBunModuleImportCycleError';
+    throw error;
+  }
+
+  /** This module or the ancestor of it that is building `moduleClass`, if either is. */
+  private findUnderConstruction(moduleClass: Function): OneBunModule | undefined {
+    return this.moduleClass === moduleClass ? this : this.parent?.findUnderConstruction(moduleClass);
+  }
+
+  /** The imports from the tree root down to this module, both included. */
+  private importRoute(): Function[] {
+    return [...(this.parent?.importRoute() ?? []), ...this.importedVia];
   }
 
   /**
@@ -709,11 +943,12 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Reject NestJS-style object providers, which were silently discarded.
+   * Reject NestJS-style object providers, which would otherwise be silently discarded.
    *
    * `@Module({ providers: [{ provide: X, useValue: v }] })` typechecks against the metadata
-   * shape but every later filter drops anything that is not a function, so the provider
-   * simply never existed and the failure surfaced as an unrelated unresolved dependency.
+   * shape but every later filter drops anything that is not a function, so without this check
+   * the provider would simply not exist and the failure would surface as an unrelated unresolved
+   * dependency.
    *
    * @see docs:migration-nestjs.md
    */
@@ -803,24 +1038,52 @@ export class OneBunModule implements ModuleInstance {
       }
     }
 
-    // Create services in dependency order
-    const pendingProviders = [...metadata.providers.filter((p) => typeof p === 'function')];
+    // Create services in dependency order: a FIFO queue, where a provider whose in-module
+    // dependency is not built yet goes back to the TAIL. That discipline is what fixes the
+    // construction order — and with it the onModuleInit order — so it must not change.
+    const listedProviders = metadata.providers.filter((p): p is Function => typeof p === 'function');
+    const pendingProviders = [...listedProviders];
     const createdServices = new Set<Function>();
-    // Names, not classes: this one only ever feeds message text and buildDependencyChain.
-    const unresolvedDeps = new Map<string, string[]>(); // Track unresolved dependencies for error reporting
-    let iterations = 0;
-    const maxIterations = pendingProviders.length * 2; // Prevent infinite loops
-
-    while (pendingProviders.length > 0 && iterations < maxIterations) {
-      iterations++;
-      const provider = pendingProviders.shift();
-      if (!provider || typeof provider !== 'function') {
-        continue;
+    // The in-module provider each deferred provider waited for on its LATEST attempt. The created
+    // set only grows, so a dependency once passed never blocks again: when the loop stalls, this
+    // is exactly what every leftover provider is still waiting for.
+    const blockedOn = new Map<Function, ProviderWait>();
+    // Providers that left the queue without an instance, and why. A consumer stalled on one of
+    // them is told that, rather than being reported as part of a cycle that does not exist.
+    const neverConstructed = new Map<Function, NeverConstructedReason>();
+    // The provider of this module that a parameter of type `depType` must wait for, now that
+    // nothing resolves it, or `undefined` when no provider of this module can. That is `depType`
+    // itself when this module can resolve the class. A parameter typed as an abstract or base
+    // class resolves by `instanceof` to whichever subclass is built first, so otherwise it is the
+    // first listed provider extending `depType` that is still to be built — or, failing that, one
+    // that left the queue without an instance, so that a stall can say why. The consumer never
+    // counts: a class is not injected into itself. Without this second branch a consumer listed
+    // before the only implementation of its abstract-typed parameter failed at once.
+    const providerToWaitFor = (depType: Function, consumer: Function): Function | undefined => {
+      if (availableServiceClasses.has(depType)) {
+        return createdServices.has(depType) ? undefined : depType;
       }
+      const unbuilt = listedProviders.filter((candidate) => candidate !== consumer &&
+        !createdServices.has(candidate) && constructsInstanceOf(candidate, depType));
+
+      return unbuilt.find((candidate) => !neverConstructed.has(candidate)) ?? unbuilt[0];
+    };
+    // Deferrals since a provider last left the queue. Resolution reads only state that changes
+    // when a provider leaves it, so once every provider still pending has been retried without
+    // that happening, no further pass can differ: that stall is the loop's only stop. It used
+    // to be a budget of `2 * providers.length` attempts, but a graph listed consumer-first needs
+    // up to N(N+1)/2 — a chain of four in reverse order already ran out and reported a "cycle".
+    let deferralsSinceProgress = 0;
+
+    while (pendingProviders.length > 0 && deferralsSinceProgress < pendingProviders.length) {
+      // The loop condition guarantees an element.
+      const provider = pendingProviders.shift()!;
 
       const serviceMetadata = getServiceMetadata(provider);
       if (!serviceMetadata) {
         this.logger.debug(`Provider ${provider.name} does not have @Service decorator, skipping`);
+        neverConstructed.set(provider, 'undecorated');
+        deferralsSinceProgress = 0;
         continue;
       }
 
@@ -828,6 +1091,7 @@ export class OneBunModule implements ModuleInstance {
       // constructor (and its dependencies') for an instance nothing would ever receive.
       if (this.scope.overrides.has(serviceMetadata.tag as Context.Tag<unknown, unknown>)) {
         createdServices.add(provider);
+        deferralsSinceProgress = 0;
         this.logger.debug(`Provider ${provider.name} replaced by a test override, not constructed`);
         continue;
       }
@@ -844,6 +1108,10 @@ export class OneBunModule implements ModuleInstance {
       let allDependenciesResolved = true;
       const holes: number[] = [];
       let resolvedAfterHole = false;
+      // Logged only once this attempt resolves every parameter. A later parameter can still defer
+      // the provider, and by its next attempt the implementation may be built and injected: a
+      // warning logged now would then be false, and a true one would repeat on every attempt.
+      const optionalLeftUndefined: string[] = [];
 
       if (detectedDeps !== undefined) {
         for (let i = 0; i < detectedDeps.length; i++) {
@@ -861,22 +1129,27 @@ export class OneBunModule implements ModuleInstance {
             continue;
           }
 
-          // Check if it's a service that hasn't been created yet
-          const isServiceInModule = availableServiceClasses.has(depType);
-          if (isServiceInModule && !createdServices.has(depType)) {
-            // Track unresolved dependency for error reporting
-            const deps = unresolvedDeps.get(provider.name) || [];
-            if (!deps.includes(depType.name)) {
-              deps.push(depType.name);
-              unresolvedDeps.set(provider.name, deps);
-            }
-            // This dependency will be created later, defer this service
+          // A provider of this module that may still be built: defer this one to the tail. A
+          // required parameter waits even for one that already left the queue without an
+          // instance, so that the stall can say why it is missing. An @Optional() parameter waits
+          // only for its own class, and only while that is still pending. Typed as an abstract or
+          // base class it does not wait at all: a provider its implementation injects back boots
+          // only because it does not.
+          const waitFor = providerToWaitFor(depType, provider);
+          const isOptional = isOptionalParam(provider, i);
+          const reason = waitFor === undefined ? undefined : neverConstructed.get(waitFor);
+          if (waitFor !== undefined && (!isOptional || (waitFor === depType && reason === undefined))) {
+            blockedOn.set(provider, { provider: waitFor, parameterType: depType });
             allDependenciesResolved = false;
             pendingProviders.push(provider);
+            deferralsSinceProgress++;
             break;
           }
 
-          if (isOptionalParam(provider, i)) {
+          if (isOptional) {
+            if (waitFor !== undefined) {
+              optionalLeftUndefined.push(this.describeOptionalLeftUndefined(provider, i, depType, waitFor, reason));
+            }
             continue;
           }
 
@@ -888,8 +1161,16 @@ export class OneBunModule implements ModuleInstance {
       if (!allDependenciesResolved) {
         continue;
       }
+      // Leaving the queue is progress whether or not the constructor below succeeds.
+      deferralsSinceProgress = 0;
 
+      for (const warning of optionalLeftUndefined) {
+        this.logger.warn(warning);
+      }
       this.reportUnresolvableParams(provider, holes, resolvedAfterHole);
+      if (detectedDeps === undefined) {
+        this.reportInheritedConstructorDependencies(provider, 'service');
+      }
 
       // Create service instance with resolved dependencies.
       // Set ambient init context so BaseService constructor can pick up logger/config,
@@ -962,33 +1243,117 @@ export class OneBunModule implements ModuleInstance {
           throw error;
         }
         this.logger.error(`Failed to create service ${provider.name}: ${error}`);
+        neverConstructed.set(provider, 'constructor-threw');
       }
     }
 
-    // Only report circular dependency if there are still unresolved services
-    const unresolvedServices = pendingProviders
-      .filter((p) => typeof p === 'function')
-      .map((p) => p.name);
+    if (pendingProviders.length > 0) {
+      throw this.stalledProvidersError(pendingProviders, blockedOn, neverConstructed);
+    }
+  }
 
-    if (iterations >= maxIterations && unresolvedServices.length > 0) {
-      const details = unresolvedServices
-        .map((serviceName) => {
-          const deps = unresolvedDeps.get(serviceName) || [];
+  /**
+   * The error for providers still pending when the resolution loop stalled.
+   *
+   * Every one of them was deferred during the final, fruitless pass, so each waits for exactly
+   * one in-module provider. Following those waits either closes a cycle — the one case reported
+   * as `CircularDependencyError`, naming only the cycle — or leaves the pending set at a provider
+   * that left the queue without an instance, which is reported as the dependency that could not
+   * be resolved, with the reason it was never constructed.
+   */
+  private stalledProvidersError(
+    pending: readonly Function[],
+    blockedOn: ReadonlyMap<Function, ProviderWait>,
+    neverConstructed: ReadonlyMap<Function, NeverConstructedReason>,
+  ): CircularDependencyError | DependencyResolutionError {
+    // Deferred during the final pass (see above), so every pending provider has an entry.
+    const waitOf = (provider: Function): ProviderWait => blockedOn.get(provider)!;
+    const waits = new Map(pending.map((provider) => [provider, waitOf(provider).provider]));
+    const cycle = findStalledCycle(waits);
 
-          return `  - ${serviceName} -> needs: [${deps.join(', ')}]`;
+    if (cycle !== undefined) {
+      const chain = cycle.map((provider) => provider.name).join(' -> ');
+      const unresolvedServices = pending.map((provider) => provider.name);
+      const details = pending
+        .map((provider) => {
+          const wait = waitOf(provider);
+          const needs = wait.provider === wait.parameterType
+            ? wait.provider.name
+            : `${wait.parameterType.name} (${wait.provider.name})`;
+
+          return `  - ${provider.name} -> needs: [${needs}]`;
         })
         .join('\n');
-
-      const dependencyChain = this.buildDependencyChain(unresolvedDeps, unresolvedServices);
-
-      const errorMessage =
+      this.logger.error(
         `Circular dependency detected in module ${this.moduleClass.name}!\n` +
-        `Unresolved services:\n${details}\n` +
-        `Dependency chain: ${dependencyChain}`;
+          `Unresolved services:\n${details}\n` +
+          `Dependency chain: ${chain}`,
+      );
 
-      this.logger.error(errorMessage);
-      throw new CircularDependencyError(this.moduleClass.name, dependencyChain, unresolvedServices);
+      return new CircularDependencyError(this.moduleClass.name, chain, unresolvedServices);
     }
+
+    // No cycle, so walking the waits from any provider leaves the pending set: some provider
+    // waits for one that is neither pending nor constructed.
+    const consumer = pending.find((provider) => !waits.has(waitOf(provider).provider))!;
+    const { provider: dependency, parameterType } = waitOf(consumer);
+
+    return new DependencyResolutionError(
+      consumer.name,
+      parameterType.name,
+      'service',
+      [this.describeNeverConstructed(dependency, parameterType, neverConstructed.get(dependency))],
+    );
+  }
+
+  /**
+   * Why a provider listed in this module's `providers` has no instance, for the consumer that
+   * waited for it — as `parameterType`, which is the provider itself or a class it extends.
+   */
+  private describeNeverConstructed(
+    dependency: Function,
+    parameterType: Function,
+    reason: NeverConstructedReason | undefined,
+  ): string {
+    const subject = dependency === parameterType
+      ? dependency.name
+      : `${dependency.name} (it extends ${parameterType.name})`;
+    const listed = `${subject} is listed in the providers of ${this.moduleClass.name}, but was never constructed`;
+
+    switch (reason) {
+      case 'undecorated':
+        return `${listed}: this copy of @onebun/core sees no @Service() on it, so it was skipped. ` +
+          'Decorate it with @Service(). If it already is, the application resolves two copies of ' +
+          '@onebun/core — deduplicate the dependency.';
+      case 'constructor-threw':
+        return `${listed}: creating it threw, and the error was logged as ` +
+          `"Failed to create service ${dependency.name}".`;
+      default:
+        return `${listed}: either it is not @Service()-decorated for this copy of @onebun/core, ` +
+          'or its constructor threw (see the error log).';
+    }
+  }
+
+  /**
+   * The warning for an `@Optional()` parameter left `undefined` although a provider of this
+   * module could have filled it: that provider was never constructed, or it extends the
+   * parameter's abstract type and is not built yet — which an optional parameter does not wait for.
+   */
+  private describeOptionalLeftUndefined(
+    consumer: Function,
+    index: number,
+    parameterType: Function,
+    provider: Function,
+    reason: NeverConstructedReason | undefined,
+  ): string {
+    const head = `${consumer.name} gets undefined for its @Optional() parameter #${index} (${parameterType.name}): `;
+    if (reason !== undefined) {
+      return head + this.describeNeverConstructed(provider, parameterType, reason);
+    }
+
+    return head + `${provider.name}, which extends it, is not built yet, and an @Optional() parameter typed ` +
+      `as an abstract or base class does not wait for one. List ${provider.name}, and what it injects, ` +
+      `before ${consumer.name}.`;
   }
 
   /**
@@ -1147,11 +1512,9 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve exception filter classes into instances with dependency injection, once.
    *
-   * Filters were the one element of the documented pipeline with no DI path at all: the types
-   * accepted instances only, so a class was a compile error, and an instance was merged into the
-   * route metadata untouched — `this.logger`, `this.config` and every injected service were
-   * `undefined` inside `catch()`. That is the one place in an application that sees every
-   * unhandled error, and it was the one place that could not reach a service to report it to.
+   * A filter class gets its constructor dependencies here, and a filter extending `BaseService`
+   * gets `this.logger` and `this.config`, so inside `catch()` — the one place in an application
+   * that sees every unhandled error — a filter can reach the service it reports that error to.
    *
    * Mirrors `resolveInterceptors`: one instance per class per module, an already-constructed
    * instance passed through (and initialized if it extends `BaseService`, as `resolveGuards`
@@ -1204,18 +1567,17 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve guard classes into instances with dependency injection, once.
    *
-   * Guards were the only element of the documented request pipeline with no DI at all:
-   * `executeHttpGuards` did `new guard()` with zero arguments, on EVERY request. A guard
-   * extending `BaseService` therefore saw `this.config` and `this.logger` as `undefined`,
-   * because the ambient init context is only set around module construction — so the
-   * documented `this.config.get('auth.apiKey')` threw at request time.
+   * The dependencies are resolved once, here; the guard itself is still constructed per request,
+   * with those dependencies and inside the ambient init context, which is otherwise set only
+   * around module construction. A guard extending `BaseService` therefore sees `this.config` and
+   * `this.logger`, and the documented `this.config.get('auth.apiKey')` works at request time.
    *
-   * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through,
-   * so `@UseGuards(new RolesGuard(['admin']))` keeps working.
+   * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through as it
+   * is, so `@UseGuards(new RolesGuard(['admin']))` runs that one instance.
    *
    * Transport-agnostic: WebSocket gateways and queue consumers run their guards through this
    * same method, via the binding `createControllersWithDI` attaches to each instance, so
-   * `@UseGuards` behaves identically on all three transports instead of only having DI on HTTP.
+   * `@UseGuards` resolves guards with the same DI on all three transports.
    *
    * @see docs:api/guards.md
    */
@@ -1517,16 +1879,15 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve a constructor's arguments POSITIONALLY: argument `i` is parameter `i`, always.
    *
-   * The five pipeline kinds — controller, middleware, interceptor, filter, guard — shared five
-   * byte-identical copies of this loop, and every one of them built its array with `push`. That
-   * was safe only for as long as `getConstructorParamTypes` never returned a hole. It does now,
-   * and a `push` against a hole is exactly the defect being fixed: the argument list gets shorter
-   * and every later dependency lands one slot to the left (onebun-FB-18). Providers keep their
-   * own loop because they also defer on a not-yet-constructed dependency.
+   * One loop for the five pipeline kinds — controller, middleware, interceptor, filter, guard.
+   * It fills the array by index, never with `push`: `getConstructorParamTypes` returns holes, and
+   * a `push` against a hole would shorten the argument list and land every later dependency one
+   * slot to the left. Providers keep their own loop because they also defer on a
+   * not-yet-constructed dependency.
    *
    * A parameter the container cannot name is `undefined` IN ITS OWN SLOT rather than a thrown
-   * error, so nothing that works today stops working: a JS default parameter applies to
-   * `undefined`, so `opts: Opts = {}` still receives its default.
+   * error: a JS default parameter applies to `undefined`, so `opts: Opts = {}` receives its
+   * default.
    */
   private resolveConstructorArgs(
     target: Function,
@@ -1535,6 +1896,8 @@ export class OneBunModule implements ModuleInstance {
     const paramTypes = getConstructorParamTypes(target);
 
     if (paramTypes === undefined || paramTypes.length === 0) {
+      this.reportInheritedConstructorDependencies(target, kind);
+
       return [];
     }
 
@@ -1583,9 +1946,10 @@ export class OneBunModule implements ModuleInstance {
    * between them would be wrong most of the time.
    *
    * The warning is reserved for a hole FOLLOWED by a parameter that did resolve, because that is
-   * the configuration that used to corrupt silently: the later dependency slid into the hole's
-   * slot, every field stayed truthy, and the failure surfaced somewhere else entirely as
-   * `x.someMethod is not a function`. A trailing hole is far more often a deliberate optional.
+   * the configuration a collapsed, non-positional array corrupts silently: the later dependency
+   * slides into the hole's slot, every field stays truthy, and the failure surfaces somewhere else
+   * entirely as `x.someMethod is not a function`. A trailing hole is far more often a deliberate
+   * optional.
    */
   private reportUnresolvableParams(target: Function, holes: number[], resolvedAfterHole: boolean): void {
     if (holes.length === 0) {
@@ -1609,49 +1973,50 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Build a human-readable dependency chain for circular dependency error reporting
-   * Traverses the dependency graph to find and display the cycle
+   * Say, once per class, that a class with no constructor types of its own is built without the
+   * constructor dependencies its parent takes.
+   *
+   * Nothing else would: the class boots, every such field is `undefined`, and the failure shows up
+   * at the first request that uses one — as a 500 or a 403, far from its cause. Called only for a
+   * class DI found no constructor types for; see {@link findInheritedConstructorDependencies} for
+   * the two shapes that are reported. The advice names the decorator of the class's `kind`.
    */
-  private buildDependencyChain(
-    unresolvedDeps: Map<string, string[]>,
-    unresolvedServices: string[],
-  ): string {
-    // Find cycle by traversing dependencies
-    const visited = new Set<string>();
-    const chain: string[] = [];
+  private reportInheritedConstructorDependencies(target: Function, kind: ConstructedKind): void {
+    if (this.inheritedDependenciesReported.has(target)) {
+      return;
+    }
+    this.inheritedDependenciesReported.add(target);
 
-    const findCycle = (service: string): boolean => {
-      if (visited.has(service)) {
-        chain.push(service);
-
-        return true;
-      }
-      visited.add(service);
-      chain.push(service);
-
-      const deps = unresolvedDeps.get(service) || [];
-      for (const dep of deps) {
-        if (unresolvedServices.includes(dep)) {
-          if (findCycle(dep)) {
-            return true;
-          }
-        }
-      }
-      chain.pop();
-
-      return false;
-    };
-
-    for (const service of unresolvedServices) {
-      visited.clear();
-      chain.length = 0;
-      if (findCycle(service)) {
-        return chain.join(' -> ');
-      }
+    const inherited = findInheritedConstructorDependencies(target);
+    if (inherited === undefined) {
+      return;
     }
 
-    // If no cycle found, just show all unresolved services
-    return unresolvedServices.join(' <-> ');
+    const names = inherited.types.map((type) => type?.name ?? 'unresolvable').join(', ');
+    const decorator = decoratorFor(target, kind);
+    if (inherited.declaresParameters) {
+      this.logger.warn(
+        `${target.name} declares a constructor with parameters, but no types were emitted for them, so `
+        + 'it is built with no constructor arguments and each parameter receives undefined. TypeScript '
+        + 'emits constructor types only for a class that carries a decorator, and DI never borrows a '
+        + `parent's: those of ${inherited.ancestor.name} (${names}) are not used. Add ${decorator} to `
+        + `${target.name} to have its constructor injected.`,
+      );
+
+      return;
+    }
+
+    // Worded for both shapes that reach here: no constructor at all, and — indistinguishable from
+    // it — an undecorated class whose own constructor takes no parameters and may supply the
+    // parent's dependencies itself.
+    this.logger.warn(
+      `${target.name} declares no constructor of its own (or, without a decorator, one whose parameter `
+      + 'types were not recorded), so it is built with no constructor arguments: DI reads a class\'s OWN '
+      + `constructor types, never its parent's. If it inherits the constructor of ${inherited.ancestor.name}, `
+      + `which takes (${names}), each of them receives undefined. To have them injected, declare the `
+      + `constructor in ${target.name} with those parameters, pass them to super(...), and give `
+      + `${target.name} a decorator (${decorator}) if it has none.`,
+    );
   }
 
   /**
@@ -2236,7 +2601,7 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Get service instance by class, optionally from a NAMED registration.
    *
-   * Without a token this answers from the tag-keyed slot, exactly as before. With one it
+   * Without a token this answers from the tag-keyed slot. With one it
    * walks the tree for the module that selected that registration — the tag slot holds one
    * instance per module and cannot answer for a second registration, so an application with
    * two of them has no other way to reach the one it means.

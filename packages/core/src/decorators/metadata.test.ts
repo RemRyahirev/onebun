@@ -7,8 +7,6 @@ import {
   describe,
   test,
   expect,
-  beforeEach,
-  afterEach,
   mock,
 } from 'bun:test';
 
@@ -19,6 +17,7 @@ import {
   getConstructorParamTypes,
   setConstructorParamTypes,
 } from './metadata';
+import { runScenario } from './reflect-interop-fixtures/scenario-protocol';
 
 describe('Metadata System', () => {
   describe('defineMetadata and getMetadata', () => {
@@ -533,54 +532,44 @@ describe('Metadata System', () => {
   });
 
   describe('Reflect polyfill and global initialization', () => {
-    let originalReflect: any;
-    let originalDecorate: any;
-    
-    beforeEach(() => {
-      originalReflect = (globalThis as any).Reflect;
-      originalDecorate = (globalThis as any).__decorate;
-    });
+    // These used to delete `globalThis.Reflect` and re-require this module in the test process.
+    // What they checked — how core treats the global it finds at import time — only means
+    // something in a process where core has not been imported yet, so each runs in a fresh one.
+    // Import-order scenarios with reflect-metadata live in reflect-interop.test.ts.
+    const scenarioTimeoutMs = 30_000;
 
-    afterEach(() => {
-      (globalThis as any).Reflect = originalReflect;
-      (globalThis as any).__decorate = originalDecorate;
-    });
+    test('should install the complete Reflect Metadata API when no implementation is there', async () => {
+      const { exitCode, result } = await runScenario('core');
 
-    test('should initialize Reflect polyfill when Reflect is not available', () => {
-      // Remove Reflect temporarily
-      delete (globalThis as any).Reflect;
-      
-      // Re-import the module to trigger initialization
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      expect((globalThis as any).Reflect).toBeDefined();
-      expect(typeof (globalThis as any).Reflect.getMetadata).toBe('function');
-      expect(typeof (globalThis as any).Reflect.defineMetadata).toBe('function');
-      
-      // Test the polyfill functionality
-      class TestClass {}
-      (globalThis as any).Reflect.defineMetadata('test-key', 'test-value', TestClass);
-      const result = (globalThis as any).Reflect.getMetadata('test-key', TestClass);
-      expect(result).toBe('test-value');
-    });
+      expect(exitCode).toBe(0);
+      expect(result.api).toEqual([
+        'metadata',
+        'defineMetadata',
+        'hasMetadata',
+        'hasOwnMetadata',
+        'getMetadata',
+        'getOwnMetadata',
+        'getMetadataKeys',
+        'getOwnMetadataKeys',
+        'deleteMetadata',
+      ]);
+      expect(result.registry).toBe(true);
+      // The polyfill's own functionality: a defineMetadata / getOwnMetadata round-trip.
+      expect(result.roundTrip).toEqual(['greeting']);
+    }, scenarioTimeoutMs);
 
-    test('should extend existing Reflect when available', () => {
-      // Set up partial Reflect
-      (globalThis as any).Reflect = {
-        existingMethod: () => 'exists',
-      };
-      
-      // Re-import the module to trigger initialization
-      delete require.cache[require.resolve('./metadata')];
-      const metadataModule = require('./metadata');
-      
-      expect((globalThis as any).Reflect.existingMethod).toBeDefined();
-      expect((globalThis as any).Reflect.getMetadata).toBeDefined();
-      expect((globalThis as any).Reflect.defineMetadata).toBeDefined();
-      expect((globalThis as any).Reflect.existingMethod()).toBe('exists');
-    });
+    test('should extend the existing Reflect, keeping its members and an implementation already there', async () => {
+      const [withMarker, withImplementation] = await Promise.all([
+        runScenario('marker,core'),
+        runScenario('rm01,snapshot,core'),
+      ]);
 
+      // An unrelated member of the global survives: core extends the object, never replaces it.
+      expect(withMarker.result.marker).toBe('kept');
+      // A complete implementation loaded first keeps every one of its functions.
+      expect(withImplementation.result.unchangedSinceSnapshot).toBe(true);
+      expect(withImplementation.result.registry).toBe(false);
+    }, scenarioTimeoutMs);
   });
 
   describe('getConstructorParamTypes edge cases', () => {

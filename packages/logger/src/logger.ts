@@ -349,13 +349,14 @@ export const createSyncLogger = (
 const activeTransports = new Set<LogTransport>();
 
 /**
- * Shutdown every logger transport built by this module (flush OTLP batches, etc.)
- * Should be called as the very last step in application shutdown.
+ * The tracked transport each layer was built with, so that one layer's can be shut down alone.
  */
-export const shutdownLogger = async (): Promise<void> => {
-  const transports = [...activeTransports];
-  activeTransports.clear();
+const layerTransports = new WeakMap<Layer.Layer<Logger>, LogTransport>();
 
+/**
+ * Shut down a set of transports: flush what they buffer and stop their flush timers.
+ */
+const shutDownTransports = async (transports: LogTransport[]): Promise<void> => {
   // One failing flush must not strand the others: a collector that is down is exactly when the
   // remaining transports most need their chance to drain.
   await Promise.all(transports.map(async (transport) => {
@@ -365,6 +366,42 @@ export const shutdownLogger = async (): Promise<void> => {
       // Shutdown is best-effort — there is nowhere left to report a logging failure to.
     }
   }));
+};
+
+/**
+ * Shut down every logger transport built by this module in the process: flush what they buffer
+ * and stop their flush timers. The last step of an application's `stop()`.
+ *
+ * Takes no argument, and ignores any it is handed, so it can be passed point-free — as a
+ * `beforeExit` listener, to `.then()`, or to `Effect.promise()`. {@link shutdownLoggerLayer} is
+ * the form that closes one logger.
+ *
+ * @see docs:api/logger.md
+ */
+export const shutdownLogger = async (): Promise<void> => {
+  const transports = [...activeTransports];
+  activeTransports.clear();
+
+  await shutDownTransports(transports);
+};
+
+/**
+ * Shut down only the transport one layer from `makeLoggerFromOptions()` was built with; every
+ * other logger keeps exporting.
+ *
+ * The call for an owner closing what it built and nothing else: an application undoing a failed
+ * `start()` closes its own logger, while a `loggerLayer` it was handed and a sibling service's
+ * logger stay open. A layer with nothing to shut down — console only, not built by
+ * `makeLoggerFromOptions()`, or already shut down — is a no-op, and a later
+ * {@link shutdownLogger} does not reach it again.
+ *
+ * @param layer - A layer returned by `makeLoggerFromOptions()`
+ * @see docs:api/logger.md
+ */
+export const shutdownLoggerLayer = async (layer: Layer.Layer<Logger>): Promise<void> => {
+  const transport = layerTransports.get(layer);
+
+  await shutDownTransports(transport !== undefined && activeTransports.delete(transport) ? [transport] : []);
 };
 
 /**
@@ -459,7 +496,7 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
     transport = new ConsoleTransport();
   }
 
-  return Layer.succeed(
+  const layer = Layer.succeed(
     LoggerService,
     new LoggerImpl({
       minLevel,
@@ -468,6 +505,11 @@ export const makeLoggerFromOptions = (options?: LoggerOptions): Layer.Layer<Logg
       defaultContext: options?.defaultContext ?? {},
     }),
   );
+  if (activeTransports.has(transport)) {
+    layerTransports.set(layer, transport);
+  }
+
+  return layer;
 };
 
 /**

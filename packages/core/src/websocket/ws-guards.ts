@@ -290,7 +290,7 @@ export class WsAnyGuard implements WsGuard {
 /**
  * Execute a list of guards.
  *
- * A guard that THROWS denies. `@UseGuards` reaches WebSocket handlers now, so a guard written
+ * A guard that THROWS denies. `@UseGuards` reaches WebSocket handlers, so a guard written
  * against an HTTP request can land here and blow up on `getRequest()`; failing open would make
  * that a silent authorization bypass. HTTP deliberately does the opposite — a throw there
  * travels to the exception filters so `throw new HttpException(401, ...)` keeps its status —

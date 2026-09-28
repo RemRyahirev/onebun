@@ -10,6 +10,7 @@ export {
   parseLogLevel,
   resolveOtlpLogEndpoint,
   shutdownLogger,
+  shutdownLoggerLayer,
   type SyncLogger,
 } from './logger';
 

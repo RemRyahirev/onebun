@@ -53,7 +53,9 @@ export interface ControllerDefinition {
 
 /**
  * Service definition containing all endpoints and controllers.
- * Used for generating typed HTTP clients.
+ * `createServiceClient` routes its calls with it. It carries route metadata, not types.
+ *
+ * @see docs:api/requests.md
  */
 export interface ServiceDefinition<TModule = unknown> {
   /**

@@ -454,6 +454,74 @@ describe('TestingModule', () => {
       }
     });
   });
+
+  describe('provider order (FB-24)', () => {
+    @Service()
+    class OrderA extends BaseService {}
+
+    @Service()
+    class OrderB extends BaseService {
+      constructor(readonly a: OrderA) {
+        super();
+      }
+    }
+
+    @Service()
+    class OrderC extends BaseService {
+      constructor(readonly b: OrderB) {
+        super();
+      }
+    }
+
+    @Service()
+    class OrderD extends BaseService {
+      constructor(readonly c: OrderC) {
+        super();
+      }
+    }
+
+    @Service()
+    class OrderE extends BaseService {
+      constructor(readonly d: OrderD) {
+        super();
+      }
+    }
+
+    @Service()
+    class OrderF extends BaseService {
+      constructor(readonly e: OrderE) {
+        super();
+      }
+    }
+
+    const reversed = [OrderF, OrderE, OrderD, OrderC, OrderB, OrderA];
+
+    it('compiles providers listed consumer-first, [F, E, D, C, B, A] (0.8.1: CircularDependencyError)', async () => {
+      const module = await TestingModule.create({ providers: reversed }).compile();
+
+      try {
+        expect(module.get(OrderF).e.d.c.b.a).toBe(module.get(OrderA));
+      } finally {
+        await module.close();
+      }
+    });
+
+    it('overriding the ROOT of a reversed chain compiles, and the next provider holds the mock', async () => {
+      // An override leaves the queue the way a built provider does. 0.8.1 failed this boot as well,
+      // but only because the reversed chain alone exceeded the budget: the override cost no extra attempt.
+      const mock = { mocked: true };
+      const module = await TestingModule
+        .create({ providers: reversed })
+        .overrideProvider(OrderA).useValue(mock)
+        .compile();
+
+      try {
+        expect(module.get(OrderB).a).toBe(mock as unknown as OrderA);
+      } finally {
+        await module.close();
+      }
+    });
+  });
 });
 
 // ============================================================================
