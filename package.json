@@ -27,6 +27,7 @@
     "lint": "eslint --fix --max-warnings=0",
     "typecheck": "bunx tsc --noEmit && bun run typecheck:examples",
     "typecheck:examples": "bunx tsc --noEmit -p examples/crud-api && bunx tsc --noEmit -p examples/multi-service && bunx tsc --noEmit -p examples/websocket-chat",
+    "typecheck:consumer": "bun scripts/consumer-typecheck.ts",
     "publish:check": "bun scripts/publish.ts --dry-run",
     "publish:packages": "bun scripts/publish.ts",
     "version:bump": "bun scripts/version-bump.ts",

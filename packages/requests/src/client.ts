@@ -222,11 +222,21 @@ const isSuccessStatus = (status: number, policy: RedirectPolicy): boolean =>
  *
  * `set-cookie` is joined as well. `Headers.forEach` hands every `set-cookie` over on its own, so
  * assigning them one after another, as {@link collectErrorHeaders} does, keeps only the last
- * cookie. `Object.fromEntries` also keeps a header named `__proto__` as an own property, where an
+ * cookie; here it only collects the names, once each, and `get()` joins the values.
+ * `Object.fromEntries` also keeps a header named `__proto__` as an own property, where an
  * assignment goes to the prototype setter and is lost.
+ *
+ * `forEach` rather than `keys()`: this package ships its sources, and under TypeScript 5.x an
+ * application with lib DOM but not DOM.Iterable has a `Headers` without `keys()`.
  */
-const collectResponseHeaders = (headers: Headers): Record<string, string> =>
-  Object.fromEntries([...new Set(headers.keys())].map((name) => [name, headers.get(name) ?? '']));
+const collectResponseHeaders = (headers: Headers): Record<string, string> => {
+  const names = new Set<string>();
+  headers.forEach((_value, name) => {
+    names.add(name);
+  });
+
+  return Object.fromEntries([...names].map((name) => [name, headers.get(name) ?? '']));
+};
 
 /**
  * An error answer's headers, for `details.headers`: collected by assignment, so a `set-cookie`

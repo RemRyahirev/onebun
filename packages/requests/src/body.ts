@@ -21,11 +21,35 @@ import {
   pipe,
 } from 'effect';
 
+/** A format Bun's `DecompressionStream` decodes. */
+type DecoderFormat = 'gzip' | 'deflate' | 'deflate-raw' | 'brotli' | 'zstd';
+
+/**
+ * What the client uses of a `DecompressionStream`: compressed bytes go in, decoded bytes come out.
+ *
+ * Named here rather than taken from the global: this package ships its sources, so an application
+ * compiles them against its own typings, and the global's shape depends on which ones it loads.
+ * Under lib DOM the constructor takes no `'brotli'` or `'zstd'`, and under lib DOM or
+ * `@types/node` 26 the writable side takes `BufferSource`, which `pipeThrough` on a stream of
+ * `Uint8Array` does not accept.
+ */
+interface Decompressor {
+  readonly readable: ReadableStream<Uint8Array>;
+  readonly writable: WritableStream<Uint8Array>;
+}
+
+/** `DecompressionStream`'s constructor, with the formats and the shape the Bun runtime has. */
+type DecompressorConstructor = new (format: DecoderFormat) => Decompressor;
+
+/** A `DecompressionStream` for `format`; throws for a format this runtime does not decode. */
+const createDecompressor = (format: DecoderFormat): Decompressor =>
+  new (DecompressionStream as unknown as DecompressorConstructor)(format);
+
 /**
  * The content codings the client decodes, lower-cased, and the `DecompressionStream` format for
  * each. `br` is `'brotli'` there: `new DecompressionStream('br')` throws.
  */
-const DECODER_FORMATS: ReadonlyMap<string, Bun.CompressionFormat> = new Map<string, Bun.CompressionFormat>([
+const DECODER_FORMATS: ReadonlyMap<string, DecoderFormat> = new Map<string, DecoderFormat>([
   ['gzip', 'gzip'],
   ['x-gzip', 'gzip'],
   ['deflate', 'deflate'],
@@ -37,9 +61,9 @@ const DECODER_FORMATS: ReadonlyMap<string, Bun.CompressionFormat> = new Map<stri
 const OFFERED_CODINGS: readonly string[] = ['gzip', 'deflate', 'br', 'zstd'];
 
 /** Whether this runtime's `DecompressionStream` knows `format`. */
-const canDecode = (format: Bun.CompressionFormat): boolean => {
+const canDecode = (format: DecoderFormat): boolean => {
   try {
-    new DecompressionStream(format);
+    createDecompressor(format);
 
     return true;
   } catch {
@@ -87,8 +111,8 @@ export const contentCodings = (headers: Headers): string[] =>
  * The decoder format for each of `codings`, in the order they are undone — the reverse of the
  * order they were applied — or the first coding the client has no decoder for.
  */
-const decodingPlan = (codings: string[]): { formats: Bun.CompressionFormat[] } | { unsupported: string } => {
-  const formats: Bun.CompressionFormat[] = [];
+const decodingPlan = (codings: string[]): { formats: DecoderFormat[] } | { unsupported: string } => {
+  const formats: DecoderFormat[] = [];
 
   for (const coding of [...codings].reverse()) {
     const format = DECODER_FORMATS.get(coding);
@@ -351,7 +375,7 @@ const trackedSource = (first: Uint8Array, source: ChunkReader, state: SourceStat
  */
 const decodingReader = (
   source: ChunkReader,
-  formats: Bun.CompressionFormat[],
+  formats: DecoderFormat[],
   encoding: string,
 ): BodyReader => {
   const state: SourceState = { failed: false, error: undefined };
@@ -365,7 +389,7 @@ const decodingReader = (
     let decoded: ChunkReader;
     try {
       decoded = formats.reduce<ReadableStream<Uint8Array>>(
-        (stream, format, index) => stream.pipeThrough(new DecompressionStream(
+        (stream, format, index) => stream.pipeThrough(createDecompressor(
           index === 0 && format === 'deflate' && !opensWithZlibHeader(first) ? 'deflate-raw' : format,
         )),
         trackedSource(first, source, state),
