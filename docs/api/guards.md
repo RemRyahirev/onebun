@@ -16,16 +16,16 @@ import { Guard, HttpGuard, HttpExecutionContext, createHttpGuard, UseGuards } fr
 2. Implement `Guard` (any transport) or `HttpGuard` / `WsGuard` / `MessageGuard` (one transport), class-based, for DI
 3. Use built-in `AuthGuard`, `RolesGuard` (HTTP), `WsAuthGuard` & friends (WebSocket), `MessageAuthGuard` & friends (queue)
 
-**ONE decorator, three transports.** `@UseGuards` works on HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe` consumers, class-level and method-level, exactly like `@UseInterceptors`. Before 0.4.5 it wrote a metadata key only HTTP route registration read, so on a WebSocket or queue handler it was a SILENT no-op — no type error, no warning, no log line, and the handler ran completely unguarded. **Audit every queue consumer and WebSocket handler you guarded with `@UseGuards` before upgrading.**
+**ONE decorator, three transports.** `@UseGuards` works on HTTP routes, WebSocket `@OnMessage` handlers and queue `@Subscribe` consumers, class-level and method-level. One decorator covers all three transports — each level (class, method) has one metadata key that every transport reads — so a guarded WebSocket or queue handler is enforced exactly as a guarded route is. Here guards and interceptors differ: method-level `@UseGuards` on a `@Subscribe` handler guards it (queue registration collects method guards up the prototype chain with `getMethodGuards`), while a method-level `@UseInterceptors` on a `@Subscribe` handler is dropped — queue interceptors go on the class
 
 **Applying guards:**
 - `@UseGuards(MyGuard)` on a controller/gateway/consumer class — applies to every route, message handler and subscription on it, but NOT to `@Cron`/`@Interval`/`@Timeout` methods: those are producers and are never guarded (nor intercepted), silently
 - `@UseGuards(MyGuard)` on a method — applies to that handler only
 - Both can be combined; class guards run first, then method guards
-- `@UseWsGuards` (WebSocket) and `@UseMessageGuards` (queue) still exist and still work. They are the narrower spelling for a guard that only makes sense on one transport; guards from both decorators are merged, shared `@UseGuards` first, and deduplicated by identity — a guard written under both decorators runs once
-- **Deduplication is by identity, at every level and on every transport.** Method-level guards are deduplicated as they are collected up the prototype chain (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited and re-declared on an override runs once; the merge of the class-level list with the method-level list is deduplicated too, so the same guard named at BOTH levels runs once per request or message. Through 0.6.0 that second merge was a plain concatenation on HTTP and queue — doubled work for a guard that hits a database, and doubled denial lines in the log — while WebSocket already dropped duplicates
-- Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@OnMessage`/`@Subscribe` behaves identically. Before 0.4.5 a route-level `@UseGuards` written ABOVE the method decorator was silently discarded and the route was reachable — audit any route guarded that way if you are upgrading from 0.4.4 or earlier. The same applied to `@UseInterceptors` and `@UseFilters`
-- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request, as it always did: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
+- `@UseWsGuards` (WebSocket) and `@UseMessageGuards` (queue) are the narrower spelling for a guard that only makes sense on one transport; guards from both decorators are merged, shared `@UseGuards` first, and deduplicated by identity — a guard written under both decorators runs once
+- **Deduplication is by identity, at every level and on every transport.** Method-level guards are deduplicated as they are collected up the prototype chain (`getMethodGuards` ends in `[...new Set(...)]`), so a guard inherited and re-declared on an override runs once; the merge of the class-level list with the method-level list is deduplicated too, so the same guard named at BOTH levels runs once per request or message — a guard that hits a database does that work once, and a denial is logged once
+- Decorator source order does NOT matter: `@UseGuards` above or below `@Get`/`@OnMessage`/`@Subscribe` behaves identically. The same holds for `@UseInterceptors` and `@UseFilters`
+- Class-based guards get full dependency injection on ALL THREE transports — constructor dependencies, `this.config` and `this.logger` all work inside `canActivate`. `this.config` is the APPLICATION's config object, so it is only a usable one when the app was created with `envSchema`: without a schema the framework installs a `NotInitializedConfig` stub whose every `get()` throws `Configuration not initialized`, and on HTTP that throw reaches the exception filters as a 500 rather than a 403. Dependencies are resolved once when handlers are registered; when the guard CLASS is passed, the instance is created per invocation, so stashing per-request state on `this` is safe there. Passing an INSTANCE — `@UseGuards(new RolesGuard(['admin']))` — shares that one object across every concurrent request: per-request state on `this` leaks between them and can let a denied request through. Use locals inside `canActivate` in that form. Function-based guards from `createHttpGuard(fn)` have no DI by design
 - **The guard class must carry a decorator for constructor DI to work at all** — `@Service()` is the conventional one. TypeScript only emits the `design:paramtypes` metadata the DI reads for a class that has at least one decorator; an undecorated guard class with constructor parameters receives `undefined` for each and throws inside `canActivate`. This applies on HTTP too, and to an undecorated subclass of a decorated guard: it never receives the base's types (startup warns `<Guard> declares a constructor with parameters, but no types were emitted ...`)
 - A DECORATED guard whose constructor dependency cannot be resolved fails the application at STARTUP with `DependencyResolutionError`, instead of being constructed with `undefined`. Register the DEPENDENCY in the module's `providers` — registering the guard itself does not help
 - A class-level `@UseGuards` is INHERITED by a subclass controller, base first then the subclass's own. `@UseMiddleware`, `@UseInterceptors` and `@UseFilters` inherit the same way; routes do not
@@ -86,7 +86,7 @@ interface HttpExecutionContext {
 }
 ```
 
-`HttpGuard`, `WsGuard` and `MessageGuard` all satisfy `Guard`, so existing single-transport guards keep compiling and keep working.
+`HttpGuard`, `WsGuard` and `MessageGuard` all satisfy `Guard`, so a single-transport guard can be passed anywhere a `Guard` is expected.
 
 ## Creating Guards
 
@@ -129,7 +129,7 @@ Constructor dependencies are injected the same way a service's are, and `this.co
 `@UseGuards(new RolesGuard(['admin']))` hands the framework an already-built object, and that ONE
 instance serves every concurrent request — it is constructed once, at decoration time, not per
 invocation. A guard written that way that stores the caller on `this`, awaits, and then reads
-`this` back will read whatever the LAST request wrote: two overlapping requests measurably let the
+`this` back will read whatever the LAST request wrote: two overlapping requests can let the
 denied one through. Keep per-request state in locals inside `canActivate` there, never on `this`.
 Stateless instances — `new RolesGuard(['admin'])` reads only its constructor argument — are
 unaffected; every instance-form example on this page is stateless for that reason.
@@ -146,10 +146,6 @@ class ApiKeyGuard {                          // ← no decorator
   canActivate(ctx: HttpExecutionContext) { return this.keys.check(ctx); }
 }
 ```
-:::
-
-::: warning Upgrading from 0.4.4 or earlier
-Guards received no dependency injection at all: they were constructed with no arguments on every request, so `this.config` and `this.logger` were `undefined` and the `ApiKeyGuard` above threw a `TypeError` at request time. On WebSocket and queue handlers that remained true until 0.4.5. `this.config` now arrives, but it is only a working config when the app declared an `envSchema` — see above.
 :::
 
 ### Async guard
@@ -203,10 +199,6 @@ class ResourceController extends BaseController {
 
 Decorator source order does not matter — `@UseGuards` above or below the route decorator behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`.
 
-::: warning Upgrading from 0.4.4 or earlier
-A route-level `@UseGuards` written **above** the method decorator used to be silently discarded: the guard never ran and the route answered as if it were unprotected. Audit every route-level guard in your codebase — the order shown above is exactly the one that was broken. `@UseInterceptors` and `@UseFilters` were skipped the same way.
-:::
-
 ### On a base controller
 
 A class-level guard is inherited by every controller that extends the class, so a shared protected base can carry it once. The base does not need to be a `@Controller`.
@@ -223,10 +215,6 @@ class AdminController extends ProtectedController {
 ```
 
 Base guards run before the subclass's own, matching the controller-then-route order. Routes declared on the base are not mounted under the subclass — see [Controllers — Extending a Base Controller](/api/controllers#extending-a-base-controller).
-
-::: warning Upgrading from 0.4.4 or earlier
-Class-level decorators were not inherited at all: a subclass of a guarded base answered as if unprotected, with no error and nothing in the logs. Audit any shared protected base controller.
-:::
 
 ### Combining controller + route guards
 
@@ -250,7 +238,7 @@ The two lists are merged controller-first and deduplicated by identity: naming t
 
 ## One Decorator, Three Transports
 
-`@UseGuards` is the same decorator on an HTTP route, a WebSocket `@OnMessage` handler and a queue `@Subscribe` consumer — the shape `@UseInterceptors` has always had.
+`@UseGuards` is the same decorator on an HTTP route, a WebSocket `@OnMessage` handler and a queue `@Subscribe` consumer, at class level and at method level on all three. `@UseInterceptors` differs on the queue: its method form does nothing on a `@Subscribe` handler (see [Queue handler](/api/interceptors#queue-handler)), while a method-level `@UseGuards` guards one.
 
 ```typescript
 @Controller('/orders')
@@ -275,10 +263,6 @@ wraps it. Both are accepted without a type error and silently do nothing there, 
 class-level `@UseGuards` on a class that also carries routes and subscriptions. Guard the work
 inside the method, or put the authorization on the `@Subscribe` consumer of the pattern the job
 publishes to — that consumer is guarded normally.
-
-::: danger Upgrading from 0.4.4 or earlier
-`@UseGuards` on a `@Subscribe` or `@OnMessage` handler was a **silent no-op**: no type error, no warning, nothing in the logs, and the handler ran completely unguarded. Audit every queue consumer and WebSocket handler you believed was guarded. `@UseMessageGuards` and `@UseWsGuards` were unaffected.
-:::
 
 ### What a guard sees on each transport
 
@@ -334,7 +318,7 @@ The framework also logs every denial itself, at `warn`, naming the guard, the ha
 
 ### Transport-specific decorators
 
-`@UseWsGuards` and `@UseMessageGuards` are still exported and still work. Reach for them when a guard only makes sense on one transport, so the type system checks the context for you:
+`@UseWsGuards` and `@UseMessageGuards` are the transport-specific spellings of `@UseGuards`. Reach for them when a guard only makes sense on one transport, so the type system checks the context for you:
 
 <!-- typecheck: skip -->
 ```typescript
@@ -347,7 +331,7 @@ handleAdmin(@Client() client: WsClientData) { /* ... */ }
 async handleInternal(message: Message<EventData>) { /* ... */ }
 ```
 
-Guards from both decorators are merged on the same handler, shared `@UseGuards` first, and deduplicated by identity — the same guard written under both decorators, or at both class and method level, runs once. That holds on all three transports; through 0.6.0 it was a WebSocket-only property and HTTP and queue concatenated their two levels as given. Both decorators give class guards the same dependency injection `@UseGuards` does.
+Guards from both decorators are merged on the same handler, shared `@UseGuards` first, and deduplicated by identity — the same guard written under both decorators, or at both class and method level, runs once. That holds on all three transports. Both decorators give class guards the same dependency injection `@UseGuards` does.
 
 The composite helpers `MessageAllGuards` / `MessageAnyGuard` / `WsAllGuards` / `WsAnyGuard` are the exception: they take their children in their own constructor, at decoration time, before any module exists, so a child class with a constructor dependency gets nothing. Pass already-constructed children, or list the guards directly — `@UseGuards(A, B)` resolves each one with full DI and runs them in order.
 

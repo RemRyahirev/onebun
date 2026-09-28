@@ -197,9 +197,9 @@ export interface MetricsService {
    * Metric names registered against prom-client's process-global registry that this
    * application's registry does not have, and which therefore never reach its /metrics.
    *
-   * A metric built as `new Counter({ ..., registers: [register] })` used to be scraped because
-   * the application scraped that same registry. It no longer does, and this is what lets the
-   * framework say so instead of serving a silently shorter body.
+   * A metric built as `new Counter({ ..., registers: [register] })` lands in the process-global
+   * registry, which the application does not scrape; this is what lets the framework say so
+   * instead of serving a silently shorter body.
    */
   getOrphanedMetricNames(): string[];
 

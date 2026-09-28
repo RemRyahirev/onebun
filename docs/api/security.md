@@ -30,12 +30,12 @@ middleware: [CorsMiddleware.configure({ origin: 'https://example.com' })]
 **Auto-ordering:** CORS → RateLimit → [user middleware] → SecurityHeaders
 
 **What the chain covers:** every response the application produces — controller routes, static
-files, and unmatched paths answered with a 404. A request that matches nothing consumes rate-limit
-budget, so `max` bounds request volume rather than volume on paths that happen to exist. Through
-0.6.0 the chain was merged into per-route handlers only, so a served SPA carried no CSP and an
-attacker hammering nonexistent paths was unmetered. Two things stay outside it on purpose: the CORS
-preflight short-circuit, which answers with CORS headers alone and must not be seen by rate limiting
-or auth, and a WebSocket upgrade, which hands the socket to Bun rather than producing a response.
+files, and unmatched paths answered with a 404 — so a served SPA carries the CSP. A request that
+matches nothing consumes rate-limit budget, so `max` bounds request volume rather than volume on
+paths that happen to exist, and an attacker hammering nonexistent paths is metered. Two things stay
+outside it on purpose: the CORS preflight short-circuit, which answers with CORS headers alone and
+must not be seen by rate limiting or auth, and a WebSocket upgrade, which hands the socket to Bun
+rather than producing a response.
 
 **CORS preflight:** answered BEFORE routing, so no `@Options()` route is needed on any path a
 browser preflights. The short-circuit lives at the top of the `Bun.serve` `fetch` fallback, ahead of
@@ -102,21 +102,21 @@ and so does a path that does not exist.
 
 Five things follow, and they are worth stating exactly:
 
-1. **No `@Options()` route is required.** Previously one was: without it the `OPTIONS` never
-   entered the middleware chain and came back a bare `404` with no CORS headers, so the browser
-   blocked the `POST` it was preflighting.
+1. **No `@Options()` route is required.** The preflight is answered with its CORS headers whether
+   or not the path declares one, so the browser gets the grant it needs before it sends the `POST`
+   it was preflighting.
 2. **A declared `@Options()` route is never shadowed by the short-circuit.** Bun's router runs
    first, so a matched path never reaches the fallback where the short-circuit lives.
 3. **A non-preflight `OPTIONS` reaches your application.** The split is the
    `Access-Control-Request-Method` header, which the Fetch spec requires on every real preflight.
-   A `curl -X OPTIONS` is API discovery, not CORS, and it now reaches your `@Options()` handler —
+   A `curl -X OPTIONS` is API discovery, not CORS, and it reaches your `@Options()` handler —
    or an honest `404` where you declared none.
 4. **A real preflight is answered by CORS even where an `@Options()` route exists.** A preflight
    response that does not carry the grant is a blocked request whatever its status, so the CORS
    layer answers it. Use `preflightContinue: true` to take that over.
-5. **`preflightContinue: true` opts out entirely.** The short-circuit does not fire and today's
-   behaviour is preserved, because the option exists so that a downstream handler produces the
-   response.
+5. **`preflightContinue: true` opts out entirely.** The option exists so that a downstream handler
+   produces the response, so the short-circuit does not fire: the preflight is routed like any
+   other request, and `CorsMiddleware` adds its headers to whatever the handler answers.
 
 A disallowed origin still gets a well-formed `204` — without `Access-Control-Allow-Origin`. The
 browser then blocks the request, which is the correct outcome and its decision to make.

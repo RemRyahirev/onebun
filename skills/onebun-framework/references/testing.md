@@ -53,11 +53,8 @@ expect(response).toBeDefined();
 
 ### createTestMiddleware
 
-Same API again, for a `@Middleware()`. Added in 0.8.1 — before it, a middleware built with
-`createTestService` had `this.config` and `this.logger` undefined for its whole life, and the
-`config` option went to a mock the instance never received. A middleware that reads config
-defensively (`try { this.config.get(…) } catch`) hid that completely: every read took the catch
-branch, so the suite asserted fallback behaviour and passed.
+Same API again, for a `@Middleware()` (since 0.8.1). The instance gets `this.config` and
+`this.logger`, and the `config` option is what its `this.config.get()` reads.
 
 ```typescript
 import { createTestMiddleware } from '@onebun/core/testing';
@@ -80,13 +77,12 @@ does — and then call whichever fallback the instance exposes (`initializeServi
 consequences:
 
 - A class that reads `this.config` or `this.logger` in its constructor (right after `super()`)
-  builds correctly. Before 0.8.1 it died with
-  `TypeError: undefined is not an object (evaluating 'this.config.get')`.
+  builds correctly.
 - Any of the three initialises any framework kind, including interceptors and WebSocket gateways.
   The names exist so a test reads as what it builds.
 
 A `config` option given to a class that extends no framework base and exposes no `initialize*`
-method now throws, naming the class. Configuration that goes nowhere used to be accepted silently.
+method throws, naming the class, so configuration never goes silently nowhere.
 
 ### Return type: TestInstanceResult<T>
 
@@ -186,8 +182,8 @@ container helpers** — `bun add -d testcontainers`. It is declared in `@onebun/
 The failed-start cleanup needs 10.3.0+, the first release that exports `getContainerRuntimeClient`,
 but it is feature-detected, not a floor: the function is read off the namespace and used only when
 it is a function, never imported by name (a named import of a missing export fails to link and
-would take the whole barrel down). On 10.0–10.2 the barrel loads and a failed start behaves as in
-0.8.1. So even a file that only pulls `createTestService` resolves the whole
+would take the whole barrel down). On 10.0–10.2 the barrel loads and a failed start gets no
+cleanup. So even a file that only pulls `createTestService` resolves the whole
 testcontainers graph, and without the peer the import fails outright. This is deliberate: the
 subpath is the boundary that keeps a Docker client out of a production install, and integration
 tests against real services are the framework's default way to test.
@@ -266,14 +262,14 @@ Omit the option unless you actually need a different budget.
 
 ### Failed starts, labels and sweeping
 
-- **A failed start removes its own container.** testcontainers cleans up only when the wait
-  strategy fails; an OCI start error or a failed port inspection used to leave the container
-  `created` or `running`. Every helper call now stamps `dev.onebun.testing.owner=<fresh UUID>`
+- **A failed start removes its own container.** testcontainers itself cleans up only when the
+  wait strategy fails; an OCI start error or a failed port inspection leaves the container
+  `created` or `running`. So every helper call stamps `dev.onebun.testing.owner=<fresh UUID>`
   before `create` and, if `start()` rejects, force-removes exactly the containers with that label.
   Sibling containers — same process, same testcontainers session — are never touched. Needs
   testcontainers >= 10.3.0 (feature-detected; the peer range stays `>=10.0.0`). On 10.0–10.2 a
-  failed start keeps 0.8.1 behaviour: no cleanup, the start error rethrown unchanged, no
-  `containerCleanupFailure`, the container left behind. Labels are applied on every version.
+  failed start gets no cleanup: the start error is rethrown unchanged, with no
+  `containerCleanupFailure`, and the container is left behind. Labels are applied on every version.
 - **The error is the start error, unchanged** — same object, class and message; with no runtime it
   is still `Could not find a working container runtime strategy`. If the cleanup fails too, the
   error carries `containerCleanupFailure: { ownerLabel, error }` (`ContainerCleanupFailure`);

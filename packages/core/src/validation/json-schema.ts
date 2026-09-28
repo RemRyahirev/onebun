@@ -8,8 +8,8 @@ type ArkJsonSchemaOptions = Parameters<Type['toJsonSchema']>[0];
  *
  * A partial conversion is still a structurally valid JSON Schema, so nothing downstream can
  * tell it from a schema for a genuinely unconstrained value. This key is the difference —
- * machine-readable on purpose, because the previous marker was a free-text `description`
- * that callers had to string-match.
+ * machine-readable on purpose, so that callers need not string-match a free-text
+ * `description`.
  *
  * @see docs:api/validation.md
  */
@@ -60,7 +60,7 @@ export function toJsonSchema(
  * keeps everything it did manage to build and replaces only the unrepresentable node with an
  * empty schema. `{ when: 'Date', name: 'string' }` therefore yields
  * `{ type: 'object', properties: { name: { type: 'string' }, when: {} }, required: [...] }`
- * where it previously yielded `{ type: 'object' }` and nothing else.
+ * where catching the failure would yield `{ type: 'object' }` and nothing else.
  *
  * That distinction cannot be recovered after the fact: the thrown `ToJsonSchemaError` carries
  * the code but NOT the partially built schema, so a caught error can only produce a stub.

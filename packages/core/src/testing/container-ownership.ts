@@ -140,9 +140,8 @@ function attachCleanupFailure(startError: unknown, failure: ContainerCleanupFail
  * that fails too is reported on it as `containerCleanupFailure`, never in its place.
  *
  * With testcontainers 10.0–10.2 (no `getContainerRuntimeClient` in `namespace`) there is no runtime
- * client to remove anything with. There a failed start is what it was in 0.8.1: no cleanup is
- * attempted and the start error is rethrown as it is. The labels, the caller's and the owner
- * label, are applied all the same.
+ * client to remove anything with. There no cleanup is attempted and the start error is rethrown as
+ * it is. The labels, the caller's and the owner label, are applied all the same.
  *
  * @param namespace - The testcontainers module namespace to read `getContainerRuntimeClient` from.
  * Only tests pass one, to stand in for a release without it.

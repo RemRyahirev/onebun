@@ -7,8 +7,8 @@ description: System architecture overview. Module hierarchy, DI container, reque
 ## Internal Architecture Notes
 
 **DI Resolution Order**:
-1. Module imports resolved first (depth-first). A module is published as built only when its own initialization finishes, so one met again while it is still being built — an import cycle, a self-import included — throws `OneBunModuleImportCycleError` naming the cycle in import order (it used to overflow the stack). See [Decorators — @Module()](/api/decorators#module)
-2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core, or creating it threw). A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all (as through 0.8.1 — waiting would turn an implementation that injects its consumer back into a cycle). It gets `undefined`, with a warning, when a provider of the module could have filled it
+1. Module imports resolved first (depth-first). A module is published as built only when its own initialization finishes, so one met again while it is still being built — an import cycle, a self-import included — throws `OneBunModuleImportCycleError` naming the cycle in import order. See [Decorators — @Module()](/api/decorators#module)
+2. Providers instantiated in dependency order (dependencies first), whatever order `providers` lists them in. The pass is a FIFO queue: a provider whose same-module dependency is not built yet is requeued at the tail, and the pass stops only when a full rotation builds nothing (no attempt budget). What is left then is a `CircularDependencyError` if the waits close a cycle (the chain names only the cycle), otherwise a `DependencyResolutionError` naming the dependency that left the queue unconstructed (no `@Service()` for this copy of core, or creating it threw). A parameter typed as an abstract or base class, which resolves by `instanceof`, waits for the first listed provider of the module that extends the type and is still to be built, so the consumer may precede the implementation too. An `@Optional()` parameter waits only for its own class, and only while that is pending: typed as an abstract class it does not wait at all, because waiting would turn an implementation that injects its consumer into a cycle. It gets `undefined`, with a warning, when a provider of the module could have filled it
 3. Controllers receive injected services via constructor (from the same module's providers and imported modules' exports)
 4. **Exports are only required for cross-module injection.** Within a module, any provider can be injected into controllers and other providers without being listed in `exports`.
 
@@ -19,7 +19,7 @@ description: System architecture overview. Module hierarchy, DI container, reque
 4. Shutdown signal (or `app.stop()`) → every route answers `503 Service Unavailable` while the listener deliberately stays open, in-flight requests are drained (budget: half of `shutdownTimeout`, 7500ms by default), then the HTTP listener is closed
 5. Listener already closed → `beforeApplicationDestroy(signal?)` called
 6. WebSocket cleanup → queue service stop → queue adapter disconnect → trace flush → `onModuleDestroy()` called (no signal argument)
-7. Shared Redis released (refcounted) → `onApplicationDestroy(signal?)` called → DI scope disposed → logger transport flushed
+7. Remaining shared-Redis holders logged at debug level (the application releases nothing; each consumer gave its hold back when it closed) → `onApplicationDestroy(signal?)` called → DI scope disposed → logger transport flushed
 
 The whole shutdown is bounded by `shutdownTimeout` (default 15000ms); on expiry the phase still running is named in the error log, and on the signal path the process exits with code 1 instead of 0. Full order: [Core — Graceful Shutdown](/api/core#graceful-shutdown)
 
@@ -390,8 +390,8 @@ await this.callBeforeApplicationDestroy(signal);
 // Phase 6: Call onModuleDestroy() on all services and controllers
 await this.callOnModuleDestroy();
 
-// Phase 7: Release the shared Redis connection, then
-//          call onApplicationDestroy(signal) on all services and controllers
+// Phase 7: Call onApplicationDestroy(signal) on all services and controllers
+//          (the shared Redis client is not released here: each consumer gave its hold back)
 await this.callOnApplicationDestroy(signal);
 ```
 
@@ -703,7 +703,7 @@ it is read. It does not check types. Any name compiles, arguments are `any[]`, a
 
 - The option is `url`, not `baseUrl` (`ServiceClientOptions` omits `baseUrl`), and controllers are
   keyed by class name: `usersClient.users` throws `Controller "users" not found in service definition`.
-- This snippet used to show both mistakes, under a comment promising type safety. It passed the docs
-  typecheck only because it imported nothing, and unresolved names are not reported.
+- Only the option is caught by the compiler. The client is typed `any`, so `usersClient.users.findById('123')`
+  compiles and fails only at run time, and no call on it is type safe.
 
 </llm-only>

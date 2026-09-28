@@ -3,11 +3,10 @@ import type { Span as OtelSpan } from '@opentelemetry/api';
 /**
  * Where a `TraceSpan` keeps the OpenTelemetry span it was started from.
  *
- * The OTel span used to be created and then dropped, with `endHttpTraceSync` trying to recover it
- * through `trace.getActiveSpan()` — which is `undefined`, because nothing ever makes the span
- * active. So `.end()` never ran, `BatchSpanProcessor.onEnd` never fired, and the collector stayed
- * empty however it was configured. The span object survives the whole request already; carrying
- * the OTel span on it means ending never depends on ambient state.
+ * The span object survives the whole request, so carrying the OTel span on it means ending it
+ * never depends on ambient state. Recovering it through `trace.getActiveSpan()` instead fails
+ * wherever nothing has made the span active: `.end()` would never run, `BatchSpanProcessor.onEnd`
+ * would never fire, and the collector would stay empty however it was configured.
  *
  * A SYMBOL key, not a field. `JSON.stringify` and `Object.keys` skip own symbol properties, so a
  * user logging a span cannot serialize the live span graph — which reaches the

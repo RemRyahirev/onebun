@@ -83,11 +83,11 @@ import {
 /**
  * The DI state that a single application owns for the whole of its module tree.
  *
- * Everything here used to live on `globalThis` behind `Symbol.for()`, which meant one
- * process held exactly one copy no matter how many applications ran in it: a second
- * `DrizzleModule.forRoot()` silently reused the first application's connection, and a test
- * suite could talk to — and drop — the wrong database. The scope is threaded BY REFERENCE
- * through module construction instead, so two applications never see each other's services.
+ * The scope is threaded BY REFERENCE through module construction rather than kept on
+ * `globalThis` behind `Symbol.for()`, so a process holds one copy per application and two
+ * applications never see each other's services: a second `DrizzleModule.forRoot()` does not
+ * reuse the first application's connection, and a test suite cannot talk to — and drop — the
+ * wrong database.
  *
  * In multi-service mode each sub-application gets its own scope: one global service instance
  * per sub-application, not one per process.
@@ -106,20 +106,21 @@ export interface GlobalScope {
   /**
    * Modules already constructed in this application, keyed by module class.
    *
-   * A module class is built ONCE per application and `imports` decides VISIBILITY only.
-   * Before this, deduplication existed for `@Global()` modules alone, so the documented
-   * remedy for a non-global module — every submodule importing it via `forFeature()` — gave
-   * each submodule its OWN instance: three CacheService instances for a root plus two
-   * leaves, three initializations, and state written in one invisible in another.
+   * A module class is built ONCE per application and `imports` decides VISIBILITY only — for a
+   * non-global module as much as for a `@Global()` one. So the documented remedy for a
+   * non-global module, every submodule importing it via `forFeature()`, shares one instance: a
+   * root plus two leaves get one CacheService, initialized once, and state written through one
+   * importer is visible to the others.
    */
   sharedModules: Map<Function, OneBunModule>;
   /**
    * This application's metrics service, when it has one.
    *
-   * `BaseService.metrics` and `BaseController.metrics` used to read a single `globalThis` slot
-   * that every application overwrote as it started, so a custom counter created in one service
-   * landed in whichever application booted last. Typed as `unknown` because `@onebun/core` does
-   * not depend on `@onebun/metrics`; the base classes narrow it at the getter.
+   * `BaseService.metrics` and `BaseController.metrics` read it from here rather than from a single
+   * `globalThis` slot that every application would overwrite as it starts, so a custom counter
+   * created in one service lands in that service's own application, not in whichever application
+   * booted last. Typed as `unknown` because `@onebun/core` does not depend on `@onebun/metrics`;
+   * the base classes narrow it at the getter.
    */
   metrics?: unknown;
 }
@@ -308,10 +309,9 @@ function decoratorFor(target: Function, kind: ConstructedKind): string {
  * - it declares a constructor with parameters but carries no decorator, so TypeScript emitted no
  *   types for them and each parameter is `undefined` (typically a guard, interceptor, filter or
  *   middleware that extends a decorated base).
- * With `reflect-metadata` imported before the core, 0.8.1 borrowed the parent's types for both
- * through its walking `getMetadata`, so these are also the shapes whose behaviour that upgrade
- * changed. The second one is still never HANDED the parent's types — that is the positional
- * defect own-only reading exists to avoid — it is only reported.
+ * Neither is HANDED the parent's types, even with `reflect-metadata` imported before the core,
+ * whose walking `getMetadata` would offer them: for the second shape that is the positional
+ * defect own-only reading exists to avoid. Both are only reported.
  *
  * "No constructor types" means no own `design:paramtypes` array at all (Bun records `[]` for an
  * explicit `constructor()` on a decorated class) and no explicit `@Inject` types. Callers pass
@@ -481,10 +481,10 @@ export class OneBunModule implements ModuleInstance {
    * Middleware and interceptor instances this module built for the pipeline.
    *
    * They are constructed by `resolveMiddleware` / `resolveInterceptors` and live in neither
-   * `serviceInstances` nor `controllerInstances`, so every lifecycle pass walked straight past
-   * them: a middleware that opened a pool in `onModuleInit` never had the hook run on the object
-   * that serves requests. Registering the class in `providers` did not help — that produced a
-   * SECOND instance which got the hook and never saw a request.
+   * `serviceInstances` nor `controllerInstances`, so without this set every lifecycle pass would
+   * walk straight past them: a middleware that opens a pool in `onModuleInit` would never have the
+   * hook run on the object that serves requests. Registering the class in `providers` is no
+   * substitute — that produces a SECOND instance which gets the hook and never sees a request.
    *
    * A Set keyed by identity, so a class registered at several sites is initialized once.
    */
@@ -788,9 +788,9 @@ export class OneBunModule implements ModuleInstance {
    *
    * Every import is built before its importer, and a module is published to
    * `scope.sharedModules` only when its own initialization finishes. So a module met again while
-   * it is still under construction — it imports itself, directly or through its imports — was
-   * built again from scratch, which met it again, without end. `start()` died with
-   * `RangeError: Maximum call stack size exceeded`, which names no module (WI-408).
+   * it is still under construction — it imports itself, directly or through its imports — would
+   * be built again from scratch, which would meet it again, without end, until `start()` died with
+   * a `RangeError: Maximum call stack size exceeded` that names no module.
    *
    * Only a real cycle gets here: the callers first take a module that finished building, or a
    * `@Global()` module already processed, from the scope.
@@ -943,11 +943,12 @@ export class OneBunModule implements ModuleInstance {
   }
 
   /**
-   * Reject NestJS-style object providers, which were silently discarded.
+   * Reject NestJS-style object providers, which would otherwise be silently discarded.
    *
    * `@Module({ providers: [{ provide: X, useValue: v }] })` typechecks against the metadata
-   * shape but every later filter drops anything that is not a function, so the provider
-   * simply never existed and the failure surfaced as an unrelated unresolved dependency.
+   * shape but every later filter drops anything that is not a function, so without this check
+   * the provider would simply not exist and the failure would surface as an unrelated unresolved
+   * dependency.
    *
    * @see docs:migration-nestjs.md
    */
@@ -1132,8 +1133,8 @@ export class OneBunModule implements ModuleInstance {
           // required parameter waits even for one that already left the queue without an
           // instance, so that the stall can say why it is missing. An @Optional() parameter waits
           // only for its own class, and only while that is still pending. Typed as an abstract or
-          // base class it does not wait at all, as before 0.8.2: a provider its implementation
-          // injects back boots today only because it does not.
+          // base class it does not wait at all: a provider its implementation injects back boots
+          // only because it does not.
           const waitFor = providerToWaitFor(depType, provider);
           const isOptional = isOptionalParam(provider, i);
           const reason = waitFor === undefined ? undefined : neverConstructed.get(waitFor);
@@ -1511,11 +1512,9 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve exception filter classes into instances with dependency injection, once.
    *
-   * Filters were the one element of the documented pipeline with no DI path at all: the types
-   * accepted instances only, so a class was a compile error, and an instance was merged into the
-   * route metadata untouched — `this.logger`, `this.config` and every injected service were
-   * `undefined` inside `catch()`. That is the one place in an application that sees every
-   * unhandled error, and it was the one place that could not reach a service to report it to.
+   * A filter class gets its constructor dependencies here, and a filter extending `BaseService`
+   * gets `this.logger` and `this.config`, so inside `catch()` — the one place in an application
+   * that sees every unhandled error — a filter can reach the service it reports that error to.
    *
    * Mirrors `resolveInterceptors`: one instance per class per module, an already-constructed
    * instance passed through (and initialized if it extends `BaseService`, as `resolveGuards`
@@ -1568,18 +1567,17 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve guard classes into instances with dependency injection, once.
    *
-   * Guards were the only element of the documented request pipeline with no DI at all:
-   * `executeHttpGuards` did `new guard()` with zero arguments, on EVERY request. A guard
-   * extending `BaseService` therefore saw `this.config` and `this.logger` as `undefined`,
-   * because the ambient init context is only set around module construction — so the
-   * documented `this.config.get('auth.apiKey')` threw at request time.
+   * The dependencies are resolved once, here; the guard itself is still constructed per request,
+   * with those dependencies and inside the ambient init context, which is otherwise set only
+   * around module construction. A guard extending `BaseService` therefore sees `this.config` and
+   * `this.logger`, and the documented `this.config.get('auth.apiKey')` works at request time.
    *
-   * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through,
-   * so `@UseGuards(new RolesGuard(['admin']))` keeps working.
+   * Mirrors `resolveInterceptors`. An entry that is already an instance is passed through as it
+   * is, so `@UseGuards(new RolesGuard(['admin']))` runs that one instance.
    *
    * Transport-agnostic: WebSocket gateways and queue consumers run their guards through this
    * same method, via the binding `createControllersWithDI` attaches to each instance, so
-   * `@UseGuards` behaves identically on all three transports instead of only having DI on HTTP.
+   * `@UseGuards` resolves guards with the same DI on all three transports.
    *
    * @see docs:api/guards.md
    */
@@ -1881,16 +1879,15 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Resolve a constructor's arguments POSITIONALLY: argument `i` is parameter `i`, always.
    *
-   * The five pipeline kinds — controller, middleware, interceptor, filter, guard — shared five
-   * byte-identical copies of this loop, and every one of them built its array with `push`. That
-   * was safe only for as long as `getConstructorParamTypes` never returned a hole. It does now,
-   * and a `push` against a hole is exactly the defect being fixed: the argument list gets shorter
-   * and every later dependency lands one slot to the left (onebun-FB-18). Providers keep their
-   * own loop because they also defer on a not-yet-constructed dependency.
+   * One loop for the five pipeline kinds — controller, middleware, interceptor, filter, guard.
+   * It fills the array by index, never with `push`: `getConstructorParamTypes` returns holes, and
+   * a `push` against a hole would shorten the argument list and land every later dependency one
+   * slot to the left. Providers keep their own loop because they also defer on a
+   * not-yet-constructed dependency.
    *
    * A parameter the container cannot name is `undefined` IN ITS OWN SLOT rather than a thrown
-   * error, so nothing that works today stops working: a JS default parameter applies to
-   * `undefined`, so `opts: Opts = {}` still receives its default.
+   * error: a JS default parameter applies to `undefined`, so `opts: Opts = {}` receives its
+   * default.
    */
   private resolveConstructorArgs(
     target: Function,
@@ -1949,9 +1946,10 @@ export class OneBunModule implements ModuleInstance {
    * between them would be wrong most of the time.
    *
    * The warning is reserved for a hole FOLLOWED by a parameter that did resolve, because that is
-   * the configuration that used to corrupt silently: the later dependency slid into the hole's
-   * slot, every field stayed truthy, and the failure surfaced somewhere else entirely as
-   * `x.someMethod is not a function`. A trailing hole is far more often a deliberate optional.
+   * the configuration a collapsed, non-positional array corrupts silently: the later dependency
+   * slides into the hole's slot, every field stays truthy, and the failure surfaces somewhere else
+   * entirely as `x.someMethod is not a function`. A trailing hole is far more often a deliberate
+   * optional.
    */
   private reportUnresolvableParams(target: Function, holes: number[], resolvedAfterHole: boolean): void {
     if (holes.length === 0) {
@@ -2603,7 +2601,7 @@ export class OneBunModule implements ModuleInstance {
   /**
    * Get service instance by class, optionally from a NAMED registration.
    *
-   * Without a token this answers from the tag-keyed slot, exactly as before. With one it
+   * Without a token this answers from the tag-keyed slot. With one it
    * walks the tree for the module that selected that registration — the tag slot holds one
    * instance per module and cannot answer for a second registration, so an application with
    * two of them has no other way to reach the one it means.

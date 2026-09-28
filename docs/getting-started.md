@@ -6,7 +6,6 @@ description: Installation and basic setup guide for OneBun framework. Prerequisi
 
 ## Technical Context for AI Agents
 
-**Framework Version**: 0.4.0
 **Runtime**: Bun.js 1.2.12+ (NOT Node.js compatible)
 **TypeScript**: strict mode required
 

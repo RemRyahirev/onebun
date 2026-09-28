@@ -52,9 +52,7 @@ A typical NestJS project with BullMQ, caching, rate limiting, and sessions opens
 
 In NestJS, guards protect HTTP routes. Want authorization on WebSocket messages? Write custom middleware. Want to gate a queue handler? Build it yourself. In OneBun, `@UseGuards(AuthGuard)` works on HTTP routes, WebSocket message handlers (`@OnMessage`) and queue consumers (`@Subscribe`) — one decorator, class-level or method-level, with the same constructor dependency injection on all three. Guards receive the universal `ExecutionContext`; narrow it with `isHttpContext()` / `isWsContext()` / `isQueueContext()`, because a guard that reads `getRequest()` has no request to read on a queue message. See [Guards — One decorator, three transports](/api/guards#one-decorator-three-transports) for what a guard sees and what denial does on each.
 
-::: warning Before 0.4.5
-`@UseGuards` on a `@Subscribe` or `@OnMessage` handler was silently ignored — no type error, no warning, and the handler ran unguarded. If you migrated a guard onto a queue consumer or WebSocket handler on an earlier version, audit it.
-:::
+`@UseGuards` guards `@OnMessage` and `@Subscribe` handlers since `@onebun/core` 0.5.0.
 
 ### Multi-service without the pain
 
@@ -640,7 +638,7 @@ NestJS supports `useFactory`, `useValue`, `useClass`, and `useExisting` in modul
 
 If you used `useFactory` for dynamic providers, use `getConfig()` for pre-init config or `onModuleInit()` for async initialization.
 
-An object entry such as `{ provide: X, useValue: v }` in `@Module({ providers })` **throws an error naming the module** and the entry. It was previously discarded without a word, and the failure surfaced later as an unrelated `Could not resolve dependency` on whichever service expected it:
+An object entry such as `{ provide: X, useValue: v }` in `@Module({ providers })` **fails the boot with an error named `OneBunInvalidProviderError` that names the module** and the entry — at the entry itself, not later as an unrelated `Could not resolve dependency` on whichever service expected it:
 
 ```typescript
 // Does not work — throws OneBunInvalidProviderError at boot
@@ -719,7 +717,7 @@ await module.close();  // always close in afterEach
 4. Replace `@Injectable()` with `@Service()` and extend `BaseService` — see [Services](/api/services)
 5. Update controllers to extend `BaseController` and add `super()` call — see [Controllers](/api/controllers)
 6. Replace DTO classes + `class-validator` with ArkType schemas — see [Validation](/api/validation)
-7. ~~Update route paths~~ — not needed, `@Get(':id')` works as-is in OneBun
+7. Keep your route paths — `@Get(':id')` works as-is in OneBun
 8. Update route handlers to return plain objects and throw `HttpException` for errors
 9. Replace Express `Request`/`Response` types with `OneBunRequest`/`OneBunResponse`
 10. Move `ConfigService` usage to `this.config` (from `BaseService`)

@@ -27,7 +27,7 @@ export class DbModule {}
 
 **Module resolution rules**:
 - `exports` accepts SERVICES only. `exports: [SomeModule]` throws `OneBunInvalidExportError` naming both modules — a re-exported module never contributed anything. Import the providing module directly where its services are needed
-- `imports` must not form a cycle. A module that imports itself, directly or through its imports, throws `OneBunModuleImportCycleError` (a `OneBunBootstrapError`, matched by `name`) at `start()`: `Module import cycle: A -> B -> A`, plus `(import path from the root: Root -> A -> B -> A)` when the cycle starts below the root. A self-import ends with `Remove A from its own imports.` Detection looks only at the modules still under construction (the importer and its builders), after an already-built module or an already-processed `@Global()` module has been taken from the scope, so a module reached twice without a cycle (a diamond) still boots with one instance. A `@Global()` module that the root builds ahead of its import loop is reported with the real imports that reach it, never as a direct import of the root. It used to overflow the stack (`RangeError: Maximum call stack size exceeded`, naming no module)
+- `imports` must not form a cycle. A module that imports itself, directly or through its imports, throws `OneBunModuleImportCycleError` (a `OneBunBootstrapError`, matched by `name`) at `start()`: `Module import cycle: A -> B -> A`, plus `(import path from the root: Root -> A -> B -> A)` when the cycle starts below the root. A self-import ends with `Remove A from its own imports.` Detection looks only at the modules still under construction (the importer and its builders), after an already-built module or an already-processed `@Global()` module has been taken from the scope, so a module reached twice without a cycle (a diamond) still boots with one instance. A `@Global()` module that the root builds ahead of its import loop is reported with the real imports that reach it, never as a direct import of the root. A cycle always surfaces as this error, never as a stack overflow (`RangeError: Maximum call stack size exceeded`)
 - A `@Global()` module's services reach every module regardless of its position in an `imports` array, and whether the importing module lists it at all — import order is not semantic
 - One `@Global()` service instance per application (per sub-application in multi-service mode), not per process
 - Object providers (`{ provide: X, useValue: v }`) throw `OneBunInvalidProviderError`; providers are classes
@@ -127,7 +127,7 @@ export class UserService extends BaseService {
 - Importing `@onebun/core` installs the complete global Reflect Metadata API (nine functions, per-member keys, prototype walk) unless one is already there; the core has NO dependency on `reflect-metadata`
 - `reflect-metadata` (or a library that imports it: tsyringe, `@simplewebauthn/server`) may be imported before OR after the core; a later 0.2.x joins the registry the core publishes (`Symbol.for('@reflect-metadata:registry')`) and keeps earlier metadata. Recommend `reflect-metadata` >= 0.2.2 to apps that import it
 - DI reads OWN `design:paramtypes` only: a subclass without its own constructor gets no dependencies, an undecorated subclass with its own constructor gets none either — repeat the constructor and keep a decorator
-- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages, each naming the decorator for the class's kind (`@Middleware()` for middleware, `@Controller()` or `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise): `<Class> declares no constructor of its own ...` (fix: declare the constructor, and give the class a decorator if it has none) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`, or `@Middleware()` to middleware). An undecorated class whose own constructor takes no parameters records nothing either, so it cannot be told from one with no constructor and gets the first message, worded for both (`... (or, without a decorator, one whose parameter types were not recorded) ...`); it is harmless when that constructor passes the parent's dependencies itself. Through 0.8.1, with `reflect-metadata` imported BEFORE the core, both borrowed the parent's types (the second by position, which worked when its parameters matched the parent's); since 0.8.2 neither does in any import order
+- The module logs a startup warning for a class with no constructor types of its own under a parent that takes dependencies — services, controllers, guards, middleware, interceptors, filters. Two messages, each naming the decorator for the class's kind (`@Middleware()` for middleware, `@Controller()` or `@WebSocketGateway()` for a controller or gateway, `@Service()` otherwise): `<Class> declares no constructor of its own ...` (fix: declare the constructor, and give the class a decorator if it has none) and, for an undecorated class that declares constructor parameters, `<Class> declares a constructor with parameters, but no types were emitted ...` (fix: add `@Service()`, or `@Middleware()` to middleware). An undecorated class whose own constructor takes no parameters records nothing either, so it cannot be told from one with no constructor and gets the first message, worded for both (`... (or, without a decorator, one whose parameter types were not recorded) ...`); it is harmless when that constructor passes the parent's dependencies itself. Neither shape borrows the parent's types — not even by position — in any import order, `reflect-metadata` imported BEFORE the core included
 
 </llm-only>
 
@@ -181,7 +181,7 @@ import { UserService } from './user.service';
 export class UserModule {}
 ```
 
-**`exports` accepts services only.** Listing a MODULE there — the NestJS re-export idiom — throws `OneBunInvalidExportError` naming both modules. It never worked: a re-exported module contributed nothing to the importer, so either the importer failed at a controller with no mention of the export, or it also imported the module directly and got a second copy of every provider. Import the module that provides the service directly wherever the service is needed:
+**`exports` accepts services only.** Listing a MODULE there — the NestJS re-export idiom — throws `OneBunInvalidExportError` naming both modules. A re-exported module contributes nothing to the importer — a module's services reach only the modules that import it directly (or every module, for a `@Global()` one) — so the error names the mistake at boot instead of leaving the importer to fail at a controller with no mention of the export. Import the module that provides the service directly wherever the service is needed:
 
 ```typescript
 // Does not work — throws OneBunInvalidExportError at boot
@@ -193,7 +193,7 @@ export class FeatureModule {}
 export class FeatureModule {}
 ```
 
-**`imports` must not form a cycle.** A module that imports itself — directly, or through the modules it imports — fails `start()` with `OneBunModuleImportCycleError` (a `OneBunBootstrapError`). Each imported module is built before its importer, so a cycle leaves no module to build first. The message lists the cycle in import order and, when the cycle does not start at the root module, the import path the application took to reach it. It used to overflow the stack instead, with `RangeError: Maximum call stack size exceeded` naming no module.
+**`imports` must not form a cycle.** A module that imports itself — directly, or through the modules it imports — fails `start()` with `OneBunModuleImportCycleError` (a `OneBunBootstrapError`). Each imported module is built before its importer, so a cycle leaves no module to build first. The message lists the cycle in import order and, when the cycle does not start at the root module, the import path the application took to reach it. A cycle always fails this way, never as a `RangeError: Maximum call stack size exceeded`.
 
 ```typescript
 // Throws at start(): "Module import cycle: UsersModule -> UsersModule. ...
@@ -246,7 +246,7 @@ function removeFromGlobalModules(target: Function): void;
 
 **The registry is process-wide.** It holds one entry per module CLASS with no application dimension, so `removeFromGlobalModules()` changes globality for every application in the process, not just yours. It is not the multi-database mechanism — `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` is.
 
-**Two unnamed `forRoot()` calls that disagree are refused.** When a process configures the same dynamic module twice without a token, and the two calls differ in `isGlobal` or in what they configure, an application that imports that module fails at `start()` with `OneBunConflictingRegistrationError`, naming both call sites. Before, the call evaluated last silently decided for everyone: an application that wrote `isGlobal: false` could boot with ambient injection anyway, and two applications naming different databases could both open one of them. The check is per application — one that never imports the contested module boots normally — and two calls that agree stay silent.
+**Two unnamed `forRoot()` calls that disagree are refused.** When a process configures the same dynamic module twice without a token, and the two calls differ in `isGlobal` or in what they configure, an application that imports that module fails at `start()` with `OneBunConflictingRegistrationError`, naming both call sites. Letting the call evaluated last decide for everyone would boot an application that wrote `isGlobal: false` with ambient injection anyway, or point two applications naming different databases at one of them. The check is per application — one that never imports the contested module boots normally — and two calls that agree stay silent.
 
 <llm-only>
 **Technical details for AI agents:**
@@ -895,7 +895,7 @@ Explicit dependency injection for edge cases. **In most cases, automatic DI work
 An **abstract-class**-typed parameter needs no `@Inject`: DI resolves it to a registered subclass on its own, and `@Inject(AbstractClass)` is a compile error — see [Architecture](/architecture) for the exact diagnostics.
 
 ::: tip An unresolvable parameter is undefined, in its own slot
-A parameter the container cannot name — an interface, `any`, `unknown`, a type alias — receives `undefined` and the framework logs which parameter index it was. It does not shift the parameters after it; those keep their own values. Up to and including 0.7.x it did shift them, silently, which is why an interface-typed parameter with resolvable parameters after it was the worst shape this could take; 0.8.0 is where that stopped.
+A parameter the container cannot name — an interface, `any`, `unknown`, a type alias — receives `undefined` and the framework logs which parameter index it was. It does not shift the parameters after it; those keep their own values. When a parameter that does resolve follows it, the index is also reported as a startup `warn`; a trailing one is logged at `debug` only.
 
 This is about the ARGUMENT the constructor receives. The `design:paramtypes` entry for that same
 parameter is `Object`, not `undefined` — see
@@ -969,8 +969,8 @@ Marks a constructor parameter as optional for dependency injection. When the dep
 
 A dependency listed in the module's own `providers` that was never constructed — its constructor
 threw, or this copy of `@onebun/core` sees no `@Service()` on it — counts as not available too: the
-parameter receives `undefined`, and a warning names the dependency and why it has no instance.
-Before 0.8.2 that failed the boot instead.
+parameter receives `undefined`, a warning names the dependency and why it has no instance, and
+the boot goes on.
 
 An `@Optional()` parameter typed as an **abstract class** does not wait for its implementation the
 way every other parameter does: it receives the subclass only if that is already built when its
@@ -1387,9 +1387,9 @@ cannot be told apart from `any` or a circular import — and it does not treat `
 into silent `undefined` injections. The non-injectable set is exactly `Object`, `String`, `Number`
 and `Boolean`.
 
-A hole is only harmful when a **later** parameter resolves — that is the shape where the later
-dependency used to slide into the hole's slot. The framework warns about exactly that case at
-startup; see [capturing framework logs](/testing#capturing-framework-logs) for reading the warning
+The framework warns at startup about a hole followed by a **later** parameter that resolves — the
+shape in which a missing dependency is easiest to overlook, since every other field is filled; a
+trailing hole is far more often a deliberate optional and is logged at `debug` only. See [capturing framework logs](/testing#capturing-framework-logs) for reading the warning
 from a test. A parameter named by `@Inject(TOKEN)` still shows as `Object` here, because the token
 lives in a side map keyed by parameter index, not in `design:paramtypes`.
 
@@ -1470,23 +1470,21 @@ both (`<Class> declares no constructor of its own (or, without a decorator, one 
 were not recorded) ...`), which is harmless when that constructor passes the parent's dependencies
 itself.
 
-**Upgrading from 0.8.1 with `reflect-metadata` imported first.** Through 0.8.1 the core read
-constructor types through whatever `getMetadata` was on the global `Reflect`. When
-`reflect-metadata` (or a library that imports it, such as `@simplewebauthn/server`) was imported
-BEFORE the core, that `getMetadata` walked the prototype chain, so a subclass with no constructor
-types of its own borrowed its parent's. Since 0.8.2 none does, in either import order. The app still
-boots, so look for the two startup warnings above:
+**The import order of `reflect-metadata` does not change this.** The core reads constructor types
+with `getOwnMetadata`, never with the prototype-walking `getMetadata`, so a subclass with no
+constructor types of its own gets none of its parent's even when `reflect-metadata` (or a library
+that imports it, such as `@simplewebauthn/server`) is imported BEFORE the core. The app still boots,
+so the two startup warnings above are how to find each class this affects:
 
-- `<Class> declares no constructor of its own ...` — a subclass without a constructor used to
-  inherit its parent's dependencies, whether it is decorated or an undecorated guard, interceptor,
-  filter or middleware. Declare the constructor in it and pass them to `super(...)`. An undecorated
-  one needs a decorator as well — `@Service()`, or `@Middleware()` for middleware — or the
-  constructor it now declares records no types either and the next warning takes over.
+- `<Class> declares no constructor of its own ...` — a subclass without a constructor gets none of
+  its parent's dependencies, whether it is decorated or an undecorated guard, interceptor, filter
+  or middleware. Declare the constructor in it and pass them to `super(...)`. An undecorated one
+  needs a decorator as well — `@Service()`, or `@Middleware()` for middleware — or the constructor
+  it declares records no types either and the next warning takes over.
 - `<Class> declares a constructor with parameters, but no types were emitted ...` — an undecorated
   guard, interceptor, filter or middleware that extends a decorated class and declares its own
-  constructor used to receive the parent's types in that import order, by position, which worked
-  when its parameters matched the parent's. It now receives none. Add `@Service()` to it, or
-  `@Middleware()` if it is middleware.
+  constructor receives no types at all, not even the parent's by position. Add `@Service()` to it,
+  or `@Middleware()` if it is middleware.
 
 ## Complete Example
 

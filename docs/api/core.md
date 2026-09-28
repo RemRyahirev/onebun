@@ -324,9 +324,9 @@ await app.start();
 **Static responses go through the global middleware chain.** A served file carries the same
 `security` headers a controller route does — which is the reason to serve a SPA from the API origin
 at all — and it consumes `rateLimit` budget like any other request. Size `max` for the number of
-assets a page pulls, or put the assets behind a CDN. Through 0.6.0 static responses and unmatched
-paths bypassed the chain entirely: no security headers, and rate limiting bounded only the paths
-that happened to match a controller.
+assets a page pulls, or put the assets behind a CDN. A path that matches neither a route nor a
+static file goes through the same chain: it carries the security headers too, and rate limiting
+counts it like a request to a controller.
 
 **Example: static under a path prefix**
 
@@ -504,9 +504,9 @@ The convention the framework packages follow is `@scope/package/ClassName`.
 - `@Service()` mints `Context.GenericTag(target.name)` — one tag OBJECT per class, and `tag.key` is the bare class name. Effect keys `Context`/`Layer` by `tag.key`; OneBun's own maps (`serviceInstances`, `GlobalScope.services`, overrides) are keyed by the tag OBJECT, which is why injection is unaffected by a name collision
 - `getService(Class)` and untokened `getLayer()` throw `OneBunAmbiguousServiceError` when the module tree holds 2+ instances under one key. `getService(Class, token)` is exempt — it names one registration — and so is `getLayer(selections)` for every class the selections name; a class left unnamed still throws, and the message lists only the unresolved ones. The check runs after `ensureSingleServiceMode`, so multi-service mode still reports its own error first
 - `getLayer(selections)` builds the module layer and merges `Layer.succeed(tag, instance)` per selection ON TOP. Last-merged wins for a shared tag in Effect — the same rule that makes the untokened form ambiguous is what lets a selection resolve it
-- The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT. Keyed by name, two same-named provider classes made boot depend on the order of the `providers` array
-- The same pass stops on NO PROGRESS — a full rotation of the pending queue that builds nothing — not on an attempt budget. Through 0.8.1 it gave up after `2 * providers.length` dequeues, while a consumer-first listing needs up to N(N+1)/2, so a reversed chain of 4 failed with a `CircularDependencyError` that named no cycle. After a stall, `CircularDependencyError` is thrown only when the waits close a cycle, and its `chain` is trimmed to that cycle; otherwise the error is `DependencyResolutionError` naming the dependency that left the queue unconstructed
-- A parameter typed as an abstract or base class resolves by `instanceof` (`resolveDependencyByType`'s fallback), and the abstract class is never in `availableServiceClasses`. So the same pass defers such a consumer on the first listed provider that EXTENDS the type and is still to be built (`providerToWaitFor`); without that, a consumer listed before its implementation threw `DependencyResolutionError` at once, and only a full dependencies-first sort booted. Deferral never changes WHICH subclass is injected: resolution still takes the first instance built. An `@Optional()` parameter waits only for its OWN class while that is still pending: a provider that left the queue unconstructed (constructor threw, or undecorated) gives it `undefined` plus a warning, and typed as an abstract class it never waits — as through 0.8.1, since waiting would turn `Impl(Consumer)` + `Consumer(@Optional() Base)`, which boots with `undefined`, into a `CircularDependencyError`
+- The DI ordering pass in `createServicesWithDI` keys `availableServiceClasses`/`createdServices` by class OBJECT, never by name, so two same-named provider classes are distinct entries and boot does not depend on the order of the `providers` array
+- The same pass stops on NO PROGRESS — a full rotation of the pending queue that builds nothing — not on an attempt budget: a consumer-first listing of N providers needs up to N(N+1)/2 dequeues, so a budget linear in N (such as `2 * providers.length`) would give up on a valid chain of 4 and report a cycle that is not there. After a stall, `CircularDependencyError` is thrown only when the waits close a cycle, and its `chain` is trimmed to that cycle; otherwise the error is `DependencyResolutionError` naming the dependency that left the queue unconstructed
+- A parameter typed as an abstract or base class resolves by `instanceof` (`resolveDependencyByType`'s fallback), and the abstract class is never in `availableServiceClasses`. So the same pass defers such a consumer on the first listed provider that EXTENDS the type and is still to be built (`providerToWaitFor`), so a consumer may be listed before its implementation — it is deferred, not failed with `DependencyResolutionError`, and no dependencies-first sort is needed. Deferral never changes WHICH subclass is injected: resolution still takes the first instance built. An `@Optional()` parameter waits only for its OWN class while that is still pending: a provider that left the queue unconstructed (constructor threw, or undecorated) gives it `undefined` plus a warning, and typed as an abstract class it never waits, since waiting would turn `Impl(Consumer)` + `Consumer(@Optional() Base)`, which boots with `undefined`, into a `CircularDependencyError`
 - The framework's own tag keys `LoggerService`, `ConfigService`, `QueueService` and `SharedRedisService` are NOT namespaced, so a user service with one of those names shares their key. It reaches nothing at runtime — the framework reads its logger from its own layer, never from `rootLayer` — but it does make `getLayer()` ambiguous
 </llm-only>
 
@@ -532,28 +532,28 @@ OneBun enables graceful shutdown **by default**. On SIGTERM or SIGINT — and on
 6. Releases the remaining WebSocket resources: ping timers and client storage
 7. Stops the queue service and disconnects the queue adapter, after waiting for a scheduled job
    that is mid-run (bounded at 30 seconds)
-8. Stops system-metrics collection — the 5-second sampler started at boot. Nothing used to stop
-   it, so its `setInterval` kept the event loop alive and a script that booted and stopped an
-   application never terminated
+8. Stops system-metrics collection — the 5-second sampler started at boot. Its `setInterval`
+   would otherwise keep the event loop alive, so this step is what lets a script that boots and
+   stops an application terminate
 9. Flushes traces
 10. Calls `onModuleDestroy()` hooks on all services and controllers
-11. Releases the shared Redis connection (disconnected when the last consumer lets go)
+11. Logs, at debug level, whoever still holds the shared Redis connection. The application releases nothing: the cache and the queue adapter give their holds back when they close, and the connection closes when the last holder lets go
 12. Calls `onApplicationDestroy(signal)` hooks on all services and controllers
 13. Flushes the logger transport
 
 Steps 1–4 are what keeps a rolling deploy from cutting responses that were mid-flight: the
-destroy hooks no longer run while the socket is still accepting work.
+destroy hooks never run while the socket is still accepting work.
 
 ::: warning Bun reports the close code as 1000 to its own client
 The server sends 1001 — that is what a `close` callback on the server side reports, and what the
-reason accompanies. Bun's `WebSocket` client currently surfaces the code as **1000** regardless.
-Measured against a bare `Bun.serve` with no framework involved. If your client branches on the
+reason accompanies. Bun's `WebSocket` client currently surfaces the code as **1000** regardless;
+a bare `Bun.serve` with no framework involved shows the same. If your client branches on the
 code, branch on the reason instead until that changes.
 
-WebSocket connections used to be closed by nothing at all: the shutdown severed them at the very
-end with `server.stop(true)`, so a client saw no close frame, stayed `readyState === 1`, and
-learned the service was gone only when the process died — an abnormal 1006 at an arbitrary
-moment. `@OnDisconnect` ran, but after the client storage had already been wiped.
+Either way the client gets a close frame at step 2, while the service is still up: its
+`readyState` leaves `1` and it can reconnect elsewhere, rather than learning the service is gone
+from an abnormal `1006` when the process exits. `@OnDisconnect` runs while the client storage is
+still intact — it is released only at step 6.
 :::
 
 **Bounded, always**. `shutdownTimeout` (default **15000 ms**) caps the whole sequence.
@@ -576,15 +576,16 @@ that failed, which rolled itself back ([When `start()` fails](#when-start-fails)
 that follows a rollback. `start()` resolves, or rejects with the boot's own error, exactly as it
 would have without the `stop()`. Destroy hooks run once, after every `onModuleInit` has finished.
 In multi-service mode the parent's `stop()` waits for its `start()` the same way, and after a
-`start()` that resolved it stops every service; it used to find none started yet and return.
+`start()` that resolved it stops every service, including the ones that finished booting after
+the `stop()` was called.
 
-Run beside the boot, as it used to be, `stop()` released only what existed when it began and
-resolved; the boot then went on to connect the queue, start serving and register its signal
-handlers, nothing ever released them, and the process never exited.
+The wait is what makes the stop complete. A boot in progress still has the queue to connect, the
+listener to open and its signal handlers to register; a teardown run beside it would release only
+what existed when it began, leave everything acquired afterwards open, and keep the process alive.
 
 The wait counts toward `shutdownTimeout`: the sequence gets what is left of the budget, so
-`stop()` still resolves within it. A boot still running when the budget is spent is no longer
-waited for — `stop()` resolves, logging `Shutdown timed out after <n>ms while waiting for start()
+`stop()` still resolves within it. A boot still running when the budget is spent is not waited
+for any further — `stop()` resolves, logging `Shutdown timed out after <n>ms while waiting for start()
 to finish booting`, and the signal path exits with code **1** — and the application is stopped
 as soon as that boot settles. Only the system-metrics sampler is stopped at the deadline: it is
 started before `onModuleInit`, nothing in the boot depends on it, and left running it would keep
@@ -622,7 +623,7 @@ app.enableGracefulShutdown(); // Register the handlers yourself instead
 // the connection closes when the last holder does.
 await app.stop();
 
-// Deprecated and ignored — kept only so existing call sites still compile
+// Deprecated and ignored: the option has no effect and logs a warning
 await app.stop({ closeSharedRedis: false });
 
 // Pass signal for lifecycle hooks
@@ -648,9 +649,10 @@ acquiring — the HTTP listener, the WebSocket storage, the queue service and th
 connection, the system-metrics sampler, the trace and log flushes — and the destroy hooks. Then it
 rethrows the error it caught; nothing in the rollback replaces it.
 
-So a process that catches a failed boot ends on its own. It used to stay alive instead: the queue
-adapter's connection and the metrics sampler each kept the event loop open, so a test or a
-supervisor that caught the rejection without calling `stop()` hung until something killed it.
+So a process that catches a failed boot ends on its own. The queue adapter's connection and the
+metrics sampler, each of which would keep the event loop open, are released before the rejection
+reaches your `catch`, so a test or a supervisor that catches it does not have to call `stop()` for
+the process to exit.
 
 - **Nothing to clean up in the catch.** `await app.stop()` after a rejected `start()` resolves and
   runs none of the sequence again: it awaits the rollback that already ran, and the destroy hooks
@@ -735,14 +737,14 @@ parent's `stop()` does not reach them either — exit the process from the catch
 <llm-only>
 
 - Mechanism: the single-service `start()` catch logs `Failed to start application:`, then calls `rollBackFailedStart()` → `executeShutdown({ rollback: true })` — the SAME `performShutdown` as `stop()`. `rollback` changes the wording of the first, last and summary lines, and narrows the three telemetry steps to what the application owns (next bullet). Every step is guarded (`runShutdownStep`), the sequence is raced against `shutdownTimeout`, and `rollBackFailedStart` catches on top, so `start()` rethrows exactly the value its catch received — the rollback never substitutes its own error
-- Telemetry in the rollback, versus `stop()`: metrics — the sampler is always stopped, but `dispose()` (registry `clear()`, `__onebunMetricsService` handed back) runs only when the application created the registry (`ownsMetricsRegistry()`: no `metrics.registry` in options); traces — `traceService.shutdown({ spanProcessors: 'flush' })` (`TraceShutdownOptions`): `forceFlush()` on the provider, shutdown of only the `BatchSpanProcessor` it built from `exportOptions`, global slot and context manager handed back — `stop()` calls `shutdown()`, which reaches the caller's processors too; logs — `shutdownLoggerLayer(this.loggerLayer)` when the application built the layer, nothing for a `loggerLayer` from options — `stop()` calls the process-wide `shutdownLogger()`. Measured on the version that shut all three down: a `loggerLayer` or `spanProcessors` shared across attempts (the documented new-instance loop, or a same-instance retry) exported no log line and no span from the attempt that booted; a `metrics.registry` lost everything registered on it; a started multi-service sibling stopped exporting logs
-- The rollback does NOT take the shutdown latch (`shutdownPromise`), which is terminal: its outcome is kept as `rollbackPromise` until the next `start()`. While it is set, `stop()` and a signal await it and run no step of the sequence again (no destroy hook or `disconnect()` twice), then run the three narrowed telemetry steps in their `stop()` form — `executeShutdown({ afterRollback: true })` → `closeWhatTheRollbackLeftOpen()`, bounded by `shutdownTimeout`, each step guarded: `dispose()` of a `metrics.registry` from options, `traceService.shutdown()` (a plain shutdown after the `'flush'` one shuts down exactly the caller's processors that pass left running, and releases nothing again), and the process-wide `shutdownLogger()`. Its outcome is merged into the rollback's (`timedOut` OR-ed, failures concatenated). Without it, what the caller passed in outlived a `stop()` that had always closed it: an OTLP `loggerLayer`'s flush timer, or a span processor holding a ref'd handle until its `shutdown()`, kept alive a process that `stop()` after a failed start had always let exit (measured: killed at 12 s, 0.8.1 exited in 0.4 s). Stock OTel exporters in a `BatchSpanProcessor` do not hold the loop, so they exited either way. That close runs once: it is kept as `closeAfterRollbackPromise`, and every later `stop()` awaits its outcome, so a repeated `stop()` cannot clear a registry or shut down log transports that another application took up since. The next `start()` awaits and clears both `rollbackPromise` and `closeAfterRollbackPromise`, so a `stop()` after a successful retry is a real stop. The rollback always runs its own sequence and always sets `rollbackPromise`: a `stop()` called while the failing `start()` was still booting is queued behind the boot (next bullet), not running beside it. Before that queue existed, `rollBackFailedStart()` awaited such a `stop()` instead, which had released only what existed when it began
-- `stop()` during `start()`: `start()` wraps the boot (`boot()` single-service, `startServices()` multi-service) and keeps `bootInFlight = { settled, stop }` until it settles; `settled` never rejects and clears `bootInFlight` inside its own chain, so whatever runs after it sees no boot in flight regardless of continuation order. While it is set, `runShutdown()` routes every caller — `stop()`, the orchestrator's `stopAll()`, a signal (the handler's "Already shutting down" check also looks at `bootInFlight.stop`) — to ONE `stopWhenBootSettles()`, which waits for `settled`, then calls `runShutdown()` again and so takes the ordinary branch: the terminal latch after a boot that resolved, `closeAfterRollback` after one that rolled back, the old latch after a restart following `stop()` (a no-op, as a `stop()` after that restart always was). The wait is raced against `shutdownTimeout`; the sequence then gets the remainder as `ShutdownRequest.budgetMs` (its deadline and the drain's half are cut from it). If the deadline expires first, the outcome is `{ timedOut: true, phase: 'waiting for start() to finish booting' }` (signal path: exit 1) and the stop stays chained to `settled`, running with a full budget when the boot settles. Nothing but the system-metrics sampler is torn down under a running boot. The sampler is: at the deadline `stopWhenBootSettles()` calls `stopSystemMetricsCollection()` as a guarded step (the outcome's `phase` stays the wait), because it starts before `setup()`, nothing in the boot uses it, and it alone kept a process whose `onModuleInit` never settles alive after `stop()` gave up (measured: killed at 5 s, where the stop that ran beside the boot let it exit in 0.1 s); the chained stop clears it again, a no-op. A queue connected before a hang in `onApplicationInit` stays open. Anything more is exactly what used to run destroy hooks under `onModuleInit` and leave the later acquisitions open (measured before the queue, on 0.8.1 and with the rollback alike: the queue adapter connected after `stop()` resolved, liveConnections 1, the process killed at 12 s; with a failing boot the rollback awaited that same `stop()` and released nothing either). `start()` itself is unchanged in outcome: it resolves or rejects with the boot's own error
+- Telemetry in the rollback, versus `stop()`: metrics — the sampler is always stopped, but `dispose()` (registry `clear()`, `__onebunMetricsService` handed back) runs only when the application created the registry (`ownsMetricsRegistry()`: no `metrics.registry` in options); traces — `traceService.shutdown({ spanProcessors: 'flush' })` (`TraceShutdownOptions`): `forceFlush()` on the provider, shutdown of only the `BatchSpanProcessor` it built from `exportOptions`, global slot and context manager handed back — `stop()` calls `shutdown()`, which reaches the caller's processors too; logs — `shutdownLoggerLayer(this.loggerLayer)` when the application built the layer, nothing for a `loggerLayer` from options — `stop()` calls the process-wide `shutdownLogger()`. Shutting all three down in the rollback would break every retry: a `loggerLayer` or `spanProcessors` shared across attempts (the documented new-instance loop, or a same-instance retry) would export no log line and no span from the attempt that boots; a `metrics.registry` would lose everything registered on it; a started multi-service sibling would stop exporting logs
+- The rollback does NOT take the shutdown latch (`shutdownPromise`), which is terminal: its outcome is kept as `rollbackPromise` until the next `start()`. While it is set, `stop()` and a signal await it and run no step of the sequence again (no destroy hook or `disconnect()` twice), then run the three narrowed telemetry steps in their `stop()` form — `executeShutdown({ afterRollback: true })` → `closeWhatTheRollbackLeftOpen()`, bounded by `shutdownTimeout`, each step guarded: `dispose()` of a `metrics.registry` from options, `traceService.shutdown()` (a plain shutdown after the `'flush'` one shuts down exactly the caller's processors that pass left running, and releases nothing again), and the process-wide `shutdownLogger()`. Its outcome is merged into the rollback's (`timedOut` OR-ed, failures concatenated). Without it, what the caller passed in would outlive the `stop()`: an OTLP `loggerLayer`'s flush timer, or a span processor holding a ref'd handle until its `shutdown()`, keeps the process alive until closed. Stock OTel exporters in a `BatchSpanProcessor` do not hold the loop. That close runs once: it is kept as `closeAfterRollbackPromise`, and every later `stop()` awaits its outcome, so a repeated `stop()` cannot clear a registry or shut down log transports that another application took up since. The next `start()` awaits and clears both `rollbackPromise` and `closeAfterRollbackPromise`, so a `stop()` after a successful retry is a real stop. The rollback always runs its own sequence and always sets `rollbackPromise`: a `stop()` called while the failing `start()` was still booting is queued behind the boot (next bullet), not running beside it. `rollBackFailedStart()` never awaits such a `stop()` in place of its own sequence: that `stop()` began before the boot's later acquisitions and would release only what existed when it began
+- `stop()` during `start()`: `start()` wraps the boot (`boot()` single-service, `startServices()` multi-service) and keeps `bootInFlight = { settled, stop }` until it settles; `settled` never rejects and clears `bootInFlight` inside its own chain, so whatever runs after it sees no boot in flight regardless of continuation order. While it is set, `runShutdown()` routes every caller — `stop()`, the orchestrator's `stopAll()`, a signal (the handler's "Already shutting down" check also looks at `bootInFlight.stop`) — to ONE `stopWhenBootSettles()`, which waits for `settled`, then calls `runShutdown()` again and so takes the ordinary branch: the terminal latch after a boot that resolved, `closeAfterRollback` after one that rolled back, the existing latch after a restart following `stop()` (a no-op, as any `stop()` after such a restart is). The wait is raced against `shutdownTimeout`; the sequence then gets the remainder as `ShutdownRequest.budgetMs` (its deadline and the drain's half are cut from it). If the deadline expires first, the outcome is `{ timedOut: true, phase: 'waiting for start() to finish booting' }` (signal path: exit 1) and the stop stays chained to `settled`, running with a full budget when the boot settles. Nothing but the system-metrics sampler is torn down under a running boot. The sampler is: at the deadline `stopWhenBootSettles()` calls `stopSystemMetricsCollection()` as a guarded step (the outcome's `phase` stays the wait), because it starts before `setup()`, nothing in the boot uses it, and it alone would keep a process whose `onModuleInit` never settles alive after `stop()` gives up; the chained stop clears it again, a no-op. A queue connected before a hang in `onApplicationInit` stays open. Tearing down anything more under a running boot would run destroy hooks under `onModuleInit` and leave the boot's later acquisitions open — a queue adapter connecting after `stop()` resolved, one live connection holding the process. `start()`'s outcome does not depend on the `stop()`: it resolves or rejects with the boot's own error
 - Same-instance retry: the `start()` that clears `rollbackPromise` calls `reacquireAfterRollback()` unless the application had been `stop()`ped before (latch set). It rebuilds what the rollback closed: the metrics service when the application owns its registry (new registry and sampler; `__onebunMetricsService` re-pointed — with a `metrics.registry` from options the service is kept, since registering its metric names on the same registry again would throw, and `start()` restarts its sampler), the trace service (new provider built with the same `spanProcessors` instances; the global slot and the context manager are claimed again) and — only when the application built its own logger and it exports over OTLP — the logger layer. Not rebuilt, and not needing it: a `loggerLayer` passed in options (still open). Not rebuilt: a logger taken with `getLogger()` before the retry (console only). The failed attempt's queue connection and sampler are gone, not running beside the retry's (tests pin one live connection and one sampler)
-- A `start()` that fails on an application that is already running (a second `start()` while the first boot serves, e.g. on its own explicit port) is NOT rolled back — the rollback would reach the running boot's listener, sampler and observability. It rethrows and leaves that attempt's partial resources, as before the rollback existed
-- `start()` after a successful `stop()` behaves as it did before the rollback existed: it boots with the metrics registry disposed and the trace provider shut down, and the `stop()` after it is a no-op (terminal latch) — build a new instance to restart
+- A `start()` that fails on an application that is already running (a second `start()` while the first boot serves, e.g. on its own explicit port) is NOT rolled back — the rollback would reach the running boot's listener, sampler and observability. It rethrows and leaves that attempt's partial resources in place
+- `start()` after a successful `stop()` is not a restart: it boots with the metrics registry disposed and the trace provider shut down, and the `stop()` after it is a no-op (terminal latch) — build a new instance to restart
 - That value is NOT always the object user code threw. Service and controller `onModuleInit` run inside `Effect.runPromise(module.setup())`, so their failure arrives as Effect's `FiberFailure` (`Runtime.isFiberFailure(e)` is true, `e.message` is the original message, `e.name` is prefixed `(FiberFailure) `): assert with `toThrow('<message>')` / match on the message, never `toBe(thrown)` or `instanceof`. Failures outside Effect — `onApplicationInit`, middleware/interceptor `onModuleInit`, a queue `subscribe`, `Bun.serve` on a taken port, env schema validation — arrive as the thrown object itself; an env LOADING failure (`EnvLoadError`, run through `Effect.runPromise`) arrives as a `FiberFailure` too. Same caveat as `DrizzleStartupError` and `CacheBackendUnavailableError`
-- Measured before the fix (FB-30): a JetStream application whose `@Subscribe` named a subject no declared stream binds was still alive 12 s after catching the rejection; disconnecting the adapter alone did not end it and neither did disabling metrics alone — both held the loop. The in-memory adapter's 100 ms delayed-message interval, the scheduler's job timers, a bound listener and an OTLP log transport's flush timer are the same class of holder
+- Event-loop holders the rollback must release: in a JetStream application whose `@Subscribe` names a subject no declared stream binds, the adapter's connection and the metrics sampler EACH hold the loop — releasing either one alone leaves the process alive after the rejection is caught. The in-memory adapter's 100 ms delayed-message interval, the scheduler's job timers, a bound listener and an OTLP log transport's flush timer are the same class of holder
 - A failure inside handler registration (a refused `subscribe`) happens before `QueueService.start()`, and `QueueService.stop()` returns early for a service that never started; the adapter `disconnect()` that follows is what closes the connection and the subscriptions made so far
 - `publish()` calls from `onModuleInit` are held until the queue is ready; a boot that fails before that point never sends them, although their message ids were already returned
 - `shutdownLoggerLayer(layer)` at the end of the rollback closes only the application's own transport, so whatever the caller logs in its catch through `app.getLogger()` after the rollback reaches the console but not the collector; a line logged through a `loggerLayer` of its own is still exported, on that transport's next batch or at its `shutdownLogger()`
@@ -846,8 +848,8 @@ Keys are **environment variable names** (`DB_NAME`), never `config.get()` paths 
 ignored silently.
 
 Per-service scoping itself holds: each service gets its own configuration instance, so its
-`envOverrides` and `envSchemaExtend` apply to it alone. Through 0.6.0 they did not — every service
-after the first read the ENV resolved for the first one to start.
+`envOverrides` and `envSchemaExtend` apply to it alone — no service reads the ENV resolved for
+another, whichever one starts first.
 :::
 
 ### Usage Example
@@ -941,11 +943,11 @@ export class AppModule {}
 export class UserModule {}
 ```
 
-**Import order does not matter.** A `@Global()` module's services reach every module that can see it regardless of where it sits in an `imports` array — and whether or not the importing module lists it at all. A sibling import that happens to initialize the global module first no longer leaves the importer with nothing.
+**Import order does not matter.** A `@Global()` module's services reach every module that can see it regardless of where it sits in an `imports` array — and whether or not the importing module lists it at all. A sibling import that happens to initialize the global module first does not take its services away from the importer.
 
 **Visibility, not instance count.** `@Global()` makes a module's exported services reachable from every module without an explicit import; a module without it is reachable only where it is imported. Either way the module itself is constructed exactly ONCE per application, so two modules importing the same one share its services rather than each getting a copy.
 
-**Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection instead of silently reusing the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
+**Scope: one instance per application.** A `@Global()` module contributes exactly one instance per application — not one per process. Two applications in the same process each build their own, so a second `DrizzleModule.forRoot()` or `CacheModule.forRoot()` opens its own connection and never reuses the first application's. In multi-service mode the boundary is the sub-application: one global service instance per sub-application, and stopping one leaves its siblings untouched.
 
 **Globality itself is still per process.** The instances are per application; the answer to "is this module ambient?" is not — it lives in one `Set` keyed by the module class. Two unnamed `forRoot()` calls that disagree about it, or about what they configure, therefore cannot each be honoured, and the framework refuses rather than letting the last one decide: an application importing the contested module fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. Give each configuration a token — `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` — when they must coexist.
 

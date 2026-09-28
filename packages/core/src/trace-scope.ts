@@ -151,10 +151,10 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
  * Re-root like {@link inRootTraceScope}, and open a span the work actually belongs to.
  *
  * `inRootTraceScope` alone leaves background work with NO active span, and a log line can only
- * name a span that exists: measured on a plain `@Subscribe` handler with tracing enabled, every
- * entry came out as `(no trace on the entry)`. HTTP has never had this problem because the request
- * path starts a span of its own; this is the same treatment for the work that arrives by other
- * means — a queue message, a scheduler tick, a WebSocket frame.
+ * name a span that exists: every entry a plain `@Subscribe` handler logs with tracing enabled would
+ * come out as `(no trace on the entry)`. HTTP needs no such help because the request path starts
+ * a span of its own; this is the same treatment for the work that arrives by other means — a
+ * queue message, a scheduler tick, a WebSocket frame.
  *
  * **The span is opened only against an explicit `owner`.** Falling back to the ambient tracer, the
  * way `inRootTraceScope` does for ownership, would let an application with tracing switched off
@@ -171,14 +171,13 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
  *   stored context long after it finished. It also keeps the store and the active span in
  *   agreement the way {@link getCurrentTraceContext} expects.
  * - With no owner the scope is entered with a shallow COPY of the enclosing context
- *   ({@link inheritRequestContext}). This branch used to enter no scope at all, so every read here
- *   answered from the enclosing store — copying keeps every one of those reads identical while
- *   giving the work a context of its own to WRITE into. Without it there is no per-unit-of-work
+ *   ({@link inheritRequestContext}). Every read here answers as it would from the enclosing store,
+ *   while the work gets a context of its own to WRITE into. Without it there is no per-unit-of-work
  *   context on a queue, scheduler or WebSocket handler with tracing off, and "one decorator, three
  *   transports" would rest on a store that only one of them has.
  *
- * This costs one AsyncLocalStorage frame on the no-owner branch, which it did not before. It is
- * the price of the store existing on every transport rather than on the traced ones.
+ * This costs one AsyncLocalStorage frame on the no-owner branch: the price of the store existing on
+ * every transport rather than on the traced ones.
  *
  * **A failure sets the status but does not record the exception.** The HTTP boundary does exactly
  * this (`endHttpTraceSync`), and a handler that is itself `@Traced` already records the throw on

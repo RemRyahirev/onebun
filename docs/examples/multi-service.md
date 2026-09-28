@@ -208,7 +208,7 @@ curl -X PUT http://localhost:3002/orders/orders/{orderId}/status \
 
 ## Graceful Shutdown
 
-`OneBunApplication` in multi-service mode supports graceful shutdown out of the box. A SINGLE handler on the parent application receives SIGTERM or SIGINT and stops every running service CONCURRENTLY. The child applications register no signal handlers of their own — when they did, the first service to finish stopping called `process.exit(0)` and truncated its siblings' teardown.
+`OneBunApplication` in multi-service mode supports graceful shutdown out of the box. A SINGLE handler on the parent application receives SIGTERM or SIGINT and stops every running service CONCURRENTLY. The child applications register no signal handlers of their own, so no service can exit the process while its siblings are still tearing down.
 
 ### Shutdown Sequence
 

@@ -150,7 +150,7 @@ The error message searches all registered modules and reports:
 - Whether a global module should have auto-resolved it, or is `@Global()` but was never imported by this application — a `@Global()` module still has to be imported once, anywhere
 - Whether it comes from a named registration, in which case the suggestion names `forFeature(<token>)` rather than the registration's internal class
 
-Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it no longer suppresses the "decorate it with `@Service()` and list it in a module's providers" advice, which prints when nothing else matched.
+Matching is by class **identity**, not by name: a same-named class in a package this application never imports is not a candidate, and it does not suppress the "decorate it with `@Service()` and list it in a module's providers" advice, which prints whenever nothing else matched.
 
 ### Circular Dependencies
 
@@ -191,11 +191,11 @@ that implementation and before the implementation's own dependencies. The one ex
 `@Optional()` parameter of that kind: it does not wait, so list the implementation first — see
 [@Optional()](/api/decorators#optional).
 
-A graph that already booted is constructed in the same order as before, so `onModuleInit` order
-does not move either. Before 0.8.2, four or more providers listed consumer-first could fail with a
-`CircularDependencyError` whose chain was not a cycle (`C <-> D`), and a consumer listed before the
-implementation of its abstract-typed parameter failed with `DependencyResolutionError`. Listing
-dependencies first was the workaround, and it still works.
+The construction order is deterministic: providers are taken in the listed order, and one whose
+dependency is not built yet goes to the back of the queue. A list that already puts dependencies
+first is therefore built exactly in the listed order, and `onModuleInit` runs in that order too. A
+consumer-first list boots however long its chain is — `CircularDependencyError` is reserved for a
+real cycle (below).
 
 A real cycle (A → B → A) is detected and throws `CircularDependencyError`. The chain names only the
 cycle: a provider that merely waits on it — `X` in `X -> Y -> Z -> Y` — is listed among the
@@ -263,7 +263,7 @@ it: new requests are answered `503`, the in-flight ones are drained (force-close
 budget — half of `shutdownTimeout`, 7.5s by default — expires), and the HTTP listener is closed. A
 request issued from inside a destroy hook to the application's own server fails to connect, so these
 hooks are for cleanup, not for serving or self-calling. See
-[Graceful Shutdown](./core.md#graceful-shutdown) for the full 11-step sequence.
+[Graceful Shutdown](./core.md#graceful-shutdown) for the full sequence.
 :::
 
 ::: tip Eager Instantiation & Standalone Services
@@ -425,7 +425,7 @@ SHUTDOWN:
 4. Before destroy hook → beforeApplicationDestroy(signal)
 5. WebSockets closed, queue stopped and disconnected, traces flushed
 6. Module destroy hook → onModuleDestroy()
-7. Shared Redis released
+7. Shared Redis: the application releases nothing — the cache and the queue adapter gave their holds back when they closed; a debug line names any remaining holder
 8. Application destroy hook → onApplicationDestroy(signal)
 9. Logger transport flushed
 
@@ -438,7 +438,7 @@ FAILED START (a startup step threw):
    step again; it only closes what step 2 left open, as every stop() does
 ```
 
-A destroy hook can no longer serve or reach the application's own HTTP server: the listener is
+A destroy hook cannot serve or reach the application's own HTTP server: the listener is
 closed at step 3, before hook 4, and a request to it from inside a hook is refused at the socket.
 
 ## Accessing Logger

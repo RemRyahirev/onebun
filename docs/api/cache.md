@@ -108,9 +108,9 @@ Registering one token twice throws rather than silently replacing the first, and
 
 **One registration per module.** A module that selects two registrations of the same service cannot resolve it by type — the service has a single injection identity — so it must name each one with `@Inject(TOKEN)`. Without the annotation the application refuses to start, naming both candidates.
 
-**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws; `isGlobal: false` alongside `as` is accepted and does nothing, because it asks for what a named registration already guarantees. Neither spelling changes `CacheModule`'s own globality — only an unnamed `forRoot()` decides that, and it keeps the global behaviour it always had.
+**A named registration is never global.** That is what makes two of them safe: ambient visibility has one slot per service, so a named registration reaches a module only by being imported. Combining `as` with `isGlobal: true` throws; `isGlobal: false` alongside `as` is accepted and does nothing, because it asks for what a named registration already guarantees. Neither spelling changes `CacheModule`'s own globality — only an unnamed `forRoot()` decides that, and it is global unless it passes `isGlobal: false`.
 
-`forFeature()` with no token still SHARES: every module importing the same registration receives the same `CacheService`, so a value written through one is visible through another and the cache is initialized once. `isGlobal` controls visibility, never instance count.
+`forFeature()` with no token SHARES: every module importing the same registration receives the same `CacheService`, so a value written through one is visible through another and the cache is initialized once. `isGlobal` controls visibility, never instance count.
 
 ### Redis Configuration
 
@@ -224,7 +224,7 @@ An application that configures **nothing** is unaffected: with no `type` and no 
 The boot failure is **not catchable by class**. `CacheBackendUnavailableError` is not exported from
 `@onebun/cache`, and because the failure is raised from `onModuleInit` the rejection reaches the
 caller wrapped by Effect: the constructor is `FiberFailureImpl` and the name is prefixed, so strict
-equality fails too. What works today is a substring test — the message survives intact:
+equality fails too. What works is a substring test — the message survives intact:
 
 ```typescript
 try {
@@ -277,7 +277,7 @@ const status = cacheService.getBackendStatus();
 
 **Technical details for AI agents:**
 - `CacheModule` is decorated with `@Global()` — by default `CacheService` is available in all modules without explicit import
-- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. A later unnamed `forRoot()` that does not opt out puts the module back — symmetric, but not isolation: the registry holds one entry per module CLASS for the whole process. Two unnamed `forRoot()` calls that disagree about `isGlobal`, or about what they configure, are REFUSED: an application importing CacheModule fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. It used to be last-writer-wins — measured, `{isGlobal:false}` then default left both applications global with the opt-out silently ignored, and default then `{isGlobal:false}` left both failing to resolve `CacheService`. An application that does not import CacheModule is unaffected, and two calls that agree stay silent. Use `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` when two configurations must coexist
+- `isGlobal` option in `CacheModuleOptions` (default: `true`). When `isGlobal: false`, calls `removeFromGlobalModules(CacheModule)` so each module must explicitly import CacheModule. A later unnamed `forRoot()` that does not opt out puts the module back — symmetric, but not isolation: the registry holds one entry per module CLASS for the whole process. That registry state is last-writer-wins, so two unnamed `forRoot()` calls that disagree about `isGlobal`, or about what they configure, are REFUSED: an application importing CacheModule fails at `start()` with `OneBunConflictingRegistrationError` naming both call sites. Without the refusal, `{isGlobal:false}` then default would leave both applications global with the opt-out silently ignored, and default then `{isGlobal:false}` would leave both failing to resolve `CacheService`. An application that does not import CacheModule is unaffected, and two calls that agree stay silent. Use `forRoot({ as: TOKEN })` with `forFeature(TOKEN)` when two configurations must coexist
 - `isGlobal: false` is NOT the multi-cache mechanism — that is `forRoot({ as: TOKEN })` plus `forFeature(TOKEN)`, which gives each registration its own options and its own `CacheService`. An unnamed `forRoot()` still writes to a single class-static slot shared by the process
 - `as: symbol | string` names a registration. Registering one token twice throws; selecting an unconfigured token fails at startup; `as` with `isGlobal: true` throws and `as` with `isGlobal: false` is inert (a named registration is already non-global, and neither spelling changes `CacheModule`'s globality); a module holding two registrations must name each with `@Inject(TOKEN)`
 - `CacheModule.forFeature()` returns the module class, so it is an ordinary import. A module class is constructed ONCE per application, so every importer shares one CacheService — `isGlobal` controls visibility, never instance count
@@ -286,7 +286,7 @@ const status = cacheService.getBackendStatus();
 - Auto-init flow: check `CacheModule.forRoot()` options → load env vars → merge (module > env > defaults) → create cache instance
 - A configured Redis that does not connect within `connectTimeout` THROWS out of `autoInitialize()` and fails the application start. `allowDegradedStart: true` (or `<PREFIX>_ALLOW_DEGRADED_START=true`) turns that into a `WARN` plus `createInMemoryCache()`. A `connectTimeout` of `0` means "no driver timeout" and is treated here as the default `5000` ms rather than as an instant failure
 - The connect is wrapped in `withDeadline()`: the driver retries a black-holed host forever with `reconnect: true`, so nothing else bounds it. On timeout the abandoned `RedisCache` is closed, otherwise its client keeps reconnecting for the life of the process
-- A failure in loading/parsing the env configuration itself is a different path: it still logs `ERROR: Failed to auto-initialize cache from environment` and falls back to in-memory, since the configured backend is not known at that point
+- A failure in loading/parsing the env configuration itself is a different path: it logs `ERROR: Failed to auto-initialize cache from environment` and falls back to in-memory, since the configured backend is not known at that point
 - `getBackendStatus()` returns `{ configured, active, degraded }` (`CacheType` values); `degraded` is `active !== configured` and is only reachable with `allowDegradedStart`
 - Redis cache uses `createRedisCache(options)` which creates a Bun-native Redis client
 - In-memory cache uses `InMemoryCache` with LRU eviction, TTL, and periodic cleanup
@@ -316,7 +316,7 @@ CacheModule.forRoot({
 
 A shared client is **reference-counted, and whoever takes a hold gives it back**. The cache releases its hold when it closes; the Redis queue adapter releases its when it disconnects; code that took the client itself with `SharedRedisProvider.getClient()` releases it with `SharedRedisProvider.release()`. The connection is closed when the last holder lets go — and never because an application stopped.
 
-`app.stop()` releases nothing. It used to release exactly one hold per stop, whether or not anything in that application had ever acquired: measured, a service with no Redis at all took a sibling's hold to zero on its own shutdown and the sibling's next queue publish threw `Redis client not connected`, while a service with a cache AND a queue gave back one of the two holds it took, so the socket outlived every application in the process. `stop({ closeSharedRedis })` is deprecated and ignored.
+`app.stop()` releases nothing on anyone's behalf: each holder gives back exactly the holds it took. An application with no Redis at all therefore cannot take a sibling's hold to zero on its own shutdown — which would make the sibling's next queue publish throw `Redis client not connected` — and one with a cache AND a queue gives back both of its holds, so the socket does not outlive every application in the process. `stop({ closeSharedRedis })` is deprecated and ignored.
 
 If a process will not exit, the shutdown log names what still holds the connection (`Shared Redis still held by 1: …`) at debug level.
 
@@ -333,7 +333,7 @@ const client = await SharedRedisProvider.getClient();
 await SharedRedisProvider.release();
 ```
 
-Before 0.4.5 nothing in the lifecycle called `close()`, so a cache built by one test suite stayed open into the next.
+Stop the application in each test suite's teardown: the lifecycle closes the cache on `app.stop()`, so a cache built by a suite that neither stops its application nor calls `close()` stays open into the next suite.
 
 ### Injection
 
@@ -461,20 +461,19 @@ Which prefix applies depends on where the client comes from:
 
 **The client is the sole owner of the prefix.** It applies one on every command, prefixes the
 patterns `clear()` and `getStats()` scope themselves with, and strips it back off results. Nothing
-above it prefixes as well, because two owners that do not know about each other is precisely how
-`myapp:cache:myapp:cache:user:1` happened.
+above it prefixes as well: two owners that do not know about each other would store the entry as
+`myapp:cache:myapp:cache:user:1`.
 
 That is also why a `keyPrefix` **cannot** be combined with `useSharedClient: true` — the shared
 client owns the keyspace, so a cache-level prefix has nowhere to go. It is rejected at
-construction, naming `SharedRedisProvider.configure()` as the place to set it. It used to be
-dropped in silence, so keys landed under the shared prefix alone and anything written against the
-configured name found nothing. A `keyPrefix` cannot be supplied alongside an injected client
-either: the constructor takes options **or** a client, never both.
+construction, naming `SharedRedisProvider.configure()` as the place to set it; dropping it
+silently would put keys under the shared prefix alone, where nothing that uses the configured name
+finds them. A `keyPrefix` cannot be supplied alongside an injected client either: the constructor
+takes options **or** a client, never both.
 
-Before 0.5.1 the standalone path applied the prefix twice — entries were stored under
-`prefix + prefix + key` — so any reader outside the cache (a runbook, `SCAN`, a Redis ACL key
-pattern, another service) looked in the wrong place. Caches warmed by an older release will miss
-on their first read after upgrading and refill normally.
+The prefix is applied exactly once, so a reader outside the cache — a runbook, `SCAN`, a Redis ACL
+key pattern, another service — finds a standalone entry at `prefix + key`, the key in the table
+above.
 
 #### `mget<T>()`
 
@@ -695,13 +694,12 @@ console.log(cache.isUsingSharedClient()); // true
 
 **One configuration per process.** There is a single shared connection, so there is a single
 configuration: a second `configure()` asking for a different URL, key prefix, `reconnect` or
-`tls` throws `OneBunSharedRedisConflictError`, naming both targets and both call sites. It used
-to be accepted and ignored — two applications pointing at different Redis databases both kept
-whichever connection existed first, under the first one's key prefix, so one application's
-`clear()` reached the other's data. Re-stating the same configuration is fine. For a second,
-genuinely different target use a dedicated client — `SharedRedisProvider.createClient({ url })`,
-or the consumer's own connection options — and in tests call `SharedRedisProvider.reset()`
-between configurations.
+`tls` throws `OneBunSharedRedisConflictError`, naming both targets and both call sites. Accepting
+it would leave the second caller on the connection that already exists, under the first one's key
+prefix, where one application's `clear()` reaches the other's data. Re-stating the same
+configuration is fine. For a second, genuinely different target use a dedicated client —
+`SharedRedisProvider.createClient({ url })`, or the consumer's own connection options — and in
+tests call `SharedRedisProvider.reset()` between configurations.
 
 ## Effect.js Integration
 

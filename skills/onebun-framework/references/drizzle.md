@@ -143,8 +143,8 @@ changes the BASE module's globality. Only an unnamed `forRoot()` decides that; `
 about VISIBILITY, not about multiple databases.
 
 **Two unnamed `forRoot()` calls that disagree are refused at `app.start()`.** An unnamed registration is
-identified by the module class itself, so a process cannot hold two of them: whichever ran last used to decide
-for everyone, silently. Now a disagreement — about `isGlobal`, or about what the call configures — raises
+identified by the module class itself, so a process cannot hold two of them, and whichever ran last would
+decide for everyone. A disagreement — about `isGlobal`, or about what the call configures — therefore raises
 `OneBunConflictingRegistrationError` naming both call sites. It fires only for applications that import the
 contested module, and two calls that agree stay silent. This is the reason `as: TOKEN` exists; do not reach for
 a second bare `forRoot()`. In tests, `resetRegistrations()` in `beforeEach` — the registry outlives the file.
@@ -234,8 +234,8 @@ driver's connect **and** the startup reachability probe, one number for both. A 
 not forwarded — to the driver a zero timeout means *no* timeout, so it would turn a misconfiguration into an
 unbounded connect.
 
-**There is no `pool.min`.** It was accepted and discarded on every release that had it, because Bun's `SQL`
-opens connections on demand and has no minimum-pool concept. It is now a compile error.
+**There is no `pool.min`.** Bun's `SQL` opens connections on demand and has no minimum-pool concept, so `pool`
+has no `min` option and passing one is a compile error.
 
 ## Schema Definition
 
@@ -363,8 +363,8 @@ export class UserRepository extends BaseService {
 
 Always use transactions for multi-table writes to ensure atomicity. **Everything called from inside the
 callback is in the transaction, on both dialects** — a query through `DrizzleService`, a repository method, a
-call into another service. Nothing has to be rewritten to take `tx`, though passing it is still valid and
-still means the same thing.
+call into another service. Nothing has to be rewritten to take `tx`, though passing it is valid and means
+the same thing.
 
 <!-- typecheck: skip -->
 ```typescript
@@ -420,9 +420,8 @@ application while a transaction is open:
 refused, and the SQLite re-entrancy errors cannot occur.
 
 - A query issued through the service or a repository from **inside** the callback runs ON the transaction and
-  is rolled back with it, exactly as on SQLite. Earlier releases took another pooled connection here, so such
-  a write **survived the rollback** — silently. If you threaded `tx` into repository methods to work around
-  that, it still works.
+  is rolled back with it, exactly as on SQLite. Repository methods that take `tx` explicitly land on the same
+  transaction; threading it through is optional.
 - A **nested** `db.transaction()` is a SAVEPOINT on the connection the outer one holds: it sees the outer's
   uncommitted rows, an inner rollback keeps the outer work, an outer rollback undoes everything.
   `tx.getRawTransaction().transaction(...)` is the same thing, reached explicitly.
@@ -494,8 +493,8 @@ The same holds for `sql.placeholder()`: a json column
 round-trips through .prepare() on both .values() and .set(),
 and an explicit `null` binds SQL NULL rather than the JSON text `null`.
 
-**Raw SQL: use `jsonbParam()` / `jsonParam()` from `@onebun/drizzle/pg`.** The fix lives in the
-column encoders, so a value interpolated into ``db.execute(sql`...`)`` never reaches it. The helpers
+**Raw SQL: use `jsonbParam()` / `jsonParam()` from `@onebun/drizzle/pg`.** The encoding lives in
+the column encoders, so a value interpolated into ``db.execute(sql`...`)`` never reaches it. The helpers
 render `$n::text::jsonb` (`$n::text::json`) with `JSON.stringify(value)` bound as ONE text
 parameter — correct for objects, arrays (`[]` and one-element ones too), strings, numbers,
 booleans and `null`, in any expression:
@@ -542,8 +541,9 @@ Raw values: arrays expand; booleans bind as `1`/`0`; and **a plain object as the
 silently binds NULL for EVERY positional parameter** of the statement (bun:sqlite named-binding
 mode) — on the default `DB_TYPE`, with no error.
 
-**Rows written by OneBun ≤ 0.5.0 are double-encoded** and are not migrated automatically. Repair
-them *before* deploying, because the read path no longer compensates:
+**A double-encoded row** — a jsonb string holding JSON text, `jsonb_typeof` answering `'string'` —
+is never rewritten automatically, and the read path decodes once, so the ORM returns it as that
+string. Repair such rows *before* deploying code that reads them as values:
 
 ```sql
 UPDATE t SET c = (c #>> '{}')::jsonb

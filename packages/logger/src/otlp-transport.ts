@@ -47,9 +47,9 @@ export interface OtlpLogTransportOptions {
    * Called once for a batch that was not delivered, with the failure and how many records were
    * lost.
    *
-   * A non-2xx from the collector used to be indistinguishable from a success — the response was
-   * never inspected — so a misconfigured endpoint swallowed every log line in silence. Supply
-   * this to find out; it must not log through the same logger, which would loop.
+   * A non-2xx from the collector is a failure too, not a success, so a misconfigured endpoint
+   * does not swallow every log line in silence. Supply this to find out; it must not log through
+   * the same logger, which would loop.
    */
   onExportFailure?: (error: Error, recordCount: number) => void;
 

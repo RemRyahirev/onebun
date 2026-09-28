@@ -312,9 +312,9 @@ variables — cheap, and independent.
   option order never splits the cache
 - Named path: `Map<key, { schemaFingerprint, proxy }>`. On a hit with a different schema fingerprint
   `create()` throws `TypedEnv key '<key>' is already bound to a different schema`
-- Through 0.6.0 both paths were one `Map` keyed by the literal string `'default'`: the second schema
-  in a process was silently discarded, and in multi-service every service after the first ran on the
-  first one's `valueOverrides`
+- The two paths are separate caches on purpose: one `Map` keyed by a single constant string would
+  silently discard the second schema in a process, and in multi-service every service after the
+  first would run on the first one's `valueOverrides`
 - `TypedEnv.clear()` clears the named map and replaces the `WeakMap`
 
 </llm-only>
@@ -650,7 +650,7 @@ Or use built-in validators like `Env.port()`:
 Env.number({ default: 3000, validate: Env.port() })
 ```
 Both reject the value with the right reason, but neither knows the variable it was attached to, so
-today they report it without a name — `Environment variable validation failed for "": Value must be
+they report it without a name — `Environment variable validation failed for "": Value must be
 <= 65535. Got: a number`. Where the operator needs the name, write the `validate` function above
 and pass the name yourself.
 :::
@@ -681,7 +681,7 @@ try {
 ### `strict` does nothing
 
 `EnvLoadOptions.strict` is accepted by the types and **has no implementation** — nothing reads it.
-Setting it neither restricts loading to schema variables nor makes anything required; measured, a
+Setting it neither restricts loading to schema variables nor makes anything required: a
 schema parsed with `strict: true` and with `strict: false` produces byte-identical values, and a
 missing variable with no `required` flag still yields the type's zero value under both. Do not
 reach for it as production hardening.
@@ -708,7 +708,7 @@ const envSchema = {
 - Variables without `env` option get auto-generated names: `server.port` → `SERVER_PORT`
 - `EnvParser.parse()` treats `''` identically to `undefined` ("not configured"): the `default` applies and `required: true` is not satisfied. Only the exact empty string counts — whitespace-only values are passed through to the type parser
 - The required-variable failure distinguishes the two cases in words: `Required variable is not set` vs `Required variable is set to an empty string`
-- `parseSchema()` uses `Effect.runSyncExit` + `Cause.squash`, not `runSync` inside `try`/`catch`: `runSync` throws a `FiberFailure` (not an `EnvValidationError`), which the old catch re-wrapped, printing the whole message twice
+- `parseSchema()` uses `Effect.runSyncExit` + `Cause.squash`, not `runSync` inside `try`/`catch`: `runSync` throws a `FiberFailure` (not an `EnvValidationError`), which a `catch` would re-wrap, printing the whole message twice
 - `required` must be explicitly set to `true` — if not set and no `default` is provided, a type-default is used (empty string, 0, false, []); a variable is therefore never absent, which keeps `InferConfigType` free of `| undefined`
 - Parsing order: resolve value → parse by type → validate (validate function must return `Effect.Effect<T, EnvValidationError>`)
 - `strict` in `EnvLoadOptions` is DEAD: declared in `packages/envs/src/types.ts` and duplicated in `packages/core/src/types.ts` (`envOptions`), read nowhere. `EnvLoader.load`/`loadSync` destructure only `envFilePath`/`loadDotEnv`/`envOverridesDotEnv`/`valueOverrides`, and `EnvParser.parse` reads only `defaultArraySeparator`. It neither restricts loading to schema variables (`loadSync` never receives a schema) nor makes anything required. Do not describe it as doing either
@@ -762,8 +762,8 @@ The property is `variable` — there is no `variableName`. See the table under
 
 ## Deriving values
 
-There is **no** `transform` option, and there never was one that ran: a value is resolved, parsed by
-its declared type and validated, and nothing rewrites it afterwards. TypeScript rejects a
+There is **no** `transform` option: a value is resolved, parsed by its declared type and
+validated, and nothing rewrites it afterwards. TypeScript rejects a
 `transform` key; `Env.number()` also drops it on the floor, while `Env.string()` keeps it on the
 config object where nothing ever reads it — so a JS caller, or a TS caller who casts, silently gets
 the untransformed value.

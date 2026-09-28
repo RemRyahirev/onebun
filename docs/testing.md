@@ -21,7 +21,7 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `overrideProvider()` registers the mock under the service's Effect.Context tag in the application's `GlobalScope`, which PHASE -1 of module init seeds into EVERY module before any provider is constructed — so it reaches services and imported modules, not only root-module controllers, and the real provider is skipped rather than built and discarded
 - `inject()` makes real HTTP requests via `undici.fetch` (bypasses global fetch mocks)
 - Always call `close()` in `afterEach` to prevent port leaks
-- `_testProviders` is an internal option; the application copies it into its `GlobalScope.overrides` before building the module tree (there is no post-hoc pass over the root module any more)
+- `_testProviders` is an internal option; the application copies it into its `GlobalScope.overrides` before building the module tree (nothing patches the root module after the tree is built)
 - No `envSchema` in `setOptions()` + a service reading `this.config` in its constructor = `DependencyResolutionError: Could not resolve dependency X`. `module.ts` re-throws only `OneBun*`-named errors; the config stub's plain `Error` is logged to the silent mock logger and the service is dropped
 
 **Testcontainers** (`createRedisContainer`, `createNatsContainer`, `createPostgresContainer`):
@@ -33,10 +33,10 @@ description: Testing utilities for OneBun applications — unit testing helpers,
 - `createPostgresContainer` waits for the SECOND `database system is ready to accept connections` line. The image starts a temporary server for its init scripts, logs that line for it, stops it, and only then starts the real one — waiting for the first hands back a URL that is about to stop working
 - NATS supports `enableJetStream: true` option
 - Always call `stop()` in `afterAll` to clean up containers
-- Every call stamps `dev.onebun.testing.owner=<fresh UUID>` on its container BEFORE `create` (via `withLabels`, spread last so a caller label under that key cannot replace it). When `start()` rejects, the helper lists `all: true` containers with exactly that label through `getContainerRuntimeClient().container.dockerode` and force-removes them (`v: true`). Needed because testcontainers cleans up only when the WAIT STRATEGY fails; a failure in `container.start` (OCI runtime error) or in the port inspection after it left the container `created` or `running`, with no handle to stop it. Never filter by `org.testcontainers.session-id` for this: it is process-wide (and shared across processes by a reused Ryuk), so it would take sibling containers down
+- Every call stamps `dev.onebun.testing.owner=<fresh UUID>` on its container BEFORE `create` (via `withLabels`, spread last so a caller label under that key cannot replace it). When `start()` rejects, the helper lists `all: true` containers with exactly that label through `getContainerRuntimeClient().container.dockerode` and force-removes them (`v: true`). Needed because testcontainers cleans up only when the WAIT STRATEGY fails; a failure in `container.start` (OCI runtime error) or in the port inspection after it leaves the container `created` or `running`, with no handle to stop it. Never filter by `org.testcontainers.session-id` for this: it is process-wide (and shared across processes by a reused Ryuk), so it would take sibling containers down
 - The start error is ALWAYS rethrown unchanged — same object, class and message. `getContainerRuntimeClient()` is resolved first, so "Could not find a working container runtime strategy" (no runtime) passes through as-is with nothing to clean up. If the cleanup's list or remove fails too, the start error gets an enumerable `containerCleanupFailure: { ownerLabel: 'dev.onebun.testing.owner=<uuid>', error }` property (type `ContainerCleanupFailure`) — never an AggregateError in its place
-- `labels?: Record<string, string>` on all three option types, applied before `create`: a Ryuk-less harness sweeps what a killed run left behind with `dockerode.listContainers({ all: true, filters: { label: ['k=v'] } })`
-- Peer range stays `testcontainers >= 10.0.0`; the failed-start cleanup is FEATURE-DETECTED and needs `>= 10.3.0`, the first release exporting `getContainerRuntimeClient`. `container-ownership.ts` (internal, not re-exported) reads it off the namespace (`import * as testcontainers`) and uses it only when it is a function — NOT a named import: a named import of a missing export fails to link (`SyntaxError: Export named 'getContainerRuntimeClient' not found`) and would break ANY import from `@onebun/core/testing`, `createTestService` included. On 10.0–10.2 a failed start behaves exactly as in 0.8.1: no cleanup attempted, the start error rethrown unchanged, no `containerCleanupFailure`, no warning — the container is left behind. Caller and owner labels are still applied there (`withLabels` exists since 10.0), so labelled containers can be swept on every version — through the Docker CLI on 10.0–10.2, since the documented sweep recipe imports `getContainerRuntimeClient` (10.3.0+). The runtime-client shape the cleanup uses is typed structurally for the same reason (10.3.0 ships no dockerode types; `@onebun/core` ships `.ts` sources, so they are type-checked against the consumer's testcontainers)
+- `labels?: Record<string, string>` on all three option types (since 0.8.2), applied before `create`: a Ryuk-less harness sweeps what a killed run left behind with `dockerode.listContainers({ all: true, filters: { label: ['k=v'] } })`
+- Peer range stays `testcontainers >= 10.0.0`; the failed-start cleanup is FEATURE-DETECTED and needs `>= 10.3.0`, the first release exporting `getContainerRuntimeClient`. `container-ownership.ts` (internal, not re-exported) reads it off the namespace (`import * as testcontainers`) and uses it only when it is a function — NOT a named import: a named import of a missing export fails to link (`SyntaxError: Export named 'getContainerRuntimeClient' not found`) and would break ANY import from `@onebun/core/testing`, `createTestService` included. On 10.0–10.2 a failed start attempts no cleanup: the start error is rethrown unchanged, with no `containerCleanupFailure` and no warning, and the container is left behind. Caller and owner labels are still applied there (`withLabels` exists since 10.0), so labelled containers can be swept on every version — through the Docker CLI on 10.0–10.2, since the documented sweep recipe imports `getContainerRuntimeClient` (10.3.0+). The runtime-client shape the cleanup uses is typed structurally for the same reason (10.3.0 ships no dockerode types; `@onebun/core` ships `.ts` sources, so they are type-checked against the consumer's testcontainers)
 
 **Mock Utilities**:
 - `createMockConfig(values, options)` — returns `IConfig` with `get()` returning from values map
@@ -95,8 +95,8 @@ machine executing the tests. The rest of `@onebun/core/testing` — `createTestS
 `TestingModule`, `useFakeTimers`, the mock helpers — does not.
 
 The helpers remove a container whose start failed only with testcontainers 10.3.0 or later. With
-10.0–10.2 a failed start leaves its container behind, as it did in OneBun 0.8.1; the `labels`
-option works on every version. See [Container labels and cleanup](#container-labels-and-cleanup).
+10.0–10.2 a failed start leaves its container behind; the `labels` option works on every
+testcontainers version. See [Container labels and cleanup](#container-labels-and-cleanup).
 
 ## Unit Testing — `createTestService` / `createTestController` / `createTestMiddleware`
 
@@ -176,8 +176,8 @@ extends — service, controller, middleware, interceptor or WebSocket gateway. T
 so a test reads as what it builds.
 
 A `config` option handed to a class that extends none of those and exposes no `initialize*` method
-throws. Configuration that goes nowhere used to be accepted silently, which is a middleware suite
-asserting fallback behaviour while `this.config` is `undefined`.
+throws: configuration that went nowhere would leave a middleware suite asserting fallback
+behaviour while `this.config` is `undefined`.
 
 ## Integration Testing — `TestingModule`
 
@@ -460,14 +460,15 @@ in whichever test connects first rather than in the helper.
 
 **A failed start cleans up after itself.** testcontainers removes a container on its own only
 when the wait strategy gives up. A failure earlier — the OCI runtime refusing to start the
-process, or the port inspection after the start — used to leave the container behind, `created`
-or even `running`, with no handle to stop it. Every helper call now stamps its container with a
-label of its own, `dev.onebun.testing.owner=<fresh UUID>`, before it is created, and when the
-start fails it removes exactly the containers carrying that label. Containers of other calls,
-other suites and other harnesses are never touched. The cleanup needs testcontainers 10.3.0 or
-later, the first release that exports `getContainerRuntimeClient`; it is used when it is there.
-With 10.0–10.2 a failed start behaves as it did in 0.8.1: the start error is rethrown unchanged
-and the container is left behind. Your `labels` and the owner label are applied on every version.
+process, or the port inspection after the start — leaves the container behind, `created` or even
+`running`, with no handle to stop it. So every helper call stamps its container with a label of
+its own, `dev.onebun.testing.owner=<fresh UUID>`, before it is created, and when the start fails
+it removes exactly the containers carrying that label. Containers of other calls, other suites
+and other harnesses are never touched. The cleanup needs testcontainers 10.3.0 or later, the
+first release that exports `getContainerRuntimeClient`; it is used when it is there. With
+10.0–10.2 a failed start attempts no cleanup: the start error is rethrown unchanged and the
+container is left behind. Your `labels` and the owner label are applied on every testcontainers
+version.
 
 The error you see is always the start error itself — same object, class and message. With no
 container runtime at all it is still testcontainers' `Could not find a working container runtime
@@ -475,7 +476,7 @@ strategy`. If the cleanup fails as well, the start error carries a `containerCle
 property (`ContainerCleanupFailure`): `ownerLabel` is the `key=value` filter that finds what was
 left behind, and `error` is why listing or removing it failed.
 
-**`labels` mark everything a suite starts.** They are applied before `create`, so a container is
+**`labels` (since 0.8.2) mark everything a suite starts.** They are applied before `create`, so a container is
 findable from its first moment — including one a run that was killed half-way through a start
 left behind. Without Ryuk (`TESTCONTAINERS_RYUK_DISABLED=true`) nothing else removes such a
 container, and pruning everything labelled `org.testcontainers` would take other harnesses'

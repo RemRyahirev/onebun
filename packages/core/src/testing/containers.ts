@@ -167,9 +167,8 @@ export async function createNatsContainer(
  *
  * Unconditional, like the Redis and NATS helpers beside it: Docker is a hard requirement of
  * `bun test` in this repository rather than something a flag opts into. The alternative — gating
- * on an env var — is how the only Postgres test in the tree came to `return` early on every run
- * that never set `TEST_POSTGRES_URL`, which is to say every run, which is how a silent jsonb
- * corruption bug shipped with a green suite.
+ * on an env var such as `TEST_POSTGRES_URL` — makes a test `return` early on every run that does
+ * not set it, so the suite stays green while the code the test covers goes unchecked.
  *
  * `Wait.forLogMessage(..., 2)` is not a typo. The postgres image starts a temporary server to run
  * its initialisation scripts and logs "ready to accept connections" for it, then shuts it down and

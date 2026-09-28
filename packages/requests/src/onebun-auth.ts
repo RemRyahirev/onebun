@@ -451,8 +451,8 @@ export function makeSingleReplicaNonceStore(
  * Produce the `X-OneBun-Signature` value for a request.
  *
  * Sign what is FINAL: the URL with its query already built, the Content-Type that will be sent,
- * and the exact body bytes. Signing a request config before the client finishes assembling it is
- * how the previous scheme came to cover neither the query nor the body.
+ * and the exact body bytes. A signature over a request config the client has not finished
+ * assembling would cover neither the query nor the body.
  *
  * @see docs:api/requests.md
  */

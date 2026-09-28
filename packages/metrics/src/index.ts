@@ -19,10 +19,10 @@ export { Registry } from 'prom-client';
 /**
  * prom-client's PROCESS-GLOBAL registry.
  *
- * @deprecated This is no longer the registry an application scrapes — each one owns its own,
- * so two applications in a process do not collide or serve each other's series. Reach the
+ * @deprecated This is not the registry an application scrapes — each one owns its own, so two
+ * applications in a process do not collide or serve each other's series. Reach the
  * application's registry through `metricsService.getRegistry().register`, or pass
- * `metrics: { registry: register }` to opt an application back onto this one.
+ * `metrics: { registry: register }` to put an application on this one.
  */
 export { register } from 'prom-client';
 // Decorators

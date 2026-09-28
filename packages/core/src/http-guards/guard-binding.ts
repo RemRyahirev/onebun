@@ -60,8 +60,7 @@ export function attachGuardBinding(instance: object, binding: GuardBinding): voi
  * Read back the guard binding attached by the owner module, if there is one.
  *
  * Absent for an instance built outside a module — a hand-constructed gateway in a unit test,
- * for instance. Callers fall back to zero-argument construction, which is what every guard got
- * before this existed.
+ * for instance. Callers then fall back to zero-argument construction.
  */
 export function getGuardBinding(instance: unknown): GuardBinding | undefined {
   if (instance === null || (typeof instance !== 'object' && typeof instance !== 'function')) {

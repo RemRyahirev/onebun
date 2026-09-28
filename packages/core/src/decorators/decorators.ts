@@ -1030,10 +1030,9 @@ const CONTROLLER_MIDDLEWARE_METADATA = 'onebun:controller_middleware';
 /**
  * Metadata key for method-level guards (shared across HTTP, WS, Queue).
  *
- * One key, three transports — the same shape `INTERCEPTORS_METADATA` has always had. It used
- * to be `'onebun:http_guards'`, read only by HTTP route registration, so `@UseGuards` on a
- * `@Subscribe` or `@OnMessage` handler was a silent no-op: no type error, no warning,
- * and the handler ran completely unguarded.
+ * One key, three transports: HTTP route registration, WebSocket gateways and queue consumers all
+ * read it, so `@UseGuards` on a `@Subscribe` or `@OnMessage` handler guards that handler exactly
+ * as it guards a route.
  *
  * @see docs:api/guards.md
  */

@@ -28,9 +28,9 @@ import { WsStorageEvent, isPubSubAdapter } from './ws-storage';
 /**
  * Clear all client sockets (for testing purposes only)
  *
- * @deprecated A no-op since sockets became per-gateway state: there is no process-wide map left
- * to clear, and a gateway's own map goes away with the gateway. Kept because it is reachable
- * from the package root, so removing it is a breaking export change.
+ * @deprecated A no-op: sockets are per-gateway state, so there is no process-wide map to clear,
+ * and a gateway's own map goes away with the gateway. It stays exported because it is reachable
+ * from the package root, and removing it would be a breaking export change.
  * @internal
  */
 export function _resetClientSocketsForTesting(): void {
@@ -175,16 +175,16 @@ export abstract class BaseWebSocketGateway {
    * Whether this gateway may see a client record.
    *
    * Storage is shared by every gateway in the application and rooms are keyed by name alone, so
-   * a read went straight to another gateway's data: measured, `getClientsByRoom` on a room only
-   * `/admin` ever touched returned the full record of an `/admin` client — `auth`, `metadata`
-   * and all. The socket fence stopped messages crossing; it never stopped reads.
+   * without this check a read would go straight to another gateway's data: `getClientsByRoom` on
+   * a room only `/admin` ever touched would return the full record of an `/admin` client —
+   * `auth`, `metadata` and all. The socket fence stops messages crossing; it does not stop reads.
    *
    * Two deliberate escapes. A gateway with no key of its own (constructed by hand, never
    * registered) filters nothing — it has no identity to compare against. And a record with no key
    * is accepted where it cannot be ambiguous: an application with exactly one gateway. That
-   * second escape used to be unconditional, which made a keyless record EVERYBODY's — the
-   * opposite of what the key is for, and reachable from user code, since `storage` is protected
-   * and any caller can write a record without one.
+   * second escape is conditional on purpose: unconditional, it would make a keyless record
+   * EVERYBODY's — the opposite of what the key is for, and reachable from user code, since
+   * `storage` is protected and any caller can write a record without one.
    */
   protected _owns(client: WsClientData | null | undefined): boolean {
     if (!client) {
@@ -792,9 +792,9 @@ export abstract class BaseWebSocketGateway {
    * The native pub/sub topic this gateway uses for a room.
    *
    * Bun's topics are a process-wide namespace and the framework subscribes sockets to the raw
-   * room name, so two gateways with a colliding room name share a topic. The raw subscription
-   * stays — a user's own `getWsServer().publish('lobby', …)` must keep working exactly as it
-   * does — and this is the scoped one that {@link publishToRoom} addresses.
+   * room name, so two gateways with a colliding room name share a topic. A joined socket is
+   * subscribed to both topics: the raw one, which a user's own `getWsServer().publish('lobby', …)`
+   * addresses, and this scoped one, which {@link publishToRoom} addresses.
    */
   protected roomTopic(roomName: string): string {
     return this.gatewayKey === undefined ? roomName : `${this.gatewayKey}::${roomName}`;

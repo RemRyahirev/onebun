@@ -287,19 +287,22 @@ store, push out the entry for the request being replayed, replay it.
 | `oneBunAuthFailureStatus` | Maps a reason to 401 or 503 — a full or unreachable store is your outage, not the caller's fault |
 | `isSigningAuth` | Whether a scheme signs the request (`onebun`) rather than shaping it (`bearer`, `apikey`, `basic`, `custom`). Drives pipeline order: shaping runs before the URL is built, signing after |
 
-#### Upgrading from the previous scheme {#hmac-v1-migration}
+#### HMAC scheme versions {#hmac-v1-migration}
 
-The previous implementation signed one payload and verified another, so **only a literal `GET /`
-ever validated** — every POST and every path failed. It also covered neither the query string nor
-the body, compared signatures with `===`, and never recorded the nonce it generated, so a captured
-header set replayed for five minutes.
+The wire format is version 1 (since 0.6.0), and every signature header carries `v=1`. It is the
+only format the client produces and the only one the verifier accepts, so the caller and the
+callee must both speak it. Any other value fails with a named reason: an `X-OneBun-Signature`
+that holds a bare hex digest, the unversioned format, fails with
+`reason: 'legacy-unversioned-signature'`, one that names another version (`v=<n>;…`) fails with
+`'unsupported-version'`, and anything else with `'malformed-header'`. The single
+`X-OneBun-Signature` header is the whole protocol: `X-OneBun-Service-Id`, `X-OneBun-Timestamp`,
+`X-OneBun-Nonce` and `X-OneBun-Algorithm` are neither sent nor read.
 
-Fixing any one of those changes the wire format, so they changed together and the format now
-carries `v=1`. A caller on the old version fails against a new callee with
-`reason: 'legacy-unversioned-signature'` rather than mysteriously. The five `X-OneBun-*` headers
-are replaced by the single `X-OneBun-Signature` above, and `validateOneBunAuth` is gone —
-`verifyOneBunRequest` replaces it, and takes the request rather than a header set, because the
-method, path, query and body it must check are not in a header set.
+There is no `validateOneBunAuth`. Verify with `verifyOneBunRequest`, which takes the request
+rather than a header set, because the method, path, query and body it checks are not in a header
+set. It compares signatures in constant time. With a `nonceStore` it records each nonce it
+accepts, so a captured request is refused when it is replayed; with `nonceStore: false` it
+records nothing, and a replay inside the freshness window is accepted.
 
 ## Retry Configuration
 
@@ -552,9 +555,9 @@ your application, not to its caller.
 | `TIMEOUT_ERROR`, `ABORT_ERROR`, `FETCH_ERROR` | `details.details`, the raw error: Bun's connection error names the request URL |
 | `RESPONSE_PARSE_ERROR`, `RESPONSE_READ_ERROR`, `RESPONSE_DECODE_ERROR` | `details.details`: the upstream's body, or the raw error |
 
-The rest of the body is what it was: the status, `error`, `code`, `details.method`,
+The rest of the body is sent: the status, `error`, `code`, `details.method`,
 `details.duration`, `details.transport`, and every field of an error you wrote yourself. The error
-object keeps everything too: only the body the filter serializes is shorter.
+object keeps everything: only the body the filter serializes leaves the transport details out.
 
 ```typescript
 import { Controller, Get, Param } from '@onebun/core';
@@ -654,8 +657,8 @@ export const envelopeFilter = createExceptionFilter((error) => {
 
 - The client registers each error record it builds, with the keys that hold transport details, in a
   `WeakMap` kept on `globalThis` under `Symbol.for('onebun:requests-transport-details')`. Nothing is
-  added to the record: it reads, compares (`toEqual`), prints and snapshots as it did. Two copies of
-  `@onebun/requests` in one process share the registry.
+  added to the record: it reads, compares (`toEqual`), prints and snapshots as any plain record
+  does. Two copies of `@onebun/requests` in one process share the registry.
 - `withoutTransportDetails` is a `JSON.stringify` replacer. `JSON.stringify` hands it every value
   after `toJSON`, so it finds the client's record at any depth: under `details.originalError`, where
   `req()` puts the `FiberFailure` whose `toJSON` keeps a reference to the failure, and as the
@@ -666,8 +669,8 @@ export const envelopeFilter = createExceptionFilter((error) => {
   JSON round trip. Code that rebuilds a client failure into another error must pass the record by
   reference, or pick fields.
 - An upstream OneBun service's own error envelope (`{ success: false, error, code, details }` parsed
-  from its body) is not a transport detail: it is propagated as the error, `details` and all, as
-  before. `RESPONSE_PARSE_ERROR` with `details: 'Response text is empty'` is the client's own text
+  from its body) is not a transport detail: it is propagated as the error, `details` and all.
+  `RESPONSE_PARSE_ERROR` with `details: 'Response text is empty'` is the client's own text
   and is not withheld either.
 - Rejections of the Promise API (`client.get()`, `RequestsService.get()`, the service client) are a
   `FiberFailure`, which is not a `OneBunBaseError`: the default filter answers it as any unhandled
@@ -675,11 +678,11 @@ export const envelopeFilter = createExceptionFilter((error) => {
   failure's JSON, goes out whole like any unhandled error's message.
 - The application does not log a `OneBunBaseError` before the filter runs, so with the flag off the
   transport details reach neither the body nor the log. Catch the error and log what you need.
-- Up to 0.8.2 the default filter sent them wherever a `OneBunBaseError` carried them: `req()`'s
-  `REQUEST_FAILED` put the upstream's last `set-cookie`, its other headers, its body and the full
-  request URL under `details.originalError.cause.failure.details`, and an error built from a
-  failure's `details` (the `RequestsService` Effect API, `fromErrorResponse`, the mapping example
-  above) put them at the top of `details`. The Promise API's `FiberFailure` was masked then too.
+- Where the transport details sit: `req()`'s `REQUEST_FAILED` carries the upstream's last
+  `set-cookie`, its other headers, its body and the full request URL under
+  `details.originalError.cause.failure.details`, and an error built from a failure's `details`
+  (the `RequestsService` Effect API, `fromErrorResponse`, the mapping example above) carries them
+  at the top of `details`. The replacer leaves them out in both places.
 
 </llm-only>
 
@@ -716,11 +719,11 @@ not, and `retryOnTimeout` — off by default — decides whether it is replayed.
 
 <llm-only>
 
-Up to 0.8.1 a timeout during the body read was reported as `RESPONSE_READ_ERROR` (text body) or
-`RESPONSE_PARSE_ERROR` (JSON body) with the status as `code`. A stalled 200 looked like a malformed
-body, and a stalled 500 was replayed by `retryOn` as a server 500 regardless of
-`retryOnTimeout: false`. Code that matched those names to detect a slow upstream should match
-`getTransportFailureKind(e) === 'timeout'` instead; `details.statusCode` keeps the status.
+A timeout during the body read is never a `RESPONSE_READ_ERROR` or a `RESPONSE_PARSE_ERROR`, and
+its `code` is `0`, not the status: a stalled 200 does not look like a malformed body, and a stalled
+500 is not replayed by `retryOn`, only by `retryOnTimeout`. To detect a slow upstream, match
+`getTransportFailureKind(e) === 'timeout'`, not an error name or a status; `details.statusCode`
+keeps the status.
 
 </llm-only>
 
@@ -863,7 +866,7 @@ const report = await client.get('/reports/latest', undefined, { redirect: 'follo
 ```
 
 A request's own `redirect` wins over the client's. `redirect` is not one of the config markers, so
-`client.get('/login', { redirect: '/home' })` still sends `GET /login?redirect=%2Fhome`. Pass the
+`client.get('/login', { redirect: '/home' })` sends `GET /login?redirect=%2Fhome`. Pass the
 policy in the third argument, as in the last call above.
 
 Under `'manual'` the body of the `3xx` is read like any other body, under
@@ -909,27 +912,21 @@ policy — a `304`, for one, resolves as a success (see
 
 <llm-only>
 
-Up to 0.8.1 `fetch` followed redirects itself. On a hop to another origin it dropped only
-`Authorization`, `Cookie` and `Proxy-Authorization`, so the `apikey` header, `custom` auth
-headers, `X-OneBun-Signature` and every caller-set header reached the other origin, and a `POST`
-answered `307` re-sent its body there together with the key. The service client inherited this
-through `RequestsOptions`. Code that relied on a credential reaching a redirect target on another
-origin now gets the target's 401: call that origin with its own client.
+The client follows redirects itself: each hop is a `fetch` with `redirect: 'manual'`, so the
+header safelist of [Credentials stay with their origin](#redirect-headers) applies to every hop,
+a `307` that re-sends a `POST` body to another origin included. The service client gets the same
+through `RequestsOptions`. A redirect target on another origin receives no credential and
+typically answers 401: call that origin with its own client.
 
-A redirect that cannot be followed failed under other names. A redirect loop, and a `Location`
-that was not an http(s) URL, were a `FETCH_ERROR` (`'network'`), which `retryOnNetworkError`
-replayed. Bun's `fetch`
-follows up to 127 redirects, so under the default config a loop cost four attempts of 127 requests
-each — 508 requests. A redirect status without a `Location` was an `HTTP_ERROR` with the 3xx as
-`code`, which `retryOn` could replay. All three are now `REDIRECT_ERROR`, sent once — a loop costs
-21 requests.
+A redirect loop, a `Location` that is not an http(s) URL and a redirect status without a
+`Location` are all `REDIRECT_ERROR`, never a `FETCH_ERROR` or an `HTTP_ERROR`, so neither
+`retryOnNetworkError` nor `retryOn` replays them. A loop costs 21 requests, once.
 
-Redirect policy, from 0.8.3:
+Redirect policy:
 
-- Up to 0.8.2 there was no policy: every redirect was followed, and the only way to see a `3xx`
-  was a `fetch` of your own. The `'follow'` default keeps that behaviour.
-- Up to 0.8.2 a same-origin hop under `onebun` auth always carried the original signature and
-  failed with `signature-mismatch`. With an `audience` it now verifies. Without one nothing changed.
+- `redirect` exists since 0.8.2. Its default, `'follow'`, follows every redirect.
+- A same-origin hop under `onebun` auth verifies only when the auth names an `audience`. Without
+  one it carries the original signature and fails with `signature-mismatch`.
 - `redirect` is deliberately not a config marker of the two-argument `get`/`delete`/`head`/
   `options` form: `?redirect=` is a common query parameter (a login flow's return path), and
   making it a marker would silently turn that query into config.
@@ -1052,9 +1049,9 @@ It is never retried either, whatever `retryOn` lists. A request without a limit 
 
 <llm-only>
 
-- Up to 0.8.2 there was no limit. Every body was read whole with `response.text()`, and an error
-  status's body was copied whole into `details.details`: a 64 MiB `502` ended up inside the error,
-  and so inside whatever logged or serialized it.
+- `maxResponseBytes` exists since 0.8.2. Without it a body is read whole, however large, and an
+  error status's body is copied whole into `details.details`: a 64 MiB `502` ends up inside the
+  error, and so inside whatever logs or serializes it.
 - Why the client decodes instead of `fetch`: Bun's automatic decompression inflates a whole
   compressed chunk before a reader sees any of it. Measured on Bun 1.4.2, a 128 MiB gzip of zeros
   (130 KB on the wire) reached a reader that wanted 1 MiB as one 130 MB first chunk, and the
@@ -1066,7 +1063,7 @@ It is never retried either, whatever `retryOn` lists. A request without a limit 
   its own decompression, and `content-encoding`/`content-length` in `headers`. A default limit
   would be a breaking change and is left for 1.0.
 - `code` is the status that arrived, as for `RESPONSE_PARSE_ERROR` and `REDIRECT_ERROR`, and
-  `getTransportFailureKind()` is `undefined` for both new errors. They are excluded from retries by
+  `getTransportFailureKind()` is `undefined` for both errors. They are excluded from retries by
   name, so `retryOn: [500]` does not replay a `RESPONSE_TOO_LARGE` on a `500`, and `retryOn: [200]`
   does not replay one on a `200`.
 - One retry difference with and without a limit: a `503` whose compressed body is broken while its
@@ -1250,19 +1247,19 @@ the coding, and those two describe the compressed bytes.
 
 <llm-only>
 
-- Up to 0.8.3 there was no `responseType`. Every body the client read went through
-  `response.text()` or JSON parsing: a binary body came back with its non-UTF-8 bytes replaced by
-  `U+FFFD` (bytes `[0, 255, 128, 65]` became `"\u0000��A"`), and nothing resolved before
-  the whole body had arrived, so a server-sent event stream never resolved at all. The only way
-  out was a `fetch` of your own. `'auto'` is still the default and reads exactly as before.
-- `responseType` joined the config markers of the two-argument `get`/`delete`/`head`/`options`
-  form, as `maxResponseBytes` did: sent as `?responseType=stream`, it would leave a caller waiting
+- `responseType` exists since 0.8.2. Under `'auto'`, the default, a body goes through
+  `response.text()` or JSON parsing: a binary body comes back with its non-UTF-8 bytes replaced by
+  `U+FFFD` (bytes `[0, 255, 128, 65]` become `"\u0000��A"`), and nothing resolves before
+  the whole body has arrived, so a server-sent event stream never resolves at all. Use `'bytes'`
+  or `'stream'` for those.
+- `responseType` is one of the config markers of the two-argument `get`/`delete`/`head`/`options`
+  form, as `maxResponseBytes` is: sent as `?responseType=stream`, it would leave a caller waiting
   for a stream with a string that arrives only once the whole body has. A query that really has a
   `responseType` parameter takes the three-argument form, `get(url, { responseType }, config)`.
-  In the two-argument form the whole record is config, so its other keys stop being query data
-  too: `get('/search', { q: 'cats', responseType: 'json' })` now sends `GET /search`, where up to
-  0.8.3 it sent `GET /search?q=cats&responseType=json`. A value other than `'bytes'` or `'stream'`
-  reads as `'auto'`.
+  In the two-argument form the whole record is config, so its other keys are not query data
+  either: `get('/search', { q: 'cats', responseType: 'json' })` sends `GET /search`, not
+  `GET /search?q=cats&responseType=json`. A value other than `'bytes'` or `'stream'` reads as
+  `'auto'`.
 - Under `'stream'` `timeout` takes what it takes in the other modes, up to 2^53 - 1 ms. The
   countdown is kept in stretches of at most 2^31 - 1 ms, the longest delay `setTimeout` keeps,
   each re-armed for the rest; a single `setTimeout` past that fires after 1 ms, and would have
@@ -1385,16 +1382,15 @@ URL with the address in it:
 
 <llm-only>
 
-- Up to 0.8.3 there was no `connectAddress`. The workaround was a `fetch` of your own:
-  `fetch('https://<ip>/…', { headers: { Host: name }, tls: { serverName: name } })`, which is what
-  the client now does for every hop.
+- `connectAddress` exists since 0.8.2. For every hop the client calls
+  `fetch('https://<ip>/…', { headers: { Host: name }, tls: { serverName: name } })`.
 - Per request only; `RequestsOptions` has no `connectAddress`. A lookup answer is valid for the
   call it was made for, and a client-wide address would outlive it. The service client has no
   per-call config, so it cannot pin an address; use `HttpClient` for such a call.
-- `connectAddress` joined the config markers of the two-argument `get`/`delete`/`head`/`options`
-  form, as `maxResponseBytes` and `responseType` did: sent as `?connectAddress=203.0.113.7`, the
+- `connectAddress` is one of the config markers of the two-argument `get`/`delete`/`head`/`options`
+  form, as `maxResponseBytes` and `responseType` are: sent as `?connectAddress=203.0.113.7`, the
   request would go wherever DNS points, which fails open. In the two-argument form the whole record
-  is config, so its other keys stop being query data too. A query that really has a
+  is config, so its other keys are not query data either. A query that really has a
   `connectAddress` parameter takes the three-argument form.
 - `isIP` accepts an IPv6 zone (`fe80::1%eth0`), but a URL cannot hold one, and the `URL` hostname
   setter ignores a value it cannot hold without an error, so the request would have gone to the
@@ -1599,7 +1595,7 @@ const created = await usersClient.UsersController.create({ name: 'John' });
 
 <llm-only>
 
-Three mistakes this section exists to prevent, all of which typecheck-clean code used to make:
+Three mistakes this section exists to prevent:
 
 - `createServiceDefinition({ name, controllers: {...} })` — an object literal is rejected; the function
   signature is `createServiceDefinition(moduleClass)` and it throws
@@ -1661,8 +1657,8 @@ callee's handlers.
   string-indexed, and `ServiceDefinition['_controllers']` is `Map<string, ControllerDefinition>`,
   so even `ServiceClient<typeof definition>` accepts every controller name. Do not describe the
   client as type-safe, and do not claim a misspelled method or a wrong argument fails to compile.
-- Earlier docs advertised this client as typed and type-safe. It never was: the names come from the
-  module at run time, and nothing supplies argument or result types.
+- The client is neither typed nor type-safe: the names come from the module at run time, and
+  nothing supplies argument or result types.
 - `usersClient.users.findById(...)` (a lowercase key) compiles and then throws
   `Controller "users" not found in service definition`. The key is the controller class name.
 - `const user = await client.UsersController.findById(id)` compiles and gives the envelope, not the
@@ -1679,17 +1675,17 @@ A path parameter value fills exactly one segment of the route, and it is inserte
 encoding**. A value that would make the request reach a different route is refused: the call rejects
 with a `TypeError` naming the controller, the method and the parameter, and no request is made. Sent,
 such a value would carry this client's credentials to that other route — `'../admin/secret'` as a
-user id used to read `GET /admin/secret`.
+user id would read `GET /admin/secret`.
 
-| Refused value | What it would have done |
+| Refused value | What it would do if sent |
 |---|---|
-| `null`, `undefined` | sent the text `null` / `undefined` as the id |
-| contains `/`, `\`, `?` or `#` | ended the segment: the rest became more path, a query string or a fragment. A URL parser treats `\` like `/` |
-| `''`, `.`, `..` | an empty segment or a dot segment: `''` and `.` reached the sibling route (`GET /users/`), `..` climbed one level |
+| `null`, `undefined` | send the text `null` / `undefined` as the id |
+| contains `/`, `\`, `?` or `#` | end the segment: the rest becomes more path, a query string or a fragment. A URL parser treats `\` like `/` |
+| `''`, `.`, `..` | make an empty segment or a dot segment: `''` and `.` reach the sibling route (`GET /users/`), `..` climbs one level |
 | `%2e` for a dot: `%2e`, `%2e%2e`, `.%2E`, `%2E.` | the same as `.` and `..`: the URL parser reads `%2e` as a dot |
 | one of the above with a tab or newline inside (`'.\t.'`) or whitespace at the end (`'.. '`) | the same again: the URL parser deletes tabs and newlines, and trims the end of the URL, before it looks for dot segments |
 
-Every other value is sent unchanged, so a value that already routed correctly still does. To send a
+Every other value is sent unchanged. To send a
 value that contains `/`, `?`, `#` or `\`, percent-encode it: the router decodes the segment, and the
 handler receives the original text.
 
@@ -1745,7 +1741,7 @@ const hasFindById = 'findById' in usersClient.UsersController; // true
 const hasOrders = 'OrdersController' in usersClient; // false
 ```
 
-Reading a controller or method that the definition does not have still throws, at the line that
+Reading a controller or method that the definition does not have throws, at the line that
 reads it. A missing controller gives
 `Controller "OrdersController" not found in service definition. Available controllers: UsersController`,
 which lists the controllers there are. A missing method gives
@@ -1754,10 +1750,10 @@ which lists the controllers there are. A missing method gives
 <llm-only>
 
 - The names JavaScript reads on its own read as `undefined` at both levels: `then`, `toJSON` and
-  every symbol key. Before the fix, `then` threw, so `await Promise.resolve(client)` and any `async`
-  function returning the client rejected with `Controller "then" not found`. `JSON.stringify(client)`
-  also threw on `toJSON`. The `Object.prototype` members (`toString`, `valueOf`, `constructor`, ...)
-  read as they do on a plain object.
+  every symbol key. So `await Promise.resolve(client)` and an `async` function returning the client
+  resolve to the client rather than rejecting with `Controller "then" not found`, and
+  `JSON.stringify(client)` does not throw on `toJSON`. The `Object.prototype` members (`toString`,
+  `valueOf`, `constructor`, ...) read as they do on a plain object.
 - `'Name' in client` is the check that does not throw. Reading `client.Name` to probe for a
   controller throws when it is missing.
 - A handler that is itself named `then` or `toJSON` wins over the rule above, as an own property
@@ -1795,8 +1791,8 @@ interface SuccessResponse<T> {
 a `location`, a rate-limit header. Names are lower-cased. A header sent more than once is joined
 with `, `, as `Headers.get()` joins it, and `set-cookie` is joined the same way. After a redirect,
 they are the final hop's headers; under [`redirect: 'manual'`](#redirect-policy), the redirect's
-own, `location` included. An error's `details.headers` is collected as it always was: there,
-a `set-cookie` sent more than once keeps only its last value. Under
+own, `location` included. An error's `details.headers` is collected differently: there, a
+`set-cookie` sent more than once keeps only its last value. Under
 [`maxResponseBytes`](#max-response-bytes), both leave out `content-encoding` and `content-length`
 when the client decoded the body.
 
@@ -1835,11 +1831,11 @@ To log or snapshot an envelope, use `{ ...response }` or the fields you need.
 - It is deliberately invisible to serialization. Do not "fix" that by spreading it back in
   (`{ ...response, headers: response.headers }`): the result is enumerable, and a controller
   returning it sends the upstream's `set-cookie` to its caller in the body.
-- `toEqual`/`toStrictEqual` ignore it, so an assertion on the envelope's shape does not change;
+- `toEqual`/`toStrictEqual` ignore it, so an assertion on the envelope's shape does not see it;
   assert `response.headers?.['x-name']` directly.
 - `Bun.inspect`, `console.log` and bun:test's `toMatchSnapshot` DO show it, `set-cookie` and `date`
   included (`node:util`'s `inspect` does not). A snapshot of a raw envelope therefore changes on
-  upgrade and on every run, because `date` changes. A snapshot or a log of the envelope should use
+  every run, because `date` changes. A snapshot or a log of the envelope should use
   `{ ...response }` or pick the fields it needs.
 - `content-length` and `content-encoding` describe the bytes on the wire. `fetch` decompresses the
   body, so for a gzip answer `result` is the decoded body while `content-length` is the compressed
@@ -1855,7 +1851,7 @@ To log or snapshot an envelope, use `{ ...response }` or the fields you need.
   sends a controller's caller, with the request URL and the upstream's body (see
   [An uncaught client error and your caller](#uncaught-client-errors)). `exposeErrorDetails`, and a
   filter of your own that serializes the error without `withoutTransportDetails`, send it whole.
-- Up to 0.8.2 a success had no `headers`.
+- A success carries `headers` since 0.8.2.
 
 </llm-only>
 

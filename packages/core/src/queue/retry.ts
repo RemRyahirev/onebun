@@ -15,9 +15,9 @@ import type { DeadLetterOptions, RetryOptions } from './types';
 /**
  * Attempts a subscription makes when `retry` says nothing.
  *
- * One — today's observable behaviour. A higher default would silently turn every existing
- * throwing handler into several deliveries, and a non-idempotent side effect into several
- * side effects, on the strength of an upgrade nobody asked for. `retry.attempts` is opt-in.
+ * One: a handler that throws is delivered once. A higher default would silently turn every
+ * throwing handler into several deliveries, and a non-idempotent side effect into several side
+ * effects, without anyone having asked for retries. `retry.attempts` is opt-in.
  */
 export const DEFAULT_RETRY_ATTEMPTS = 1;
 

@@ -78,11 +78,10 @@ function effectivePathSegment(text: string): string {
  * The text that replaces one `:name` token, or a `TypeError` for a value that would make the
  * request reach a different route than the one the endpoint declares.
  *
- * The value is sent unencoded, as it always was, so a caller who percent-encodes it first keeps
- * working. Refusing is the one change: an unencoded `/`, `?`, `#` or `\` ends the segment, and
- * `..`, `.` or an empty segment moves the path up a level or onto a sibling route. The request
- * would carry this client's credentials to that route. The refusal happens before any request
- * is made.
+ * The value is sent unencoded, so a caller who percent-encodes it first gets exactly what they
+ * encoded. What is refused: an unencoded `/`, `?`, `#` or `\` ends the segment, and `..`, `.` or an
+ * empty segment moves the path up a level or onto a sibling route. The request would carry this
+ * client's credentials to that route. The refusal happens before any request is made.
  */
 function pathSegmentFor(endpoint: EndpointMetadata, name: string, value: unknown): string {
   const route = `${endpoint.httpMethod} ${endpoint.path}`;
@@ -190,8 +189,8 @@ const PROBED_NAMES: ReadonlySet<string> = new Set(['then', 'toJSON']);
  * The throw is kept away from reads the caller never wrote, which a plain object answers without
  * one:
  * - `then`, `toJSON` and every symbol key (`Symbol.toPrimitive`, `Symbol.iterator`, inspection
- *   hooks) read as `undefined`. A `then` that throws makes every promise that settles with the
- *   proxy reject, which is how an async factory returning the client used to fail;
+ *   hooks) read as `undefined`. A `then` that throws would make every promise that settles with
+ *   the proxy reject, so an async factory returning the client would fail;
  * - the members every object inherits from `Object.prototype` (`toString`, `valueOf`,
  *   `constructor`, `hasOwnProperty`, ...) read as inherited, which is what `String(client)` needs.
  *

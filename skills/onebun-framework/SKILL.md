@@ -119,8 +119,7 @@ never replaces it. A failure thrown in a service's or controller's `onModuleInit
 wrapped by Effect as a `FiberFailure` that keeps the MESSAGE but not the class: match on the
 message (`rejects.toThrow('...')`), never `instanceof` / `toBe(thrown)` — same caveat as
 `DrizzleStartupError` in `references/drizzle.md`. The catch needs no `stop()` (calling it runs no
-step again; it only closes what the rollback left open for a retry, as every `stop()` does), and the process ends by itself, so exit non-zero or a failed boot reports success. (Older
-versions left the process alive instead: the queue connection and the metrics sampler held it.)
+step again; it only closes what the rollback left open for a retry, as every `stop()` does), and the process ends by itself, so exit non-zero or a failed boot reports success.
 The rollback closes the telemetry the application BUILT (its metrics registry, trace provider, and the
 OTLP transport of its own logger — so what the catch logs via `app.getLogger()` reaches the console only)
 and leaves open what you PASSED IN: a `loggerLayer`, `tracing.spanProcessors` (flushed, not shut down),
@@ -138,8 +137,7 @@ for the boot to settle, then does what a `stop()` right after it would: the full
 that resolved — the queue connection and listener the boot opened after the `stop()` included — or the
 post-rollback close after one that failed. `start()` still resolves, or rejects with its own error; the
 destroy hooks run once, after `onModuleInit`. The wait counts toward `shutdownTimeout`; a boot that
-outlives it is stopped when it settles. (Older versions ran the sequence beside the boot, and whatever
-the boot acquired afterwards stayed open for good.) Against a boot that never settles, `stop()` resolves
+outlives it is stopped when it settles. Against a boot that never settles, `stop()` resolves
 only after the whole `shutdownTimeout` (15 s by default — give a test's application a shorter one) and
 releases only the metrics sampler; a queue the boot already connected stays open, so end the process
 yourself (`process.exit`) once you have given up on it. To abort a boot from inside, throw from the hook
@@ -186,7 +184,7 @@ one service's `/metrics` returns that service's series with that service's `defa
 nothing else. `metrics.prefix` is a naming choice, not the isolation mechanism. Process-level
 series (CPU, memory, event loop) describe the process and so appear on every service's endpoint —
 aggregate them with `max`, not `sum`. A metric registered directly against prom-client's global
-`register` is no longer served by any application; build them with `this.metrics.createCounter()`,
+`register` is not served by any application; build them with `this.metrics.createCounter()`,
 or pass `metrics: { registry: register }` to put one application back on the global registry.
 
 **Calling another service: `createServiceClient(createServiceDefinition(UsersModule), { url })`.**
@@ -242,8 +240,8 @@ not exit is reported at debug as `Shared Redis still held by N: <call sites>`.
 
 **One shared Redis configuration per process.** `SharedRedisProvider.configure()` refuses a second
 call naming a different `url`, `keyPrefix`, `reconnect` or `tls` — there is a single shared
-connection, so a second target cannot be honoured and used to be accepted silently, leaving two
-services on one database under one prefix. For a genuinely different target build a dedicated
+connection, so a second target cannot be honoured, and accepting it would leave two services on one
+database under one prefix. For a genuinely different target build a dedicated
 client (`SharedRedisProvider.createClient({ url })`, or the consumer's own options); in tests call
 `await SharedRedisProvider.reset()` between configurations.
 
@@ -372,9 +370,7 @@ wherever the service is needed.
 imports, fails `start()` with `OneBunModuleImportCycleError` (a `OneBunBootstrapError`; match on
 `name`): `Module import cycle: A -> B -> A`, plus the import path from the root when the cycle
 starts below it. There is no `forwardRef`: move what the modules on the cycle share into a module
-that imports none of them. Older releases overflowed the stack instead (`RangeError: Maximum call
-stack size exceeded`, naming no module), so on those, check `imports` for a cycle first when boot
-dies with that RangeError.
+that imports none of them. `OneBunModuleImportCycleError` exists since 0.8.2.
 
 **Import order is not semantic.** A `@Global()` module's services reach every module regardless
 of where it sits in an `imports` array, and whether or not the importing module lists it at all.
@@ -389,10 +385,7 @@ only the cycle — break it by extracting a third service, there is no `forwardR
 waiting on a same-module provider that was never constructed (no `@Service()` visible to this copy
 of `@onebun/core`, or its constructor threw — see `Failed to create service <Name>` in the log)
 throws `DependencyResolutionError` naming that dependency; an `@Optional()` parameter gets
-`undefined` and a warning instead. Through 0.8.1, four or more providers listed consumer-first
-could fail with a `CircularDependencyError` whose chain was no cycle (`C <-> D`), and a provider
-with an abstract-typed parameter listed before the implementation failed at once;
-dependencies-first was the workaround, and on 0.8.1 it still is.
+`undefined` and a warning instead.
 
 ## Services
 
@@ -438,8 +431,8 @@ Key rules:
   parameter as the class, or annotate it `@Inject(ConcreteClass)`. To audit an existing codebase
   use `isInjectableParamType` — the container's own predicate — not a filter for `undefined`,
   which finds nothing: `getConstructorParamTypes(C)?.flatMap((t, i) => isInjectableParamType(t) ? [] : [i])`.
-  The framework warns at startup when such a hole is FOLLOWED by a resolved parameter (the shape
-  that used to corrupt silently); read it from a test with `TestingModule.captureLogs()`
+  The framework warns at startup when such a hole is FOLLOWED by a resolved parameter; read it
+  from a test with `TestingModule.captureLogs()`
 - **Lifecycle interfaces are type-only exports** — import them as `type OnModuleInit`, otherwise
   TS1484 under `verbatimModuleSyntax`, which `bun create @onebun` writes into the scaffolded tsconfig
 - **`implements OnModuleInit` is a style rule, not a runtime requirement.** The framework
@@ -449,7 +442,7 @@ Key rules:
   never fires
 - `this.config` is available in the constructor (after `super()`), so use it there for
   config-derived fields instead of hardcoding defaults in class properties.
-  `createTestService` supports this since 0.8.1 — see Testing below
+  `createTestService` supports this — see Testing below
 - All defaults belong in `envSchema` (config.ts), not in service code
 - Use `onModuleInit` only for async initialization that can't be done in constructor
 - `QueueService.publish()` works from `onModuleInit` and from `onModuleDestroy` — the boot message
@@ -635,7 +628,7 @@ together. To say something specific to a client, throw an `HttpException` with y
 The second row sends the error's `details` whole, except the transport details of an error the HTTP client
 produced — the upstream's headers (`set-cookie`), the request URL, a redirect's `Location`, the upstream's
 body — which `withoutTransportDetails` drops at any depth unless `exposeErrorDetails` is on. So an uncaught
-`client.req()` failure no longer forwards the upstream's cookies or the internal URL to your caller; a copy
+`client.req()` failure does not forward the upstream's cookies or the internal URL to your caller; a copy
 of the client's record (`{ ...e.details }`) is yours and is sent whole.
 
 ## Guards, Exception Filters, Security
@@ -800,10 +793,9 @@ See `references/queues-and-nats.md` for the full queue system reference includin
 NATS/JetStream configuration, message guards, and scheduled jobs.
 
 Queue handlers are discovered only in `controllers` (not `providers`). A class in `providers`
-carrying queue decorators is reported at startup — one warning naming the class and every
-decorated method — instead of being skipped in silence, and when those are the only handlers the
-disabled-queue debug line says so rather than claiming none were found. The queue system is
-enabled when **any** of these holds:
+carrying queue decorators is not registered, and startup reports it — one warning naming the class
+and every decorated method; when those are the only handlers, the disabled-queue debug line says
+so. The queue system is enabled when **any** of these holds:
 
 1. a controller carries a queue decorator (`@Subscribe`, `@Cron`, `@Interval`, `@Timeout`), or
 2. `queue.enabled: true` is set in `ApplicationOptions`, or
@@ -897,8 +889,7 @@ Default adapter is `InMemoryQueueAdapter`. Configure via `ApplicationOptions.que
 Setting `queue.adapter` (or `queue.options` / `queue.redis`) enables the queue by itself — a
 producer-only app that publishes but has no `@Subscribe` handler anywhere still gets a live
 adapter. The adapter is therefore constructed and connected during `app.start()`, so such an
-app fails to boot when the broker is unreachable instead of silently discarding every
-`publish()`.
+app fails to boot when the broker is unreachable.
 
 **Type-safe adapter config:** When you pass a class constructor as `adapter`, the `options`
 field is automatically typed to match the adapter's constructor parameter — no type assertions needed.
@@ -942,7 +933,7 @@ Key points about JetStream:
   no create, no update. That is how a stream owned by a platform operator or another team is
   declared; a tenant-scoped user usually has no write on it and the reconcile pass would fail the
   boot. `manageStreams: false` is the same switch adapter-wide, and a per-stream `manage` overrides
-  it in either direction. The cost: a missing or differently-bound unmanaged stream is no longer
+  it in either direction. The cost: a missing or differently-bound unmanaged stream is not
   caught at `app.start()`, only at the first `publish()`/`subscribe()`
 - `inboxPrefix` is required on any broker that grants the client SUBSCRIBE on its own inbox space
   only (`_INBOX_<tenant>_<app>.>`): every JetStream operation is request/reply over the inbox, so
@@ -962,7 +953,7 @@ Key points about JetStream:
   `storage`/`retention` cannot be changed in place (delete the stream to change them). The stamp lives in
   stream metadata, so this needs nats-server 2.10+; every failure emits `onError` as well as throwing
 - Replicas may all boot at once: a create that loses to a peer's (10058 for a stream, 10148 for a
-  consumer) is reconciled against the peer's resource once instead of failing startup — no staggered rollout
+  consumer) is reconciled against the peer's resource once and startup goes on — no staggered rollout is needed
 
 ## Testing
 
@@ -1015,17 +1006,12 @@ const { instance, logger } = createTestMiddleware(AdminAuthMiddleware, {
 const response = await instance.use(request, async () => new Response('ok'));
 ```
 
-**Since 0.8.1 all three helpers set the ambient init context before `new`**, so a class that reads
+**All three helpers set the ambient init context before `new`**, so a class that reads
 `this.config` or `this.logger` in its constructor — the shape this skill prescribes above — builds
 correctly. They are one builder under three names: each initialises whichever base the class extends
 (service, controller, middleware, interceptor, WebSocket gateway). A `config` option handed to a
-class that extends none of them and exposes no `initialize*` method now throws instead of being
-stored on a config the instance never receives.
-
-Before 0.8.1 the helpers constructed first and initialised afterwards, so `this.config` was
-`undefined` during the constructor (`TypeError: undefined is not an object`), and middleware had no
-helper at all — `this.config` and `this.logger` stayed undefined for the instance's whole life,
-which a defensive `try { this.config.get(…) } catch` turned into a silently passing suite.
+class that extends none of them and exposes no `initialize*` method throws, naming the class.
+`createTestMiddleware` exists since 0.8.1.
 
 For a full boot, `TestingModule` also sets the init context — hand it the schema:
 `TestingModule.create({ ... }).setOptions({ envSchema }).compile()`. Without `envSchema` the
@@ -1095,8 +1081,8 @@ await postgres.stop();
 All three accept `labels` (applied before the container is created — sweep a killed run's
 leftovers by them), and a start that fails after Docker `create` removes its own container and
 rethrows the original error unchanged. The removal needs testcontainers >= 10.3.0 and is
-feature-detected (the peer range stays `>=10.0.0`); on 10.0–10.2 a failed start behaves as in
-0.8.1. See `references/testing.md` → "Failed starts, labels and sweeping".
+feature-detected (the peer range stays `>=10.0.0`); on 10.0–10.2 there is no removal — a failed
+start leaves its container behind and rethrows the start error unchanged. See `references/testing.md` → "Failed starts, labels and sweeping".
 
 ## Modifying Existing Code
 
@@ -1149,8 +1135,8 @@ at least in the areas you're modifying.
 | `import { createNativeWsClient } from '@onebun/core'` in a browser bundle | Fails to build (`cluster`, `v8`). Use the browser's `WebSocket` with the native frames and `?token=`, or `socket.io-client` |
 | `export type AppConfig = typeof envSchema` | Use `InferConfigType<typeof envSchema>` — `typeof` gives schema shape, not resolved value types |
 | Adding `reflect-metadata` to a OneBun app "for DI", or ordering imports around it | Not needed: `@onebun/core` installs the complete global Reflect Metadata API itself. A library that brings its own (tsyringe, `@simplewebauthn/server`) works in any import order; if the app imports `reflect-metadata` directly, require >= 0.2.2 |
-| `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Constructor types are read OWN, never inherited: a subclass without its own constructor gets no dependencies, and startup warns `Child declares no constructor of its own ...`. Repeat `constructor(dep: Dep) { super(dep); }` and keep the decorator (an undecorated subclass emits no metadata at all, so an undecorated guard, interceptor, filter or middleware needs BOTH the constructor and a decorator: `@Service()`, or `@Middleware()` for middleware). An undecorated class whose own `constructor()` takes no parameters gets the same warning, worded for both shapes (`... (or, without a decorator, one whose parameter types were not recorded) ...`): harmless if that constructor passes the parent's dependencies itself. Through 0.8.1 it DID inherit when `reflect-metadata` was imported before the core — after upgrading, fix every class that warning names |
-| Undecorated `class StrictGuard extends BaseAuthGuard { constructor(t: TokenStore) { super(t); } }` (guard, interceptor, filter or middleware) | No types are emitted for an undecorated class and DI never borrows the parent's, so it receives NO dependencies; startup warns `StrictGuard declares a constructor with parameters, but no types were emitted ...`. Add `@Service()` to it — `@Middleware()` to middleware, which is what the warning names for it. Through 0.8.1 with `reflect-metadata` imported before the core it received the parent's types by position, which worked when the parameters matched — after upgrading, fix every class that warning names |
+| `@Service() class Child extends Parent {}` expecting the parent's constructor dependencies | Constructor types are read OWN, never inherited: a subclass without its own constructor gets no dependencies, and startup warns `Child declares no constructor of its own ...`. Repeat `constructor(dep: Dep) { super(dep); }` and keep the decorator (an undecorated subclass emits no metadata at all, so an undecorated guard, interceptor, filter or middleware needs BOTH the constructor and a decorator: `@Service()`, or `@Middleware()` for middleware). An undecorated class whose own `constructor()` takes no parameters gets the same warning, worded for both shapes (`... (or, without a decorator, one whose parameter types were not recorded) ...`): harmless if that constructor passes the parent's dependencies itself. This holds in any import order of `reflect-metadata` — fix every class that warning names |
+| Undecorated `class StrictGuard extends BaseAuthGuard { constructor(t: TokenStore) { super(t); } }` (guard, interceptor, filter or middleware) | No types are emitted for an undecorated class and DI never borrows the parent's, so it receives NO dependencies; startup warns `StrictGuard declares a constructor with parameters, but no types were emitted ...`. Add `@Service()` to it — `@Middleware()` to middleware, which is what the warning names for it. This holds in any import order of `reflect-metadata`, even when the parameters match the parent's — fix every class that warning names |
 
 ## Checklist for New Services
 

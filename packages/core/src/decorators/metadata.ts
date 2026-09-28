@@ -121,18 +121,18 @@ export function setConstructorParamTypes(target: Function, types: (Function | un
  * process that speaks the same API: tsyringe, class-transformer, inversify, and any
  * `reflect-metadata` a dependency imports on its own (`@simplewebauthn/server` does, via tsyringe).
  *
- * It used to be three functions — `metadata`, `getMetadata`, `defineMetadata` — that ignored the
- * property key and the prototype chain. That shape broke both generations of reflect-metadata
- * loaded after it (onebun-FB-33):
+ * A partial API breaks both generations of reflect-metadata loaded after it. Take the three
+ * functions an older copy of this module installs — `metadata`, `getMetadata`, `defineMetadata` —
+ * which ignore the property key and the prototype chain:
  *
  * - 0.2.x sees an existing `Reflect.defineMetadata`, wraps the global as a legacy "fallback
- *   provider" and calls its `getOwnMetadataKeys` on the first lookup. There was none, so every
- *   later decorator threw, and classes decorated earlier lost their `design:paramtypes`.
- * - 0.1.x only fills the functions that are missing, so it added `getOwnMetadata` next to our
- *   `defineMetadata`: one target's metadata split across two stores, and a tsyringe `@inject`
- *   token written through one half was never read back through the other.
+ *   provider" and calls its `getOwnMetadataKeys` on the first lookup. There is none, so every
+ *   later decorator throws, and classes decorated earlier lose their `design:paramtypes`.
+ * - 0.1.x only fills the functions that are missing, so it adds `getOwnMetadata` next to the
+ *   existing `defineMetadata`: one target's metadata splits across two stores, and a tsyringe
+ *   `@inject` token written through one half is never read back through the other.
  *
- * What is installed now is the complete API — all nine functions, with per-property storage and
+ * What is installed is the complete API — all nine functions, with per-property storage and
  * the proposal's prototype walk — plus the provider registry reflect-metadata 0.2.x shares between
  * its copies (`Symbol.for('@reflect-metadata:registry')`). A 0.2.x loaded later finds the registry,
  * registers its own store beside ours and routes every target to whichever store holds it, so
@@ -518,7 +518,7 @@ function createReflectMetadataApi(registry: MetadataRegistry, ownProvider: Metad
  *
  * "Already there" means ANY of the nine functions: a complete implementation owns the metadata
  * decorated so far, and a partial one (an older copy of this module, which installed three) is
- * left exactly as it was rather than mixed with a second store — the two-copies case is WI-274.
+ * left exactly as it was rather than mixed with a second store.
  */
 function installGlobalReflectMetadata(): void {
   const reflect = globalReflect();
@@ -636,17 +636,17 @@ export function isInjectableParamType(type: Function | undefined): type is Funct
  * emitted.
  *
  * Entry `i` describes parameter `i`, and an entry that names nothing usable is `undefined` in
- * its own slot. That is the whole contract, and it used to be violated: this function `.filter()`ed
- * the array, which COLLAPSES it. An interface-typed parameter — `Object` at runtime — was not
- * reported as unresolvable, it was DELETED, and every later parameter slid one slot left. The
- * service then constructed successfully holding the wrong object in several fields, with nothing
- * logged and nothing thrown (reported as onebun-FB-18; the line, as onebun-FB-19).
+ * its own slot. That is the whole contract. Filtering the array would COLLAPSE it: an
+ * interface-typed parameter — `Object` at runtime — would not be reported as unresolvable but
+ * DELETED, and every later parameter would slide one slot left. The service would then construct
+ * successfully holding the wrong object in several fields, with nothing logged and nothing thrown.
  *
- * The damage went past the arguments. `@Optional()` and `@Inject()` are keyed by the DECLARED
- * parameter index, so against a shortened array both landed on the wrong parameter. A
- * `@Inject(TOKEN)` sitting after a dropped entry silently fell through to plain tag resolution.
+ * The damage would go past the arguments. `@Optional()` and `@Inject()` are keyed by the DECLARED
+ * parameter index, so against a shortened array both would land on the wrong parameter, and a
+ * `@Inject(TOKEN)` sitting after a dropped entry would silently fall through to plain tag
+ * resolution.
  *
- * Nothing is filtered here now. Deciding that `Object` cannot be resolved is the resolver's job —
+ * Nothing is filtered here. Deciding that `Object` cannot be resolved is the resolver's job —
  * see {@link isInjectableParamType} — and it can only be done per index, which is precisely what
  * a filter destroys.
  */

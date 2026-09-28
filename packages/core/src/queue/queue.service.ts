@@ -173,7 +173,8 @@ export class QueueService {
    *
    * `disconnectAdapter: false` leaves the transport open, which is what lets `onModuleDestroy`
    * publish a goodbye message: the application stops the consumers before the modules tear down
-   * and disconnects afterwards. Defaults to true, so every other caller is unchanged.
+   * and disconnects afterwards. Defaults to true: a plain `stop()` disconnects the adapter once the
+   * consumers and the scheduler have stopped.
    */
   async stop(options?: { disconnectAdapter?: boolean }): Promise<void> {
     if (!this.started) {

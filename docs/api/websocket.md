@@ -264,12 +264,10 @@ socket.addEventListener('message', (message) => {
 
 - Do not recommend `createNativeWsClient` or `createWsClient` for a frontend bundle. `import { … }
   from '@onebun/core'` pulls the whole server graph (prom-client, envs, trace), and `bun build
-  --target browser` fails on `cluster` and `v8`. The docs used to recommend it "for frontend in a
-  monorepo"; that was wrong.
-- The WebSocket clients are not type-checked against the gateway. Earlier docs said the client was
-  generated from the gateway decorators and that a changed server event broke the client's build.
-  Neither is true: `createWsClient` reads gateway names at run time, and event names and payloads
-  are untyped.
+  --target browser` fails on `cluster` and `v8`. That holds for a frontend in a monorepo too.
+- The WebSocket clients are not type-checked against the gateway. The client is not generated from
+  the gateway decorators, and a changed server event does not break the client's build:
+  `createWsClient` reads gateway names at run time, and event names and payloads are untyped.
 - All gateway clients of one `createWsClient` share its single connection to `url`. The server
   chooses the gateway from that connection (its path, or the Socket.IO namespace), not from the name
   used on the client.
@@ -367,7 +365,7 @@ An upgrade goes to the gateway whose declared `path` covers the request most spe
 `/chat` serves `/chat` and `/chat/room1`, and does NOT serve `/chatterbox`.
 
 The default path — `@WebSocketGateway()` with no options — is `/`, and `/` covers every path. An
-application that declares no path keeps accepting clients on whatever URL they connect to.
+application that declares no path accepts clients on whatever URL they connect to.
 
 Two gateways declared at the same path are told apart by `namespace`; a client that states none
 is bound to the first and a warning names the gateway that took it.
@@ -395,13 +393,13 @@ With the Redis storage adapter, a remote event reaches the gateway that publishe
 other: the published payload carries the publishing gateway's key, exactly as a stored client
 record does.
 
-A payload or a record that carries NO key — written by an instance running a build from before
-the key existed — is accepted only where it cannot be ambiguous: an application that registered
-exactly one gateway. There is nothing for it to be confused with there, so a rolling deploy keeps
-working. With more than one gateway it is refused and the receiving gateway says so once:
-delivering it would reach clients of a gateway that did not publish it, which is the thing the
-key exists to prevent. This is the same rule the upgrade path already applies — a connection
-whose gateway cannot be established is refused rather than guessed at.
+Payloads and records carry the key since 0.7.0. One that carries NO key — written by an instance
+running an older build — is accepted only where it cannot be ambiguous: an application that
+registered exactly one gateway. There is nothing for it to be confused with there, so a rolling
+deploy keeps working. With more than one gateway it is refused and the receiving gateway says so
+once: delivering it would reach clients of a gateway that did not publish it, which is the thing
+the key exists to prevent. This is the same rule the upgrade path applies — a connection whose
+gateway cannot be established is refused rather than guessed at.
 
 For a room fan-out through Bun's native pub/sub — one call, fan-out in the runtime rather than
 a send per socket — use `publishToRoom(room, event, data)`. It addresses a topic scoped to this
@@ -410,9 +408,9 @@ gateway, so a room name used by two gateways does not collide.
 ::: warning
 `getWsServer().publish(topic, …)` is NOT fenced. Bun's native pub/sub topics are a process-wide
 namespace and sockets are subscribed to the raw room name, so a message published that way
-reaches any socket subscribed to that topic regardless of which gateway admitted it. That is
-unchanged on purpose — existing `publish('lobby', …)` calls keep working exactly as they did.
-Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
+reaches any socket subscribed to that topic regardless of which gateway admitted it. That is on
+purpose: `publish('lobby', …)` addresses the raw topic `lobby`, whatever gateway its subscribers
+belong to. Use `emitToRoom()` or `publishToRoom()` when you want the gateway boundary respected.
 :::
 
 `namespace` distinguishes two gateways that would otherwise share a path. A client selects one by
@@ -447,9 +445,8 @@ transport stays open, so the client may name another namespace.
 :::
 
 Because a Socket.IO client is bound to a gateway at upgrade — provisionally, but bound — that
-gateway's `authenticate` hook runs for it. It did not before: no gateway was resolved on the
-Socket.IO branch, so the hook was skipped. A hook that returns `false` will now refuse a
-Socket.IO connection that previously succeeded.
+gateway's `authenticate` hook runs for it, exactly as for a native client: a hook that returns
+`false` refuses the Socket.IO connection.
 
 ### Authentication
 
@@ -479,8 +476,8 @@ Three outcomes, because a gateway usually needs all of them:
 
 The hook receives the bearer token from `?token=` or the `Authorization` header, plus the upgrade request for anything the token does not carry — cookies, headers, the peer address. A hook that throws refuses the upgrade.
 
-::: warning Upgrading from 0.4.4 or earlier
-`WsAuthGuard` could never pass: the framework parsed the token and then marked every client `authenticated: false`, and nothing anywhere set it to `true`. A handler guarded with it was unreachable for every client. If you worked around that by setting `client.auth.authenticated` in an `@OnConnect` handler, that still works — `authenticate` is the supported way to do it now.
+::: tip Setting `client.auth` in `@OnConnect`
+Without `authenticate`, the framework parses the token into `client.auth` as `{ authenticated: false, token }`, and nothing else sets `authenticated` to `true`. Setting `client.auth.authenticated` yourself in an `@OnConnect` handler also lets the client past `WsAuthGuard`, but `authenticate` is the supported way to do it.
 :::
 
 ## Event decorators
@@ -624,7 +621,7 @@ Use `@UseWsGuards(...guards)` on handlers. Built-in: `WsAuthGuard`, `WsPermissio
 
 `WsAuthGuard` and `WsPermissionGuard` read what the gateway's [`authenticate`](#authentication) hook attached to the client. Without that hook no client is authenticated and no client has permissions, so both deny everyone — the guards check an identity, they do not establish one.
 
-Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically. Before 0.4.5 a guard written above the handler decorator was silently discarded and the handler ran unguarded.
+Decorator source order does not matter: `@UseWsGuards` above or below `@OnMessage` behaves identically.
 
 ## Interceptors
 
@@ -670,9 +667,8 @@ application's own so that `prefix` applies.
 
 ::: warning
 `type: 'redis'` makes Redis a startup dependency: a connection that cannot be opened fails
-`start()` rather than falling back to memory. Falling back is what the option did for its whole
-life before this — it was read by no code at all, so an application configured for Redis ran in
-memory and said nothing.
+`start()` rather than falling back to memory, so an application configured for Redis never runs
+in memory without saying so.
 :::
 
 Shutdown removes the clients THIS instance was serving. It does not clear the namespace, so a

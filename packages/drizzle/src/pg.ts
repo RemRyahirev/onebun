@@ -8,9 +8,9 @@
  * import { jsonbParam, jsonParam } from '@onebun/drizzle/pg';
  * ```
  *
- * The builders are a bare re-export: this package adds no column types of its own. The
- * `json`/`jsonb` encoding fix lives in the encoders rather than in a column type so it covers
- * `drizzle-orm/pg-core` imports too.
+ * The builders are a bare re-export: this package adds no column types of its own. The patch that
+ * makes `json`/`jsonb` values encode correctly lives in the encoders rather than in a column type,
+ * so it covers `drizzle-orm/pg-core` imports too.
  *
  * `jsonbParam()`/`jsonParam()` are the one thing this subpath adds. They live here, not in the
  * package root, because the SQL they render (`$n::text::jsonb`) is PostgreSQL-specific.

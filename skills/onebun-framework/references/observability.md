@@ -60,7 +60,7 @@ on `BaseService` / `BaseController` — resolves to the innermost open span.
   the header names, marked `isRemote`, so two services share one trace in the backend. A malformed or
   all-zero inbound context starts a fresh root — `Tracer.startSpan` discards a parent that fails
   `isSpanContextValid`, which is why there is no second copy of that check in OneBun.
-- **Still flat with no `exportOptions.endpoint`**: the request takes the lightweight path and no HTTP span
+- **Flat with no `exportOptions.endpoint`**: the request takes the lightweight path and no HTTP span
   exists for methods to hang off.
 - **A log line names the span it was written from.** `getCurrentTraceContext()` resolves from the
   OpenTelemetry active span first and the request scope second — the same order the outgoing `traceparent`
@@ -69,11 +69,9 @@ on `BaseService` / `BaseController` — resolves to the innermost open span.
   callee's lines carry the callee's span rather than the caller's; and queue handlers, `@Cron` jobs and
   WebSocket callbacks — which have no request scope at all — carry a trace id whenever a span is open,
   which is whenever the handler is traced.
-  Two defects used to sit here. The request scope was filled with a context minted separately from the span,
-  so every HTTP log line named a trace that existed nowhere (measured: span on `4074598c…`, logs on
-  `38b97f3e…`). And the fallback meant to cover the non-HTTP contexts guarded on `getCurrentTraceContext`, a
-  method the trace service does not have — it is `getCurrentContext` — so it never fired.
-- **Sampling reads differently now.** The sampler is `ParentBased`, so the decision is made once at the root
+  The request scope holds the HTTP span's own context, so the trace id on a request's log lines is the trace
+  its span is on — copied out of a log line, it finds the span in the backend.
+- **Sampling is decided per trace.** The sampler is `ParentBased`, so the decision is made once at the root
   and inherited: `samplingRate: 0.1` means one request in ten with all of its spans, not one span in ten.
 
 ## Outgoing Trace Propagation
@@ -90,25 +88,22 @@ needs both or a `traceparent`.
 - Suppress with `tracing: false` on the client or on one call.
 - `@onebun/requests` has no `@onebun/*` dependencies (core depends on it, not the reverse), so the seam is
   `setTraceContextProvider()`, which `OneBunApplication` registers at construction. Outside an application,
-  register your own or nothing propagates. It used to be `globalThis.__onebunCurrentTraceContext`, which
-  nothing ever assigned — so every outgoing call went out untraced, silently, and one global cell would
-  have been the wrong shape anyway with concurrent requests.
+  register your own or nothing propagates.
 - `client.get(url, { tracing: false })` reaches the config arm of the overload, and so do `delete`, `head`
   and `options` — the four share one resolver (`resolveQueryOverload` in `client.ts`, also used by the
-  `RequestsService` layer). Up to 0.8.1 the other three kept an inline four-name list, so
-  `delete(url, { tracing: false })` sent `?tracing=false` with the trace headers still attached. The markers
+  `RequestsService` layer). The markers
   are `method`/`headers`/`timeout`/`auth`/`tracing`/`metrics`/`maxResponseBytes`/`responseType`/`connectAddress`; `retries`, `query` and
   `redirect` are deliberately excluded (`get('/login', { redirect: '/home' })` is query data, even though
   `redirect` is also the redirect-policy config key), so a config holding only those takes the
   three-argument form: `get(url, undefined, { redirect: 'error' })`. A third argument always makes the second the query, `undefined`
-  included: `get(url, undefined, config)` applies `config` (up to 0.8.1 it was dropped). One marker makes the WHOLE
+  included: `get(url, undefined, config)` applies `config`. One marker makes the WHOLE
   record config, so a record whose keys the app did not choose (built from an incoming query string) must never be
   the second of two arguments: `{ q, tracing: 'x', url: '/admin' }` changes the path (the host, without `baseUrl`),
   `{ q, connectAddress: '10.0.0.5' }` picks the dialled IP. Use `get(url, query, {})`; a third argument that is
   `undefined` is still the two-argument form.
 - **HEAD, 204 and 304 answers are not parsed**: `result` is `undefined` and `statusCode` says which arrived,
-  whatever the `content-type`. A 304 resolves as a success. Up to 0.8.1 `client.head()` failed with
-  `RESPONSE_PARSE_ERROR` against every JSON endpoint (Bun keeps `application/json` on the HEAD answer).
+  whatever the `content-type` — Bun keeps `application/json` on a HEAD answer, so `client.head()` against a
+  JSON endpoint resolves `result: undefined`, never `RESPONSE_PARSE_ERROR`. A 304 resolves as a success.
 - **Success headers**: `SuccessResponse.headers` is the upstream's response headers (final hop after
   redirects), names lower-cased, a repeated header joined with `, ` as `Headers.get()` does — `set-cookie`
   too, so it cannot be split back reliably. Read `head.headers?.etag`, `created.headers?.location`. It is
@@ -118,7 +113,7 @@ needs both or a `traceparent`.
   in to "keep" it (that makes it serializable again). `toEqual` ignores it; assert the header directly.
   `Bun.inspect`, `console.log` and `toMatchSnapshot` DO show it (`set-cookie`, `date`): log or snapshot
   `{ ...response }` or the fields you need. `RequestsService` returns `result` only (no headers);
-  `HttpClient` and the service client carry them. Up to 0.8.2 a success had no headers at all.
+  `HttpClient` and the service client carry them. `SuccessResponse.headers` exists since 0.8.2.
 - **An `HTTP_ERROR`'s `details.headers` is a different record**: enumerable, and a repeated `set-cookie` keeps
   only its last value. The error object keeps it, `details.url` and the upstream body; the default exception
   filter leaves those out of the caller's body when a client error escapes a controller (`withoutTransportDetails`,
@@ -128,11 +123,11 @@ needs both or a `traceparent`.
   `code: 0`, `getTransportFailureKind(e) === 'timeout'`, with the status that arrived in
   `details.statusCode` and `details.phase: 'body'`. So a stalled 5xx follows `retryOnTimeout` (off by
   default), not `retryOn`; a 5xx that arrives whole, even with an unparsable body, still follows `retryOn`.
-  Up to 0.8.1 it was `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR` with the status as `code`. Detect a slow
-  upstream by the transport kind, never by those names.
+  Detect a slow upstream by the transport kind, never by `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR` or the
+  status in `code`.
 - **Interrupting a `*Effect` call aborts the fetch** (`Effect.timeout`, `Effect.race`, `Fiber.interrupt`),
-  in either phase; the upstream sees the close at once. Up to 0.8.1 the fetch ran on until the client's own
-  `timeout`. The interrupted Effect reports the interruption, not an `ErrorResponse`.
+  in either phase; the upstream sees the close at once, without waiting for the client's own `timeout`. The
+  interrupted Effect reports the interruption, not an `ErrorResponse`.
 - **Redirects are followed by the client, not by `fetch`** (`redirect: 'manual'` per hop): 301/302/303/307/308,
   up to 20, `Location` resolved against the URL that answered. Methods change as in `fetch` (301/302 POST and
   303 non-HEAD become a body-less GET without `Content-Type`; 307/308 keep method and body bytes). One
@@ -145,15 +140,12 @@ needs both or a `traceparent`.
   `traceparent`, `X-Trace-Id`, `X-Span-Id`, plus `Content-Type` while a body goes along; `127.0.0.1` and
   `localhost` are different origins, and a dropped header never comes back later in the chain. So no auth
   (bearer, basic, apikey header, custom, onebun) and no header from `RequestsOptions.headers`/`config.headers`
-  reaches another origin — if it needs credentials, give it its own client. Up to 0.8.1 `fetch` followed and
-  stripped only `Authorization`/`Cookie`/`Proxy-Authorization`: the apikey header, custom auth headers, the
-  HMAC signature and caller headers leaked. A loop (21st redirect), a missing `Location` or a non-http(s) one
-  fails `REDIRECT_ERROR` with `code` = that 3xx and `details.reason`
+  reaches another origin — if it needs credentials, give it its own client. A loop (21st redirect), a missing
+  `Location` or a non-http(s) one fails `REDIRECT_ERROR` with `code` = that 3xx and `details.reason`
   `'too-many-redirects' | 'missing-location' | 'invalid-location'` (plus `'other-host'` under `connectAddress`,
-  and `'refused-by-policy'` under `redirect: 'error'`); it is never retried, whatever `retryOn`
-  says (0.8.1: `FETCH_ERROR` replayed by `retryOnNetworkError` — Bun's own cap is 127 hops, so a loop cost
-  508 requests — or `HTTP_ERROR` 3xx). No signature is ever made for another origin, nor for a hop back on
-  the first origin after one.
+  and `'refused-by-policy'` under `redirect: 'error'`); it is never retried, whatever `retryOn` or
+  `retryOnNetworkError` says. No signature is ever made for another origin, nor for a hop back on the first
+  origin after one.
 - **Redirect policy** `redirect: 'follow' | 'error' | 'manual'` (type `RedirectPolicy`) on `RequestsOptions`
   and per request (`config.redirect` wins; `undefined` = not set; default `'follow'`). Applies only to
   301/302/303/307/308 — a 300 or 304 is treated the same under every policy. `'error'`: `REDIRECT_ERROR`,
@@ -166,7 +158,7 @@ needs both or a `traceparent`.
   `RequestsService` returns `result` alone, so under `'manual'` it yields only the 3xx body — no status, no
   `Location`: read redirects through `HttpClient` (or the service client, which returns the envelope).
   `RequestsService` fails a refused redirect with a `OneBunBaseError` (`code` 500 as for every non-mapped
-  status, the 3xx in `details.status`). Up to 0.8.2 every redirect was followed.
+  status, the 3xx in `details.status`). The `redirect` option exists since 0.8.2.
 - **`maxResponseBytes` caps the DECODED body while it is read** (client option, or per request; the request's
   wins, `Infinity` is the same as unset — that request takes `fetch`'s path). Off by default — an uncapped
   request keeps `fetch`'s path exactly. Set, the request goes out with `decompress: false` and
@@ -187,8 +179,8 @@ needs both or a `traceparent`.
   decoded the body, both a success's `headers` and an `HTTP_ERROR`'s `details.headers` omit
   `content-encoding`/`content-length`. Costs ~20% throughput on small gzip JSON, which is why
   there is no default cap before 1.0. A `NaN` cap refuses every non-empty body.
-- **`responseType: 'auto' | 'bytes' | 'stream'`** (type `ResponseType`, per request only; default `'auto'` =
-  JSON or text as before). `'bytes'`: `result` is a `Uint8Array`, byte for byte (content coding undone, JSON not
+- **`responseType: 'auto' | 'bytes' | 'stream'`** (type `ResponseType`, per request only, since 0.8.2; default
+  `'auto'` = JSON or text). `'bytes'`: `result` is a `Uint8Array`, byte for byte (content coding undone, JSON not
   parsed) — `'auto'` turns non-UTF-8 bytes into U+FFFD. `'stream'`: the call resolves AT THE HEADERS with
   `result: ReadableStream<Uint8Array>`; type it as the call's generic (`get<ReadableStream<Uint8Array>>(url,
   undefined, { responseType: 'stream' })`). Under `'stream'` `timeout` is NOT a whole-response deadline: it bounds
@@ -203,12 +195,11 @@ needs both or a `traceparent`.
   `for await`) — the connection stays open with the stream. HEAD/204/304 → `result: undefined` in every mode.
   Pass a stream on with `new Response(r.result, { headers: { 'Content-Type': ... } })`, never forwarding
   `content-encoding`/`content-length`. `responseType` IS a config marker (two-argument `get(url, { responseType })`
-  is config; before, it went out as `?responseType=`) — the whole record then becomes config, so a query record
+  is config, never sent as `?responseType=`) — the whole record then becomes config, so a query record
   that also carries `responseType` loses all its keys; use `get(url, query, config)`. The stream's countdown is
   re-armed in stretches of at most 2^31 - 1 ms (`setTimeout` fires a longer delay after 1 ms), so any `timeout`
-  `AbortSignal.timeout` takes (up to 2^53 - 1) works under `'stream'` too. Up to 0.8.3 every body was text, and
-  nothing resolved before the body ended.
-- **`connectAddress: '<ip>'`** (per request only, a config marker) connects to an address the app resolved and
+  `AbortSignal.timeout` takes (up to 2^53 - 1) works under `'stream'` too.
+- **`connectAddress: '<ip>'`** (per request only, a config marker, since 0.8.2) connects to an address the app resolved and
   validated itself (SSRF / DNS-rebinding defence), with no lookup: `fetch` gets the URL with the IP as its host
   (IPv6 bracketed, canonical), `Host` = the URL's `host[:port]` (a caller-set `Host` is sent as is), and over
   HTTPS `tls.serverName` = the URL's host name, so SNI is the name and the certificate is verified against the
@@ -224,16 +215,15 @@ needs both or a `traceparent`.
   `HTTPS_PROXY` gets `CONNECT <ip>:<port>`, `NO_PROXY` is matched against the IP (an entry naming the host does
   not exempt it). A `custom` auth interceptor may set or replace it, not remove it: a config it returns without
   one (rebuilt as `{ method, url, headers }`, or `connectAddress: undefined`) keeps the caller's. Allow/deny
-  policy and the lookup stay in the app; the service client has no per-call config, so use `HttpClient`. Up to 0.8.3 the only way was a `fetch` of your own with `Host` + `tls.serverName`.
+  policy and the lookup stay in the app; the service client has no per-call config, so use `HttpClient`.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header
-  names, so the two services share one trace in the backend as well as one trace id in the logs. The one
-  remaining gap is the callee's log `spanId` — see the Span Nesting section.
-- **The outgoing metric records the real upstream status.** `onebun_http_requests_total` used to label every
-  success `status_code="200"` (`result.success ? HttpStatusCode.OK : result.code`), so 201, 202 and 204 were
-  all reported as 200 and an alert on non-200 responses never fired. `SuccessResponse.statusCode` now carries
-  what the upstream returned, and the label is derived from it.
+  names, so the two services share one trace in the backend as well as one trace id in the logs. The callee's
+  log lines name the callee's own span, with the caller's span as `parentSpanId` — see the Span Nesting section.
+- **The outgoing metric records the real upstream status.** `SuccessResponse.statusCode` carries what the
+  upstream returned, and the `status_code` label of `onebun_http_requests_total` is derived from it, so 201,
+  202 and 204 are reported as themselves, not as 200.
 
 ## Auto-Tracing (traceAll)
 
@@ -319,7 +309,7 @@ Implementation details:
   - Retries never overlap — the exporter holds the one batch it is retrying — so a dead collector cannot
     accumulate in-flight copies. Overflow past that is dropped by the processor's own `maxQueueSize`.
   - The final flush in `app.stop()` is an ordinary export under the same budget, and each shutdown phase is
-    guarded, so a collector that is down at shutdown no longer aborts the rest of the sequence.
+    guarded, so a collector that is down at shutdown does not abort the rest of the sequence.
   - A local OTel Collector agent (app → `localhost:4318` → backend) owning a durable retry queue is still the
     stronger setup for a remote/SaaS backend; the in-process retry covers a blip, not an outage.
 - `batchSize` has **no framework default**: `initTracerProvider` forwards it as `maxExportBatchSize` with no
@@ -376,24 +366,21 @@ Key points:
 - `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT` enable OTLP logging **on their own**, with
   no `loggerOptions` at all: `OneBunApplication` always builds through `makeLoggerFromOptions()`. Priority is
   `loggerOptions.otlpEndpoint` > `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` > `OTEL_EXPORTER_OTLP_ENDPOINT`;
-  `resolveOtlpLogEndpoint(options?)` is that resolution exported as a function.
-  (Before this was fixed, the env path was inert — the app exported zero logs however the env was set, and the
-  workaround was `loggerOptions: {}`. That workaround is now unnecessary, not wrong.)
+  `resolveOtlpLogEndpoint(options?)` is that resolution exported as a function. An empty `loggerOptions: {}` is
+  not needed for the env variables to take effect (it is harmless).
 - `service.name` / `service.version` land on **whichever** path enabled OTLP. Sources in order:
   `loggerOptions.otlpResourceAttributes` if you set it, else `tracing.serviceName` / `tracing.serviceVersion`,
   else `OTEL_SERVICE_NAME`, else `onebun-service` / `1.0.0` — the same fallbacks `initTracerProvider` uses, so
   logs and spans from an unconfigured service land under one name rather than two.
-- `shutdownLogger()` flushes **every** transport built in the process, not only the most recent one. A
-  multi-service application builds one logger per child; a single active-transport slot used to drop all but
-  the last, leaving their flush timers rescheduling forever with nobody holding a reference.
-  `shutdownLoggerLayer(layer)` closes only the transport of that `makeLoggerFromOptions()` layer (a separate
-  function, so `shutdownLogger` keeps its zero-argument signature and still works point-free). A failed
+- `shutdownLogger()` flushes **every** transport built in the process, not only the most recent one — a
+  multi-service application builds one logger per child, and each of them is flushed and its flush timer
+  stopped. `shutdownLoggerLayer(layer)` closes only the transport of that `makeLoggerFromOptions()` layer (a separate
+  function, so `shutdownLogger` has a zero-argument signature and works point-free). A failed
   `app.start()` uses it for the logger the application built, so a `loggerLayer` passed in options (built once,
   shared across retry attempts) and a multi-service sibling's logger keep exporting; `app.stop()` — including a
   `stop()` after a failed start — still closes them all. A `loggerLayer` you built with OTLP holds the process
   open via its flush timer until one of those runs.
-- **Delivery failures are inspected.** `flush()` never looked at the response, so a 503, a 404 and a success
-  were indistinguishable and a misconfigured endpoint swallowed every line. Now: transport failures and
+- **Delivery failures are inspected.** `flush()` reads the response status: transport failures and
   408/429/500/502/503/504 put the batch back at the head of the buffer for the next flush; any other status
   discards it (a 400 will be refused identically); `otlpMaxBufferedRecords` (default 1000) caps what is held,
   dropping oldest first; every loss goes to `otlpOnExportFailure`, which defaults to stderr — it cannot go
@@ -441,7 +428,7 @@ Note the asymmetry above: traces fall back to `'http://localhost:4318'`, logs do
 `OTEL_EXPORTER_OTLP_ENDPOINT` unset, `otlpEndpoint` is `undefined` and you get traces but no OTLP logs — give
 the log endpoint the same `|| 'http://localhost:4318'` fallback if you want them to move together.
 
-The `otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT` line is now redundant: drop `loggerOptions` entirely
+The `otlpEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT` line is redundant: drop `loggerOptions` entirely
 and the same variable enables OTLP logging with the service attributes filled in from `tracing`. Keep it only
 when the log endpoint differs from the trace endpoint.
 
@@ -465,9 +452,9 @@ Backend (Bun)
 5. Queue adapter disconnect
 6. **Trace service shutdown** — flushes pending spans
 7. `onModuleDestroy()` hooks
-8. Shared Redis **release** — drops one refcounted lease; the client is disconnected only when the last
-   consumer lets go. Not a `disconnect()`: an outright disconnect meant the first application to stop in
-   multi-service mode tore the client out from under its still-running siblings
+8. Shared Redis — the application releases nothing: the cache and the queue adapter give their holds back
+   in their own `close()` / `disconnect()`, and the connection closes when the last holder in the process
+   lets go. A debug line names any remaining holder (in multi-service mode, the still-running siblings)
 9. `onApplicationDestroy(signal)` hooks
 10. DI scope disposal (after every destroy hook, so hooks can still read service instances), then the final
     "application stopped" log line
@@ -490,6 +477,5 @@ budget, `stop()` resolves with `Shutdown timed out after <n>ms while waiting for
 one thing stopped at that point (`System metrics collection stopped`): left running, it alone kept alive
 a process whose boot never settles.
 
-This changed: the sequence used to be a chain of bare awaits, so the first rejection abandoned everything
-after it and the only trace was one `Shutdown sequence failed` line. The step most likely to reject is the
-one whose collector is going down with the pod, which made it the common case rather than an edge one.
+The per-step guard matters because the step most likely to reject is the trace flush, whose collector is
+often going down with the pod — a common case, not an edge one.

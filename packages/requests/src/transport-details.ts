@@ -15,8 +15,8 @@
  * Which keys of a client error's `details` record hold transport details.
  *
  * A registry beside the record rather than a mark on it, so the record reads, compares, copies and
- * prints exactly as it did: a property, even a non-enumerable symbol, shows in `Bun.inspect`,
- * `console.log` and a `toMatchSnapshot` snapshot. A `WeakMap` holds no record alive.
+ * prints exactly as an unregistered one does: a property, even a non-enumerable symbol, shows in
+ * `Bun.inspect`, `console.log` and a `toMatchSnapshot` snapshot. A `WeakMap` holds no record alive.
  *
  * On `globalThis` behind `Symbol.for`, so that two copies of this package in one process — the
  * application's and the one `@onebun/core` resolved — read each other's entries: the client that

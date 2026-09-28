@@ -120,8 +120,8 @@ export interface StreamDefinition {
    * reconciles its CONSUMER on that stream, which is a separate grant
    * (`$JS.API.CONSUMER.*.<stream>.>`) and the one a consuming tenant is normally given.
    *
-   * The cost is that a stream that is missing or bound to different subjects is no longer caught
-   * at `app.start()`; it surfaces at the first `publish()` or `subscribe()` instead.
+   * The cost is that a stream that is missing or bound to different subjects is not caught at
+   * `app.start()`; it surfaces at the first `publish()` or `subscribe()` instead.
    *
    * @see docs:api/queue.md
    */

@@ -92,14 +92,13 @@ class AdminController extends BaseController {
 }
 ```
 
-**Decorator source order does not matter** — `@UseGuards` above or below `@Get`/`@Delete` behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`. Before 0.4.5 a route-level `@UseGuards` written ABOVE the method decorator was silently discarded and the route was reachable; code written against 0.4.4 or earlier in that order needs auditing, not rewriting.
+**Decorator source order does not matter** — `@UseGuards` above or below `@Get`/`@Delete` behaves identically, and the same holds for `@UseInterceptors` and `@UseFilters`.
 
 The same `@UseGuards` works on a `@WebSocketGateway` and on a queue consumer, and merges with the
 transport-specific `@UseWsGuards` / `@UseMessageGuards` on the same handler — shared `@UseGuards`
 first. **Every guard merge deduplicates by identity**, on all three transports: controller+route,
-class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once.
-Through 0.6.0 only WebSocket did this and the other two concatenated, so a guard named at two levels
-ran twice — doubled cost and doubled side effects for anything that logs, counts or calls out.
+class+handler, and `@UseGuards` + `@UseWsGuards`/`@UseMessageGuards`. A guard named twice runs once,
+so a guard that logs, counts or calls out does it once per invocation, at whatever levels it is named.
 
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved
@@ -124,11 +123,10 @@ undecorated guard with constructor parameters receives `undefined` for every one
 nothing fails at startup either: there are no parameter types left to fail on. That holds for an
 undecorated guard that EXTENDS a decorated base guard too: DI reads a class's OWN
 `design:paramtypes`, never its parent's, so the subclass does not receive the base's dependencies
-by position. Decorate the subclass and declare its constructor to have it injected. Startup warns
+by position — whatever the import order of `reflect-metadata`, and even when its parameters match
+the base's. Decorate the subclass and declare its constructor to have it injected. Startup warns
 about such a subclass (`<Guard> declares a constructor with parameters, but no types were emitted
-...`). Through 0.8.1, with `reflect-metadata` imported before the core, it DID receive the base's
-types by position, so one whose parameters matched the base's worked there and gets nothing since
-0.8.2: add `@Service()` to it.
+...`): add `@Service()` to it.
 
 **An INSTANCE passed to `@UseGuards` is shared, a CLASS is not.** `@UseGuards(new SomeGuard(...))`
 hands over one object built at decoration time, and that single object serves every concurrent
@@ -204,10 +202,9 @@ without parameter decorators; the two execution paths behave identically. Filter
 and the first one to return a Response answers. **Returning `undefined` declines** and hands the
 error one level out; that is the supported way to say "not mine". A filter that THROWS is treated
 as a bug: reported with its name and answered by the default filter, without consulting the rest
-of the chain — so never rethrow to decline. Through 0.6.0 only the most specific filter ran and a
-rethrow reached the default filter, which is what the docs used to call "pass to next filter".
+of the chain — so never rethrow to decline.
 
-Interceptors now sit INSIDE that boundary: a handler error reaches
+Interceptors sit INSIDE that boundary: a handler error reaches
 `try { await next() } catch` before any filter sees it.
 
 Middleware is NOT filtered, by design: it post-processes the response `next()` returns, so
@@ -321,8 +318,7 @@ any depth — `client.req()` nests the failure under `details.originalError` —
 of your own that serializes such an error, or puts its `details` into a body of its own (a
 `ValidationError` from an upstream's 422 carries the client's record as `details`):
 `JSON.stringify(body, withoutTransportDetails)`. Filters see only throws: a handler that RETURNS a
-client failure (`return outcome.left`) sends it whole as its `result`. Up to 0.8.2 the default
-filter sent them.
+client failure (`return outcome.left`) sends it whole as its `result`.
 
 `httpEnvelope: true` overrides the status column: every row answers HTTP 200 and the real status
 lives in `code`.
@@ -360,12 +356,8 @@ const app = new OneBunApplication(AppModule, { maxRequestBodySize: 1024 * 1024 }
 
 **Configuring `cors` is enough.** A browser preflight is answered before routing, so no
 `@Options()` route is needed on the paths a frontend calls. A path declaring only `@Post()` answers
-its preflight correctly, and so does a path that does not exist.
-
-This changed: previously the preflight never entered the middleware chain — Bun's method map
-rejected the verb and the fallback returned a bare `404` with no `Access-Control-*` headers — so a
-cross-origin `POST` to a `@Post()`-only path was blocked at preflight even with `cors` configured
-correctly. Any advice to "declare `@Options()` on every path a browser will preflight" is obsolete.
+its preflight correctly, and so does a path that does not exist. Do not declare `@Options()` on a
+path just so a browser's preflight succeeds — CORS answers it.
 
 Four details worth keeping straight:
 

@@ -1015,12 +1015,12 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * Close the connection a failed `connect()` opened, before its error reaches the caller.
    *
    * `disconnect()` returns early while `connected` is false, and `connected` is set only once the
-   * streams are reconciled. So a failure after the connection opened — a declared stream the
-   * server refuses (`replicas: 3` on a single node, a narrowing or create-only change), or a
-   * server without JetStream — left the socket open with nothing able to close it: the adapter
-   * said it was disconnected, and the process never exited. Nothing was subscribed yet, so there
-   * is nothing to wait for; bounded all the same, and never thrown, so the connect error stays
-   * the one the caller sees.
+   * streams are reconciled. So without this, a failure after the connection opened — a declared
+   * stream the server refuses (`replicas: 3` on a single node, a narrowing or create-only change),
+   * or a server without JetStream — would leave the socket open with nothing able to close it: the
+   * adapter would say it was disconnected, and the process would never exit. Nothing was subscribed
+   * yet, so there is nothing to wait for; bounded all the same, and never thrown, so the connect
+   * error stays the one the caller sees.
    */
   private async releaseFailedConnect(): Promise<void> {
     this.js = null;
@@ -1604,11 +1604,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    * and must: a delete has to name exactly the stream the subscription bound to, or it cannot
    * decommission what `subscribe()` created.
    *
-   * It used to have a private strict twin, `requireStreamForSubject`, byte-identical except for
-   * the no-match branch — the twin threw, the public one fell back to the first declaration. Two
-   * copies of one predicate, and neither handled ambiguity: both returned whichever candidate
-   * came first. Now that the public resolver refuses instead of guessing, the twin had no reason
-   * to exist, and one implementation cannot drift from itself.
+   * There is no strict twin of the resolver for this path: `resolveStreamForSubject` refuses a
+   * pattern that no declared stream binds, or that more than one does, instead of guessing, so
+   * the one implementation serves both and cannot drift from itself.
    *
    * @param pattern - The subscription pattern the consumer was created for.
    * @param group - The `group` the subscription declared.
@@ -1808,8 +1806,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
    *
    * An undeclared key must be absent, never present-and-undefined: the client merges an
    * update with a shallow `Object.assign`, so `max_msgs: undefined` overwrites whatever the
-   * server had. That is how a stream pre-provisioned with limits used to be wiped on every
-   * connect. The `retention`/`storage`/`num_replicas` fallbacks are create-only — `update`
+   * server had, and would wipe the limits of a pre-provisioned stream on every connect. The
+   * `retention`/`storage`/`num_replicas` fallbacks are create-only — `update`
    * cannot change the first two, and applying a default on update would rewrite a value the
    * application never asked about.
    */

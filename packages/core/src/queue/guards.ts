@@ -220,11 +220,10 @@ export class MessageTraceGuard implements MessageGuard {
  * ```
  *
  * DELIBERATELY OUTSIDE DI. The children are constructed by THIS constructor, at decoration
- * time, long before any module exists — so a child class with a constructor dependency gets
- * nothing, exactly as before. Giving them DI would mean changing this public constructor, and
- * `new MessageAllGuards([...])` as documented must keep working untouched. Pass an already
- * constructed child, or list the guards directly on `@UseGuards(A, B)` where each one is
- * resolved individually with full DI.
+ * time, long before any module exists: each class child is built with `new guard()`, so a
+ * child class with a constructor dependency gets nothing, and `new MessageAllGuards([...])` needs no
+ * module. Pass an already constructed child, or list the guards directly on `@UseGuards(A, B)`
+ * where each one is resolved individually with full DI.
  * @see docs:api/queue.md
  */
 export class MessageAllGuards implements MessageGuard {
@@ -279,11 +278,10 @@ export class MessageAllGuards implements MessageGuard {
  * ```
  *
  * DELIBERATELY OUTSIDE DI. The children are constructed by THIS constructor, at decoration
- * time, long before any module exists — so a child class with a constructor dependency gets
- * nothing, exactly as before. Giving them DI would mean changing this public constructor, and
- * `new MessageAllGuards([...])` as documented must keep working untouched. Pass an already
- * constructed child, or list the guards directly on `@UseGuards(A, B)` where each one is
- * resolved individually with full DI.
+ * time, long before any module exists: each class child is built with `new guard()`, so a
+ * child class with a constructor dependency gets nothing, and `new MessageAnyGuard([...])` needs no
+ * module. Pass an already constructed child, or list the guards directly on `@UseGuards(A, B)`
+ * where each one is resolved individually with full DI.
  * @see docs:api/queue.md
  */
 export class MessageAnyGuard implements MessageGuard {
@@ -323,7 +321,7 @@ export class MessageAnyGuard implements MessageGuard {
 /**
  * Execute an array of guards and return whether all passed.
  *
- * A guard that THROWS denies. `@UseGuards` reaches queue consumers now, so a guard written
+ * A guard that THROWS denies. `@UseGuards` reaches queue consumers, so a guard written
  * against an HTTP request can land here and blow up on `getRequest()`; failing open would turn
  * that into a silent authorization bypass on every message. HTTP deliberately does the
  * opposite — a throw there travels to the exception filters so `throw new HttpException(401)`

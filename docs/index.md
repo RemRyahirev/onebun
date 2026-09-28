@@ -357,7 +357,7 @@ Only `@onebun/core` is required — it includes `logger`, `envs`, `requests`, `m
 ```json
 {
   "dependencies": {
-    "@onebun/core": "^0.4.0"
+    "@onebun/core": "^0.8.0"
   }
 }
 ```
@@ -366,9 +366,9 @@ Add optional packages as needed:
 
 ```json
 {
-  "@onebun/drizzle": "^0.4.0",
-  "@onebun/cache": "^0.4.0",
-  "@onebun/nats": "^0.4.0",
-  "@onebun/docs": "^0.4.0"
+  "@onebun/drizzle": "^0.8.0",
+  "@onebun/cache": "^0.8.0",
+  "@onebun/nats": "^0.8.0",
+  "@onebun/docs": "^0.8.0"
 }
 ```

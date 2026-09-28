@@ -30,12 +30,12 @@ import { CacheInterceptor } from '@onebun/cache';
 2. Class implementing `Interceptor` — constructor DI works, provided the class carries a **class** decorator (`@Service()` is the conventional one; a method decorator does not count)
 3. Class extending `BaseInterceptor` — same DI, plus `this.logger` and `this.config`
 
-**Interceptor lifetime:** an interceptor class is instantiated when handlers are REGISTERED, once per class per application, and that one instance serves every route, gateway handler and subscription that names it. Through 0.6.0 it was once per registration SITE, so a class covering three routes was three instances and any state it kept was silently per route. Never keep per-request state on `this` — guards are the opposite (per-invocation) and that habit does not carry over
+**Interceptor lifetime:** an interceptor class is instantiated when handlers are REGISTERED, once per class per owning module — the module whose `controllers` declare the controller, gateway or queue consumer — and that one instance serves every route, gateway handler and subscription of that module that names it: a class covering three routes of one module is one instance, and any state it keeps is shared across all three. A global interceptor from `ApplicationOptions.interceptors` resolves through each handler's owning module too, so an application whose handlers live in three modules builds three instances of it. Never keep per-request state on `this` — guards are the opposite (per-invocation) and that habit does not carry over
 
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
 - `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only, on HTTP routes and WS handlers; on a `@Subscribe` handler the method form is silently dropped, put queue interceptors on the class
-- Global via `ApplicationOptions.interceptors` — every transport: HTTP routes, WebSocket message handlers and `@Subscribe` queue subscribers. Merged outermost, ahead of gateway/class-level and handler-level lists. Through 0.6.0 it was HTTP only, and the other two silently ran without it
+- Global via `ApplicationOptions.interceptors` — every transport: HTTP routes, WebSocket message handlers and `@Subscribe` queue subscribers. Merged outermost, ahead of gateway/class-level and handler-level lists. A global interceptor therefore also runs on WebSocket and queue contexts: narrow with `isHttpContext(ctx)` before reading `ctx.getRequest()`
 - All three can be combined; onion wrapping order: global (outermost) → controller/gateway → handler (innermost)
 
 **Interceptors work across all transports:**
@@ -57,7 +57,7 @@ Use `isHttpContext(ctx)`, `isWsContext(ctx)`, `isQueueContext(ctx)` for type-saf
 **Key differences from NestJS:** No RxJS — uses `next: () => Promise<unknown>` instead of Observable.
 
 **Execution order:**
-- HTTP: middleware → guards[→filters] → [filters→ interceptors → handler] → response. Filters sit ABOVE the interceptor chain and below the middleware chain: an interceptor wrapping `await next()` in a try/catch sees a handler error, an error from parameter extraction or schema validation, and it can rethrow to let the filters answer. An error the interceptor itself throws is filtered the same way. Guards are outside the chain, so a guard rejection is filtered without reaching an interceptor. Through 0.6.0 the handler was already filtered by the time `next()` returned, so that catch block was dead code on HTTP — and only on HTTP, since queue and WebSocket have no filter layer.
+- HTTP: middleware → guards[→filters] → [filters→ interceptors → handler] → response. Filters sit ABOVE the interceptor chain and below the middleware chain: an interceptor wrapping `await next()` in a try/catch sees a handler error, an error from parameter extraction or schema validation, and it can rethrow to let the filters answer. An error the interceptor itself throws is filtered the same way. Guards are outside the chain, so a guard rejection is filtered without reaching an interceptor. Queue and WebSocket have no filter layer; there the same catch sees the handler's error too.
 - WS: guards → interceptors(handler)
 - Queue: guards → interceptors(handler)
 
@@ -160,16 +160,19 @@ class AddHeaderInterceptor implements Interceptor {
 ```
 
 An interceptor is instantiated when handlers are registered, never per request: **one instance per
-class per application**, shared by every route, WebSocket handler and queue subscription that names
-it — so a counter, a limiter or a cache on `this` counts what you expect it to. Passing an
-*instance* instead of a class opts out: the caller owns it, and two instances of the same class stay
-two. Never hold per-request state on `this` — keep it in locals inside `intercept()`. Guards are the
-opposite: passing the guard CLASS constructs the guard per invocation, so state on `this` is safe
-there.
+class per module**, shared by every route, WebSocket handler and queue subscription that names it
+in that module. The module is the one whose `controllers` declare the controller, gateway or
+consumer, and the instance resolves its dependencies from that module's DI scope. A counter, a
+limiter or a cache on `this` therefore counts across one module's handlers; a class named by
+handlers in two modules is two instances, with two counters. Passing an *instance* instead of a
+class opts out: the caller owns it, and two instances of the same class stay two. Never hold
+per-request state on `this` — keep it in locals inside `intercept()`. Guards are the opposite:
+passing the guard CLASS constructs the guard per invocation, so state on `this` is safe there.
 
-Through 0.6.0 the instance was per registration site: a class covering three routes was constructed
-three times, each route permanently bound to its own copy, and a global interceptor got one instance
-per route in the application.
+Construction is per class and module, not per route: a class covering three routes of one module
+is one instance. A class listed in `ApplicationOptions.interceptors` resolves through the owning
+module of each handler it wraps, so it is built once per module that has handlers — not once per
+route, and not once per application.
 
 ### With DI
 
@@ -307,10 +310,10 @@ class OrderController extends BaseController {
 Pass interceptors in `ApplicationOptions.interceptors`. They wrap every **HTTP route**, every
 **WebSocket message handler** and every **`@Subscribe` queue subscriber** in the application, and
 they wrap outermost — ahead of a gateway-level or class-level `@UseInterceptors`, which is the same
-order HTTP routes use. Through 0.6.0 the list was merged at HTTP route registration only, so a
-global logging or metrics interceptor covered HTTP and silently skipped the other two transports.
+order HTTP routes use. A global logging or metrics interceptor therefore covers all three
+transports; one that reads `ctx.getRequest()` must narrow with `isHttpContext(ctx)` first.
 
-Scheduled handlers (`@Cron`, `@Interval`, `@Timeout`) are still not wrapped — see the pipeline
+Scheduled handlers (`@Cron`, `@Interval`, `@Timeout`) are not wrapped — see the pipeline
 table below.
 
 ```typescript
@@ -473,8 +476,8 @@ class AuditInterceptor extends BaseInterceptor {
 }
 ```
 
-This applies to guards, filters and middleware alike. `CacheInterceptor` shipped without it and
-answered 500 on every GET it wrapped.
+This applies to guards, filters and middleware alike. An undecorated `CacheInterceptor` would answer
+500 on every GET it wraps, which is why it carries `@Service()`.
 :::
 
 ## Execution Order

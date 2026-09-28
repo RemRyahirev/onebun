@@ -215,13 +215,13 @@ queue handler, a scheduled job or a WebSocket callback — which have no request
 is also what the framework's own logger and its outgoing `traceparent` header use, so the three
 can never name different spans.
 
-::: warning It used to read a process global
-This section showed `(globalThis as any).__onebunTraceService` and called
-`traceService.getCurrentTraceContext()` — a method that does not exist; the trace service spells
-it `getCurrentContext()`, and that one reads a fiber-local value which a fresh
-`Effect.runPromise` cannot see anyway. Anything copied from the old snippet returned `undefined`
-or `null` every time. The global is also written once per application and never cleared, so in a
-process running several the last one constructed wins it.
+::: warning Not through `__onebunTraceService`
+Read the current trace with `getCurrentTraceContext()`, not through
+`(globalThis as any).__onebunTraceService`. The trace service has no `getCurrentTraceContext()`
+method; it spells it `getCurrentContext()`, and that one reads a fiber-local value which a fresh
+`Effect.runPromise` cannot see, so called that way it answers `null` every time. The global is
+also written once per application and never cleared, so in a process running several the last
+one constructed wins it.
 :::
 
 ### Context Propagation
@@ -273,8 +273,8 @@ header, so the two services share one trace in the backend as well as one trace 
 `traceId` continued, a fresh `spanId`, and the caller's span as `parentSpanId`. So a log line joins
 to the span that emitted it, and one hop up is readable without opening the trace.
 
-It used to report the inbound span id verbatim, which stamped every line from the callee with a
-span living in the calling service — click it in a backend and you land in the caller.
+The inbound span id is never reported as the callee's `spanId`: that span lives in the calling
+service, and a line stamped with it would land you in the caller when you click it in a backend.
 :::
 
 Outside an application — a standalone `createHttpClient()` with no `OneBunApplication` in the
@@ -402,9 +402,9 @@ a trace is sampled once at its root and its children follow that decision rather
 the dice and leaving the trace full of holes. Every request still gets a trace id for log
 correlation, whether or not its span is exported.
 
-Because the decision is made at the root and inherited, `samplingRate: 0.1` now means one request in
-ten with all of its spans — not one span in ten. Re-check the number against your ingest volume if
-you set it while spans were still arriving flat.
+Because the decision is made at the root and inherited, `samplingRate: 0.1` means one request in
+ten with all of its spans — not one span in ten. Size it against your ingest volume in requests,
+not in spans.
 
 ### Span Nesting
 
@@ -437,9 +437,9 @@ connection's async context and the second request would otherwise be filed under
 
 Fresh trace, not *no* trace. Each of those boundaries opens a span of its own — `queue <pattern>`,
 `cron <name>`, `interval <name>`, `timeout <name>`, `ws open`, `ws message`, `ws close` — for the
-same reason an HTTP request gets one: a log line can only name a span that exists. Re-rooting alone
-left background handlers with none, so every line they wrote carried no trace id at all and there
-was no way to follow a request into the work it queued.
+same reason an HTTP request gets one: a log line can only name a span that exists. Re-rooted
+without a span, a background handler would write every line with no trace id at all, and there
+would be no way to follow a request into the work it queued.
 
 Two frames deliberately get no span: the raw `message` callback, because every Engine.IO heartbeat
 arrives through it, and `drain`. The frames that reach your handlers get theirs one level in.
@@ -447,7 +447,7 @@ arrives through it, and `drain`. The frames that reach your handlers get theirs 
 Each kind has its own switch, alongside `traceHttpRequests`: `tracing.traceQueueMessages`,
 `tracing.traceScheduledJobs` and `tracing.traceWebSocketEvents`, all `true` by default. A busy
 consumer and a once-a-day cron are different decisions, so they are different keys. Setting one to
-`false` returns those handlers to logging without a trace id; `@Traced` methods inside them still
+`false` leaves those handlers logging without a trace id; `@Traced` methods inside them still
 get their own spans.
 
 `inRootTraceScope(fn)` from `@onebun/core` is what re-roots, and `inEntrySpan(name, fn, tracer)`
@@ -533,7 +533,7 @@ So a failed export is retried:
   included, and retries never overlap — the exporter holds the one batch it is retrying. This is
   also what keeps a dead collector from holding shutdown open, since the final flush is an ordinary
   export under the same budget. Overflow beyond that is dropped by `BatchSpanProcessor`'s own
-  `maxQueueSize`, unchanged.
+  `maxQueueSize`, which OneBun leaves at the SDK default.
 
 Set `retryAttempts: 0` for at-most-once delivery.
 
@@ -558,19 +558,18 @@ actually installs its provider; the others create theirs and are quietly refused
 Shutdown accounts for that:
 
 - **An application that did not install the global leaves it alone.** If you registered your
-  own OpenTelemetry SDK before starting the app, stopping the app does not touch it. It used to:
-  the teardown called `trace.disable()` unconditionally, which unregisters the global whoever
-  put it there.
+  own OpenTelemetry SDK before starting the app, stopping the app does not touch it: the teardown
+  calls `trace.disable()` only on a registration it owns, because that call unregisters the
+  global whoever put it there.
 - **When the owner stops and another OneBun application is still running, the global is handed
-  over to it.** Tracing keeps working for the survivors instead of going silently dark.
+  over to it.** Tracing keeps working for the survivors instead of going silently dark: without
+  the handover, one `app.stop()` would leave every other application in the process resolving a
+  non-recording tracer through the global, and every span from it would carry an all-zero trace
+  id, correlate with nothing and never be exported.
 - **Only when the last one stops is the registration removed.** Leaving a shut-down provider
   installed would accept spans and drop them without a word.
 
-The failure this replaces was quiet and total: one `app.stop()` left every other application in
-the process resolving a non-recording tracer, so every subsequent span carried an all-zero trace
-id, correlated with nothing and was never exported.
-
-The registration is no longer what decides where an application's spans go. Every span the
+The registration is not what decides where an application's spans go. Every span the
 framework creates comes from the application's OWN provider, so a guest application uses its own
 endpoint and its own `service.name` even though the global slot belongs to the first starter —
 see [Several applications in one process](#several-applications-in-one-process).
@@ -607,12 +606,12 @@ application is asking:
 - a framework span created outside every entry boundary — during `start()` before the first
   request, for instance.
 
-Those go to the first-registered provider, which is the behaviour that predates this and is
-unchanged. `appTracer()` is the accessor the framework's own decorators use — it answers with
-the owning application's tracer when there is one and falls back to the global otherwise — and
-`runWithAppTracer(tracer, fn)` is what establishes ownership at a boundary. Both are exported
-for code that needs to state ownership itself; neither is needed for ordinary use. In a single-application process it is that application's own provider, so nothing is
-lost; in a multi-application process it is the first starter's.
+Those go to the first-registered provider. `appTracer()` is the accessor the framework's own
+decorators use — it answers with the owning application's tracer when there is one and falls back
+to the global otherwise — and `runWithAppTracer(tracer, fn)` is what establishes ownership at a
+boundary. Both are exported for code that needs to state ownership itself; neither is needed for
+ordinary use. In a single-application process it is that application's own provider, so nothing
+is lost; in a multi-application process it is the first starter's.
 
 ::: tip Observing one application's spans
 A processor registered on the process-global provider sees none of an application's spans, since
@@ -648,34 +647,32 @@ finishes what the flush left running.
 
 **Technical details for AI agents — the global tracer provider slot:**
 - `initTracerProvider(options)` in `packages/trace/src/provider.ts` builds the `BasicTracerProvider`, registers it, and returns `{ provider, shutdown }`. `TraceServiceImpl` holds that result and calls `shutdown()` from `OneBunApplication.stop()`
-- Ownership is recorded from the RETURN VALUE of `trace.setGlobalTracerProvider(provider)`, which is `false` when something already holds the slot. A successful registration means the slot was empty and is now ours, regardless of what the module remembered — an earlier draft also required the remembered owner to be `null`, which left a provider installed but unowned after any external `trace.disable()`, so its own shutdown declined to release it
+- Ownership is recorded from the RETURN VALUE of `trace.setGlobalTracerProvider(provider)`, which is `false` when something already holds the slot. A successful registration means the slot was empty and is now ours, regardless of what the module remembered — the remembered owner is deliberately NOT required to be `null`: requiring it would leave a provider installed but unowned after any external `trace.disable()`, and its own shutdown would then decline to release it
 - `installedTracerProvider()` is exported and re-derives ownership from reality: `trace.getTracerProvider()` returns a `ProxyTracerProvider` wrapper, so identity is read through its public `getDelegate()`. Shutdown releases the global only when the remembered owner AND the installed delegate are both this provider
 - Teardown has three cases and only the last disables anything: not the owner -> touch nothing; owner with another live provider -> `trace.disable()` immediately followed by `setGlobalTracerProvider(successor)`, because a duplicate registration would be refused; owner with nothing left -> `trace.disable()`
 - `shutdown()` is idempotent via a `shutdownStarted` flag, and removes the provider from the live set BEFORE flushing so a concurrent shutdown cannot elect a provider that is on its way down. `releaseGlobal` runs in a `finally`, because a failed flush is still a dead provider
 - `shutdown(options?: TraceShutdownOptions)`: `{ spanProcessors: 'flush' }` does `provider.forceFlush()` and shuts down only the processors `initTracerProvider` built itself (the `BatchSpanProcessor` over `OtlpFetchSpanExporter`), NOT `provider.shutdown()` — that one reaches every processor the provider holds, the caller's `spanProcessors` included. The global slot and the context-manager claim are released the same way in both modes. The provider object itself is left un-shut-down and is dropped by its owner. `OneBunApplication` uses it only in the rollback of a failed `start()`; `stop()` keeps the default `'shutdown'`. Without caller processors the two modes are the same `provider.shutdown()`
-- The `shutdownStarted` idempotence has one exception: after a `'flush'` pass that left caller processors running (`callerProcessorsLeftRunning`), a later call WITHOUT `'flush'` shuts those processors down and does nothing else — no second `releaseGlobal`, no context-manager release, the processors built here are not touched again. A repeated `'flush'` is a no-op. That is what an application's `stop()` after a failed start calls; returning early there left a caller processor holding a ref'd handle until its `shutdown()` keeping the process alive, where 0.8.1's `stop()` shut it down
-- `enabled: false` builds no provider, and its tracer comes from a detached `new ProxyTracerProvider()` — NOT from `trace.getTracer()`. The global fallback made a switched-off service borrow whichever enabled sibling had installed the slot and record spans under that sibling's `service.name`; measured in one process, the same disabled service answered with a valid trace id after an enabled sibling was constructed and with the all-zero one when alone. A delegate-less `ProxyTracerProvider` resolves to the API's no-op tracer and cannot reach the global
+- The `shutdownStarted` idempotence has one exception: after a `'flush'` pass that left caller processors running (`callerProcessorsLeftRunning`), a later call WITHOUT `'flush'` shuts those processors down and does nothing else — no second `releaseGlobal`, no context-manager release, the processors built here are not touched again. A repeated `'flush'` is a no-op. That is what an application's `stop()` after a failed start calls; returning early there would leave a caller processor holding a ref'd handle that keeps the process alive until its `shutdown()`
+- `enabled: false` builds no provider, and its tracer comes from a detached `new ProxyTracerProvider()` — NOT from `trace.getTracer()`. The global fallback would make a switched-off service borrow whichever enabled sibling had installed the slot and record spans under that sibling's `service.name` — a valid trace id with an enabled sibling in the process, the all-zero one without. A delegate-less `ProxyTracerProvider` resolves to the API's no-op tracer and cannot reach the global
 
 </llm-only>
 
-::: tip A failed flush no longer cancels the rest of the teardown
+::: tip A failed flush does not cancel the rest of the teardown
 The flush runs after the queue adapter disconnects and before `onModuleDestroy`. If the collector
 is unreachable while spans are still buffered — the usual case when it goes down with the pod —
 the last batch export fails and the flush rejects.
 
 Every step of the shutdown sequence is individually guarded, so that rejection is logged as
 `Shutdown step "flushing traces" failed` and the teardown continues: `onModuleDestroy` and
-`onApplicationDestroy` hooks run, the shared Redis lease is released, and the logger flushes. A
+`onApplicationDestroy` hooks run, and the logger flushes. A
 summary line names every phase that failed, so the tail of the log shows the whole picture rather
-than whichever failure happened to be last. `app.stop()` resolves either way.
-
-This used to abandon everything after the flush, with a single `Shutdown sequence failed` line as
-the only trace — precisely the work graceful shutdown exists to do, skipped by the step most
-likely to fail.
+than whichever failure happened to be last. `app.stop()` resolves either way. The flush is the
+step most likely to fail, and what comes after it is precisely the work graceful shutdown exists
+to do.
 
 The shutdown order is: drain in-flight HTTP → `beforeApplicationDestroy` → WebSocket cleanup →
-queue service → queue adapter → **trace flush** → `onModuleDestroy` → shared Redis release →
-`onApplicationDestroy` → log flush.
+queue service → queue adapter → **trace flush** → `onModuleDestroy` → `onApplicationDestroy` → log
+flush.
 :::
 
 ### SigNoz / OTel Collector Integration
@@ -776,7 +773,7 @@ class ImportantService extends BaseService {
 ```
 
 ::: warning `@TraceAll()` cannot opt a class in
-`@TraceAll()` has no effect today. The application hands auto-trace options to the module graph only when `traceAll: true`, and a class is inspected for `@TraceAll()` / `@NoTrace()` only when the module received those options — so with `traceAll: false` nothing is ever inspected, and with `traceAll: true` the class would have been traced anyway. To trace a subset, use `traceAll: true` narrowed by `traceFilter.includeClasses` / `excludeClasses`, or put `@Traced()` on the individual methods, which wraps at class-definition time and needs no wiring at all. `@NoTrace()` works as documented, because it only ever has to take effect while `traceAll` is true.
+`@TraceAll()` has no effect. The application hands auto-trace options to the module graph only when `traceAll: true`, and a class is inspected for `@TraceAll()` / `@NoTrace()` only when the module received those options — so with `traceAll: false` nothing is ever inspected, and with `traceAll: true` the class would have been traced anyway. To trace a subset, use `traceAll: true` narrowed by `traceFilter.includeClasses` / `excludeClasses`, or put `@Traced()` on the individual methods, which wraps at class-definition time and needs no wiring at all. `@NoTrace()` works as documented, because it only ever has to take effect while `traceAll` is true.
 :::
 
 ### Priority

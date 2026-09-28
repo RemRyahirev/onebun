@@ -327,8 +327,8 @@ through its flush timer, so a layer you built yourself is yours to close when no
 
 ### When the Collector Rejects a Batch
 
-The response is inspected. A 503, a 404 and a success used to be indistinguishable — nothing looked
-at the status — so a misconfigured endpoint swallowed every log line in silence.
+The transport reads the status of every response, so a 503, a 404 and a success are handled
+differently, and a misconfigured endpoint does not swallow log lines in silence.
 
 - **Held and retried** on a transport failure (connection refused, DNS, TLS, timeout) and on
   408/429/500/502/503/504. The records go back to the head of the buffer, in order, and the next
@@ -479,9 +479,9 @@ The `trace` key is **absent**, not empty, where no span is open: bootstrap and s
 - When `otlpEndpoint` is set, `makeLoggerFromOptions()` creates a `CompositeTransport` with both `ConsoleTransport` and `OtlpLogTransport`
 - OTLP log transport auto-enables from env: `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`
 - `resolveOtlpLogEndpoint(options?)` is that resolution as a function — the application calls it to decide whether to attach resource attributes BEFORE building the logger
-- `OneBunApplication` always builds through `makeLoggerFromOptions()`, including when no `loggerOptions` are given; routing that case to `makeLogger()` is what used to make the env variables inert
-- `shutdownLogger()` flushes every transport built in the process, not only the most recent one — a multi-service application builds one logger per child, and a single active-transport slot dropped all but the last
-- `shutdownLoggerLayer(layer)` shuts down only the transport that `layer` was built with (a `WeakMap` from each layer `makeLoggerFromOptions()` returns to its tracked transport); a console-only layer, a layer from another factory, or one already shut down is a no-op, and a later `shutdownLogger()` does not reach it again. A separate function, not an optional argument of `shutdownLogger`: that one keeps its zero-argument signature, so it still works point-free (`process.on('beforeExit', shutdownLogger)`, `.then(shutdownLogger)`, `Effect.promise(shutdownLogger)`), where an optional `layer` parameter read the exit code or `AbortSignal` as a layer and shut down nothing. `OneBunApplication` calls it in the rollback of a failed `start()` for a logger it built itself, so a `loggerLayer` passed in options and a sibling service's logger keep exporting; `stop()` still calls the process-wide form, and so does a `stop()` after a failed start
+- `OneBunApplication` always builds through `makeLoggerFromOptions()`, including when no `loggerOptions` are given; `makeLogger()` does not read `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`, so routing that case to it would leave those env variables inert
+- `shutdownLogger()` flushes every transport built in the process, not only the most recent one — a multi-service application builds one logger per child, and a single active-transport slot would drop all but the last
+- `shutdownLoggerLayer(layer)` shuts down only the transport that `layer` was built with (a `WeakMap` from each layer `makeLoggerFromOptions()` returns to its tracked transport); a console-only layer, a layer from another factory, or one already shut down is a no-op, and a later `shutdownLogger()` does not reach it again. A separate function, not an optional argument of `shutdownLogger`: that one keeps its zero-argument signature, so it works point-free (`process.on('beforeExit', shutdownLogger)`, `.then(shutdownLogger)`, `Effect.promise(shutdownLogger)`), where an optional `layer` parameter would read the exit code or `AbortSignal` as a layer and shut down nothing. `OneBunApplication` calls it in the rollback of a failed `start()` for a logger it built itself, so a `loggerLayer` passed in options and a sibling service's logger keep exporting; `stop()` calls the process-wide form, and so does a `stop()` after a failed start
 - Logger configuration priority: `loggerLayer` > `loggerOptions` > env vars > `NODE_ENV` defaults
 
 </llm-only>

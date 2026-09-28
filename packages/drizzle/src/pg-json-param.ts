@@ -3,7 +3,7 @@
  *
  * ## Why a helper
  *
- * The json/jsonb fix in `pg-json-encoding.ts` lives in the column encoders, so a value
+ * The json/jsonb patch in `pg-json-encoding.ts` lives in the column encoders, so a value
  * interpolated straight into ``sql`...` `` never reaches it. Measured against `postgres:16` through
  * `DrizzleService`, every obvious raw form is wrong for some shape:
  *

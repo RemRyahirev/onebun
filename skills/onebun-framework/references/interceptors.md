@@ -8,8 +8,9 @@ throws at startup, the interceptor just misbehaves or never runs:
 
 1. **A class with constructor parameters MUST carry a class decorator** (`@Service()`).
    `extends BaseInterceptor` does NOT buy DI.
-2. **One instance per class per application, built at startup** — shared by every route, gateway
-   handler and subscription that names the class; never keep per-request state on `this`.
+2. **One instance per class per module, built at startup** — shared by every route, gateway
+   handler and subscription of that module that names the class; never keep per-request state on
+   `this`.
 3. **On the queue side only `@Subscribe` is intercepted, and only via a CLASS-level
    `@UseInterceptors`** — `@Cron`/`@Interval`/`@Timeout` and method-level `@UseInterceptors` on a
    subscriber are ignored.
@@ -42,18 +43,19 @@ anything, and `onModuleDestroy` on the way down. The same holds for middleware. 
 them — a guard is constructed per request, so there is no instance to initialize, and the framework
 warns at startup if a guard class implements `onModuleInit`.
 
-## Lifetime: one instance per class, shared by every request
+## Lifetime: one instance per class per module, shared by every request
 
 An interceptor class is instantiated when handlers are **registered** (application startup), once
-per class per application, and that instance serves every request or message that reaches any
-handler it wraps — including a global interceptor across every route, and the same class used on
-HTTP, WebSocket and the queue. An interceptor passed as an **instance**
+per class per owning module — the module whose `controllers` declare the controller, gateway or
+consumer — and that instance serves every request or message that reaches any handler of that
+module it wraps, on HTTP, WebSocket and the queue alike. A global interceptor
+(`ApplicationOptions.interceptors`) resolves through each handler's owning module as well, so an
+application whose handlers live in three modules builds three instances of it. An interceptor passed
+as an **instance**
 (`new TimeoutInterceptor(5000)`) is not copied either: the resolver hands it through untouched, so
-the caller owns its lifetime and two instances of one class stay two.
-
-Through 0.6.0 the instance was per registration SITE: a class covering three routes was constructed
-three times, each route bound to its own copy, so a counter or a limiter on `this` counted per route
-without saying so.
+the caller owns its lifetime and two instances of one class stay two. A class covering three routes
+of one module is constructed once, so a counter or a limiter on `this` counts across all three, not
+per route — and not across modules.
 
 Consequences, in order of how often they bite:
 
@@ -205,14 +207,11 @@ Two queue-side traps, both silent:
   `this.logger` comes from the ambient init context, not from DI.
 - **TimeoutInterceptor** — throws `HttpException(408)` for HTTP, plain `Error` elsewhere. A number
   cannot come from DI, so the class form is rejected at CONSTRUCTION with a message naming the
-  mistake. It used to accept it silently: `timeoutMs` was `undefined`, the budget collapsed to
-  ~0 ms, and every handler answered `408 "Request timed out after undefinedms"`.
+  mistake.
 - **CacheInterceptor** — caches 2xx GET responses via `CacheService`, passes through non-GET and
   non-HTTP. Use it directly as a class, with `CacheModule` in the module `imports` so
-  `CacheService` is resolvable. It used to ship with **no class decorator**, so
-  `@UseInterceptors(CacheInterceptor)` injected `cacheService: undefined` and every GET 500ed;
-  importing `CacheModule` did not help, because the missing piece was metadata rather than a
-  provider. The workaround of wrapping it in a decorated subclass is no longer needed.
+  `CacheService` is resolvable. It carries its own `@Service()` class decorator, so it needs no
+  decorated subclass to be injected.
 
 **Writing your own interceptor with constructor dependencies: decorate it.** TypeScript emits
 `design:paramtypes` only for a decorated class, and that is exactly the metadata
@@ -237,8 +236,7 @@ The same trap applies to guards, filters and middleware. The interceptor itself 
 Filters sit ABOVE the interceptor chain and below the middleware chain — an interceptor's try/catch
 around `await next()` sees a handler error, a validation error, and can rethrow for the filters to
 answer; an error the interceptor itself throws is filtered the same way. A guard rejection is
-filtered outside the chain and never reaches an interceptor. Through 0.6.0 the handler was already
-filtered by the time `next()` returned, so that catch block was dead code on HTTP only.
+filtered outside the chain and never reaches an interceptor.
 **WebSocket:** guards → interceptors → handler
 **Queue:** guards → interceptors → handler, for `@Subscribe` subscribers only. `@Cron`, `@Interval`
 and `@Timeout` jobs are handed to the scheduler as bound methods, so neither interceptors nor guards
@@ -257,5 +255,5 @@ Interceptors wrap in onion order: global outermost → class-level → method-le
   only class level (NestJS has separate patterns)
 - `BaseInterceptor` with ambient init context (same pattern as `BaseMiddleware`) — it supplies
   `this.logger`/`this.config`, not constructor DI
-- Interceptors are singletons per class per application; NestJS scopes them with `Scope.REQUEST`,
+- Interceptors are singletons per class per module; NestJS scopes them with `Scope.REQUEST`,
   which has no equivalent here

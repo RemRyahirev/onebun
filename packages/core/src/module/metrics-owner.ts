@@ -34,8 +34,8 @@ export const METRICS_OWNER = Symbol.for('onebun:metrics-owner');
  * records nothing instead of writing into a disposed registry.
  *
  * Non-enumerable so it never shows up in a spread, `JSON.stringify` or a test snapshot, and
- * guarded because a frozen or proxied instance must not break construction — a missing stamp
- * only costs the fallback that every instance had before this existed.
+ * guarded because a frozen or proxied instance must not break construction — an instance without
+ * a stamp falls back to the process-wide metrics slot.
  */
 export function attachMetricsOwner(instance: object, scope: GlobalScope): void {
   try {

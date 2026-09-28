@@ -291,7 +291,7 @@ refused with a message saying exactly that.
 
 What this costs: the narrowing guard, the create-only divergence guard and the create-if-missing
 branch all ride on the reconcile pass. An unmanaged stream that is missing or bound to different
-subjects is no longer caught at `app.start()` — it surfaces at the first `publish()` or
+subjects is not caught at `app.start()` — it surfaces at the first `publish()` or
 `subscribe()` instead.
 
 ## License

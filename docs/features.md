@@ -345,8 +345,8 @@ are checked when they are read; arguments and results are untyped (`any`).
 ### Graceful Shutdown
 Enabled by default. On SIGTERM/SIGINT the application first refuses new requests with
 `503` while the listener stays open, drains the requests already being served, and only
-then closes the listener and runs the destroy hooks — so a rolling deploy stops cutting
-responses that were mid-flight. Bounded by `shutdownTimeout` (default 15s), idempotent,
+then closes the listener and runs the destroy hooks — so a rolling deploy does not cut
+responses that are mid-flight. Bounded by `shutdownTimeout` (default 15s), idempotent,
 and in multi-service mode a single parent handler stops every service.
 
 ### Shared Redis Connection

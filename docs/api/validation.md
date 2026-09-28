@@ -305,10 +305,10 @@ classes: a schema built by one copy produces failure objects belonging to that c
 that identifies them by class identity (`result instanceof type.errors`) silently answers "no
 failure". Two copies of the *same version* are enough — version skew is not required.
 
-OneBun no longer fails open on this. `validate()`, `validateOrThrow()` and `@Body` requiredness
+OneBun does not fail open on this. `validate()`, `validateOrThrow()` and `@Body` requiredness
 identify ArkType failures by ArkType's own brand (the ` arkKind` key `@ark/schema` discriminates
-on), which is copy-independent. A duplicate install is still unsupported, though: composing schemas
-across copies (`.and`, `.or`, `.array()`) and cross-copy registry references remain broken, so
+on), which is copy-independent. A duplicate install is unsupported all the same: composing schemas
+across copies (`.and`, `.or`, `.array()`) and cross-copy registry references are broken, so
 deduplicate rather than rely on the framework's tolerance.
 
 ### Detecting duplicates
@@ -341,8 +341,8 @@ listing — that is expected and is not a second copy of arktype (see
   the cause, lists the detected registries, and tells you to deduplicate.
 - If validation returns a value that is neither valid data nor a recognisable `ArkErrors` — an
   ArkType internal this version cannot identify — the framework throws `DuplicateArkTypeError`
-  instead of handing that object back as the validated payload. Failing closed is deliberate: the
-  alternative was HTTP 200 with ArkType error objects as the response body.
+  instead of handing that object back as the validated payload. Failing closed is deliberate:
+  failing open would answer HTTP 200 with ArkType error objects as the response body.
 
 ```typescript
 import { DuplicateArkTypeError, validate } from '@onebun/core';
@@ -650,7 +650,7 @@ const withDates = getJsonSchema(type({ when: 'Date', name: 'string' }), {
 - That order is forced, not stylistic: the thrown `ToJsonSchemaError` carries `code` but NOT the partially built schema, so a caught error can only ever produce a stub. The partial schema exists only inside the fallback context
 - The fallback context is `{ code, base }`, plus the constraint itself for some codes (e.g. `predicate`)
 - A caller's `fallback` takes precedence in both ArkType shapes — an object keyed by code, or a universal function — and the codes it handles are not marked, because the caller has handled them
-- The outer `catch` remains reachable only when the per-code mechanism cannot repair the failure, e.g. a caller's fallback that itself throws. It binds the error and reports its `code` in the marker; the previous bare `catch {}` discarded the one value that said what was unrepresentable
+- The outer `catch` remains reachable only when the per-code mechanism cannot repair the failure, e.g. a caller's fallback that itself throws. It binds the error and reports its `code` in the marker, so even that path names what was unrepresentable
 - `JSON_SCHEMA_PARTIAL` is `'x-onebun-partial'` — an `x-` prefixed key, so it passes through OpenAPI tooling as a vendor extension rather than being rejected
 - `@onebun/docs`'s `arktypeToJsonSchema()` delegates straight to `getJsonSchema`, so the marker reaches the generated OpenAPI document.
 

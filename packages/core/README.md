@@ -550,10 +550,10 @@ app.enableGracefulShutdown();
 
 // Option 2: Stop programmatically
 await app.stop();
-
-// Option 3: Stop but keep shared Redis connection open (for other consumers)
-await app.stop({ closeSharedRedis: false });
 ```
+
+`stop({ closeSharedRedis })` is deprecated and ignored: `stop()` releases no shared Redis hold on
+anyone's behalf (see [Shared Redis Connection](#shared-redis-connection)).
 
 ### What Gets Cleaned Up
 
@@ -561,11 +561,11 @@ When the application stops, the following resources are cleaned up:
 
 1. **HTTP Server** - Bun server is stopped
 2. **WebSocket Handler** - All WebSocket connections are closed
-3. **Shared Redis** - If using SharedRedisProvider, the connection is closed (unless `closeSharedRedis: false`)
+3. **Shared Redis holds** - The application's own consumers give back the holds they took: the cache in its `close()`, the queue adapter in its `disconnect()`. The application itself releases nothing on the shared client
 
 ### Shared Redis Connection
 
-When using `SharedRedisProvider` for cache, WebSocket storage, or other features, the connection is automatically closed on shutdown:
+When using `SharedRedisProvider` for cache, the queue or other features, every consumer takes a hold on the one shared client and gives it back when it closes. The connection closes when the last holder in the process lets go, so an application that stops while another application or your own code still holds the client leaves the connection open. Code that called `SharedRedisProvider.getClient()` itself calls `await SharedRedisProvider.release()` on shutdown:
 
 ```typescript
 import { SharedRedisProvider, OneBunApplication } from '@onebun/core';
@@ -581,7 +581,8 @@ const app = new OneBunApplication(AppModule, {
 });
 
 await app.start();
-// Shared Redis will be closed when app receives SIGTERM/SIGINT
+// On SIGTERM/SIGINT the app's cache and queue release their holds;
+// the connection closes when the last holder in the process lets go
 ```
 
 ## License

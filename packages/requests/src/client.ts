@@ -61,8 +61,9 @@ const REDIRECT_STATUSES: readonly number[] = [
 
 /**
  * How many redirects one attempt follows. The response that would be the 21st fails with
- * `REDIRECT_ERROR` — the Fetch Standard's limit. Bun's own `fetch` allowed 127 (measured on
- * 1.4.2), and a loop was a network error that `retryOnNetworkError` replayed: 508 requests.
+ * `REDIRECT_ERROR` — the Fetch Standard's limit. Bun's own `fetch` allows 127 (measured on
+ * 1.4.2), and left to it a loop would be a network error that `retryOnNetworkError` replays:
+ * 508 requests.
  */
 const MAX_REDIRECTS = 20;
 
@@ -74,8 +75,8 @@ const MAX_REDIRECTS = 20;
  * drops only `Authorization`, `Cookie` and `Proxy-Authorization` on a cross-origin hop, while an
  * `apikey` header can have any name, `custom` auth adds any headers its config or interceptor
  * likes, and a credential passed through `RequestsOptions.headers` or `config.headers` is
- * indistinguishable from any other header. Measured on 0.8.1, all of those — and
- * `X-OneBun-Signature` — reached the other origin.
+ * indistinguishable from any other header. Forwarded as they are, all of those — and
+ * `X-OneBun-Signature` — would reach the other origin.
  *
  * What stays is what the new origin needs to answer and to join the trace.
  */
@@ -101,11 +102,10 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  * query data.
  *
  * The overload is ambiguous by construction — both arms take a plain object — so this list is the
- * whole of the decision. It used to name four fields, which left `tracing` on the wrong side:
- * `client.get(url, { tracing: false })` was read as query data and went out as `?tracing=false`,
- * with the header it was meant to suppress still attached. `get` was then given this list while
- * `delete`, `head` and `options` kept their own inline copy of the old four, so the same call on
- * those three still sent `?tracing=false`. {@link resolveQueryOverload} is now the only reader.
+ * whole of the decision. `tracing` is on it: off the list, `client.get(url, { tracing: false })`
+ * would be read as query data and go out as `?tracing=false`, with the header it was meant to
+ * suppress still attached. {@link resolveQueryOverload} is the only reader, so `get`, `delete`,
+ * `head` and `options` all decide the same way.
  *
  * `retries` and `query` are deliberately NOT here. `query` is documented as producing a literal
  * `?query=[object Object]` — the page warns against wrapping the query in a key and a test pins
@@ -115,11 +115,11 @@ const REQUEST_BODY_HEADERS: readonly string[] = [
  * Adding a name moves every query record that uses it to the config side, so a new config key
  * does not join by default. `redirect` is a config key and stays off: `client.get('/login',
  * { redirect: '/home' })` is query data — a login flow's return path — and a test pins it, so the
- * redirect policy takes the three-argument form. `maxResponseBytes` did join: nothing names a
+ * redirect policy takes the three-argument form. `maxResponseBytes` is on it: nothing names a
  * query parameter that, and a cap that went out as `?maxResponseBytes=1048576` would leave the
- * body it was meant to bound unbounded. `responseType` joined for the same reason: sent as
+ * body it was meant to bound unbounded. `responseType` is on it for the same reason: sent as
  * `?responseType=stream`, it would leave a caller waiting for a stream with a string that arrives
- * only once the whole body has. `connectAddress` joined because the other side fails open: sent as
+ * only once the whole body has. `connectAddress` is on it because the other side fails open: sent as
  * `?connectAddress=203.0.113.7`, the request would go wherever DNS says the host is — the lookup
  * the address was validated to replace.
  */
@@ -139,14 +139,13 @@ const REQUEST_CONFIG_MARKERS: readonly string[] = [
  * Resolve the `(url, queryOrConfig?, config?)` shape shared by `get`, `delete`, `head` and
  * `options` into one request config.
  *
- * - A third argument makes the second one query data, whatever it holds — `undefined` included.
- *   Each method used to take the three-argument arm only when the SECOND argument was truthy, so
- *   `get(url, undefined, { headers })` fell through to a bare request and the config was dropped.
+ * - A third argument makes the second one query data, whatever it holds — `undefined` included —
+ *   so `get(url, undefined, { headers })` sends the config rather than a bare request.
  * - With two arguments, a plain object carrying any of {@link REQUEST_CONFIG_MARKERS} is config
  *   and any other plain object is query data.
  *
  * Shared by `HttpClient` and the `RequestsService` layer, so the rule cannot drift between them
- * or between the four methods again.
+ * or between the four methods.
  *
  * @internal
  */
@@ -182,10 +181,10 @@ export const resolveQueryOverload = (
  * Whether a response carries no content by definition (RFC 9110 §6.4.1): every answer to HEAD,
  * and every 204 No Content and 304 Not Modified.
  *
- * Their body is not read. It used to be, and the content type decided how: a HEAD to any JSON
- * endpoint (`Response.json` sets the header on HEAD too) and a 204 or 304 that kept its
- * `content-type: application/json` all went to the JSON parser, which rejected the empty text with
- * `RESPONSE_PARSE_ERROR` — so `client.head()` failed against every JSON endpoint there is.
+ * Their body is not read. Read by content type, a HEAD to any JSON endpoint (`Response.json` sets
+ * the header on HEAD too) and a 204 or 304 that kept its `content-type: application/json` would all
+ * go to the JSON parser, which rejects the empty text with `RESPONSE_PARSE_ERROR` — so
+ * `client.head()` would fail against every JSON endpoint there is.
  *
  * Case-insensitive on the method, as `fetch` is: `req('head', url)` reaches the wire as HEAD.
  */
@@ -207,7 +206,7 @@ const isHandedBackRedirect = (status: number, policy: RedirectPolicy): boolean =
  *
  * 304 Not Modified is one. A server sends it only in answer to a conditional request
  * (`If-None-Match`, `If-Modified-Since`), so it is the outcome the caller asked about — "your copy
- * is current" — not a failure to recover from. It used to fall outside the range and reject.
+ * is current" — not a failure to recover from, so it resolves rather than rejects.
  *
  * A redirect handed back under `redirect: 'manual'` is one as well: the redirect is what the
  * caller asked for ({@link isHandedBackRedirect}).
@@ -238,7 +237,7 @@ const collectResponseHeaders = (headers: Headers): Record<string, string> =>
  * controller's caller only because the record is registered as transport details
  * ({@link markTransportDetails}); under `exposeErrorDetails`, and in any filter of the application's
  * own that serializes the error whole, it still goes out. Joining every `set-cookie` here would put
- * all of the upstream's cookies there instead of one, so the record stays as it always was.
+ * all of the upstream's cookies there instead of one, so the record keeps only the last.
  */
 const collectErrorHeaders = (headers: Headers): Record<string, string> => {
   const record: Record<string, string> = {};
@@ -394,9 +393,9 @@ const transportFailureKindOf = (error: unknown): TransportFailureKind => {
  * the two it was.
  *
  * `receivedStatus` is set when the failure hit while the body was being read: the status line had
- * arrived and is kept in `details.statusCode`, with `details.phase: 'body'`. It used to be the
- * `code` of a `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR` instead, so a 500 whose body stalled
- * was retried by `retryOn` as a server 500 and `retryOnTimeout: false` never saw it.
+ * arrived and is kept in `details.statusCode`, with `details.phase: 'body'`. It is not the `code`:
+ * as the `code` of a `RESPONSE_READ_ERROR`/`RESPONSE_PARSE_ERROR`, a 500 whose body stalled would
+ * be retried by `retryOn` as a server 500, and `retryOnTimeout: false` would never see it.
  */
 const classifyTransportFailure = (
   error: unknown,
@@ -1072,10 +1071,10 @@ const buildHeaders = (
  * `fetch` resolves at the headers; the body streams in afterwards under the same signal, so the
  * client-side timeout — or an interruption of the attempt — can fire here too. Such a failure is a
  * transport failure like one before the headers, and is classified as one: `TIMEOUT_ERROR`, code
- * `0`, retried only under `retryOnTimeout`. It used to be reported as `readFailure` (a
- * `RESPONSE_READ_ERROR` or `RESPONSE_PARSE_ERROR`) with the status as its code — a stalled 200
- * looked like a malformed body, and a stalled 500 was replayed by `retryOn` as if the server had
- * answered 500 in full.
+ * `0`, retried only under `retryOnTimeout`. Reported as `readFailure` (a `RESPONSE_READ_ERROR` or
+ * `RESPONSE_PARSE_ERROR`) with the status as its code, a stalled 200 would look like a malformed
+ * body, and a stalled 500 would be replayed by `retryOn` as if the server had answered 500 in
+ * full.
  *
  * Any other read failure keeps `readFailure` and the status.
  */
@@ -1220,10 +1219,10 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647;
 /**
  * A countdown is counted in stretches of at most {@link MAX_TIMER_DELAY_MS}, each re-arming the
  * next for what is left. `AbortSignal.timeout`, which bounds a request under `'auto'` and
- * `'bytes'`, takes any delay up to 2^53 - 1 ms. A single `setTimeout` did not: a `timeout` past
- * 2^31 - 1, the obvious way to say "no idle limit" on a long-lived stream, fired after 1 ms, and
- * every `'stream'` call under it failed `TIMEOUT_ERROR` at the headers while the same call under
- * `'auto'` went through.
+ * `'bytes'`, takes any delay up to 2^53 - 1 ms. A single `setTimeout` does not: a `timeout` past
+ * 2^31 - 1, the obvious way to say "no idle limit" on a long-lived stream, would fire after 1 ms,
+ * and every `'stream'` call under it would fail `TIMEOUT_ERROR` at the headers while the same call
+ * under `'auto'` goes through.
  */
 const restartableTimeout = (timeout: number): RestartableTimeout => {
   const controller = new AbortController();
@@ -1417,7 +1416,7 @@ const signHop = (
  * redirect a fresh, valid signature for a method, path and body of its choosing on that origin —
  * which is what following it means. With an audience, that signature is good only at the callee
  * the audience names. Without one it is good at every service that shares the secret, so the hop
- * fails closed instead, as it did before the policy existed.
+ * fails closed instead.
  */
 const resignerFor = (
   auth: OneBunAuthConfig | undefined,
@@ -1440,8 +1439,9 @@ const resignerFor = (
  * One signal governs the whole attempt, every hop and the body included: `fetch` resolves at the
  * headers and the body is read afterwards under the same signal. It fires on the client-side
  * timeout, and on an interruption of the Effect running the attempt (`Effect.timeout`,
- * `Effect.race`, `Fiber.interrupt`). The interruption used to abandon the `fetch` without aborting
- * it: the connection stayed open, and the server went on holding it until the client's own timeout.
+ * `Effect.race`, `Fiber.interrupt`). The interruption aborts the `fetch` rather than abandoning
+ * it, which would leave the connection open and the server holding it until the client's own
+ * timeout.
  *
  * The interruption is wired through `Effect.onInterrupt` around the whole attempt rather than
  * through the signal `Effect.tryPromise` hands to `fetch`: that signal is only live while the
@@ -1676,11 +1676,12 @@ const executeWithRetry = <T, E extends string, R extends string>(
  * default: `client.request({ url, method: undefined })` overrides the `GET` that
  * `HttpClient.requestEffect` sets, and `client.get(url, { method: undefined })` does the same
  * through {@link resolveQueryOverload}. Both type-check while `exactOptionalPropertyTypes` is off.
- * `fetch` sends such a request as GET, but the client's own string operations on the method threw
- * a TypeError: HEAD detection on every answer, the retry allowlist on every failure. Thrown there,
- * it is a defect rather than a failure — it passed every `catchAll`, so the caller got no
- * `ErrorResponse` and no metrics were recorded, after the request had already gone out. With
- * `onebun` auth the signer threw on it first, so a signed request was never sent at all.
+ * `fetch` sends such a request as GET, but the client's own string operations on the method would
+ * throw a TypeError on it: HEAD detection on every answer, the retry allowlist on every failure.
+ * Thrown there, it would be a defect rather than a failure — it passes every `catchAll`, so the
+ * caller would get no `ErrorResponse` and no metrics would be recorded, after the request had
+ * already gone out. With `onebun` auth the signer would throw on it first, so a signed request
+ * would never be sent at all.
  *
  * Done here, once, because {@link executeRequest} is the one path every caller takes — `HttpClient`
  * and the `RequestsService` layer alike.

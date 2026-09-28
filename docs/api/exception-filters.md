@@ -37,7 +37,7 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
 - `OneBunBaseError` subclasses → `error.toErrorResponse()`: `{ success: false, error, code, details, originalError }` (HTTP status = error's code). Serialized with the `withoutTransportDetails` replacer from `@onebun/requests` unless `exposeErrorDetails` is set: the transport details of an error the HTTP client produced — the upstream's response headers (`set-cookie`), the request URL with its query, a redirect's `Location`, the upstream's body or the raw transport error — are left out, at any depth (`client.req()` nests the client failure under `details.originalError`). Only records the client registered are touched; an author-written `details: { headers, url }` is sent whole. See docs/api/requests.md#uncaught-client-errors
 - Any other `Error` **or thrown value** → `{ success: false, error: 'Internal Server Error', code: 500 }` (HTTP 500). The exported constant is `UNHANDLED_ERROR_MESSAGE`. The thrown value's own message is NOT in the body: it is written by whatever threw it — a driver, a socket, the file system — and routinely names an absolute path, an internal host and port, a service hostname, a failing statement with its bound parameters, or the password inside a connection string. The two branches above keep their messages, because they are author-written and client-facing; this branch has no way to tell a safe message from a leaking one, so it is withheld wholesale rather than filtered. A denylist of shapes would always miss the shape it had not met
-- `createErrorResponse` always emits a `details` key, defaulting to `{}`. Only the unhandled branch ever populated it, and it no longer does unless `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
+- `createErrorResponse` always emits a `details` key, defaulting to `{}`. In the default filter only the unhandled branch populates it, and only when `exposeErrorDetails` is set: `createDefaultExceptionFilter({ exposeErrorDetails })` in `packages/core/src/exception-filters/exception-filters.ts`, fed from `ApplicationOptions.exposeErrorDetails` at the application's own filter construction site
 - `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
 - The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
 - The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
@@ -114,11 +114,11 @@ class ValidationExceptionFilter implements ExceptionFilter {
 
 **Which filter answers.** Filters are tried from the most specific outwards — route, then
 controller, then global, then the framework's default filter — and the first one to return a
-Response answers. Returning `undefined` declines, and the error moves one level out; that is the
-supported way to say "not mine". Do **not** rethrow to decline: a throw out of `catch()` is how a
-BUG in a filter looks, so it is reported with the filter's name and answered by the default filter
-without consulting the rest of the chain. Through 0.6.0 only the most specific filter ran at all,
-and this page told you to rethrow — which reached the default filter rather than the next one.
+Response answers. Returning `undefined` (or `null`) declines, and the error moves one level out;
+that is the supported way to say "not mine". Do **not** rethrow to decline: a throw out of
+`catch()` is how a BUG in a filter looks, so it is reported with the filter's name and answered by
+the default filter without consulting the rest of the chain: a rethrow reaches the default
+filter, never the next one out.
 
 ## HttpException
 
@@ -250,19 +250,20 @@ a route-level filter cannot override that contract. A guard that *throws* is fil
 
 ## Filter Priority
 
-Filters merge global → controller → route, and **the last one wins**. A route-level filter
-fully shadows controller-level and global filters, which in turn shadow the built-in
-default filter:
+Filters merge global → controller → route and are tried from the **most specific** outwards:
+route-level first, then controller-level, then global, then the built-in default filter:
 
 ```
-Route-level filter ▸ shadows ▸ Controller-level ▸ shadows ▸ Global ▸ shadows ▸ Default
+Route-level filter ▸ declines ▸ Controller-level ▸ declines ▸ Global ▸ declines ▸ Default
 ```
 
-Exactly one filter runs per error. There is no fallthrough between user filters.
+Exactly one filter answers each error: the first one that returns a `Response`. A filter that
+returns `undefined` declines, and the next filter out gets the error; a `null` return (from
+untyped code) declines the same way.
 
-A filter that re-throws, or returns anything other than a `Response`, falls back to the
-built-in **default filter** — which never throws and is therefore always the terminal
-handler.
+A filter that throws, or returns anything that is neither a `Response` nor `undefined`/`null`, is
+reported with its name, and the built-in **default filter** answers without consulting the rest
+of the chain. The default filter never throws and is therefore always the terminal handler.
 
 ## Default Filter Behaviour
 
@@ -288,13 +289,13 @@ Invalid URL: postgres://app:hunter2@db.internal:5432/app
 
 An absolute path, an internal host and port, the service topology, a password. Nothing in the
 filter can tell one of those from a harmless message, so the whole branch answers with the fixed
-string `'Internal Server Error'` — exported as `UNHANDLED_ERROR_MESSAGE`. Filtering by pattern
-instead was rejected: a denylist always misses the shape it has not met, and reads as safe.
+string `'Internal Server Error'` — exported as `UNHANDLED_ERROR_MESSAGE`. It does not
+filter by pattern: a denylist always misses the shape it has not met, and reads as safe.
 
-Every body also carries a `details` object, and on the default filter it is **empty**. It used to
-carry the error's stack trace, class name and non-HTTP `code` for any unhandled throw. A stack
-trace in an API response discloses absolute filesystem paths, dependency versions and internal
-module layout to whoever can provoke a 500, so it is withheld too.
+Every body also carries a `details` object, and on the default filter it is **empty**: it does not
+carry the error's stack trace, class name or non-HTTP `code`. A stack trace in an API response
+discloses absolute filesystem paths, dependency versions and internal module layout to whoever can
+provoke a 500, so it is withheld too.
 
 Nothing is lost operationally: the application logs the whole error, message and stack included,
 before the filter runs — look for `Unhandled error in <Controller>.<handler>`.
@@ -382,7 +383,7 @@ const auditFilter = createExceptionFilter(async (error, ctx) => {
 
 ```
 Handler, guard or interceptor throws
-→ the route's effective filter (route ▸ controller ▸ global, last one wins)
-→ Default filter, if that filter re-threw or returned a non-Response
+→ the route's filters, most specific first (route ▸ controller ▸ global); the first Response answers
+→ Default filter, if every filter declined, or one threw or returned something else
 → Response sent, back out through the interceptor and middleware chains
 ```

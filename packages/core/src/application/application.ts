@@ -653,8 +653,8 @@ interface ShutdownRequest {
   rollback?: boolean;
   /**
    * A `stop()` after such a rollback, with no `start()` since. The rollback ran the sequence, so
-   * this runs only the three telemetry steps it narrowed, now in their `stop()` form: the caller
-   * is done with this application, and every `stop()` has always closed those as well.
+   * this runs only the three telemetry steps it narrowed, in their `stop()` form: the caller is
+   * done with this application, and every `stop()` closes those as well.
    */
   afterRollback?: boolean;
   /**
@@ -668,10 +668,10 @@ interface ShutdownRequest {
 /**
  * A `start()` that has not settled yet, and the `stop()` queued behind it.
  *
- * A stop() used to run its sequence beside a boot still in `onModuleInit`: it released what
- * existed at that moment — nothing, mostly — and resolved, and the boot then connected the queue,
- * started the sampler and opened the listener after the terminal latch was taken, so nothing
- * ever released them and the process never exited.
+ * The stop() is queued rather than run beside a boot still in `onModuleInit`: run beside it, it
+ * would release what exists at that moment — nothing, mostly — and resolve, and the boot would
+ * then connect the queue, start the sampler and open the listener after the terminal latch was
+ * taken, so nothing would ever release them and the process would never exit.
  */
 interface BootInFlight {
   /** Settles when the boot does, including its rollback; never rejects. */
@@ -737,8 +737,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Whether a queue will run, decided before `setup()` from classes and options alone.
    *
    * Kept so `initializeQueue` reuses this answer instead of reaching a second one: two
-   * computations of one decision is how the queue came to be enabled for the adapter and
-   * disabled for the proxy at the same time.
+   * computations of one decision could enable the queue for the adapter and disable it for the
+   * proxy at the same time.
    */
   private queueEnablement: QueueEnablementDecision | null = null;
   /**
@@ -997,9 +997,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Point `@onebun/requests` at this process's per-request trace context.
    *
    * `@onebun/requests` cannot import core — core depends on requests, not the reverse — so the
-   * seam is a registered function. It used to be a process-global cell that nothing ever wrote,
-   * which made every outgoing call leave untraced and silent; a single cell would have been the
-   * wrong shape anyway, since concurrent requests share it and the last writer would win.
+   * seam is a registered function. A single process-global cell would be the wrong shape:
+   * concurrent requests share it, and the last writer would win.
    *
    * The OpenTelemetry active span comes first when there is one: it is the innermost open span,
    * so a call made from inside a `@Traced` method hangs off that method rather than off the
@@ -1035,7 +1034,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * The tracing options actually used, with a default reporter for abandoned span exports.
    *
-   * An export that fails without a word is how tracing came to deliver nothing for so long, and
+   * An export that fails without a word leaves tracing delivering nothing with nobody told, and
    * the exporter has no logger of its own. Anything the user supplied wins — this only fills the
    * gap where the alternative is silence.
    */
@@ -1064,10 +1063,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *
    * Every path goes through `makeLoggerFromOptions`, including the one where nothing was
    * configured, because it — and not `makeLogger` — is what reads
-   * `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`. Sending the
-   * no-options case to `makeLogger` meant setting either variable did nothing whatsoever,
-   * which defeats the reason the variables exist: one image promoted from dev to prod with
-   * observability turned on by injection rather than by a code change.
+   * `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`. Sent to `makeLogger`,
+   * the no-options case would ignore both variables, which defeats the reason the variables
+   * exist: one image promoted from dev to prod with observability turned on by injection rather
+   * than by a code change.
    */
   private resolveLoggerOptions(): LoggerOptions | undefined {
     const configured = this.options.loggerOptions;
@@ -2867,9 +2866,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      *   4. the inline guard call                            — throwing guards, without
      *
      * Sites 1 and 2 are one boundary in two shapes, and they are ABOVE the interceptor chain.
-     * `executeHandler` and the fast arm used to filter for themselves, below it, which made
+     * Filtering below it, inside `executeHandler` or the fast arm, would make
      * `try { await next() } catch` in an interceptor dead code on HTTP while the identical
-     * class saw the throw on the queue and on WebSocket. Guards keep their own sites because
+     * class sees the throw on the queue and on WebSocket. Guards keep their own sites because
      * they run outside the chain — an interceptor never wraps a guard.
      *
      * DELIBERATELY NOT applied to the middleware chain. Middleware post-processes the
@@ -2882,9 +2881,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      *
      * Filters are tried from the most specific outwards — route, then controller, then global,
      * then the framework's default — and the first one to return a Response answers. A filter
-     * DECLINES by returning `undefined`, which is the supported way to say "not mine": the
-     * documentation used to show `throw error` for that, and a throw cannot mean it, because a
-     * bug in a filter throws too.
+     * DECLINES by returning `undefined`, which is the supported way to say "not mine": a
+     * `throw error` cannot mean it, because a bug in a filter throws too.
      *
      * A filter that THROWS is treated as the bug it is: reported with the filter's name and
      * answered by the default filter, without consulting the rest of the chain. A filter that
@@ -3394,8 +3392,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * Called while `start()` is still booting, it waits for the boot to settle and then does what
    * it would have done called right after: stops what a boot that resolved started, or — after a
    * boot that failed and rolled itself back — closes what that rollback left open. The wait
-   * counts toward `shutdownTimeout`. A boot still running when the budget is spent is no longer
-   * waited for: its system-metrics sampler is stopped then, and the rest as soon as it settles.
+   * counts toward `shutdownTimeout`. When the budget is spent with the boot still running, the
+   * wait ends: the boot's system-metrics sampler is stopped then, and the rest as soon as it
+   * settles.
    * Do not await this from the boot's own `onModuleInit` or `onApplicationInit` — it waits for
    * that boot, so the hook sits out the whole budget. Throw from the hook to abort the boot.
    *
@@ -3403,7 +3402,7 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    */
   async stop(options?: {
     /**
-     * @deprecated Ignored. An application no longer releases the shared Redis client — whoever
+     * @deprecated Ignored. An application does not release the shared Redis client — whoever
      * acquired a hold gives it back, and the connection closes when the last holder does.
      */
     closeSharedRedis?: boolean;
@@ -3415,11 +3414,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Undo a `start()` that rejected, before its error reaches the caller.
    *
-   * It used to log and rethrow with nothing released. Whatever the boot had acquired stayed
-   * open — the queue adapter's connection and the system-metrics `setInterval` each kept the
-   * event loop alive on their own (measured: only releasing both let the process end) — so a
-   * caller that caught the rejection without calling `stop()` never exited. Tests and
-   * supervisors that catch a failed boot hung.
+   * Whatever the boot acquired is released here. The queue adapter's connection and the
+   * system-metrics `setInterval` each keep the event loop alive on their own — only releasing both
+   * lets the process end — so without this a caller that catches the rejection without calling
+   * `stop()`, such as a test or a supervisor that catches a failed boot, would never exit.
    *
    * The `stop()` sequence, not a list of its own: the half-started application holds exactly
    * what a started one holds, minus what it never reached, and every step already tolerates
@@ -3431,17 +3429,17 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * built. `stop()` ends the process's logging and shuts down every span processor the provider
    * holds; after a failed start the caller usually tries again, often with the same options
    * object, and a `loggerLayer`, `tracing.spanProcessors` or `metrics.registry` it passed in must
-   * still work for that attempt — measured: shut down here, the successful retry exported no log
-   * line and no span, and in multi-service mode a sibling that had started stopped exporting logs.
+   * still work for that attempt: shut down here, the successful retry would export no log line
+   * and no span, and in multi-service mode a sibling that had started would stop exporting logs.
    *
    * Never throws. A step that fails is logged by the sequence and the caller still receives
    * the error that stopped the boot — a cleanup failure standing in for it would send the
    * operator after the wrong problem.
    *
    * Always its own sequence, even when a `stop()` was called during the boot: that `stop()` is
-   * queued behind the boot (`stopWhenBootSettles`), so nothing else is tearing it down. It used
-   * to run beside the boot instead, and this awaited it — which released only what existed when
-   * that `stop()` began, not the queue connection a boot still in `onModuleInit` went on to open.
+   * queued behind the boot (`stopWhenBootSettles`), so nothing else is tearing it down. A `stop()`
+   * run beside the boot would release only what existed when it began, not the queue connection a
+   * boot still in `onModuleInit` goes on to open.
    */
   private async rollBackFailedStart(): Promise<void> {
     const rollback = this.executeShutdown({ rollback: true }).catch(
@@ -3469,10 +3467,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * The rollback is the `stop()` sequence narrowed to what this application owns: it disposes the
    * metrics registry the application created, shuts down the trace provider and the export
    * pipeline it built, and closes the OTLP log transport of the logger it built — right for an
-   * application that is gone, which a failed start is until someone calls `start()` again. Before
-   * the rollback existed nothing was released, so a retry reused all three; building them again
-   * is what keeps the retry's `/metrics`, spans and exported logs working, while the failed
-   * attempt's sampler and connection are gone instead of running beside the retry's own.
+   * application that is gone, which a failed start is until someone calls `start()` again. A retry
+   * therefore builds all three again, which keeps the retry's `/metrics`, spans and exported logs
+   * working, while the failed attempt's sampler and connection are gone instead of running beside
+   * the retry's own.
    *
    * What the caller passed in was left open by the rollback and is reused as it is: a
    * `loggerLayer`, the `tracing.spanProcessors` (the rebuilt provider gets the same instances), and
@@ -3505,9 +3503,9 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   }
 
   /**
-   * Release the metrics registry, and hand back the process-wide slot if it still points here —
-   * nothing ever cleared it, so a stopped application kept receiving writes from every code path
-   * that has no application handle.
+   * Release the metrics registry, and hand back the process-wide slot if it still points here, so
+   * a stopped application does not keep receiving writes from every code path that has no
+   * application handle.
    */
   private releaseMetricsRegistry(): void {
     this.metricsService?.dispose?.();
@@ -3580,9 +3578,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * The first `stop()` after a failed start: await the rollback, then close the steps it narrowed,
    * so that a retry and the other applications in the process kept what the caller passed in. A
    * `stop()` is the caller done with this one, and ends as every `stop()` does. Skipped, what the
-   * caller passed in outlived a `stop()` that had always closed it: an OTLP `loggerLayer`'s flush
-   * timer, or a span processor holding a handle until its `shutdown()`, kept alive a process that
-   * used to exit.
+   * caller passed in would outlive the `stop()`: an OTLP `loggerLayer`'s flush timer, or a span
+   * processor holding a handle until its `shutdown()`, would keep the process alive.
    */
   private async closeAfterRollback(
     rollback: Promise<ShutdownOutcome>,
@@ -3603,25 +3600,23 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * A `stop()` called while `start()` is still booting: wait for the boot to settle, then stop as
    * a `stop()` called right after it would.
    *
-   * Run beside the boot, as it used to be, the sequence released what existed when it began and
-   * took the terminal latch; the boot then went on to connect the queue, start the sampler and
-   * open the listener, and nothing was left that would ever release them (measured: the queue
-   * connection still live and the process killed at 12 s). It also ran the destroy hooks of
-   * services whose `onModuleInit` was still running. Waiting keeps the order every hook expects —
+   * Run beside the boot, the sequence would release what existed when it began and take the
+   * terminal latch; the boot would then go on to connect the queue, start the sampler and open the
+   * listener, and nothing would be left to release them. It would also run the destroy hooks of
+   * services whose `onModuleInit` is still running. Waiting keeps the order every hook expects —
    * init, then destroy — and lets the ordinary paths do the work: a boot that resolved is stopped
    * by the full sequence, and one that failed has rolled itself back, so what is left is the
    * close that follows a rollback.
    *
    * The wait comes out of the same `shutdownTimeout` as the sequence, which gets what is left of
-   * it. A boot still running when the budget is spent is no longer waited for — the outcome says
+   * it. When the budget is spent with the boot still running, the wait ends — the outcome says
    * the deadline expired, so the signal path exits with 1 — but the stop stays chained to the
    * boot and runs, with a budget of its own, when it settles.
    *
    * Only the system-metrics sampler is released at that deadline. It is started before
    * `onModuleInit`, nothing in the boot depends on it, and it holds the event loop on its own: left
-   * running, a boot that never settles kept the process alive after `stop()` gave up on it, where
-   * the stop that ran beside the boot had let it exit (measured: killed at 5 s, against an exit in
-   * 0.1 s). The stop chained to the boot clears it again, which is a no-op.
+   * running, a boot that never settles would keep the process alive after `stop()` gave up on it.
+   * The stop chained to the boot clears it again, which is a no-op.
    */
   private async stopWhenBootSettles(
     settled: Promise<void>,
@@ -3738,12 +3733,12 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Run one shutdown step, and keep going if it rejects.
    *
-   * The sequence used to be a chain of bare awaits, so the FIRST step that rejected abandoned
-   * every later one — and the only trace was a single line the process was about to stop being
-   * able to emit. In practice the likely rejecter is the trace flush, which pushes the last span
-   * batch to a collector that is usually going down with the pod. When it rejected, user
-   * `onModuleDestroy` hooks never ran, the shared Redis lease was never released, and the logger
-   * never flushed: precisely the work graceful shutdown exists to do.
+   * In a chain of bare awaits the FIRST step that rejects abandons every later one, and the only
+   * trace is a single line the process is about to stop being able to emit. In practice the likely
+   * rejecter is the trace flush, which pushes the last span batch to a collector that is usually
+   * going down with the pod; abandoning everything after it would skip the user `onModuleDestroy`
+   * hooks, the release of the shared Redis lease and the logger flush: precisely the work graceful
+   * shutdown exists to do.
    *
    * `outcome.phase` is set before the step so a timeout can still name what was running, and the
    * failure is recorded by phase so an operator is told WHICH part failed rather than that
@@ -4097,16 +4092,15 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
   /**
    * Put WebSocket state where `websocket.storage` says it goes.
    *
-   * The option was declared, exported and documented, and read by nobody: `WsHandler` built an
-   * in-memory adapter in its constructor before looking at any of it. Measured against a real
-   * application with `storage: { type: 'redis' }` — the client lived in a Map and Redis held
-   * zero keys, so an operator who configured multi-instance ran single-instance and was told
-   * nothing.
+   * `WsHandler` builds an in-memory adapter in its constructor, before looking at any option; this
+   * replaces it with the configured one. Without it, `storage: { type: 'redis' }` would keep every
+   * client in a Map and write zero keys to Redis, so an operator who configured multi-instance
+   * would run single-instance and be told nothing.
    *
    * The connection is this application's own rather than the shared provider's, because the
    * documented `prefix` has to land somewhere: `RedisClient` IS the namespace, and the shared
    * client already carries whoever configured it first. A prefix that silently did not apply
-   * would be the same class of lie this is fixing.
+   * would be the same kind of silent misconfiguration.
    */
   private async initializeWebSocketStorage(): Promise<void> {
     const storage = this.options.websocket?.storage;
@@ -4310,8 +4304,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    *
    * Throws when there is no queue to hand back, with the same explanation an injected
    * `QueueService` gives — which one depends on why: never enabled, still starting, already
-   * stopped. It used to return `null` here, so the natural next line was a `TypeError` on
-   * `queue.publish` and the diagnosis the framework already had never reached the caller.
+   * stopped. It never returns `null`, so the diagnosis reaches the caller rather than surfacing as
+   * a `TypeError` on the next `queue.publish`.
    *
    * @returns The queue service
    * @throws Error when the queue is not available, naming the reason and the remedy
@@ -4671,8 +4665,8 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
    * one service class does not fit in one. A layer built without saying which instance takes the
    * slot would carry whichever was merged last — a function of module import order.
    *
-   * `resolved` are the classes a `getLayer(selections)` call named. Those are no longer
-   * ambiguous: the caller stated the answer. Everything else still refuses, and the message
+   * `resolved` are the classes a `getLayer(selections)` call named. Those are not ambiguous: the
+   * caller stated the answer. Everything else still refuses, and the message
    * names only what is actually still unresolved, so a partial selection does not report the
    * classes it already fixed.
    */

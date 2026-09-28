@@ -11,11 +11,11 @@
 /**
  * Message acknowledgment mode
  * - 'auto': Message is automatically acknowledged after successful handler execution. A handler
- *   that throws is retried up to `retry.attempts` times (default 1 — one delivery, as before),
- *   with `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
+ *   that throws is retried up to `retry.attempts` times (default 1 — one delivery), with
+ *   `retry.backoff` and `retry.delay` deciding the wait between attempts. `onMessageFailed`
  *   fires on every failed attempt. Once the attempts are exhausted the message is dropped on the
- *   memory adapter, and dropped on the Redis adapter too until `deadLetter.queue` is honoured
- *   there; JetStream dead-letters it.
+ *   memory adapter; the Redis adapter republishes it to `deadLetter.queue` when one is configured
+ *   and drops it otherwise; JetStream dead-letters it.
  * - 'manual': Handler must call message.ack() or message.nack() explicitly. `nack(true)` is
  *   uncapped — it is the handler's instruction, not the framework's policy, and `Message.attempt`
  *   is what lets a handler stop itself.
@@ -198,7 +198,7 @@ export interface PublishOptions {
 export interface RetryOptions {
   /**
    * Total deliveries, not extra ones: `attempts: 3` runs the handler at most three times.
-   * Defaults to 1 — one delivery, which is what an unconfigured subscription has always done.
+   * Defaults to 1 — one delivery and no retry, which is what an unconfigured subscription gets.
    * Honoured by the memory, Redis and JetStream adapters; core NATS tracks no delivery state
    * and ignores it.
    */
@@ -642,8 +642,8 @@ export interface IntervalDecoratorOptions {
   /**
    * Run once as soon as the job starts, rather than waiting out the first period.
    *
-   * `false` gives "every hour, starting next hour", which used to be impossible: the first run
-   * always happened at boot.
+   * `false` gives "every hour, starting next hour": the first run waits out the first period
+   * instead of happening at boot.
    *
    * @defaultValue true
    */
