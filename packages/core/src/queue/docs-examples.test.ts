@@ -1600,3 +1600,80 @@ describe('Interval overlap and the first run', () => {
     expect(jobs[0]?.options.runOnStart).toBeUndefined();
   });
 });
+
+/**
+ * @source docs:api/queue.md#retry-max-delay
+ */
+describe('RetryOptions.maxDelay — the documented ceiling', () => {
+  it('runs the documented exponential subscription at 1, 2, 4, 8, 16 and then 30 seconds', async () => {
+    class ReportBuilder {
+      calls = 0;
+
+      @Subscribe('reports.build', {
+        retry: {
+          attempts: -1, backoff: 'exponential', delay: 1_000, maxDelay: 30_000, 
+        },
+      })
+      async build(message: Message<{ reportId: string }>) {
+        this.calls += 1;
+        if (this.calls < 9) {
+          throw new Error(`dependency down for ${message.data.reportId}`);
+        }
+      }
+    }
+
+    const [subscription] = getSubscribeMetadata(ReportBuilder);
+    expect(subscription.options?.retry?.maxDelay).toBe(30_000);
+
+    // The waits the comment in the snippet lists, then the ceiling for every further attempt.
+    const waits = Array.from({ length: 8 }, (_, index) => retryDelayMs(subscription.options?.retry, index + 1));
+    expect(waits).toEqual([1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000]);
+
+    const timers = useFakeTimers();
+    const adapter = new InMemoryQueueAdapter();
+
+    try {
+      await adapter.connect();
+
+      const consumer = new ReportBuilder();
+      await adapter.subscribe<{ reportId: string }>(subscription.pattern, async (message) => {
+        await consumer.build(message);
+      }, subscription.options);
+
+      await adapter.publish('reports.build', { reportId: 'r-1' });
+
+      for (const wait of waits) {
+        timers.advanceTime(wait);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+
+      // Nine attempts in exactly the eight documented waits: uncapped, the last wait alone
+      // would have been 128 s.
+      expect(consumer.calls).toBe(9);
+    } finally {
+      await adapter.disconnect();
+      timers.restore();
+    }
+  });
+
+  it('keeps the ladder untouched when maxDelay is not set', () => {
+    expect(retryDelayMs({ backoff: 'exponential', delay: 1_000 }, 12)).toBe(2_048_000);
+  });
+
+  it('applies the ceiling to the base delay and refuses an invalid value at subscribe()', async () => {
+    expect(retryDelayMs({ delay: 1_000, maxDelay: 250 }, 1)).toBe(250);
+    expect(retryDelayMs({ backoff: 'fixed', delay: 1_000, maxDelay: 0 }, 1)).toBe(0);
+
+    const adapter = new InMemoryQueueAdapter();
+    await adapter.connect();
+
+    try {
+      for (const maxDelay of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(adapter.subscribe('reports.build', async () => undefined, { retry: { maxDelay } }))
+          .rejects.toThrow('"reports.build"');
+      }
+    } finally {
+      await adapter.disconnect();
+    }
+  });
+});

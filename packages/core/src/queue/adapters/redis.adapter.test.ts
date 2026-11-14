@@ -810,6 +810,65 @@ describe('RedisQueueAdapter', () => {
       expect(calls).toBeLessThan(10);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
+    it('parks a retry in the delayed set no further out than retry.maxDelay', async () => {
+      const client = (adapter as unknown as {
+        client: { zrangebyscore: (k: string, min: string, max: string) => Promise<string[]> };
+      }).client;
+      const prefix = (adapter as unknown as { options: { keyPrefix: string } }).options.keyPrefix;
+      const delayedKey = `${prefix}queue:delayed`;
+
+      let calls = 0;
+      // The formula alone would park the first retry 10 s out.
+      await adapter.subscribe('orders.max-delay', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: 2, backoff: 'fixed', delay: 10_000, maxDelay: 900, 
+        }, 
+      });
+
+      await adapter.publish('orders.max-delay', { orderId: 1 });
+      await waitFor(() => calls >= 1);
+
+      // The delayed set is scored by due time: a member at or below now + 2 s was parked by the
+      // ceiling, not by the 10 s the formula gives.
+      let dueSoon: string[] = [];
+      await waitFor(async () => {
+        dueSoon = await client.zrangebyscore(delayedKey, '-inf', String(Date.now() + 2000));
+
+        return dueSoon.length > 0;
+      });
+      expect(JSON.parse(dueSoon[0]).attempt).toBe(2);
+
+      await waitFor(() => calls >= 2, 10_000);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      await expect(adapter.subscribe('orders.bad-max-delay', async () => undefined, { retry: { maxDelay: -1 } }))
+        .rejects.toThrow(/retry\.maxDelay.*"orders\.bad-max-delay"/);
+    });
+
+    it('registers and polls nothing when it refuses an invalid retry.maxDelay', async () => {
+      const internals = adapter as unknown as { subscriptions: unknown[]; startQueuePolling: () => void };
+      let polled = 0;
+      const original = internals.startQueuePolling.bind(adapter);
+      internals.startQueuePolling = () => {
+        polled += 1;
+        original();
+      };
+
+      try {
+        await expect(adapter.subscribe('orders.refused', async () => undefined, { retry: { maxDelay: Number.NaN } }))
+          .rejects.toThrow(/retry\.maxDelay/);
+
+        expect(internals.subscriptions).toHaveLength(0);
+        expect(polled).toBe(0);
+      } finally {
+        internals.startQueuePolling = original;
+      }
+    });
+
     it('stops an unlimited retry as soon as the handler succeeds', async () => {
       let calls = 0;
       let processed = 0;

@@ -1236,6 +1236,74 @@ describe('InMemoryQueueAdapter', () => {
 
       expect(reported).toEqual([3, 3, 3]);
     });
+
+    it('waits at most retry.maxDelay between attempts of an exponential backoff', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.capped', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 50, 
+        }, 
+      });
+
+      await adapter.publish('orders.capped', { orderId: 1 });
+      // Uncapped, the second wait alone would be 2000 ms and the third 4000 ms.
+      await runRetries(6, 50);
+
+      expect(calls).toBe(7);
+    });
+
+    it('waits at most retry.maxDelay on a capped-attempts linear backoff', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await adapter.subscribe('orders.capped-linear', async () => {
+        calls += 1;
+        throw new Error('handler exploded');
+      }, {
+        retry: {
+          attempts: 4, backoff: 'linear', delay: 1000, maxDelay: 20, 
+        }, 
+      });
+
+      const published = adapter.publish('orders.capped-linear', { orderId: 2 });
+      for (let round = 0; round < 4; round += 1) {
+        await settle();
+        advanceTime(20);
+      }
+      await settle();
+
+      // Asserted before awaiting publish(): without the ceiling the waits are 1, 2 and 3 s and
+      // the call count is 1 here, which fails this expectation instead of hanging the test.
+      expect(calls).toBe(4);
+      await published;
+    });
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      await adapter.connect();
+
+      for (const maxDelay of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        await expect(adapter.subscribe('orders.bad', async () => undefined, { retry: { maxDelay } }))
+          .rejects.toThrow(/retry\.maxDelay.*"orders\.bad"/);
+      }
+    });
+
+    it('registers nothing when it refuses an invalid retry.maxDelay', async () => {
+      await adapter.connect();
+
+      let calls = 0;
+      await expect(adapter.subscribe('orders.refused', async () => {
+        calls += 1;
+      }, { retry: { maxDelay: -1 } })).rejects.toThrow();
+
+      expect((adapter as unknown as { subscriptions: unknown[] }).subscriptions).toHaveLength(0);
+      await adapter.publish('orders.refused', { orderId: 1 });
+      expect(calls).toBe(0);
+    });
   });
 
   describe('error handling', () => {

@@ -106,6 +106,9 @@ export function isLastAttempt(attempt: number | undefined, maxAttempts: number |
  * `attempt` is 1-based, as `Message.attempt` is: after the first delivery fails, the wait is
  * `retryDelayMs(retry, 1)`.
  *
+ * `retry.maxDelay`, when set, is the ceiling of the result for every backoff, the default wait of
+ * an unlimited subscription with no `retry` aside (that one has no `retry` to carry it).
+ *
  * With no `retry` at all this is 0 — there is no retry to schedule, and a caller that asks
  * anyway should not be made to wait for a redelivery that will not happen.
  *
@@ -125,14 +128,52 @@ export function retryDelayMs(retry: RetryOptions | undefined, attempt: number, m
   }
 
   const delay = policy.delay ?? DEFAULT_RETRY_DELAY_MS;
+  let computed: number;
 
   switch (policy.backoff) {
     case 'linear':
-      return delay * attempt;
+      computed = delay * attempt;
+      break;
     case 'exponential':
-      return delay * 2 ** (attempt - 1);
+      computed = delay * 2 ** (attempt - 1);
+      break;
     case 'fixed':
     default:
-      return delay;
+      computed = delay;
+  }
+
+  // A base delay of 0 stays 0 at any attempt: `0 * Infinity` is NaN once the exponent overflows.
+  if (Number.isNaN(computed)) {
+    computed = 0;
+  }
+
+  // `Math.min` also bounds a ladder that has overflowed to `Infinity`. Not set: no ceiling at all.
+  return policy.maxDelay === undefined ? computed : Math.min(computed, policy.maxDelay);
+}
+
+/**
+ * Refuses a `retry.maxDelay` that is not a finite, non-negative number.
+ *
+ * Called by every adapter that honours `retry`, at `subscribe()`, so a bad value fails the call
+ * that registered the subscription — with the pattern in the message — rather than turning into a
+ * `NaN` wait on the first failed delivery. `undefined` (no ceiling) is valid.
+ *
+ * @throws Error naming the subscription pattern and the value received
+ *
+ * @see docs:api/queue.md
+ */
+export function validateRetryOptions(retry: RetryOptions | undefined, pattern: string): void {
+  const maxDelay: unknown = retry?.maxDelay;
+
+  if (maxDelay === undefined) {
+    return;
+  }
+
+  if (typeof maxDelay !== 'number' || !Number.isFinite(maxDelay) || maxDelay < 0) {
+    throw new Error(
+      `Invalid retry.maxDelay for subscription "${pattern}": expected a finite number of milliseconds ` +
+      `of 0 or more, got ${typeof maxDelay === 'string' ? JSON.stringify(maxDelay) : String(maxDelay)} ` +
+      `(${typeof maxDelay}). Omit maxDelay for a backoff with no ceiling.`,
+    );
   }
 }

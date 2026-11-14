@@ -46,6 +46,7 @@ import {
   resolveAckMode,
   resolveMaxAttempts,
   retryDelayMs,
+  validateRetryOptions,
   tracksDelivery,
   wasNacked,
   type NackAwareMessage,
@@ -1153,6 +1154,8 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     options?: SubscribeOptions,
   ): Promise<Subscription> {
     this.ensureConnected();
+
+    validateRetryOptions(options?.retry, pattern);
 
     const jsModule = await getJetStreamModule();
 

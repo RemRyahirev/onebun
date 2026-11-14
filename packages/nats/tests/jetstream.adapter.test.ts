@@ -4737,6 +4737,55 @@ describe('dead-letter queue: disposition', () => {
       expectRetriedNotDeadLettered(await deliverFailing(1_000, UNLIMITED));
     });
 
+    it('sends a nak delay no longer than retry.maxDelay', async () => {
+      // delay 1000 doubled eleven times would be 1024 s; the ceiling is what travels with the nak.
+      const { jsMsg } = await deliverFailing(
+        12,
+        {
+          retry: {
+            attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 30_000, 
+          }, 
+        },
+      );
+
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.nak).toHaveBeenCalledWith(30_000);
+    });
+
+    it('sends the formula below the ceiling unchanged', async () => {
+      const { jsMsg } = await deliverFailing(
+        3,
+        {
+          retry: {
+            attempts: -1, backoff: 'exponential', delay: 1000, maxDelay: 30_000, 
+          }, 
+        },
+      );
+
+      expect(jsMsg.nak).toHaveBeenCalledWith(4000);
+    });
+
+    it('applies retry.maxDelay to the default wait of an unlimited subscription with a retry and no delay', async () => {
+      const { jsMsg } = await deliverFailing(1, { retry: { attempts: -1, maxDelay: 40 } });
+
+      expect(jsMsg.nak).toHaveBeenCalledWith(40);
+    });
+
+    it('refuses an invalid retry.maxDelay when the subscription is registered', async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+      const consumersGet = asAny(adapter).js.consumers.get;
+
+      await expect(adapter.subscribe('test.topic', async () => undefined, { retry: { maxDelay: Number.NaN } }))
+        .rejects.toThrow(/retry\.maxDelay.*"test\.topic"/);
+
+      // Refused before anything is registered, looked up or created on the server.
+      expect(asAny(adapter).subscriptions).toHaveLength(0);
+      expect(mockJsm.consumers.add).not.toHaveBeenCalled();
+      expect(mockJsm.consumers.info).not.toHaveBeenCalled();
+      expect(mockJsm.streams.info).not.toHaveBeenCalled();
+      expect(consumersGet).not.toHaveBeenCalled();
+    });
+
     it('treats deadLetter.maxRetries: -1 and retry.attempts: 0 as no limit as well', async () => {
       expectRetriedNotDeadLettered(await deliverFailing(5, { deadLetter: { queue: DLQ, maxRetries: -1 } }));
       expectRetriedNotDeadLettered(await deliverFailing(5, { retry: { attempts: 0 }, deadLetter: { queue: DLQ } }));

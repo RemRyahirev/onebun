@@ -213,6 +213,16 @@ export interface RetryOptions {
   backoff?: 'fixed' | 'linear' | 'exponential';
   /** Base delay in milliseconds (default 100). */
   delay?: number;
+  /**
+   * Ceiling for the wait between attempts, in milliseconds: the wait is
+   * `min(maxDelay, <backoff formula>)`, whichever of `'fixed'`, `'linear'` and `'exponential'` is
+   * set, and on every adapter that honours `retry`. Not set by default: the `'linear'` and
+   * `'exponential'` waits then keep growing for as long as the message keeps failing. A negative,
+   * `NaN` or infinite value is refused when the subscription is registered.
+   *
+   * @see docs:api/queue.md#retry
+   */
+  maxDelay?: number;
 }
 
 /**

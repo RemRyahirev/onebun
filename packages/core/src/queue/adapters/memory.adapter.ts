@@ -31,6 +31,7 @@ import {
   isLastAttempt,
   resolveMaxAttempts,
   retryDelayMs,
+  validateRetryOptions,
   UNLIMITED_ATTEMPTS,
 } from '../retry';
 import { QueueScheduler } from '../scheduler';
@@ -356,6 +357,7 @@ export class InMemoryQueueAdapter implements QueueAdapter {
     options?: SubscribeOptions,
   ): Promise<Subscription> {
     this.ensureConnected();
+    validateRetryOptions(options?.retry, pattern);
 
     const entry: SubscriptionEntry = {
       pattern,

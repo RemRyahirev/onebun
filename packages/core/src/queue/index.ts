@@ -76,6 +76,7 @@ export {
   resolveMaxAttempts,
   isLastAttempt,
   retryDelayMs,
+  validateRetryOptions,
   DEFAULT_RETRY_ATTEMPTS,
   DEFAULT_RETRY_DELAY_MS,
 } from './retry';

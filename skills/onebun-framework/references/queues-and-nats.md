@@ -158,7 +158,10 @@ adapter-level `consumerConfig`.
 `retry.attempts` is the total number of deliveries under `ackMode: 'auto'`, defaulting to 1 — an
 unconfigured subscription still delivers once. `backoff` uses the same formulas as
 `@onebun/requests`: fixed `delay`, `delay * n`, `delay * 2^(n-1)`, with `delay` defaulting to
-100 ms. All three fields are honoured by the memory, Redis and JetStream adapters, through one
+100 ms. `retry.maxDelay` (milliseconds, not set by default) is the ceiling of the wait:
+`min(maxDelay, formula)` for every backoff, applied inside `retryDelayMs` so memory, Redis and
+JetStream all honour it; without it `'linear'` and `'exponential'` grow without bound. A negative,
+`NaN` or infinite `maxDelay` makes `subscribe()` throw, naming the pattern. All fields are honoured by the memory, Redis and JetStream adapters, through one
 shared `retryDelayMs`; core NATS tracks no delivery state and honours none of them.
 
 Where the wait is held differs: memory sleeps in process, Redis parks the retry in its
@@ -187,8 +190,8 @@ other negative value mean the same (that is how NATS reads `max_deliver`), and s
 `consumerConfig.maxDeliver: -1` when the subscription sets neither). A failing message is retried
 until the handler succeeds and no delivery is dead-lettered by count — only an explicit
 `nack(false)` reaches the dead-letter queue (on Redis under `'manual'`; on JetStream also the one a
-message-guard denial sends). The backoff has no ceiling, so `'exponential'` keeps doubling the
-wait. With no `retry` at all an unlimited subscription waits the default `'fixed'` 100 ms, never
+message-guard denial sends). Without `retry.maxDelay` the backoff has no ceiling, so
+`'exponential'` keeps doubling the wait; with it the wait stops at `maxDelay`. With no `retry` at all an unlimited subscription waits the default `'fixed'` 100 ms, never
 zero; only an explicit `retry.delay: 0` retries without a wait. The rule applies to real numbers:
 an untyped string such as `'0'` or `'-1'` (from env or JSON) resolves to one delivery, and
 `'3'` to 3.

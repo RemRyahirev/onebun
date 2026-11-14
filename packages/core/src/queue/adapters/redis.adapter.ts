@@ -46,6 +46,7 @@ import {
   isLastAttempt,
   resolveMaxAttempts,
   retryDelayMs,
+  validateRetryOptions,
 } from '../retry';
 import { QueueScheduler } from '../scheduler';
 
@@ -462,6 +463,7 @@ export class RedisQueueAdapter implements QueueAdapter {
     options?: SubscribeOptions,
   ): Promise<Subscription> {
     this.ensureConnected();
+    validateRetryOptions(options?.retry, pattern);
 
     const entry: RedisSubscriptionEntry = {
       pattern,

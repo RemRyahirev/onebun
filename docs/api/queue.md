@@ -285,13 +285,13 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 **Technical details for AI agents — the retry policy under `'auto'`:**
-- `resolveMaxAttempts`, `isLastAttempt` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory, Redis and JetStream adapters call all three (JetStream's cap is the consumer's `max_deliver`, resolved from `retry.attempts` in `resolveConsumerConfig`). Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent. `UNLIMITED_ATTEMPTS` (`-1`) is the module's internal name for the unlimited cap and is NOT exported from `@onebun/core`: handler code asks `isLastAttempt()` instead of comparing with it
+- `resolveMaxAttempts`, `isLastAttempt`, `retryDelayMs` and `validateRetryOptions` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory, Redis and JetStream adapters call all four — `validateRetryOptions(retry, pattern)` at the top of `subscribe()`, before anything is registered, and it throws for a `retry.maxDelay` that is negative, `NaN`, infinite or not a number (JetStream's cap is the consumer's `max_deliver`, resolved from `retry.attempts` in `resolveConsumerConfig`). Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent. `UNLIMITED_ATTEMPTS` (`-1`) is the module's internal name for the unlimited cap and is NOT exported from `@onebun/core`: handler code asks `isLastAttempt()` instead of comparing with it
 - No limit: `resolveMaxAttempts` returns `-1` for a `number` that is `<= 0` or non-finite (`Infinity`, `NaN`); a positive number is floored, never below 1. A value that is not a `number` (an untyped string from env or JSON) is read with `Number()`: below 1 is raised to 1, anything else is floored, so `'3'` is 3 and `'0'`/`'-1'` is 1; one that does not read as a finite number gets the default 1. So the resolved cap is a finite positive integer or exactly `-1`. The same rule is how NATS reads `max_deliver` (`-1` is "redeliver until acknowledged", `0` is stored as `-1`, other negatives are stored as sent)
 - Every comparison against a resolved cap goes through `isLastAttempt(attempt, maxAttempts)` = `maxAttempts > 0 && attempt >= maxAttempts` (`false` when either is `undefined`): the memory adapter's exhaustion check, the Redis adapter's exhaustion/dead-letter check in `processMessage`, and JetStream's dead-letter branch (`isLastAttempt(deliveryCount, resolved.maxDeliver)` against the raw `max_deliver`). JetStream does NOT call `resolveMaxAttempts` for the wire: `retry.attempts` reaches `max_deliver` unchanged. It does call `resolveMaxAttempts({ attempts: entry.maxDeliver })` once per message for `Message.maxAttempts` and the nak delay, so all three adapters report `-1` for an unlimited subscription whichever non-positive value set it
 - `retryDelayMs(retry, attempt, maxAttempts?)`: with no `retry` it is `0`, EXCEPT when the passed resolved cap is `<= 0` — then it applies the documented defaults (`'fixed'`, 100 ms). All three adapters pass the cap. Without `retry` the limit can only come from `deadLetter.maxRetries` or `consumerConfig.maxDeliver`, and a zero wait there is a hot loop: a direct LPUSH on Redis, a bare `-NAK` on JetStream. An explicit `retry.delay: 0` is still `0`
 - Memory with no limit: the retry after a failure is NOT awaited. `deliver()` hands it to `armRetry()`, a `setTimeout` per attempt (also for a zero delay) tracked in `SubscriptionEntry.retryTimers`. `armRetry()` arms nothing when the entry is no longer registered (`isRegistered()`: connected and in `this.subscriptions`) — a handler in flight during `unsubscribe()`/`disconnect()` fails into it afterwards — and a timer that fires for an unregistered entry does nothing. A timer that fires while the entry is paused pushes its redelivery onto `SubscriptionEntry.heldRetries` instead of running it; `InMemorySubscription.resume()` calls `releaseHeldRetries()`, which re-arms each with a 0 ms timer. `unsubscribe()` and `disconnect()` clear timers and held retries through `cancelRetries()`. Every timer delay goes through `timerDelay()`, capped at `2^31 - 1` ms: Bun fires a longer `setTimeout` after 1 ms. A capped retry is still awaited inside `deliver()` — `sleep()` (also capped) then a recursive `deliver()` — so `publish()` resolves after every capped retry has run, and capped retries do not wait for `resume()`. Because the unlimited retry runs on its own timer, a message published after the failure is delivered before the retry
 - `attempts` counts TOTAL deliveries, not extra ones, matching the `attempt >= maxAttempts` comparison `isLastAttempt` makes. `attempt` is 1-based, `redelivered` is `attempt > 1`
-- Backoff formulas are the same three `@onebun/requests` ships: `fixed` -> `delay`, `linear` -> `delay * n`, `exponential` -> `delay * 2^(n-1)`, where `n` is the 1-based attempt that just failed. `delay` defaults to 100 ms
+- Backoff formulas are the same three `@onebun/requests` ships: `fixed` -> `delay`, `linear` -> `delay * n`, `exponential` -> `delay * 2^(n-1)`, where `n` is the 1-based attempt that just failed, then `min(retry.maxDelay, …)` when `maxDelay` is set (a `NaN` from `0 * Infinity` is read as 0). `delay` defaults to 100 ms
 - By contrast manual nack(true) is uncapped on both adapters — it is the handler's instruction, not the framework's policy, which is why `Message.attempt` has to be real: it is the only way a handler stops itself
 - Memory keeps the counter in the delivery closure and retries the ONE failing `SubscriptionEntry`, not `dispatch()`. Going back through `dispatch()` would re-invoke every matching subscription, so one broken consumer would re-run its healthy neighbours
 - Redis keeps the counter in the persisted envelope (`attempt` on the JSON on the list) because a retry is a re-push and the replica that claims it next may not be the one that failed; an in-process counter would restart at 1 on every hop. A delayed retry is parked in the existing `queue:delayed` sorted set rather than awaited in a closure, so the wait survives a restart; a zero delay skips the set, which would otherwise cost a poll tick
@@ -508,6 +508,7 @@ between attempts is:
 | `attempts` | **Total** deliveries, not extra ones — `attempts: 3` runs the handler at most three times. `-1` means no limit | `1` |
 | `backoff` | `'fixed'` → `delay`, `'linear'` → `delay * n`, `'exponential'` → `delay * 2^(n-1)`, where `n` is the attempt that just failed | `'fixed'` |
 | `delay` | Base delay in milliseconds | `100` |
+| `maxDelay` | Ceiling for the wait between attempts, in milliseconds: the wait is `min(maxDelay, <backoff formula>)`. See [Capping the wait](#retry-max-delay) | not set — no ceiling |
 
 The default of 1 means an unconfigured subscription delivers once — retries are opt-in, so a
 handler with a non-idempotent side effect is never quietly upgraded to three of them.
@@ -540,8 +541,9 @@ class PaymentCapture extends BaseController {
   does JetStream's `consumerConfig.maxDeliver: -1` when the subscription sets neither. With no
   `retry` at all such a subscription waits the defaults from the table above — `'fixed'`, 100 ms —
   between attempts, never zero: only an explicit `delay: 0` retries without a wait.
-- The ladder has no ceiling either: under `'exponential'` the wait keeps doubling for as long as the
-  message keeps failing. `'fixed'` is the backoff that stays constant.
+- Without `maxDelay` the `'linear'` and `'exponential'` ladders have no ceiling: under `'exponential'`
+  the wait keeps doubling for as long as the message keeps failing. `'fixed'` is the backoff that
+  stays constant, and [`maxDelay`](#retry-max-delay) bounds the other two.
 
 Where each adapter keeps an endless retry: JetStream sends the consumer `max_deliver` as written —
 the server's own "redeliver until acknowledged" — and Redis parks every retry in Redis, as it does
@@ -563,7 +565,7 @@ for a capped one. The in-memory adapter runs it in the background:
 [error-handling recipe](#error-handling-in-handlers) compares against: `message.attempt` is
 1-based, and under a positive cap `attempt >= maxAttempts` is the terminal delivery.
 
-Honoured by the memory, Redis and JetStream adapters — all three fields, computed by one shared
+Honoured by the memory, Redis and JetStream adapters — every field, computed by one shared
 function, so a ladder means the same thing wherever it is declared. Core NATS tracks no delivery
 state and ignores it. Under `ackMode: 'none'` it goes inert on every adapter, along with
 `deadLetter` and the `attempt` / `maxAttempts` / `redelivered` fields.
@@ -575,6 +577,42 @@ a handler that never returns, a process that dies — still comes back at `ack_w
 nak'd it. The consumer's own `backoff` field is deliberately left alone: JetStream's backoff list
 *replaces* `ack_wait` per delivery, so writing a one-second base delay there would also cut the
 handler's acknowledgement window to one second.
+
+##### Capping the wait {#retry-max-delay}
+
+`retry.maxDelay` is the longest wait the retry policy asks for between two attempts, in milliseconds. The wait is
+`min(maxDelay, <backoff formula>)` for every backoff, on every adapter that honours `retry`, so a
+handler that retries while a dependency is down can back off by doubling and still come back at a
+bounded rate:
+
+```typescript
+@Controller('/reports')
+class ReportBuilder extends BaseController {
+  @Subscribe('reports.build', {
+    // 1 s, 2 s, 4 s, 8 s, 16 s, then 30 s between every further attempt
+    retry: { attempts: -1, backoff: 'exponential', delay: 1_000, maxDelay: 30_000 },
+  })
+  async build(message: Message<{ reportId: string }>) {
+    await this.buildReport(message.data.reportId); // retried until the dependency answers
+  }
+}
+```
+
+- `maxDelay` is not set by default: the waits are then exactly what `backoff` and `delay` give,
+  without a ceiling.
+- On JetStream the ceiling bounds the delay sent with the nak. A delivery lost some other way — a
+  handler that never returns, a process that dies — still comes back at `ack_wait`, which can be
+  longer than `maxDelay`.
+- A value of `0` retries without a wait. A negative, `NaN` or infinite value — or one that is not a
+  number — is refused when the subscription is registered: `subscribe()` throws an error that names
+  the subscription's pattern. The check is `validateRetryOptions(retry, pattern)`, exported for custom
+  adapters.
+- The ceiling applies to the whole wait, including the base `delay`: `delay: 1_000, maxDelay: 250`
+  waits 250 ms. On the in-memory adapter a timer cannot wait longer than 2^31 - 1 ms (about 24.8
+  days), so a larger `maxDelay` is capped there by the timer.
+- A subscription with no `retry` has nowhere to set it: an unlimited one (`deadLetter.maxRetries: -1`)
+  waits the default `'fixed'` 100 ms. Add `retry: { maxDelay }` to bound a wait built from other
+  options.
 
 Retries apply to `ackMode: 'auto'`, where the framework owns the decision. Under `'manual'`,
 `nack(true)` is **uncapped** — it is your instruction, not a policy — and `message.attempt` is
@@ -1806,7 +1844,7 @@ async handleOrder(message: Message<OrderData>) {
 
 **How many attempts.** `maxRetries` sets the server's `max_deliver`, behind `retry.attempts`. The full order is `retry.attempts` → `deadLetter.maxRetries` → `consumerConfig.maxDeliver` → `3`. `retry.attempts` comes first, so a subscription that declares a retry ladder keeps exactly that `max_deliver` whether or not it also declares a dead-letter queue.
 
-**Unlimited attempts.** A resolved `max_deliver` of `-1` — `retry.attempts: -1`, `maxRetries: -1` or `consumerConfig.maxDeliver: -1`, or any value of `0` or below — has no last attempt, so a failing message is redelivered without end and is never dead-lettered by count; `message.maxAttempts` reports `-1`. The dead-letter queue is then reached only by an explicit `message.nack(false)` — the handler's own, or the one sent when a [message guard](#message-guards) denies the message.
+**Unlimited attempts.** A resolved `max_deliver` of `-1` — `retry.attempts: -1`, `maxRetries: -1` or `consumerConfig.maxDeliver: -1`, or any value of `0` or below — has no last attempt, so a failing message is redelivered without end and is never dead-lettered by count; `message.maxAttempts` reports `-1`. The wait between those attempts grows without a ceiling under `'linear'` and `'exponential'` unless [`retry.maxDelay`](#retry-max-delay) is set, and is the ceiling when it is. The dead-letter queue is then reached only by an explicit `message.nack(false)` — the handler's own, or the one sent when a [message guard](#message-guards) denies the message.
 
 **What happens on the last attempt.** The payload is republished to `deadLetter.queue` **first**, and only once that succeeded is the original terminated. If the republish fails, the original is deliberately left alone — the server redelivers it or exhausts `max_deliver` exactly as it does without a dead-letter queue — and the failure is reported to `@OnQueueError`. Terminating first and republishing second would turn a failed republish into a lost message, which is the one outcome a dead-letter queue exists to prevent.
 
