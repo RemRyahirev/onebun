@@ -941,6 +941,87 @@ describe('docs/api/websocket.md', () => {
       await app.stop();
     }
   });
+
+  /**
+   * A guard on `@OnJoinRoom` is asked before the join: the client it denies gets the FORBIDDEN
+   * frame and is not in the room, so the room's broadcasts never reach it. The handler runs after
+   * the join of a client the guard allows.
+   *
+   * @source docs:api/websocket.md#room-joins-and-leaves
+   */
+  it('keeps a client the join guard denies out of the room and answers it FORBIDDEN', async () => {
+    const users: Record<string, { id: string; permissions: string[] }> = {
+      vipOne: { id: 'u-vip-1', permissions: ['rooms:vip'] },
+      vipTwo: { id: 'u-vip-2', permissions: ['rooms:vip'] },
+      basic: { id: 'u-basic', permissions: [] },
+    };
+    const verifyToken = async (token: string) => users[token];
+
+    @WebSocketGateway({
+      path: '/ws',
+      async authenticate({ token }) {
+        const user = token ? await verifyToken(token) : null;
+
+        return user ? { userId: user.id, permissions: user.permissions } : null;
+      },
+    })
+    class LoungeGateway extends BaseWebSocketGateway {
+      // Asked before the join: without `rooms:vip` the client stays out of every `vip:*` room.
+      @UseWsGuards(new WsPermissionGuard('rooms:vip'))
+      @OnJoinRoom('vip:*')
+      handleVipJoin(@Client() client: WsClientData, @RoomName() room: string) {
+        // Runs after the join, so the joining client is excluded by id.
+        this.emitToRoom(room, 'user:joined', { userId: client.auth?.userId }, [client.id]);
+
+        return { event: 'room:joined', data: { room } };
+      }
+    }
+
+    @Module({ controllers: [LoungeGateway] })
+    class LoungeModule {}
+
+    const app = new OneBunApplication(LoungeModule, {
+      ...baseOptions,
+      loggerLayer: makeMockLoggerLayer(),
+      websocket: {},
+    });
+
+    await app.start();
+
+    const connect = async (token: string) => {
+      const client = createNativeWsClient({ url: wsUrl(app, '/ws'), auth: { token }, timeout: CLIENT_TIMEOUT_MS });
+      const joined: JsonRecord[] = [];
+      client.on<JsonRecord>('user:joined', (data) => joined.push(data));
+      await client.connect();
+
+      return { client, joined };
+    };
+
+    try {
+      const first = await connect('vipOne');
+      const basic = await connect('basic');
+      const second = await connect('vipTwo');
+      const forbidden = { code: 'FORBIDDEN', event: 'join', message: 'Guard denied this message' };
+
+      expect(await first.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual({ room: 'vip:lounge' });
+      expect(await basic.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual(forbidden);
+
+      // The second member's join reaches the first member, who is in the room...
+      expect(await second.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual({ room: 'vip:lounge' });
+      expect(await waitUntil(() => first.joined[0], 'user:joined')).toEqual({ userId: 'u-vip-2' });
+
+      // ...and not the denied client. Its next reply is sent after that broadcast, so anything
+      // the broadcast had addressed to it would have arrived first.
+      expect(await basic.client.emit<JsonRecord>('join', 'vip:lounge')).toEqual(forbidden);
+      expect(basic.joined).toEqual([]);
+
+      first.client.disconnect();
+      basic.client.disconnect();
+      second.client.disconnect();
+    } finally {
+      await app.stop();
+    }
+  });
 });
 
 // --- docs/examples/websocket-chat.md ---------------------------------------------------------

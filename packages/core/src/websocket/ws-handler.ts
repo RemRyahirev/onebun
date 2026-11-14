@@ -42,6 +42,12 @@ import { getGatewayMetadata, isWebSocketGateway } from './ws-decorators';
 import { WsExecutionContextImpl, executeGuards } from './ws-guards';
 import { matchPattern } from './ws-pattern-matcher';
 import {
+  cancelRoomJoins,
+  trackRoomJoin,
+  untrackRoomJoin,
+  type PendingRoomJoin,
+} from './ws-pending-joins';
+import {
   parseMessage,
   createOpenPacket,
   createHandshake,
@@ -77,6 +83,9 @@ const WS_INTERNAL_ERROR_CODE = 1011;
 /** How long shutdown waits for the disconnect path of the sockets it just closed. */
 const WS_CLOSE_DRAIN_TIMEOUT_MS = 5_000;
 
+/** `ServerWebSocket.readyState` of an open connection. */
+const WS_OPEN = 1;
+
 const ParamType = WsParamType;
 const HandlerType = WsHandlerType;
 
@@ -98,6 +107,13 @@ const GUARD_DENIED = Symbol('onebun:ws:guard-denied');
  * denial is reported and the connection carries on.
  */
 const GUARD_DENIED_EVENT = 'error';
+
+/** The `message` of the `FORBIDDEN` frame a guard's denial is answered with. */
+const GUARD_DENIED_MESSAGE = 'Guard denied this message';
+/** The `message` of the `FORBIDDEN` frame answering a join that a leave of the same room cancelled. */
+const JOIN_CANCELLED_BY_LEAVE_MESSAGE = 'Room join cancelled by a leave of the same room';
+/** The `message` of the `FORBIDDEN` frame answering a join cancelled by a Socket.IO move. */
+const JOIN_CANCELLED_BY_MOVE_MESSAGE = 'Room join cancelled: the connection moved to another gateway';
 
 /**
  * The guards each handler was DECLARED with, before any resolution.
@@ -121,6 +137,29 @@ interface GatewayInstance {
   handlers: Map<WsHandlerType, WsHandlerMetadata[]>;
   /** The registry key this gateway is stored under, recorded on every client it admits. */
   key: string;
+}
+
+/** An `@OnJoinRoom` handler whose pattern matched the room being joined, with what it captured. */
+interface MatchedRoomHandler {
+  gateway: GatewayInstance;
+  handler: WsHandlerMetadata;
+  params: Record<string, string>;
+}
+
+/**
+ * The room a `join` / `leave` message names: the data when it is a string, else its `room`
+ * field, else what follows the `join:` / `leave:` prefix of the event.
+ *
+ * `undefined` when that is not a string. Such a message names no room — an array or an object
+ * would otherwise reach storage as a key and the pub/sub calls as a topic, and throw there — so
+ * it is dropped, as any other malformed message is.
+ */
+function roomNameOf(event: string, data: unknown, prefix: 'join:' | 'leave:'): string | undefined {
+  const named: unknown = typeof data === 'string'
+    ? data
+    : (data as { room?: unknown } | null | undefined)?.room || event.replace(prefix, '');
+
+  return typeof named === 'string' ? named : undefined;
 }
 
 /**
@@ -205,6 +244,12 @@ export class WsHandler {
    * refused one is deliberately NOT recorded, so a client can name a namespace it may reach.
    */
   private readonly socketioConnected = new WeakSet<ServerWebSocket<WsClientData>>();
+
+  /**
+   * A Socket.IO move's removal of a connection's stored rooms, while it runs — see
+   * `rebindSocket`. Present only during a move.
+   */
+  private readonly roomsMoving = new WeakMap<ServerWebSocket<WsClientData>, Promise<void>>();
 
   constructor(
     private logger: SyncLogger,
@@ -939,23 +984,86 @@ export class WsHandler {
     return undefined;
   }
 
-  /** Move an open socket from one gateway to another, registry and stored record together. */
+  /**
+   * Move an open socket from one gateway to another, registry and stored record together.
+   *
+   * Rooms do not move with it: the socket arrives on `to` in no room. A room joined while it
+   * belonged to `from` was joined under `from`'s `@OnJoinRoom` guards, or under none, and `to`'s
+   * were never asked; carried over, the membership would receive `to`'s room broadcasts unchecked.
+   * The rooms are cleared in the same synchronous step as the move, so there is no moment at which
+   * the socket belongs to `to` and still holds `from`'s rooms. Nothing here waits on a join: one
+   * still pending on `from`'s guards is cancelled and answered at once.
+   *
+   * `auth` and `metadata` — what `from`'s `authenticate` hook set at upgrade — stay as they are.
+   */
   private async rebindSocket(
     ws: ServerWebSocket<WsClientData>,
     from: GatewayInstance,
     to: GatewayInstance,
   ): Promise<void> {
-    const clientId = ws.data.id;
+    const client = ws.data;
+    const clientId = client.id;
 
     // The gateway's own map IS the handler's map for that key — `_attachSockets` shares the one
-    // object — so these two calls move the socket in both at once.
+    // object — so these two calls move the socket in both at once. A join started on `from`
+    // checks the owner before and after its storage write, and backs out once it is `to`.
     from.instance._unregisterSocket(clientId);
-    ws.data.gatewayKey = to.key;
+    client.gatewayKey = to.key;
     to.instance._registerSocket(clientId, ws);
+
+    // Joins waiting on `from`'s guards.
+    cancelRoomJoins(ws, 'moved');
+
+    const rooms = client.rooms;
+    client.rooms = [];
+    for (const room of rooms) {
+      for (const topic of from.instance._roomTopics(room)) {
+        ws.unsubscribe(topic);
+      }
+    }
+
+    // The stored memberships, decided in this same step as well. The removals of the rooms the
+    // connection had are issued now — the in-memory adapter completes them before anything else
+    // runs — and so is the read of the rooms the storage alone records. On Redis that read is
+    // ordered before any write issued after the move, so the sweep removes only rooms the
+    // connection had at the move, never one `to` adds once it owns the socket. A join the client
+    // sends meanwhile waits for this (see handleRoomJoin).
+    const removed = Promise.all(rooms.map(async (room) => await this.storage.removeClientFromRoom(clientId, room)));
+    const stored = this.storage.getRoomsForClient(clientId);
+    const clearing = this.sweepStoredRooms(ws, rooms, removed, stored);
+    this.roomsMoving.set(ws, clearing);
+    try {
+      await clearing;
+    } finally {
+      if (this.roomsMoving.get(ws) === clearing) {
+        this.roomsMoving.delete(ws);
+      }
+    }
 
     // The stored record carries the key every other gateway's reads are fenced against, so it
     // has to move too or the connection is invisible to the gateway now serving it.
     await this.storage.updateClient(clientId, { gatewayKey: to.key });
+  }
+
+  /**
+   * Finish a move's storage cleanup: once the removals of the rooms the connection had are done,
+   * remove the rooms the storage alone recorded at the move — the read was issued then. A room the
+   * new gateway has admitted the client to since is left alone.
+   */
+  private async sweepStoredRooms(
+    ws: ServerWebSocket<WsClientData>,
+    had: string[],
+    removed: Promise<unknown>,
+    stored: Promise<string[]>,
+  ): Promise<void> {
+    const [, storedAtMove] = await Promise.all([removed, stored]);
+    const client = ws.data;
+
+    for (const room of storedAtMove) {
+      if (!had.includes(room) && !client.rooms.includes(room)) {
+        await this.storage.removeClientFromRoom(client.id, room);
+      }
+    }
   }
 
   /**
@@ -1021,16 +1129,7 @@ export class WsHandler {
             const result = await this.executeHandler(gateway, handler, ws, data, match.params);
 
             if (result === GUARD_DENIED) {
-              // Answer the client rather than leaving it waiting on a message that will never
-              // arrive — an unanswered ack id is indistinguishable from a hung server.
-              ws.send(this.encodeResponse(
-                ws.data.protocol,
-                {
-                  event: GUARD_DENIED_EVENT,
-                  data: { code: 'FORBIDDEN', event, message: 'Guard denied this message' },
-                },
-                ackId,
-              ));
+              this.sendForbidden(ws, event, ackId);
 
               continue;
             }
@@ -1048,7 +1147,41 @@ export class WsHandler {
   }
 
   /**
-   * Handle room join
+   * Answer a message the framework refused with the `FORBIDDEN` error frame.
+   *
+   * Answer the client rather than leave it waiting on a reply that will never arrive — an
+   * unanswered ack id is indistinguishable from a hung server. One frame for every refusal that
+   * answers — a denied message, a denied room join, a join cancelled before it happened — so they
+   * all read the same to the client; only `message` says which it was.
+   */
+  private sendForbidden(
+    ws: ServerWebSocket<WsClientData>,
+    event: string,
+    ackId?: number,
+    message: string = GUARD_DENIED_MESSAGE,
+  ): void {
+    ws.send(this.encodeResponse(
+      ws.data.protocol,
+      {
+        event: GUARD_DENIED_EVENT,
+        data: { code: 'FORBIDDEN', event, message },
+      },
+      ackId,
+    ));
+  }
+
+  /**
+   * Handle room join.
+   *
+   * A guard on `@OnJoinRoom` decides whether the client joins, so the guards run BEFORE the room
+   * changes: those of every handler whose pattern matches the room, in declaration order. One
+   * denial keeps the client out — no storage write, no subscription, nothing in `client.rooms` —
+   * runs none of the handlers, and is answered with the `FORBIDDEN` frame a denied message gets.
+   * A room no handler matches has no guard to ask and is joined unconditionally. Once every guard
+   * has allowed it, the join and the handlers run as they do without guards: the room change
+   * first, then each handler, without asking its guards a second time.
+   *
+   * A join that asks guards is pending until its room change is made — see `joinAfterGuards`.
    */
   private async handleRoomJoin(
     ws: ServerWebSocket<WsClientData>,
@@ -1056,13 +1189,157 @@ export class WsHandler {
     data: unknown,
     ackId?: number,
   ): Promise<void> {
+    const roomName = roomNameOf(event, data, 'join:');
+    if (roomName === undefined) {
+      this.logger.debug(`Ignoring a room join from client ${ws.data.id} that names no room`);
+
+      return;
+    }
+
+    // A Socket.IO move is clearing this connection's stored rooms: a join must not land between
+    // that clearing's read and its removals, or the removal takes the new membership with it.
+    const moving = this.roomsMoving.get(ws);
+    if (moving) {
+      await moving;
+    }
+
+    // OnJoinRoom handlers — owning gateway only — matched before the room changes, because their
+    // guards decide whether it does.
+    const joinOwner = this.ownerOf(ws);
+    const matched: MatchedRoomHandler[] = [];
+    for (const gateway of joinOwner ? [joinOwner] : []) {
+      for (const handler of gateway.handlers.get(HandlerType.JOIN_ROOM) || []) {
+        const match = handler.pattern ? matchPattern(handler.pattern, roomName) : { matched: true, params: {} };
+        if (match.matched) {
+          matched.push({ gateway, handler, params: match.params });
+        }
+      }
+    }
+
+    if (matched.some(({ handler }) => handler.guards && handler.guards.length > 0)) {
+      await this.joinAfterGuards(ws, event, data, ackId, roomName, joinOwner, matched);
+
+      return;
+    }
+
+    if (await this.addToRoom(ws, roomName, joinOwner)) {
+      await this.runJoinHandlers(ws, data, ackId, roomName, matched);
+    }
+  }
+
+  /**
+   * A join that asks guards: pending from its arrival until its room change is made.
+   *
+   * While pending it can be cancelled, and is then answered at once instead of joining: by a
+   * `leave` of the same room — the client's own or a server-side `leaveRoom()` — which takes effect
+   * immediately, and by a Socket.IO move to another gateway, whose guards it never asked. Whatever
+   * its guards say afterwards is ignored. A connection that closed is dropped silently — there is
+   * nobody to answer — and asks no further guard.
+   */
+  private async joinAfterGuards(
+    ws: ServerWebSocket<WsClientData>,
+    event: string,
+    data: unknown,
+    ackId: number | undefined,
+    roomName: string,
+    joinOwner: GatewayInstance | undefined,
+    matched: MatchedRoomHandler[],
+  ): Promise<void> {
+    const join = trackRoomJoin(ws, roomName, (reason) => {
+      if (ws.readyState === WS_OPEN) {
+        this.sendForbidden(
+          ws,
+          event,
+          ackId,
+          reason === 'left' ? JOIN_CANCELLED_BY_LEAVE_MESSAGE : JOIN_CANCELLED_BY_MOVE_MESSAGE,
+        );
+      }
+    });
+
+    let joined = false;
+    try {
+      joined = await this.admitAfterGuards(ws, event, data, ackId, join, joinOwner, matched);
+    } finally {
+      untrackRoomJoin(ws, join);
+    }
+
+    if (joined) {
+      await this.runJoinHandlers(ws, data, ackId, roomName, matched);
+    }
+  }
+
+  /**
+   * Ask the guards of a pending join, then make its room change — each step only while the join
+   * is still wanted, so a cancelled or orphaned join asks no further guard and writes nothing.
+   * A cancelled join was answered when it was cancelled; nothing is sent for it here.
+   */
+  private async admitAfterGuards(
+    ws: ServerWebSocket<WsClientData>,
+    event: string,
+    data: unknown,
+    ackId: number | undefined,
+    join: PendingRoomJoin,
+    joinOwner: GatewayInstance | undefined,
+    matched: MatchedRoomHandler[],
+  ): Promise<boolean> {
+    for (const { gateway, handler, params } of matched) {
+      if (!handler.guards || handler.guards.length === 0) {
+        continue;
+      }
+      if (!this.joinWanted(ws, joinOwner, join)) {
+        return false;
+      }
+      if (!(await this.joinGuardsAllow(gateway, handler, ws, data, params))) {
+        if (join.cancelled === undefined) {
+          this.sendForbidden(ws, event, ackId);
+        }
+
+        return false;
+      }
+    }
+
+    // The guards may have taken a while. A closed connection must not be written back into a
+    // room its close already removed it from — nothing would remove it again — a moved one must
+    // not take a membership its new gateway's guards never saw, and a cancelled join stays undone.
+    if (!this.joinWanted(ws, joinOwner, join)) {
+      return false;
+    }
+
+    return await this.addToRoom(ws, join.room, joinOwner, join);
+  }
+
+  /** Whether a pending join may still go ahead: not cancelled, connection open and not moved. */
+  private joinWanted(
+    ws: ServerWebSocket<WsClientData>,
+    joinOwner: GatewayInstance | undefined,
+    join: PendingRoomJoin,
+  ): boolean {
+    return join.cancelled === undefined && this.servedBy(ws, joinOwner);
+  }
+
+  /**
+   * Add the client to a room — storage, subscription, `client.rooms` — and say whether it stays.
+   *
+   * The storage write is the one wait inside the room change, and a close, a Socket.IO move or a
+   * leave cancelling a pending join can land during it. Each of them has already taken the client
+   * out of the room, so a write that finishes after one of them is taken back rather than left as
+   * a membership nothing will remove.
+   */
+  private async addToRoom(
+    ws: ServerWebSocket<WsClientData>,
+    roomName: string,
+    joinOwner: GatewayInstance | undefined,
+    join?: PendingRoomJoin,
+  ): Promise<boolean> {
     const client = ws.data;
-    const roomName = typeof data === 'string' ? data : 
-      (data as { room?: string })?.room || 
-                     event.replace('join:', '');
 
     // Add to storage
     await this.storage.addClientToRoom(client.id, roomName);
+    if (!this.servedBy(ws, joinOwner) || join?.cancelled !== undefined) {
+      await this.storage.removeClientFromRoom(client.id, roomName);
+
+      return false;
+    }
 
     // Subscribe to Bun pub/sub
     ws.subscribe(roomName);
@@ -1072,30 +1349,70 @@ export class WsHandler {
       client.rooms.push(roomName);
     }
 
-    // Call OnJoinRoom handlers — owning gateway only.
-    const joinOwner = this.ownerOf(ws);
-    for (const gateway of joinOwner ? [joinOwner] : []) {
-      const handlers = gateway.handlers.get(HandlerType.JOIN_ROOM) || [];
+    return true;
+  }
 
-      for (const handler of handlers) {
-        const match = handler.pattern ? matchPattern(handler.pattern, roomName) : { matched: true, params: {} };
-        
-        if (match.matched) {
-          try {
-            const result = await this.executeHandler(gateway, handler, ws, data, match.params, roomName);
-            if (result !== undefined && isWsHandlerResponse(result)) {
-              ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
-            }
-          } catch (error) {
-            this.logger.error(`Error in OnJoinRoom handler: ${error}`);
-          }
+  /** Run the matched `@OnJoinRoom` handlers once the client is in the room; their guards have run. */
+  private async runJoinHandlers(
+    ws: ServerWebSocket<WsClientData>,
+    data: unknown,
+    ackId: number | undefined,
+    roomName: string,
+    matched: MatchedRoomHandler[],
+  ): Promise<void> {
+    for (const { gateway, handler, params } of matched) {
+      try {
+        const result = await this.executeHandler(gateway, handler, ws, data, params, roomName, true);
+        if (result !== undefined && isWsHandlerResponse(result)) {
+          ws.send(this.encodeResponse(ws.data.protocol, result, ackId));
         }
+      } catch (error) {
+        this.logger.error(`Error in OnJoinRoom handler: ${error}`);
       }
     }
   }
 
+  /** Whether the socket is still open and still bound to the gateway a room change started on. */
+  private servedBy(ws: ServerWebSocket<WsClientData>, owner: GatewayInstance | undefined): boolean {
+    return ws.readyState === WS_OPEN && this.ownerOf(ws) === owner;
+  }
+
   /**
-   * Handle room leave
+   * Ask one `@OnJoinRoom` handler's guards whether the join may happen.
+   *
+   * Fails closed: a guard that throws already denies inside `executeGuards`, and anything else
+   * that throws while the guards are asked denies too, because the join would otherwise go ahead
+   * without them.
+   */
+  private async joinGuardsAllow(
+    gateway: GatewayInstance,
+    handler: WsHandlerMetadata,
+    ws: ServerWebSocket<WsClientData>,
+    data: unknown,
+    patternParams: Record<string, string>,
+  ): Promise<boolean> {
+    try {
+      return await this.guardsAllow(gateway, handler, ws, data, patternParams);
+    } catch (error) {
+      this.logger.error(
+        `WebSocket guards of ${handler.handler} threw on a room join for client ${ws.data.id}, denying: ${error}`,
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * Handle room leave.
+   *
+   * The room change comes first and a guard on `@OnLeaveRoom` cannot undo it: a denial skips the
+   * handler and nothing else. A guard that could hold a client in a room would turn "deny" into
+   * "keep receiving the room's broadcasts", the opposite of what a denial is for.
+   *
+   * A leave never waits for a join. It takes effect at once and cancels every join of the same room
+   * this connection still has waiting on guards — each answered there and then — so a `join`
+   * followed by a `leave` ends with the client out of the room however long the join's guards take,
+   * or if they never answer.
    */
   private async handleRoomLeave(
     ws: ServerWebSocket<WsClientData>,
@@ -1104,9 +1421,14 @@ export class WsHandler {
     ackId?: number,
   ): Promise<void> {
     const client = ws.data;
-    const roomName = typeof data === 'string' ? data :
-      (data as { room?: string })?.room ||
-                     event.replace('leave:', '');
+    const roomName = roomNameOf(event, data, 'leave:');
+    if (roomName === undefined) {
+      this.logger.debug(`Ignoring a room leave from client ${client.id} that names no room`);
+
+      return;
+    }
+
+    cancelRoomJoins(ws, 'left', roomName);
 
     // Remove from storage
     await this.storage.removeClientFromRoom(client.id, roomName);
@@ -1140,7 +1462,47 @@ export class WsHandler {
   }
 
   /**
+   * Run a handler's guards, logging a denial and a guard that threw.
+   */
+  private async guardsAllow(
+    gateway: GatewayInstance,
+    handler: WsHandlerMetadata,
+    ws: ServerWebSocket<WsClientData>,
+    data: unknown,
+    patternParams: Record<string, string>,
+  ): Promise<boolean> {
+    const client = ws.data;
+    const context = new WsExecutionContextImpl(
+      client,
+      ws,
+      data,
+      handler,
+      patternParams,
+    );
+
+    const canActivate = await executeGuards(handler.guards ?? [], context, (name, error) => {
+      // The framework's own diagnostic. Before this, a guard that threw denied the message
+      // and said nothing anywhere — indistinguishable from a guard that meant to deny.
+      this.logger.error(
+        `WebSocket guard ${name} threw on ${gateway.metadata?.path ?? '/'} ` +
+        `${handler.handler} for client ${client.id}, denying: ${error}`,
+      );
+    });
+    if (!canActivate) {
+      this.logger.warn(
+        `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
+        `for client ${client.id}`,
+      );
+    }
+
+    return canActivate;
+  }
+
+  /**
    * Execute a handler with parameter injection
+   *
+   * @param guardsChecked - the caller already ran this handler's guards and they allowed it, as a
+   *   room join does before the room changes. Skipping them here keeps each guard to one call.
    */
   private async executeHandler(
     gateway: GatewayInstance,
@@ -1149,36 +1511,15 @@ export class WsHandler {
     data: unknown,
     patternParams: Record<string, string>,
     roomName?: string,
+    guardsChecked = false,
   ): Promise<unknown> {
     const client = ws.data;
     const instance = gateway.instance;
 
     // Check guards
-    if (handler.guards && handler.guards.length > 0) {
-      const context = new WsExecutionContextImpl(
-        client,
-        ws,
-        data,
-        handler,
-        patternParams,
-      );
-
-      const canActivate = await executeGuards(handler.guards, context, (name, error) => {
-        // The framework's own diagnostic. Before this, a guard that threw denied the message
-        // and said nothing anywhere — indistinguishable from a guard that meant to deny.
-        this.logger.error(
-          `WebSocket guard ${name} threw on ${gateway.metadata?.path ?? '/'} ` +
-          `${handler.handler} for client ${client.id}, denying: ${error}`,
-        );
-      });
-      if (!canActivate) {
-        this.logger.warn(
-          `WebSocket guard denied ${handler.handler} (${handler.pattern ?? handler.type}) ` +
-          `for client ${client.id}`,
-        );
-
-        return GUARD_DENIED;
-      }
+    if (!guardsChecked && handler.guards && handler.guards.length > 0
+      && !(await this.guardsAllow(gateway, handler, ws, data, patternParams))) {
+      return GUARD_DENIED;
     }
 
     // Build arguments

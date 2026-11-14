@@ -108,11 +108,32 @@ override adds guards, it cannot drop an inherited one. Only `@UseGuards` carries
 `@UseWsGuards`, `@UseMessageGuards` and `@UseInterceptors` are read from the method that declares
 the handler, so an override does not inherit those.
 
-A denial on a WebSocket lifecycle handler is silent to the client: only `@OnMessage` answers with
-a `FORBIDDEN` error frame. A denied `@OnConnect` leaves the socket open without running the handler
-or sending its reply; a denied `@OnDisconnect` skips the cleanup written in it (the framework still
-unregisters the client); `@OnJoinRoom`/`@OnLeaveRoom` run after the framework has already changed
-the room, so a guard there gates the handler, not the room change.
+**A guard on `@OnJoinRoom` is access control for the room.** It runs BEFORE the room changes; a
+denial keeps the client out (not stored, not subscribed, not in `client.rooms`, no broadcasts),
+runs none of the room's `@OnJoinRoom` handlers and answers with the same `FORBIDDEN` error frame a
+denied `@OnMessage` gets. The guards of every `@OnJoinRoom` handler whose pattern matches the room
+are asked (gateway-level ones included), in declaration order; one denial is enough. When all allow,
+the client joins and the handlers run after it, each guard asked once. The guard sees the client
+before the join, so `client.rooms` does not list the room yet — `WsRoomGuard('<the room being
+joined>')` denies every join to it. A room no `@OnJoinRoom` handler matches has no guard and is
+joined — to protect a room, give it a matching handler. The guards cover only the client's own
+`join` message: a server-side `joinRoom(clientId, room)` never asks them. A `leave` never waits for
+a join — the client's `leave` and a server-side `leaveRoom()` (a kick) apply at once and cancel a
+still-pending join of the same room; the kick only on the instance holding the connection — with
+shared Redis storage, `leaveRoom()` on another instance does not cancel it and the join lands later. A cancelled join (by a leave or a Socket.IO move) is answered at
+once with the same `FORBIDDEN` frame; its guards' later verdict is ignored. A connection that closes
+before the guard answers is not added. Pending joins are not limited in number. A Socket.IO CONNECT
+that moves a connection to another gateway (`40/<namespace>,`) takes it out of every room it had in
+the same step (a server-side `joinRoom()` still writing is taken back), so no membership crosses
+gateways and the client rejoins rooms on the new gateway. `client.auth` / `client.metadata` set by
+the first gateway's `authenticate` hook DO move with it. A `join`/`leave` whose room is not a string
+is ignored.
+
+The other lifecycle denials are silent to the client. A denied `@OnConnect` leaves the socket open
+without running the handler or sending its reply; a denied `@OnDisconnect` skips the cleanup written
+in it (the framework still unregisters the client); a denied `@OnLeaveRoom` skips the handler, and
+the client leaves the room anyway — the framework removes it first, so a leave guard can never keep
+a client in a room.
 
 **Class-based guards get DI on their DEPENDENCIES, not on the instance.** Constructor dependencies,
 `this.config` and `this.logger` all work inside `canActivate`, and the dependencies are resolved
@@ -201,8 +222,8 @@ answers 200, so the status is not the denial signal there; `code` is.
 
 On the other transports a denial is not a Response at all. WebSocket: the handler is skipped and an
 `error` frame `{ code: 'FORBIDDEN', event, message: 'Guard denied this message' }` goes back on the
-same ack id — the socket is **not** closed, since one denied message must not tear down a
-multiplexed connection. Queue: the message is `nack`ed with `requeue: false` (a guard decision is
+same ack id — for a denied `@OnMessage` and a denied room join alike — and the socket is **not**
+closed, since one denied message must not tear down a multiplexed connection. Queue: the message is `nack`ed with `requeue: false` (a guard decision is
 deterministic, so requeueing would deny the same message forever) and surfaces as
 `onMessageFailed`, not `onMessageProcessed`.
 
