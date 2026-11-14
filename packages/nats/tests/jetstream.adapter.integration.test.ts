@@ -58,6 +58,8 @@ function asAny(obj: unknown): AnyRecord {
 
 const CONTAINER_BOOT_MS = 120_000;
 const CASE_TIMEOUT_MS = 30_000;
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
 const POLL_DEADLINE_MS = 10_000;
 const POLL_INTERVAL_MS = 25;
 
@@ -1752,6 +1754,334 @@ describe('JetStreamQueueAdapter Integration', () => {
       // And a limits stream keeps both after the ack.
       expect(await storedMessages(producer, streamName)).toBe(2);
     }, CASE_TIMEOUT_MS);
+  });
+
+  describe('native NATS wildcards in a subscription pattern', () => {
+    const opened: JetStreamQueueAdapter[] = [];
+
+    afterEach(async () => {
+      for (const created of opened.splice(0)) {
+        if (created.isConnected()) {
+          await created.disconnect();
+        }
+      }
+    });
+
+    function makeStreamAdapter(
+      streamName: string,
+      subjects: string[],
+      retention: 'workqueue' | 'limits',
+    ): JetStreamQueueAdapter {
+      const created = new JetStreamQueueAdapter({
+        servers: nats.url,
+        streams: [{ name: streamName, subjects, retention }],
+      });
+      opened.push(created);
+
+      return created;
+    }
+
+    async function storedMessages(observer: JetStreamQueueAdapter, streamName: string): Promise<number> {
+      const info = await (asAny(observer).jsm as AnyRecord).streams.info(streamName);
+
+      return info.state.messages as number;
+    }
+
+    async function consumerFilters(observer: JetStreamQueueAdapter, streamName: string): Promise<string[]> {
+      const filters: string[] = [];
+      for await (const info of await (asAny(observer).jsm as AnyRecord).consumers.list(streamName)) {
+        filters.push(info.config.filter_subject as string);
+      }
+
+      return filters;
+    }
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      const tag = retention === 'limits' ? 'L' : 'W';
+
+      it(`delivers every message a ">" pattern covers to the handler on a ${retention} stream`, async () => {
+        const streamName = `ITEST_NATIVE_GT_${tag}`;
+        const root = `nativegt${tag}`;
+        const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+        await worker.connect();
+
+        const received: Array<Message<{ n: number }>> = [];
+        const storedWhileHandling: number[] = [];
+        await worker.subscribe<{ n: number }>(`${root}.>`, async (message) => {
+          storedWhileHandling.push(await storedMessages(worker, streamName));
+          received.push(message);
+          await message.ack();
+        }, { group: `itest-native-gt-${tag}`, ackMode: 'manual' });
+
+        await worker.publish(`${root}.a`, { n: 1 });
+        await worker.publish(`${root}.a.b`, { n: 2 });
+
+        await pollUntil(() => received.length === 2);
+        expect(received.map(message => message.subject).sort()).toEqual([`${root}.a`, `${root}.a.b`]);
+        // A native wildcard names nothing, so it captures nothing.
+        expect(received.map(message => message.params)).toEqual([{}, {}]);
+        // The filter the server applies is the pattern itself.
+        expect(await consumerFilters(worker, streamName)).toEqual([`${root}.>`]);
+
+        if (retention === 'workqueue') {
+          // Each task was still stored while its handler ran: only the handler's ack deleted it.
+          expect(storedWhileHandling.every(count => count >= 1)).toBe(true);
+          await pollUntil(async () => await storedMessages(worker, streamName) === 0);
+        } else {
+          expect(await storedMessages(worker, streamName)).toBe(2);
+        }
+      }, CASE_TIMEOUT_MS);
+
+      it(`delivers one token to a "*" pattern and leaves deeper subjects alone on a ${retention} stream`, async () => {
+        const streamName = `ITEST_NATIVE_STAR_${tag}`;
+        const root = `nativestar${tag}`;
+        const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+        await worker.connect();
+
+        const received: Array<Message<{ n: number }>> = [];
+        await worker.subscribe<{ n: number }>(`${root}.*`, async (message) => {
+          received.push(message);
+          await message.ack();
+        }, { group: `itest-native-star-${tag}`, ackMode: 'manual' });
+
+        await worker.publish(`${root}.a.b`, { n: 2 });
+        await worker.publish(`${root}.a`, { n: 1 });
+
+        await pollUntil(() => received.length === 1);
+        expect(received[0].subject).toBe(`${root}.a`);
+        expect(received[0].params).toEqual({});
+
+        // The deeper subject was never this consumer's: on a workqueue it is still waiting.
+        await pollUntil(async () => await storedMessages(worker, streamName) === (retention === 'workqueue' ? 1 : 2));
+        expect(received).toHaveLength(1);
+      }, CASE_TIMEOUT_MS);
+    }
+
+    it('delivers to a ">"-only pattern every subject the stream binds', async () => {
+      const streamName = 'ITEST_NATIVE_ALL';
+      const worker = makeStreamAdapter(streamName, ['nativeall.>'], 'workqueue');
+      await worker.connect();
+
+      const received: string[] = [];
+      await worker.subscribe('>', async (message) => {
+        received.push(message.subject ?? '');
+      }, { group: 'itest-native-all' });
+
+      await worker.publish('nativeall.x', { n: 1 });
+      await worker.publish('nativeall.x.y', { n: 2 });
+
+      await pollUntil(() => received.length === 2);
+      expect(received.sort()).toEqual(['nativeall.x', 'nativeall.x.y']);
+      await pollUntil(async () => await storedMessages(worker, streamName) === 0);
+    }, CASE_TIMEOUT_MS);
+
+    it('delivers the same subjects to ">" and "#", and the same tokens to "*" and "{name}"', async () => {
+      const streamName = 'ITEST_NATIVE_PARITY';
+      const worker = makeStreamAdapter(streamName, ['nativeparity.>'], 'limits');
+      await worker.connect();
+
+      const seen: Record<string, Array<{ subject?: string; params: Record<string, string> }>> = {
+        native: [], framework: [], star: [], named: [],
+      };
+      const record = (key: string) => async (message: Message<unknown>): Promise<void> => {
+        seen[key].push({ subject: message.subject, params: message.params });
+      };
+
+      await worker.subscribe('nativeparity.>', record('native'), { group: 'parity-native' });
+      await worker.subscribe('nativeparity.#', record('framework'), { group: 'parity-framework' });
+      await worker.subscribe('nativeparity.*', record('star'), { group: 'parity-star' });
+      await worker.subscribe('nativeparity.{id}', record('named'), { group: 'parity-named' });
+
+      await worker.publish('nativeparity.a', { n: 1 });
+      await worker.publish('nativeparity.a.b', { n: 2 });
+
+      await pollUntil(() => seen.native.length === 2 && seen.framework.length === 2
+        && seen.star.length === 1 && seen.named.length === 1);
+
+      const subjects = (key: string): string[] => seen[key].map(entry => entry.subject ?? '').sort();
+      expect(subjects('native')).toEqual(['nativeparity.a', 'nativeparity.a.b']);
+      expect(subjects('framework')).toEqual(subjects('native'));
+      expect(seen.star).toEqual([{ subject: 'nativeparity.a', params: {} }]);
+      expect(seen.named).toEqual([{ subject: 'nativeparity.a', params: { id: 'a' } }]);
+    }, CASE_TIMEOUT_MS);
+
+    it('gives ">" and "#" in one group a single durable, as the same pattern twice would be', async () => {
+      const streamName = 'ITEST_NATIVE_DURABLE';
+      const worker = makeStreamAdapter(streamName, ['nativedurable.>'], 'workqueue');
+      await worker.connect();
+
+      await worker.subscribe('nativedurable.>', async () => undefined, { group: 'itest-native-durable' });
+      await worker.subscribe('nativedurable.#', async () => undefined, { group: 'itest-native-durable' });
+
+      expect(await consumerFilters(worker, streamName)).toEqual(['nativedurable.>']);
+    }, CASE_TIMEOUT_MS);
+
+    for (const pattern of ['nativebad.>.run', '>.nativebad', 'nativebad..run', 'nativebad.', 'nativebad.new run']) {
+      it(`refuses "${pattern}", which can never receive a message, at subscribe(), naming it, and creates no consumer`, async () => {
+        const streamName = 'ITEST_NATIVE_INVALID';
+        const worker = makeStreamAdapter(streamName, ['nativebad.>'], 'limits');
+        await worker.connect();
+
+        let thrown: Error | undefined;
+        try {
+          await worker.subscribe(pattern, async () => undefined, { group: 'itest-native-invalid' });
+        } catch (error) {
+          thrown = error as Error;
+        }
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown!.message).toContain(`"${pattern}"`);
+        expect(await consumerFilters(worker, streamName)).toEqual([]);
+      }, CASE_TIMEOUT_MS);
+    }
+
+    /** A parameter name may hold whitespace: the name never reaches the wire, which carries `*`. */
+    for (const { retention, cases } of [
+      {
+        retention: 'limits' as const,
+        cases: [
+          {
+            pattern: 'wsL.p.{a b}', group: 'itest-ws', publish: ['wsL.p.a'], delivered: 'wsL.p.a', params: { [SPACED_NAME]: 'a' },
+          },
+          {
+            pattern: 'wsL.r.{a b}', group: undefined, publish: ['wsL.r.a'], delivered: 'wsL.r.a', params: { [SPACED_NAME]: 'a' },
+          },
+          {
+            pattern: 'wsL.q.v{a b}', group: 'itest-ws', publish: ['wsL.q.x', 'wsL.q.v1'], delivered: 'wsL.q.v1', params: { [SPACED_NAME]: '1' },
+          },
+        ],
+      },
+      {
+        retention: 'workqueue' as const,
+        cases: [
+          {
+            pattern: 'wsW.p.{a b}', group: 'itest-ws', publish: ['wsW.p.a'], delivered: 'wsW.p.a', params: { [SPACED_NAME]: 'a' },
+          },
+        ],
+      },
+    ]) {
+      const root = retention === 'limits' ? 'wsL' : 'wsW';
+
+      for (const {
+        pattern, group, publish, delivered, params,
+      } of cases) {
+        it(`delivers to "${pattern}"${group ? '' : ' without a group'} on a ${retention} stream, capturing into the spaced name`, async () => {
+          const streamName = `ITEST_WS_${retention.toUpperCase()}`;
+          const worker = makeStreamAdapter(streamName, [`${root}.>`], retention);
+          await worker.connect();
+
+          const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+          await worker.subscribe(pattern, async (message) => {
+            received.push({ subject: message.subject, params: message.params });
+          }, group === undefined ? undefined : { group });
+
+          for (const subject of publish) {
+            await worker.publish(subject, { subject });
+          }
+
+          await pollUntil(() => received.length >= 1);
+          expect(received).toEqual([{ subject: delivered, params }]);
+        }, CASE_TIMEOUT_MS);
+      }
+    }
+
+    it('refuses the partial-token "wsW.q.v{a b}" on a workqueue stream, as any partial-token pattern', async () => {
+      const worker = makeStreamAdapter('ITEST_WS_WORKQUEUE', ['wsW.>'], 'workqueue');
+      await worker.connect();
+
+      let thrown: Error | undefined;
+      try {
+        await worker.subscribe('wsW.q.v{a b}', async () => undefined, { group: 'itest-ws' });
+      } catch (error) {
+        thrown = error as Error;
+      }
+
+      expect(thrown?.message).toMatch(/partial-token/);
+    }, CASE_TIMEOUT_MS);
+
+    /**
+     * A wildcard glued into a token is a literal token on the server: the subscription receives the
+     * one subject it spells, and none of the subjects the in-process matcher's sub-token `*` would
+     * also accept. A `{name}` beside it widens the filter to `*` and narrows back in process.
+     */
+    const glued: Array<{ tail: string; delivered: string; params: Record<string, string>; neighbours: string[] }> = [
+      {
+        tail: 'a*b', delivered: 'a*b', params: {}, neighbours: ['aqb'],
+      },
+      {
+        tail: 'v*', delivered: 'v*', params: {}, neighbours: ['v1'],
+      },
+      {
+        tail: '*a', delivered: '*a', params: {}, neighbours: ['ba'],
+      },
+      {
+        tail: '**', delivered: '**', params: {}, neighbours: ['ab'],
+      },
+      {
+        tail: 'foo>', delivered: 'foo>', params: {}, neighbours: ['fooz'],
+      },
+      {
+        tail: 'a>b', delivered: 'a>b', params: {}, neighbours: ['ab'],
+      },
+      {
+        tail: '>>', delivered: '>>', params: {}, neighbours: ['a'],
+      },
+      {
+        tail: '{id}>', delivered: '1>', params: { id: '1' }, neighbours: ['1'],
+      },
+    ];
+
+    for (const retention of ['limits', 'workqueue'] as const) {
+      const tag = retention === 'limits' ? 'L' : 'W';
+
+      glued.forEach(({
+        tail, delivered, params, neighbours,
+      }, index) => {
+        const root = `glued${tag}.${index}`;
+        const widens = tail.includes('{');
+
+        if (retention === 'workqueue' && widens) {
+          it(`refuses the partial-token "${root}.${tail}" on a workqueue stream`, async () => {
+            const worker = makeStreamAdapter(`ITEST_GLUED_${tag}`, [`glued${tag}.>`], retention);
+            await worker.connect();
+
+            let thrown: Error | undefined;
+            try {
+              await worker.subscribe(`${root}.${tail}`, async () => undefined, { group: 'itest-glued' });
+            } catch (error) {
+              thrown = error as Error;
+            }
+
+            expect(thrown?.message).toMatch(/partial-token/);
+          }, CASE_TIMEOUT_MS);
+
+          return;
+        }
+
+        it(`delivers to "${root}.${tail}" the literal subject "${root}.${delivered}" on a ${retention} stream`, async () => {
+          const streamName = `ITEST_GLUED_${tag}`;
+          const worker = makeStreamAdapter(streamName, [`glued${tag}.>`], retention);
+          await worker.connect();
+
+          const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+          await worker.subscribe(`${root}.${tail}`, async (message) => {
+            received.push({ subject: message.subject, params: message.params });
+          }, { group: 'itest-glued' });
+
+          expect(await consumerFilters(worker, streamName))
+            .toContain(widens ? `${root}.*` : `${root}.${tail}`);
+
+          for (const neighbour of neighbours) {
+            await worker.publish(`${root}.${neighbour}`, { neighbour });
+          }
+          await worker.publish(`${root}.${delivered}`, { delivered });
+
+          // Stream order: once the subject published last is in, every earlier one was decided.
+          await pollUntil(() => received.length >= 1);
+          expect(received).toEqual([{ subject: `${root}.${delivered}`, params }]);
+        }, CASE_TIMEOUT_MS);
+      });
+    }
   });
 
   describe('replicas booting at the same time', () => {

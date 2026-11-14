@@ -55,7 +55,7 @@ interface Message<T> {
 
 `params` is what the **subscriber's** pattern captured: `@Subscribe('orders.{id}.{event}')` receiving
 `orders.123.created` reads `message.params.id === '123'` and `message.params.event === 'created'`. All four
-adapters populate it. It is always an object — `{}` for an exact pattern, for `*` and for `#` — so never
+adapters populate it. It is always an object — `{}` for an exact pattern, for `*`, `#` and `>` — so never
 write `message.params?.id`. Treat it as read-only: one object per delivery, reused across that delivery's
 retries. A `@Cron`/`@Interval`/`@Timeout` method receives no message at all — it is the data provider, and
 what it returns is published to the job's pattern.
@@ -591,7 +591,7 @@ const app = new OneBunApplication(AppModule, {
 
 - No persistence — messages are fire-and-forget
 - Consumer groups via NATS queue groups
-- Pattern conversion via `toNatsSubject`: OneBun's `#` wildcard → NATS `>`, and a `{name}` parameter → NATS `*` (automatic)
+- Pattern conversion via `toNatsSubject`: OneBun's `#` wildcard → NATS `>`, and a `{name}` parameter → NATS `*` (automatic); the native `*` and trailing `>` pass through as written
 - `metadata.headers` travels twice: in the envelope (what the handler's `message.metadata` holds) and as NATS wire headers, so `nats sub` sees them too. Names keep their published case on both paths — look them up (`metadata.headers[...]`, `MessageHeaderGuard`) spelled exactly as published. Headers a message brings on its own (`Nats-Msg-Id` from a JetStream `messageId`, a name another client repeated) are delivered but never merged into `metadata`
 - Wire headers reach a handler as `message.headers` on both NATS adapters (JetStream converts them on first read), and `NatsClient.subscribe()` / `request()` give the same map as `NatsMessage.headers`: a `Map<string, string[]>` (every value in arrival order, absent when none). Inside the package, read driver headers only through `toHeaderMap()` (`MsgHdrs.keys()` + `values()`) — `MsgHdrs` has no `entries()`, and any throw inside `NatsClient`'s consume loop ends the subscription for good
 
@@ -698,7 +698,10 @@ Key JetStream behaviors:
   `group` is required (no group-less/ephemeral subscription); `ackMode: 'none'` is refused (the
   server rejects ack_policy none with 10084); a partial-token parameter pattern such as
   `jobs.v{version}` is refused (its filter `jobs.*` would deliver `jobs.x`, and the adapter's
-  ack of the unmatched message deletes it on a workqueue) — `jobs.{version}` is fine.
+  ack of the unmatched message deletes it on a workqueue) — `jobs.{version}` is fine. A native
+  wildcard is treated as its framework spelling: `jobs.>` = `jobs.#` (same filter, same durable for
+  the same group, same refusals, overlaps `jobs.#` in another group), `jobs.*` = `jobs.{id}`
+  without the capture; every task the filter delivers reaches the handler before any ack.
   **One consumer per subject, stream-wide**: a second group or an overlapping pattern on the same
   subject is rejected by the server (10100); the error names the overlapping subscription in this
   app, or else points at a stale durable from a renamed group / changed pattern —
@@ -835,6 +838,7 @@ Key JetStream behaviors:
 |---|---|---|---|
 | `events.*` | `events.*` | `events.*` | Single-level wildcard |
 | `events.#` | `events.>` | `events.*` | Multi-level wildcard (auto-converted) |
+| `events.>` | `events.>` | `events.*` | Multi-level wildcard, NATS spelling of `#` — same matches on every adapter |
 | `events.{id}` | `events.*` | `events.*` | Named parameter — widened on the wire, re-checked in process |
 | `events.created` | `events.created` | `events.created` | Exact match |
 
@@ -842,7 +846,30 @@ A # is only translated as the final token; toNatsSubject throws on a # in any ot
 The throw surfaces from the `JetStreamQueueAdapter` constructor for a stream declaration, and
 from the awaited `publish()` / `subscribe()` call otherwise.
 
-On the Redis adapter {name}, * and a trailing # all translate to the glob *; a non-trailing # throws.
+Native NATS wildcards are accepted on EVERY adapter: `*` is the single-token wildcard, and `>` as the
+whole last token is `#` by another name (`events.>` and `events.#` match the same topics, capture
+nothing, and on JetStream share filter and durable). Write portable patterns from literal tokens,
+whole-token `*`/`{name}`, and a last token of `#` or `>` — then the in-memory adapter in tests
+matches exactly as NATS does in production. The non-portable shapes:
+
+| Pattern | Memory / Redis | NATS / JetStream |
+|---|---|---|
+| `orders.v*`, `orders.a*b` (`*` glued into a token) | `*` matches one or more characters at its position (`orders.v2`, `orders.aqb`) | the literal subject only (`orders.v*`, never `orders.v2`) |
+| `events.new>`, `events.a>b` (`>` glued into a token) | `>` is a literal character | the literal subject only |
+| `events.>.created`, `>.created` (`>` before the last token) | `>` is a literal character | refused at `subscribe()`, error names the pattern |
+| `orders..created`, `orders.`, a space, tab or line break outside a `{name}` | literal | refused at `subscribe()` |
+
+The NATS server reads `*`/`>` as wildcards only when each is a whole token (`>` only last), so a glued
+one is served the one literal subject it spells — the one non-portable shape that every adapter
+accepts. To match part of a token everywhere use `orders.v{version}` (refused on a workqueue). The
+two refused rows can never receive a message on NATS — left to the server, a non-final `>` or an
+empty token is refused by JetStream and silently delivers nothing on core NATS, and the NATS client
+refuses a subject with a space, tab or line break — so `subscribe()` throws for them before any
+server call. Other whitespace (a no-break space, a vertical tab) is a valid subject character and is
+served as written; a space inside a `{name}` is part of its name and never reaches the wire
+(`orders.{a b}` filters `orders.*`). `publish()` checks none of this: `publish('orders.v*', …)` sends that literal subject.
+
+On the Redis adapter {name}, * and a trailing # or > all translate to the glob *; a non-trailing # throws.
 Redis could serve `*.created` — the rejection keeps one pattern language across every adapter. The
 glob only narrows which keys `SCAN` walks; `createQueuePatternMatcher(pattern)`, built from the
 original pattern, decides what a handler actually receives, so a glob that over-matches is safe.

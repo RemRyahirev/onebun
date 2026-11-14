@@ -39,7 +39,7 @@ import {
   type NatsMessage,
   type NatsSubscriptionHandle,
 } from './nats-client';
-import { toNatsSubject } from './subject';
+import { toNatsSubject, validateNatsSubscriptionPattern } from './subject';
 
 const NOT_CONNECTED_MESSAGE = 'NatsQueueAdapter not connected. Call connect() first.';
 
@@ -354,7 +354,11 @@ export class NatsQueueAdapter implements QueueAdapter {
   ): Promise<Subscription> {
     this.ensureConnected();
 
-    // OneBun spells the multi-level wildcard '#' and NATS spells it '>', and NATS has
+    // Core NATS accepts a subscription no subject can match — a `>` before the last token, an
+    // empty token — and then delivers nothing, without a word; such a pattern is refused here.
+    validateNatsSubscriptionPattern(pattern);
+
+    // OneBun spells the multi-level wildcard '#' as well as NATS's '>', and NATS has
     // no form for a named parameter at all — `{id}` widens to '*' and `entry.matcher`
     // narrows it back.
     const natsPattern = toNatsSubject(pattern);

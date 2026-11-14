@@ -397,6 +397,7 @@ async handleOrder(message: Message<OrderData>) {
 | `orders.created` | `orders.created` | Exact match | `orders.created` | `orders.created` |
 | `orders.*` | `orders.created`, `orders.updated` | Single-level wildcard | `orders.*` | `orders.*` |
 | `events.#` | `events.user.created`, `events.order.paid` | Multi-level wildcard | `events.>` | `events.*` |
+| `events.>` | `events.user.created`, `events.order.paid` | Multi-level wildcard — the NATS spelling of `#` | `events.>` | `events.*` |
 | `orders.{id}` | `orders.123` → `{ id: '123' }` | Named parameter | `orders.*` | `orders.*` |
 
 A captured value is read from `message.params`, on every adapter:
@@ -430,13 +431,14 @@ captured from the subject the message was delivered on, never from anything the 
 into the message — see [where `pattern`, `params` and `subject` come from](#message-subject).
 
 The **NATS subject** column applies to the `NatsQueueAdapter` and `JetStreamQueueAdapter`
-only. NATS has no equivalent of a named parameter, so `{name}` widens to `*` on the wire
+only. `*` and a trailing `>` are NATS's own wildcards and reach the server as written; `#` is sent
+as `>`. NATS has no equivalent of a named parameter, so `{name}` widens to `*` on the wire
 and the pattern is re-checked in process — a subscription never receives a message its
-pattern does not match.
+pattern does not match, and every message the server delivers to it reaches its handler.
 
 The **Redis key glob** column applies to the `RedisQueueAdapter`, which uses it to `SCAN` for
 topics that already hold a backlog. The mapping is `{name}` → `*`, `*` → `*`, and a
-**trailing `#`** → `*` — a Redis glob `*` spans separators, so `events.*` also matches the key
+**trailing `#` or `>`** → `*` — a Redis glob `*` spans separators, so `events.*` also matches the key
 for `events.user.created`. Every translation only widens: the in-process matcher, built from the
 original pattern, decides what a handler actually receives.
 
@@ -447,11 +449,74 @@ anywhere else (`#.created`, `events.#.created`) throws — from the `JetStreamQu
 constructor for a stream declaration, and from the awaited `publish()` / `subscribe()` call
 otherwise.
 
+#### Native NATS wildcards: `*` and `>` {#native-wildcards}
+
+`>` is accepted as the NATS spelling of `#` on **every** adapter, as the whole last token:
+`events.>` and `events.#` match the same topics, capture nothing, and on JetStream create the same
+consumer filter — with the same `group`, the same durable consumer. `*` is the single-token
+wildcard everywhere. A pattern built from literal tokens, whole-token `*` and `{name}`, and a last
+token of `#` or `>` means the same on all four adapters, so an application tested on the in-memory
+adapter subscribes exactly as it will on NATS:
+
+```typescript
+import {
+  BaseController,
+  Controller,
+  Subscribe,
+  type Message,
+} from '@onebun/core';
+
+@Controller('/audit')
+export class AuditConsumer extends BaseController {
+  // The same subscription as `@Subscribe('tenants.{tenant}.#')`, spelled the NATS way.
+  @Subscribe('tenants.{tenant}.>')
+  async onTenantEvent(message: Message<unknown>): Promise<void> {
+    // Delivered `tenants.acme.orders.created`:
+    message.params.tenant; // 'acme' — a {name} captures; `*` and `>` capture nothing
+    message.subject;       // 'tenants.acme.orders.created'
+  }
+}
+```
+
+Portably, `*` is a wildcard only as a whole token, and `>` only as the whole last token. What
+any other shape does depends on the adapter:
+
+| Pattern | Memory and Redis | NATS and JetStream |
+|---|---|---|
+| `events.>`, `>` | multi-level wildcard, exactly as `events.#`, `#` | multi-level wildcard; filter `events.>`, `>` |
+| `orders.*` | single-level wildcard | single-level wildcard; filter `orders.*` |
+| `orders.v*`, `orders.a*b`, `orders.**` | `*` also matches inside a token: `orders.v*` matches `orders.v2` and `orders.v*` | the literal subject only: `orders.v*` receives `orders.v*`, never `orders.v2` |
+| `events.new>`, `events.a>b` | `>` is a literal character: matches only the topic spelled that way | the same: the literal subject only |
+| `events.>.created`, `>.created` | `>` is a literal character: matches only the topic spelled that way | refused at `subscribe()` |
+| `orders..created`, `orders.`, a space, tab or line break outside a `{name}` | literal | refused at `subscribe()` |
+
+A glued `*` is accepted everywhere and means different things: the NATS server reads `*` and `>`
+as wildcards only when each is a whole token, so it serves such a subscription the one literal
+subject it spells, while the in-process matcher on memory and Redis reads a glued `*` as one or
+more characters at its own position (`orders.a*b` matches `orders.aqb`). To match part of a token
+on every adapter,
+use a named parameter — `orders.v{version}` — keeping in mind that a
+[work-queue stream](#work-queue-streams) refuses it.
+
+The awaited `subscribe()` of both NATS adapters throws for the last two rows, naming the pattern,
+before anything reaches the server: no NATS subject can match such a pattern, so it could never
+receive a message. Left to the server, a `>` before the last token or an empty token is refused by
+JetStream, while core NATS accepts the subscription and delivers nothing to it; a subject with a
+space, a tab or a line break is refused by the NATS client on both. Any other character — a
+no-break space, a vertical tab — is a valid subject character and is served as written. A space
+inside a `{name}` is part of the parameter's name and never reaches the wire: `orders.{a b}` filters
+`orders.*` and captures `params['a b']`. `publish()` checks none of this; `publish('orders.v*', …)` sends that literal
+subject.
+
 <llm-only>
 
 **Technical details for AI agents:**
 - `toNatsSubject is the only OneBun-to-NATS subject translation in the package.` It lives in `packages/nats/src/subject.ts`, is re-exported from `packages/nats/src/index.ts`, and has six call sites, given here by function rather than line number because the numbers go stale on every edit: the `JetStreamQueueAdapter` constructor (stream declarations), `publish()`, `subscribe()` (the consumer `filter_subject`), `resolveStreamForSubject()`, `deleteDurableConsumer()` (deriving the durable name to remove), and `NatsQueueAdapter.subscribe()` (the core-NATS subscription)
-- The rules: a token containing a `{name}` parameter becomes `*`; a trailing `#` token becomes `>`; `*` and literal tokens pass through; a `#` in any other position throws
+- The rules: a token containing a `{name}` parameter becomes `*`; a trailing `#` token becomes `>`; `*`, `>` and literal tokens pass through; a `#` in any other position throws
+- `validateNatsSubscriptionPattern(pattern)`, beside `toNatsSubject()` in `packages/nats/src/subject.ts` and not on the package barrel, runs at the top of `NatsQueueAdapter.subscribe()` and of `JetStreamQueueAdapter.subscribe()` (right after `validateRetryOptions`), before any server call — a plain synchronous throw, not `failConsumer()`. Per token it refuses exactly three shapes, each of which can never receive a message: an empty token (the raw token, so `{}` is not one); a space, tab, line feed or carriage return outside the token's `{…}` groups (`SUBJECT_SEPARATOR`, `/[ \t\n\r]/` — exactly the set nats.js refuses in a subject, so a no-break space or a vertical tab passes; tested on the token with `PARAMETER_GROUPS` removed, since `toNatsSubject()` turns a token with a parameter into `*` — `{a b}` and `v{a b}` pass); a whole-token `>` that is not the last token (the raw token, so `{>}` is a parameter name). Nothing else: a `*` or `>` glued to other characters (`orders.v*`, `a*b`, `**`, `new>`, `a>b`, `>>`, `{id}>`) passes and reaches the server as written, where it is a literal token unless a `{…}` in it widens it to `*`. It leaves `#` to `toNatsSubject()`. It is not called by `publish()`, the stream declarations or `deleteDurableConsumer()`: a publish may name any literal subject
+- What nats-server 2.10 with nats.js 3.3.1 does with each refused shape, which is why it is refused rather than passed through: a non-final `>` is refused by JetStream ("invalid subject") and ignored by core NATS, which delivers nothing and reports nothing; an empty token makes the JetStream consumer-create API subject itself invalid, which surfaces as a misleading "jetstream is not enabled", and core NATS ignores it the same way; a space, tab, CR or LF outside a parameter is refused by the client on both adapters (`illegal subject`; on JetStream through the consumer-create API subject), while any other character, `\u00A0`, `\u3000`, `\v` and `\f` included, is accepted by client and server and delivered as a literal subject. A glued `*`/`>`, by contrast, is a valid LITERAL filter: the server delivers that literal subject, and the matcher's exact-match path accepts it
+- The native wildcards live in the SHARED matcher, `parseQueuePattern()` in `packages/core/src/queue/pattern-matcher.ts`, not in the NATS adapters: a `>` that is the whole last token (`isTrailingNatsWildcard`) compiles to the same `.*` as a trailing `#`; any other `>` is escaped as a literal. So `events.>` means one thing on all four adapters and the in-memory adapter in a test matches as NATS does in production. `isQueuePattern()` counts `>` only in that position (`TRAILING_NATS_WILDCARD`), which is what sends a Redis `events.>` subscription through SCAN while `events.>.x` stays an exact-topic drain; `matchQueuePattern()` and `createQueuePatternMatcher()` take their exact-match fast path through the same predicate. `toRedisQueueGlob()` maps a trailing `>` to `*` like a trailing `#`. `buildFromQueuePattern()` strips a trailing `>` like the other wildcards. The shared matcher compiles every `*`, glued or not, to `[^.]+`, so on memory and Redis a glued `*` matches one or more characters at its own position (`a*b` matches `aqb`), while a NATS filter reads the same token literally
+- Agreement on NATS: every subject the server filter (`toNatsSubject(pattern)`) delivers is matched by `createQueuePatternMatcher(pattern)`, except under a partial-token `{name}`, which widens the filter (`widensOnTranslation`); the matcher narrows those back and a workqueue refuses the pattern. A glued `*` makes the matcher WIDER than the filter, never narrower — the server delivers only the literal subject, which the matcher's exact-match path accepts. So a delivery reaches its handler, and the consume loop's stray `msg.ack()` is only ever reached by the widened deliveries
 - Translation only ever widens. The transport delivers a superset and `entry.matcher`, built by `createQueuePatternMatcher(pattern)` from the ORIGINAL pattern, narrows it back — which makes the match check in the consume loop load-bearing, not redundant. A non-matching message is `ack()`ed, never left unacked
 - Stream declarations are translated eagerly in the `JetStreamQueueAdapter` constructor, so `resolvedStreams[].natsSubjects` — the input to `ensureStream`'s subject-coverage guard and to `resolveStreamForSubject` — is already in NATS form. A declaration of `orders.{id}` binds `orders.*`
 - The publish path translates the pattern but does not widen a concrete subject: `publish('orders.123', …)` sends `orders.123`
@@ -721,7 +786,7 @@ Two cases where they are absent, both deliberate:
 `params` carries what the **subscriber's** pattern captured from the delivered topic:
 `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
 
-It is always an object — `{}` for an exact pattern and for a `*` or `#` wildcard — so a handler
+It is always an object — `{}` for an exact pattern and for a `*`, `#` or `>` wildcard — so a handler
 never guards the access. It is captured **per subscription, not per publish**: one topic
 reaching two subscriptions with different patterns gives each handler its own values, in its
 own object, and it is therefore not part of the published envelope and does not travel over
@@ -806,7 +871,7 @@ export class ResultConsumer extends BaseController {
 | In-memory | the topic passed to `publish()` | `undefined` | `undefined` |
 
 `pattern` holds the same value as `subject` on every adapter, and `params` is captured from it. For
-a message sent through `publish()` to a literal topic — one without `{name}`, `*` or `#` — both are
+a message sent through `publish()` to a literal topic — one without `{name}`, `*`, `#` or a last-token `>` — both are
 that topic, the value the envelope's `pattern` field carries too. A topic that is not literal names
 no single subject and is not an address to publish to: JetStream sends `{name}` as `*` and `#` as
 `>`, so a handler sees that NATS wildcard subject (`orders.*`, `events.>`) and a `{name}` captures
@@ -1867,6 +1932,12 @@ What the declaration changes, and what it requires:
   so it cannot wedge the consumer. On a workqueue that acknowledgement deletes the task, silently.
   `subscribe()` refuses such a pattern there. A whole-token parameter (`jobs.{version}`) translates
   exactly and is fine; check the value in the handler.
+- **Native wildcards follow their framework spelling.** `tasks.>` is `tasks.#` and `tasks.*` is
+  `tasks.{id}` without the capture: the same filter, the same durable for the same `group`, the same
+  refusals, and the same one-consumer-per-subject rule — `tasks.>` in one group and `tasks.#` in
+  another overlap. Every task the filter delivers reaches the handler before anything acknowledges
+  it. A wildcard glued into a token (`tasks.v*`) is served its literal subject here as on any
+  stream, see [native wildcards](#native-wildcards).
 - **Exhausted tasks stay stored.** A task whose handler fails `max_deliver` times is not deleted.
   It stays in the stream, keeps counting against `maxMsgs` and `maxBytes`, and is never delivered
   to that consumer again. Raising `retry.attempts` or `consumerConfig.maxDeliver` updates the
@@ -1898,7 +1969,8 @@ are all down loses what is published meanwhile.
 - `stream.retention === 'workqueue'` selects `jsModule.DeliverPolicy.All` as the `deliverPolicy` argument of `resolveConsumerConfig()`; anything else, `undefined` included, selects `DeliverPolicy.New`. That is the only site in the package that picks a deliver policy. The result lives on `entry.resolved`, so `recreateConsumer()` rebuilds a vanished consumer deliver-all too. `deliver_policy` stays creation-only: it is not in the `hashReconcileConfig` subset and never reaches `consumers.update()`, so a workqueue consumer and a limits consumer with the same knobs stamp the same hash
 - There is no typed `deliverPolicy` option, deliberately: the declared retention already determines the only value the server accepts, and `all` on a limits stream is exactly the replay `deliver_policy: new` exists to prevent. There is no server probe of the retention either — it needs `$JS.API.STREAM.INFO`, which a `manage: false` tenant is typically denied
 - On a workqueue, `workQueueRefusal(pattern, filterSubject, streamName, options)` — a pure function beside `validateDeadLetterQueue` — returns a refusal for `!options.group` (the same predicate as `entry.durable`), for `resolveAckMode(options) === 'none'`, and for `widensOnTranslation(pattern)`; `subscribe()` throws it through `failConsumer()`, so `onError` fires and neither `consumers.info` nor `consumers.add` is called. The server's own answers would be 10100 for a second ephemeral on the subject, 10084 for `ack_policy: none` (the same code on nats-server 2.10, 2.11 and 2.14) and nothing at all for the widened pattern, whose strays the consume loop's unmatched-message `msg.ack()` would delete
-- `widensOnTranslation(pattern)` lives in `packages/nats/src/subject.ts` beside `toNatsSubject()`: true when some token contains a `{…}` parameter without being exactly one (`/^\{[^.}]*\}$/`). `*` and a trailing `#` never widen — the in-process matcher reads `{id}` and `*` as one non-empty token, and a trailing `#` as everything `>` delivers
+- `widensOnTranslation(pattern)` lives in `packages/nats/src/subject.ts` beside `toNatsSubject()`: true when some token contains a `{…}` parameter without being exactly one (`/^\{[^.}]*\}$/`). `*` and a trailing `#` or `>` never widen — the in-process matcher reads `{id}` and `*` as one non-empty token, and a trailing `#` or `>` as everything the server's `>` delivers
+- `workQueueRefusal()` sees a native wildcard exactly as its framework spelling: `widensOnTranslation()` is false for both, the group and `ackMode` checks do not read the pattern, and the 10100 overlap scan and `durableConsumerName()` read `filterSubject`, which `toNatsSubject()` makes identical for `tasks.>` and `tasks.#`. A glued `*`/`>` without a `{…}` does not widen — its filter is the literal token, which the matcher accepts — so it passes; `{id}>` and `{id}*` widen like `v{version}` and are refused as partial-token patterns
 - Server rejections are classified by numeric code through `hasApiErrorCode(err, code)` in `packages/nats/src/config-stamp.ts`; `isNotFoundError` is the same predicate under the name its call sites mean. The client's `JetStreamApiCodes` names neither workqueue code, so the adapter declares `CONSUMER_WQ_NOT_DELIVER_ALL_CODE` (10101) and `CONSUMER_WQ_NOT_UNIQUE_CODE` (10100). `workQueueRemedy()` turns 10101 into `undeclaredWorkQueueRemedy()` (declare `retention: 'workqueue'`, quoting the retention declared today) and 10100 into `workQueueNotUniqueRemedy()`, on both `addConsumer()` and the `consumers.update()` path. `error.cause` is the original rejection
 - The 10100 remedy scans `this.subscriptions` for entries on the same stream whose `filterSubject` `natsSubjectsOverlap()`s this one and whose `consumerName` differs (a replica of the same `(group, pattern)` is not a collision). A hit is named with its pattern and group; no hit yields the stale-durable advice with `deleteDurableConsumer(oldPattern, oldGroup)` and `nats consumer rm`. There is no separate pre-flight overlap check: it could not see other processes, and within one process the server's answer is already deterministic. On the update path the remedy replaces the usual delete-and-recreate advice, because a recreate would be refused the same way
 - `ensureConsumer()` and `addConsumer()` take the subscription's `group` (not a precomputed `isDurable`), so the remedy can name it; durability is `Boolean(group)` there, the same predicate `subscribe()` stores on `entry.durable`
@@ -2056,8 +2128,9 @@ to redeliver the original, so that message is lost.
 | Publish deduplication | ❌ | ❌ | ❌ | ✅ |
 | Acknowledgments | ✅ | ✅ | ❌ ² | ✅ |
 
-¹ On NATS and JetStream `#` must be the final token of a pattern — see
-[Pattern Syntax](#pattern-syntax).
+¹ On NATS and JetStream `#` and a whole-token `>` must be the final token of a pattern, and a `*` or
+`>` glued to other characters matches its literal subject only — see [Pattern Syntax](#pattern-syntax)
+and [native wildcards](#native-wildcards).
 
 ² `NatsQueueAdapter` accepts every `ackMode` and rejects nothing, but core NATS has no
 acknowledgement protocol at all, so `message.ack()` and `message.nack()` are permanent

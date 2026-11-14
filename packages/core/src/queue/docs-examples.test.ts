@@ -1355,6 +1355,7 @@ describe('Pattern Syntax — the Redis key glob column', () => {
     expect(toRedisQueueGlob('orders.created')).toBe('orders.created');
     expect(toRedisQueueGlob('orders.*')).toBe('orders.*');
     expect(toRedisQueueGlob('events.#')).toBe('events.*');
+    expect(toRedisQueueGlob('events.>')).toBe('events.*');
     expect(toRedisQueueGlob('orders.{id}')).toBe('orders.*');
   });
 
@@ -1436,6 +1437,63 @@ describe('Pattern Syntax — the Redis key glob column', () => {
 
     expect(delivered[0]!.params).toEqual({ id: '123' });
     expect(Object.keys(delivered[0]!.metadata ?? {})).not.toContain('params');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#native-wildcards
+ */
+describe('Native NATS wildcards: * and > (docs/api/queue.md)', () => {
+  it('delivers to the documented tenants.{tenant}.> consumer, capturing only the {name}', async () => {
+    class AuditConsumer {
+      readonly seen: Array<{ tenant: string; subject?: string }> = [];
+
+      @Subscribe('tenants.{tenant}.>')
+      async onTenantEvent(message: Message<unknown>): Promise<void> {
+        this.seen.push({ tenant: message.params.tenant, subject: message.subject });
+        // "`*` and `>` capture nothing": the {name} is the only key.
+        expect(Object.keys(message.params)).toEqual(['tenant']);
+      }
+    }
+
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    const consumer = new AuditConsumer();
+
+    await service.initialize(adapter);
+    await service.registerService(consumer, AuditConsumer);
+
+    // The in-memory publish resolves once every matching handler has run.
+    await adapter.publish('tenants.acme.orders.created', {});
+    // `>`, like `#`, needs at least one token after the separator.
+    await adapter.publish('tenants.acme', {});
+
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(consumer.seen).toEqual([{ tenant: 'acme', subject: 'tenants.acme.orders.created' }]);
+  });
+
+  it('matches "events.>" exactly where "events.#" matches, on every adapter that matches in process', () => {
+    for (const topic of ['events', 'events.created', 'events.user.created', 'eventsx.created']) {
+      expect(matchQueuePattern('events.>', topic)).toEqual(matchQueuePattern('events.#', topic));
+    }
+    expect(matchQueuePattern('>', 'orders.created').matched).toBe(true);
+  });
+
+  it('reads the non-portable rows of the table the way the memory and Redis column says', () => {
+    // `*` also matches inside a token.
+    expect(matchQueuePattern('orders.v*', 'orders.v2').matched).toBe(true);
+    expect(matchQueuePattern('orders.a*b', 'orders.axb').matched).toBe(true);
+    // `>` anywhere but the whole last token is a literal character.
+    expect(matchQueuePattern('events.>.created', 'events.user.created').matched).toBe(false);
+    expect(matchQueuePattern('events.>.created', 'events.>.created').matched).toBe(true);
+    expect(matchQueuePattern('events.new>', 'events.newer').matched).toBe(false);
+    expect(matchQueuePattern('events.new>', 'events.new>').matched).toBe(true);
+    // An empty token is literal too.
+    expect(matchQueuePattern('orders..created', 'orders..created').matched).toBe(true);
+    // And the Redis glob follows the matcher.
+    expect(toRedisQueueGlob('events.>.created')).toBe('events.>.created');
   });
 });
 

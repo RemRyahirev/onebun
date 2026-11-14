@@ -43,6 +43,9 @@ import {
 } from '../src/config-stamp';
 import { JetStreamQueueAdapter, createJetStreamQueueAdapter } from '../src/jetstream.adapter';
 
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
+
 // ============================================================================
 // Helpers to access private internals via casting
 // ============================================================================
@@ -6338,5 +6341,176 @@ describe('delivery subject: pattern and params follow the subject, not the envel
       const multi = await roundTrip('test.#', 'test.events.#');
       expect(multi.message?.pattern).toBe('test.events.>');
     });
+  });
+});
+
+describe('native NATS wildcards in a subscription pattern', () => {
+  /**
+   * Subscribes `pattern` and feeds one OneBun envelope delivered on `subject` through the consume
+   * loop. Settles on the loop's own `ack()` — sent after a handler that returned, and for a stray
+   * the pattern does not match — so no timer decides when the message has been handled.
+   */
+  async function consume(
+    pattern: string,
+    subject: string,
+    overrides: Partial<JetStreamAdapterOptions> = {},
+  ): Promise<{ message: Message | null; events: string[] }> {
+    const { adapter } = makeConnectedAdapter(overrides);
+    const events: string[] = [];
+    const settled = makeDeferred();
+    const jsMsg = makeMockJsMsg({
+      subject,
+      data: new TextEncoder().encode(envelopeJson({ pattern: subject })),
+      ack: mock(() => {
+        events.push('ack');
+        settled.resolve();
+      }),
+    });
+    asAny(adapter).js.consumers.get = mock(() => Promise.resolve(makeMockConsumer([jsMsg])));
+
+    let message: Message | null = null;
+    await adapter.subscribe(pattern, async (received) => {
+      events.push('handler');
+      message = received;
+    }, { group: 'g' });
+    await settled.promise;
+
+    return { message, events };
+  }
+
+  for (const [pattern, subject] of [
+    ['test.>', 'test.a'],
+    ['test.>', 'test.a.b.c'],
+    ['>', 'test.a.b'],
+    ['test.*', 'test.a'],
+    ['test.{tenant}.>', 'test.acme.orders.created'],
+  ] as const) {
+    it(`runs the handler of "${pattern}" for ${subject}, and acknowledges only after it`, async () => {
+      const { message, events } = await consume(pattern, subject);
+
+      expect(events).toEqual(['handler', 'ack']);
+      expect(message?.subject).toBe(subject);
+      expect(message?.params).toEqual(pattern === 'test.{tenant}.>' ? { tenant: 'acme' } : {});
+    });
+  }
+
+  it('runs the handler of a ">" pattern on a workqueue stream before the ack that deletes the task', async () => {
+    const { events } = await consume('jobs.>', 'jobs.render.page', { streams: [JOBS_WORKQUEUE] });
+
+    expect(events).toEqual(['handler', 'ack']);
+  });
+
+  it('sends a native wildcard pattern to the server as its own filter', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+
+    await adapter.subscribe('test.>', async () => undefined, { group: 'g' });
+    await adapter.subscribe('test.*', async () => undefined, { group: 'g' });
+
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('test.>');
+    expect(callArg(mockJsm.consumers.add, 1, 1).filter_subject).toBe('test.*');
+  });
+
+  for (const pattern of ['test.>.created', '>.created', 'test..created', 'test.', 'test.new order']) {
+    it(`refuses "${pattern}", which no filter can express, before any server call`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+
+      const thrown = await attemptSubscribe(adapter, pattern, { group: 'g' });
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toContain(`"${pattern}"`);
+      expect(asAny(mockJsm.consumers.add).mock.calls.length).toBe(0);
+      expect(asAny(mockJsm.consumers.info).mock.calls.length).toBe(0);
+    });
+  }
+
+  for (const [pattern, subject, params] of [
+    ['test.v*', 'test.v*', {}],
+    ['test.a*b', 'test.a*b', {}],
+    ['test.new>', 'test.new>', {}],
+    ['test.a>b', 'test.a>b', {}],
+    ['test.{id}>', 'test.1>', { id: '1' }],
+  ] as const) {
+    it(`subscribes the glued "${pattern}" as written and runs its handler for ${subject}`, async () => {
+      const { adapter, mockJsm } = makeConnectedAdapter();
+      await adapter.subscribe(pattern, async () => undefined, { group: 'g' });
+      // Literal on the server, unless a parameter widens the token to `*`.
+      expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe(pattern === 'test.{id}>' ? 'test.*' : pattern);
+
+      const { message, events } = await consume(pattern, subject);
+
+      expect(events).toEqual(['handler', 'ack']);
+      expect(message?.params).toEqual(params);
+    });
+  }
+
+  it('subscribes a parameter whose name holds whitespace on the one-token filter', async () => {
+    const { adapter, mockJsm } = makeConnectedAdapter();
+    await adapter.subscribe('test.{a b}', async () => undefined, { group: 'g' });
+    expect(callArg(mockJsm.consumers.add, 0, 1).filter_subject).toBe('test.*');
+
+    const { message } = await consume('test.{a b}', 'test.a');
+    expect(message?.params).toEqual({ [SPACED_NAME]: 'a' });
+  });
+
+  it('accepts a glued wildcard on a workqueue, and refuses there only what widens', async () => {
+    expect(await attemptSubscribe(makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter, 'jobs.v*', { group: 'workers' }))
+      .toBeUndefined();
+    expect((await attemptSubscribe(
+      makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+      'jobs.{id}>',
+      { group: 'workers' },
+    ))?.message).toMatch(/partial-token/);
+  });
+
+  describe('the workqueue checks read a native wildcard as its framework spelling', () => {
+    const spellings = [['jobs.>', 'jobs.#'], ['jobs.*', 'jobs.{id}']] as const;
+
+    for (const [native, framework] of spellings) {
+      it(`refuses "${native}" without a group exactly as "${framework}"`, async () => {
+        const nativeRefusal = await attemptSubscribe(makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter, native, {});
+        const frameworkRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          framework,
+          {},
+        );
+
+        expect(nativeRefusal!.message).toMatch(/without a group/);
+        expect(nativeRefusal!.message.replace(native, '<pattern>'))
+          .toBe(frameworkRefusal!.message.replace(framework, '<pattern>'));
+      });
+
+      it(`refuses "${native}" under ackMode 'none' exactly as "${framework}"`, async () => {
+        const options = { group: 'workers', ackMode: 'none' };
+        const nativeRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          native,
+          options,
+        );
+        const frameworkRefusal = await attemptSubscribe(
+          makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] }).adapter,
+          framework,
+          options,
+        );
+
+        expect(nativeRefusal!.message).toMatch(/ackMode 'none'/);
+        expect(nativeRefusal!.message.replace(native, '<pattern>'))
+          .toBe(frameworkRefusal!.message.replace(framework, '<pattern>'));
+      });
+
+      it(`accepts "${native}" with a group, on the filter and durable "${framework}" gets`, async () => {
+        const onNative = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+        const onFramework = makeConnectedAdapter({ streams: [JOBS_WORKQUEUE] });
+
+        await onNative.adapter.subscribe(native, async () => undefined, { group: 'workers' });
+        await onFramework.adapter.subscribe(framework, async () => undefined, { group: 'workers' });
+
+        const nativeConsumer = callArg(onNative.mockJsm.consumers.add, 0, 1);
+        const frameworkConsumer = callArg(onFramework.mockJsm.consumers.add, 0, 1);
+        expect(nativeConsumer.filter_subject).toBe(frameworkConsumer.filter_subject);
+        expect(nativeConsumer.durable_name).toMatch(/^workers--jobs__--[0-9a-f]{12}$/);
+        expect(nativeConsumer.durable_name).toBe(frameworkConsumer.durable_name);
+        expect(nativeConsumer.deliver_policy).toBe(realJetStream.DeliverPolicy.All);
+      });
+    }
   });
 });

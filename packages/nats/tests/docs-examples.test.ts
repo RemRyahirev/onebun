@@ -71,6 +71,7 @@ describe('Pattern Syntax translation table (docs/api/queue.md)', () => {
     expect(toNatsSubject('orders.created')).toBe('orders.created');
     expect(toNatsSubject('orders.*')).toBe('orders.*');
     expect(toNatsSubject('events.#')).toBe('events.>');
+    expect(toNatsSubject('events.>')).toBe('events.>');
     expect(toNatsSubject('orders.{id}')).toBe('orders.*');
   });
 
@@ -1668,5 +1669,71 @@ describe('Work-queue streams (docs/api/queue.md)', () => {
 
     expect(error).toBeUndefined();
     expect(added[0].filter_subject).toBe('tasks.*');
+  });
+});
+
+/**
+ * @source docs:api/queue.md#native-wildcards
+ */
+describe('Native NATS wildcards: * and > (docs/api/queue.md)', () => {
+  it('sends "events.>" to the server as the filter "events.#" gets, on a durable of the same name', async () => {
+    const native = await subscribeOnDocumentedWorkQueue('tasks.>', { group: 'workers' });
+    const framework = await subscribeOnDocumentedWorkQueue('tasks.#', { group: 'workers' });
+
+    expect(native.error).toBeUndefined();
+    expect(native.added[0].filter_subject).toBe('tasks.>');
+    expect(native.added[0].filter_subject).toBe(framework.added[0].filter_subject);
+    expect(native.added[0].durable_name).toBe(framework.added[0].durable_name);
+  });
+
+  it('subscribes core NATS on the native wildcard subject as written', async () => {
+    const { adapter, client } = connectedNatsAdapter();
+    await adapter.connect();
+
+    await adapter.subscribe('events.>', async () => undefined);
+    await adapter.subscribe('orders.*', async () => undefined);
+
+    expect((client.subscribe.mock.calls as unknown[][]).map(call => call[0])).toEqual(['events.>', 'orders.*']);
+    await adapter.disconnect();
+  });
+
+  for (const pattern of ['tasks.>.created', '>.tasks', 'tasks..created', 'tasks.', 'tasks.new task']) {
+    it(`refuses "${pattern}" at subscribe() on both NATS adapters, naming it, before the server`, async () => {
+      const onJetStream = await subscribeOnDocumentedWorkQueue(pattern, { group: 'workers' });
+      expect(onJetStream.error?.message).toContain(`"${pattern}"`);
+      expect(onJetStream.added).toEqual([]);
+
+      const { adapter, client } = connectedNatsAdapter();
+      await adapter.connect();
+      const onCoreNats = await adapter.subscribe(pattern, async () => undefined).catch((error: unknown) => error);
+      expect((onCoreNats as Error).message).toContain(`"${pattern}"`);
+      expect(client.subscribe).not.toHaveBeenCalled();
+      await adapter.disconnect();
+    });
+  }
+
+  it('subscribes a glued wildcard on the literal subject it spells, on both NATS adapters', async () => {
+    // "NATS serves its literal subject": the filter keeps the token as written.
+    for (const pattern of ['tasks.v*', 'tasks.new>']) {
+      const onJetStream = await subscribeOnDocumentedWorkQueue(pattern, { group: 'workers' });
+      expect(onJetStream.error).toBeUndefined();
+      expect(onJetStream.added[0].filter_subject).toBe(pattern);
+    }
+
+    const { adapter, client } = connectedNatsAdapter();
+    await adapter.connect();
+    await adapter.subscribe('tasks.v*', async () => undefined);
+    expect((client.subscribe.mock.calls as unknown[][])[0][0]).toBe('tasks.v*');
+    await adapter.disconnect();
+  });
+
+  it('lets publish() send a glued wildcard as the literal subject it names', async () => {
+    const { adapter, client } = connectedNatsAdapter();
+    await adapter.connect();
+
+    await adapter.publish('orders.v*', { n: 1 });
+
+    expect((client.publish.mock.calls as unknown[][])[0][0]).toBe('orders.v*');
+    await adapter.disconnect();
   });
 });

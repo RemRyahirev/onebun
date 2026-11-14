@@ -188,4 +188,70 @@ describe('queue-pattern-matcher', () => {
       expect(matching).toEqual([]);
     });
   });
+
+  describe('the NATS spelling ">" of the multi-level wildcard', () => {
+    const topics = [
+      'events',
+      'events.created',
+      'events.user.created',
+      'events.>',
+      'events.#',
+      'eventsx.created',
+      'logs.created',
+    ];
+
+    it('matches a trailing ">" exactly where a trailing "#" matches, capturing nothing', () => {
+      for (const topic of topics) {
+        expect({ topic, match: matchQueuePattern('events.>', topic) })
+          .toEqual({ topic, match: matchQueuePattern('events.#', topic) });
+      }
+
+      expect(matchQueuePattern('events.>', 'events.user.created')).toEqual({ matched: true, params: {} });
+      expect(matchQueuePattern('events.>', 'events')).toEqual({ matched: false, params: {} });
+    });
+
+    it('compiles a trailing ">" to the same matcher as a trailing "#"', () => {
+      const native = createQueuePatternMatcher('events.>');
+      const framework = createQueuePatternMatcher('events.#');
+
+      expect(topics.filter(topic => native(topic).matched)).toEqual(topics.filter(topic => framework(topic).matched));
+      expect(findMatchingTopics('events.>', topics)).toEqual(['events.created', 'events.user.created', 'events.>', 'events.#']);
+    });
+
+    it('matches every topic with a bare ">", as with a bare "#"', () => {
+      expect(matchQueuePattern('>', 'orders.created.today')).toEqual({ matched: true, params: {} });
+      expect(createQueuePatternMatcher('>')('x').matched).toBe(true);
+    });
+
+    it('still delivers the literal topic a ">" pattern spells', () => {
+      // A subscription to `events.>` that received the topic `events.>` keeps receiving it.
+      expect(createQueuePatternMatcher('events.>')('events.>')).toEqual({ matched: true, params: {} });
+    });
+
+    it('combines with named parameters, which still capture', () => {
+      expect(matchQueuePattern('tenants.{tenant}.>', 'tenants.acme.orders.created'))
+        .toEqual({ matched: true, params: { tenant: 'acme' } });
+    });
+
+    it('reads a ">" anywhere but the whole last token as a literal character', () => {
+      expect(matchQueuePattern('events.>.created', 'events.>.created').matched).toBe(true);
+      expect(matchQueuePattern('events.>.created', 'events.user.created').matched).toBe(false);
+      expect(createQueuePatternMatcher('events.new>')('events.new>').matched).toBe(true);
+      expect(createQueuePatternMatcher('events.new>')('events.newer').matched).toBe(false);
+      expect(createQueuePatternMatcher('>.events')('x.events').matched).toBe(false);
+    });
+
+    it('counts as a pattern only where it is a wildcard', () => {
+      expect(isQueuePattern('events.>')).toBe(true);
+      expect(isQueuePattern('>')).toBe(true);
+      expect(isQueuePattern('events.>.created')).toBe(false);
+      expect(isQueuePattern('events.new>')).toBe(false);
+    });
+
+    it('is removed by buildFromQueuePattern like the other wildcards, and only as the last token', () => {
+      expect(buildFromQueuePattern('tenants.{tenant}.>', { tenant: 'acme' })).toBe('tenants.acme.');
+      expect(buildFromQueuePattern('tenants.{tenant}.#', { tenant: 'acme' })).toBe('tenants.acme.');
+      expect(buildFromQueuePattern('events.new>', {})).toBe('events.new>');
+    });
+  });
 });

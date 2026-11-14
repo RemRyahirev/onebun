@@ -452,6 +452,25 @@ describe('RedisQueueAdapter', () => {
       expect(received).toEqual([{ jobId: 'a' }]);
     }, CONTAINER_TEST_TIMEOUT_MS);
 
+    it('drains the backlog of every topic a trailing ">" covers, and of the literal topic it spells', async () => {
+      // `wildgt.>` is a pattern subscription: its backlog is found by SCAN, through the glob
+      // `wildgt.*`, and narrowed by the matcher — which reads the trailing `>` as `#`.
+      await adapter.publish('wildgt.a', { n: 1 });
+      await adapter.publish('wildgt.a.b', { n: 2 });
+      await adapter.publish('wildgt.>', { n: 3 });
+      await adapter.publish('wildgtx.a', { n: 4 });
+
+      const received: Array<{ subject?: string; params: Record<string, string> }> = [];
+      await adapter.subscribe('wildgt.>', async (message) => {
+        received.push({ subject: message.subject, params: message.params });
+      });
+
+      await waitFor(() => received.length === 3);
+
+      expect(received.map(entry => entry.subject).sort()).toEqual(['wildgt.>', 'wildgt.a', 'wildgt.a.b']);
+      expect(received.every(entry => Object.keys(entry.params).length === 0)).toBe(true);
+    }, CONTAINER_TEST_TIMEOUT_MS);
+
     it('delivers a message published before the subscription existed, exactly once', async () => {
       // The reason the list leg exists at all: pub/sub reaches only subscribers that are already
       // listening, so without the list this message would be lost. It must still arrive once, not

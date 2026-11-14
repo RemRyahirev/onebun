@@ -126,7 +126,7 @@ export interface Message<T = unknown> {
    * matched against the delivery subject.
    *
    * `@Subscribe('orders.{id}')` receiving `orders.123` reads `message.params.id === '123'`.
-   * Always an object — `{}` for a pattern with no named parameters, and for a `*` or `#`
+   * Always an object — `{}` for a pattern with no named parameters, and for a `*`, `#` or `>`
    * wildcard — so a handler never has to guard the access itself.
    *
    * Captured **per subscription**, not per publish: one topic delivered to two subscriptions
@@ -603,7 +603,7 @@ export interface QueueAdapter {
   // Subscribing
   /**
    * Subscribe to messages matching a pattern
-   * Supports wildcards: 'orders.*', 'events.user.#'
+   * Supports wildcards: 'orders.*', 'events.user.#', and 'events.user.>' as the NATS spelling of '#'
    */
   subscribe<T>(
     pattern: string,

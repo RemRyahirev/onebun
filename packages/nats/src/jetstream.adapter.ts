@@ -65,7 +65,11 @@ import {
 } from './config-stamp';
 import { NatsClient, toHeaderMap } from './nats-client';
 import { natsPublishError } from './publish-failure';
-import { toNatsSubject, widensOnTranslation } from './subject';
+import {
+  toNatsSubject,
+  validateNatsSubscriptionPattern,
+  widensOnTranslation,
+} from './subject';
 import {
   natsSubjectCovers,
   natsSubjectsOverlap,
@@ -1272,11 +1276,15 @@ export class JetStreamQueueAdapter implements QueueAdapter {
     this.ensureConnected();
 
     validateRetryOptions(options?.retry, pattern);
+    // Before anything reaches the server: a pattern no NATS filter can express — a `>` before the
+    // last token, an empty token, whitespace — would never receive a message, and is refused here.
+    validateNatsSubscriptionPattern(pattern);
 
     const jsModule = await getJetStreamModule();
 
     // The filter widens to a NATS subject; `entry.matcher`, built from the original
-    // pattern, narrows it back and extracts the named parameters.
+    // pattern, narrows it back and extracts the named parameters. A native `*` or `>` is the
+    // same wildcard on both sides.
     const filterSubject = toNatsSubject(pattern);
 
     if (options?.deadLetter !== undefined) {
@@ -2442,7 +2450,9 @@ export class JetStreamQueueAdapter implements QueueAdapter {
           // max_deliver. Enough of them wedge the consumer permanently.
           // On a workqueue stream this ack DELETES the message. That is why subscribe()
           // refuses there every pattern whose filter is wider than the pattern itself
-          // (`widensOnTranslation`): a whole-token pattern produces no strays to delete.
+          // (`widensOnTranslation`): every other pattern — `*`, a trailing `>` or `#`, a
+          // whole-token `{name}`, a literal token, a glued `*` the server reads literally —
+          // matches every subject its filter delivers, so it produces no strays to delete.
           msg.ack();
           continue;
         }

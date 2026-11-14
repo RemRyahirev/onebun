@@ -8,6 +8,8 @@
  * - Exact match: 'orders.created' matches only 'orders.created'
  * - Single-level wildcard (*): 'orders.*' matches 'orders.created', 'orders.updated'
  * - Multi-level wildcard (#): 'events.#' matches 'events.user.created', 'events.order.shipped'
+ * - Multi-level wildcard (>), the NATS spelling of '#': 'events.>' matches exactly what 'events.#'
+ *   matches. It is a wildcard only as the whole last token; a '>' anywhere else is a literal character
  * - Named parameters: 'orders.{orderId}' extracts orderId from matching messages
  *
  * Separator: '.' (dot) is used as the separator (like AMQP/MQTT)
@@ -44,6 +46,14 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** A pattern whose last token is exactly `>` — the NATS multi-token wildcard, `#` by another name. */
+const TRAILING_NATS_WILDCARD = /(?:^|\.)>$/;
+
+/** Whether the `>` at `index` is the whole last token of `pattern`, and therefore a wildcard. */
+function isTrailingNatsWildcard(pattern: string, index: number): boolean {
+  return index === pattern.length - 1 && (index === 0 || pattern[index - 1] === '.');
+}
+
 /**
  * Parse a queue pattern into a regex and extract parameter names
  *
@@ -73,6 +83,11 @@ export function parseQueuePattern(pattern: string): {
         // Invalid # position, treat as literal
         regexStr += escapeRegex(char);
       }
+      i++;
+    } else if (char === '>' && isTrailingNatsWildcard(pattern, i)) {
+      // The NATS spelling of a trailing `#`, compiled identically, so the two spellings match the
+      // same topics and a NATS server filter of `>` and this matcher agree on every subject.
+      regexStr += '.*';
       i++;
     } else if (char === '*') {
       // Single-level wildcard: matches exactly one segment
@@ -137,9 +152,8 @@ export function matchQueuePattern(pattern: string, topic: string): QueuePatternM
     return { matched: true, params: {} };
   }
 
-  // Check if pattern has any special characters
-  if (!pattern.includes('*') && !pattern.includes('#') && !pattern.includes('{')) {
-    // No wildcards or parameters, must be exact match
+  // No wildcards or parameters, must be exact match
+  if (!isQueuePattern(pattern)) {
     return { matched: false, params: {} };
   }
 
@@ -177,7 +191,7 @@ export function isQueuePatternMatch(pattern: string, topic: string): boolean {
  */
 export function createQueuePatternMatcher(pattern: string): (topic: string) => QueuePatternMatch {
   // Exact match fast path
-  if (!pattern.includes('*') && !pattern.includes('#') && !pattern.includes('{')) {
+  if (!isQueuePattern(pattern)) {
     return (topic: string) => ({
       matched: pattern === topic,
       params: {},
@@ -208,10 +222,14 @@ export function createQueuePatternMatcher(pattern: string): (topic: string) => Q
 }
 
 /**
- * Check if a string is a pattern (contains wildcards or parameters)
+ * Check if a string is a pattern (contains wildcards or parameters).
+ *
+ * `*`, `#` and `{` count wherever they appear; `>` counts only as the whole last token, the one
+ * position where it is a wildcard — `events.>` is a pattern, `a>b` and `events.>.x` are literals.
+ * @see docs:api/queue.md
  */
 export function isQueuePattern(value: string): boolean {
-  return value.includes('*') || value.includes('#') || value.includes('{');
+  return value.includes('*') || value.includes('#') || value.includes('{') || TRAILING_NATS_WILDCARD.test(value);
 }
 
 /**
@@ -243,8 +261,8 @@ export function buildFromQueuePattern(pattern: string, params: Record<string, st
     result = result.replace(`{${key}}`, value);
   }
 
-  // Remove wildcards (they shouldn't be in built topics)
-  result = result.replace(/[*#]/g, '');
+  // Remove wildcards (they shouldn't be in built topics). `>` is one only as the last token.
+  result = result.replace(/[*#]/g, '').replace(TRAILING_NATS_WILDCARD, (tail) => tail.slice(0, -1));
 
   return result;
 }

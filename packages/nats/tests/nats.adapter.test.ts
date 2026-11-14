@@ -371,6 +371,66 @@ describe('NatsQueueAdapter', () => {
 
       expect(Object.keys(message?.metadata ?? {})).not.toContain('params');
     });
+
+    it('runs the handler of a native ">" or "*" pattern for every subject the server delivers, capturing nothing', async () => {
+      expect((await deliverTo('events.>', 'events.user.signed'))?.subject).toBe('events.user.signed');
+      expect((await deliverTo('events.>', 'events.user.signed'))?.params).toEqual({});
+      expect((await deliverTo('>', 'events.user.signed'))?.params).toEqual({});
+      expect((await deliverTo('events.*', 'events.signed'))?.params).toEqual({});
+      expect((await deliverTo('tenants.{tenant}.>', 'tenants.acme.orders.created'))?.params)
+        .toEqual({ tenant: 'acme' });
+    });
+
+    it('runs the handler of a glued wildcard for the literal subject the server delivers to it', async () => {
+      expect((await deliverTo('orders.v*', 'orders.v*'))?.subject).toBe('orders.v*');
+      expect((await deliverTo('events.a>b', 'events.a>b'))?.subject).toBe('events.a>b');
+      expect((await deliverTo('events.{id}>', 'events.1>'))?.params).toEqual({ id: '1' });
+    });
+  });
+
+  describe('subscription patterns NATS cannot express', () => {
+    /** A connected adapter whose client records what reached it, without a server. */
+    function connectedAdapter(): { connected: NatsQueueAdapter; subscribe: ReturnType<typeof mock> } {
+      const connected = new NatsQueueAdapter({ servers: 'nats://localhost:4222' });
+      const subscribe = mock(() => Promise.resolve({ unsubscribe: () => undefined }));
+      asAny(connected).connected = true;
+      asAny(connected).client = { subscribe, isConnected: () => true };
+
+      return { connected, subscribe };
+    }
+
+    for (const pattern of ['events.>.created', '>.created', 'orders..created', 'orders.', 'orders.new order']) {
+      it(`refuses "${pattern}", which no subject can match, before the client subscribes`, async () => {
+        const { connected, subscribe } = connectedAdapter();
+
+        const thrown = await connected.subscribe(pattern, async () => undefined).catch((error: unknown) => error);
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect((thrown as Error).message).toContain(`"${pattern}"`);
+        expect(subscribe).not.toHaveBeenCalled();
+      });
+    }
+
+    it('subscribes a native ">" and "*" pattern on the subject it spells', async () => {
+      const { connected, subscribe } = connectedAdapter();
+
+      await connected.subscribe('events.>', async () => undefined);
+      await connected.subscribe('orders.*', async () => undefined);
+      await connected.subscribe('events.#', async () => undefined);
+
+      expect(subscribe.mock.calls.map(call => (call as unknown[])[0])).toEqual(['events.>', 'orders.*', 'events.>']);
+    });
+
+    it('subscribes a glued wildcard on the literal subject it spells, widened only by a parameter', async () => {
+      const { connected, subscribe } = connectedAdapter();
+
+      for (const pattern of ['orders.v*', 'orders.a*b', 'events.new>', 'events.a>b', 'orders.{id}>']) {
+        await connected.subscribe(pattern, async () => undefined);
+      }
+
+      expect(subscribe.mock.calls.map(call => (call as unknown[])[0]))
+        .toEqual(['orders.v*', 'orders.a*b', 'events.new>', 'events.a>b', 'orders.*']);
+    });
   });
 
   describe('delivery subject', () => {

@@ -30,6 +30,14 @@ describe('toRedisQueueGlob', () => {
     expect(toRedisQueueGlob('events.*')).toBe('events.*');
   });
 
+  it('translates a trailing > like a trailing #, and leaves any other > literal', () => {
+    expect(toRedisQueueGlob('events.>')).toBe('events.*');
+    expect(toRedisQueueGlob('>')).toBe('*');
+    // Not a wildcard to the matcher anywhere else, so not to the glob either.
+    expect(toRedisQueueGlob('events.>.created')).toBe('events.>.created');
+    expect(toRedisQueueGlob('events.new>')).toBe('events.new>');
+  });
+
   it('throws on a # outside the final token, naming the pattern and the rule', () => {
     // Redis could serve `*.created` perfectly well. The throw is about keeping one pattern
     // language across adapters — NATS cannot express this at all, and a pattern that works on

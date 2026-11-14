@@ -33,6 +33,10 @@ import { NatsQueueAdapter, createNatsQueueAdapter } from '../src/nats.adapter';
  */
 const POLL_DEADLINE_MS = 3_000;
 const POLL_INTERVAL_MS = 10;
+/** A cold image pull outlasts bun's default hook timeout by far. */
+const CONTAINER_BOOT_MS = 120_000;
+/** A parameter name holding whitespace, which never reaches the wire. */
+const SPACED_NAME = 'a b';
 
 /** Polls instead of sleeping for a guessed duration, so a slow container costs latency, not a flake. */
 async function pollUntil(predicate: () => boolean): Promise<void> {
@@ -73,11 +77,11 @@ describe('NatsQueueAdapter Integration', () => {
   beforeAll(async () => {
     nats = await createNatsContainer();
     natsUrl = nats.url;
-  });
+  }, CONTAINER_BOOT_MS);
 
   afterAll(async () => {
     await nats.stop();
-  });
+  }, CONTAINER_BOOT_MS);
 
   beforeEach(() => {
     adapter = createNatsQueueAdapter({
@@ -363,6 +367,128 @@ describe('NatsQueueAdapter Integration', () => {
       const totalReceived = consumer1Messages.length + consumer2Messages.length;
       expect(totalReceived).toBe(10);
     });
+  });
+
+  describe('native NATS wildcards in a subscription pattern', () => {
+    beforeEach(async () => {
+      await adapter.connect();
+    });
+
+    /**
+     * Subscribes `pattern`, publishes `subjects` in order, and returns what the handler saw once
+     * `expected` messages arrived. One connection delivers in publish order, so a case that publishes
+     * the subject it expects LAST has seen everything before it once that one is in.
+     */
+    async function deliveredTo(
+      pattern: string,
+      subjects: string[],
+      expected: number,
+    ): Promise<Array<{ subject?: string; params: Record<string, string> }>> {
+      const seen: Array<{ subject?: string; params: Record<string, string> }> = [];
+      await adapter.subscribe(pattern, async (message) => {
+        seen.push({ subject: message.subject, params: message.params });
+      });
+      await subscriptionsRegistered(clientOf(adapter));
+
+      for (const subject of subjects) {
+        await adapter.publish(subject, { subject });
+      }
+      await pollUntil(() => seen.length >= expected);
+
+      return seen;
+    }
+
+    it('delivers every subject a ">" pattern covers to the handler, capturing nothing', async () => {
+      const seen = await deliveredTo('nativegt.>', ['nativegt.a', 'nativegt.a.b'], 2);
+
+      expect(seen).toEqual([
+        { subject: 'nativegt.a', params: {} },
+        { subject: 'nativegt.a.b', params: {} },
+      ]);
+    });
+
+    it('delivers a ">"-only pattern every subject', async () => {
+      const seen = await deliveredTo('>', ['nativeall.a'], 1);
+
+      expect(seen.map(entry => entry.subject)).toContain('nativeall.a');
+    });
+
+    it('delivers one token to a "*" pattern, and the same subjects as "{name}" captures', async () => {
+      const named: Array<Record<string, string>> = [];
+      await adapter.subscribe('nativestar.{id}', async (message) => {
+        named.push(message.params);
+      });
+
+      const seen = await deliveredTo('nativestar.*', ['nativestar.a.b', 'nativestar.a'], 1);
+
+      expect(seen).toEqual([{ subject: 'nativestar.a', params: {} }]);
+      await pollUntil(() => named.length === 1);
+      expect(named).toEqual([{ id: 'a' }]);
+    });
+
+    it('delivers the same subjects to ">" and "#"', async () => {
+      const framework: string[] = [];
+      await adapter.subscribe('nativeparity.#', async (message) => {
+        framework.push(message.subject ?? '');
+      });
+
+      const seen = await deliveredTo('nativeparity.>', ['nativeparity.a', 'nativeparity.a.b'], 2);
+
+      await pollUntil(() => framework.length === 2);
+      expect(framework).toEqual(seen.map(entry => entry.subject ?? ''));
+    });
+
+    for (const pattern of ['nativebad.>.run', '>.nativebad', 'nativebad..run', 'nativebad.', 'nativebad.new run']) {
+      it(`refuses "${pattern}", which can never receive a message, at subscribe(), naming it`, async () => {
+        let thrown: Error | undefined;
+        try {
+          await adapter.subscribe(pattern, async () => undefined);
+        } catch (error) {
+          thrown = error as Error;
+        }
+
+        expect(thrown).toBeInstanceOf(Error);
+        expect(thrown!.message).toContain(`"${pattern}"`);
+      });
+    }
+
+    it('delivers to a parameter whose name holds whitespace, which never reaches the wire', async () => {
+      expect(await deliveredTo('ws.{a b}', ['ws.a'], 1)).toEqual([{ subject: 'ws.a', params: { [SPACED_NAME]: 'a' } }]);
+    });
+
+    it('delivers to a pattern holding a no-break space, a valid subject character, its literal subject', async () => {
+      // Only a space, tab, CR or LF is refused; the server routes any other character as written.
+      const subject = 'nbsp.a\u00A0b';
+
+      expect(await deliveredTo(subject, [subject], 1)).toEqual([{ subject, params: {} }]);
+    });
+
+    it('delivers to a partial-token parameter whose name holds whitespace', async () => {
+      expect(await deliveredTo('wsv.v{a b}', ['wsv.x', 'wsv.v1'], 1))
+        .toEqual([{ subject: 'wsv.v1', params: { [SPACED_NAME]: '1' } }]);
+    });
+
+    // A wildcard glued into a token is a literal token on the server: the subscription receives the
+    // one subject it spells. A `{name}` beside it widens to `*` and narrows back in process.
+    // [pattern, a neighbour the matcher's sub-token `*` would accept, the subject delivered, params]
+    const glued: Array<[string, string, string, Record<string, string>]> = [
+      ['glued.a*b', 'glued.aqb', 'glued.a*b', {}],
+      ['glued.v*', 'glued.v1', 'glued.v*', {}],
+      ['glued.*a', 'glued.ba', 'glued.*a', {}],
+      ['glued.**', 'glued.ab', 'glued.**', {}],
+      ['glued.foo>', 'glued.fooz', 'glued.foo>', {}],
+      ['glued.a>b', 'glued.ab', 'glued.a>b', {}],
+      ['glued.>>', 'glued.a', 'glued.>>', {}],
+      ['glued.{id}>', 'glued.1', 'glued.1>', { id: '1' }],
+    ];
+
+    for (const [pattern, neighbour, delivered, params] of glued) {
+      it(`delivers to "${pattern}" the literal subject "${delivered}" and nothing else`, async () => {
+        const seen = await deliveredTo(pattern, [neighbour, delivered], 1);
+
+        expect(seen).toEqual([{ subject: delivered, params }]);
+      });
+    }
   });
 
   describe('message properties', () => {

@@ -116,6 +116,38 @@ describe('InMemoryQueueAdapter', () => {
       expect(received.length).toBe(2);
     });
 
+    it('matches a trailing ">" as the multi-level wildcard, and still delivers the literal topic it spells', async () => {
+      await adapter.connect();
+
+      const received: Array<{ topic: string; params: Record<string, string> }> = [];
+      await adapter.subscribe('events.>', async (message) => {
+        received.push({ topic: message.pattern, params: message.params });
+      });
+
+      await adapter.publish('events.user.created', {});
+      await adapter.publish('events.>', {});
+      await adapter.publish('events', {});
+
+      expect(received).toEqual([
+        { topic: 'events.user.created', params: {} },
+        { topic: 'events.>', params: {} },
+      ]);
+    });
+
+    it('reads a ">" anywhere but the last token as a literal character', async () => {
+      await adapter.connect();
+
+      const received: string[] = [];
+      await adapter.subscribe('events.>.created', async (message) => {
+        received.push(message.pattern);
+      });
+
+      await adapter.publish('events.user.created', {});
+      await adapter.publish('events.>.created', {});
+
+      expect(received).toEqual(['events.>.created']);
+    });
+
     it('should return message ID on publish', async () => {
       await adapter.connect();
 
