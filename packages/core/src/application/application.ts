@@ -2889,6 +2889,10 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
      * returns something that is neither a Response nor `undefined` is reported the same way.
      * Applying filters on more paths widens the blast radius of a buggy user filter, so that
      * fallback is part of the design rather than a bonus.
+     *
+     * `Unhandled error in <Controller>.<handler>:` is written only on the way to the default
+     * filter — every filter declined, or one misbehaved — and never for an `HttpException` or a
+     * `OneBunBaseError`. An error a filter answered is not logged here at all.
      */
     async function applyExceptionFilters(
       error: unknown,
@@ -2896,15 +2900,6 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
       routeMeta: RouteMetadata,
       controllerName: string,
     ): Promise<Response> {
-      // Log the unexpected bucket only: HttpException and OneBunBaseError carry a
-      // deliberate status and are ordinary control flow, not incidents.
-      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
-        appLogger.error(
-          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
-          error instanceof Error ? error : new Error(String(error)),
-        );
-      }
-
       const ctx = new HttpExecutionContextImpl(req, routeMeta.handler ?? '', controllerName);
       // The field is declared wide because a decorator may write CLASSES into it; what reaches
       // the pipeline is the resolved form, built by `ownerModule.resolveFilters` during route
@@ -2948,6 +2943,19 @@ export class OneBunApplication<QA extends import('../queue/types').QueueAdapterC
         // Reached only when the filter misbehaved: stop consulting the chain, since a filter
         // that cannot be trusted to answer cannot be trusted to have declined either.
         break;
+      }
+
+      // No filter of the application answered, so the error is unhandled. Logged here and not
+      // on entry: an error a filter answered is the application's own control flow — a domain
+      // refusal mapped to a 4xx — and logging it at error level would bury the real failures.
+      // HttpException and OneBunBaseError carry a deliberate status and are not incidents
+      // either. After a misbehaving filter this line follows that filter's own, so the error
+      // it was handed is not lost behind the filter's failure.
+      if (!(error instanceof HttpException) && !(error instanceof OneBunBaseError)) {
+        appLogger.error(
+          `Unhandled error in ${controllerName}.${routeMeta.handler ?? 'unknown'}:`,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
 
       return await appDefaultExceptionFilter.catch(error, ctx);

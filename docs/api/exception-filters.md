@@ -30,8 +30,10 @@ import { ExceptionFilter, createExceptionFilter, UseFilters, HttpException } fro
 **Signature:**
 <!-- typecheck: skip -->
 ```typescript
-filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Promise<OneBunResponse>
+filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | undefined | Promise<OneBunResponse | undefined>
 ```
+
+**Logging:** the framework writes `Unhandled error in <Controller>.<handler>:` at error level, with the error, only when no route/controller/global filter answered and the error goes to the default filter — never for an error a filter answered, never for `HttpException`/`OneBunBaseError`. A filter that throws, rejects (or rethrows to decline) is logged as `Exception filter <name> threw; …`, and one that returns neither a Response nor `undefined`/`null` as `Exception filter <name> returned neither a Response nor undefined; …` — each followed by the unhandled line for the error it was handed. The line is written only after every filter settled: an async filter that never settles leaves the request pending with nothing logged. If the default filter itself fails to build its answer (an `HttpException` with a status `Response` rejects, a `OneBunBaseError` with unserializable `details`), the outer catch answers a plain 500 and logs `Request handling error:`. The log is written in `applyExceptionFilters` (`packages/core/src/application/application.ts`), after the filter loop and before `appDefaultExceptionFilter.catch`. Filters run on HTTP only: WebSocket and queue handlers have no exception-filter chain. See [What Gets Logged](#what-gets-logged)
 
 **The default filter** handles:
 - `HttpException` → `{ success: false, error: message, code: statusCode }` (HTTP status = exception's statusCode)
@@ -41,7 +43,7 @@ filter.catch(error: unknown, context: HttpExecutionContext): OneBunResponse | Pr
 - `exposeErrorDetails` governs the message and the details together — one knob, not two. A message naming an internal host is not meaningfully safer than the stack naming the file, so there is no configuration in which one is disclosed and the other is not
 - The flag is deliberately NOT derived from `NODE_ENV`. An unset or mistyped `NODE_ENV` would flip a security-relevant default the wrong way with no signal
 - The status computation is independent of the flag: a non-HTTP `code` such as `ECONNREFUSED` still maps to 500 through `toHttpStatus`, which is what stops `new Response` throwing RangeError from inside the filter
-- The stack still reaches the operator: the application logs `'Unhandled error in ...'` with the error object before the filter runs, so withholding it from the response costs no debuggability
+- The stack still reaches the operator: an error that reaches the default filter's unhandled branch is always logged as `'Unhandled error in ...'` with the error object first, so withholding it from the response costs no debuggability
 
 </llm-only>
 
@@ -58,9 +60,12 @@ interface ExceptionFilter {
   catch(
     error: unknown,
     context: HttpExecutionContext,
-  ): OneBunResponse | Promise<OneBunResponse>;
+  ): OneBunResponse | undefined | Promise<OneBunResponse | undefined>;
 }
 ```
+
+Return a `Response` to answer the error, or `undefined` to decline it — see
+[Filter Priority](#filter-priority).
 
 ## Creating Filters
 
@@ -77,8 +82,8 @@ const myFilter = createExceptionFilter((error, ctx) => {
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
   }
-  // Re-throw to let the next filter (or default) handle it
-  throw error;
+
+  return undefined; // decline: the next filter outwards gets it
 });
 ```
 
@@ -213,7 +218,8 @@ class UploadController extends BaseController {
     if (err instanceof FileSizeError) {
       return Response.json({ success: false, error: 'File too large' });
     }
-    throw err;
+
+    return undefined; // decline: the controller and global filters still get it
   }))
   @Post('/')
   async upload(@UploadedFile() file: OneBunFile) { /* ... */ }
@@ -263,7 +269,61 @@ untyped code) declines the same way.
 
 A filter that throws, or returns anything that is neither a `Response` nor `undefined`/`null`, is
 reported with its name, and the built-in **default filter** answers without consulting the rest
-of the chain. The default filter never throws and is therefore always the terminal handler.
+of the chain. The default filter is always the terminal handler — nothing is consulted after it.
+When building its own answer fails — an `HttpException` whose status `Response` rejects, such as
+`999`, or a `OneBunBaseError` whose `details` hold a `BigInt` or a circular reference — the request
+is answered with `{ success: false, error: 'Internal Server Error', code: 500 }` and that failure is
+logged as `Request handling error:`.
+
+## What Gets Logged
+
+The framework logs a thrown error at error level only when none of your filters answered it —
+when it goes to the default filter. An error your filter answered is not logged by the framework:
+mapping your own error classes to a 4xx is ordinary control flow, not an incident, so a domain
+layer that refuses a call with an error class of its own produces a 404 and no error-level line.
+
+```typescript
+import { createExceptionFilter, OneBunApplication } from '@onebun/core';
+
+// A domain error that knows nothing about HTTP
+class NotFoundDomainError extends Error {
+  readonly code = 'NOT_FOUND';
+}
+
+const domainFilter = createExceptionFilter((error) => {
+  if (error instanceof NotFoundDomainError) {
+    return Response.json({ success: false, error: error.code }, { status: 404 });
+  }
+
+  return undefined; // decline: the default filter answers, and the error is logged
+});
+
+const app = new OneBunApplication(AppModule, { filters: [domainFilter] });
+```
+
+| The thrown error | What the framework logs at error level |
+|---|---|
+| is answered by a route, controller or global filter | nothing |
+| goes to the default filter and is an `HttpException` or a `OneBunBaseError` | nothing |
+| goes to the default filter and is anything else | `Unhandled error in <Controller>.<handler>:`, once, with the error and its stack |
+| goes to the default filter because a filter threw, or returned neither a `Response` nor `undefined`/`null` | `Exception filter <name> threw; …` (or `… returned neither a Response nor undefined; …`) for the filter, then the `Unhandled error in …` line for the error it was handed, unless that is an `HttpException` or a `OneBunBaseError` |
+
+One more line can follow any row that goes to the default filter: when the default filter cannot
+build its own answer, that failure is logged as `Request handling error:`, as described above.
+
+A filter that rethrows to decline is therefore logged twice for every error it does not answer:
+once as a failing filter and once as unhandled. Decline by returning `undefined`.
+
+The `Unhandled error in …` line is written after every filter has settled. An async filter whose
+promise never settles — an `await` on a backend that does not answer — leaves the request pending
+and nothing logged, so bound slow work inside a filter with a timeout of its own.
+
+An error your filter answered is yours to report. If it builds a 5xx for something that is a real
+failure, log or report it in the filter — a filter registered by class gets constructor injection
+for exactly that, see [With dependency injection](#with-dependency-injection).
+
+A middleware that throws is not filtered (see [What Filters Cover](#what-filters-cover)), and is
+logged as `Request handling error:` instead.
 
 ## Default Filter Behaviour
 
@@ -297,8 +357,9 @@ carry the error's stack trace, class name or non-HTTP `code`. A stack trace in a
 discloses absolute filesystem paths, dependency versions and internal module layout to whoever can
 provoke a 500, so it is withheld too.
 
-Nothing is lost operationally: the application logs the whole error, message and stack included,
-before the filter runs — look for `Unhandled error in <Controller>.<handler>`.
+Nothing is lost operationally: an error that reaches this branch is logged whole, message and stack
+included, before the default filter answers — look for `Unhandled error in <Controller>.<handler>`
+(see [What Gets Logged](#what-gets-logged)).
 
 ::: tip Returning a message to the client deliberately
 Throw an `HttpException` — that is what it is for. `throw new HttpException(422, 'orderId must
@@ -356,17 +417,38 @@ const auditedFilter = createExceptionFilter((error) => {
 
 ## Accessing the Request in a Filter
 
+`ctx.getRequest()` is the live request. A filter registered by class and extending `BaseService`
+writes through the framework's logger:
+
 ```typescript
-const loggingFilter = createExceptionFilter((error, ctx) => {
-  const req = ctx.getRequest();
-  console.error(`Error on ${req.method} ${new URL(req.url).pathname}:`, error);
-  throw error; // delegate to the default filter
-});
+import {
+  BaseController,
+  BaseService,
+  Controller,
+  Service,
+  UseFilters,
+  type HttpExecutionContext,
+} from '@onebun/core';
+
+@Service()
+class RequestLoggingFilter extends BaseService {
+  catch(error: unknown, ctx: HttpExecutionContext): undefined {
+    const req = ctx.getRequest();
+    this.logger.info(`${req.method} ${new URL(req.url).pathname} failed: ${String(error)}`);
+
+    return undefined; // decline: the next filter outwards answers
+  }
+}
+
+@UseFilters(RequestLoggingFilter)
+@Controller('/orders')
+class OrderController extends BaseController { /* ... */ }
 ```
 
 ## Async Filters
 
-Filters can be asynchronous:
+Filters can be asynchronous. The request waits for the promise, so bound slow work inside the
+filter (see [What Gets Logged](#what-gets-logged)):
 
 ```typescript
 const auditFilter = createExceptionFilter(async (error, ctx) => {
@@ -375,7 +457,8 @@ const auditFilter = createExceptionFilter(async (error, ctx) => {
     controller: ctx.getController(),
     error: String(error),
   });
-  throw error;
+
+  return undefined; // decline: the next filter outwards answers
 });
 ```
 
@@ -384,6 +467,7 @@ const auditFilter = createExceptionFilter(async (error, ctx) => {
 ```
 Handler, guard or interceptor throws
 → the route's filters, most specific first (route ▸ controller ▸ global); the first Response answers
+→ if none answered: `Unhandled error in …` is logged, unless it is an HttpException or a OneBunBaseError
 → Default filter, if every filter declined, or one threw or returned something else
 → Response sent, back out through the interceptor and middleware chains
 ```

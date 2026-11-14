@@ -224,16 +224,18 @@ const myFilter = createExceptionFilter((error, ctx) => {
   if (error instanceof MyCustomError) {
     return Response.json({ success: false, error: error.message }, { status: 200 });
   }
-  throw error; // delegate to the default filter
+
+  return undefined; // decline: the next filter outwards gets it
 });
 
 // Class-based
 class ValidationFilter implements ExceptionFilter {
-  catch(error: unknown, ctx: HttpExecutionContext): Response {
+  catch(error: unknown, ctx: HttpExecutionContext): Response | undefined {
     if (error instanceof ValidationError) {
       return Response.json({ success: false, error: error.message });
     }
-    throw error;
+
+    return undefined; // decline
   }
 }
 ```
@@ -301,8 +303,20 @@ Three things about the last row that a reader will otherwise get wrong:
   both, deliberately not derived from `NODE_ENV`, since an unset or mistyped `NODE_ENV` would flip
   a security-relevant default the wrong way with no signal.
 
-Nothing is lost operationally: the application logs the whole error, message and stack included,
-before the filter runs — grep the logs for `Unhandled error in <Controller>.<handler>`.
+Nothing is lost operationally: an error that reaches this row is logged whole, message and stack
+included, before the default filter answers — grep the logs for `Unhandled error in <Controller>.<handler>`.
+
+**What gets logged at error level.** `Unhandled error in <Controller>.<handler>:` is written only
+when no route/controller/global filter answered — the error is on its way to the default filter —
+and never for an `HttpException` or a `OneBunBaseError`. An error a filter answered is not logged
+by the framework, so mapping a domain error class to a 4xx in a filter produces no error-level line;
+a filter that answers a real failure reports it itself. A filter that throws or rejects — including
+one that rethrows to decline — is logged as `Exception filter <name> threw; …`, and one that
+returns neither a Response nor `undefined`/`null` as `… returned neither a Response nor undefined; …`,
+each followed by the unhandled line for the error it was handed: decline with `return undefined`.
+The line is written after every filter settled, so an async filter that never settles leaves the
+request pending with nothing logged — bound slow work in a filter. HTTP only — WebSocket and queue
+handlers have no exception-filter chain.
 
 **The `OneBunBaseError` row leaves an HTTP-client error's transport details out.** A
 `OneBunBaseError` is sent whole, `details` and `originalError` included — except the transport

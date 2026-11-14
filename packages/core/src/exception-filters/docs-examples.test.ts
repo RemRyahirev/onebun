@@ -2,11 +2,11 @@
  * Documentation examples for docs/api/exception-filters.md.
  *
  * Every test here pins a promise the prose makes about the filter chain — which filter
- * actually runs for a given throw, what the response body and status are, and what a
- * re-throw falls back to. The snippets are exercised through a live application on port
- * 0 rather than by calling `filter.catch()` directly, because "route-level shadows
- * controller-level", "a re-throw reaches the default filter" and "the pipeline awaits an
- * async filter" are properties of the request pipeline, not of the filter object.
+ * actually runs for a given throw, what the response body and status are, and where a
+ * decline goes. The snippets are exercised through a live application on port 0 rather
+ * than by calling `filter.catch()` directly, because "route-level shadows controller-level",
+ * "a decline reaches the next filter out" and "the pipeline awaits an async filter" are
+ * properties of the request pipeline, not of the filter object.
  */
 
 import {
@@ -48,6 +48,7 @@ import { ValidationError } from '@onebun/requests';
 // tests reach the helper directly. Every documented symbol above comes through the public
 // barrel, exactly as docs/api/exception-filters.md tells the reader to import it.
 import { makeMockLoggerLayer } from '../testing/test-utils';
+import { TestingModule, type CompiledTestingModule } from '../testing/testing-module';
 
 // ============================================================================
 // Fixtures
@@ -123,8 +124,7 @@ const oneBunErrorFilter = createExceptionFilter((error, _ctx) => {
     );
   }
 
-  // Re-throw to let the next filter (or default) handle it
-  throw error;
+  return undefined; // decline: the next filter outwards gets it
 });
 
 /** docs "Class-based filter". */
@@ -174,18 +174,20 @@ class ContextRecordingFilter implements ExceptionFilter {
   }
 }
 
-/** docs "Accessing the Request in a Filter" — `console.error` replaced by a capture. */
-const requestLog: string[] = [];
-const loggingFilter = createExceptionFilter((error, ctx) => {
-  const req = ctx.getRequest();
-  requestLog.push(`${req.method} ${new URL(req.url).pathname}: ${String(error)}`);
+/** docs "Accessing the Request in a Filter". */
+@Service()
+class RequestLoggingFilter extends BaseService {
+  catch(error: unknown, ctx: HttpExecutionContext): undefined {
+    const req = ctx.getRequest();
+    this.logger.info(`${req.method} ${new URL(req.url).pathname} failed: ${String(error)}`);
 
-  throw error; // delegate to the default filter
-});
+    return undefined; // decline: the next filter outwards answers
+  }
+}
 
 /** docs "Async Filters". */
 const returningAudit = makeAuditLog();
-const rethrowingAudit = makeAuditLog();
+const decliningAudit = makeAuditLog();
 
 const auditFilter = createExceptionFilter(async (error, ctx) => {
   const receipt = await returningAudit.record({
@@ -197,14 +199,14 @@ const auditFilter = createExceptionFilter(async (error, ctx) => {
   return Response.json({ handledBy: 'audit', receipt }, { status: HttpStatusCode.ACCEPTED });
 });
 
-const rethrowingAuditFilter = createExceptionFilter(async (error, ctx) => {
-  await rethrowingAudit.record({
+const decliningAuditFilter = createExceptionFilter(async (error, ctx) => {
+  await decliningAudit.record({
     handler: ctx.getHandler(),
     controller: ctx.getController(),
     error: String(error),
   });
 
-  throw error;
+  return undefined; // decline: the next filter outwards answers
 });
 
 /** docs "On a single route" / controller-level contrast. */
@@ -213,7 +215,7 @@ const uploadRouteFilter = createExceptionFilter((err, _ctx) => {
     return Response.json({ success: false, error: 'File too large' });
   }
 
-  throw err;
+  return undefined; // decline: the controller and global filters still get it
 });
 
 const uploadControllerFilter = createExceptionFilter(
@@ -340,9 +342,16 @@ describe('docs/api/exception-filters.md', () => {
     otherUpload(): never {
       throw new FileSizeError(2048);
     }
+
+    /** Not a FileSizeError: the route filter declines and the controller filter answers. */
+    @UseFilters(uploadRouteFilter)
+    @Post('/broken')
+    brokenUpload(): never {
+      throw new Error('disk full');
+    }
   }
 
-  @UseFilters(loggingFilter)
+  @UseFilters(RequestLoggingFilter)
   @Controller('/reqinfo')
   class RequestInfoController extends BaseController {
     @Post('/probe')
@@ -360,9 +369,9 @@ describe('docs/api/exception-filters.md', () => {
     }
   }
 
-  @UseFilters(rethrowingAuditFilter)
-  @Controller('/audit-rethrow')
-  class AuditRethrowController extends BaseController {
+  @UseFilters(decliningAuditFilter)
+  @Controller('/audit-decline')
+  class AuditDeclineController extends BaseController {
     @Get('/boom')
     boom(): never {
       throw new HttpException(HttpStatusCode.CONFLICT, 'Conflict');
@@ -413,7 +422,7 @@ describe('docs/api/exception-filters.md', () => {
       UploadController,
       RequestInfoController,
       AuditController,
-      AuditRethrowController,
+      AuditDeclineController,
       DiFilterController,
     ],
     providers: [ErrorReporter],
@@ -423,6 +432,12 @@ describe('docs/api/exception-filters.md', () => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let app: OneBunApplication<any, any>;
   let base: string;
+  /** Everything this application logged: a decline must not read as a failing filter. */
+  const logs: LogRecord[] = [];
+
+  function errorLinesSince(start: number): string[] {
+    return logs.slice(start).filter((record) => record.level === 'error').map((record) => record.message);
+  }
 
   beforeAll(async () => {
     rejectingUpstream = Bun.serve({
@@ -437,7 +452,7 @@ describe('docs/api/exception-filters.md', () => {
 
     app = new OneBunApplication(FiltersModule, {
       port: 0,
-      loggerLayer: makeMockLoggerLayer() as never,
+      loggerLayer: recordingLoggerLayer(logs) as never,
       metrics: { enabled: false },
       gracefulShutdown: false,
     });
@@ -540,23 +555,26 @@ describe('docs/api/exception-filters.md', () => {
   /**
    * @source docs:api/exception-filters.md#function-based-filter
    */
-  it('createExceptionFilter handles the matched error and re-throws the rest to the default filter', async () => {
+  it('createExceptionFilter handles the matched error and declines the rest to the next filter out', async () => {
     const matched = await fetch(`${base}/fn/known`);
     const matchedBody = await matched.json() as ErrorBody;
 
     expect(matched.status).toBe(HttpStatusCode.OK);
     expect(matchedBody).toEqual({ success: false, error: 'no such record', code: HttpStatusCode.NOT_FOUND });
 
-    // The `throw error` branch is not a no-op: the default filter takes over and the
-    // response carries a real HTTP 500 instead of the filter's 200 envelope.
-    const rethrown = await fetch(`${base}/fn/unknown`);
-    const rethrownBody = await rethrown.json() as ErrorBody;
+    // The decline is not a no-op: with no filter further out, the default filter takes over
+    // and the response carries a real HTTP 500 instead of the filter's 200 envelope.
+    const logStart = logs.length;
+    const declined = await fetch(`${base}/fn/unknown`);
+    const declinedBody = await declined.json() as ErrorBody;
 
-    expect(rethrown.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
-    // Re-thrown to the default filter, so it is an unhandled error by the time it is
-    // serialized — and the default filter withholds the message.
-    expect(rethrownBody.error).toBe(UNHANDLED_ERROR_MESSAGE);
-    expect(rethrownBody.code).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+    expect(declined.status).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+    // An unhandled error by the time it is serialized — and the default filter withholds the
+    // message.
+    expect(declinedBody.error).toBe(UNHANDLED_ERROR_MESSAGE);
+    expect(declinedBody.code).toBe(HttpStatusCode.INTERNAL_SERVER_ERROR);
+    // A decline is not a failing filter: the error is logged once, as unhandled.
+    expect(errorLinesSince(logStart)).toEqual(['Unhandled error in FunctionFilterController.unknown:']);
   });
 
   // --------------------------------------------------------------------------
@@ -666,6 +684,16 @@ describe('docs/api/exception-filters.md', () => {
 
     expect(sibling.status).toBe(HTTP_GONE);
     expect(siblingBody.handledBy).toBe('upload-controller');
+
+    // What the route filter declines reaches the controller filter, which answers — and an
+    // answered error is not logged as a failure.
+    const logStart = logs.length;
+    const declined = await fetch(`${base}/uploads/broken`, { method: 'POST' });
+    const declinedBody = await declined.json() as FilterBody;
+
+    expect(declined.status).toBe(HTTP_GONE);
+    expect(declinedBody.handledBy).toBe('upload-controller');
+    expect(errorLinesSince(logStart)).toEqual([]);
   });
 
   // --------------------------------------------------------------------------
@@ -675,16 +703,19 @@ describe('docs/api/exception-filters.md', () => {
   /**
    * @source docs:api/exception-filters.md#accessing-the-request-in-a-filter
    */
-  it('ctx.getRequest() exposes the live request, and re-throwing hands over to the default filter', async () => {
-    requestLog.length = 0;
+  it('ctx.getRequest() exposes the live request to a filter that logs through this.logger and declines', async () => {
+    const logStart = logs.length;
 
     const response = await fetch(`${base}/reqinfo/probe?trace=1`, { method: 'POST' });
     const body = await response.json() as ErrorBody;
 
-    expect(requestLog).toEqual(['POST /reqinfo/probe: HttpException: Conflict']);
+    expect(logs.slice(logStart).filter((record) => record.level === 'info').map((record) => record.message))
+      .toContain('POST /reqinfo/probe failed: HttpException: Conflict');
+    // Declined, so the default filter answers the HttpException with its own status.
     expect(response.status).toBe(HttpStatusCode.CONFLICT);
     expect(body.error).toBe('Conflict');
     expect(body.code).toBe(HttpStatusCode.CONFLICT);
+    expect(errorLinesSince(logStart)).toEqual([]);
   });
 
   // --------------------------------------------------------------------------
@@ -710,15 +741,17 @@ describe('docs/api/exception-filters.md', () => {
   /**
    * @source docs:api/exception-filters.md#async-filters
    */
-  it('an async filter that awaits and then re-throws still records before the default filter answers', async () => {
-    const response = await fetch(`${base}/audit-rethrow/boom`);
+  it('an async filter that awaits and then declines still records before the default filter answers', async () => {
+    const logStart = logs.length;
+    const response = await fetch(`${base}/audit-decline/boom`);
     const body = await response.json() as ErrorBody;
 
-    expect(rethrowingAudit.entries).toEqual([
-      { handler: 'boom', controller: 'AuditRethrowController', error: 'HttpException: Conflict' },
+    expect(decliningAudit.entries).toEqual([
+      { handler: 'boom', controller: 'AuditDeclineController', error: 'HttpException: Conflict' },
     ]);
     expect(response.status).toBe(HttpStatusCode.CONFLICT);
     expect(body.error).toBe('Conflict');
+    expect(errorLinesSince(logStart)).toEqual([]);
   });
 });
 
@@ -949,9 +982,10 @@ describe('Default Filter Behaviour (docs/api/exception-filters.md)', () => {
   });
 
   it('still hands the real message to the log, which is where it belongs', async () => {
-    // Withholding it from the response must not remove it from the operator's view. The
-    // application logs the whole error before the filter runs; this asserts that, so that a
-    // future change cannot quietly make the message disappear from both places at once.
+    // Withholding it from the response must not remove it from the operator's view. When no
+    // filter of the application answers, the whole error is logged before the default filter
+    // does; this asserts that, so that a future change cannot quietly make the message
+    // disappear from both places at once.
     const records: Array<{ level: string; message: string; extra: unknown[] }> = [];
     const app = new OneBunApplication(DefaultFilterModule, {
       port: 0,
@@ -1120,6 +1154,117 @@ describe('Default Filter Behaviour: an HTTP-client error (docs/api/exception-fil
       expect(JSON.parse(text)).toMatchObject({ success: false, error: 'REQUEST_FAILED' });
       expect(text).not.toContain('COOKIE-SECRET');
       expect(text).not.toContain('URL-SECRET');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What Gets Logged
+// ---------------------------------------------------------------------------
+
+/** docs "What Gets Logged" — a domain error that knows nothing about HTTP. */
+class NotFoundDomainError extends Error {
+  readonly code = 'NOT_FOUND';
+}
+
+/** docs "What Gets Logged". */
+const domainFilter = createExceptionFilter((error) => {
+  if (error instanceof NotFoundDomainError) {
+    return Response.json({ success: false, error: error.code }, { status: HttpStatusCode.NOT_FOUND });
+  }
+
+  return undefined; // decline: the default filter answers, and the error is logged
+});
+
+/** The same mapping, declining by rethrowing — the shape the section warns about. */
+const rethrowingDomainFilter = createExceptionFilter((error) => {
+  if (error instanceof NotFoundDomainError) {
+    return Response.json({ success: false, error: error.code }, { status: HttpStatusCode.NOT_FOUND });
+  }
+
+  throw error;
+});
+
+/**
+ * Which thrown errors reach the error-level log. A domain layer that maps its own refusals to 4xx
+ * in a filter must not produce an incident-level line per refused call; an error no filter
+ * answered must still produce one, with the error attached.
+ *
+ * @source docs:api/exception-filters.md#what-gets-logged
+ */
+describe('What Gets Logged (docs/api/exception-filters.md)', () => {
+  @Controller('/refusal')
+  class RefusingController extends BaseController {
+    @Get('/not-found')
+    notFound(): never {
+      throw new NotFoundDomainError('WorkItem not found: WI-404');
+    }
+
+    @Get('/bug')
+    bug(): never {
+      throw new TypeError("Cannot read properties of undefined (reading 'id')");
+    }
+  }
+
+  @Module({ controllers: [RefusingController] })
+  class RefusalModule {}
+
+  async function withLoggedApp(
+    filter: ExceptionFilter,
+    run: (app: CompiledTestingModule) => Promise<void>,
+  ): Promise<void> {
+    const app = await TestingModule.create({ imports: [RefusalModule] })
+      .captureLogs()
+      .setOptions({ filters: [filter] })
+      .compile();
+
+    try {
+      await run(app);
+    } finally {
+      await app.close();
+    }
+  }
+
+  function errorLines(app: CompiledTestingModule): string[] {
+    return app.logs.filter((record) => record.level === 'error').map((record) => record.message);
+  }
+
+  it('writes no error-level line for an error a filter answered', async () => {
+    await withLoggedApp(domainFilter, async (app) => {
+      const response = await app.inject('GET', '/refusal/not-found');
+
+      expect(response.status).toBe(HttpStatusCode.NOT_FOUND);
+      expect(await response.json()).toEqual({ success: false, error: 'NOT_FOUND' });
+      expect(errorLines(app)).toEqual([]);
+    });
+  });
+
+  it('logs an error every filter declined, once, with the error itself', async () => {
+    await withLoggedApp(domainFilter, async (app) => {
+      const response = await app.inject('GET', '/refusal/bug');
+
+      expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(errorLines(app)).toEqual(['Unhandled error in RefusingController.bug:']);
+
+      const [record] = app.logs.filter((entry) => entry.level === 'error');
+      expect(record.args[0]).toBeInstanceOf(TypeError);
+    });
+  });
+
+  it('logs a filter that rethrows, and then the error it was handed', async () => {
+    await withLoggedApp(rethrowingDomainFilter, async (app) => {
+      const answered = await app.inject('GET', '/refusal/not-found');
+
+      expect(answered.status).toBe(HttpStatusCode.NOT_FOUND);
+      expect(errorLines(app)).toEqual([]);
+
+      const response = await app.inject('GET', '/refusal/bug');
+      const lines = errorLines(app);
+
+      expect(response.status).toBe(HTTP_INTERNAL_SERVER_ERROR);
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toContain('threw; falling back to the default filter');
+      expect(lines[1]).toBe('Unhandled error in RefusingController.bug:');
     });
   });
 });
