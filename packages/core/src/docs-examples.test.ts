@@ -6114,6 +6114,8 @@ async function createWsGatewayHarness(gatewayClass: Function, instance: BaseWebS
   const makeSocket = (data: WsClientData, out: string[]): ServerWebSocket<WsClientData> => {
     const fake = {
       data,
+      // An open socket: the gateway takes a room join back when the connection has closed meanwhile.
+      readyState: 1,
       send(message: string) {
         out.push(message);
 
