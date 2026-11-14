@@ -15,6 +15,7 @@ Unified HTTP client service for OneBun framework with comprehensive error handli
 - **Timeout management** with request-level overrides
 - **Query parameter handling** with automatic encoding
 - **JSON request/response** handling with automatic parsing
+- **Binary request bodies**: `Uint8Array`, `ArrayBuffer` and `Blob` sent byte for byte
 
 ## Installation
 
@@ -105,6 +106,24 @@ const user = await client.patch<User, Partial<UpdateUserData>>('/users/1', {
   email: 'new@example.com'
 });
 ```
+
+### Binary Request Bodies
+
+A `Uint8Array` (a `Buffer` is one), an `ArrayBuffer` or a `Blob` (a `Bun.file()` is one) is sent as
+its bytes, not through `JSON.stringify`, labelled `application/octet-stream` — a `Blob` with its own
+type. A `Content-Type` in the request's headers, in any letter case, is the only one sent. Retries,
+307/308 redirects and `onebun` signatures carry the same bytes: a `Blob` is read once, before the
+first attempt, and a `Uint8Array` or an `ArrayBuffer` is sent without a copy — leave it unchanged
+until the call settles, or a retry sends, and signs, the change.
+
+```typescript
+await client.put('/uploads/42/parts/1', new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+await client.put('/avatars/42.png', Bun.file('./avatar.png'));
+```
+
+A stream (a `ReadableStream`, a Node.js `Readable`, an async generator object), a typed array other
+than `Uint8Array`, a `DataView` and a `SharedArrayBuffer` fail with `REQUEST_CONFIG_ERROR` before
+anything is sent. See [Sending bytes](https://onebun.dev/api/requests#request-bytes).
 
 ### DELETE Requests with Query Parameters
 
@@ -214,7 +233,7 @@ const client = createHttpClient({
   timeout: 10000,
   headers: {
     'Accept': 'application/json',
-    'Content-Type': 'application/json'
+    'X-Client-Name': 'orders-service'
   },
   auth: {
     type: 'bearer',
@@ -228,6 +247,9 @@ const client = createHttpClient({
   }
 });
 ```
+
+Leave `Content-Type` out of the client's `headers`: each body gets the right one by default, and a
+client-wide `Content-Type` labels every body with that one type, binary ones included.
 
 ### Authentication Types
 

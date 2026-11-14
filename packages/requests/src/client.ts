@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { Readable } from 'node:stream';
 
 import { Effect, pipe } from 'effect';
 
@@ -448,13 +449,26 @@ const NEVER_RETRIED_ERRORS: readonly string[] = [
   RESPONSE_DECODE_ERROR,
 ];
 
-/** One request of a redirect chain: what is sent, and where. */
+/**
+ * One request of a redirect chain: what is sent, and where. `body` is the request's one body
+ * ({@link requestBodyOf}): every hop that keeps it sends, and signs, the same text or bytes.
+ */
 interface RedirectHop {
   url: string;
   method: string;
   headers: Record<string, string>;
-  body: string | undefined;
+  body: string | Uint8Array | undefined;
 }
+
+/**
+ * `body` typed as every application's `fetch` takes it.
+ *
+ * This package ships its sources, so the application's typings decide the type of the `fetch`
+ * init's `body`. Under lib DOM a `Uint8Array` — `Uint8Array<ArrayBufferLike>` since TypeScript
+ * 5.7 — is not a `BufferSource`, which there wants a view of an `ArrayBuffer`. `fetch` sends a
+ * `Uint8Array` as it is whatever buffer it views, so the cast changes nothing at runtime.
+ */
+const asFetchBody = (body: string | Uint8Array): string | ArrayBuffer => body as unknown as string | ArrayBuffer;
 
 /** `new URL(input, base)`, or `undefined` where the constructor throws. */
 const parseUrl = (input: string, base?: string): URL | undefined => {
@@ -802,7 +816,7 @@ const fetchFollowingRedirects = (
         redirect: 'manual',
         ...(dial.tls === undefined ? {} : { tls: dial.tls }),
         ...(chain.decompress ? {} : { decompress: false }),
-        ...(hop.body === undefined ? {} : { body: hop.body }),
+        ...(hop.body === undefined ? {} : { body: asFetchBody(hop.body) }),
       });
     },
     catch: (error) => classifyTransportFailure(error, chain.signal, chain.traceId),
@@ -962,18 +976,187 @@ const getTraceContext = (
   return currentOutgoingTraceContext();
 };
 
+/** The client-side timeout a request runs under: its own, else the client's, else the default. */
+const requestTimeoutOf = (config: RequestConfig, mergedOptions: RequestsOptions): number =>
+  config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS;
+
+/** The `Content-Type` a request gets by default, and the one a text or JSON body is sent with. */
+const JSON_CONTENT_TYPE = 'application/json';
+
+/** The `Content-Type` a binary body gets when neither the caller nor a `Blob`'s own type names one. */
+const BINARY_CONTENT_TYPE = 'application/octet-stream';
+
+/** What a request sends, worked out once per call by {@link requestBodyOf}. */
+interface RequestBody {
+  /** The text or bytes on the wire: the same on every attempt and every hop, and the ones signed. */
+  readonly payload: string | Uint8Array;
+  /** The `Content-Type` the request gets unless the client's or the request's headers name one. */
+  readonly contentType: string;
+}
+
+/** Why `data` is not sent: the `details.reason` of its `REQUEST_CONFIG_ERROR`. */
+type BodyRefusal = 'unsupported-body' | 'unserializable-body' | 'unreadable-body';
+
 /**
- * The exact bytes this request will send, or `undefined` when it sends none.
- *
- * Extracted so the signer and `fetch` cannot disagree: a signature over a re-serialization of the
- * same object is a signature over bytes nobody sent.
+ * The `REQUEST_CONFIG_ERROR` for a `data` the client does not send. `details.type` names an
+ * unsupported body's type, and `details.details` is the error a serialization or a read threw.
  */
-const serializeBody = (config: RequestConfig): string | undefined => {
-  if (!config.data || !BODY_CARRYING_METHODS.includes(config.method)) {
-    return undefined;
+const requestBodyError = (
+  reason: BodyRefusal,
+  cause: { type?: string; details?: unknown },
+  url: string,
+  traceId?: string,
+): ErrorResponse => createErrorResponse(
+  REQUEST_CONFIG_ERROR,
+  HttpStatusCode.INTERNAL_SERVER_ERROR,
+  traceId,
+  markTransportDetails({
+    option: 'data',
+    reason,
+    ...cause,
+    url,
+  }, ['url', 'details']),
+);
+
+/**
+ * The name a refused body is reported under: its constructor's, or else its `Symbol.toStringTag`
+ * — an async generator's `constructor` is not a function.
+ */
+const bodyTypeName = (data: object): string => {
+  const owner: unknown = (data as { constructor?: unknown }).constructor;
+
+  return typeof owner === 'function' && owner.name !== ''
+    ? owner.name
+    : Object.prototype.toString.call(data).slice('[object '.length, -1);
+};
+
+/**
+ * Whether `data` is a body the client does not send. Through `JSON.stringify` each of these would
+ * arrive as `{}`, `{"0":…}` or the stream's internal state, never as what it holds:
+ *
+ * - a stream — a `ReadableStream`, a Node.js `Readable` (every Node.js readable stream is one), an
+ *   async generator object. It is read once, so a retry or a replayed redirect would have nothing
+ *   to send, and it cannot be signed before it is sent.
+ * - a typed array other than a `Uint8Array`, a `DataView` and a `SharedArrayBuffer`. Wrap the
+ *   bytes in a `Uint8Array` to send them.
+ *
+ * Nothing else is refused for being async-iterable: a data class that also has an async iterator —
+ * a cursor, a page — is serialized as its fields. A value with a `toJSON` method says how it
+ * serializes, so it is a JSON value whatever else it is: `URLSearchParams` and `FormData` (Bun
+ * gives both one, which yields an object of their entries) go through `JSON.stringify`.
+ *
+ * Checked after the bytes {@link requestBodyOf} sends: a `Uint8Array` is an array buffer view too.
+ */
+const isUnsupportedBody = (data: object): boolean =>
+  typeof (data as { toJSON?: unknown }).toJSON !== 'function' && (
+    data instanceof ReadableStream ||
+    data instanceof Readable ||
+    Object.prototype.toString.call(data) === '[object AsyncGenerator]' ||
+    ArrayBuffer.isView(data) ||
+    data instanceof SharedArrayBuffer
+  );
+
+/**
+ * The `TIMEOUT_ERROR` for a `Blob` not read within the request's `timeout`: the record of a
+ * transport timeout (`code: 0`, `details.transport: 'timeout'`), with
+ * `details.phase: 'request-body'` — nothing was sent.
+ */
+const bodyReadTimeout = (traceId?: string): ErrorResponse => createErrorResponse(
+  TRANSPORT_FAILURE_ERRORS.timeout,
+  TRANSPORT_FAILURE_CODE,
+  traceId,
+  { transport: 'timeout', phase: 'request-body' },
+);
+
+/**
+ * A `Blob`'s bytes as a request body, labelled with its own type when it has one.
+ *
+ * The read is bounded by the request's `timeout`: a `Blob` that never yields its bytes — a
+ * `Bun.file()` of a FIFO nobody writes to, a remote file that stalls — fails `TIMEOUT_ERROR`
+ * ({@link bodyReadTimeout}) instead of leaving the call pending. A read that fails — a `Bun.file()`
+ * whose file is missing — fails `REQUEST_CONFIG_ERROR`, `reason: 'unreadable-body'`.
+ */
+const blobBodyOf = (
+  blob: Blob,
+  timeout: number,
+  url: string,
+  traceId?: string,
+): Effect.Effect<RequestBody, ErrorResponse> => pipe(
+  Effect.tryPromise({
+    try: () => blob.arrayBuffer(),
+    catch: (error) => requestBodyError('unreadable-body', { details: error }, url, traceId),
+  }),
+  Effect.timeoutFail({ duration: timeout, onTimeout: () => bodyReadTimeout(traceId) }),
+  Effect.map((buffer) => ({
+    payload: new Uint8Array(buffer),
+    contentType: blob.type === '' ? BINARY_CONTENT_TYPE : blob.type,
+  })),
+);
+
+/**
+ * What `config` sends, or `undefined` when it sends no body: its method carries none, or `data` is
+ * falsy — an empty string included — or a value `JSON.stringify` makes nothing of, such as a
+ * function.
+ *
+ * Worked out once per call, before the first attempt. Every attempt, every redirect hop that keeps
+ * the body, and the signer of each use the one result, so they cannot disagree: a signature over a
+ * re-serialization covers bytes nobody sent.
+ *
+ * - A string is sent as it is, labelled `application/json`, as everything is by default.
+ * - A `Uint8Array` (a Node.js `Buffer` is one) and an `ArrayBuffer` are sent as their bytes, without
+ *   a copy, labelled `application/octet-stream`.
+ * - A `Blob` (a `Bun.file()` is one) is read here, once, within `timeout` ({@link blobBodyOf}): a
+ *   file that changes while a retry waits cannot make the retry send, or sign, other bytes than the
+ *   first attempt.
+ * - Anything else is sent as `JSON.stringify` makes it, labelled `application/json` — serialized
+ *   once per call, not once per attempt.
+ *
+ * A body the client does not send ({@link isUnsupportedBody}) and a value `JSON.stringify` throws
+ * on — a `BigInt`, a cycle — fail `REQUEST_CONFIG_ERROR` here, before anything is sent. It is never
+ * retried, and no metrics are recorded: no request was made.
+ */
+const requestBodyOf = (
+  config: RequestConfig,
+  timeout: number,
+  url: string,
+  traceId?: string,
+): Effect.Effect<RequestBody | undefined, ErrorResponse> => {
+  const { data } = config;
+
+  if (!data || !BODY_CARRYING_METHODS.includes(config.method)) {
+    return Effect.succeed(undefined);
   }
 
-  return typeof config.data === 'string' ? config.data : JSON.stringify(config.data);
+  if (typeof data === 'string') {
+    return Effect.succeed({ payload: data, contentType: JSON_CONTENT_TYPE });
+  }
+
+  if (typeof data === 'object') {
+    if (data instanceof Uint8Array) {
+      return Effect.succeed({ payload: data, contentType: BINARY_CONTENT_TYPE });
+    }
+
+    if (data instanceof ArrayBuffer) {
+      return Effect.succeed({ payload: new Uint8Array(data), contentType: BINARY_CONTENT_TYPE });
+    }
+
+    if (data instanceof Blob) {
+      return blobBodyOf(data, timeout, url, traceId);
+    }
+
+    if (isUnsupportedBody(data)) {
+      return Effect.fail(requestBodyError('unsupported-body', { type: bodyTypeName(data) }, url, traceId));
+    }
+  }
+
+  return pipe(
+    Effect.try({
+      // `undefined` for a function or a symbol, whatever the lib's type says
+      try: (): string | undefined => JSON.stringify(data),
+      catch: (error) => requestBodyError('unserializable-body', { details: error }, url, traceId),
+    }),
+    Effect.map((text) => (text === undefined ? undefined : { payload: text, contentType: JSON_CONTENT_TYPE })),
+  );
 };
 
 /**
@@ -1028,8 +1211,18 @@ const responseByteLimit = (config: RequestConfig, mergedOptions: RequestsOptions
 const redirectPolicyOf = (config: RequestConfig, mergedOptions: RequestsOptions): RedirectPolicy =>
   config.redirect ?? mergedOptions.redirect ?? DEFAULT_REQUESTS_OPTIONS.redirect;
 
+/** Whether `headers` has a header named `lowerCaseName`, in any letter case. */
+const namesHeader = (headers: Record<string, string> | undefined, lowerCaseName: string): boolean =>
+  headers !== undefined && Object.keys(headers).some((name) => name.toLowerCase() === lowerCaseName);
+
 /**
  * Build request headers
+ *
+ * `Content-Type` is matched in any letter case, and only one is sent: the request's, else the
+ * client's, else `contentType` — the body's ({@link requestBodyOf}), `application/json` for a
+ * request without one. Two of them under names that differ only in case would both survive the
+ * spread, and `fetch` sends such a pair joined, `application/json, application/octet-stream`: a
+ * media type no server reads, and under `onebun` auth a signature over the first of the two.
  *
  * Under `maxResponseBytes`, `fetch` is told not to decompress, and then it offers no
  * `Accept-Encoding` at all. The client offers the codings it decodes instead
@@ -1039,15 +1232,21 @@ const buildHeaders = (
   config: RequestConfig,
   mergedOptions: RequestsOptions,
   traceContext?: OutgoingTraceContext,
+  contentType: string = JSON_CONTENT_TYPE,
 ): Record<string, string> => {
+  const requestContentType = namesHeader(config.headers, 'content-type');
+  const clientHeaders = requestContentType && mergedOptions.headers !== undefined
+    ? filterHeaders(mergedOptions.headers, (name) => name !== 'content-type')
+    : mergedOptions.headers;
+  const callerContentType = requestContentType || namesHeader(clientHeaders, 'content-type');
   const headers: Record<string, string> = {
     // eslint-disable-next-line @typescript-eslint/naming-convention
     'User-Agent': mergedOptions.userAgent || 'OneBun-Requests/1.0',
     // eslint-disable-next-line @typescript-eslint/naming-convention
     Accept: 'application/json',
     // eslint-disable-next-line @typescript-eslint/naming-convention
-    'Content-Type': 'application/json',
-    ...mergedOptions.headers,
+    ...(callerContentType ? {} : { 'Content-Type': contentType }),
+    ...clientHeaders,
     ...config.headers,
   };
 
@@ -1474,6 +1673,9 @@ const resignerFor = (
  * attempt connects there, and `fullUrl` — the URL signed, logged, recorded and reported — keeps the
  * host name.
  *
+ * `body` is the call's one body ({@link requestBodyOf}), worked out before the first attempt: each
+ * attempt sends and signs the same text or bytes.
+ *
  * Suspended, so the timeout starts when the attempt runs rather than when it is built.
  */
 const executeSingleRequest = <T, E extends string, R extends string>(
@@ -1482,11 +1684,12 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   headers: Record<string, string>,
   fullUrl: string,
   connectHost: string | undefined,
+  body: string | Uint8Array | undefined,
   traceId?: string,
 ): Effect.Effect<ApiResponse<T, E | string, R | string>, never> => Effect.suspend(() => {
   const requestStartTime = Date.now();
   const interruption = new AbortController();
-  const timeout = config.timeout || mergedOptions.timeout || DEFAULT_TIMEOUT_MS;
+  const timeout = requestTimeoutOf(config, mergedOptions);
   const responseType = responseTypeOf(config);
   const waitTimeout = responseType === 'stream' ? restartableTimeout(timeout) : undefined;
   const signal = AbortSignal.any([
@@ -1495,10 +1698,9 @@ const executeSingleRequest = <T, E extends string, R extends string>(
   ]);
   waitTimeout?.start();
 
-  // One serialization, used both for the body that is sent and for the body that is signed.
-  // Serializing twice would let the two diverge, and a signature over different bytes than the
-  // ones on the wire is worse than no signature — it reads as protection.
-  const body = serializeBody(config);
+  // `body` is used both for the body that is sent and for the body that is signed. Serializing
+  // twice would let the two diverge, and a signature over different bytes than the ones on the
+  // wire is worse than no signature — it reads as protection.
   const limit = responseByteLimit(config, mergedOptions);
   const policy = redirectPolicyOf(config, mergedOptions);
   const signingAuth = signingAuthOf(config, mergedOptions);
@@ -1596,13 +1798,14 @@ const executeWithRetry = <T, E extends string, R extends string>(
   headers: Record<string, string>,
   fullUrl: string,
   connectHost: string | undefined,
+  body: string | Uint8Array | undefined,
   traceId?: string,
   attemptNumber: number = 1,
 ): Effect.Effect<SuccessResponse<T>, ErrorResponse<E | string, R | string>> => {
   const requestStartTime = Date.now();
 
   return pipe(
-    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, connectHost, traceId),
+    executeSingleRequest<T, E, R>(config, mergedOptions, headers, fullUrl, connectHost, body, traceId),
     Effect.map((result) => withRetryCount(result, attemptNumber - 1)),
     Effect.flatMap((result) => {
       const duration = Date.now() - requestStartTime;
@@ -1667,6 +1870,7 @@ const executeWithRetry = <T, E extends string, R extends string>(
               headers,
               fullUrl,
               connectHost,
+              body,
               traceId,
               attemptNumber + 1,
             ),
@@ -1726,17 +1930,27 @@ export const executeRequest = <
       // before, so `apikey` with `location: 'query'` added its key to a `config.query` the URL had
       // already been assembled from — the key never reached the wire and nothing said so.
       const fullUrl = buildUrl(mergedOptions.baseUrl, finalConfig.url, finalConfig.query);
-      const headers = buildHeaders(finalConfig, mergedOptions, traceContext);
 
-      return { finalConfig, headers, fullUrl };
+      return { finalConfig, fullUrl };
     }),
-    // `connectAddress` is checked against the config auth produced — a `custom` auth interceptor
-    // may set or replace it ({@link keepCallerConnectAddress}) — and before the first attempt, so a
-    // refused one sends nothing and is not retried.
-    Effect.flatMap(({ finalConfig, headers, fullUrl }) => pipe(
+    // `connectAddress` and the body are checked against the config auth produced — a `custom` auth
+    // interceptor may set or replace either ({@link keepCallerConnectAddress}) — and before the
+    // first attempt, so a refused one sends nothing and is not retried. The body comes second: a
+    // `Blob` is read to get it, and a refused `connectAddress` should not cost that read.
+    Effect.flatMap(({ finalConfig, fullUrl }) => pipe(
       connectHostFor(finalConfig, fullUrl, traceId),
-      Effect.flatMap((connectHost) =>
-        executeWithRetry<T, E, R>(finalConfig, mergedOptions, headers, fullUrl, connectHost, traceId)),
+      Effect.flatMap((connectHost) => pipe(
+        requestBodyOf(finalConfig, requestTimeoutOf(finalConfig, mergedOptions), fullUrl, traceId),
+        Effect.flatMap((body) => executeWithRetry<T, E, R>(
+          finalConfig,
+          mergedOptions,
+          buildHeaders(finalConfig, mergedOptions, traceContext, body?.contentType),
+          fullUrl,
+          connectHost,
+          body?.payload,
+          traceId,
+        )),
+      )),
     )),
   );
 };

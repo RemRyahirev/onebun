@@ -13,7 +13,8 @@ OneBun provides a unified HTTP client with:
 - Automatic retries with configurable strategies
 - Redirects followed without taking credentials to another origin — or refused, or handed back
 - An optional cap on the decoded size of a response body
-- Binary bodies as bytes, and bodies streamed as they arrive
+- Request bodies as JSON, as text or as raw bytes
+- Binary response bodies as bytes, and response bodies streamed as they arrive
 - Integrated tracing and metrics
 - Standardized error handling
 
@@ -26,11 +27,15 @@ const client = createHttpClient({
   baseUrl: 'https://api.example.com',
   timeout: 10000,  // 10 seconds
   headers: {
-    'Content-Type': 'application/json',
     'Accept': 'application/json',
+    'X-Client-Name': 'orders-service',
   },
 });
 ```
+
+Every request of the client carries these headers. Leave `Content-Type` out of them: each body
+gets the right one by default (see [Sending bytes](#request-bytes)), and a client-wide
+`Content-Type` would label every body, binary ones included, with that one type.
 
 ## Basic Requests
 
@@ -95,8 +100,8 @@ const response = await client.post('/users', userData, {
 });
 ```
 
-`post`, `put` and `patch` take the payload positionally and never inspect it. Wrapping it —
-`client.post('/users', { body: userData, timeout: 30000 })` — sends
+`post`, `put` and `patch` take the payload positionally and never read config out of it. Wrapping
+it — `client.post('/users', { body: userData, timeout: 30000 })` — sends
 `{"body":{...},"timeout":30000}` as the request body and applies no timeout.
 
 ### PUT, PATCH, DELETE
@@ -111,6 +116,127 @@ const response = await client.patch('/users/123', { name: 'Partial Update' });
 // DELETE
 const response = await client.delete('/users/123');
 ```
+
+### Sending bytes {#request-bytes}
+
+A `Uint8Array`, an `ArrayBuffer` or a `Blob` passed as the payload is sent as its bytes, exactly
+as they are. Any other value goes through `JSON.stringify`, and a string is sent as it is.
+
+```typescript
+import { createHttpClient } from '@onebun/core';
+
+const storage = createHttpClient({ baseUrl: 'https://storage.example.com' });
+
+// A Uint8Array (a Buffer is one) or an ArrayBuffer: application/octet-stream
+const part = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+await storage.put('/uploads/42/parts/1', part);
+
+// A Blob, a file from Bun.file() included: labelled with its own type, image/png here
+await storage.put('/avatars/42.png', Bun.file('./avatar.png'));
+
+// A Content-Type of your own is the one sent
+await storage.put('/uploads/42/parts/2', part, {
+  headers: { 'Content-Type': 'application/vnd.example.chunk' },
+});
+```
+
+The `Content-Type` a request gets, unless the request's `headers` or the client's `headers` name
+one:
+
+| The payload | `Content-Type` |
+| --- | --- |
+| a string, or any value sent as JSON | `application/json` |
+| a `Uint8Array` or an `ArrayBuffer` | `application/octet-stream` |
+| a `Blob` | the `Blob`'s `type`, or `application/octet-stream` when it has none |
+
+Exactly one `Content-Type` is sent, and header names are matched in any letter case: the
+request's, else the client's, else the default above. A request's `content-type` replaces a
+client's `Content-Type` rather than going out beside it, and under `onebun` auth the signature
+covers the one that is sent. A binary payload is never labelled `application/json` unless you or
+the client's `headers` set that.
+
+**Every attempt sends the same bytes.** A retry, and a `307` or `308` redirect that repeats the
+request, send what the first attempt sent, and under [`onebun` auth](#onebun-hmac-inter-service)
+each signature covers those bytes. A JSON value is serialized once per call. A `Blob` is read once,
+before the first attempt, so a file that changes while a retry waits does not change what the
+retry sends. A `Uint8Array` or an `ArrayBuffer` is sent without a copy, so it is the one exception:
+leave it unchanged until the call settles, because a change made while a retry waits goes out with
+the retry, signed. An empty `Uint8Array`, `ArrayBuffer` or `Blob` is sent as an empty body.
+
+**`timeout` bounds the read of a `Blob` as well.** The read happens before the first attempt; one
+that takes longer than `timeout` — a file on a stalled mount, a FIFO nobody writes to — fails with
+`TIMEOUT_ERROR`, `code: 0`, `details.phase: 'request-body'`, before anything is sent, and is not
+retried.
+
+A body goes out only with `POST`, `PUT` and `PATCH`, as for JSON.
+
+#### Bodies that are refused {#request-body-refused}
+
+Exactly these payloads fail with `REQUEST_CONFIG_ERROR` before anything is sent, instead of going
+out as what `JSON.stringify` makes of them — `{}`, `{"0":1,"1":2}`, or a stream's internal state:
+
+| `details.reason` | The payload |
+| --- | --- |
+| `unsupported-body` | a stream — a `ReadableStream`, a Node.js `Readable` (every Node.js readable stream is one), an async generator object; a typed array other than a `Uint8Array`; a `DataView`; a `SharedArrayBuffer`. `details.type` names it |
+| `unserializable-body` | a value `JSON.stringify` throws on, such as a `BigInt` or an object that contains itself. `details.details` is the error |
+| `unreadable-body` | a `Blob` whose read fails, such as a `Bun.file()` whose file is missing. `details.details` is the error |
+
+Nothing else is refused. A value with a `toJSON` method is a JSON value whatever else it is:
+`URLSearchParams` and `FormData`, which Bun gives a `toJSON` that yields an object of their entries,
+go through `JSON.stringify`. So does every other object, as its fields — a data class that also
+has an async iterator, such as a cursor or a page, included: only the streams above are refused for
+being read as they arrive. A value `JSON.stringify` has no representation for still goes out as
+`{}` — a `Map` or a `Set`, say. Convert those yourself: `Object.fromEntries(map)`, `[...set]`.
+
+```typescript
+import { Effect } from '@onebun/core';
+
+const outcome = await Effect.runPromise(Effect.either(
+  storage.putEffect('/uploads/42/parts/3', Bun.file('./part.bin').stream()),
+));
+
+if (outcome._tag === 'Left' && outcome.left.error === 'REQUEST_CONFIG_ERROR') {
+  outcome.left.code;             // 500
+  outcome.left.details?.option;  // 'data'
+  outcome.left.details?.reason;  // 'unsupported-body'
+  outcome.left.details?.type;    // 'ReadableStream'
+}
+```
+
+A stream can be read only once, so a retry or a repeated redirect would have nothing left to send,
+and a signature has to cover the bytes before they go out. Send the `Blob` the stream came from, or
+read the stream into a `Uint8Array` first. To send another typed array's bytes, wrap them:
+`new Uint8Array(view.buffer, view.byteOffset, view.byteLength)`.
+
+The refusal is never retried and records no metrics: no request was made.
+
+<llm-only>
+
+- `data` is read off the config `auth` produced, so a `custom` auth interceptor that replaces it
+  replaces what is sent; the body is worked out once per call, after auth and after the
+  `connectAddress` check, and before the first attempt.
+- A `Blob` is read whole into memory, once. Send a large file in parts — `file.slice(start, end)`
+  is a `Blob` that reads only its range.
+- A `Blob` read that outlives `timeout` is abandoned, not cancelled: `Blob` reads take no signal, so
+  the read itself may go on in the background after the call has failed.
+- `FormData` and `URLSearchParams` are sent as JSON, labelled `application/json`, never as a form:
+  a `FormData` file entry becomes `{}`. To send a form body, serialize it yourself —
+  `new URLSearchParams(...).toString()` with your own `Content-Type`.
+- A Node.js `Buffer` is a `Uint8Array`, so it is sent as its bytes, not as the JSON `Buffer#toJSON`
+  produces (`{"type":"Buffer","data":[…]}`).
+- With `GET`, `DELETE`, `HEAD` and `OPTIONS` the payload is not sent, and not checked either: a
+  stream passed there is not refused. A falsy payload — `''`, `0`, `false`, `null` — sends no body.
+- A value `JSON.stringify` turns into nothing, such as a function, sends no body.
+- On a `307`/`308` to another origin the body goes along with its `Content-Type` and nothing else
+  (see [Credentials stay with their origin](#redirect-headers)). A `301`/`302` answering a `POST`,
+  and a `303`, drop the body and its `Content-Type`.
+- `REQUEST_CONFIG_ERROR` has `code: 500`, so `req()` and the `RequestsService` Effect API turn it
+  into an `InternalServerError`. `details.url` and `details.details` are transport details, left
+  out of the body the default exception filter sends. The `TIMEOUT_ERROR` of a `Blob` read carries
+  only `details.transport` and `details.phase`.
+- `RequestsService`'s `post`, `put` and `patch` send a payload by the same rules.
+
+</llm-only>
 
 ## Authentication
 
@@ -551,7 +677,7 @@ your application, not to its caller.
 |-------|-------------------------------|
 | `HTTP_ERROR` | `details.headers` (the upstream's `set-cookie` among them), `details.url` with its query, `details.details` (the upstream's body) |
 | `REDIRECT_ERROR` | `details.url`, `details.location` |
-| `REQUEST_CONFIG_ERROR` | `details.url` |
+| `REQUEST_CONFIG_ERROR` | `details.url`; for a [refused body](#request-body-refused), also `details.details`, the error a serialization or a `Blob` read threw (an `ENOENT` names the file's path) |
 | `TIMEOUT_ERROR`, `ABORT_ERROR`, `FETCH_ERROR` | `details.details`, the raw error: Bun's connection error names the request URL |
 | `RESPONSE_PARSE_ERROR`, `RESPONSE_READ_ERROR`, `RESPONSE_DECODE_ERROR` | `details.details`: the upstream's body, or the raw error |
 
@@ -711,6 +837,11 @@ if (outcome._tag === 'Left' && getTransportFailureKind(outcome.left) === 'timeou
 
 The upstream sees the connection close when the timeout fires, in either phase.
 
+A request whose payload is a `Blob` reads it first, under the same `timeout` (see
+[Sending bytes](#request-bytes)). A read that outlives it fails with `TIMEOUT_ERROR`, `code: 0` and
+`details.phase: 'request-body'`. Unlike the two phases above, nothing was sent: the upstream never
+saw the request, and the error is not retried.
+
 A streamed response is the exception: under `responseType: 'stream'`, `timeout` bounds each wait
 on the upstream rather than the whole response (see [Streaming a response](#response-stream)).
 
@@ -718,6 +849,10 @@ A `500` whose body stalls is therefore a timeout, not a `500`: the status arrive
 not, and `retryOnTimeout` — off by default — decides whether it is replayed.
 
 <llm-only>
+
+`details.phase` tells the three timeouts apart: none — before the headers, the request may have
+been processed; `'body'` — the headers had arrived; `'request-body'` — the `Blob` payload was still
+being read and nothing went out.
 
 A timeout during the body read is never a `RESPONSE_READ_ERROR` or a `RESPONSE_PARSE_ERROR`, and
 its `code` is `0`, not the status: a stalled 200 does not look like a malformed body, and a stalled
@@ -1432,7 +1567,7 @@ method you call and the path you pass, so only these fields are yours to set:
   /** Query parameters — `query`, not `params` */
   query?: Record<string, unknown>;
 
-  /** Request body for POST, PUT, PATCH — `data`, not `body` */
+  /** Request body for POST, PUT, PATCH — `data`, not `body`: JSON, a string, or bytes */
   data?: unknown;
 
   /** Override retry config for this request; merges field-wise onto the defaults */
@@ -1941,9 +2076,6 @@ export class UserApiService extends BaseService {
     this.client = createHttpClient({
       baseUrl: this.config.get('services.usersUrl'),
       timeout: 10000,
-      headers: {
-        'Content-Type': 'application/json',
-      },
       auth: {
         type: 'onebun',
         serviceId: 'my-service',

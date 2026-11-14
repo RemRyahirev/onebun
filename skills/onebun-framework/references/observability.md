@@ -216,6 +216,30 @@ needs both or a `traceparent`.
   not exempt it). A `custom` auth interceptor may set or replace it, not remove it: a config it returns without
   one (rebuilt as `{ method, url, headers }`, or `connectAddress: undefined`) keeps the caller's. Allow/deny
   policy and the lookup stay in the app; the service client has no per-call config, so use `HttpClient`.
+- **Request bodies** (`post`/`put`/`patch` payload = `config.data`; only POST/PUT/PATCH send one): a
+  `Uint8Array` (`Buffer` included), an `ArrayBuffer` or a `Blob` (`Bun.file()`, `file.slice(a, b)`) goes out
+  as its exact bytes, NOT through `JSON.stringify` (which would make `{"0":0,"1":255}` of `Uint8Array([0,255])`
+  and `{"type":"Buffer","data":[…]}` of a `Buffer`). A string goes as is, anything else as `JSON.stringify`
+  makes it — once per call, not per attempt; a value with a `toJSON` is a JSON value whatever else it is
+  (`URLSearchParams`/`FormData` go as a JSON object of their entries, never as a form), and `Map`/`Set` still
+  go as `{}`. **Content-Type**: exactly one is sent, names matched in any letter case — the request's, else
+  the client's, else the default: `application/json` for text/JSON (and no body), `application/octet-stream`
+  for bytes, a `Blob`'s own `type` when it has one. A request `content-type` replaces a client `Content-Type`
+  (kept side by side, `fetch` joins them into `application/json, application/octet-stream`, and an `onebun`
+  signature then fails `signature-mismatch`). So **never put `Content-Type` in the client's `headers`**: it
+  labels every body, binary ones included. Every attempt, every 307/308 hop and every `onebun` signature carry
+  the same bytes; a `Blob` is read once, whole, into memory before the first attempt, within `timeout` (a read
+  that outlives it fails `TIMEOUT_ERROR`, `code: 0`, `details.phase: 'request-body'`, not retried; the read is
+  abandoned, not cancelled). A `Uint8Array`/`ArrayBuffer` is sent without a copy: do not mutate it until the
+  call settles, or the retry sends (and signs) the change. Refused before anything is sent — `REQUEST_CONFIG_ERROR`,
+  `code: 500`, `details { option: 'data', reason, url, type? | details? }`, no retry, no metrics:
+  `'unsupported-body'` (a `ReadableStream`, a Node.js `Readable` — every Node.js readable stream — or an async
+  generator object, none with a `toJSON`; a data class that merely has an async iterator, a cursor say, is NOT
+  refused and goes as JSON of its fields; another typed array — wrap it as `new Uint8Array(v.buffer, v.byteOffset, v.byteLength)`;
+  a `DataView`; a `SharedArrayBuffer`; `details.type` names it), `'unserializable-body'` (`JSON.stringify`
+  throws: `BigInt`, a cycle), `'unreadable-body'` (the `Blob` read failed — `details.details` is the error, an
+  `ENOENT` names the path; it is a transport detail the default filter withholds). A stream cannot be replayed
+  or signed in advance: send the `Blob` it came from, or read it into a `Uint8Array` first.
 - `FETCH_ERROR` (`'network'`) is not proof the request never arrived: a reset after sending (`ECONNRESET`)
   lands there too, and `retryOnNetworkError` replays it for every method in `retries.methods`.
 - **The receiving side honours it**: the callee starts its HTTP span as a child of the span the header

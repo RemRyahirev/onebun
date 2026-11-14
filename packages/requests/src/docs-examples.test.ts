@@ -4,6 +4,10 @@
  * @source docs:api/requests.md
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
 import {
   describe,
   it,
@@ -148,6 +152,47 @@ function startEchoServer(): { baseUrl: string; calls: EchoedCall[]; stop(): void
   };
 }
 
+interface ReceivedBytes {
+  method: string;
+  path: string;
+  contentType: string | null;
+  body: Uint8Array;
+}
+
+/**
+ * Records the bytes every request carried. `/flaky` answers 503 to its first request and 200 after,
+ * `/moved` answers 307 to `/landing`, and everything else 200.
+ */
+function startBytesServer(): { baseUrl: string; calls: ReceivedBytes[]; stop(): void } {
+  const calls: ReceivedBytes[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(req) {
+      const url = new URL(req.url);
+      calls.push({
+        method: req.method,
+        path: url.pathname,
+        contentType: req.headers.get('content-type'),
+        body: new Uint8Array(await req.arrayBuffer()),
+      });
+
+      if (url.pathname === '/moved') {
+        return new Response(null, { status: 307, headers: { location: '/landing' } });
+      }
+
+      const firstFlaky = url.pathname === '/flaky' && calls.filter((call) => call.path === '/flaky').length === 1;
+
+      return jsonStatus(firstFlaky ? 503 : 200);
+    },
+  });
+
+  return {
+    baseUrl: `http://localhost:${server.port}`,
+    calls,
+    stop: () => server.stop(true),
+  };
+}
+
 describe('Requests README Examples', () => {
   describe('Basic Usage with Promise API (README)', () => {
     it('should create a client with basic options', () => {
@@ -175,7 +220,7 @@ describe('Requests README Examples', () => {
         /* eslint-disable @typescript-eslint/naming-convention */
         headers: {
           Accept: 'application/json',
-          'Content-Type': 'application/json',
+          'X-Client-Name': 'orders-service',
         },
         /* eslint-enable @typescript-eslint/naming-convention */
         auth: {
@@ -507,6 +552,244 @@ describe('Requests API Documentation Examples', () => {
         expect(server.calls[0]?.body).toBe('{"name":"Updated Name"}');
         expect(server.calls[1]?.body).toBe('{"name":"Partial Update"}');
         expect(server.calls[2]?.method).toBe('DELETE');
+      } finally {
+        server.stop();
+      }
+    });
+  });
+
+  describe('Sending bytes (docs/api/requests.md)', () => {
+    let dir: string;
+
+    beforeEach(async () => {
+      dir = await mkdtemp(join(tmpdir(), 'onebun-request-bytes-'));
+    });
+
+    afterEach(async () => {
+      await rm(dir, { recursive: true, force: true });
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send a Uint8Array and a Bun.file() as their bytes, each with its Content-Type', async () => {
+      const server = startBytesServer();
+      const avatar = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x80]);
+      await Bun.write(join(dir, 'avatar.png'), avatar);
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+
+        const part = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        await storage.put('/uploads/42/parts/1', part);
+        await storage.put('/avatars/42.png', Bun.file(join(dir, 'avatar.png')));
+        await storage.put('/uploads/42/parts/2', part, {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          headers: { 'Content-Type': 'application/vnd.example.chunk' },
+        });
+
+        expect(server.calls.map((call) => [call.path, call.contentType])).toEqual([
+          ['/uploads/42/parts/1', 'application/octet-stream'],
+          ['/avatars/42.png', 'image/png'],
+          ['/uploads/42/parts/2', 'application/vnd.example.chunk'],
+        ]);
+        expect(server.calls.map((call) => call.body)).toEqual([part, avatar, part]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should label each payload as the table says, and send a lower-case content-type alone', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+
+        await storage.post('/json', { a: 1 });
+        await storage.post('/text', 'plain');
+        await storage.post('/buffer', new ArrayBuffer(2));
+        await storage.post('/blob', new Blob([new Uint8Array([1])]));
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await storage.post('/own', new Uint8Array([1]), { headers: { 'content-type': 'image/webp' } });
+
+        expect(server.calls.map((call) => call.contentType)).toEqual([
+          'application/json',
+          'application/json',
+          'application/octet-stream',
+          'application/octet-stream',
+          'image/webp',
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send one Content-Type: the request\'s over the client\'s, matched in any letter case', async () => {
+      const server = startBytesServer();
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        const storage = createHttpClient({ baseUrl: server.baseUrl, headers: { 'Content-Type': 'application/json' } });
+
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        await storage.put('/part', new Uint8Array([1]), { headers: { 'content-type': 'application/octet-stream' } });
+        await storage.put('/part', new Uint8Array([1]));
+
+        // "A request's content-type replaces a client's Content-Type rather than going out beside it",
+        // and "the client's headers" label a binary payload too
+        expect(server.calls.map((call) => call.contentType)).toEqual(['application/octet-stream', 'application/json']);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should fail TIMEOUT_ERROR before anything is sent when a Blob is not read within timeout', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl, timeout: 50 });
+        const stalled = new Blob([new Uint8Array([1])]);
+        stalled.arrayBuffer = () => new Promise(() => undefined);
+
+        const outcome = await Effect.runPromise(Effect.either(storage.putEffect('/part', stalled)));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('TIMEOUT_ERROR');
+          expect(outcome.left.code).toBe(0);
+          expect(outcome.left.details?.phase).toBe('request-body');
+        }
+        expect(server.calls).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-bytes
+     */
+    it('should send the same bytes on a retry and on a 307, and an empty payload as an empty body', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl, retries: { delay: 1 } });
+        const part = new Uint8Array([0, 255, 128]);
+
+        await storage.put('/flaky', new Blob([part]));
+        await storage.post('/moved', part);
+        await storage.put('/empty', new Uint8Array(0));
+
+        expect(server.calls.map((call) => [call.method, call.path, call.body])).toEqual([
+          ['PUT', '/flaky', part],
+          ['PUT', '/flaky', part],
+          ['POST', '/moved', part],
+          ['POST', '/landing', part],
+          ['PUT', '/empty', new Uint8Array(0)],
+        ]);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should refuse a stream with REQUEST_CONFIG_ERROR before anything is sent', async () => {
+      const server = startBytesServer();
+      await Bun.write(join(dir, 'part.bin'), new Uint8Array([1, 2, 3]));
+
+      try {
+        const metrics: RequestMetricsData[] = [];
+        const storage = createHttpClient({
+          baseUrl: server.baseUrl,
+          metricsSink: (record) => metrics.push(record),
+        });
+
+        const outcome = await Effect.runPromise(Effect.either(
+          storage.putEffect('/uploads/42/parts/3', Bun.file(join(dir, 'part.bin')).stream()),
+        ));
+
+        expect(outcome._tag).toBe('Left');
+        if (outcome._tag === 'Left') {
+          expect(outcome.left.error).toBe('REQUEST_CONFIG_ERROR');
+          expect(outcome.left.code).toBe(500);
+          expect(outcome.left.details?.option).toBe('data');
+          expect(outcome.left.details?.reason).toBe('unsupported-body');
+          expect(outcome.left.details?.type).toBe('ReadableStream');
+        }
+        // "The refusal is never retried and records no metrics: no request was made."
+        expect(server.calls).toHaveLength(0);
+        expect(metrics).toHaveLength(0);
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should name each refusal by its reason, and send a wrapped typed array as its bytes', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+        const reasonOf = async (data: unknown) => {
+          const outcome = await Effect.runPromise(Effect.either(storage.putEffect('/x', data)));
+
+          return outcome._tag === 'Left' ? outcome.left.details?.reason : 'sent';
+        };
+        const view = new Int16Array([1, -1]);
+
+        expect(await reasonOf((async function* chunks() {
+          yield new Uint8Array([1]);
+        })())).toBe('unsupported-body');
+        expect(await reasonOf(view)).toBe('unsupported-body');
+        expect(await reasonOf({ size: 1n })).toBe('unserializable-body');
+        expect(await reasonOf(Bun.file(join(dir, 'missing.bin')))).toBe('unreadable-body');
+        expect(server.calls).toHaveLength(0);
+
+        expect(await reasonOf(new Uint8Array(view.buffer, view.byteOffset, view.byteLength))).toBe('sent');
+        expect(server.calls[0]?.body).toEqual(new Uint8Array(view.buffer));
+      } finally {
+        server.stop();
+      }
+    });
+
+    /**
+     * @source docs:api/requests.md#request-body-refused
+     */
+    it('should send a value with a toJSON, a Map and an async-iterable data class through JSON.stringify', async () => {
+      const server = startBytesServer();
+
+      try {
+        const storage = createHttpClient({ baseUrl: server.baseUrl });
+        const map = new Map([['a', 1]]);
+        class Cursor {
+          readonly page = 2;
+
+          async *[Symbol.asyncIterator]() {
+            yield this.page;
+          }
+        }
+
+        await storage.put('/search', new URLSearchParams({ q: 'cats' }));
+        await storage.put('/map', map);
+        await storage.put('/converted', Object.fromEntries(map));
+        await storage.put('/cursor', new Cursor());
+
+        expect(server.calls.map((call) => new TextDecoder().decode(call.body)))
+          .toEqual(['{"q":"cats"}', '{}', '{"a":1}', '{"page":2}']);
+        expect(server.calls.map((call) => call.contentType))
+          .toEqual(['application/json', 'application/json', 'application/json', 'application/json']);
       } finally {
         server.stop();
       }

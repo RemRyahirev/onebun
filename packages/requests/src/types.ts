@@ -475,7 +475,9 @@ export interface OneBunAuthConfig {
  *
  * - `timeout` — the client-side timeout fired, before the headers arrived or while the body was
  *   being read; the server may still have processed the request. A timeout during the body read
- *   keeps the status that did arrive in `details.statusCode`, with `details.phase: 'body'`.
+ *   keeps the status that did arrive in `details.statusCode`, with `details.phase: 'body'`. A
+ *   timeout with `details.phase: 'request-body'` fired while a `Blob` payload was being read,
+ *   before the first attempt: nothing was sent, so the server never saw the request.
  * - `abort` — the request was aborted deliberately rather than by the timeout
  * - `network` — the connection failed before a response arrived: refused, DNS, TLS, or reset. A
  *   refused connection or a failed lookup proves the server never saw the request; a reset after
@@ -595,12 +597,30 @@ export type ResponseType = 'auto' | 'bytes' | 'stream';
 
 /**
  * Request configuration
+ *
+ * @see docs:api/requests.md
  */
 export interface RequestConfig {
   method: HttpMethod;
   url: string;
   headers?: Record<string, string>;
   query?: Record<string, unknown>;
+  /**
+   * The request body, sent for `POST`, `PUT` and `PATCH`:
+   *
+   * - a string as it is, and any other value as `JSON.stringify` makes it, labelled
+   *   `application/json`;
+   * - a `Uint8Array` (a `Buffer` is one), an `ArrayBuffer` or a `Blob` (a `Bun.file()` is one) as
+   *   its bytes, labelled with the `Blob`'s own type, else `application/octet-stream`.
+   *
+   * Exactly one `Content-Type` is sent, matched in any letter case: the request's, else the
+   * client's, else that label. Every attempt, every 307/308 hop and the `onebun` signature carry the
+   * same bytes; a `Blob` is read once, within `timeout`, before the first attempt. A value with a
+   * `toJSON` is a JSON value. A stream (a `ReadableStream`, a Node.js `Readable`, an async generator
+   * object), any other typed array or `DataView`, a `SharedArrayBuffer`, a value `JSON.stringify`
+   * throws on, and a `Blob` whose read fails fail `REQUEST_CONFIG_ERROR` (`details.option: 'data'`)
+   * before anything is sent.
+   */
   data?: unknown;
   timeout?: number;
   retries?: Partial<RetryConfig>;

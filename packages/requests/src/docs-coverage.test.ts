@@ -157,13 +157,12 @@ describe('Creating HTTP Client (docs/api/requests.md)', () => {
         baseUrl: server.baseUrl,
         timeout: 10000,
         headers: {
-          // Both of the snippet's values are also the framework's own defaults (`buildHeaders`
-          // seeds Accept and Content-Type with 'application/json'), so a configured header is
-          // only observable through a value the default cannot supply: Accept carries one, and
-          // an ignored `headers` option — or one merged before the defaults instead of after —
-          // turns the assertion below red. Content-Type is sent as documented but pins nothing.
-          'Content-Type': 'application/json',
+          // The snippet's Accept is also the framework's own default (`buildHeaders` seeds it
+          // with 'application/json'), so a configured Accept is only observable through a value
+          // the default cannot supply: an ignored `headers` option — or one merged before the
+          // defaults instead of after — turns the assertion below red.
           Accept: 'application/vnd.example+json',
+          'X-Client-Name': 'orders-service',
         },
       });
       /* eslint-enable @typescript-eslint/naming-convention */
@@ -175,6 +174,10 @@ describe('Creating HTTP Client (docs/api/requests.md)', () => {
         .toEqual(['GET /users', 'POST /users']);
       expect(server.calls.map((call) => call.headers.get('accept')))
         .toEqual(['application/vnd.example+json', 'application/vnd.example+json']);
+      expect(server.calls.map((call) => call.headers.get('x-client-name')))
+        .toEqual(['orders-service', 'orders-service']);
+      // "Leave Content-Type out of them: each body gets the right one by default"
+      expect(server.calls[1]?.headers.get('content-type')).toBe('application/json');
     } finally {
       server.stop();
     }
