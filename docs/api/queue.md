@@ -833,7 +833,7 @@ async handleCustom(message: Message) {}
 
 ## Interceptors
 
-`@UseInterceptors()` reaches queue handlers — same decorator as HTTP and WebSocket — but only in its **class-level** form. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
+`@UseInterceptors()` reaches queue handlers — same decorator as HTTP and WebSocket — at class level and at method level. Interceptors wrap handler execution for logging, timing, or other cross-cutting concerns.
 
 ```typescript
 @UseInterceptors(LoggingInterceptor)
@@ -841,16 +841,20 @@ async handleCustom(message: Message) {}
 class EventProcessor extends BaseController {
   @Subscribe('events.created')
   async handleEvent(message: Message<{ id: string }>) {
-    // handler code
+    // wrapped by LoggingInterceptor
+  }
+
+  @Subscribe('events.audited')
+  @UseInterceptors(AuditInterceptor)
+  async handleAudited(message: Message<{ id: string }>) {
+    // wrapped by LoggingInterceptor, then AuditInterceptor
   }
 }
 ```
 
-::: warning Method-level `@UseInterceptors` never runs on a `@Subscribe` handler
-Applied to a method, the decorator records itself on the class **prototype**, while `QueueService.registerService()` reads interceptors off the **class** — the metadata store is keyed on the exact object and does not walk prototypes, so the interceptor is silently dropped and the handler runs unwrapped. Put it on the consumer class, or split handlers that need different interceptors into separate consumers. Guards are unaffected: `@UseMessageGuards` writes to the class, and the method form of `@UseGuards` is read back by walking the prototype chain.
+A class-level interceptor wraps every `@Subscribe` handler of the consumer; a method-level one wraps that handler only. The chain runs global, then class, then method, outermost first — the order HTTP routes use. The method-level list is the one declared on the method that carries `@Subscribe`, as on an HTTP route: a method that overrides a base class method has only its own `@UseInterceptors`, and a class-level list on a base class applies to its subclasses. A subclass that overrides a handler repeats `@Subscribe` on it, because a handler is registered only by its own `@Subscribe`.
 
 `@Cron`, `@Interval` and `@Timeout` handlers get no interceptors and no guards at all, at either level — the scheduler is handed the bound method directly.
-:::
 
 See [Interceptors](/api/interceptors) for full documentation.
 

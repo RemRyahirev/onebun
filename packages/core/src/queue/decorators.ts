@@ -504,14 +504,45 @@ export function getMessageGuards(
 }
 
 /**
- * Get interceptors for a queue handler method.
- * Reads from the shared `onebun:interceptors` key used by @UseInterceptors().
+ * Get the method-level interceptors of a queue handler.
+ *
+ * Reads the shared `onebun:interceptors` key written by `@UseInterceptors()` on a method, the
+ * same list an HTTP route or a WebSocket handler gets for that method: the one recorded on the
+ * prototype that declares the handler. The lookup starts at the prototype of a class (or at the
+ * object itself when it already is a prototype) and walks up to the first prototype that owns
+ * `propertyKey`, so a consumer wrapped by `@Controller` resolves the list of the class that
+ * declared the handler. A method that overrides a base method carries only its own
+ * `@UseInterceptors`; the base method's list does not carry over. The list is returned without
+ * duplicates.
+ *
+ * @param target - Consumer class, or its prototype
+ * @param propertyKey - Handler method name
+ * @returns Interceptor classes or instances declared on that method
  */
 export function getMessageInterceptors(
   target: object,
   propertyKey: string | symbol,
 ): Array<Function | Interceptor> {
-  return getMetadata(INTERCEPTORS_METADATA, target, propertyKey) || [];
+  const start: object | null = typeof target === 'function'
+    ? (target.prototype as object | null)
+    : target;
+
+  let declaring: object | null = start;
+  while (declaring && declaring !== Object.prototype
+    && !Object.prototype.hasOwnProperty.call(declaring, propertyKey)) {
+    declaring = Object.getPrototypeOf(declaring) as object | null;
+  }
+  if (!declaring || declaring === Object.prototype) {
+    declaring = start;
+  }
+  if (!declaring) {
+    return [];
+  }
+
+  const values: Array<Function | Interceptor> =
+    getMetadata(INTERCEPTORS_METADATA, declaring, propertyKey) || [];
+
+  return [...new Set(values)];
 }
 
 /**

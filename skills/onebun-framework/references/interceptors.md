@@ -11,9 +11,9 @@ throws at startup, the interceptor just misbehaves or never runs:
 2. **One instance per class per module, built at startup** — shared by every route, gateway
    handler and subscription of that module that names the class; never keep per-request state on
    `this`.
-3. **On the queue side only `@Subscribe` is intercepted, and only via a CLASS-level
-   `@UseInterceptors`** — `@Cron`/`@Interval`/`@Timeout` and method-level `@UseInterceptors` on a
-   subscriber are ignored.
+3. **On the queue side only `@Subscribe` is intercepted** — `@Cron`/`@Interval`/`@Timeout`
+   handlers are not wrapped. `@UseInterceptors` works on the consumer class and on the
+   `@Subscribe` method.
 
 ## Interface
 
@@ -165,12 +165,16 @@ class ApiController extends BaseController { ... }
 @WebSocketGateway({ path: '/ws' })
 class ChatGateway extends BaseWebSocketGateway { ... }
 
-// Queue — CLASS level only, and the class must be a @Controller
+// Queue — class level or method level, and the class must be a @Controller
 @UseInterceptors(LoggingInterceptor)
 @Controller('/orders')
 class OrderController extends BaseController {
   @Subscribe('orders.created')
-  handleOrder(message: Message) { ... }   // intercepted
+  handleOrder(message: Message) { ... }   // intercepted by LoggingInterceptor
+
+  @Subscribe('orders.audited')
+  @UseInterceptors(AuditInterceptor)
+  handleAudited(message: Message) { ... } // LoggingInterceptor, then AuditInterceptor
 
   @Interval(60_000, { pattern: 'orders.sweep' })
   sweep() { ... }                          // NOT intercepted (pattern is required)
@@ -183,13 +187,8 @@ const app = new OneBunApplication(AppModule, {
 });
 ```
 
-Two queue-side traps, both silent:
+Queue-side order is global, then class, then method, outermost first. The method-level list is the one on the method that carries `@Subscribe`, as on an HTTP route: an overriding method does NOT inherit the base method's `@UseInterceptors` (a class-level list on a base class is inherited), and a subclass repeats `@Subscribe` on a handler it overrides. A trap that stays silent:
 
-- **Method-level `@UseInterceptors` on a `@Subscribe` handler never runs** (either decorator order).
-  `UseInterceptors` in its method form stores metadata on the *prototype*, while
-  `QueueService.registerService` looks the method interceptors up on the *class* — so the lookup
-  returns nothing and only the class-level list survives. Put queue interceptors on the class; if
-  one subscriber needs different wrapping, give it its own consumer class.
 - **`@Subscribe` is only registered from classes listed in a module's `controllers`.** A
   `@Subscribe` on a `@Service()` provider is never wired to the queue at all, so there is nothing
   for an interceptor to wrap.

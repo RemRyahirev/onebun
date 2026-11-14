@@ -34,7 +34,7 @@ import { CacheInterceptor } from '@onebun/cache';
 
 **Applying interceptors:**
 - `@UseInterceptors(MyInterceptor)` on a controller/gateway class — applies to all handlers
-- `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only, on HTTP routes and WS handlers; on a `@Subscribe` handler the method form is silently dropped, put queue interceptors on the class
+- `@UseInterceptors(MyInterceptor)` on a handler method — applies to that handler only, on HTTP routes, WS handlers and `@Subscribe` queue handlers
 - Global via `ApplicationOptions.interceptors` — every transport: HTTP routes, WebSocket message handlers and `@Subscribe` queue subscribers. Merged outermost, ahead of gateway/class-level and handler-level lists. A global interceptor therefore also runs on WebSocket and queue contexts: narrow with `isHttpContext(ctx)` before reading `ctx.getRequest()`
 - All three can be combined; onion wrapping order: global (outermost) → controller/gateway → handler (innermost)
 
@@ -282,18 +282,20 @@ class ChatGateway extends BaseWebSocketGateway {
 
 ### Queue handler
 
-A class-level `@UseInterceptors` wraps the queue subscribers (`@Subscribe`) declared on that class.
-Put queue interceptors on the class: the METHOD form does nothing on a `@Subscribe` handler, because
-the method decorator writes its metadata to the prototype while queue registration looks it up on the
-class — nothing errors, the interceptor simply never runs. If one subscriber needs different
-wrapping, give it its own consumer class.
+A class-level `@UseInterceptors` wraps every queue subscriber (`@Subscribe`) declared on that class; a method-level one wraps that handler only. The chain is global, then class, then method, outermost first. The method-level list is the one declared on the method that carries `@Subscribe`, exactly as for an HTTP route: a method that overrides a base class method has only its own `@UseInterceptors`, and the base method's list does not carry over. A class-level list on a base class applies to its subclasses. A handler is registered only by its own `@Subscribe`: a subclass that overrides a handler repeats `@Subscribe` on it.
 
-Scheduled handlers — `@Cron`, `@Interval`, `@Timeout` — are **not** wrapped either: the scheduler calls
+Scheduled handlers — `@Cron`, `@Interval`, `@Timeout` — are **not** wrapped: the scheduler calls
 the bound method directly. If such a job publishes to a `pattern`, the interceptors of the class holding
 a `@Subscribe` on that pattern still run, once per delivered message.
 
 ```typescript
-import { Controller, Subscribe, UseInterceptors, LoggingInterceptor } from '@onebun/core';
+import {
+  Controller,
+  Subscribe,
+  UseInterceptors,
+  LoggingInterceptor,
+  TimeoutInterceptor,
+} from '@onebun/core';
 
 @UseInterceptors(LoggingInterceptor)
 @Controller('/orders')
@@ -301,6 +303,12 @@ class OrderController extends BaseController {
   @Subscribe('order.created')
   async handleOrderCreated(message: Message) {
     await this.processOrder(message.data);
+  }
+
+  @Subscribe('order.audited')
+  @UseInterceptors(new TimeoutInterceptor(5000))
+  async handleOrderAudited(message: Message) {
+    await this.processOrder(message.data); // LoggingInterceptor, then TimeoutInterceptor
   }
 }
 ```
@@ -508,12 +516,12 @@ Message → [Guards] → [Global Interceptors → [Gateway Interceptors → [Han
 **Queue:**
 
 ```
-Message → [Guards] → [Global Interceptors → [Controller Interceptors → Handler]]
+Message → [Guards] → [Global Interceptors → [Controller Interceptors → [Handler Interceptors → Handler]]]
 ```
 
-All three transports read `ApplicationOptions.interceptors`, and it wraps outermost on each. Queue
-has no handler level, because a method-level `@UseInterceptors` never reaches a `@Subscribe`
-handler.
+All three transports read `ApplicationOptions.interceptors`, and it wraps outermost on each. Every
+transport has a handler level: a method-level `@UseInterceptors` wraps a `@Subscribe` handler the same
+way it wraps an HTTP route or an `@OnMessage` handler.
 
 Interceptors use **onion wrapping**: the first interceptor in the list (global) wraps outermost and sees the result last. The innermost interceptor (handler-level) runs closest to the handler.
 

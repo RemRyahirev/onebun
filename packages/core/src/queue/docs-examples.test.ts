@@ -15,6 +15,8 @@ import {
   afterEach,
 } from 'bun:test';
 
+import type { Interceptor, ResolvedInterceptor } from '../types';
+
 import { UseInterceptors } from '../decorators/decorators';
 
 import { acknowledgesAutomatically, tracksDelivery } from './ack-mode';
@@ -1084,6 +1086,60 @@ describe('Interceptors on queue handlers (docs/api/queue.md)', () => {
     );
     expect(interceptors.length).toBe(1);
     expect(interceptors[0]).toBe(LoggingInterceptor);
+  });
+
+  it('should run global, class and method interceptors in that order on a @Subscribe handler', async () => {
+    const order: string[] = [];
+    const named = (name: string): Interceptor => ({
+      async intercept(_ctx, next) {
+        order.push(name);
+
+        return await next();
+      },
+    });
+    const resolve = (list: (Function | Interceptor)[]): ResolvedInterceptor[] =>
+      list.map((item) => async (ctx, next) => await (item as Interceptor).intercept(ctx, next));
+
+    @UseInterceptors(named('class'))
+    class EventProcessor {
+      @Subscribe('events.audited')
+      @UseInterceptors(named('method'))
+      handleAudited() {
+        order.push('handler');
+      }
+
+      @Subscribe('events.created')
+      handleCreated() {
+        order.push('created');
+      }
+    }
+
+    const adapter = new InMemoryQueueAdapter();
+    const service = new QueueService({ adapter: 'memory' });
+    await service.initialize(adapter);
+    await service.registerService(new EventProcessor(), EventProcessor, resolve, [named('global')]);
+    await adapter.publish('events.audited', {});
+    await adapter.publish('events.created', {});
+    await service.stop();
+    await adapter.disconnect();
+
+    expect(order).toEqual(['global', 'class', 'method', 'handler', 'global', 'class', 'created']);
+  });
+
+  it('should not carry a base method interceptor list over to an overriding handler', () => {
+    const base: Interceptor = { intercept: async (_ctx, next) => await next() };
+
+    class BaseProcessor {
+      @UseInterceptors(base)
+      handleAudited() {}
+    }
+    class EventProcessor extends BaseProcessor {
+      @Subscribe('events.audited')
+      override handleAudited() {}
+    }
+
+    expect(getMessageInterceptors(BaseProcessor, 'handleAudited')).toEqual([base]);
+    expect(getMessageInterceptors(EventProcessor, 'handleAudited')).toEqual([]);
   });
 });
 
