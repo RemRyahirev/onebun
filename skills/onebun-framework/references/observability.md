@@ -339,6 +339,12 @@ Implementation details:
 - On `app.stop()`, provider is shut down (flushes pending spans), then `trace.disable()` clears the global —
   not reached if that flush rejects
 
+## Console Log Streams
+
+The console transport writes each record plus a newline through `process.stdout` (`trace`, `debug`, `info`) or
+`process.stderr` (`warn`, `error`, `fatal`), in pretty and JSON format alike. A log line is not a readiness signal
+for another process (a pipe buffers until its reader catches up): probe the service over HTTP instead.
+
 ## OTLP Log Transport
 
 Send logs to OTel Collector alongside console output:

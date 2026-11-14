@@ -10,6 +10,8 @@ import {
 } from 'bun:test';
 import { Effect } from 'effect';
 
+import { captureLogStreams, type StreamCapture } from '../tests/stream-capture';
+
 import { JsonFormatter, PrettyFormatter } from './formatter';
 import {
   LoggerService,
@@ -125,41 +127,89 @@ describe('JsonFormatter', () => {
   });
 });
 
+describe('ConsoleTransport process streams', () => {
+  const transport = new ConsoleTransport();
+  const entryAt = (level: LogLevel): LogEntry => ({ timestamp: new Date(0), level, message: 'm' });
+  let stdoutSpy: ReturnType<typeof spyOn>;
+  let stderrSpy: ReturnType<typeof spyOn>;
+  let consoleSpies: Array<ReturnType<typeof spyOn>>;
+
+  beforeEach(() => {
+    stdoutSpy = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    stderrSpy = spyOn(process.stderr, 'write').mockImplementation(() => true);
+    consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const)
+      .map((method) => spyOn(console, method).mockImplementation(() => undefined));
+  });
+
+  afterEach(() => {
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+    consoleSpies.forEach((spy) => spy.mockRestore());
+  });
+
+  it.each([
+    [LogLevel.Trace, 'stdout'],
+    [LogLevel.Debug, 'stdout'],
+    [LogLevel.Info, 'stdout'],
+    [LogLevel.Warning, 'stderr'],
+    [LogLevel.Error, 'stderr'],
+    [LogLevel.Fatal, 'stderr'],
+  ] as const)('writes level %p to %s, newline-terminated, with no console call', (level, stream) => {
+    Effect.runSync(transport.log('line', entryAt(level)));
+
+    const hit = stream === 'stdout' ? stdoutSpy : stderrSpy;
+    const miss = stream === 'stdout' ? stderrSpy : stdoutSpy;
+    expect(hit.mock.calls).toEqual([['line\n']]);
+    expect(miss).not.toHaveBeenCalled();
+    consoleSpies.forEach((spy) => expect(spy).not.toHaveBeenCalled());
+  });
+
+  it.each([
+    ['JSON', new JsonFormatter()],
+    ['pretty', new PrettyFormatter()],
+  ] as const)('writes the %s formatter output unchanged plus one newline', (_name, formatter) => {
+    const entry = { ...entryAt(LogLevel.Info), context: { a: 1 }, additionalData: ['x\n%s'] };
+    const formatted = formatter.format(entry);
+
+    Effect.runSync(transport.log(formatted, entry));
+
+    expect(stdoutSpy.mock.calls).toEqual([[`${formatted}\n`]]);
+  });
+});
+
 describe('ConsoleTransport', () => {
   const transport = new ConsoleTransport();
+  let capture: StreamCapture;
   let logSpy: ReturnType<typeof spyOn>;
   let infoSpy: ReturnType<typeof spyOn>;
   let warnSpy: ReturnType<typeof spyOn>;
   let errorSpy: ReturnType<typeof spyOn>;
 
   beforeEach(() => {
-    logSpy = spyOn(console, 'log').mockImplementation(() => undefined);
-    infoSpy = spyOn(console, 'info').mockImplementation(() => undefined);
-    warnSpy = spyOn(console, 'warn').mockImplementation(() => undefined);
-    errorSpy = spyOn(console, 'error').mockImplementation(() => undefined);
+    capture = captureLogStreams();
+    ({
+      logSpy, infoSpy, warnSpy, errorSpy, 
+    } = capture);
   });
 
   afterEach(() => {
-    logSpy.mockRestore();
-    infoSpy.mockRestore();
-    warnSpy.mockRestore();
-    errorSpy.mockRestore();
+    capture.restore();
   });
 
   const ts = new Date();
   const base: Omit<LogEntry, 'level'|'message'> = { timestamp: ts };
 
-  it('routes info to console.info', () => {
+  it('writes info to stdout', () => {
     Effect.runSync(transport.log('x', { ...base, level: LogLevel.Info, message: 'm' }));
     expect(infoSpy).toHaveBeenCalled();
   });
 
-  it('routes warn to console.warn', () => {
+  it('writes warn to stderr', () => {
     Effect.runSync(transport.log('x', { ...base, level: LogLevel.Warning, message: 'm' }));
     expect(warnSpy).toHaveBeenCalled();
   });
 
-  it('routes error/fatal to console.error and others to console.log', () => {
+  it('writes error/fatal to stderr and debug to stdout', () => {
     Effect.runSync(transport.log('x', { ...base, level: LogLevel.Error, message: 'm' }));
     expect(errorSpy).toHaveBeenCalled();
     Effect.runSync(transport.log('x', { ...base, level: LogLevel.Fatal, message: 'm' }));
@@ -168,7 +218,7 @@ describe('ConsoleTransport', () => {
     expect(logSpy).toHaveBeenCalled();
   });
 
-  it('routes trace to console.log', () => {
+  it('writes trace to stdout', () => {
     Effect.runSync(transport.log('trace message', { ...base, level: LogLevel.Trace, message: 'trace' }));
     expect(logSpy).toHaveBeenCalledWith('trace message');
   });
