@@ -352,10 +352,10 @@ describe('a guard on a base method guards an overriding handler on every transpo
     running.push(app);
     await app.start();
 
-    const frames: Array<{ event: string; ack?: number }> = [];
+    const frames: Array<{ event: string; data?: unknown; ack?: number }> = [];
     const socket = new WebSocket(`ws://${HOST}:${app.getPort()}/ws`);
     socket.addEventListener('message', (message) => {
-      frames.push(JSON.parse(String(message.data)) as { event: string; ack?: number });
+      frames.push(JSON.parse(String(message.data)) as { event: string; data?: unknown; ack?: number });
     });
     await new Promise<void>((resolve, reject) => {
       socket.addEventListener('open', () => resolve());
