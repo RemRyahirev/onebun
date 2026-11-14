@@ -790,6 +790,8 @@ getInitData() {
 
 Guards control access to message handlers, similar to WebSocket guards. A refused message never reaches the handler: it is nacked **without** requeue — a guard decision is deterministic, so redelivery would only be denied again — and the adapter reports it through `onMessageFailed`, not `onMessageProcessed`. A guard that *throws* also denies, because on the queue there is no filter chain to carry the exception; the framework logs the guard's name and the error instead.
 
+`@UseMessageGuards` is read from the method that declares the handler, so an overriding method does not inherit it from the base method; only a `@UseGuards` on the base method carries over to the override — see [Guards — On an overriding method](/api/guards#on-an-overriding-method).
+
 ### Built-in Guards
 
 <!-- typecheck: skip -->
