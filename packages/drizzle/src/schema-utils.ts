@@ -71,9 +71,59 @@ export function getTableName<TTable extends PgTable<any> | SQLiteTable<any>>(
 }
 
 /**
- * Get primary key column name from a Drizzle table schema
+ * Find the primary-key column object of a table.
+ *
+ * Internal: not part of the package's public API. The returned object is the column itself,
+ * ready to be passed to drizzle operators such as `eq()`, so the caller never has to know
+ * whether the table's property key or the SQL column name is used. Resolution goes through the
+ * table's own columns, never through an index by the SQL name.
+ *
  * @param table - Drizzle table schema
- * @returns Primary key column name, or null if no primary key found
+ * @returns The primary-key column object, or null if the table has no primary key
+ */
+export function findPrimaryKeyColumn<TTable extends PgTable<any> | SQLiteTable<any>>(
+  table: TTable,
+): Column | null {
+  if (is(table, Table)) {
+    for (const column of Object.values<Column>(getTableColumns(table))) {
+      if (column.primary) {
+        return column;
+      }
+    }
+
+    return null;
+  }
+
+  // Plain objects shaped like a table: columns sit directly on the object
+  const tableObj = table as any;
+  for (const key in tableObj) {
+    const column = tableObj[key];
+    if (key !== '_' && typeof column === 'object' && column && column.primary === true) {
+      return column as Column;
+    }
+  }
+
+  const columns = tableObj._?.columns as Record<string, any> | undefined;
+  if (columns) {
+    for (const column of Object.values(columns)) {
+      if (column?.primary === true || column?.primaryKey === true) {
+        return column as Column;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the SQL column name of the primary key of a Drizzle table schema.
+ *
+ * The result is the name of the column in the database (`text('user_id')` gives `'user_id'`),
+ * not the property key it is declared under in the table object (`userId`). It is therefore not
+ * a key of the table object: to address the column on the table, use the column object itself.
+ *
+ * @param table - Drizzle table schema
+ * @returns Primary key SQL column name, or null if no primary key found
  * @example
  * ```typescript
  * const users = pgTable('users', {
