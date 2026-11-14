@@ -279,7 +279,7 @@ with `ackMode`, `'none'` included: `'none'` removes redelivery, not observabilit
 - A message refused by a guard is NOT reported as processed: `QueueService` calls `message.nack(false)` before returning early, so the adapter's `wasNacked` check emits `onMessageFailed` with the synthesised "was nacked by its handler" error. The denial is additionally logged as a warning through the owner module's logger, naming the consumer, the method and the pattern.
 
 **Technical details for AI agents — the retry policy under `'auto'`:**
-- `resolveMaxAttempts` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory and Redis adapters call both, and the JetStream adapter calls `retryDelayMs` (its cap is the consumer's `max_deliver`, resolved from `retry.attempts` in `resolveConsumerConfig`). Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent. `attempts < 1` is raised to 1: a subscription that never fires is not a retry policy
+- `resolveMaxAttempts` and `retryDelayMs` live in `packages/core/src/queue/retry.ts`, are exported from `@onebun/core`, and are the only place the policy is decided; the memory and Redis adapters call both, and the JetStream adapter calls `retryDelayMs` (its cap is the consumer's `max_deliver`, resolved from `retry.attempts` in `resolveConsumerConfig`). Under `'auto'` the attempt cap is retry.attempts ?? 1 — one delivery when `retry` is absent. `attempts < 1` is raised to 1 by `resolveMaxAttempts`: a subscription that never fires is not a retry policy. JetStream does NOT call `resolveMaxAttempts`: a value below 1 reaches `max_deliver` unchanged, the server treats `max_deliver <= 0` as unlimited, and the adapter's only comparison against it (`isLastDelivery()`, the dead-letter branch) answers false for it; `Message.maxAttempts` carries the raw value (`-1`)
 - `attempts` counts TOTAL deliveries, not extra ones, matching the `attempt >= maxAttempts` comparison the documented recipe already uses. `attempt` is 1-based, `redelivered` is `attempt > 1`
 - Backoff formulas are the same three `@onebun/requests` ships: `fixed` -> `delay`, `linear` -> `delay * n`, `exponential` -> `delay * 2^(n-1)`, where `n` is the 1-based attempt that just failed. `delay` defaults to 100 ms
 - By contrast manual nack(true) is uncapped on both adapters — it is the handler's instruction, not the framework's policy, which is why `Message.attempt` has to be real: it is the only way a handler stops itself
@@ -501,6 +501,14 @@ between attempts is:
 
 The default of 1 means an unconfigured subscription delivers once — retries are opt-in, so a
 handler with a non-idempotent side effect is never quietly upgraded to three of them.
+
+On JetStream `attempts: -1` means **unlimited**: it becomes the consumer's `max_deliver: -1`, the
+server's own "redeliver until acknowledged", and a failing message is retried on the `backoff`
+ladder without end — with or without a [dead-letter queue](#dead-letter-queue), which no delivery
+then reaches by count. The ladder has no ceiling, so under `'exponential'` the wait keeps doubling
+for as long as the message keeps failing; `'fixed'` is the backoff that stays constant. `message.maxAttempts` reports that `-1`, so a handler that compares
+`attempt >= maxAttempts` itself has to check that the cap is positive first. The memory and Redis
+adapters raise any value below 1 to 1.
 
 `attempts` counts total deliveries because that is what the
 [error-handling recipe](#error-handling-in-handlers) compares against: `message.attempt` is
@@ -1416,7 +1424,7 @@ const app = new OneBunApplication(AppModule, {
 Per-subscription options win over these defaults, field by field:
 
 - **`max_ack_pending`** — the rule is *prefetch overrides consumerConfig.maxAckPending*, and `100` applies when neither is set. The pull batch is the smaller of the resolved `max_ack_pending` and `prefetch` (`10` when `prefetch` is absent), so a batch can never outrun the acknowledgement window.
-- **`max_deliver`** — `retry.attempts` on `@Subscribe`, then `deadLetter.maxRetries`, override `consumerConfig.maxDeliver`, and `3` applies when none is set. `retry.attempts` wins over `deadLetter.maxRetries` when both are set, so adding a dead-letter queue to a subscription with a retry ladder does not change its `max_deliver`.
+- **`max_deliver`** — `retry.attempts` on `@Subscribe`, then `deadLetter.maxRetries`, override `consumerConfig.maxDeliver`, and `3` applies when none is set. `retry.attempts` wins over `deadLetter.maxRetries` when both are set, so adding a dead-letter queue to a subscription with a retry ladder does not change its `max_deliver`. Whichever of them supplies it, `-1` is sent unchanged and means no limit: the server redelivers until the message is acknowledged or terminated.
 - **`ack_wait`** — `ackTimeout` on `@Subscribe` overrides `consumerConfig.ackWait`, and 30 seconds (`30_000_000_000` nanoseconds) applies when neither is set.
 
 `retry.backoff` and `retry.delay` reach no consumer field at all — the adapter sends the computed
@@ -1736,6 +1744,8 @@ async handleOrder(message: Message<OrderData>) {
 
 **How many attempts.** `maxRetries` sets the server's `max_deliver`, behind `retry.attempts`. The full order is `retry.attempts` → `deadLetter.maxRetries` → `consumerConfig.maxDeliver` → `3`. `retry.attempts` comes first, so a subscription that declares a retry ladder keeps exactly that `max_deliver` whether or not it also declares a dead-letter queue.
 
+**Unlimited attempts.** A resolved `max_deliver` of `-1` — `retry.attempts: -1`, `maxRetries: -1` or `consumerConfig.maxDeliver: -1` — has no last attempt, so a failing message is redelivered without end and is never dead-lettered by count. The dead-letter queue is then reached only by an explicit `message.nack(false)` — the handler's own, or the one sent when a [message guard](#message-guards) denies the message.
+
 **What happens on the last attempt.** The payload is republished to `deadLetter.queue` **first**, and only once that succeeded is the original terminated. If the republish fails, the original is deliberately left alone — the server redelivers it or exhausts `max_deliver` exactly as it does without a dead-letter queue — and the failure is reported to `@OnQueueError`. Terminating first and republishing second would turn a failed republish into a lost message, which is the one outcome a dead-letter queue exists to prevent.
 
 The same routing happens when a handler under `ackMode: 'manual'` calls `message.nack(false)` — or the bare `message.nack()`, which means the same thing. That is deliberate: `nack(false)` already means *never deliver this again*, so with a dead-letter queue configured it parks the message rather than discarding it. `nack(true)` still asks for redelivery.
@@ -1771,7 +1781,7 @@ to redeliver the original, so that message is lost.
 
 **Technical details for AI agents — dead-letter queue:**
 - `deadLetter.maxRetries` is resolved once in `resolveConsumerConfig()` in `packages/nats/src/jetstream.adapter.ts`: `options?.retry?.attempts ?? options?.deadLetter?.maxRetries ?? consumerConfig?.maxDeliver ?? 3`. Nothing outside that function computes `max_deliver`
-- `routeToDeadLetter(entry, msg, message, error)` is the ONLY code that publishes to `deadLetter.queue`. It has exactly two triggers: the auto-nack branch of the consume loop when `msg.info.deliveryCount >= max_deliver`, and `JetStreamMessage.nack(false)` — which receives it as a closure built at message construction, so it is `undefined` when no queue is configured and `nack(false)` is then a bare `term()`
+- `routeToDeadLetter(entry, msg, message, error)` is the ONLY code that publishes to `deadLetter.queue`. It has exactly two triggers: the auto-nack branch of the consume loop when `isLastDelivery(msg.info.deliveryCount, resolved.maxDeliver)` holds — `maxDeliver > 0 && deliveryCount >= maxDeliver`, so a resolved `max_deliver` of zero or below (nats-server reads `-1` as unlimited and stores `0` as `-1`) never dead-letters by count — and `JetStreamMessage.nack(false)` — which receives it as a closure built at message construction, so it is `undefined` when no queue is configured and `nack(false)` is then a bare `term()`
 - Order inside the helper is load-bearing: `await this.publish(queue, …)` first, `msg.term()` only after it resolves. On a rejected republish it emits `onError` with the rejection as `cause` and returns WITHOUT terminating
 - The republish goes through the adapter's own `publish()`, never a second raw `js.publish`, so subject translation and the publish diagnostics apply to dead letters unchanged. `resolveStreamForSubject()` does NOT: `publish()` never calls it, on any path. A dead-letter subject that no declared stream binds is therefore not refused at startup — it surfaces as `deadLetterRepublishError` the first time a message is actually dead-lettered, and the original is left un-terminated so nothing is lost
 - Envelope: `messageId` carries the original id; `metadata` is the original map spread first, then `dlq.originalPattern`, `dlq.deliveryCount` and `dlq.error`. `MessageMetadata` has an index signature, so no `any` is involved

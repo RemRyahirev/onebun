@@ -4446,6 +4446,13 @@ describe('dead-letter queue: max_deliver resolution', () => {
       { consumerConfig: { maxDeliver: 7 } },
     )).toBe(10);
   });
+
+  it('sends retry.attempts: -1 as the server\'s own unlimited max_deliver', async () => {
+    expect(await maxDeliverFor({
+      retry: { attempts: -1 },
+      deadLetter: { queue: DLQ },
+    })).toBe(-1);
+  });
 });
 
 describe('dead-letter queue: subscribe-time validation', () => {
@@ -4492,6 +4499,7 @@ describe('dead-letter queue: disposition', () => {
     deliveryCount: number,
     options: AnyRecord = {},
     seed: Partial<AnyRecord> = {},
+    overrides: Partial<JetStreamAdapterOptions> = {},
   ) {
     const jsMsg = makeMockJsMsg({
       data: new TextEncoder().encode(JSON.stringify({
@@ -4503,7 +4511,7 @@ describe('dead-letter queue: disposition', () => {
       info: { redelivered: deliveryCount > 1, deliveryCount },
       ...seed,
     });
-    const { adapter, mockJs } = makeConnectedAdapter();
+    const { adapter, mockJs, mockJsm } = makeConnectedAdapter(overrides);
     const consumer = makeMockConsumer([jsMsg]);
     asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
 
@@ -4519,7 +4527,7 @@ describe('dead-letter queue: disposition', () => {
     await new Promise(resolve => setTimeout(resolve, 25));
 
     return {
-      adapter, mockJs, jsMsg, errors, 
+      adapter, mockJs, mockJsm, jsMsg, errors,
     };
   }
 
@@ -4593,6 +4601,81 @@ describe('dead-letter queue: disposition', () => {
     expect(body.metadata['dlq.error']).toBe('handler failed');
     // The caller's own metadata survives alongside the provenance keys.
     expect(body.metadata.traceId).toBe('trace-1');
+  });
+
+  // `max_deliver: -1` is the server's "redeliver until acknowledged". Compared with a bare
+  // `deliveryCount >= maxDeliver`, every delivery looked like the last one, so the first
+  // failure was dead-lettered.
+  describe('unlimited max_deliver', () => {
+    const UNLIMITED = { retry: { attempts: -1 }, deadLetter: { queue: DLQ } };
+
+    function expectRetriedNotDeadLettered(
+      { mockJs, jsMsg }: Awaited<ReturnType<typeof deliverFailing>>,
+    ): void {
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.term).not.toHaveBeenCalled();
+      expect(asAny(mockJs.publish).mock.calls.some((c: unknown[]) => c[0] === DLQ)).toBe(false);
+    }
+
+    it('retries the first failure under retry.attempts: -1 instead of dead-lettering it', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(1, UNLIMITED));
+    });
+
+    it('keeps retrying a later failure under retry.attempts: -1', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(3, UNLIMITED));
+      expectRetriedNotDeadLettered(await deliverFailing(1_000, UNLIMITED));
+    });
+
+    it('treats deadLetter.maxRetries: -1 and retry.attempts: 0 as no limit as well', async () => {
+      expectRetriedNotDeadLettered(await deliverFailing(5, { deadLetter: { queue: DLQ, maxRetries: -1 } }));
+      expectRetriedNotDeadLettered(await deliverFailing(5, { retry: { attempts: 0 }, deadLetter: { queue: DLQ } }));
+    });
+
+    it('treats consumerConfig.maxDeliver: -1 as no limit when the subscription sets none', async () => {
+      const failed = await deliverFailing(5, { deadLetter: { queue: DLQ } }, {}, { consumerConfig: { maxDeliver: -1 } });
+
+      expect(callArg(failed.mockJsm.consumers.add, 0, 1).max_deliver).toBe(-1);
+      expectRetriedNotDeadLettered(failed);
+    });
+
+    it('still lets a handler\'s own nack(false) route to the dead-letter queue', async () => {
+      const jsMsg = makeMockJsMsg({
+        data: new TextEncoder().encode(JSON.stringify({ pattern: 'test.topic', data: {} })),
+        info: { redelivered: false, deliveryCount: 1 },
+      });
+      const { adapter, mockJs } = makeConnectedAdapter();
+      const consumer = makeMockConsumer([jsMsg]);
+      asAny(adapter).js.consumers.get = mock(() => Promise.resolve(consumer));
+
+      await adapter.subscribe('test.topic', async (message) => {
+        await message.nack(false);
+      }, { ackMode: 'manual', ...UNLIMITED });
+
+      await new Promise(resolve => setTimeout(resolve, 25));
+
+      expect(asAny(mockJs.publish).mock.calls[0][0]).toBe(DLQ);
+      expect(jsMsg.term).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a positive limit', () => {
+    const FIVE = { retry: { attempts: 5 }, deadLetter: { queue: DLQ } };
+
+    it('retries the delivery before the limit', async () => {
+      const { mockJs, jsMsg } = await deliverFailing(4, FIVE);
+
+      expect(jsMsg.nak).toHaveBeenCalledTimes(1);
+      expect(jsMsg.term).not.toHaveBeenCalled();
+      expect(asAny(mockJs.publish).mock.calls.some((c: unknown[]) => c[0] === DLQ)).toBe(false);
+    });
+
+    it('dead-letters the delivery that reaches the limit', async () => {
+      const { mockJs, jsMsg } = await deliverFailing(5, FIVE);
+
+      expect(asAny(mockJs.publish).mock.calls[0][0]).toBe(DLQ);
+      expect(jsMsg.term).toHaveBeenCalledTimes(1);
+      expect(jsMsg.nak).not.toHaveBeenCalled();
+    });
   });
 });
 

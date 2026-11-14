@@ -181,6 +181,13 @@ acknowledgement protocol at all. A failing handler still emits `onMessageFailed`
 `deadLetter` is honoured on JetStream. `max_deliver` resolves as `retry.attempts` ->
 `deadLetter.maxRetries` -> `consumerConfig.maxDeliver` -> 3.
 
+On JetStream `-1` (from any of the three) is sent unchanged and means unlimited: the server
+redelivers until acknowledged, and no delivery is dead-lettered by count — only an explicit
+`nack(false)` reaches the dead-letter queue (the handler's own, or the one a message-guard denial
+sends). The backoff has no ceiling, so `'exponential'` keeps doubling the wait. `message.maxAttempts` reports the `-1`, so a handler
+comparing `attempt >= maxAttempts` must check the cap is positive. Memory and Redis raise
+`attempts` below 1 to 1.
+
 JetStream routes the terminal delivery to deadLetter.queue and term()s the original — republishing first, terminating only once that succeeded, so a failed republish leaves the message for the server to redeliver rather than losing it.
 
 Redis honours both fields. `deadLetter.queue` is a queue PATTERN — the message is republished
